@@ -1819,7 +1819,7 @@ def recent_claims(
 #: A kind that is not here gets no block, which is the correct behaviour for
 #: the eleven kinds whose payload already says everything there is to say.
 DERIVED_CONTEXT_KINDS: frozenset[str] = frozenset({
-    "insider_transaction", "buyback_disclosure",
+    "insider_transaction", "insider_trading_plan", "buyback_disclosure",
 })
 
 
@@ -1848,6 +1848,18 @@ def derived_context(
         return None
     company_ref = str(event.get("company_ref"))
     try:
+        if kind == "insider_trading_plan":
+            payload = event.get("payload") or {}
+            return {
+                "context": payload,
+                "lines": [
+                    "SEC Item 5 trading-arrangement disclosure (a plan action, not an executed trade):",
+                    f"person={payload.get('person_name')}; action={payload.get('action')}; "
+                    f"action_date={payload.get('action_date')}; direction={payload.get('securities_direction')}; "
+                    f"aggregate_shares={payload.get('aggregate_shares')}; expiration_date={payload.get('expiration_date')}",
+                ],
+                "refs": [event["id"], *event.get("source_refs", ())],
+            }
         if kind == "insider_transaction":
             from .insider_context import build_insider_context
             from .insider_context import prompt_block as insider_block

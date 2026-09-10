@@ -1,0 +1,703 @@
+XML 31 R20.htm IDEA: XBRL DOCUMENT
+
+v3.26.1
+
+Insider Trading Arrangements
+
+3 Months Ended
+
+Jun. 30, 2026
+
+shares
+
+Trading Arrangements, by Individual
+
+Non-Rule 10b5-1 Arrangement Adopted
+
+false
+
+Non-Rule 10b5-1 Arrangement Terminated
+
+false
+
+Jeffrey R. Leitzell [Member]
+
+Trading Arrangements, by Individual
+
+Material Terms of Trading Arrangement
+
+On June 25, 2026, Jeffrey R. Leitzell, EOG's Executive Vice President and Chief Operating Officer, terminated his written Rule 10b5-1 trading arrangement, dated June 26, 2025, in respect of EOG's common stock. The description of such trading arrangement set forth in Part II, Item 5 of EOG's Quarterly Report on Form 10-Q for the quarterly period ended June 30, 2025 is incorporated herein by reference.
+
+On June 26, 2026, Mr. Leitzell adopted a new written Rule 10b5-1 trading arrangement in respect of EOG's common stock that is intended to satisfy the affirmative defense conditions of Rule 10b5-1(c) promulgated under the Securities Exchange Act of 1934 (as amended). The arrangement, which was adopted in accordance with EOG's Insider Trading Policy and at a time when Mr. Leitzell was not in possession of material, non-public information regarding EOG, provides for the sale by Mr. Leitzell of:
+
+(1) up to 17,739 shares currently held by Mr. Leitzell;
+
+(2) 100% of the net shares to be received by Mr. Leitzell upon the vesting of previous grants of an aggregate 8,787 shares of restricted stock; and
+
+(3) 25% of the net shares to be received by Mr. Leitzell upon the vesting of previous grants of an aggregate 13,182 restricted stock units with performance-based conditions (performance units);
+
+in each case, during the specific time periods and subject to the limit price (i.e., trigger price) conditions set forth in the arrangement (and subject to EOG's withholding of shares in satisfaction of the tax withholding obligations arising upon each such vesting). Mr. Leitzell's Rule 10b5-1 trading arrangement will commence following the applicable cooling-off period and will terminate upon the earlier of (i) the completion of all sales specified in the trading arrangement and (ii) June 30, 2028.
+
+Name
+
+Jeffrey R. Leitzell
+
+Title
+
+Executive Vice President and Chief Operating Officer
+
+Rule 10b5-1 Arrangement Adopted
+
+true
+
+Adoption Date
+
+June 26, 2026
+
+Rule 10b5-1 Arrangement Terminated
+
+true
+
+Termination Date
+
+June 25, 2026
+
+Expiration Date
+
+June 30, 2028
+
+Arrangement Duration
+
+735 days
+
+Mr. Leitzell Rule Trading Arrangement, Common Stock [Member] | Jeffrey R. Leitzell [Member]
+
+Trading Arrangements, by Individual
+
+Aggregate Available
+
+17,739
+
+Mr. Leitzell Trading Arrangement, Restricted Stock [Member] | Jeffrey R. Leitzell [Member]
+
+Trading Arrangements, by Individual
+
+Aggregate Available
+
+8,787
+
+Mr. Leitzell Trading Arrangement, Restricted Stock Units With Performance-Bbased Conditions [Member] | Jeffrey R. Leitzell [Member]
+
+Trading Arrangements, by Individual
+
+Aggregate Available
+
+13,182
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_MtrlTermsOfTrdArrTextBlock
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+dtr-types:textBlockItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_NonRule10b51ArrAdoptedFlag
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:booleanItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_NonRule10b51ArrTrmntdFlag
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:booleanItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_Rule10b51ArrAdoptedFlag
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:booleanItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_Rule10b51ArrTrmntdFlag
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:booleanItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph A
+
++ Details
+
+Name:
+
+ecd_TradingArrByIndTable
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph B
+
++ Details
+
+Name:
+
+ecd_TrdArrAdoptionDate
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph C
+
++ Details
+
+Name:
+
+ecd_TrdArrDuration
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:durationItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph C
+
++ Details
+
+Name:
+
+ecd_TrdArrExpirationDate
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph A
+
++ Details
+
+Name:
+
+ecd_TrdArrIndName
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph A
+
++ Details
+
+Name:
+
+ecd_TrdArrIndTitle
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph D
+
++ Details
+
+Name:
+
+ecd_TrdArrSecuritiesAggAvailAmt
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:sharesItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+instant
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph B
+
++ Details
+
+Name:
+
+ecd_TrdArrTerminationDate
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- Details
+
+Name:
+
+ecd_IndividualAxis=eog_JeffreyR.LeitzellMember
+
+Namespace Prefix:
+
+Data Type:
+
+na
+
+Balance Type:
+
+Period Type:
+
+X
+
+- Details
+
+Name:
+
+ecd_TradingArrAxis=eog_Mr.LeitzellRuleTradingArrangementCommonStockMember
+
+Namespace Prefix:
+
+Data Type:
+
+na
+
+Balance Type:
+
+Period Type:
+
+X
+
+- Details
+
+Name:
+
+ecd_TradingArrAxis=eog_Mr.LeitzellTradingArrangementRestrictedStockMember
+
+Namespace Prefix:
+
+Data Type:
+
+na
+
+Balance Type:
+
+Period Type:
+
+X
+
+- Details
+
+Name:
+
+ecd_TradingArrAxis=eog_Mr.LeitzellTradingArrangementRestrictedStockUnitsWithPerformanceBbasedConditionsMember
+
+Namespace Prefix:
+
+Data Type:
+
+na
+
+Balance Type:
+
+Period Type:

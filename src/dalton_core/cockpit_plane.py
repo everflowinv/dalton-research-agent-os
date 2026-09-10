@@ -309,6 +309,7 @@ EVENT_KIND_LABELS = {
     "sales_note": "卖方 sales note", "crowd_post": "散户与市场议论",
     "expert_excerpt": "专家访谈摘录",
     "insider_transaction": "董事与高管的买卖",
+    "insider_trading_plan": "董事与高管的交易计划变更",
     "ownership_change": "大股东持股变化",
     "holdings_change": "机构持仓变化",
     "buyback_disclosure": "公司回购自己的股票",

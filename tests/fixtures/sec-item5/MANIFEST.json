@@ -1,0 +1,20 @@
+{
+ "captured_at": "2026-09-10",
+ "source": "SEC EDGAR primary filing Inline XBRL fact pages",
+ "fixtures": [
+  {
+   "accession": "0000821189-26-000149",
+   "url": "https://www.sec.gov/Archives/edgar/data/821189/000082118926000149/R20.htm",
+   "html_sha256": "ce9cd9e4fb0d9463eaff7e09e80775388af31fc5026535a3ec74164b2c7a521c",
+   "text_sha256": "7f5bdfe3a954b0d4e0cf51b850fe28315fc751c9e88a96c7201046103c82b79a",
+   "why": "one named officer termination followed by a separately dated adoption"
+  },
+  {
+   "accession": "0001193125-26-338217",
+   "url": "https://www.sec.gov/Archives/edgar/data/1061983/000119312526338217/R7.htm",
+   "html_sha256": "c4368fb03546c05b5c46a9d90a94f45fc79ae5d83a4e7935b9589c3849449e78",
+   "text_sha256": "c362d7d075d66d9abafe28181c7af377fd2a85d6890eec39df7f1303368f7b7d",
+   "why": "two separately named directors adopted distinct plans in one quarter"
+  }
+ ]
+}

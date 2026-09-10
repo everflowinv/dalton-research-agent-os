@@ -62,6 +62,7 @@ CONTENT_KINDS: tuple[str, ...] = (
     # answer different questions, and a research decision that named "filing"
     # for either would have chosen nothing.
     "ownership_filing",
+    "insider_trading_plan",
     "buyback_disclosure",
     "price",
     "consensus",
@@ -85,6 +86,7 @@ CAPABILITIES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     "sec": MappingProxyType({
         "content_kinds": (
             "filing", "financial_statement", "buyback_disclosure",
+            "insider_trading_plan",
         ),
         "evidence_tier": "primary_filing", "markets": ("US",), "generic": False,
         "note": (
@@ -93,7 +95,9 @@ CAPABILITIES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
             "accession and date, with the item numbers on an 8-K; the 10-Q and "
             "10-K text once a filing has been fetched, which is where the Item 2 "
             "issuer-purchases table lives (monthly shares, average price paid, "
-            "remaining authorisation). CANNOT deliver: a daily buyback figure -- "
+            "remaining authorisation), plus Item 5 adopted or terminated insider "
+            "trading arrangements. A plan is not an executed trade. CANNOT deliver: "
+            "a daily buyback figure -- "
             "the US has no such disclosure at all. A US repurchase is visible "
             "only in a 10-Q/10-K Item 2 table, in an 8-K announcing a board "
             "authorisation, or on the earnings call, and the first is up to a "

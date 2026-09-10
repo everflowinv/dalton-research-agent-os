@@ -91,6 +91,7 @@ EVENT_KINDS: tuple[str, ...] = (
     # judgement prompt renders these fields, and a director's sale and a
     # 10-K's arrival are not the same question.
     "insider_transaction",
+    "insider_trading_plan",
     "ownership_change",
     "holdings_change",
     # The issuer buying its own shares: HK daily returns and US quarterly
@@ -199,6 +200,12 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         # is unknown, never evidence that no trading plan exists.
         "plan_10b5_1", "footnotes_hash",
     }),
+    "insider_trading_plan": frozenset({
+        "accession", "form", "filing_date", "issuer_name", "person_name", "person_title",
+        "action", "action_date", "plan_type", "securities_direction",
+        "aggregate_shares", "expiration_date", "material_terms_excerpt",
+        "excerpt_hash", "document_ref", "artifact_hash", "event_key",
+    }),
     "ownership_change": frozenset({
         "accession", "form", "is_amendment", "amendment_no",
         "reporting_person", "person_cik", "person_type", "percent_of_class",
@@ -281,6 +288,7 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     # of what the business earned: see ``sec_ownership_core.OWNERSHIP_GRADE``,
     # which is the word that keeps these out of the figure path.
     "insider_transaction": "primary_filing",
+    "insider_trading_plan": "primary_filing",
     "ownership_change": "primary_filing",
     "holdings_change": "primary_filing",
     # Exchange returns and SEC issuer-purchase filings are primary filings,
@@ -389,6 +397,29 @@ def validate_payload(kind: str, payload: Any) -> dict[str, Any]:
             raise ResearchEventValidationError("buyback cumulative_basis is outside the vocabulary")
         if (result["cumulative_shares"] is None) != (basis is None):
             raise ResearchEventValidationError("buyback cumulative shares and basis must be supplied together")
+    if kind == "insider_trading_plan":
+        for field in (
+            "accession", "form", "filing_date", "issuer_name", "person_name",
+            "action", "action_date", "plan_type", "securities_direction",
+            "material_terms_excerpt", "excerpt_hash", "document_ref",
+            "artifact_hash", "event_key",
+        ):
+            if result[field] is None:
+                raise ResearchEventValidationError(
+                    f"insider trading plan {field} must be supplied")
+        if result["action"] not in {"adopted", "terminated"}:
+            raise ResearchEventValidationError("insider trading plan action is outside the vocabulary")
+        if result["plan_type"] not in {"rule_10b5_1", "non_rule_10b5_1"}:
+            raise ResearchEventValidationError("insider trading plan type is outside the vocabulary")
+        if result["securities_direction"] not in {"purchase", "sale", "unknown"}:
+            raise ResearchEventValidationError("insider trading plan direction is outside the vocabulary")
+        for field in ("filing_date", "action_date", "expiration_date"):
+            if result[field] is not None:
+                try:
+                    date.fromisoformat(result[field])
+                except ValueError as exc:
+                    raise ResearchEventValidationError(
+                        f"insider trading plan {field} must be an ISO date") from exc
     if all(value is None for value in result.values()):
         raise ResearchEventValidationError(f"a {kind} payload that says nothing is not an event")
     return result

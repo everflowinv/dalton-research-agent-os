@@ -1,0 +1,499 @@
+XML 13 R7.htm IDEA: XBRL DOCUMENT
+
+v3.26.1
+
+Insider Trading Arrangements
+
+3 Months Ended
+
+Jun. 30, 2026
+
+shares
+
+Trading Arrangements, by Individual
+
+Material Terms of Trading Arrangement
+
+(c) In this Item 5(c) of this quarterly report on Form 10-Q, the terms “officers”, “Rule 10b5-1 trading arrangements” and “non-Rule 10b5-1 trading arrangements” have the meanings ascribed to them in Item 408 of Regulation S-K.
+
+The following directors and officers adopted into or terminated a Rule 10b5-1 trading arrangement during the second quarter of 2026:
+
+•
+
+Robert E. Landry . – Mr. Landry, a member of our board of directors, adopted a Rule 10b5-1 trading arrangement on June 12, 2026 that was intended to satisfy the affirmative defense provided for under Rule 10b5-1(c) (the “Landry Plan”). The Landry Plan provides for the sale of up to 2000 shares of our common stock, subject to certain conditions. The Landry Plan will terminate on the earlier of (x) June 4, 2027 and (y) the sale of all securities that are subject to the plan.
+
+•
+
+Wendell Wierenga , Ph.D. – Mr. Wierenga, a member of our board of directors, adopted a Rule 10b5-1 trading arrangement on June 10, 2026 that was intended to satisfy the affirmative defense provided for under Rule 10b5-1(c) (the “Wierenga Plan”). The Wierenga Plan provides for the sale of up to 45,714 shares of our common stock, subject to certain conditions. The Wierenga Plan will terminate on the earlier of (x) May 16, 2028 and (y) the sale of all securities that are subject to the plan.
+
+Wendell Wierenga [Member]
+
+Trading Arrangements, by Individual
+
+Name
+
+Wendell Wierenga
+
+Rule 10b5-1 Arrangement Adopted
+
+true
+
+Adoption Date
+
+June 10, 2026
+
+Rule 10b5-1 Arrangement Terminated
+
+false
+
+Expiration Date
+
+May 16, 2028
+
+Arrangement Duration
+
+707 days
+
+Aggregate Available
+
+45,714
+
+Robert E. Landry [Member]
+
+Trading Arrangements, by Individual
+
+Name
+
+Robert E. Landry
+
+Rule 10b5-1 Arrangement Adopted
+
+true
+
+Adoption Date
+
+June 12, 2026
+
+Rule 10b5-1 Arrangement Terminated
+
+false
+
+Expiration Date
+
+June 4, 2027
+
+Arrangement Duration
+
+358 days
+
+Aggregate Available
+
+2,000
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_MtrlTermsOfTrdArrTextBlock
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+dtr-types:textBlockItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_Rule10b51ArrAdoptedFlag
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:booleanItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 1
+
++ Details
+
+Name:
+
+ecd_Rule10b51ArrTrmntdFlag
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:booleanItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph A
+
++ Details
+
+Name:
+
+ecd_TradingArrByIndTable
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph B
+
++ Details
+
+Name:
+
+ecd_TrdArrAdoptionDate
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph C
+
++ Details
+
+Name:
+
+ecd_TrdArrDuration
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:durationItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph C
+
++ Details
+
+Name:
+
+ecd_TrdArrExpirationDate
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph A
+
++ Details
+
+Name:
+
+ecd_TrdArrIndName
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:stringItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+duration
+
+X
+
+- References
+
+Reference 1: http://www.xbrl.org/2003/role/presentationRef
+
+-Publisher SEC
+
+-Name Regulation S-K
+
+-Number 229
+
+-Section 408
+
+-Subsection a
+
+-Paragraph 2
+
+-Subparagraph D
+
++ Details
+
+Name:
+
+ecd_TrdArrSecuritiesAggAvailAmt
+
+Namespace Prefix:
+
+ecd_
+
+Data Type:
+
+xbrli:sharesItemType
+
+Balance Type:
+
+na
+
+Period Type:
+
+instant
+
+X
+
+- Details
+
+Name:
+
+ecd_IndividualAxis=cytk_WendellWierengaMember
+
+Namespace Prefix:
+
+Data Type:
+
+na
+
+Balance Type:
+
+Period Type:
+
+X
+
+- Details
+
+Name:
+
+ecd_IndividualAxis=cytk_RobertELandryMember
+
+Namespace Prefix:
+
+Data Type:
+
+na
+
+Balance Type:
+
+Period Type:

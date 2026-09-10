@@ -47,6 +47,7 @@ from .research_event import (
     record_event,
 )
 from .buyback_disclosure import buyback_event_candidates
+from .insider_trading_plan import trading_plan_event_candidates
 from .store import DaltonStore
 from .tracking_cadence import (
     TrackingCadenceAuthority,
@@ -226,6 +227,8 @@ def company_events(
     # the event says.
     buybacks = buyback_event_candidates(connection, company_ref=company_ref)
     candidates += buybacks["events"]
+    plans = trading_plan_event_candidates(connection, company_ref=company_ref)
+    candidates += plans["events"]
     for candidate in candidates:
         candidate.setdefault("company_ref", company_ref)
     return candidates
