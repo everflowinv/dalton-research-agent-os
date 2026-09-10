@@ -51,6 +51,14 @@ DELIVERABLE_KINDS: tuple[str, ...] = (
     # deliverable rather than a new object precisely so that it inherits the
     # rule that a figure with no live Claim behind it is refused.
     "event_note",
+    # P12d: the Deep Insight Gate's twelve answers, rendered for a reader.  The
+    # record of truth is the gate authority's own chain -- that is what the
+    # owner's decision binds by hash and what replays by version -- and this is
+    # the reader's copy, published through the machinery every other document in
+    # this system already appears in.  It is a deliverable rather than a second
+    # object precisely so that it inherits the rule that a figure with no live
+    # Claim behind it is refused.
+    "deep_insight_gate",
 )
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
@@ -298,7 +306,7 @@ class MissionDeliverableAuthority:
         self._widen_kind_check()
 
     def _widen_kind_check(self) -> None:
-        """P14a: admit ``event_note`` on a Core built before that kind existed.
+        """P14a / P12d: admit a kind on a Core built before that kind existed.
 
         ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that is already
         there, so a Core created under the seven-kind CHECK keeps refusing the
@@ -308,13 +316,19 @@ class MissionDeliverableAuthority:
         follows ``DaltonStore._migrate_thesis_authority_columns`` exactly,
         including the foreign-key check afterwards, because a rebuild that
         silently orphaned the pointer would be worse than the constraint.
+
+        The sentinel is the *newest* kind rather than a list, so adding the next
+        one is a one-word change here and a one-word change in the rebuilt
+        CHECK: a Core that stopped at ``event_note`` is rebuilt to carry
+        ``deep_insight_gate`` as well, and one that already carries the newest
+        is left alone.
         """
 
         row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' "
             "AND name='mission_deliverable_versions'"
         ).fetchone()
-        if row is None or "'event_note'" in (row["sql"] or ""):
+        if row is None or "'deep_insight_gate'" in (row["sql"] or ""):
             return
         if self.connection.in_transaction:
             raise MissionDeliverableConflict(
@@ -339,7 +353,8 @@ class MissionDeliverableAuthority:
                     playbook_version_hash TEXT NOT NULL,
                     kind TEXT NOT NULL CHECK(kind IN (
                         'industry_framework','initial_screen','industry_model','company_model',
-                        'forecast_lines','investment_memo','weekly_brief','event_note'
+                        'forecast_lines','investment_memo','weekly_brief','event_note',
+                        'deep_insight_gate'
                     )),
                     subject_ref TEXT NOT NULL,
                     record_json TEXT NOT NULL,
