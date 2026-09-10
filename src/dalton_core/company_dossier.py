@@ -714,6 +714,7 @@ def validate_variant_view(value: Any, name: str = "variant_view") -> dict[str, A
                                else _text(wire["market_view_reason"],
                                           f"{name}.market_view_reason")),
         "structure": structure, "slots": checked, "sources": sources,
+        "gaps": _gaps(wire["gaps"], f"{name}.gaps"),
     }
 
 

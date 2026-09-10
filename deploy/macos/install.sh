@@ -49,6 +49,36 @@ fi
 
 "$venv_dir/bin/dalton-bootstrap" --state-dir "$state_dir" --config "$config_path"
 
+# INT3: the governance records this repository ships and this script
+# deliberately does *not* copy into connector-governance/. Every other
+# committed record is seeded below as part of its lane's all-or-nothing block,
+# and `tests/test_service.py::DeliberatelyUnseededTests` asserts the two sets
+# together cover `deploy/connector-governance/` exactly -- so a record added to
+# the repo and forgotten here fails the suite rather than becoming a lane that
+# reports `unconfigured` for ever with nobody having decided that.
+#
+# This array is read by nothing at runtime. It exists so the reason lives next
+# to the decision instead of in a report, and so the test above has something
+# to check against.
+DELIBERATELY_UNSEEDED=(
+  # P13ah: roic.ai answers 403 on every page, site-wide, from 2026-08-29 --
+  # confirmed here (NVDA, AAPL) and independently by the OpenClaw source survey
+  # (`docs/reports/openclaw-data-source-survey-v1.0-2026-09-09.md`), which
+  # reaches it the same way: bare HTTPS with a browser user agent, no cookie,
+  # no key, no proxy. Nothing in the writer loads either record, so seeding
+  # them buys no lane and costs the owner two approvals to make about a source
+  # that answers nothing. The records stay committed: when roic is reachable
+  # again the only change here is to seed them.
+  roic-list-transcripts-v1.json
+  roic-get-transcript-v1.json
+  # S2: the narrowing record is a *note*, not an approval. It describes an
+  # operation the upstream does not have, nothing loads it, and a permanently
+  # proposed record sitting in the runtime directory is an approval to make
+  # about nothing. It is seeded into governance-decisions/ instead (below),
+  # where the owner reads it and no lane looks.
+  guidepoint-get-transcript-narrowing-v1.json
+)
+
 # Connector governance: the writer launches AlphaEngine acquisitions only
 # against an *approved* record at this path.  Seed the committed proposal once;
 # never overwrite an existing (possibly approved) record.  The owner approves
@@ -93,18 +123,8 @@ fi
 # and a schema hash binds one operation. Same seed-once rule: copied in as
 # *proposed*, and the owner approves each in place with
 # `dalton-connector-governance approve`. Until then the lane cannot run.
-# P13ah: roic.ai transcripts, a second independent source for the four
-# quarters of calls the Playbook requires. AlphaEngine carries them too and is
-# capped at 130 calls a day -- live, CTSH sat at one call of four with the cap
-# exhausted and its screen could not be rewritten. Public web, no credential.
-# Two records for the same reason every library here has two.
-for roic_kind in roic-list-transcripts roic-get-transcript; do
-  roic_file="$governance_dir/${roic_kind}-v1.json"
-  if [[ ! -f "$roic_file" && -f "$repo_root/deploy/connector-governance/${roic_kind}-v1.json" ]]; then
-    cp "$repo_root/deploy/connector-governance/${roic_kind}-v1.json" "$roic_file"
-    chmod 600 "$roic_file"
-  fi
-done
+# P13ah / INT3: the two roic.ai records are committed and are *not* seeded --
+# see DELIBERATELY_UNSEEDED at the top of this file for why.
 for guidepoint_kind in guidepoint-search-library guidepoint-get-transcript; do
   guidepoint_file="$governance_dir/${guidepoint_kind}-v1.json"
   if [[ ! -f "$guidepoint_file" && -f "$repo_root/deploy/connector-governance/${guidepoint_kind}-v1.json" ]]; then
@@ -145,14 +165,38 @@ for yfinance_kind in yfinance-daily-prices yfinance-analyst-estimates; do
     chmod 600 "$yfinance_file"
   fi
 done
-# Not seeded here: the S1 feed connectors (sales-notes, company-wiki) and the
-# Guidepoint lane's own record. Their governance records are in the repo now,
-# but a record alone does not turn any of them on -- the feed lanes also want
-# a feed plan and an OpenClaw workspace directory, and the Guidepoint lane
-# wants a discovery plan this repo does not ship. Copying half of what a lane
-# needs gives the owner an approval to make and a lane that starts and refuses
-# every tick, which reads like a fault rather than an absence. Seeding them is
-# one block each, once whoever owns those lanes says what the other half is.
+# INT2: the rule INT1 wrote down and this block keeps -- a lane is seeded all
+# or nothing. Copying half of what a lane needs gives the owner an approval to
+# make and a lane that starts and refuses every tick, which reads like a fault
+# rather than an absence. So each block below either puts down everything its
+# lane switches on, or puts down nothing and says why.
+#
+# C1: the catalyst calendar reads Yahoo's diary for the covered companies. Its
+# own record, because a schema hash binds one operation and an approval to read
+# prices is not an approval to read anything else Yahoo serves. This one record
+# is the whole switch: without it the writer's plist carries no
+# --catalyst-calendar-governance and the lane is not installed. Seeded once as
+# *proposed*; the owner approves in place with `dalton-connector-governance
+# approve`. The lane needs no new mission version -- the live mission already
+# grants `observation`.
+calendar_governance_file="$governance_dir/yfinance-calendar-v1.json"
+if [[ ! -f "$calendar_governance_file" && -f "$repo_root/deploy/connector-governance/yfinance-calendar-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/yfinance-calendar-v1.json" "$calendar_governance_file"
+  chmod 600 "$calendar_governance_file"
+fi
+# S4: the six China / Hong Kong fundamentals records. There is no lane for them
+# in this wave -- the mission universe is US-listed -- so seeding them turns
+# nothing on and cannot half-turn-on anything. They are here so the owner can
+# read and approve them in place; six schema hashes, six separate approvals,
+# because approving statements is not approving northbound flow.
+for cn_hk_kind in financial-statements shareholders buybacks margin-balance \
+                  northbound-flow ah-premium; do
+  cn_hk_file="$governance_dir/cn-hk-findata-${cn_hk_kind}-v1.json"
+  if [[ ! -f "$cn_hk_file" && -f "$repo_root/deploy/connector-governance/cn-hk-findata-${cn_hk_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/cn-hk-findata-${cn_hk_kind}-v1.json" "$cn_hk_file"
+    chmod 600 "$cn_hk_file"
+  fi
+done
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound
@@ -197,10 +241,193 @@ fi
 # P10u: the SEC filings index asks for a form per issuer rather than a phrase,
 # so it is a 0.4 plan. Seeded once and hash bound like the others; the approval
 # it runs under is the one the owner already signed.
+#
+# INT3: the lane's governance record is seeded here too, because the writer's
+# plist names `--sec-filings-governance <state>/connector-governance/
+# sec-filings-index-v1.json` *unconditionally*. Until this block existed the
+# record lived only on the live Core: it was proposed and approved in place
+# there and was never committed, so a Core rebuilt from scratch got a writer
+# pointed at a path with no file behind it. The record is recovered from that
+# Core byte for byte, and it re-derives from the packaged SEC template through
+# `sec_filings_index.build_filings_index_governance_record` -- same source
+# hash, same schema hash, same content hash -- so it is the packaged contract's
+# own record rather than a copy of somebody's disk.
+#
+# It is committed and seeded *approved*, which is not the usual rule and is the
+# same exception `alphaengine-get-document-v1.json` and `sec-company-facts-v1.
+# json` already carry: the approval is the owner's own, made on 2026-08-26,
+# and re-proposing it here would take an approval away on the next deploy
+# rather than ask for one. Copy-once like everything else, so a live Core's
+# record is never overwritten.
+sec_filings_governance_file="$governance_dir/sec-filings-index-v1.json"
 sec_plan_file="$plan_dir/us-it-services-sec-filings-v1.json"
-if [[ ! -f "$sec_plan_file" && -f "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" ]]; then
-  cp "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" "$sec_plan_file"
-  chmod 600 "$sec_plan_file"
+if [[ -f "$repo_root/deploy/connector-governance/sec-filings-index-v1.json" \
+   && -f "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" ]]; then
+  if [[ ! -f "$sec_filings_governance_file" ]]; then
+    cp "$repo_root/deploy/connector-governance/sec-filings-index-v1.json" "$sec_filings_governance_file"
+    chmod 600 "$sec_filings_governance_file"
+  fi
+  if [[ ! -f "$sec_plan_file" ]]; then
+    cp "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" "$sec_plan_file"
+    chmod 600 "$sec_plan_file"
+  fi
+fi
+# S2 / INT2: the Guidepoint expert-network lane. Its two governance records are
+# already seeded above (P13ae); what it also wants is a discovery plan, and the
+# lane's argv fragment requires *both* files -- the plan being on disk is the
+# other half of the switch. Seeded together with the records, so the pair is
+# never half present. The narrowing record is deliberately NOT put in
+# connector-governance/: nothing loads it, it is the note the owner reads
+# before deciding what to do with the approval for an operation the upstream
+# does not have, and a permanently-proposed record in the runtime directory is
+# an approval to make about nothing.
+gp_plan_file="$plan_dir/us-it-services-guidepoint-v1.json"
+if [[ ! -f "$gp_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-guidepoint-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p9-us-it-services-guidepoint-v1.json" "$gp_plan_file"
+  chmod 600 "$gp_plan_file"
+fi
+decisions_dir="$state_dir/governance-decisions"
+mkdir -p "$decisions_dir"
+chmod 700 "$decisions_dir"
+gp_narrowing_file="$decisions_dir/guidepoint-get-transcript-narrowing-v1.json"
+if [[ ! -f "$gp_narrowing_file" && -f "$repo_root/deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json" "$gp_narrowing_file"
+  chmod 600 "$gp_narrowing_file"
+fi
+# S1 / INT2: the two human-feed lanes read files a host skill already wrote to
+# this disk. Neither one is a network connector, so what turns them on is the
+# feed plan, their approved records, and the source directory *being there*.
+# The workspace is named by an environment variable rather than assumed,
+# because a Core installed without OpenClaw has no feeds and should end up
+# with no feed lane rather than with two lanes that refuse every tick.
+#
+#   DALTON_OPENCLAW_WORKSPACE=~/.openclaw/workspace   (the default)
+#
+# The two lanes are seeded independently: sales notes and the company wiki are
+# separate approvals, separate directories and separate LaneSpecs, so one
+# being absent must not take the other with it.
+openclaw_workspace=${DALTON_OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}
+feed_plan_dir="$state_dir/feed-plans"
+feeds_dir="$state_dir/feeds"
+digest_source="$openclaw_workspace/skills/market-digest/output"
+wiki_index_source="$openclaw_workspace/wiki-index.sqlite"
+seed_feed_plan() {
+  mkdir -p "$feed_plan_dir"
+  chmod 700 "$feed_plan_dir"
+  feed_plan_file="$feed_plan_dir/p9-us-it-services-feeds-v1.json"
+  if [[ ! -f "$feed_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" ]]; then
+    cp "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" "$feed_plan_file"
+    chmod 600 "$feed_plan_file"
+  fi
+}
+if [[ -d "$digest_source" ]]; then
+  seed_feed_plan
+  for sales_notes_kind in sales-notes-list-notes sales-notes-get-note; do
+    sales_notes_file="$governance_dir/${sales_notes_kind}-v1.json"
+    if [[ ! -f "$sales_notes_file" && -f "$repo_root/deploy/connector-governance/${sales_notes_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${sales_notes_kind}-v1.json" "$sales_notes_file"
+      chmod 600 "$sales_notes_file"
+    fi
+  done
+  mkdir -p "$feeds_dir"
+  chmod 700 "$feeds_dir"
+  # A link, not a copy: the digest directory is the skill's own output and
+  # gets a new file twice a day. A copy would be a second, stale truth.
+  if [[ ! -e "$feeds_dir/market-digest-output" ]]; then
+    ln -s "$digest_source" "$feeds_dir/market-digest-output"
+  fi
+else
+  print "note: no market-digest output at $digest_source; the sales-note lane is not installed."
+fi
+# The wiki corpus is 258 MB and its index rows carry paths relative to the
+# workspace root, so the corpus root has to *be* the workspace: a link to a
+# subdirectory would make every document path escape the root and be refused.
+# The index therefore has to be reachable as <workspace>/wiki-index.sqlite,
+# which is the owner's one line to run (see the owner-steps document); this
+# script does not write inside the OpenClaw workspace.
+if [[ -d "$openclaw_workspace" && -e "$wiki_index_source" ]]; then
+  seed_feed_plan
+  for company_wiki_kind in company-wiki-list-documents company-wiki-get-document; do
+    company_wiki_file="$governance_dir/${company_wiki_kind}-v1.json"
+    if [[ ! -f "$company_wiki_file" && -f "$repo_root/deploy/connector-governance/${company_wiki_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${company_wiki_kind}-v1.json" "$company_wiki_file"
+      chmod 600 "$company_wiki_file"
+    fi
+  done
+  mkdir -p "$feeds_dir"
+  chmod 700 "$feeds_dir"
+  if [[ ! -e "$feeds_dir/company-wiki" ]]; then
+    ln -s "$openclaw_workspace" "$feeds_dir/company-wiki"
+  fi
+else
+  print "note: no wiki index at $wiki_index_source; the company-wiki lane is not installed."
+fi
+# S3 / INT2: the three crowd sources. Seven records, a per-company map of
+# handles and queries, and three host tools this Core does not know the
+# location of. All of it together or none of it: the map is the lane's switch,
+# and a lane switched on with no tool refuses every networked run with "no
+# tool configured", which is the failure this rule exists to prevent.
+#
+#   DALTON_AGENT_REACH_TOOL=/opt/homebrew/bin/agent-reach   (Xueqiu channel)
+#   DALTON_XUEQIU_HOT_RANK_TOOL=...                         (the hot-rank shim)
+#   DALTON_XREACH_TOOL=/opt/homebrew/bin/xreach             (X timelines)
+#
+# Xueqiu's hot rank is not a subcommand of agent-reach, so it needs its own
+# small shim; the other two subcommands are agent-reach's own. Even with all
+# three present the lane stays off until the owner approves a record: all seven
+# ship *proposed* and the lane reads the status rather than the file's presence.
+crowd_tools_dir="$state_dir/host-tools"
+if [[ -x "${DALTON_AGENT_REACH_TOOL:-}" && -x "${DALTON_XUEQIU_HOT_RANK_TOOL:-}" \
+   && -x "${DALTON_XREACH_TOOL:-}" ]]; then
+  mkdir -p "$crowd_tools_dir"
+  chmod 700 "$crowd_tools_dir"
+  ln -sfn "$DALTON_AGENT_REACH_TOOL" "$crowd_tools_dir/agent-reach"
+  ln -sfn "$DALTON_XUEQIU_HOT_RANK_TOOL" "$crowd_tools_dir/xueqiu-hot-rank"
+  ln -sfn "$DALTON_XREACH_TOOL" "$crowd_tools_dir/xreach"
+  for crowd_kind in xueqiu-search-posts xueqiu-get-post xueqiu-hot-rank \
+                    x-xreach-user-timeline x-xreach-search x-xreach-thread \
+                    employee-reviews-blind; do
+    crowd_file="$governance_dir/${crowd_kind}-v1.json"
+    if [[ ! -f "$crowd_file" && -f "$repo_root/deploy/connector-governance/${crowd_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${crowd_kind}-v1.json" "$crowd_file"
+      chmod 600 "$crowd_file"
+    fi
+  done
+  phase9_dir="$state_dir/phase9"
+  mkdir -p "$phase9_dir"
+  chmod 700 "$phase9_dir"
+  crowd_map_file="$phase9_dir/p9-us-it-services-crowd-sources-v1.json"
+  if [[ ! -f "$crowd_map_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-crowd-sources-v1.json" ]]; then
+    cp "$repo_root/deploy/phase9/p9-us-it-services-crowd-sources-v1.json" "$crowd_map_file"
+    chmod 600 "$crowd_map_file"
+  fi
+else
+  print "note: set DALTON_AGENT_REACH_TOOL, DALTON_XUEQIU_HOT_RANK_TOOL and DALTON_XREACH_TOOL to install the crowd-source lane."
+fi
+# P14a / INT2: the tracking policy is the daily-tracking lane's whole switch --
+# a tracking lane with no baselines has no opinion about how often to look at
+# anything. One file, so all-or-nothing is automatic. The *judgement* lane's
+# two model configurations are written further down, after the model catalog
+# sync -- they need registered profiles, which the sync is what guarantees.
+tracking_policy_file="$state_dir/tracking-policy.json"
+if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" "$tracking_policy_file"
+  chmod 600 "$tracking_policy_file"
+fi
+# P14e / INT2: the three ProbeTemplates the ad-hoc research lane may bind. The
+# manifest is publication material -- the owner publishes each template with a
+# `human:` principal, and this script never signs anything -- so it is put
+# where the owner can read it and nowhere a lane looks. The lane's own config
+# file (research-task-lane.json) is *not* written here: it is the lane's
+# switch, and switching the lane on before any template is published gives a
+# lane that answers no_executable_adhoc_template_published every tick.
+phase8_dir="$state_dir/phase8"
+mkdir -p "$phase8_dir"
+chmod 700 "$phase8_dir"
+adhoc_templates_file="$phase8_dir/p14e-adhoc-probe-templates-v1.json"
+if [[ ! -f "$adhoc_templates_file" && -f "$repo_root/deploy/phase8/p14e-adhoc-probe-templates-v1.json" ]]; then
+  cp "$repo_root/deploy/phase8/p14e-adhoc-probe-templates-v1.json" "$adhoc_templates_file"
+  chmod 600 "$adhoc_templates_file"
 fi
 # ADR-0005 / P9d-17a: the writer needs an approved extraction model
 # configuration for drafting to run as mission automation.  Idempotent: appends
@@ -281,10 +508,106 @@ elif [[ -n "${DALTON_DELIVERABLE_MODEL_TIER:-}" ]]; then
   "$venv_dir/bin/python" -m dalton_core.deliverable_model_setup \
     --config "$config_path" --tier "$DALTON_DELIVERABLE_MODEL_TIER"
 fi
+# INT3: the three lane switches that are model configurations rather than
+# records. `research_planner_setup.install` already takes the policy id and the
+# config file name as arguments -- that is why the deliverable setup is nine
+# lines rather than two hundred -- so these blocks reuse it rather than adding
+# two more modules that differ by two strings.
+#
+# Same gate as the planner and the deliverable: named, or nothing is written
+# and the lane stays absent. A lane that is absent costs nothing; a lane that
+# is switched on with no model refuses every tick and reads like a fault.
+install_role_model_config() {
+  # $1 policy id, $2 config file name, $3 profile ids (may be empty), $4 tier
+  # The venv has dalton_core installed; no PYTHONPATH, same as every other
+  # `-m dalton_core.*` call in this script.
+  "$venv_dir/bin/python" - "$config_path" "$1" "$2" "$3" "$4" <<'PYROLE'
+import json, sys
+
+from dalton_core.research_planner_setup import PlannerSetupError, install
+
+config, policy_id, config_file_name, profiles, tier = sys.argv[1:6]
+profile_ids = [item.strip() for item in profiles.split(",") if item.strip()] or None
+try:
+    result = install(config, profile_ids=profile_ids, tier=tier or None,
+                     policy_id=policy_id, config_file_name=config_file_name)
+except PlannerSetupError as exc:
+    print(json.dumps({"status": "rejected", "config": config_file_name,
+                      "reason": str(exc)}), file=sys.stderr)
+    raise SystemExit(1)
+print(config_file_name + "=" + result["routing_policy_ref"])
+PYROLE
+}
+# P14a: the judgement lane. Two configurations, written together or not at all
+# -- the lane's own fragment already refuses a judge with no verifier, and a
+# judge verified by its own model is not verified. The independence itself is
+# checked at the route, before anything is paid for, and a judgement whose
+# verifier shares the producer's family comes back `gated:same_family`; naming
+# two different families here is what stops that being every judgement.
+#
+#   DALTON_EVENT_JUDGEMENT_MODEL_TIER=brain
+#   DALTON_EVENT_VERIFIER_MODEL_TIER=verifier
+#   (or DALTON_EVENT_JUDGEMENT_MODEL_PROFILE / DALTON_EVENT_VERIFIER_MODEL_PROFILE)
+judgement_pin="${DALTON_EVENT_JUDGEMENT_MODEL_PROFILE:-}${DALTON_EVENT_JUDGEMENT_MODEL_TIER:-}"
+verifier_pin="${DALTON_EVENT_VERIFIER_MODEL_PROFILE:-}${DALTON_EVENT_VERIFIER_MODEL_TIER:-}"
+if [[ -n "$judgement_pin" && -n "$verifier_pin" ]]; then
+  if [[ "$judgement_pin" == "$verifier_pin" ]]; then
+    print -u2 "error: the event judge and its verifier are pinned to the same model ($judgement_pin); every judgement would be gated:same_family"
+    exit 2
+  fi
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-event-judgement" \
+    "event-judgement-model-config.json" \
+    "${DALTON_EVENT_JUDGEMENT_MODEL_PROFILE:-}" "${DALTON_EVENT_JUDGEMENT_MODEL_TIER:-}"
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-event-verifier" \
+    "event-verifier-model-config.json" \
+    "${DALTON_EVENT_VERIFIER_MODEL_PROFILE:-}" "${DALTON_EVENT_VERIFIER_MODEL_TIER:-}"
+elif [[ -n "$judgement_pin" || -n "$verifier_pin" ]]; then
+  print -u2 "error: set both DALTON_EVENT_JUDGEMENT_MODEL_* and DALTON_EVENT_VERIFIER_MODEL_* or neither; the judgement lane is installed as a pair"
+  exit 2
+else
+  print "note: set DALTON_EVENT_JUDGEMENT_MODEL_TIER and DALTON_EVENT_VERIFIER_MODEL_TIER (different families) to install the event-judgement lane."
+fi
+# P12b: the claim index. One configuration, so all-or-nothing is automatic.
+# The maintenance pool is the tightest of C2's four at 5% and this is where the
+# index lands, so it is worth turning on deliberately rather than by default.
+#
+#   DALTON_CLAIM_INDEX_MODEL_TIER=cheap
+if [[ -n "${DALTON_CLAIM_INDEX_MODEL_PROFILE:-}" || -n "${DALTON_CLAIM_INDEX_MODEL_TIER:-}" ]]; then
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-claim-index" \
+    "claim-index-model-config.json" \
+    "${DALTON_CLAIM_INDEX_MODEL_PROFILE:-}" "${DALTON_CLAIM_INDEX_MODEL_TIER:-}"
+else
+  print "note: set DALTON_CLAIM_INDEX_MODEL_TIER to install the claim-index lane."
+fi
 # P9d-18 / ADR-0006: point the cockpit at the Core (read-only), the state
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.
 "$venv_dir/bin/python" -m dalton_core.cockpit_setup --config "$config_path"
+# INT2 / P14-M: tell the cockpit where the gateway's own model catalog is, so
+# the page can say whether the models this Core holds are the models the broker
+# offers -- and which way they differ, because "out of sync" on its own tells
+# nobody what to do. A path rather than a convention: the control process must
+# not go looking through the host's home directory on its own, and a Core
+# installed without the gateway simply gets no catalog block.
+if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "$HOME/.openclaw/openclaw.json" <<'PYBROKER'
+import json, sys
+from pathlib import Path
+
+path, broker = Path(sys.argv[1]), sys.argv[2]
+config = json.loads(path.read_text(encoding="utf-8"))
+cockpit = ((config.get("control") or {}).get("config") or {}).get("cockpit")
+if isinstance(cockpit, dict):
+    cockpit["openclaw_config_path"] = broker
+    path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+    print("cockpit.openclaw_config_path=" + broker)
+PYBROKER
+fi
 # P10f/P10h: DALTON_EXTRACTION_MAX_WINDOWS raises reading throughput. Each
 # window is one paid model call against the mission's max_daily_paid_calls, so
 # raise the mission budget first.

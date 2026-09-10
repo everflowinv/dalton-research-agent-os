@@ -958,32 +958,53 @@ UNCONFIRMED_DATE_CAVEAT = "日期未确认"
 RESEARCH_EVENT_KIND = "calendar"
 
 
-def calendar_event_key(
-    company_ref: str, entry_ref: str, window: str, expected_date: str,
-    confidence: str,
-) -> str:
-    """One name for this company, this occurrence, this window, this date, as
-    well as it was known at the time.
+def calendar_event_payload(
+    entry: Mapping[str, Any], *, window: str, version_ref: str | None,
+) -> dict[str, Any]:
+    """One window, in the shape ``research_event`` froze for ``calendar``.
 
-    Deterministic on purpose. The lane runs daily and a preview window is open
-    for a month, so something has to stop thirty identical events; keying on
-    the date means a call that moves genuinely reopens the window rather than
-    being suppressed by the one already emitted.
+    The field set is P14a's and this function exists to meet it rather than to
+    argue with it. Three of its rules decide everything here.
 
-    ``confidence`` is in the key for the same reason the date is. A preview
-    fired against an estimated date and the same preview once the company has
-    confirmed it are two different pieces of news: the second one tells the
-    judgement layer the work it planned is now safe to commit to, and keying
-    without it would swallow that.
+    **Nothing nested.** ``validate_payload`` takes text, integers, booleans and
+    nulls, on the ground that a payload able to hold a document holds a
+    document's worth of unverified prose. So ``disagreeing_dates`` -- a list --
+    does not travel; the boolean does, and the full record is one
+    ``calendar_version_ref`` away for a reader that wants the dates.
+
+    **Nothing derived.** ``days_until`` and ``as_of`` are arithmetic over
+    ``expected_date`` and the event's own ``occurred_at``. Carrying them would
+    put two copies of one fact in an index whose whole job is to be the thin
+    one, and -- because they change daily -- would make every morning's
+    unchanged window a *new* event.
+
+    **The ledger already knows what is the same.** An event's identity is
+    ``(company_ref, kind, payload_hash)``, so a payload that says the same
+    thing tomorrow comes back as ``duplicate`` and writes nothing. That is why
+    this carries no key of its own: a second identity beside the ledger's would
+    be a second thing to keep in step with it. It is also what makes the two
+    cases that *should* re-fire re-fire, and for the right reason rather than
+    by construction -- a date that moved changes ``expected_date``, and a date
+    the company confirms changes ``confirmed`` and ``date_confidence``.
+
+    ``confirmed`` is P14a's word and the Cockpit already renders it, printing
+    "日期未确认" when it is false. ``date_confidence`` is the same fact spelled
+    out, and both are derived here from one value so that they cannot come
+    apart.
     """
 
-    return "calendar-event:" + content_hash({
-        "company_ref": _text(company_ref, "company_ref"),
-        "entry_ref": _text(entry_ref, "entry_ref"),
+    confidence = entry["confidence"]
+    return {
+        "event_kind": entry["event_kind"],
+        "expected_date": entry["expected_date"],
+        "confirmed": confidence == "confirmed",
+        "date_confidence": confidence,
         "window": _one_of(window, EVENT_WINDOWS, "window"),
-        "expected_date": _iso_date(expected_date, "expected_date"),
-        "confidence": _one_of(confidence, CONFIDENCES, "confidence"),
-    })[:32]
+        "entry_ref": entry["entry_ref"],
+        "disagreement": bool(entry["disagreement"]),
+        "calendar_version_ref": version_ref,
+        "source_ref": entry["sources"][0]["source_ref"] if entry["sources"] else None,
+    }
 
 
 def emit_calendar_events(
@@ -994,28 +1015,25 @@ def emit_calendar_events(
     now: datetime | date | None = None,
     version_ref: str | None = None,
     moved_entry_refs: Sequence[str] = (),
-    is_emitted: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Tell the event ledger which windows opened, through the caller's writer.
 
     ``record_event`` is a parameter rather than an import because P14a owns
-    that module and this one must not reach into it: the integrator passes
-    ``research_event.record_event`` and the tests pass a fake that records what
-    it was asked to write.
+    that module and this one must not reach into it: the lane binds the real
+    one to its authority and mission, and the tests pass a fake.
 
     **An estimated date opens the preview; only a confirmed one opens the
     calibration.** This is how the job is done: the preview is written against
     the expected date, because waiting for the company to confirm spends most
     of the month one is preparing in. What that costs is the occasional preview
     built against a date that then moves, and the answer to that is to say
-    which kind of date it was -- ``date_confidence`` and a caveat travel on the
-    event and on anything that renders it -- rather than to skip the work.
+    which kind of date it was -- ``confirmed`` and ``date_confidence`` travel
+    on every one of these -- rather than to skip the work.
 
-    The confirmation is then its own event. When the company's own filing turns
-    an estimate into a confirmed date, the entry's version chain records
-    ``evidence_thicker`` and a second ``preview`` event goes out, so the
-    judgement layer can re-plan against a date that is now safe to commit to.
-    That works because ``confidence`` is part of the event key.
+    The confirmation is then its own event, and it is the ledger that makes it
+    one: confirming a date changes the payload, so the second write is
+    ``fresh`` rather than a duplicate, and the judgement layer learns that the
+    work it planned against an estimate is now safe to commit to.
 
     The calibration is confirmed-only and stays that way. It is written *about*
     a release; an estimated date says a report was likely, not that one
@@ -1026,6 +1044,11 @@ def emit_calendar_events(
     thinks a week later" is a fact about the world's expectations even when it
     is not a fact about the company -- and the judgement layer, not this
     function, decides what it is worth.
+
+    Returns one row per window it asked to record, each carrying whatever the
+    writer said about it. A day on which every window was already recorded
+    returns rows whose status is ``duplicate``, which is this lane's resting
+    state and not a problem.
     """
 
     today = _as_date(now)
@@ -1033,8 +1056,6 @@ def emit_calendar_events(
     emitted: list[dict[str, Any]] = []
     for entry in entries:
         expected = entry["expected_date"]
-        confidence = entry["confidence"]
-        unconfirmed = confidence != "confirmed"
         days_until = (
             date.fromisoformat(expected) - date.fromisoformat(today)
         ).days
@@ -1046,52 +1067,37 @@ def emit_calendar_events(
                 windows.append("preview")
             elif -CALIBRATION_TRAILING_DAYS <= days_until <= 0:
                 windows.append("calibration")
-        if unconfirmed:
+        if entry["confidence"] != "confirmed":
             windows = [
                 window for window in windows if window in UNCONFIRMED_DATE_WINDOWS
             ]
         for window in windows:
-            key = calendar_event_key(
-                company_ref, entry["entry_ref"], window, expected, confidence
-            )
-            if is_emitted is not None and is_emitted(key):
-                continue
-            payload = {
-                "event_key": key,
-                "window": window,
-                "entry_ref": entry["entry_ref"],
-                "event_kind": entry["event_kind"],
-                # A label and an identity. Two occurrences can share the
-                # label -- Accenture reports twice in calendar Q4 -- so
-                # anything keying on one of these has to key on the ref.
-                "subject": entry["subject"],
-                "anchor_date": entry["anchor_date"],
-                "expected_date": expected,
-                # Named for what it qualifies. An event ledger will hold other
-                # confidences before long, and a bare "confidence" beside a
-                # date is the kind of field a renderer attaches to the wrong
-                # thing.
-                "date_confidence": confidence,
-                "date_unconfirmed": unconfirmed,
-                # The words to put beside the date, so the caveat cannot be
-                # lost by whichever consumer forgets to derive it.
-                "date_caveat": UNCONFIRMED_DATE_CAVEAT if unconfirmed else "",
-                "disagreement": entry["disagreement"],
-                "disagreeing_dates": list(entry.get("disagreeing_dates") or []),
-                "days_until": days_until,
-                "as_of": today,
-            }
+            payload = calendar_event_payload(
+                entry, window=window, version_ref=version_ref)
             source_refs = [source["ref"] for source in entry["sources"]]
             if version_ref:
                 source_refs.append(version_ref)
-            record_event(
+            written = record_event(
                 company_ref=company_ref,
                 kind=RESEARCH_EVENT_KIND,
+                # Midnight of the day the window opened. Not part of what makes
+                # two events the same, so a window that stays open keeps the
+                # date it first opened on rather than creeping forward.
                 occurred_at=f"{today}T00:00:00+00:00",
                 source_refs=source_refs,
                 payload=payload,
             )
-            emitted.append(payload)
+            emitted.append({
+                **payload,
+                "days_until": days_until,
+                "as_of": today,
+                "status": (
+                    written.get("status") if isinstance(written, Mapping) else None
+                ),
+                "event_ref": (
+                    written.get("id") if isinstance(written, Mapping) else None
+                ),
+            })
     emitted.sort(key=lambda item: (item["expected_date"], item["window"]))
     return emitted
 
@@ -1124,7 +1130,7 @@ __all__ = [
     "CatalystCalendarError",
     "CatalystCalendarNotFound",
     "CatalystCalendarValidationError",
-    "calendar_event_key",
+    "calendar_event_payload",
     "calendar_ref_for",
     "emit_calendar_events",
     "entry_ref_for",
