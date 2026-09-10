@@ -1784,12 +1784,15 @@ class EventJudgementAuthority:
 
 
 def pool(mission: Mapping[str, Any]) -> dict[str, Any]:
-    cap = (Decimal(str(mission["budget"]["max_daily_cost_usd"])) * POOL_SHARE)
+    from .budget_pools import pool_caps
+
+    cap_micros = pool_caps(mission["budget"])["caps_micros"][POOL_NAME]
+    day_micros = int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000)
     return {
         "pool": POOL_NAME,
-        "share": str(POOL_SHARE),
-        "cap_usd": str(cap.quantize(Decimal("0.000001"))),
-        "cap_micros": int(cap * 1_000_000),
+        "share": str(Decimal(cap_micros) / Decimal(day_micros)),
+        "cap_usd": str((Decimal(cap_micros) / 1_000_000).quantize(Decimal("0.000001"))),
+        "cap_micros": cap_micros,
     }
 
 

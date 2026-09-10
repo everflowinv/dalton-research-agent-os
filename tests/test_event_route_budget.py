@@ -15,6 +15,7 @@ from dalton_core.event_judgement_cli import (
     MAX_OUTPUT_TOKENS,
     TIMEOUT_SECONDS,
     event_model_contract_ref,
+    _event_run_budget,
 )
 from dalton_core.model_fallback_chain import tier_chain
 from dalton_core.model_router import ModelRouter
@@ -138,6 +139,20 @@ class EventRouteBudgetTests(unittest.TestCase):
         self.assertEqual(budget["max_input_tokens"], 42_000)
         self.assertEqual(budget["max_cost_usd"], 0.75)
         self.assertNotEqual(event_model_contract_ref(budget), event_model_contract_ref())
+
+    def test_event_run_limits_come_from_the_model_configuration(self) -> None:
+        class ConfiguredModel:
+            config = {
+                "run_budget": {"max_events": 6},
+                "purpose_run_budgets": {
+                    "event_judgement": {"max_events_per_company": 2}
+                },
+            }
+
+        self.assertEqual(
+            _event_run_budget(None, ConfiguredModel()),
+            {"max_events": 6, "max_events_per_company": 2},
+        )
 
 
 if __name__ == "__main__":

@@ -15,6 +15,12 @@ budget and each of the four event purposes independently. Effective limits
 govern prompt admission, WorkOrders, pool reservation, and the event contract
 fingerprint.
 
+The batch reads `max_events` and `max_events_per_company` from the configured
+run budget when the CLI flags are absent; explicit CLI flags remain the final
+override. Its daily `event_response` ceiling comes from the mission's explicit
+pool allocation through the shared pool authority, with shared defaults only
+for older missions that have no `pools` block.
+
 Prompts retain the complete primary event and filing/month or HK/week group.
 Verifier prompts also retain the complete producer draft, full event group,
 canonical cited evidence records, and closed contract. Missing cited records
@@ -29,8 +35,9 @@ work identity even when prompt text is unchanged.
 
 ## Evidence
 
-`PYTHONPATH=src python3 -m unittest tests.test_call_budget tests.test_cockpit_plane tests.test_event_judgement tests.test_event_route_budget tests.test_mission_event_judgement_lane`
-passed 155 tests in 23.559 seconds, with one existing optional test skipped.
+The broad focused call-budget/Cockpit/event run passed 155 tests in 23.559
+seconds with one existing optional test skipped. After the run-budget and
+mission-pool wiring, the event-focused subset passed 147 tests in 5.802 seconds.
 
 The route test synchronizes the current catalog fixture into a real
 `ModelRouter`, publishes real brain and verifier policies, resolves their

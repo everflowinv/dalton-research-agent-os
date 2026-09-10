@@ -516,6 +516,15 @@ class LedgerTests(JudgementHarness):
         self.assertEqual(after["spent_micros"], 40_000)
         self.assertEqual(after["remaining_micros"], after["cap_micros"] - 40_000)
 
+    def test_the_pool_uses_the_mission_explicit_event_cap(self):
+        mission = json.loads(json.dumps(self.mission))
+        mission["budget"]["pools"] = {
+            "coverage": 1, "event_response": 2,
+            "adhoc": 1, "maintenance": 1,
+        }
+        state = pool(mission)
+        self.assertEqual(state["cap_micros"], 2_000_000)
+
     def test_a_refused_pair_is_still_spend(self):
         # It writes no judgement row and it was still paid for; summing the
         # judgements would under-report exactly the day the cap exists for.

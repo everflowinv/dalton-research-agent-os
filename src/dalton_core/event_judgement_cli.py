@@ -33,6 +33,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .budget_pools import POOL_EXHAUSTED_STATUS
+from .call_budget import resolve_run_budget
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
@@ -344,6 +345,19 @@ def _call_budget(model: Any, purpose: str) -> dict[str, Any]:
     }
 
 
+def _event_run_budget(config_path: Path | None, model: Any) -> dict[str, Any]:
+    config = getattr(model, "config", None)
+    if config is None and config_path is not None:
+        config = json.loads(Path(config_path).expanduser().read_text(encoding="utf-8"))
+    return resolve_run_budget(
+        config or {}, PURPOSE,
+        defaults={
+            "max_events": MAX_EVENTS_PER_RUN,
+            "max_events_per_company": MAX_EVENTS_PER_COMPANY,
+        },
+    )
+
+
 def research_admitter_for(store: DaltonStore, mission: Any):
     """P14e's admission entry point, by name, or nothing.
 
@@ -398,8 +412,8 @@ def run_judgement(
     policy_path: Path | None = None,
     scheduler_db: Path | None = None,
     company_ref: str | None = None,
-    max_events: int = MAX_EVENTS_PER_RUN,
-    per_company: int = MAX_EVENTS_PER_COMPANY,
+    max_events: int | None = None,
+    per_company: int | None = None,
     dry_run: bool = False,
     judge_model: Any = None,
     verifier_model: Any = None,
@@ -459,15 +473,25 @@ def run_judgement(
         state = pool_state(judgements, mission, day=day)
         summary["pool"] = state
 
+        run_budget = _event_run_budget(judge_model_config, judge_model)
+        effective_max_events = (
+            max_events if max_events is not None else int(run_budget["max_events"])
+        )
+        effective_per_company = (
+            per_company
+            if per_company is not None
+            else int(run_budget["max_events_per_company"])
+        )
+
         batch: list[list[dict[str, Any]]] = []
         for ref in tracked:
             batch.extend(
                 unjudged_event_groups(
-                    events, judgements, company_ref=ref, limit=per_company,
+                    events, judgements, company_ref=ref, limit=effective_per_company,
                     now=moment,
                 )
             )
-        batch = batch[:max_events]
+        batch = batch[:effective_max_events]
         summary["candidates"] = len(batch)
         if not batch:
             summary.update({"status": "idle", "judgement_status": "nothing_unjudged"})
@@ -792,8 +816,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-policy", type=Path)
     parser.add_argument("--scheduler", type=Path)
     parser.add_argument("--company-ref")
-    parser.add_argument("--max-events", type=int, default=MAX_EVENTS_PER_RUN)
-    parser.add_argument("--per-company", type=int, default=MAX_EVENTS_PER_COMPANY)
+    parser.add_argument("--max-events", type=int)
+    parser.add_argument("--per-company", type=int)
     parser.add_argument("--dry-run", action="store_true", help="count and stop; no calls")
     parser.add_argument("--quiet", action="store_true")
     return parser
