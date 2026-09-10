@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, tempfile, unittest
+import hashlib, json, sqlite3, tempfile, unittest
 from pathlib import Path
 from dalton_core.research_html_export import (render_research_html, export_research_html,
     ResearchHtmlExportError, _typed_claims)
@@ -15,7 +15,7 @@ class HtmlRenderTests(unittest.TestCase):
         return mission,lib
     def test_safe_deterministic_report_has_toc_approval_chart_and_unknown(self):
         mission,lib=self.fixture()
-        claims={"claim:1":{"value":"10","unit":"usd","scale":"billion","currency":"USD","metric_or_aspect":"revenue","period":"FY25"},"claim:2":{"value":"12","unit":"usd","scale":"billion","currency":"USD","metric_or_aspect":"revenue","period":"FY26E"}}
+        claims={"claim:1":{"id":"claim:1","subject_ref":"company:acn","value":"10","unit":"usd","scale":"billion","currency":"USD","metric_or_aspect":"revenue","period":"FY2025","basis":"reported"},"claim:2":{"id":"claim:2","subject_ref":"company:acn","value":"12","unit":"usd","scale":"billion","currency":"USD","metric_or_aspect":"revenue","period":"FY2026","basis":"reported"}}
         a=render_research_html(lib,mission=mission,claims=claims); b=render_research_html(lib,mission=mission,claims=claims)
         self.assertEqual(a,b); self.assertIn('Contents',a); self.assertIn('pending_human_decision',a)
         self.assertIn('<svg',a); self.assertIn('claim:1',a); self.assertIn('Unknown / unavailable',a)
@@ -23,7 +23,7 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn('&lt;script&gt;',a); self.assertNotIn('src="http',a)
     def test_incompatible_units_do_not_make_a_chart(self):
         mission,lib=self.fixture(); nums=lib['products'][0]['sections'][0]['numbers']; nums[1]['text']='Margin 12%'
-        claims={"claim:1":{"value":"10","unit":"usd","scale":"billion","currency":"USD","metric_or_aspect":"revenue","period":"FY25"},"claim:2":{"value":"12","unit":"percent","scale":"one","currency":None,"metric_or_aspect":"margin","period":"FY26E"}}
+        claims={"claim:1":{"id":"claim:1","subject_ref":"company:acn","value":"10","unit":"usd","scale":"billion","currency":"USD","metric_or_aspect":"revenue","period":"FY2025","basis":"reported"},"claim:2":{"value":"12","unit":"percent","scale":"one","currency":None,"metric_or_aspect":"margin","period":"FY26E"}}
         page=render_research_html(lib,mission=mission,claims=claims)
         self.assertIn('Chart unavailable',page); self.assertNotIn('<svg',page)
 
@@ -40,12 +40,23 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         self.assertEqual(m1['mission_version_hash'],self.mission['content_hash'])
         self.assertTrue(all(p['status']=='missing' for p in m1['product_versions']))
         self.assertEqual(before,self.state_dir.joinpath('core.sqlite').stat().st_size)
+    def test_sqlite_uri_escapes_question_and_hash_in_real_path(self):
+        unusual = self.state_dir / "core?#copy.sqlite"
+        target = sqlite3.connect(unusual)
+        try:
+            self.store.connection.backup(target)
+        finally:
+            target.close()
+        result = export_research_html(
+            unusual, "company:sec-cik:0001467373", self.state_dir / "escaped.html")
+        self.assertEqual(result["mission_version_hash"], self.mission["content_hash"])
+
     def test_two_real_claim_rows_resolve_as_one_typed_series(self):
         refs=[]
         for index, value in enumerate(("10", "12"), 1):
             claim={"schema_version":"0.2","id":f"claim-version:html:{index}",
-                "claim_ref":"claim:html:revenue","version":index,"subject_ref":"company:sec-cik:0001467373",
-                "metric_or_aspect":"revenue","period":f"FY2{4+index}","basis":"official",
+                "claim_ref":f"claim:html:revenue:{index}","version":index,"subject_ref":"company:sec-cik:0001467373",
+                "metric_or_aspect":"revenue","period":f"FY202{4+index}","basis":"reported",
                 "normalized_statement":f"Revenue USD {value} billion","claim_kind":"quantitative",
                 "value":value,"unit":"usd","currency":"USD","scale":"billion",
                 "producer_execution_refs":[],"semantic_review_ref":None,"semantic_review_hash":None,
