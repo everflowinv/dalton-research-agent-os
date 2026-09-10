@@ -4,8 +4,8 @@ Chem's version of this was a cron entry that never fired once.  So the cadence
 here is not a timer at all: every tick asks the Ledger two questions and both
 are cheap.
 
-**Is a review owed?**  A company past its Initial Screen with no review for
-this month, or with an earnings calibration that no review has been written
+**Is a review owed?**  A company past its Initial Screen with no review in
+the prior 30 days, or with an earnings calibration that no review has been written
 against.  One read of this lane's own table plus one of the deliverable
 chain -- and a review that exists is a review that exists, so a writer restart
 on the 12th does not buy a second one.
@@ -43,6 +43,7 @@ from .zero_base_review import WRITE_SCOPE
 
 LAUNCHER_KWARG = "zero_base_review_launcher"
 REVIEW_MODEL_CONFIG = "zero-base-review-model-config.json"
+VERIFIER_MODEL_CONFIG = "zero-base-review-verifier-model-config.json"
 TRACKING_POLICY = "tracking-policy.json"
 MAX_FAILURE_DETAIL_CHARS = 500
 
@@ -265,18 +266,21 @@ def add_arguments(parser: Any) -> None:
         "--zero-base-review-model-config",
         help="the model configuration the monthly zero-base review calls with",
     )
+    parser.add_argument("--zero-base-review-verifier-model-config")
     parser.add_argument("--zero-base-review-policy")
 
 
 def build_launcher(args: Any) -> Any | None:
     config = getattr(args, "zero_base_review_model_config", None)
-    if not config:
+    verifier = getattr(args, "zero_base_review_verifier_model_config", None)
+    if not config or not verifier:
         return None
     from .zero_base_review_launcher import ZeroBaseReviewLauncher
 
     return ZeroBaseReviewLauncher(
         state_dir=Path(args.db).expanduser().resolve().parent,
         model_config=config,
+        verifier_model_config=verifier,
         policy_path=getattr(args, "zero_base_review_policy", None),
         scheduler_db=getattr(args, "scheduler", None),
     )
@@ -293,9 +297,11 @@ def argv_fragment(context: Any) -> list[str]:
     """
 
     config = context.state / REVIEW_MODEL_CONFIG
-    if not config.is_file():
+    verifier = context.state / VERIFIER_MODEL_CONFIG
+    if not (config.is_file() and verifier.is_file()):
         return []
-    argv = ["--zero-base-review-model-config", str(config)]
+    argv = ["--zero-base-review-model-config", str(config),
+            "--zero-base-review-verifier-model-config", str(verifier)]
     policy = context.state / TRACKING_POLICY
     if policy.is_file():
         argv += ["--zero-base-review-policy", str(policy)]

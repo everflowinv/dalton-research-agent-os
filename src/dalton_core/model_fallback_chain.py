@@ -129,6 +129,7 @@ _PURPOSE_TIERS: dict[str, str] = {
     # today is the hardest question in the set -- there is no event to
     # anchor it and the whole file argues for the answer we already hold.
     "zero_base_review": TIER_BRAIN,
+    "zero_base_review_verifier": TIER_VERIFIER,
     # Reading a rating and a target price off page one of a broker note is
     # "apply a stated standard to a lot of items" -- cheap.
     "street_estimate": TIER_CHEAP,

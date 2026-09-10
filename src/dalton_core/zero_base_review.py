@@ -33,7 +33,7 @@ for the judgement lane.  Nothing here can move a pointer on a thesis, a
 dossier or a debate map.
 
 **The cadence is a fact about the ledger, not a timer.**  A review is owed
-when this company has no review for the current month, or when an earnings
+when this company has no review in the prior 30 days, or when an earnings
 calibration has been published that no review has been written against.  Both
 are one read, so a writer restart in the middle of a month does not produce a
 second review, and the ``inputs_hash`` rule underneath means that even a lane
@@ -52,7 +52,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -71,6 +71,7 @@ _SCHEMA_PATH = Path(__file__).with_name("zero_base_review_schema.sql")
 #: Registered at import, like every other purpose: a purpose registered after
 #: the call that uses it is not registered.
 PURPOSE = register_purpose("zero_base_review")
+VERIFIER_PURPOSE = register_purpose("zero_base_review_verifier")
 
 #: The scope a review is published under.  ``deliverable``: a dated document
 #: about one company, produced on a cadence and read by a person -- the same
@@ -223,6 +224,18 @@ def _reviewed_periods(
     }
 
 
+def _latest_review_at(connection: sqlite3.Connection, review_ref: str) -> datetime | None:
+    if not _table_exists(connection, "zero_base_review_versions"):
+        return None
+    row = connection.execute(
+        "SELECT created_at FROM zero_base_review_versions WHERE review_ref=? "
+        "ORDER BY created_at DESC, version_id DESC LIMIT 1", (review_ref,),
+    ).fetchone()
+    if row is None:
+        return None
+    return datetime.fromisoformat(str(row["created_at"]))
+
+
 def review_state(
     connection: sqlite3.Connection,
     *,
@@ -234,8 +247,8 @@ def review_state(
 
     Read-only, so the lane tick can ask it without holding anything that can
     write.  The earnings trigger is checked first: a print is the moment the
-    accumulated story is most likely to be wrong, and a company whose
-    calibration landed on the 3rd should not wait for next month.
+    accumulated story is most likely to be wrong, and it restarts the 30-day
+    clock once the earnings-triggered review is recorded.
     """
 
     month = month_label(now)
@@ -255,17 +268,18 @@ def review_state(
                 "reason": "这家公司出了一版新的财报对账，还没有从零重问过",
             })
             continue
-        if ("monthly", month) not in seen:
+        latest_review = _latest_review_at(connection, review_ref)
+        if latest_review is None or now - latest_review >= timedelta(days=30):
             state.append({
                 "company_ref": company_ref, "review_ref": review_ref, "due": True,
                 "trigger": "monthly", "period_label": month, "calibration": calibration,
-                "reason": f"{month} 这个月还没有对这家公司做过零基复盘",
+                "reason": "距这家公司上一版零基复盘已满 30 天",
             })
             continue
         state.append({
             "company_ref": company_ref, "review_ref": review_ref, "due": False,
             "trigger": "monthly", "period_label": month, "calibration": calibration,
-            "reason": f"{month} 已经复盘过，且没有新的财报对账",
+            "reason": "距上一版复盘不足 30 天，且没有新的财报对账",
         })
     return state
 
@@ -719,6 +733,67 @@ def review(
             **validated}
 
 
+def build_verifier_prompt(context: Mapping[str, Any], answered: Mapping[str, Any]) -> str:
+    archived = [ref for ref in context.get("allowed_refs") or () if str(ref).startswith(
+        ("thesis", "debate", "claim")
+    )]
+    return "\n".join([
+        "You are an independent verifier. Check all four zero-base answers.",
+        "Each answer must be grounded in archived thesis, debate, or claim refs, and the",
+        "next verification point must contain a real date on or after the as-of date.",
+        f"As of: {context['as_of']}",
+        "Archived refs: " + ", ".join(archived),
+        "Review: " + canonical_json({key: answered[key] for key in OUTPUT_KEYS}),
+        'Return raw JSON only: {"verdict":"pass|reject","findings":["<reason>"]}',
+        "A pass has no findings; a reject has at least one.",
+    ])[:MAX_PROMPT_CHARS]
+
+
+def verify_review(
+    context: Mapping[str, Any], answered: Mapping[str, Any], *, model: Any,
+    mission: Mapping[str, Any], request_id: str,
+    family_resolver: Callable[[str | None], str | None],
+) -> dict[str, Any]:
+    producer_family = family_resolver((answered.get("model") or {}).get("route_decision_ref"))
+    independence = {"producer_family": producer_family, "verifier_family": None,
+                    "predicate": "model_family_ne"}
+    if producer_family is None:
+        return {"status": "refused", "reason": "the producer model family could not be resolved",
+                "independence": independence, "model": None}
+    prompt = build_verifier_prompt(context, answered)
+    try:
+        call = model.call(purpose=VERIFIER_PURPOSE, request_id=request_id,
+                          prompt=prompt, mission=mission)
+    except CockpitModelError as exc:
+        return {"status": "refused", "reason": f"the verifier call did not succeed: {exc}",
+                "lane_status": lane_status_for(exc, "refused"), "model": None,
+                "independence": independence}
+    provenance = _provenance(call)
+    verifier_family = family_resolver(provenance.get("route_decision_ref"))
+    independence["verifier_family"] = verifier_family
+    if verifier_family is None or verifier_family == producer_family:
+        return {"status": "refused", "reason": "model_family_not_independent",
+                "independence": independence, "model": provenance}
+    try:
+        payload = unwrap_json_object(call["text"])
+        if not isinstance(payload, Mapping) or set(payload) != {"verdict", "findings"}:
+            raise ZeroBaseReviewValidationError("the verifier output is exactly verdict and findings")
+        findings = payload["findings"]
+        if payload["verdict"] not in ("pass", "reject") or not isinstance(findings, list):
+            raise ZeroBaseReviewValidationError("the verifier verdict is pass or reject and findings is a list")
+        if (payload["verdict"] == "pass") == bool(findings):
+            raise ZeroBaseReviewValidationError("a pass has no findings and a reject has at least one")
+        findings = [_text(row, "verifier finding", maximum=500) for row in findings]
+    except ZeroBaseReviewValidationError as exc:
+        return {"status": "refused", "reason": str(exc), "independence": independence,
+                "model": provenance}
+    if payload["verdict"] != "pass":
+        return {"status": "refused", "reason": "; ".join(findings),
+                "independence": independence, "model": provenance, "findings": findings}
+    return {"status": "verified", "independence": independence, "model": provenance,
+            "findings": []}
+
+
 # ---------------------------------------------------------------------------
 # the record a person reads
 # ---------------------------------------------------------------------------
@@ -1056,6 +1131,7 @@ __all__ = [
     "NARRATIVE_TITLE",
     "OUTPUT_KEYS",
     "PURPOSE",
+    "VERIFIER_PURPOSE",
     "QUESTIONS",
     "REWRITE_DECISIONS",
     "SCHEMA_VERSION",
@@ -1069,6 +1145,7 @@ __all__ = [
     "build_context",
     "build_review_body",
     "build_review_prompt",
+    "build_verifier_prompt",
     "company_debates",
     "due_reviews",
     "inputs_hash",
@@ -1080,4 +1157,5 @@ __all__ = [
     "review_ref_for",
     "review_state",
     "validate_review_output",
+    "verify_review",
 ]

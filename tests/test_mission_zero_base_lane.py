@@ -150,6 +150,7 @@ class InstallationTests(unittest.TestCase):
     class Args:
         db = "/tmp/does-not-matter/core.sqlite"
         zero_base_review_model_config = None
+        zero_base_review_verifier_model_config = None
         zero_base_review_policy = None
         scheduler = None
 
@@ -170,6 +171,9 @@ class InstallationTests(unittest.TestCase):
             context.state = state
             self.assertEqual(argv_fragment(context), [])
             (state / "zero-base-review-model-config.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(argv_fragment(context), [])
+            (state / "zero-base-review-verifier-model-config.json").write_text(
+                "{}", encoding="utf-8")
             fragment = argv_fragment(context)
             self.assertEqual(fragment[0], "--zero-base-review-model-config")
             (state / "tracking-policy.json").write_text("{}", encoding="utf-8")

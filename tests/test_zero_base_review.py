@@ -33,12 +33,13 @@ from dalton_core.zero_base_review import (
     review_ref_for,
     review_state,
     validate_review_output,
+    verify_review,
 )
 
 from tests.zero_base_fixtures import MISSION
 
 MARCH = datetime(2026, 3, 12, 9, tzinfo=timezone.utc)
-APRIL = datetime(2026, 4, 2, 9, tzinfo=timezone.utc)
+APRIL = datetime(2026, 4, 12, 9, tzinfo=timezone.utc)
 
 THESIS = {
     "ref": "thesis-version:acn-1",
@@ -153,11 +154,27 @@ class CadenceTests(unittest.TestCase):
         self.record()
         self.assertFalse(self.state()["due"])
 
-    def test_the_next_month_is_due_again(self) -> None:
+    def test_thirty_one_days_later_is_due_again(self) -> None:
         self.record()
         state = self.state(APRIL)
         self.assertTrue(state["due"])
         self.assertEqual(state["period_label"], "2026-04")
+
+    def test_january_31_and_february_1_do_not_create_two_reviews(self) -> None:
+        self.reviews = ZeroBaseReviewAuthority(
+            self.store, clock=lambda: "2026-01-31T09:00:00.000000+00:00")
+        self.record(period_label="2026-01")
+        self.assertFalse(self.state(datetime(2026, 2, 1, 9, tzinfo=timezone.utc))["due"])
+
+    def test_an_earnings_review_restarts_the_thirty_day_clock(self) -> None:
+        self.record()
+        self.add_calibration("mission-deliverable-version:cal-1")
+        self.reviews = ZeroBaseReviewAuthority(
+            self.store, clock=lambda: "2026-03-20T09:00:00.000000+00:00")
+        self.record(trigger="earnings_calibration",
+                    period_label="mission-deliverable-version:cal-1", inputs_hash="2" * 64)
+        self.assertFalse(self.state(datetime(2026, 4, 11, 9, tzinfo=timezone.utc))["due"])
+        self.assertTrue(self.state(datetime(2026, 4, 19, 9, tzinfo=timezone.utc))["due"])
 
     def test_a_new_calibration_makes_a_reviewed_month_due_again(self) -> None:
         self.record()
@@ -351,6 +368,34 @@ class ModelCallTests(unittest.TestCase):
         found = review(context(), model=model, mission=MISSION, request_id="r1")
         self.assertEqual(found["status"], "refused")
         self.assertNotIn("form_a_view", found)
+
+    def test_an_independent_verifier_can_pass_all_four_answers(self) -> None:
+        producer = review(context(), model=FakeModel(answer()), mission=MISSION,
+                          request_id="r1")
+        verifier = FakeModel({"verdict": "pass", "findings": []})
+        original_call = verifier.call
+        def call(**kwargs):
+            result = original_call(**kwargs)
+            result["route_decision_ref"] = "route:verifier"
+            return result
+        verifier.call = call
+        found = verify_review(
+            context(), producer, model=verifier, mission=MISSION,
+            request_id="r1-verify",
+            family_resolver={"route:1": "openai", "route:verifier": "anthropic"}.get,
+        )
+        self.assertEqual(found["status"], "verified")
+        self.assertIn("Archived refs", verifier.calls[0]["prompt"])
+        self.assertIn('"next_verification"', verifier.calls[0]["prompt"])
+
+    def test_a_same_family_verifier_is_refused(self) -> None:
+        producer = review(context(), model=FakeModel(answer()), mission=MISSION,
+                          request_id="r1")
+        found = verify_review(
+            context(), producer, model=FakeModel({"verdict": "pass", "findings": []}),
+            mission=MISSION, request_id="r1-verify", family_resolver=lambda _: "openai",
+        )
+        self.assertEqual(found["status"], "refused")
 
     def test_the_purpose_routes_to_the_brain_tier_and_the_coverage_pool(self) -> None:
         from dalton_core.budget_pools import pool_for_purpose
@@ -602,6 +647,8 @@ class RegistrationTests(unittest.TestCase):
                    ).read_text(encoding="utf-8")
         self.assertIn("zero-base-review-model-config.json", install)
         self.assertIn("DALTON_ZERO_BASE_REVIEW_MODEL_TIER", install)
+        self.assertIn("zero-base-review-verifier-model-config.json", install)
+        self.assertIn("DALTON_ZERO_BASE_REVIEW_VERIFIER_MODEL_TIER", install)
 
 
 if __name__ == "__main__":  # pragma: no cover

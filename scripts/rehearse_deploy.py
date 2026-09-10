@@ -818,6 +818,15 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
         "gated:same_family",
     ),
     LaneSwitch(
+        "zero_base_review (W4)", "zero-base-review-model-config.json", None, False,
+        "written only with its independent verifier configuration",
+    ),
+    LaneSwitch(
+        "zero_base_review verifier (W4)",
+        "zero-base-review-verifier-model-config.json", None, False,
+        "written with DALTON_ZERO_BASE_REVIEW_VERIFIER_MODEL_PROFILE/TIER",
+    ),
+    LaneSwitch(
         "claim_index (P12b)", "claim-index-model-config.json", None, False,
         "INT3: written when DALTON_CLAIM_INDEX_MODEL_PROFILE/TIER is set",
     ),

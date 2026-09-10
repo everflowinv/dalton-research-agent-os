@@ -30,6 +30,7 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         *,
         state_dir: str | Path,
         model_config: str | Path | None = None,
+        verifier_model_config: str | Path | None = None,
         policy_path: str | Path | None = None,
         scheduler_db: str | Path | None = None,
         **kwargs: Any,
@@ -37,6 +38,10 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         super().__init__(state_dir=state_dir, **kwargs)
         self.model_config = (
             None if model_config is None else Path(model_config).expanduser().resolve()
+        )
+        self.verifier_model_config = (
+            None if verifier_model_config is None
+            else Path(verifier_model_config).expanduser().resolve()
         )
         self.policy_path = (
             None if policy_path is None else Path(policy_path).expanduser().resolve()
@@ -53,7 +58,9 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         ``gated``.
         """
 
-        return self.model_config is not None and self.model_config.is_file()
+        return (self.model_config is not None and self.model_config.is_file()
+                and self.verifier_model_config is not None
+                and self.verifier_model_config.is_file())
 
     def _command(self, *, ticket_dir: Path, mode: str = "review", **_: Any) -> list[str]:
         command = [
@@ -64,6 +71,8 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         ]
         if self.model_config is not None:
             command += ["--model-config", str(self.model_config)]
+        if self.verifier_model_config is not None:
+            command += ["--verifier-model-config", str(self.verifier_model_config)]
         if self.policy_path is not None:
             command += ["--tracking-policy", str(self.policy_path)]
         if self.scheduler_db is not None:

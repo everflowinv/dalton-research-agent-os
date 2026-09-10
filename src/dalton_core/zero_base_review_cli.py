@@ -8,7 +8,7 @@ already in the Core.  There is no model in it, so it may run as often as the
 tick likes; the ``inputs_hash`` rule means a pass over unmoved rows writes
 nothing.
 
-``review`` does that and then pays for one bounded call per company whose
+``review`` does that and then pays for a producer and independent verifier per company whose
 zero-base review is owed: at most :data:`MAX_REVIEWS_PER_RUN`, so a month
 boundary that makes five companies due at once cannot spend the coverage pool
 in a single tick.
@@ -52,10 +52,12 @@ from .zero_base_review import (
     build_review_body,
     due_reviews,
     review,
+    verify_review,
 )
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 REVIEW_MODEL_CONFIG = register_model_config_name("zero-base-review-model-config.json")
+VERIFIER_MODEL_CONFIG = register_model_config_name("zero-base-review-verifier-model-config.json")
 
 # One company's prompt is a table: a handful of theses, a dozen debates, a
 # dozen events. It has never needed a large window.
@@ -143,11 +145,14 @@ def run_zero_base(
     summary_dir: Path,
     mode: str = "review",
     model_config: Path | None = None,
+    verifier_model_config: Path | None = None,
     policy_path: Path | None = None,
     scheduler_db: Path | None = None,
     company_ref: str | None = None,
     max_reviews: int = MAX_REVIEWS_PER_RUN,
     model: Any = None,
+    verifier_model: Any = None,
+    family_resolver: Any = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     if mode not in MODES:
@@ -222,19 +227,26 @@ def run_zero_base(
             summary.update({"status": "succeeded", "review_status": "nothing_due"})
             return summary
         model = model or _model(model_config, state_dir, scheduler_db)
-        if model is None:
+        verifier_model = verifier_model or _model(verifier_model_config, state_dir, scheduler_db)
+        if model is None or verifier_model is None:
             summary.update({
                 "status": "idle", "review_status": "gated",
-                "failure_reason": "the zero-base review lane needs a model configuration",
+                "failure_reason": "the zero-base review lane needs producer and verifier model configurations",
             })
             return summary
         may_propose = (
             CANDIDATE_SCOPE in granted and CHECKPOINT_KIND in checkpoints
         )
+        if family_resolver is None:
+            from .event_judgement import route_family_resolver
+            config = (json.loads(Path(model_config).expanduser().read_text(encoding="utf-8"))
+                      if model_config is not None else {})
+            family_resolver = route_family_resolver(config.get("model_router_db"))
         for item in pending[:max(1, int(max_reviews))]:
             outcome = _review_one(
                 store, reviews=reviews, outcomes=outcomes, mission=mission,
-                item=item, model=model, moment=moment, actor_ref=actor,
+                item=item, model=model, verifier_model=verifier_model,
+                family_resolver=family_resolver, moment=moment, actor_ref=actor,
                 may_propose=may_propose,
             )
             summary["reviews"].append(outcome)
@@ -266,6 +278,8 @@ def _review_one(
     mission: Any,
     item: dict[str, Any],
     model: Any,
+    verifier_model: Any,
+    family_resolver: Any,
     moment: datetime,
     actor_ref: str,
     may_propose: bool,
@@ -285,10 +299,20 @@ def _review_one(
                 "trigger": item["trigger"], "period_label": item["period_label"],
                 "reason": answered.get("reason"),
                 "lane_status": answered.get("lane_status")}
+    verified = verify_review(
+        context, answered, model=verifier_model, mission=mission,
+        request_id=f"{request_id}-verify", family_resolver=family_resolver,
+    )
+    if verified["status"] != "verified":
+        return {"company_ref": company_ref, "status": "refused",
+                "trigger": item["trigger"], "period_label": item["period_label"],
+                "reason": verified.get("reason"), "lane_status": verified.get("lane_status"),
+                "verification": verified}
     body = build_review_body(
         context, {**answered, "model": answered.get("model")},
         calibration_ref=(item.get("calibration") or {}).get("version_ref"),
     )
+    body["verification"] = verified
     written = reviews.record(body, actor_ref=actor_ref)
     result = {
         "company_ref": company_ref, "status": written["status"],
@@ -332,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary-dir", required=True)
     parser.add_argument("--mode", choices=MODES, default="review")
     parser.add_argument("--model-config")
+    parser.add_argument("--verifier-model-config")
     parser.add_argument("--tracking-policy")
     parser.add_argument("--scheduler")
     parser.add_argument("--company-ref")
@@ -343,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
         summary_dir=Path(args.summary_dir),
         mode=args.mode,
         model_config=None if not args.model_config else Path(args.model_config),
+        verifier_model_config=(None if not args.verifier_model_config
+                               else Path(args.verifier_model_config)),
         policy_path=None if not args.tracking_policy else Path(args.tracking_policy),
         scheduler_db=None if not args.scheduler else Path(args.scheduler),
         company_ref=args.company_ref,
@@ -358,6 +385,7 @@ __all__ = [
     "MAX_REVIEWS_PER_RUN",
     "MODES",
     "REVIEW_MODEL_CONFIG",
+    "VERIFIER_MODEL_CONFIG",
     "SUMMARY_SCHEMA_VERSION",
     "main",
     "outcome_inputs",
