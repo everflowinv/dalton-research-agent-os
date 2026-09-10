@@ -124,7 +124,20 @@ class SourceBaseTests(StageHarness):
         calls = self.item(self.evaluate(), ACN, "earnings_calls")
         self.assertEqual(calls["have"], 2)
         self.assertEqual(calls["classified_periods"], ["FY2026-Q1", "FY2026-Q2"])
+        self.assertEqual(calls["required_periods"],
+                         ["FY2025-Q3", "FY2025-Q4", "FY2026-Q1", "FY2026-Q2"])
+        self.assertEqual(calls["missing_periods"], ["FY2025-Q3", "FY2025-Q4"])
         self.assertEqual(calls["unclassified"], 2)
+
+    def test_four_nonconsecutive_historical_calls_do_not_pass_recent_window(self) -> None:
+        for title in ("Issuer Q1 2024", "Issuer Q3 2024", "Issuer Q1 2025",
+                      "Issuer Q2 2026 Earnings Conference Call"):
+            self.document(ACN, TRANSCRIPTS, "acquired", title=title)
+        calls = self.item(self.evaluate(), ACN, "earnings_calls")
+        self.assertEqual(calls["have"], 1)
+        self.assertEqual(calls["status"], "partial")
+        self.assertEqual(calls["missing_periods"],
+                         ["FY2025-Q3", "FY2025-Q4", "FY2026-Q1"])
 
     def test_shared_document_attribution_is_per_company_and_dismissal_wins(self) -> None:
         document_ref = self.document(ACN, TRANSCRIPTS, "acquired", read=True)

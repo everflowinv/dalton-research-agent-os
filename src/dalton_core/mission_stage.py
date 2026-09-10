@@ -245,7 +245,8 @@ def _document_counts(
     def bucket(company: str, spec: str) -> dict[str, int]:
         return counts.setdefault(
             (company, spec), {"acquired": 0, "pending": 0, "failed": 0,
-                              "read": 0, "periods": [], "unclassified": 0}
+                              "read": 0, "periods": [], "required_periods": [],
+                              "missing_periods": [], "unclassified": 0}
         )
 
     row = connection.execute(
@@ -324,7 +325,6 @@ def _document_counts(
                 periods = earnings_periods.setdefault((company_ref, spec_ref), set())
                 if period not in periods:
                     periods.add(period)
-                    entry_counts["acquired"] += 1
                     entry_counts["periods"] = sorted(periods)
             else:
                 entry_counts["acquired"] += 1
@@ -355,7 +355,17 @@ def _document_counts(
             if period in periods:
                 continue
             periods.add(period)
-        bucket(company_ref, spec_ref)["read"] += 1
+        else:
+            bucket(company_ref, spec_ref)["read"] += 1
+    for key, periods in earnings_periods.items():
+        entry_counts = bucket(*key)
+        required = _required_quarters(max(periods, key=_quarter_ordinal))
+        entry_counts["required_periods"] = required
+        entry_counts["missing_periods"] = [period for period in required
+                                            if period not in periods]
+        entry_counts["acquired"] = sum(period in periods for period in required)
+        entry_counts["read"] = sum(period in read_periods.get(key, set())
+                                   for period in required)
     return counts
 
 
@@ -385,6 +395,19 @@ def _earnings_call_period(title: Any) -> str | None:
                 quarter, year = match.group(1), match.group(2)
             return f"FY{year}-Q{quarter}"
     return None
+
+
+def _quarter_ordinal(period: str) -> int:
+    match = re.fullmatch(r"FY(20\d{2})-Q([1-4])", period)
+    if match is None:
+        raise MissionStageError("invalid classified fiscal quarter")
+    return int(match.group(1)) * 4 + int(match.group(2)) - 1
+
+
+def _required_quarters(latest: str) -> list[str]:
+    end = _quarter_ordinal(latest)
+    return [f"FY{ordinal // 4}-Q{ordinal % 4 + 1}"
+            for ordinal in range(end - 3, end + 1)]
 
 
 def retired_claim_refs(connection: sqlite3.Connection) -> set[str]:
@@ -473,6 +496,8 @@ def evaluate_mission(
             else:
                 have = read = pending = failed = unclassified = 0
                 classified_periods: set[str] = set()
+                required_periods: set[str] = set()
+                missing_periods: set[str] = set()
                 for spec in item["spec_refs"]:
                     entry = counts.get((company_ref, spec))
                     if entry is None:
@@ -483,6 +508,8 @@ def evaluate_mission(
                     failed += entry["failed"]
                     unclassified += int(entry.get("unclassified") or 0)
                     classified_periods.update(entry.get("periods") or ())
+                    required_periods.update(entry.get("required_periods") or ())
+                    missing_periods.update(entry.get("missing_periods") or ())
             item_status, note = _item_status(
                 item,
                 have,
@@ -497,6 +524,9 @@ def evaluate_mission(
                 "failed": failed, "status": item_status, "note": note,
                 "source_ref": item["source_ref"], "spec_refs": list(item["spec_refs"]),
                 **({"classified_periods": sorted(classified_periods),
+                    "required_periods": sorted(required_periods),
+                    "missing_periods": sorted(missing_periods),
+                    "period_coverage": "known" if required_periods else "unknown",
                     "unclassified": unclassified}
                    if item["item_ref"] == "earnings_calls" else {}),
             })
