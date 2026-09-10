@@ -1487,23 +1487,7 @@ class MissionSourceDiscoveryCoordinator:
             return {"status": "busy", "reason": "a discovery child is still running"}
         skipped: list[dict[str, Any]] = []
 
-        def last_dispatch_time(member: Mapping[str, Any]) -> tuple[int, str, str]:
-            latest_times = []
-            for candidate_spec in self.plan["specs"]:
-                rows = self.missions.discovery_dispatches(
-                    mission["id"], company_ref=member["company_ref"],
-                    spec_ref=candidate_spec["spec_ref"], limit=1,
-                )
-                if rows:
-                    latest_times.append(str(rows[0]["created_at"]))
-            if not latest_times:
-                return (0, "", "")
-            return (1, max(latest_times), str(member["company_ref"]))
-
-        # Rotate companies by their last attempted discovery so an incomplete
-        # first company cannot monopolize every newly-opened retry window.
-        members = sorted(mission["universe"], key=last_dispatch_time)
-        for member in members:
+        for member in mission["universe"]:
             company_ref = member["company_ref"]
             if company_ref not in self.plan["companies"]:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})

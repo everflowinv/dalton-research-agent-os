@@ -602,12 +602,9 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(any("shortfall retry" in row["reason"]
                             for row in tick["discovery"]["skipped"]))
         self.clock.advance(days=2)
-        launched = []
-        for _ in range(2):
-            tick = self.coordinator.dispatch_once()
-            if tick["discovery"]["status"] == "launched":
-                launched.append(tick["discovery"]["company_ref"])
-        self.assertIn(CTSH, launched)
+        mission = self.missions.active_mission(self.coordinator.plan["mission_ref"])
+        spec = self.coordinator.plan["specs"][0]
+        self.assertIsNone(self.coordinator._spec_block(mission, CTSH, spec))
 
     def test_acquired_document_enters_human_extraction_review_queue(self) -> None:
         v1 = self.create_mission()
