@@ -389,6 +389,9 @@ MODEL_SELECTION_MODE_LABELS = {
     "tier": "跟随档位",
     "explicit": "自己点名",
     "tier_after_retirement": "你选的都退役了，暂时按档位走",
+    "legacy_pin": "沿用当前策略固定的模型",
+    "policy_filters": "由当前策略筛选模型",
+    "tier_preview": "默认档位预览（尚未绑定策略）",
 }
 MODEL_TIER_LABELS = {
     "brain": "要动脑的（写判断、做规划）",

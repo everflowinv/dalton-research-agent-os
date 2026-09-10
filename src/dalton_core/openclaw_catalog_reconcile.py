@@ -249,12 +249,13 @@ def openclaw_broker_profiles_from_config(
     profile_ids: Sequence[str] | None = None,
     metadata_declarations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the runnable verifier catalog from explicitly brokered models.
+    """Project explicitly brokered models into Dalton's current catalog.
 
-    Existing curated routes keep their immutable profile definitions.  A new
-    broker profile gets a conservative verify-only definition from the public
-    provider catalog and a content-bound version reference.  Orphan or changed
-    routes are rejected instead of being guessed into a paid run.
+    Route, price and capacity come from the current public broker catalog.
+    Curated profile IDs supply initial role metadata; changed and unknown
+    routes need an exact-route Dalton declaration to establish lineage.
+    The synchronizer appends versions when this projection changes, retaining
+    immutable history. Models absent from the provider catalog are refused.
     """
 
     if availability_ttl.total_seconds() <= 0:
