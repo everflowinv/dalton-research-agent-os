@@ -349,9 +349,15 @@ def validate_preview_output(value: Any, context: Mapping[str, Any]) -> dict[str,
             f"{stray_numbers[:5]}；写 {GAP_MARKER} 而不是猜一个数字"
         )
     caveat = (context.get("occurrence") or {}).get("date_caveat") or ""
-    if caveat and caveat not in body:
+    if caveat and caveat not in summary:
+        # Checked against the model's own paragraph rather than the assembled
+        # body: ``preview_body`` appends the caveat itself, so checking the
+        # body would pass every answer and prove nothing.  A preview written
+        # against a date the company has not confirmed has to say so where a
+        # reader starts reading.
         raise EarningsSeasonValidationError(
-            f"the report date is not confirmed and the preview does not say so（{caveat}）"
+            f"the report date is not confirmed and the preview's summary does "
+            f"not say so（{caveat}）"
         )
     return {
         "summary": summary,
@@ -405,7 +411,14 @@ def document_summary(context: Mapping[str, Any]) -> str:
         f"（{occurrence.get('date_confidence')}）",
         f"期间 {context.get('period_end') or '未知'}",
     ]
+    if context.get("model_version_ref"):
+        parts.append(f"我们的模型 [{context['model_version_ref']}]")
     for row in context.get("forecast") or ():
+        if row.get("value") is None:
+            # An unavailable cell is a gap, not a figure.  Printing "None"
+            # beside a ref would be the one thing this line exists to stop.
+            parts.append(f"我们 {row['label']}={GAP_MARKER} [{(row['refs'] or [''])[0]}]")
+            continue
         parts.append(
             f"我们 {row['label']}={row['value']}{row['unit'] or ''}"
             f" [{(row['refs'] or [''])[0]}]"

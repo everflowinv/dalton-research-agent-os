@@ -446,6 +446,10 @@ def forecast_rows(
 ) -> list[dict[str, Any]]:
     """Our own line-by-line number for one quarter, each with its refs.
 
+    Every cell for that quarter, not one per line: once the quarter is
+    actualised a line holds both the estimate it made and the actual that
+    answered it, and the calibration is *about* the pair.
+
     Every row carries the cell ref, the assumptions behind it and the version
     it was read from, because "our estimate" with no way back to what it rests
     on is the kind of number this whole layer exists to make impossible.
@@ -473,7 +477,6 @@ def forecast_rows(
                     ] if ref
                 ] + list(cell.get("assumption_refs") or []),
             })
-            break
     return rows[:limit]
 
 
