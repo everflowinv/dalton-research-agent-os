@@ -7,6 +7,10 @@ from dalton_core.investment_memo_contract import CHECK_REFS
 from dalton_core.investment_memo_draft import (
     GROUPS, InvestmentMemoDraftError, build_group_prompt, parse_group_output, verify_memo,
 )
+from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.mission_deliverable import MissionDeliverableAuthority
+from dalton_core.store import DaltonStore, content_hash
+from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
 
 TITLES = ["Key Information", "Executive Summary", "S1 company", "S2 industry",
@@ -94,7 +98,7 @@ class InvestmentMemoDraftTests(unittest.TestCase):
                                 "kind": "claim", "text": "source"}],
                   "input_bindings": [{"ref": "claim-version:1", "hash": "c" * 64, "kind": "claim"}]}
         result = run_memo(store=object(), frozen=frozen, model=producer, verifier_model=verifier)
-        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["status"], "succeeded", result)
         self.assertEqual(len(producer.calls), 4)
         self.assertEqual(len(verifier.calls), 1)
         gate = authority_type.return_value.publish.call_args.kwargs["gate"]
@@ -111,3 +115,55 @@ class InvestmentMemoDraftTests(unittest.TestCase):
         result = run_memo(store=object(), frozen=frozen, model=producer, verifier_model=FakeModel([]))
         self.assertEqual(result["status"], "refused")
         authority_type.return_value.publish.assert_not_called()
+
+    def test_success_publishes_through_real_mission_deliverable_authority(self):
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        state = bootstrap_method_authorities(store)
+        params = mission_params(state)
+        params["autonomy"] = {**params["autonomy"],
+                              "may_write": [*params["autonomy"]["may_write"], "deliverable"]}
+        mission_ref = params.pop("mission_ref")
+        mission = CoverageMissionAuthority(store).create_mission(mission_ref, **params)
+        claim = {"schema_version": "0.2", "id": "claim-version:" + "1" * 64,
+                 "claim_ref": "claim:memo:1", "version": 1,
+                 "subject_ref": mission["universe"][0]["company_ref"],
+                 "metric_or_aspect": "business", "period": "2026Q2", "basis": "fixture",
+                 "normalized_statement": "Demand improved.", "claim_kind": "qualitative",
+                 "value": None, "unit": None, "currency": None, "scale": None,
+                 "producer_execution_refs": [], "semantic_review_ref": None,
+                 "semantic_review_hash": None, "candidate_origin_ref": None,
+                 "candidate_origin_hash": None, "actor_ref": "system:test",
+                 "prior_version_ref": None, "created_at": "2026-09-10T00:00:00+00:00"}
+        claim["content_hash"] = content_hash({k: v for k, v in claim.items() if k != "content_hash"})
+        with store._transaction() as cur:
+            cur.execute("INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,content_hash,created_at) VALUES(?,?,?,?,?,?)",
+                        (claim["id"], claim["claim_ref"], 1, json.dumps(claim), claim["content_hash"], claim["created_at"]))
+        actual_titles = state["playbook"]["deliverable_templates"]["investment_memo"]
+        actual_questions = state["playbook"]["key_questions"]
+        responses = []
+        for _, section_indexes, question_indexes in GROUPS:
+            payload = group_payload([actual_titles[i] for i in section_indexes],
+                [{"question_ref": f"memo_q{i+1:02d}", "question": actual_questions[i]} for i in question_indexes])
+            for section in payload["sections"]:
+                section["claim_refs"] = [claim["id"]]
+            for answer in payload["key_questions"]:
+                answer["refs"] = [claim["id"]]
+            responses.append(payload)
+        verifier = FakeModel([], "verifier")
+        def bound_call(**kwargs):
+            contract = json.loads(next(line for line in kwargs["prompt"].splitlines()
+                                       if line.startswith('{"finding_codes"')))
+            verifier.responses = iter([{**contract, "verdict": "pass", "finding_codes": []}])
+            return FakeModel.call(verifier, **kwargs)
+        verifier.call = bound_call
+        frozen = {"status": "ready", "mission": mission, "playbook": state["playbook"],
+                  "company": mission["universe"][0],
+                  "material": [{"ref": claim["id"], "hash": claim["content_hash"],
+                                "kind": "claim", "text": claim["normalized_statement"]}],
+                  "input_bindings": [{"ref": claim["id"], "hash": claim["content_hash"], "kind": "claim"}]}
+        result = run_memo(store=store, frozen=frozen, model=FakeModel(responses), verifier_model=verifier)
+        self.assertEqual(result["status"], "succeeded", result)
+        stored = MissionDeliverableAuthority(store).latest(
+            "mission-deliverable:investment_memo:" + mission["universe"][0]["company_ref"].rsplit(":", 1)[-1])
+        self.assertEqual(stored["gate"]["verified_body_hash"], result["gate"]["verified_body_hash"])
