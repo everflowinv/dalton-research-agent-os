@@ -43,3 +43,11 @@ Memo + 模型阶段 + registry 集成75项 /2.823s通过；真实company model a
 - 最后三个Sol并行实现完整prior import、基金Excel exporter、HTML final deliverable。源文件和私有研究不进入仓库。
 
 Next step：接受完整运行候选后备份部署、health与逐字核对、实际产物复查；最终交付代码独立验收后再冻结，报告所有未满足的模型或人审条件。
+
+## 18:42 UTC 全量发现与来源实际状态
+
+`726ee7d` 全量6418项/535.048s发现2 failures、1 error（1 skip）：三个旧ResearchTask预算/结算fixture的问题没有收入意图，新的SEC收入模板正确拒绝。修正fixture为真实可绑定的收入问题，保留无匹配能力拒绝测试；111项/11.026s通过。新冻结 `299227b` 再跑完整验收；运行文件与此前wheel535文件完全相同（仅测试/文档变化），SHA `8ec8790399ccd040d31bf7edd2ace3c17882821433ab4f1e8ebd9d4b2aaf95d4`。之前失败候选均未部署。
+
+18:32只读扩展验收：五家公司都没有价格、consensus、估值记录。最新价格/consensus child明确在网络前拒绝“governance record is not approved”；三份yfinance治理仍proposed，不是依赖安装成功就已接入。已在私有owner包准备逐项能力/hash/权限审阅清单与未执行的owner命令；不代签。这也解释了真正估值和价格异动产品仍然缺失。
+
+最后交付开发继续交叉审查：导入已覆盖18sheet/41634模型cell和Word396块/52media/15嵌入对象，正补实际CLI artifact留存与日历识别；HTML禁止正文猜数字，改typed authority序列；XLSX须有可证明财年边界才合年度，不能把ACN的连续四季误标为财年。Cockpit下载入口正在接线。
