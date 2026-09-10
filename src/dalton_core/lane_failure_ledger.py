@@ -234,7 +234,9 @@ class LaneFailureLedger:
         if lane is not None:
             sql += "AND lane=? "
             params.append(lane)
-        sql += "ORDER BY recorded_at, event_id"
+        # A content hash is not a sequence: preserve append order when two
+        # operations share a timestamp, including with an injected clock.
+        sql += "ORDER BY recorded_at, rowid"
         return [dict(row) for row in self.connection.execute(sql, params).fetchall()]
 
     def parked_by_dependency(

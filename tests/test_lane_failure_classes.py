@@ -512,6 +512,32 @@ class LedgerTests(unittest.TestCase):
         again = lane_budget("research_task", state_dir=self.root, clock=self.clock)
         self.assertEqual(again.blocked("doc:9").action, "terminal")
 
+    def test_replaying_recovery_never_appends_another_recovery(self) -> None:
+        first = lane_budget("research_task", state_dir=self.root, clock=self.clock)
+        first.record("task:62", reason=TASK_62)
+        self.now = NOW + timedelta(seconds=1)
+        first.clear("task:62")
+        with LaneFailureLedger(default_path(self.root), clock=self.clock) as ledger:
+            original = ledger.events(now=self.now)
+        for restart in range(3):
+            self.now += timedelta(seconds=1)
+            restored = lane_budget("research_task", state_dir=self.root, clock=self.clock)
+            self.assertEqual(restored.parked_items(), [])
+            with LaneFailureLedger(default_path(self.root), clock=self.clock) as ledger:
+                self.assertEqual(ledger.events(now=self.now), original, restart)
+
+    def test_equal_timestamp_recovery_follows_append_order(self) -> None:
+        with LaneFailureLedger(self.root / "same-clock.sqlite", clock=self.clock) as ledger:
+            for index in range(8):
+                budget = LaneFailureBudget(f"lane:{index}", ledger=ledger, clock=self.clock)
+                budget.record("work", reason=TASK_62)
+                budget.clear("work")
+                rows = ledger.events(now=self.now, lane=f"lane:{index}")
+                self.assertEqual([row["event"] for row in rows], ["parked", "dependency_ok"])
+                restored = LaneFailureBudget(f"lane:{index}", clock=self.clock).replay(rows)
+                self.assertEqual(restored.parked_items(), [])
+            self.assertEqual(ledger.parked_by_dependency(now=self.now)["parked_items"], 0)
+
     def test_without_a_state_directory_the_budget_still_works(self) -> None:
         budget = lane_budget("research_task", clock=self.clock)
         self.assertEqual(budget.record("a", reason=TASK_62).action, "parked")

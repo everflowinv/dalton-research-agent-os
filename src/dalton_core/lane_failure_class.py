@@ -526,6 +526,14 @@ class LaneFailureBudget:
         """
 
         name = str(dependency or UNKNOWN_DEPENDENCY)
+        resumed = self._release_dependency(name)
+        if resumed or self.ledger is not None:
+            self._append_dependency_ok(name, resumed)
+        return resumed
+
+    def _release_dependency(self, name: str) -> list[str]:
+        """Rebuild recovery state without appending another historical event."""
+
         resumed = [
             item for item, found in self._parked.items()
             if (found.dependency or UNKNOWN_DEPENDENCY) == name
@@ -535,8 +543,6 @@ class LaneFailureBudget:
             self._reason.pop(item, None)
         self._down_since.pop(name, None)
         self._probe_spent.pop(name, None)
-        if resumed or self.ledger is not None:
-            self._append_dependency_ok(name, resumed)
         return sorted(resumed)
 
     # -- reading -----------------------------------------------------------
@@ -724,8 +730,11 @@ class LaneFailureBudget:
             elif event == "permission_ok":
                 self._not_permitted.pop(item, None)
             elif event == "dependency_ok":
-                self.dependency_answered(
+                self._release_dependency(
                     str(row.get("dependency") or UNKNOWN_DEPENDENCY))
+            elif event == "resumed":
+                self._parked.pop(item, None)
+                self._reason.pop(item, None)
         return self
 
 

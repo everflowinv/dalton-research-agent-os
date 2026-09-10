@@ -24,3 +24,9 @@ F14 的真实范围是 13 个协调器，按 `resume-failure-ledger-next-2026-09
 ## 进展
 
 三个 Sol 子代理已启动。签署/部署未执行，live 未修改。后续交付、发现、测试和 next step 随实际结果追加。
+
+### 公共账本恢复修复
+
+主代理发现 `LaneFailureBudget.replay()` 在读取 `dependency_ok` 时调用会写账本的 `dependency_answered()`；每次 writer 重启会重写恢复历史。现拆出只更新内存的恢复函数，replay 不再产生新事件，并支持单项 `resumed` 历史。另修同时间戳按 event hash 排序造成“先恢复后失败”：读账本改为 timestamp + SQLite append rowid，保持同刻的真实写入顺序。
+
+回归覆盖三个重启后账本逐行不变、八组同刻 park/recovery、现有 permission / cockpit / extraction；76 项 / 7.327s，OK。公开调用 API 不变，三条子代理线继续并行。
