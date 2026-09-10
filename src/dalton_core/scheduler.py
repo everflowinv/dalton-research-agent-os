@@ -193,6 +193,16 @@ class Scheduler:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        if connection is None and self.path != ":memory:":
+            # The controller, writer and child workers share this file. A
+            # read snapshot must not block a completion from committing.
+            # Migrate an owned on-disk scheduler once; supplied connections
+            # retain the journal policy of their enclosing authority.
+            mode = self.connection.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() != "wal":
+                mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                if str(mode).lower() != "wal":
+                    raise SchedulerValidationError("scheduler requires WAL journal mode")
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_scheduler_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
