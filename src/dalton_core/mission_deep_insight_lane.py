@@ -95,16 +95,16 @@ def clear_obsolete_permissions(
             budget.retire(row["item_key"])
 
 
-def company_ledger_signature(connection: Any, company_ref: str) -> str:
-    from .cockpit_model import verifier_provider_contract_fingerprint
+def company_ledger_signature(connection: Any, company_ref: str,
+                             launcher: Any | None = None) -> str:
     from .deep_insight_gate_cli import deep_insight_company_source_fingerprint
-
-    value = "|".join((
-        company_ref,
-        deep_insight_company_source_fingerprint(connection, company_ref),
-        verifier_provider_contract_fingerprint("deep_insight_gate_verifier"),
-    ))
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+    paths = () if launcher is None else (
+        getattr(launcher, "model_config_path", None),
+        getattr(launcher, "verifier_model_config_path", None),
+        getattr(launcher, "policy_path", None),
+    )
+    return deep_insight_company_source_fingerprint(
+        connection, company_ref, input_paths=paths)
 
 
 def ledger_signature(connection: Any) -> str:
@@ -229,7 +229,7 @@ class MissionDeepInsightLaneCoordinator:
         quiet_companies = []
         for company_ref in companies:
             evidence = (ledger_signature(self.connection) if company_ref is None else
-                        f"{company_ref}|{company_ledger_signature(self.connection, company_ref)}")
+                        f"{company_ref}|{company_ledger_signature(self.connection, company_ref, self.launcher)}")
             signature = permission_key(self.connection, self.launcher, evidence)
             clear_obsolete_permissions(self.budget, signature, company_ref)
             if signature in self._quiet_signatures:
@@ -242,7 +242,10 @@ class MissionDeepInsightLaneCoordinator:
                 held_decisions[label] = held
                 continue
             try:
-                ticket = self.launcher.start(signature=signature, company_ref=company_ref)
+                ticket = self.launcher.start(
+                    signature=signature, company_ref=company_ref,
+                    source_fingerprint=(None if company_ref is None
+                                        else evidence.rsplit("|", 1)[1]))
             except LaneChildConflict as exc:
                 return {"status": "busy", "settled": settled,
                         "reason": f"{type(exc).__name__}: {exc}"}

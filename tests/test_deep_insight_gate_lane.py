@@ -37,7 +37,8 @@ from dalton_core.deep_insight_gate import (
     DEEP_INSIGHT_GATE_RUBRIC, GROUPS, QUESTION_REFS, DeepInsightGateAuthority,
 )
 from dalton_core.deep_insight_gate_cli import (
-    build_parser, deliverable_sections, granted_scope, group_material, run_gate,
+    build_parser, deep_insight_company_source_fingerprint, deliverable_sections,
+    granted_scope, group_material, run_gate,
     screened_companies,
 )
 from dalton_core.deep_insight_gate_launcher import DeepInsightGateLauncher, run_digest
@@ -1076,7 +1077,7 @@ class LaneTests(unittest.TestCase):
             def __init__(self):
                 self.started = 0
 
-            def start(self, *, signature, company_ref=None):
+            def start(self, *, signature, company_ref=None, source_fingerprint=None):
                 self.started += 1
                 return {"id": f"ticket-{self.started}", "signature": signature}
 
@@ -1108,7 +1109,7 @@ class LaneTests(unittest.TestCase):
                 self.gate_status = gate_status
                 self.started = 0
 
-            def start(self, *, signature, company_ref=None):
+            def start(self, *, signature, company_ref=None, source_fingerprint=None):
                 self.started += 1
                 self.signature = signature
                 return {"id": f"ticket-{self.started}", "signature": signature}
@@ -1136,7 +1137,7 @@ class LaneTests(unittest.TestCase):
             def __init__(self):
                 self.started = []
 
-            def start(self, *, signature, company_ref=None):
+            def start(self, *, signature, company_ref=None, source_fingerprint=None):
                 self.started.append((signature, company_ref))
                 return {"id": f"ticket-{len(self.started)}", "signature": signature,
                         "company_ref": company_ref}
@@ -1193,19 +1194,83 @@ class LaneTests(unittest.TestCase):
                 state_dir=state, model_config_path=state / "model.json",
                 verifier_model_config_path=state / "verify.json",
                 policy_path=state / "policy.json")
-            command = launcher._command(ticket_dir=state / "ticket")
+            command = launcher._command(
+                ticket_dir=state / "ticket", company_ref=ACN,
+                source_fingerprint="a" * 64)
             self.assertTrue(launcher.configured)
             for flag in ("--model-config", "--verifier-model-config", "--gate-policy"):
                 self.assertIn(flag, command)
+            self.assertIn("--source-fingerprint", command)
 
     def test_the_child_parser_takes_the_arguments_the_launcher_sends(self):
         args = build_parser().parse_args([
             "--state-dir", "/tmp/x", "--model-config", "/tmp/m.json",
             "--verifier-model-config", "/tmp/v.json", "--gate-policy", "/tmp/p.json",
             "--company-ref", ACN, "--quiet",
+            "--source-fingerprint", "a" * 64,
         ])
         self.assertEqual(args.company_ref, ACN)
         self.assertTrue(args.quiet)
+
+    def test_launcher_adopts_a_finished_ticket_once_after_restart(self):
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            model = state / "model.json"
+            model.write_text("{}")
+            first_launcher = DeepInsightGateLauncher(
+                state_dir=state, model_config_path=model)
+            first = first_launcher.start(
+                signature="signature", company_ref=ACN,
+                source_fingerprint="a" * 64)
+            first_launcher.wait(timeout=30)
+            settled = first_launcher.status(first["id"])
+            first_launcher.close()
+            ticket_dir = Path(
+                settled["command"][settled["command"].index("--summary-dir") + 1])
+            before = (ticket_dir / "run.log").read_bytes()
+
+            restarted = DeepInsightGateLauncher(
+                state_dir=state, model_config_path=model)
+            self.addCleanup(restarted.close)
+            adopted = restarted.start(
+                signature="signature", company_ref=ACN,
+                source_fingerprint="a" * 64)
+            self.assertEqual(adopted["id"], first["id"])
+            self.assertNotEqual(adopted["status"], "running")
+            self.assertEqual((ticket_dir / "run.log").read_bytes(), before)
+
+    def test_child_refuses_moved_inputs_before_any_model_call(self):
+        harness = Harness()
+        self.addCleanup(harness.close)
+        expected = deep_insight_company_source_fingerprint(
+            harness.store.connection, ACN,
+            input_paths=(harness.model_config, None, harness.policy_path))
+        producer = FakeModel()
+        verifier = FakeModel(route="route:verify")
+        fresh = harness.fixture.add_claim(
+            "fingerprint-moved", kind="qualitative", value=None, unit=None,
+            statement="新的材料改变了文件输入。")
+        harness.publish_dossier(extra={"guidance_style": fresh["claim_version_id"]})
+        summary = harness.run(
+            company_ref=ACN,
+            expected_source_fingerprint=expected,
+            model_factory=lambda: producer,
+            verifier_model_factory=lambda: verifier)
+        self.assertEqual(summary["gate_status"], "input_changed")
+        self.assertEqual(summary["cost_micros"], 0)
+        self.assertEqual(producer.prompts, [])
+        self.assertEqual(verifier.prompts, [])
+
+    def test_child_accepts_the_exact_current_input_binding(self):
+        harness = Harness()
+        self.addCleanup(harness.close)
+        expected = deep_insight_company_source_fingerprint(
+            harness.store.connection, ACN,
+            input_paths=(harness.model_config, None, harness.policy_path))
+        summary = harness.run(company_ref=ACN,
+                              expected_source_fingerprint=expected, dry_run=True)
+        self.assertEqual(summary["gate_status"], "dry_run")
+        self.assertEqual(summary["cost_micros"], 0)
 
 
 class DeliverableKindTests(unittest.TestCase):

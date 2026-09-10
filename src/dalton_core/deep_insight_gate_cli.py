@@ -170,7 +170,9 @@ def valuation_rows(store: DaltonStore, company_ref: str) -> list[dict[str, Any]]
     return rows
 
 
-def deep_insight_company_source_fingerprint(connection: Any, company_ref: str) -> str:
+def deep_insight_company_source_fingerprint(
+    connection: Any, company_ref: str, *, input_paths: tuple[Path | None, ...] = (),
+) -> str:
     """Hash the bounded authority inputs the selected company's gate can read."""
 
     class ReadView:
@@ -198,8 +200,31 @@ def deep_insight_company_source_fingerprint(connection: Any, company_ref: str) -
             "WHERE gate_version_ref=?", (gate["id"],),
         ).fetchone()
         decision = None if row is None else json.loads(row["record_json"])
+    mission = None
+    pointer = connection.execute(
+        "SELECT mission_version_id FROM coverage_mission_pointer "
+        "ORDER BY mission_ref LIMIT 1"
+    ).fetchone()
+    if pointer is not None:
+        row = connection.execute(
+            "SELECT record_json FROM coverage_mission_versions "
+            "WHERE mission_version_id=?", (pointer["mission_version_id"],)
+        ).fetchone()
+        mission = None if row is None else json.loads(row["record_json"])
+    files = []
+    for path in input_paths:
+        if path is None:
+            files.append(None)
+        else:
+            target = Path(path).expanduser().resolve()
+            files.append({"path": str(target), "hash": content_hash(
+                json.loads(target.read_text(encoding="utf-8")))})
+    from .cockpit_model import verifier_provider_contract_fingerprint
     return content_hash({
         "schema_version": "0.1", "company_ref": company_ref,
+        "mission": mission, "input_files": files,
+        "provider_contract": verifier_provider_contract_fingerprint(
+            "deep_insight_gate_verifier"),
         "dossier": dossier, "debate_map": debate, "prior_gate": gate,
         "prior_decision": decision,
         "numbers": number_material(view, company_ref, limit=MAX_NUMBER_ROWS),
@@ -664,6 +689,7 @@ def run_gate(
     model_factory: Callable[..., Any] | None = None,
     verifier_model_factory: Callable[..., Any] | None = None,
     family_resolver: Callable[[str | None], str | None] | None = None,
+    expected_source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     state_dir = Path(state_dir).expanduser().resolve()
     summary_dir = Path(summary_dir)
@@ -707,6 +733,17 @@ def run_gate(
             summary.update({"status": "idle", "gate_status": "no_mission"})
             return summary
         mission = missions.mission(pointer["mission_version_id"])
+        if expected_source_fingerprint is not None:
+            observed = deep_insight_company_source_fingerprint(
+                store.connection, company_ref or "",
+                input_paths=(model_config_path, verifier_model_config_path, policy_path),
+            )
+            if observed != expected_source_fingerprint:
+                summary.update({
+                    "status": "idle", "gate_status": "input_changed",
+                    "failure_reason": "selected Deep Insight inputs changed before drafting",
+                })
+                return summary
         scope = granted_scope(mission)
         if scope is None:
             summary.update({
@@ -1140,6 +1177,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "criteria are the Constitution's rather than either "
                              "document's")
     parser.add_argument("--company-ref", help="draft this company rather than choosing")
+    parser.add_argument("--source-fingerprint")
     parser.add_argument("--change-reason", default="evidence_thicker")
     parser.add_argument("--dry-run", action="store_true",
                         help="plan and stop; no model call and no write")
@@ -1155,6 +1193,7 @@ def main(argv: list[str] | None = None) -> int:
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         scheduler_db=args.scheduler_db, policy_path=args.gate_policy,
         company_ref=args.company_ref, change_reason=args.change_reason,
+        expected_source_fingerprint=args.source_fingerprint,
         dry_run=args.dry_run,
     )
     if not args.quiet:

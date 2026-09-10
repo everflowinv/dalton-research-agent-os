@@ -54,6 +54,7 @@ class DeepInsightGateLauncher(LaneChildLauncher):
         self.policy_path = (
             None if policy_path is None
             else Path(policy_path).expanduser().resolve())
+        self._adopted_finished: set[str] = set()
 
     @property
     def configured(self) -> bool:
@@ -66,7 +67,8 @@ class DeepInsightGateLauncher(LaneChildLauncher):
 
         return self.model_config_path is not None
 
-    def _command(self, *, ticket_dir: Path, company_ref: str | None = None) -> list[str]:
+    def _command(self, *, ticket_dir: Path, company_ref: str | None = None,
+                 source_fingerprint: str | None = None) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
@@ -74,6 +76,8 @@ class DeepInsightGateLauncher(LaneChildLauncher):
         ]
         if company_ref:
             command += ["--company-ref", company_ref]
+        if source_fingerprint:
+            command += ["--source-fingerprint", source_fingerprint]
         if self.model_config_path is not None:
             command += ["--model-config", str(self.model_config_path)]
         if self.verifier_model_config_path is not None:
@@ -85,19 +89,32 @@ class DeepInsightGateLauncher(LaneChildLauncher):
             command += ["--gate-policy", str(self.policy_path)]
         return command
 
-    def start(self, *, signature: str, company_ref: str | None = None) -> dict[str, Any]:
+    def start(self, *, signature: str, company_ref: str | None = None,
+              source_fingerprint: str | None = None) -> dict[str, Any]:
         if not isinstance(signature, str) or not signature.strip():
             raise LaneChildRejected("a gate run needs a ledger signature")
         digest = run_digest(company_ref, signature.strip())
+        if (company_ref is not None and
+                (not isinstance(source_fingerprint, str)
+                 or len(source_fingerprint) != 64)):
+            raise LaneChildRejected("a company gate run needs its sha256 source fingerprint")
+        ticket_id = f"{self.TICKET_PREFIX}:{digest}"
+        if (self._current is None and ticket_id not in self._adopted_finished
+                and self._ticket_path(ticket_id).is_file()):
+            adopted = self.status(ticket_id)
+            if adopted.get("status") != "running":
+                self._adopted_finished.add(ticket_id)
+            return adopted
         return self.spawn(
             digest=digest,
             record={
                 "company_ref": company_ref,
+                "source_fingerprint": source_fingerprint,
                 "signature": signature.strip(),
                 "run_digest": digest,
                 "model_configured": self.configured,
             },
-            company_ref=company_ref,
+            company_ref=company_ref, source_fingerprint=source_fingerprint,
         )
 
 
