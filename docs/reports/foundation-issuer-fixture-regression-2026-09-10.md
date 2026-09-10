@@ -7,7 +7,12 @@ The shared harness now exposes an explicit `add_issuer_proof()` fixture operatio
 Validation with Python 3.13:
 
 ```text
-PYTHONPATH=src /opt/homebrew/bin/python3.13 -m unittest tests.test_document_extraction_automation.AutomationAdmissionTests tests.test_document_numeric_lane tests.test_metric_discovery_lane tests.test_admission_attribution tests.test_document_subject
+PYTHONPATH=/Users/everflow/Projects/dalton-foundation-issuer-regression-worktree/src /opt/homebrew/bin/python3.13 -m unittest tests.test_document_extraction_automation tests.test_document_numeric_lane tests.test_metric_discovery_lane tests.test_admission_attribution tests.test_document_subject
 ```
 
-Result: 60 tests passed. The entire `tests.test_document_extraction_automation` module still has one unrelated baseline failure in `WebAdmissionTests`: its public-web fetch child exits before this change on frozen `e9d06c2`; the identical isolated test fails in the untouched frozen acceptance tree. No production gate or runtime source was changed.
+Result: 64 tests passed. The absolute `PYTHONPATH` is material because the
+public-web fixture launches a child with its state directory as `cwd`. A
+relative `PYTHONPATH=src` resolves below that temporary directory and produces
+`ModuleNotFoundError: No module named 'dalton_core'`; the frozen full suite used
+an absolute source path, which is why it had no WebAdmission failure. No
+production gate or runtime source was changed.
