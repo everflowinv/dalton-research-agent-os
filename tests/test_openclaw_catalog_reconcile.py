@@ -58,6 +58,26 @@ def _config() -> dict:
     }
 
 
+def _controls(model_ref: str, *, expires_at: str = "2026-09-10T09:00:00Z") -> dict:
+    return {
+        "mode": (
+            "google-generative-ai-count-tokens-v1"
+            if model_ref.startswith("google/")
+            else "openai-responses-input-count-v1"
+        ),
+        "rateCard": {
+            "model": model_ref,
+            "serviceTier": "default",
+            "inputUsdPerMillion": "1.00",
+            "cachedInputUsdPerMillion": "0.50",
+            "cacheWriteUsdPerMillion": "1.50",
+            "outputUsdPerMillion": "2.00",
+            "verifiedAt": "2026-08-01T00:00:00Z",
+            "expiresAt": expires_at,
+        },
+    }
+
+
 from dalton_core.model_deployment import _ENDPOINTS
 
 _ENDPOINT_COUNT = len(_ENDPOINTS)
@@ -111,12 +131,9 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         profiles = config["plugins"]["entries"]["dalton-openclaw-model-broker"][
             "config"
         ]["profiles"]
-        controlled = profiles[0]
-        controlled["providerControls"] = {
-            "mode": "openai-responses-input-count-v1",
-            "rateCard": {"inputPerMillionUsd": 1, "outputPerMillionUsd": 2,
-                         "validUntil": "2026-09-10T09:00:00.000000+00:00"},
-        }
+        controlled = next(item for item in profiles
+                          if item["model"].startswith(("openai/", "google/")))
+        controlled["providerControls"] = _controls(controlled["model"])
         catalog = {
             item["id"]: item
             for item in openclaw_broker_profiles_from_config(config, checked_at=NOW)
@@ -131,37 +148,21 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         malformed_controls = (
             {},
             {"mode": "openai-responses-input-count-v1", "rateCard": {}},
-            {
-                "mode": "openai-responses-input-count-v1",
-                "rateCard": {
-                    "inputPerMillionUsd": True,
-                    "outputPerMillionUsd": 2,
-                    "validUntil": "2026-09-10T09:00:00+00:00",
-                },
-            },
-            {
-                "mode": "openai-responses-input-count-v1",
-                "rateCard": {
-                    "inputPerMillionUsd": 1,
-                    "outputPerMillionUsd": float("inf"),
-                    "validUntil": "2026-09-10T09:00:00+00:00",
-                },
-            },
-            {
-                "mode": "openai-responses-input-count-v1",
-                "rateCard": {
-                    "inputPerMillionUsd": 1,
-                    "outputPerMillionUsd": 2,
-                    "validUntil": "2026-08-22T07:59:59+00:00",
-                },
-            },
+            {**_controls("openai/gpt-5.6-sol"), "thinkingLevel": "high"},
+            {**_controls("openai/gpt-5.6-sol"), "unexpected": True},
+            {**_controls("google/gemini-3.8-flash"),
+             "mode": "openai-responses-input-count-v1"},
+            _controls("openai/example", expires_at="2026-08-22T07:59:59Z"),
         )
         for controls in malformed_controls:
             with self.subTest(controls=controls):
                 config = _config()
-                profile = config["plugins"]["entries"][
-                    "dalton-openclaw-model-broker"
-                ]["config"]["profiles"][0]
+                profile = next(
+                    item for item in config["plugins"]["entries"][
+                        "dalton-openclaw-model-broker"
+                    ]["config"]["profiles"]
+                    if item["model"].startswith("openai/")
+                )
                 profile["providerControls"] = controls
                 projected = next(
                     item
@@ -176,17 +177,13 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
 
     def test_malformed_controls_append_refusing_version_without_mutating_history(self):
         config = _config()
-        profile = config["plugins"]["entries"][
-            "dalton-openclaw-model-broker"
-        ]["config"]["profiles"][0]
-        profile["providerControls"] = {
-            "mode": "openai-responses-input-count-v1",
-            "rateCard": {
-                "inputPerMillionUsd": 1,
-                "outputPerMillionUsd": 2,
-                "validUntil": "2026-09-10T09:00:00+00:00",
-            },
-        }
+        profile = next(
+            item for item in config["plugins"]["entries"][
+                "dalton-openclaw-model-broker"
+            ]["config"]["profiles"]
+            if item["model"].startswith("openai/")
+        )
+        profile["providerControls"] = _controls(profile["model"])
         with tempfile.TemporaryDirectory() as directory:
             with ModelRouter(Path(directory) / "router.sqlite") as router:
                 sync_openclaw_model_catalog(router, config, checked_at=NOW)
@@ -223,17 +220,15 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
 
     def test_expired_controls_are_removed_by_the_next_catalog_sync(self):
         config = _config()
-        profile = config["plugins"]["entries"][
-            "dalton-openclaw-model-broker"
-        ]["config"]["profiles"][0]
-        profile["providerControls"] = {
-            "mode": "openai-responses-input-count-v1",
-            "rateCard": {
-                "inputPerMillionUsd": 1,
-                "outputPerMillionUsd": 2,
-                "validUntil": "2026-08-22T08:30:00+00:00",
-            },
-        }
+        profile = next(
+            item for item in config["plugins"]["entries"][
+                "dalton-openclaw-model-broker"
+            ]["config"]["profiles"]
+            if item["model"].startswith("openai/")
+        )
+        profile["providerControls"] = _controls(
+            profile["model"], expires_at="2026-08-22T08:30:00Z"
+        )
         with tempfile.TemporaryDirectory() as directory:
             with ModelRouter(Path(directory) / "router.sqlite") as router:
                 sync_openclaw_model_catalog(router, config, checked_at=NOW)
@@ -275,12 +270,7 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
                     ]["config"]["profiles"]
                     if item["id"] == "profile:gemini-3-8-flash"
                 )
-                profile["providerControls"] = {
-                    "mode": "google-generative-ai-count-tokens-v1",
-                    "rateCard": {"inputPerMillionUsd": "1",
-                                 "outputPerMillionUsd": "2",
-                                 "validUntil": "2026-09-10T09:00:00.000000+00:00"},
-                }
+                profile["providerControls"] = _controls(profile["model"])
                 result = sync_openclaw_model_catalog(router, config, checked_at=NOW)
                 after = next(
                     item for item in router.latest_profiles()

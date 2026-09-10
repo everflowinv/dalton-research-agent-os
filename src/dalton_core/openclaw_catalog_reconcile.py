@@ -151,21 +151,37 @@ def _provider_models(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return output
 
 
-def _provider_controls_valid(value: Any, checked_at: datetime | None = None) -> bool:
-    if not isinstance(value, Mapping) or set(value) != {"mode", "rateCard"}:
+def _provider_controls_valid(
+    value: Any, model_ref: str, checked_at: datetime | None = None
+) -> bool:
+    if not isinstance(value, Mapping) or not {"mode", "rateCard"} <= set(value) \
+            or set(value) - {"mode", "rateCard", "thinkingLevel"}:
         return False
-    if value["mode"] not in {
-        "openai-responses-input-count-v1",
-        "google-generative-ai-count-tokens-v1",
-    }:
+    providers = {
+        "openai-responses-input-count-v1": "openai",
+        "google-generative-ai-count-tokens-v1": "google",
+    }
+    provider = providers.get(value["mode"])
+    if provider is None or not model_ref.startswith(f"{provider}/"):
+        return False
+    if "thinkingLevel" in value and value["thinkingLevel"] != "low":
         return False
     rate = value["rateCard"]
     if not isinstance(rate, Mapping) or set(rate) != {
-        "inputPerMillionUsd", "outputPerMillionUsd", "validUntil"
+        "model", "serviceTier", "inputUsdPerMillion",
+        "cachedInputUsdPerMillion", "cacheWriteUsdPerMillion",
+        "outputUsdPerMillion", "verifiedAt", "expiresAt",
     }:
         return False
-    for key in ("inputPerMillionUsd", "outputPerMillionUsd"):
-        if isinstance(rate[key], bool):
+    if rate["model"] != model_ref or rate["serviceTier"] != "default":
+        return False
+    for key in (
+        "inputUsdPerMillion", "cachedInputUsdPerMillion",
+        "cacheWriteUsdPerMillion", "outputUsdPerMillion",
+    ):
+        if not isinstance(rate[key], str) or not re.fullmatch(
+            r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", rate[key]
+        ):
             return False
         try:
             number = float(rate[key])
@@ -174,12 +190,17 @@ def _provider_controls_valid(value: Any, checked_at: datetime | None = None) -> 
         if not math.isfinite(number) or number <= 0:
             return False
     try:
-        expires = datetime.fromisoformat(rate["validUntil"].replace("Z", "+00:00"))
+        verified = datetime.fromisoformat(rate["verifiedAt"].replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(rate["expiresAt"].replace("Z", "+00:00"))
     except (TypeError, ValueError, AttributeError):
         return False
-    if expires.tzinfo is None:
+    if verified.tzinfo is None or expires.tzinfo is None:
         return False
-    return checked_at is None or expires.astimezone(timezone.utc) > checked_at
+    verified = verified.astimezone(timezone.utc)
+    expires = expires.astimezone(timezone.utc)
+    if expires <= verified:
+        return False
+    return checked_at is None or verified <= checked_at < expires
 
 
 def _broker_profiles(
@@ -204,7 +225,9 @@ def _broker_profiles(
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
         provider_controls = profile.get("providerControls")
-        controls_declared = _provider_controls_valid(provider_controls, checked_at)
+        controls_declared = _provider_controls_valid(
+            provider_controls, model_ref, checked_at
+        )
         output[profile_id] = {
             "id": profile_id,
             "provider": provider,
