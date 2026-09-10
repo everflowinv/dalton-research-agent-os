@@ -8,7 +8,7 @@ Apply persists an owner approval receipt between candidate publication and selec
 
 Installing these files is not deployment or product acceptance. The approved selector affects the next LaunchAgent render; `deploy/macos/install.sh` and post-start artifact acceptance remain separate. The helper performs no network or model call.
 
-The earlier private packet has not been regenerated after these stronger checks. Its command must not be used because the helper now requires explicit active-plan byte hash and governance artifact/hash arguments. Nothing was applied to live.
+The private packet command and manifest now include the active-plan byte hash and packaged governance artifact/hash. A real prepare against the current live Core completed read-only with candidate, approval receipt, and selector targets all absent. Nothing was applied to live.
 
 Verification:
 
@@ -16,4 +16,4 @@ Verification:
 PYTHONPATH=src python3 -m unittest tests.test_sec_8k_owner_install tests.test_sec_8k_discovery_proposal
 ```
 
-Result: 8 tests passed. Tests cover dry-run non-writing behavior, explicit owner gates, idempotent apply in a temporary directory, tamper/stale rejection, scope mutation rejection, and refusal to overwrite a different target. `git diff --check` passed.
+Result: 11 tests passed. Tests cover dry-run non-writing behavior, explicit owner gates, idempotent apply and receipt reuse, symlink/path collision rejection, tamper/stale rejection, scope mutation rejection, and a real temporary Core mission/governance authorization path whose source database bytes remain unchanged. `git diff --check` passed.

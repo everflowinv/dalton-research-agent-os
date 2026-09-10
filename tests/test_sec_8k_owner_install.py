@@ -3,6 +3,10 @@ from pathlib import Path
 from unittest.mock import patch
 from scripts.build_sec_8k_discovery_proposal import build_candidate_plan, build_selector_proposal
 from scripts.install_sec_8k_discovery_selection import run
+from dalton_core.connector_governance import build_governance_record
+from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.store import DaltonStore
+from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 ROOT=Path(__file__).parents[1]
 
 def write(path,value): path.write_text(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n'); return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -58,4 +62,33 @@ class OwnerInstallTests(unittest.TestCase):
   with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission):
    with self.assertRaisesRegex(ValueError,'schema/source'): run(self.args)
   self.assertFalse(self.target.exists())
+ def test_prepare_after_apply_reads_receipt_and_symlink_is_never_identical(self):
+  self.args.command='apply'; self.args.actor='human:owner'; self.args.execute=True; self.args.service_stopped_ack=True
+  with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission):
+   applied=run(self.args)
+   self.args.command='prepare'; self.args.actor=None; self.args.execute=False; self.args.service_stopped_ack=False
+   prepared=run(self.args)
+  self.assertEqual(prepared['approval_receipt']['target_state'],'identical')
+  self.assertEqual(prepared['approval_receipt']['actor_ref'],'human:owner')
+  selector=self.target/'sec-filings-plan-selection-v1.json'; selector.unlink()
+  selector.symlink_to(self.selector)
+  with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission):
+   with self.assertRaisesRegex((ValueError,FileExistsError),'install targets|symlink|different target'): run(self.args)
+ def test_real_core_authority_prepare_and_apply_preserve_source_database(self):
+  self.bundle.stop(); self.authority.stop()
+  core=self.root/'real-core.sqlite'; store=DaltonStore(str(core)); authorities=bootstrap_method_authorities(store)
+  params=mission_params(authorities); params['autonomy']['may_write'].append('source_discovery')
+  next(row for row in params['source_plan'] if row['source_ref']=='source:sec-edgar')['status']='connected'
+  ref=params.pop('mission_ref'); CoverageMissionAuthority(store).create_mission(ref,**params); store.close()
+  governance=build_governance_record('sec-filings-index',approved_by='human:owner',status='approved')
+  governance_path=self.root/'governance.json'; governance_sha=write(governance_path,governance)
+  self.args.source_core=core; self.args.governance=governance_path; self.args.governance_sha256=governance_sha
+  before=hashlib.sha256(core.read_bytes()).hexdigest()
+  try:
+   prepared=run(self.args); self.assertEqual(prepared['result'],'prepared_only; no files written')
+   self.args.command='apply'; self.args.actor='human:owner'; self.args.execute=True; self.args.service_stopped_ack=True
+   applied=run(self.args); self.assertEqual(applied['selector']['write'],'created')
+   self.assertEqual(hashlib.sha256(core.read_bytes()).hexdigest(),before)
+  finally:
+   self.bundle.start(); self.authority.start()
 if __name__=='__main__': unittest.main()
