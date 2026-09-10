@@ -45,10 +45,62 @@ from .model_fallback_chain import (
     tier_for,
     validate_selection,
 )
-from .model_router import ModelRouter, canonical_json
+from .model_router import (
+    ModelRouter,
+    canonical_json,
+    live_links,
+    policy_chain,
+    resolve_chain,
+)
 from .store import content_hash
 
 SELECTION_MODES: tuple[str, ...] = ("tier", "explicit")
+# Each calling stage in the owner's words. One map, used both by the cockpit's
+# model page and by the text of a fallback notice, so the owner reads the same
+# name for a stage wherever it appears.
+PURPOSE_LABELS: dict[str, str] = {
+    "ask": "问答",
+    "goal": "把目标拆成计划",
+    "steer": "调整方向",
+    "draft": "起草交付物",
+    "plan": "决定下一步做什么",
+    "model_spec": "写公司模型规格",
+    "claim_index": "给结论打标签",
+    "quality": "给产出打分",
+    "event_judgement": "判断新发生的事",
+    "thesis_reflection": "回看论点还成不成立",
+    "dossier": "写公司档案",
+    "debate_map": "整理市场在吵什么",
+    "deep_insight_gate": "回答深度认知门的十二问",
+    "industry_framework": "写行业框架",
+    "earnings_preview": "写业绩前瞻",
+    "earnings_calibration": "业绩后对账",
+    "conviction_call": "提出值得下注的判断",
+    "street_estimate": "读研报里的目标价",
+}
+# The seam the delivery slice attaches to. It is a module-level function rather
+# than a parameter because the point is that the lane never changes: when
+# Discord or Feishu delivery is built, it replaces this body and nothing else.
+# Until then the notice lives in the cockpit, which is why the tick summary
+# says ``notification_channel: "cockpit"`` rather than "none" -- the owner does
+# get told; the telling is a page rather than a push.
+NOTIFICATION_CHANNEL = "cockpit"
+
+
+def notice_delivery(notice: Mapping[str, Any]) -> None:
+    """Push one fallback notice somewhere the owner will see it unprompted.
+
+    A deliberate no-op today.  Delivery (Discord / Feishu) was deferred by the
+    owner to the end of the plan, and a lane that half-built it would be a lane
+    that has to be edited again when the real thing lands.  What this seam
+    guarantees is that the *decision* about what to say, when to say it and how
+    often has already been made and tested: one message per (model, stage),
+    written once, deduplicated in the ledger.
+    """
+
+    del notice
+
+
 # The keys that make a policy version a *version* rather than content. Two
 # versions are "the same selection" when everything except these agrees.
 _VERSION_KEYS = frozenset({"policy_version_ref", "version", "created_at",
@@ -273,6 +325,128 @@ def set_model_selection(
     }
 
 
+def _purpose_label(purpose: str) -> str:
+    label = PURPOSE_LABELS.get(purpose)
+    return f"{label}（{purpose}）" if label else purpose
+
+
+def retirement_fallbacks(
+    router: ModelRouter,
+    *,
+    policy: Mapping[str, Any],
+    retired_profile_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Which stages just lost a model, and what each one runs instead.
+
+    Compared against the chain the policy *names*, not against the chain that
+    is live now: the question is "was this stage pointed at the model that has
+    gone", and by the time this runs the answer to "can it still route to it"
+    is already no for every stage.
+    """
+
+    retired = [profile_id for profile_id in retired_profile_ids]
+    if not retired:
+        return []
+    held = {profile["id"]: profile for profile in router.latest_profiles()}
+    affected: list[dict[str, Any]] = []
+    for purpose, tier in sorted(purpose_tiers().items()):
+        named = policy_chain(policy, tier=tier, purpose=purpose)
+        if named is None:
+            continue
+        lost = [profile_id for profile_id in retired if profile_id in named["chain"]]
+        if not lost:
+            continue
+        now = resolve_chain(policy, tier=tier, purpose=purpose, profiles=held)
+        chain = list(now["chain"]) if now is not None else []
+        remaining = live_links(chain, held)
+        replacement = remaining[0] if remaining else None
+        superseded = (now or {}).get("superseded_chain")
+        if replacement is None:
+            message = (
+                f"模型 {'、'.join(lost)} 已在 OpenClaw 消失；环节 "
+                f"{_purpose_label(purpose)} 没有可用的替代模型，现在一次也调不了；"
+                "请到 cockpit 模型页选择"
+            )
+        else:
+            message = (
+                f"模型 {'、'.join(lost)} 已在 OpenClaw 消失；环节 "
+                f"{_purpose_label(purpose)} 已自动回退到 {replacement}；"
+                "如需更改请到 cockpit 模型页选择"
+            )
+        affected.append({
+            "purpose": purpose,
+            "tier": tier,
+            "retired_profile_ids": lost,
+            "replacement_profile_id": replacement,
+            "chain": chain,
+            "superseded_chain": superseded,
+            "message": message,
+        })
+    return affected
+
+
+def record_retirement_notices(
+    router: ModelRouter,
+    *,
+    state_dir: str | Path,
+    retired_profile_ids: Sequence[str],
+    delivery: Any = None,
+) -> dict[str, Any]:
+    """Write one notice per (model, stage) the retirement moved, and deliver it.
+
+    Deduplicated by the ledger rather than by this function: the lane runs
+    every hour and will see the same retirement every hour, and a notice keyed
+    on the moment would be an hourly alarm nobody reads.  Delivery is attempted
+    only for a notice that is *new*, for the same reason.
+    """
+
+    deliver = delivery if delivery is not None else notice_delivery
+    written: list[dict[str, Any]] = []
+    repeated: list[str] = []
+    affected: list[dict[str, Any]] = []
+    seen_policies: set[str] = set()
+    for item in model_configs(state_dir):
+        policy_ref = item["config"]["routing_policy_ref"]
+        if policy_ref in seen_policies:
+            continue
+        seen_policies.add(policy_ref)
+        try:
+            policy = router.get_policy(policy_ref)
+        except Exception:  # noqa: BLE001 - a pin this router cannot read is not ours
+            continue
+        affected.extend(
+            retirement_fallbacks(
+                router, policy=policy, retired_profile_ids=retired_profile_ids
+            )
+        )
+    for item in affected:
+        for profile_id in item["retired_profile_ids"]:
+            result = router.record_fallback_notice(
+                profile_id=profile_id,
+                purpose=item["purpose"],
+                tier=item["tier"],
+                replacement_profile_id=item["replacement_profile_id"],
+                reason="not_in_broker_catalog",
+                message=item["message"],
+                detail={
+                    "chain": item["chain"],
+                    "superseded_chain": item["superseded_chain"],
+                },
+            )
+            if result["status"] == "fresh":
+                written.append(result["notice"])
+                deliver(result["notice"])
+            else:
+                repeated.append(result["notice"]["id"])
+    return {
+        "notification_channel": NOTIFICATION_CHANNEL,
+        "notices_written": [notice["id"] for notice in written],
+        "notices_repeated": repeated,
+        "affected_purposes": [item["purpose"] for item in affected],
+        "messages": [notice["message"] for notice in written],
+    }
+
+
 def current_selection(
     state_dir: str | Path, *, router_db: str | Path | None = None
 ) -> dict[str, Any]:
@@ -316,10 +490,15 @@ def current_selection(
 
 
 __all__ = [
+    "NOTIFICATION_CHANNEL",
+    "PURPOSE_LABELS",
     "SELECTION_MODES",
     "ModelSelectionError",
     "current_selection",
     "model_configs",
+    "notice_delivery",
     "publish_selection",
+    "record_retirement_notices",
+    "retirement_fallbacks",
     "set_model_selection",
 ]

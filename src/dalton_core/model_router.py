@@ -547,6 +547,58 @@ def policy_chain(
     return {"mode": "tier", "tier": tier, "chain": tuple(declared[tier])}
 
 
+def live_links(
+    chain: Sequence[str], profiles: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """The links of a chain this Core could actually route to right now."""
+
+    return [
+        profile_id for profile_id in chain
+        if profile_id in profiles and profiles[profile_id].get("status") != "retired"
+    ]
+
+
+def resolve_chain(
+    policy: Mapping[str, Any],
+    *,
+    tier: str | None,
+    purpose: str | None,
+    profiles: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """The chain, after retirement has been taken into account.
+
+    The owner's rule: when the gateway drops a model Dalton was using, the
+    stage falls to the next link by itself.  Most of that is free -- a retired
+    profile is refused as a candidate, so a chain whose *first* link is retired
+    selects its second without anybody doing anything.
+
+    The case that is not free is an explicit selection whose models have *all*
+    gone.  Refusing the call would be silent-by-another-name: the owner chose
+    two models a month ago, the gateway dropped both, and the stage stops.  So
+    the selection is superseded by the tier's own chain -- which is what the
+    stage would have run had nobody selected anything -- and the fact that it
+    happened is carried in ``superseded_chain`` so the notice and the page can
+    both say so.  The selection itself is untouched: it is content of an
+    immutable policy version, and re-selecting is the owner's move.
+    """
+
+    resolved = policy_chain(policy, tier=tier, purpose=purpose)
+    if resolved is None:
+        return None
+    if resolved["mode"] != "explicit" or live_links(resolved["chain"], profiles):
+        return resolved
+    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
+    fallback = tuple(declared.get(tier) or ()) if tier is not None else ()
+    if not fallback or not live_links(fallback, profiles):
+        return resolved
+    return {
+        "mode": "tier_after_retirement",
+        "tier": tier,
+        "chain": fallback,
+        "superseded_chain": list(resolved["chain"]),
+    }
+
+
 def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
     keys = {
         "schema_version",
@@ -1114,6 +1166,139 @@ class ModelRouter:
             )
         return {"status": "fresh", "decision": record}
 
+    def record_fallback_notice(
+        self,
+        *,
+        profile_id: str,
+        purpose: str,
+        tier: str,
+        replacement_profile_id: str | None,
+        reason: str,
+        message: str,
+        detail: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """P14-M2: say once that a stage lost the model it was pointed at.
+
+        Keyed on (model, stage) and on nothing else, deliberately.  The lane
+        that writes this runs every hour and will see the same retirement every
+        hour for as long as the profile stays retired; a notice keyed on the
+        moment would become an hourly alarm, and an alarm that repeats is an
+        alarm that gets muted.  ``duplicate`` is therefore the normal answer
+        after the first hour.
+        """
+
+        profile_id = _ref(profile_id, "profile_id")
+        purpose = _string(purpose, "purpose")
+        tier = _token(tier, "tier")
+        reason = _token(reason, "reason")
+        message = _string(message, "message")
+        if replacement_profile_id is not None:
+            replacement_profile_id = _ref(
+                replacement_profile_id, "replacement_profile_id"
+            )
+        notice_id = ("model-fallback-notice:"
+                     + canonical_hash({"profile_id": profile_id, "purpose": purpose})[:32])
+        now = _timestamp(self._now())
+        notice = {
+            "schema_version": SCHEMA_VERSION,
+            "id": notice_id,
+            "profile_id": profile_id,
+            "purpose": purpose,
+            "tier": tier,
+            "replacement_profile_id": replacement_profile_id,
+            "reason": reason,
+            "message": message,
+            "detail": json.loads(canonical_json(dict(detail or {}))),
+            "created_at": now,
+        }
+        notice["content_hash"] = canonical_hash(notice)
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT notice_json FROM model_fallback_notices WHERE notice_id=?",
+                (notice_id,),
+            ).fetchone()
+            if existing is not None:
+                return {"status": "duplicate",
+                        "notice": json.loads(existing["notice_json"])}
+            cur.execute(
+                "INSERT INTO model_fallback_notices "
+                "(notice_id, profile_id, purpose, tier, replacement_profile_id, "
+                "reason, notice_hash, notice_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    notice_id,
+                    profile_id,
+                    purpose,
+                    tier,
+                    replacement_profile_id,
+                    reason,
+                    notice["content_hash"],
+                    canonical_json(notice),
+                    now,
+                ),
+            )
+        return {"status": "fresh", "notice": notice}
+
+    def acknowledge_fallback_notice(
+        self, *, notice_id: str, actor_ref: str
+    ) -> dict[str, Any]:
+        """The owner has read one notice.  A second acknowledgement is a no-op."""
+
+        notice_id = _ref(notice_id, "notice_id")
+        actor_ref = _string(actor_ref, "actor_ref")
+        now = _timestamp(self._now())
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT notice_json FROM model_fallback_notices WHERE notice_id=?",
+                (notice_id,),
+            ).fetchone()
+            if row is None:
+                return {"status": "unknown",
+                        "reason": f"there is no notice {notice_id}"}
+            existing = cur.execute(
+                "SELECT actor_ref, created_at FROM model_fallback_notice_acks "
+                "WHERE notice_id=?",
+                (notice_id,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "status": "duplicate",
+                    "notice": json.loads(row["notice_json"]),
+                    "acknowledged_by": existing["actor_ref"],
+                    "acknowledged_at": existing["created_at"],
+                }
+            cur.execute(
+                "INSERT INTO model_fallback_notice_acks "
+                "(notice_id, actor_ref, created_at) VALUES (?, ?, ?)",
+                (notice_id, actor_ref, now),
+            )
+        return {
+            "status": "acknowledged",
+            "notice": json.loads(row["notice_json"]),
+            "acknowledged_by": actor_ref,
+            "acknowledged_at": now,
+        }
+
+    def fallback_notices(self, *, open_only: bool = False) -> list[dict[str, Any]]:
+        """Every notice, newest first, each carrying its acknowledgement."""
+
+        rows = self.connection.execute(
+            "SELECT n.notice_json, a.actor_ref AS ack_actor, a.created_at AS ack_at "
+            "FROM model_fallback_notices n "
+            "LEFT JOIN model_fallback_notice_acks a ON a.notice_id=n.notice_id "
+            "ORDER BY n.notice_sequence DESC"
+        ).fetchall()
+        notices: list[dict[str, Any]] = []
+        for row in rows:
+            if open_only and row["ack_actor"] is not None:
+                continue
+            notices.append({
+                **json.loads(row["notice_json"]),
+                "acknowledged_by": row["ack_actor"],
+                "acknowledged_at": row["ack_at"],
+            })
+        return notices
+
     def allow_decisions(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Every recorded allow decision, newest first."""
 
@@ -1423,8 +1608,12 @@ class ModelRouter:
                 global_reasons.append("producer_family_required")
             chain_positions: dict[str, int] | None = None
             chain_length = 0
+            latest_profiles = self._latest_profiles(cur)
+            by_id = {profile["id"]: profile for profile in latest_profiles}
             if tier is not None:
-                resolved = policy_chain(policy, tier=tier, purpose=purpose)
+                resolved = resolve_chain(
+                    policy, tier=tier, purpose=purpose, profiles=by_id
+                )
                 if resolved is None:
                     global_reasons.append("tier_not_declared_by_policy")
                 else:
@@ -1437,7 +1626,7 @@ class ModelRouter:
             supplied_slots = set(slots)
             candidates: list[dict[str, Any]] = []
             snapshot: list[dict[str, Any]] = []
-            for profile in self._latest_profiles(cur):
+            for profile in latest_profiles:
                 reasons = list(global_reasons)
                 if profile["profile_version_ref"] in switch_exclusions:
                     reasons.append("already_tried_in_switch_chain")

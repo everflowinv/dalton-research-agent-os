@@ -95,8 +95,13 @@ class ModelCatalogSyncCoordinator:
         *,
         config_path: str | Path,
         clock: Callable[[], Any] | None = None,
+        delivery: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         self.config_path = Path(config_path).expanduser()
+        # The documented seam. ``model_selection.notice_delivery`` is a no-op
+        # today and the delivery slice replaces its body; a test replaces this
+        # parameter. Either way the lane itself does not change.
+        self.delivery = delivery
         if clock is None:
             from datetime import datetime, timezone
 
@@ -114,9 +119,15 @@ class ModelCatalogSyncCoordinator:
         """Reconcile once, unconditionally.  The window check is the caller's."""
 
         from .model_router import ModelRouter
-        from .openclaw_catalog_reconcile import load_openclaw_config
+        from .model_selection import (
+            NOTIFICATION_CHANNEL,
+            record_retirement_notices,
+        )
+        from .openclaw_catalog_reconcile import (
+            load_openclaw_config,
+            sync_openclaw_model_catalog,
+        )
         from .openclaw_model_discovery import discover_models, summarise
-        from .openclaw_catalog_reconcile import sync_openclaw_model_catalog
 
         settings = load_lane_config(self.config_path)
         openclaw_path = Path(settings["openclaw_config_path"])
@@ -133,8 +144,30 @@ class ModelCatalogSyncCoordinator:
             sync = sync_openclaw_model_catalog(
                 router, config, checked_at=checked_at
             )
+            # The owner's rule: a model disappearing from OpenClaw must never
+            # be silent.  The chain falls to its next link on its own -- that
+            # is what a chain is for -- and this is the half that would not
+            # have happened by itself: saying which stage lost what, and what
+            # it runs instead, once per (model, stage) rather than every hour.
+            #
+            # The state directory is the router database's own, which is where
+            # the installer puts every model configuration; deriving it beats
+            # a third path in the switch file that could disagree with the
+            # second.
+            notices = record_retirement_notices(
+                router,
+                state_dir=router_db.parent,
+                retired_profile_ids=sync["retired_profile_ids_this_run"],
+                delivery=self.delivery,
+            )
+            open_notices = router.fallback_notices(open_only=True)
             discovery = discover_models(config, router=router, checked_at=checked_at)
         return {
+            "notification_channel": NOTIFICATION_CHANNEL,
+            "notices_written": notices["notices_written"],
+            "notices_open": len(open_notices),
+            "fallback_messages": notices["messages"][:MAX_NAMES_IN_SUMMARY],
+            "purposes_fallen_back": _names(notices["affected_purposes"]),
             "status": "changed" if sync["changed"] else "current",
             "catalog_in_sync": sync["catalog_in_sync"],
             "broker_catalog_hash": sync["broker_catalog_hash"],

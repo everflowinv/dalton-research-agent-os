@@ -37,7 +37,7 @@ from typing import Any
 
 from .cockpit_model import purposes, register_purpose
 from .model_accounting import ModelAccountingError, _route_estimate_micros
-from .model_router import ModelRouter, policy_chain
+from .model_router import ModelRouter, live_links, policy_chain, resolve_chain
 
 
 class FallbackChainError(RuntimeError):
@@ -315,7 +315,11 @@ def profile_families(router: ModelRouter) -> dict[str, dict[str, Any]]:
 
 
 def effective_chain(
-    policy: Mapping[str, Any], purpose: str, *, tier: str | None = None
+    policy: Mapping[str, Any],
+    purpose: str,
+    *,
+    tier: str | None = None,
+    profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """What this purpose actually runs under this pinned policy version.
 
@@ -323,16 +327,25 @@ def effective_chain(
     ``tier`` when the stage follows its tier's chain -- which is also what an
     unselected stage does, so the page can say "跟随档位" without having to
     distinguish "nobody looked" from "somebody looked and left it".
+
+    Given ``profiles`` -- this Core's catalog at its latest versions -- a third
+    mode is reachable: ``tier_after_retirement``, when every model the owner
+    selected has been retired and the stage has fallen back to its tier's own
+    chain rather than stopping.
     """
 
     tier = tier or tier_for(purpose)
-    resolved = policy_chain(policy, tier=tier, purpose=purpose)
+    resolved = (
+        policy_chain(policy, tier=tier, purpose=purpose) if profiles is None
+        else resolve_chain(policy, tier=tier, purpose=purpose, profiles=profiles)
+    )
     if resolved is None:
         # The policy carries no chain for this tier: the single-shot path.
         return {"mode": "tier", "tier": tier, "chain": list(tier_chain(tier)),
-                "declared": False}
+                "declared": False, "superseded_chain": None}
     return {"mode": resolved["mode"], "tier": tier,
-            "chain": list(resolved["chain"]), "declared": True}
+            "chain": list(resolved["chain"]), "declared": True,
+            "superseded_chain": resolved.get("superseded_chain")}
 
 
 def validate_selection(
@@ -506,7 +519,8 @@ def execute_chain(
         policy = router.get_policy(policy_version_ref)
     except Exception:  # noqa: BLE001 - route() raises the readable error below
         policy = {}
-    resolved = policy_chain(policy, tier=tier, purpose=purpose)
+    held = profile_families(router)
+    resolved = resolve_chain(policy, tier=tier, purpose=purpose, profiles=held)
     chain = tuple(resolved["chain"]) if resolved is not None else tier_chain(tier)
     # Independence is measured against the producer's own route decision, so a
     # verification cannot be told a producer it did not have.
@@ -520,22 +534,37 @@ def execute_chain(
         # chain whose every link is the producer's family reads as "no link is
         # routable" -- true, and useless. Said once, in front, it reads as what
         # it is: this stage was pointed at the family it is supposed to check.
-        held = profile_families(router)
-        if all(
-            (held.get(profile_id) or {}).get("family") == producer_family
-            for profile_id in chain
-        ):
+        #
+        # Measured against the links that are still *live*, because the case
+        # this has to catch is the one the owner named: the gateway drops the
+        # only independent verifier and the remaining links are all the
+        # producer's family. Falling through to them would leave the work
+        # verified in name only, which is worse than not verified at all.
+        available = live_links(chain, held)
+        independent = [
+            profile_id for profile_id in available
+            if (held.get(profile_id) or {}).get("family") != producer_family
+        ]
+        if not independent:
+            gone = [profile_id for profile_id in chain if profile_id not in available]
             return {
                 "status": "refused",
                 "tier": tier,
                 "purpose": purpose,
                 "reason": "verifier_not_independent",
                 "message": (
-                    f"every model chosen for {purpose} is in the {producer_family} "
-                    "family, which produced the work being checked; an independent "
-                    "check needs a different family"
+                    f"no model left for {purpose} is independent of the "
+                    f"{producer_family} family that produced the work being "
+                    "checked"
+                    + (
+                        f"; {', '.join(gone)} has been retired" if gone
+                        else ""
+                    )
+                    + " -- choose a model from a different family on the cockpit's "
+                    "model page"
                 ),
                 "chain": list(chain),
+                "retired_links": gone,
                 "links": [],
                 "served": None,
             }
@@ -702,9 +731,10 @@ def purpose_selection(
     rows: list[dict[str, Any]] = []
     for purpose, tier in sorted(_PURPOSE_TIERS.items()):
         resolved = (
-            effective_chain(policy, purpose, tier=tier) if policy is not None
+            effective_chain(policy, purpose, tier=tier, profiles=held)
+            if policy is not None
             else {"mode": "tier", "tier": tier, "chain": list(tier_chain(tier)),
-                  "declared": False}
+                  "declared": False, "superseded_chain": None}
         )
         chain = resolved["chain"]
         served = served_by_purpose.get(purpose)
@@ -712,6 +742,10 @@ def purpose_selection(
             "purpose": purpose,
             "tier": tier,
             "mode": resolved["mode"],
+            # What the owner had selected, when every model in it has been
+            # retired and the stage has fallen back to its tier's chain.
+            "superseded_chain": resolved.get("superseded_chain"),
+            "live_chain": live_links(chain, held),
             "chain": [
                 {
                     "position": position,
