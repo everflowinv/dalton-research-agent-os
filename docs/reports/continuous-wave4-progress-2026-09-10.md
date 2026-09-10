@@ -23,3 +23,11 @@ Code frozen at `61f56759c5e249be150623844df3ee4550a5ee65` in a detached acceptan
 The latest integration now covers cross-provider credential references, exact-purpose routing for legacy workers, quality's independent verifier, owner metadata binding/deduplication/application status, and truthful legacy pin displays. Resident service choices explicitly report that a restart is needed. A preliminary current-live-copy activation rehearsal passed 13 steps, 67 schemas and 38 tick entries with zero escaped calls; the final frozen-code rehearsal is separate and still being recorded.
 
 Private deployment review includes a guarded deploy script and the accepted wheel. Its release manifest deliberately remains pending until full-suite, final rehearsal and runtime acceptance results are complete. The script has only been syntax-checked; neither deployment nor any owner signature has run.
+
+## Full-suite findings and final read-side work
+
+The first frozen run (`61f5675`) completed **6,242 tests / 529.886s with 3 errors and 1 skip**. All three errors were deployment-pair fixtures relying on removed implicit static catalog seeding. Production installs synchronize the catalog first; the fixtures now do the same (`5e326f6`, 7 deployment-pair tests passed). The stronger same-family verifier budget test also passed separately. This is not recorded as a green full run.
+
+Final frozen activation rehearsal passed all 13 steps, 67 schemas and 38 tick entries / zero escaped. Read-only copied-state selection passed planner and both thesis-impact roles. The old Agenda pin remains v2 against v3; selection explicitly refuses it with no file changes. It requires a deliberate pin migration if that retired workflow is reactivated.
+
+A remaining Cockpit read-side issue is being closed before final acceptance: a single representative model config cannot describe every role's actual policy. Per-purpose consumer bindings and visible provider/model routes are being wired so the page shows the same model the worker will use. After that change, freeze again and repeat the complete suite and artifacts. Private deployment remains locked pending that acceptance.
