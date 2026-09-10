@@ -27,6 +27,7 @@ from dalton_core.claim_index_tagging import (
     STALE_DOWNGRADE,
     STALE_MARK,
     rule_tags,
+    stale_due_at,
     stale_importance,
 )
 from dalton_core.connector_governance import (
@@ -52,6 +53,7 @@ from dalton_core.initial_screen import (
 )
 from dalton_core.mission_deliverable import (
     IMPORT_CHANGE_REASON,
+    deliverable_change_reasons,
     MissionDeliverableAuthority,
     MissionDeliverableConflict,
     MissionDeliverableValidationError,
@@ -396,6 +398,26 @@ class ImportanceTests(unittest.TestCase):
             "internal_prior",
         )
 
+    def test_staleness_is_decided_at_tag_time_and_says_when_it_is_due(self) -> None:
+        # Pinned as a limitation rather than left to be discovered: a claim
+        # tagged before it crossed the threshold keeps its tier until
+        # something re-tags it, and nothing re-tags on a clock, because an
+        # index that changed with no evidence behind the change is what
+        # ADR-0008 refuses. `stale_due_at` is the date a judgement-layer sweep
+        # would key on.
+        self.assertEqual(stale_due_at("2026-01-01"), "2026-06-30")
+        self.assertIsNone(stale_due_at(None))
+        self.assertIsNone(stale_due_at("not a date"))
+        fresh = rule_tags(
+            {"claim_kind": "qualitative", "subject_ref": ACN,
+             "normalized_statement": "s", "period": "2026-01-01"},
+            {"importance": "internal_prior",
+             "importance_basis": "discovery_spec:prior-research"},
+            now=date(2026, 3, 1),
+        )
+        self.assertEqual(fresh["importance"], "internal_prior")
+        self.assertEqual(stale_due_at(fresh["as_of"]), "2026-06-30")
+
     def test_the_rule_tagger_reads_the_threshold(self) -> None:
         tags = rule_tags(
             {"claim_kind": "qualitative", "subject_ref": ACN,
@@ -532,29 +554,83 @@ class PriorModelTests(unittest.TestCase):
         )
         self.assertEqual(narrowed["low"], "64100")
 
-    def test_the_prior_model_is_not_reachable_from_the_number_paths(self) -> None:
+    #: The modules a number has to pass through to become a figure, a statement
+    #: line or a forecast actual. None of them may reach a prior-research
+    #: module, directly or through anything they import.
+    CHOKEPOINTS = (
+        "model_forecast", "model_forecast_driver", "forecast_reconciliation",
+        "coverage_mission", "claim_index_figures", "research_verification",
+        "statement_snapshot",
+    )
+    #: The modules that hold prior *content* -- a workbook's assumptions, a
+    #: prior screen's sections. These are what must be unreachable.
+    #:
+    #: ``prior_research_core`` is deliberately not here. It is a connector
+    #: identity module, and ``connector_governance`` reaches every connector
+    #: identity by construction: it holds one lazy callback per governed kind,
+    #: so it reaches ``company_wiki_core`` and ``sales_notes_core`` by the same
+    #: path. Listing it would make this test assert that the governance
+    #: registry may not know about this connector, which is not the claim --
+    #: and it carries no numbers to leak.
+    PRIOR_MODULES = frozenset({"prior_model_import", "prior_screen_import"})
+
+    @staticmethod
+    def _imports(path: Path) -> set[str]:
         import ast
 
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module.lstrip("."))
+            elif isinstance(node, ast.ImportFrom) and node.level:
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+        return {name.rsplit(".", 1)[-1] for name in names}
+
+    def test_the_prior_model_is_not_reachable_from_the_number_paths(self) -> None:
+        # The transitive closure, not one hop. A chokepoint that imports a
+        # module that imports the prior model can still reach it, and the
+        # whole claim being made here is that it cannot.
         package = Path(__file__).resolve().parents[1] / "src" / "dalton_core"
-        # The chokepoints: statement lines, forecast actuals, figure admission.
-        for name in (
-            "model_forecast", "model_forecast_driver", "forecast_reconciliation",
-            "coverage_mission", "claim_index_figures", "research_verification",
-            "statement_snapshot",
-        ):
+        for name in self.CHOKEPOINTS:
             with self.subTest(module=name):
-                tree = ast.parse((package / f"{name}.py").read_text(encoding="utf-8"))
-                names: list[str] = []
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.ImportFrom) and node.module:
-                        names.append(node.module)
-                    if isinstance(node, ast.Import):
-                        names += [alias.name for alias in node.names]
+                seen: set[str] = set()
+                frontier = [name]
+                path_to: dict[str, list[str]] = {name: [name]}
+                while frontier:
+                    current = frontier.pop()
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    module_path = package / f"{current}.py"
+                    if not module_path.is_file():
+                        continue
+                    for imported in sorted(self._imports(module_path)):
+                        if imported in seen:
+                            continue
+                        path_to.setdefault(imported, path_to[current] + [imported])
+                        frontier.append(imported)
+                reached = sorted(seen & self.PRIOR_MODULES)
                 self.assertFalse(
-                    [item for item in names if "prior_model" in item
-                     or "prior_research" in item or "prior_screen" in item],
-                    f"{name} imports a prior-research module; the arrow is one-way",
+                    reached,
+                    f"{name} reaches {reached} via "
+                    f"{' -> '.join(path_to[reached[0]]) if reached else ''}; "
+                    "the arrow is one-way",
                 )
+
+    def test_the_closure_walks_further_than_one_hop(self) -> None:
+        # The test above is only worth having if it looks past direct imports.
+        # This is the shape it has to see through, and it is a real path: the
+        # governance registry reaches every connector identity, this one no
+        # differently from the wiki's.
+        package = Path(__file__).resolve().parents[1] / "src" / "dalton_core"
+        governance = self._imports(package / "connector_governance.py")
+        self.assertIn("prior_research_core", governance)
+        self.assertIn("company_wiki_core", governance)
+        self.assertNotIn("prior_model_import", governance)
+        self.assertNotIn("prior_screen_import", governance)
 
     def test_decimals_are_exact_text_and_a_boolean_is_not_a_number(self) -> None:
         self.assertEqual(decimal_text(0.1), "0.1")
@@ -602,11 +678,20 @@ class DeliverableV0Tests(unittest.TestCase):
             actor_ref=OWNER,
         )
 
-    def test_imported_prior_is_in_the_vocabulary_and_only_on_a_v0(self) -> None:
-        self.assertIn(IMPORT_CHANGE_REASON, CHANGE_REASONS)
-        self.assertEqual(CHANGE_REASONS[:5], (
+    def test_imported_prior_is_a_deliverable_word_and_only_on_a_v0(self) -> None:
+        # ADR-0008's five stay five. `imported_prior` is not a sixth reason a
+        # version changed -- it is a version that changed nothing -- and no
+        # other authority can produce it, so it lives where it is reachable.
+        self.assertEqual(CHANGE_REASONS, (
             "filing_actual", "driver_event", "assumption_review",
             "evidence_thicker", "human_revision"))
+        self.assertNotIn(IMPORT_CHANGE_REASON, CHANGE_REASONS)
+        self.assertEqual(deliverable_change_reasons(),
+                         (*CHANGE_REASONS, IMPORT_CHANGE_REASON))
+        for module in ("catalyst_calendar", "tracking_cadence", "debate_map"):
+            with self.subTest(module=module):
+                other = __import__(f"dalton_core.{module}", fromlist=["CHANGE_REASONS"])
+                self.assertEqual(other.CHANGE_REASONS, CHANGE_REASONS)
         with self.assertRaises(MissionDeliverableValidationError):
             self.authority.publish(
                 kind="initial_screen", subject_ref=self.company,
@@ -815,6 +900,56 @@ class DeliverableV0Tests(unittest.TestCase):
                              as_of="2024-03-28")
         self.assertIn("d:1", gate["answers"][0]["basis"])
         self.assertIn("2024-03-28", gate["answers"][0]["basis"])
+
+    def test_the_cli_promotes_a_screen_and_a_model_and_refuses_the_wrong_kind(self) -> None:
+        # The two importers have a caller: an owner-run command, not a tick.
+        # Reading the corpus is automation's job; saying "that one is our
+        # earlier view of this company" is a judgement (ADR-0008).
+        from dalton_core.prior_research_cli import (
+            build_import_parser,
+            import_model,
+            import_screen,
+        )
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        corpus = build_corpus(Path(temp.name) / "corpus")
+        PriorModelTests.build_workbook(corpus / "ACN" / "model.xlsx")
+        (corpus / "ACN" / MANIFEST_NAME).write_text(json.dumps({"documents": [
+            {"path": "2024/screen.md", "kind": "initial_screen",
+             "as_of": "2024-03-28", "author": "human:pm", "source_note": ""},
+            {"path": "model.xlsx", "kind": "model_excel",
+             "as_of": "2024-06-30", "author": "human:analyst", "source_note": "维护中"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+
+        def parse(command: str, document_id: str) -> Any:
+            return build_import_parser().parse_args([
+                command, "--db", self.store.path, "--corpus-root", str(corpus),
+                "--document-id", document_id, "--company-ref", self.company,
+                "--actor-ref", OWNER,
+            ])
+
+        screen_id = document_ref("ACN", "2024/screen.md")
+        model_id = document_ref("ACN", "model.xlsx")
+        outcome = import_screen(parse("import-screen", screen_id))
+        self.assertEqual((outcome["status"], outcome["version"]), ("fresh", 0))
+        self.assertEqual(outcome["as_of"], "2024-03-28")
+
+        model = import_model(parse("import-model", model_id))
+        self.assertEqual((model["status"], model["version"]), ("fresh", 1))
+        self.assertEqual(model["as_of"], "2024-06-30")
+        self.assertGreater(model["assumption_count"], 0)
+
+        # A document the manifest calls a memo is not a screen, and the
+        # refusal says which word the owner wrote.
+        for command, document_id in (("import-screen", model_id),
+                                     ("import-model", screen_id)):
+            with self.subTest(command=command):
+                with self.assertRaises(Exception) as caught:
+                    (import_screen if command == "import-screen" else import_model)(
+                        parse(command, document_id)
+                    )
+                self.assertIn("filed as", str(caught.exception))
 
     def test_a_screen_with_no_headings_arrives_as_one_section(self) -> None:
         sections = split_sections("一段没有标题的旧笔记。\n还有第二行。\n")

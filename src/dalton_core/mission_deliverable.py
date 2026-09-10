@@ -55,6 +55,24 @@ DELIVERABLE_KINDS: tuple[str, ...] = (
 #: The one ``change_reason`` a version zero may carry, and the only version it
 #: may be carried on. Named here so the two rules read as one thing.
 IMPORT_CHANGE_REASON = "imported_prior"
+
+
+def deliverable_change_reasons() -> tuple[str, ...]:
+    """ADR-0008's five, plus the one word only a deliverable chain can use.
+
+    Deliberately *not* a widening of ``model_forecast_driver.CHANGE_REASONS``.
+    Those five are reasons a version *changed*; ``imported_prior`` is a
+    version that changed nothing, because it is a document that already
+    existed being put at the head of the chain. A catalyst calendar or a
+    tracking cadence can never produce it, so putting it in the shared tuple
+    would only let those authorities accept a word that means nothing to them
+    -- a closed vocabulary is worth having precisely because every word in it
+    is reachable.
+    """
+
+    from .model_forecast_driver import CHANGE_REASONS
+
+    return (*CHANGE_REASONS, IMPORT_CHANGE_REASON)
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
 GAP_MARKER = "缺来源"
@@ -177,7 +195,7 @@ def validate_revision(value: Any) -> dict[str, Any] | None:
 
     if value is None:
         return None
-    from .model_forecast_driver import CHANGE_REASONS
+    reasons = deliverable_change_reasons()
 
     if not isinstance(value, Mapping):
         raise MissionDeliverableValidationError("revision must be an object")
@@ -187,9 +205,9 @@ def validate_revision(value: Any) -> dict[str, Any] | None:
             f"revision has unknown fields: {', '.join(unknown)}"
         )
     reason = value.get("change_reason")
-    if reason not in CHANGE_REASONS:
+    if reason not in reasons:
         raise MissionDeliverableValidationError(
-            f"change_reason must be one of {list(CHANGE_REASONS)}"
+            f"change_reason must be one of {list(reasons)}"
         )
     refs = value.get("evidence_refs") or ()
     if isinstance(refs, (str, bytes)) or not isinstance(refs, Sequence):
@@ -753,6 +771,7 @@ __all__ = [
     "GAP_MARKER",
     "IMPORTED_FIGURE_GAP",
     "IMPORT_CHANGE_REASON",
+    "deliverable_change_reasons",
     "MissionDeliverableAuthority",
     "MissionDeliverableConflict",
     "MissionDeliverableError",

@@ -399,8 +399,15 @@ if [[ -n "$prior_research_dir" && -d "$prior_research_dir" ]]; then
   # A link, not a copy: the owner keeps adding to this directory and a copy
   # would be a second, stale truth. The manifest paths are relative to each
   # company folder, so the link has to be the declared root itself.
-  if [[ ! -e "$feeds_dir/prior-research" ]]; then
+  # `-e` alone is false for a *dangling* symlink, so a link left over from a
+  # directory the owner has since moved would be silently re-created beside
+  # itself -- or rather not re-created, and the lane would come up pointing at
+  # nothing. `-L` catches the dangling case; `ln -sfn` replaces it.
+  if [[ ! -e "$feeds_dir/prior-research" && ! -L "$feeds_dir/prior-research" ]]; then
     ln -s "$prior_research_dir" "$feeds_dir/prior-research"
+  elif [[ -L "$feeds_dir/prior-research" && ! -e "$feeds_dir/prior-research" ]]; then
+    print "note: $feeds_dir/prior-research is a dangling link; repointing it at $prior_research_dir."
+    ln -sfn "$prior_research_dir" "$feeds_dir/prior-research"
   fi
 else
   print "note: set DALTON_PRIOR_RESEARCH_DIR to an existing directory to install the prior-research lane."

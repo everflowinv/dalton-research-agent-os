@@ -257,6 +257,116 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
+# -- the two imports an owner runs by hand ------------------------------
+#
+# Deliberately owner-run rather than part of the tick. Reading the corpus is
+# automation's job -- it is a governed source like any other -- but *promoting*
+# one of those documents to version zero of a company's chain, or to a prior
+# model, is a statement about which document is the fund's earlier view of this
+# company. That is a judgement, and ADR-0008's split says the storage layer
+# does not make it. So the lane files everything as Claims, and these two
+# commands are how a person says "that one is the screen".
+
+
+def import_screen(args: argparse.Namespace) -> dict[str, Any]:
+    """Store one prior document as version 0 of a company's screen chain."""
+
+    from .coverage_mission import CoverageMissionAuthority
+    from .mission_deliverable import MissionDeliverableAuthority
+    from .prior_screen_import import import_prior_screen
+    from .research_playbook import ResearchPlaybookAuthority
+    from .store import DaltonStore
+
+    header, text = read_document(args.corpus_root, args.document_id)
+    if header["kind"] != "initial_screen":
+        raise PriorResearchRunError(
+            f"{args.document_id} is filed as {header['kind']!r}; only a document "
+            "the manifest calls an initial_screen becomes version zero"
+        )
+    store = DaltonStore(str(Path(args.db).expanduser().resolve()))
+    try:
+        missions = CoverageMissionAuthority(store)
+        pointer = store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer "
+            "ORDER BY mission_ref LIMIT 1"
+        ).fetchone()
+        if pointer is None:
+            raise PriorResearchRunError("this Core holds no coverage mission")
+        mission = missions.mission(pointer["mission_version_id"])
+        playbooks = ResearchPlaybookAuthority(store)
+        playbook = playbooks.playbook(
+            mission["bindings"]["playbook_version"]["ref"]
+        )
+        record = import_prior_screen(
+            MissionDeliverableAuthority(store), mission=mission, playbook=playbook,
+            company_ref=args.company_ref, document=header, text=text,
+            actor_ref=args.actor_ref,
+        )
+    finally:
+        store.close()
+    return {
+        "operation": "import_screen", "status": record["status"],
+        "version_ref": record["id"], "version": record["version"],
+        "company_ref": args.company_ref, "document_ref": header["document_id"],
+        "as_of": header["as_of"],
+    }
+
+
+def import_model(args: argparse.Namespace) -> dict[str, Any]:
+    """Store one prior workbook as the next PriorModelVersion of its chain."""
+
+    from .prior_model_import import (
+        PriorModelAuthority,
+        read_workbook,
+        workbook_digest,
+    )
+    from .store import DaltonStore
+
+    header, _ = read_document(args.corpus_root, args.document_id)
+    if header["kind"] != "model_excel":
+        raise PriorResearchRunError(
+            f"{args.document_id} is filed as {header['kind']!r}; only a document "
+            "the manifest calls a model_excel becomes a PriorModelVersion"
+        )
+    root = Path(args.corpus_root).expanduser().resolve()
+    workbook = root / header["company"] / header["relative_path"]
+    store = DaltonStore(str(Path(args.db).expanduser().resolve()))
+    try:
+        record = PriorModelAuthority(store).publish(
+            company_ref=args.company_ref,
+            source_document_ref=header["document_id"],
+            as_of=header["as_of"],
+            workbook_sha256=workbook_digest(workbook),
+            assumptions=read_workbook(workbook),
+            actor_ref=args.actor_ref,
+            note=header["source_note"],
+        )
+    finally:
+        store.close()
+    return {
+        "operation": "import_model", "status": record["status"],
+        "version_ref": record["id"], "version": record["version"],
+        "company_ref": args.company_ref, "document_ref": header["document_id"],
+        "as_of": header["as_of"], "assumption_count": record["assumption_count"],
+    }
+
+
+def build_import_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Promote one read prior document to a versioned output."
+    )
+    parser.add_argument("command", choices=("import-screen", "import-model"))
+    parser.add_argument("--db", required=True, help="the Core database")
+    parser.add_argument("--corpus-root", required=True)
+    parser.add_argument("--document-id", required=True)
+    parser.add_argument("--company-ref", required=True)
+    parser.add_argument(
+        "--actor-ref", default="human:coverage-owner",
+        help="who is saying this is the fund's earlier view of this company",
+    )
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state-dir", required=True)
@@ -288,8 +398,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    if raw and raw[0] in ("import-screen", "import-model"):
+        args = build_import_parser().parse_args(raw)
+        try:
+            outcome = (import_screen if args.command == "import-screen"
+                       else import_model)(args)
+        except (PriorResearchRunError, PriorResearchError) as exc:
+            print(json.dumps({"status": "failed",
+                              "failure_reason": f"{type(exc).__name__}: {exc}"},
+                             ensure_ascii=False, indent=1))
+            return 1
+        print(json.dumps(outcome, ensure_ascii=False, indent=1))
+        return 0
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(raw)
     if args.operation == LIST_OPERATION:
         if not args.since or not args.until:
             parser.error("--since and --until are required for list_documents")
@@ -317,4 +440,12 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
     sys.exit(main())
 
 
-__all__ = ["PriorResearchRunError", "build_parser", "main", "run"]
+__all__ = [
+    "PriorResearchRunError",
+    "build_import_parser",
+    "build_parser",
+    "import_model",
+    "import_screen",
+    "main",
+    "run",
+]

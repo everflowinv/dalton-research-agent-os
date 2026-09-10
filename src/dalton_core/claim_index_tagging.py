@@ -39,7 +39,7 @@ import json
 import re
 import sqlite3
 import unicodedata
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Iterable, Mapping, Sequence
 
 from .claim_aspect_vocabulary import (
@@ -185,6 +185,24 @@ STALE_DOWNGRADE: Mapping[str, str] = {"internal_prior": "sell_side"}
 STALE_MARK = "may_be_stale"
 
 
+def stale_due_at(as_of: str | None, *, stale_after_days: int = STALE_AFTER_DAYS) -> str | None:
+    """The day a claim with this ``as_of`` becomes stale, or ``None``.
+
+    Exists so the limitation below is answerable rather than merely admitted:
+    ``SELECT ... FROM claim_index_entry_versions WHERE importance='internal_prior'
+    AND date(as_of, '+180 days') <= date('now')`` is the sweep that would
+    re-tag, and this is the same arithmetic in Python for a caller that has
+    the entry in hand.
+    """
+
+    if as_of is None:
+        return None
+    try:
+        return (date.fromisoformat(as_of) + timedelta(days=stale_after_days)).isoformat()
+    except ValueError:
+        return None
+
+
 def stale_importance(
     importance: str,
     importance_basis: str,
@@ -199,6 +217,17 @@ def stale_importance(
     A claim with no usable date is not aged -- it is already at the bottom of
     every ordering that matters, and inventing an age for it would be the same
     mistake the prior-research feed refuses to make at the other end.
+
+    **This is decided at tag time and is not re-decided on its own.** The index
+    lane tags claims that have no current entry; a claim tagged the week it was
+    read keeps ``internal_prior`` after it crosses the threshold, because
+    nothing re-reads it. That is a real gap and it is deliberate rather than
+    overlooked: a sweep that re-versions entries on a clock would make the
+    index change with no evidence behind the change, which is the one thing
+    ADR-0008 refuses. The fix belongs in the judgement layer -- a tick that
+    decides to re-tag and says why -- and ``stale_due_at`` above is the date it
+    would key on. Until then a reader of a tag reads it as of ``as_of``, and
+    the age is recoverable from the entry itself.
     """
 
     if importance not in STALE_DOWNGRADE or as_of is None:

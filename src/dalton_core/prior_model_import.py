@@ -281,22 +281,37 @@ def read_workbook(path: str | Path) -> list[dict[str, Any]]:
                     values_only=True,
                 )
             ]
+            formula_grid = [] if formula_sheet is None else [
+                list(row[:MAX_COLUMNS_PER_SHEET])
+                for row in formula_sheet.iter_rows(
+                    max_row=MAX_ROWS_PER_SHEET,
+                    max_col=MAX_COLUMNS_PER_SHEET,
+                    values_only=True,
+                )
+            ]
             for row_index, row in enumerate(grid):
                 for column_index, value in enumerate(row):
-                    cell = sheet.cell(row=row_index + 1, column=column_index + 1)
-                    address = str(cell.coordinate)
-                    formula = ""
-                    if formula_sheet is not None:
-                        raw = formula_sheet.cell(
-                            row=row_index + 1, column=column_index + 1
-                        ).value
-                        if isinstance(raw, str) and raw.startswith("="):
-                            formula = raw[:MAX_FORMULA_CHARS]
+                    # Decide first, materialise second. A model sheet is mostly
+                    # empty and mostly labels; asking openpyxl for a Cell object
+                    # and a coordinate string per visited position built tens of
+                    # thousands of objects to throw nearly all of them away.
+                    raw_formula = None
+                    if row_index < len(formula_grid) and column_index < len(
+                        formula_grid[row_index]
+                    ):
+                        raw_formula = formula_grid[row_index][column_index]
+                    formula = (
+                        raw_formula[:MAX_FORMULA_CHARS]
+                        if isinstance(raw_formula, str) and raw_formula.startswith("=")
+                        else ""
+                    )
                     numeric = isinstance(value, (int, float, Decimal)) and not isinstance(
                         value, bool
                     )
                     if not numeric and not formula:
                         continue
+                    cell = sheet.cell(row=row_index + 1, column=column_index + 1)
+                    address = str(cell.coordinate)
                     label = _cell_label(grid, row_index, column_index)
                     unit, unit_basis = guess_unit(
                         label=label, number_format=cell.number_format

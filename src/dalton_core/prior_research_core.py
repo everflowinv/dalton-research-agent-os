@@ -215,12 +215,24 @@ def prior_research_schema_hash(operation: str) -> str:
     })
 
 
+#: The renderers this feed's identity is bound to, newest reader last. Named in
+#: the adapter hash because they are what turns bytes into the text a Claim is
+#: quoted from: a different PDF or spreadsheet reader produces different text
+#: from the same file, which is a different capability and must not pass under
+#: an approval granted for this one. The two hand-rolled readers carry their
+#: own version; the two libraries are pinned by the extras that supply them.
+RENDERER_IDENTITY: tuple[str, ...] = (
+    _TEXT_RENDERER, _DOCX_RENDERER, "pdf-pypdf:0.1", _XLSX_RENDERER + ":0.1",
+)
+
+
 def prior_research_adapter_hash(operation: str) -> str:
     template, _ = prior_research_contract(operation)
     return content_hash({
         "target_ref": template["transport"]["target_ref"],
         "source": template["source_identity"]["source_ref"],
         "operation": operation,
+        "renderers": list(RENDERER_IDENTITY),
     })
 
 
@@ -679,7 +691,10 @@ def company_folders(corpus_root: str | Path) -> list[str]:
         raise PriorResearchError("prior-research corpus root is missing")
     names: list[str] = []
     for child in sorted(root.iterdir(), key=lambda item: item.name):
-        if not child.is_dir() or child.is_symlink():
+        # A symlinked company folder is skipped, not followed: the corpus root
+        # is itself a link the installer made, and following a second one is
+        # how a read escapes the directory the owner declared.
+        if child.is_symlink() or not child.is_dir():
             continue
         if _COMPANY_RE.fullmatch(child.name) is None:
             continue
@@ -822,6 +837,7 @@ __all__ = [
     "DOC_FORMATS",
     "FORMAT_BY_SUFFIX",
     "OPERATIONS",
+    "RENDERER_IDENTITY",
     "ROOT_ENV_VAR",
     "SIDE_EFFECT",
     "SOURCE_REF",
