@@ -33,6 +33,8 @@
   "market_vs_us": {
    "convergence_pathway": "十月的 bookings 与 book-to-bill 会先于收入证实或证伪这一点。",
    "market_view": "卖方多数把审批延后读成需求下修，四家里有三家在下调 2027 年收入。",
+   "market_view_available": true,
+   "market_view_reason": null,
    "observable_signals": "月度招聘公告、外包合同披露、以及电话会上对审批周期的措辞变化。",
    "our_view": "预算恢复只是被审批链条推迟了一到两个季度，不是需求塌了。",
    "refs": [

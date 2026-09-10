@@ -3060,23 +3060,22 @@ class CockpitPlane:
 
         return annotate_with_index(core, rows, ref_key="ref")
 
-    @staticmethod
-    def _answer_policy(core: Any) -> dict[str, Any] | None:
-        """The active answer-sufficiency policy, or None on a Core without one.
+    def _answer_policy(self, core: Any, company_ref: str | None) -> dict[str, Any]:
+        """The live answer-sufficiency policy, as the router itself reads it.
 
-        Read for one field: whether the owner has budgeted an ad-hoc route.
-        A Core from before S5 has no such table and the honest answer is that
-        there is no policy, which the refresh grant reports as its own reason.
+        Not re-implemented here.  ``answer_routing.active_policy_for_company``
+        is the router's own projection lifted to a module function: it resolves
+        the active mandate, checks the pointer hash, checks that the policy was
+        written against *this* version of the mandate, and checks the effective
+        window.  An earlier draft of this method asked only "is there a pointer
+        row", which would have let a question spend the mission's connector
+        quota under a policy the owner had already superseded.
         """
 
-        if not _table_exists(core, "answer_sufficiency_policy_pointer"):
-            return None
-        row = core.execute(
-            "SELECT v.record_json FROM answer_sufficiency_policy_versions v "
-            "JOIN answer_sufficiency_policy_pointer p ON p.version_id=v.version_id "
-            "ORDER BY p.updated_at DESC LIMIT 1"
-        ).fetchone()
-        return None if row is None else json.loads(row["record_json"])
+        from .answer_routing import active_policy_for_company
+
+        return active_policy_for_company(
+            core, company_ref, as_of=_iso(self.clock()))
 
     def _already_refreshed(self, request_id: str) -> bool:
         """Whether this exact question has already spent its one look."""
@@ -3090,6 +3089,7 @@ class CockpitPlane:
                 *, refresh: bool = False) -> dict[str, Any]:
         from . import ask_answer, ask_context, ask_refresh
 
+        today = _iso(self.clock())[:10]
         with self._core() as core:
             mission = self._mission(core)
             everything = self._claims(core)
@@ -3097,16 +3097,20 @@ class CockpitPlane:
             theses = [json.loads(r["content_json"]) for r in core.execute(
                 "SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
             journal_enabled = _table_exists(core, "analyst_journal_entries")
-            policy = self._answer_policy(core)
-            specs = ask_refresh.known_specs(core, mission["mission_ref"])
             members = self._members(mission)
             context = ask_context.build_context(
                 core, question=question, mission=mission, members=members,
                 claims=claims, theses=theses, company_names=COMPANY_NAMES,
                 label=lambda ref: self._label(members, ref),
-                today=_iso(self.clock())[:10],
+                today=today,
                 duplicates_dropped=len(everything) - len(claims),
             )
+            # The policy governs a company, so it is read after the question's
+            # subjects are resolved rather than before.
+            named = list(context["subjects"]["companies"])
+            policy_state = self._answer_policy(core, named[0] if named else None)
+            specs = ask_refresh.known_specs(core, mission["mission_ref"])
+            pool = ask_refresh.pool_balance(core, mission, day=today)
         prompt = ask_answer.build_prompt(context, mission=mission)
         call = model.call(purpose="ask", request_id=request_id, prompt=prompt, mission=mission)
         answer = ask_answer.parse_answer(unwrap_json_object(call["text"]) or {}, context=context)
@@ -3114,33 +3118,42 @@ class CockpitPlane:
         replayed = call["replayed"]
 
         plan = ask_refresh.plan_refresh(
-            answer, context, mission=mission, policy=policy, specs=specs,
+            answer, context, mission=mission,
+            policy=policy_state["policy"] if policy_state["state"] == "active" else None,
+            specs=specs, pool=pool,
             already_refreshed=self._already_refreshed(request_id))
-        refreshed_with: list[dict[str, Any]] = []
-        refresh_note = None
+        outcome: dict[str, Any] | None = None
         if refresh and plan["available"]:
             outcome = ask_refresh.run_refresh(
-                plan, search=lambda **params: self._discovery_search(login, **params))
-            refreshed_with = outcome["headers"]
-            refresh_note = outcome["note"]
+                plan,
+                start=lambda **params: self._start_discovery(login, **params),
+                status=lambda ticket_ref: self._discovery_status(login, ticket_ref),
+                documents=lambda discovery_ref: self._discovered_by(
+                    mission["mission_ref"], discovery_ref))
             self.journal.record_event(
-                kind="refresh", title=f"为回答你的问题补搜了一次：{plan['suggestion']['source']}",
-                detail=outcome["note"], login=login,
-                refs={"request_id": request_id, **outcome["operation"]})
-            # The second and last call.  A new request id, because it is a
-            # different prompt and the scheduler is content-addressed on it;
-            # the same day ledger, because it is the same mission's money.
-            again = ask_refresh.with_headers(context, refreshed_with)
-            second = model.call(purpose="ask", request_id=f"{request_id}:refresh",
-                                prompt=ask_answer.build_prompt(again, mission=mission),
-                                mission=mission)
-            answer = ask_answer.parse_answer(
-                unwrap_json_object(second["text"]) or {}, context=again)
-            context = again
-            cost_micros += second["cost_micros"]
-            replayed = replayed and second["replayed"]
+                kind="refresh",
+                title=f"为回答你的问题补搜了一次：{plan['suggestion']['source']}",
+                detail=outcome["status_label"], login=login,
+                refs={"request_id": request_id, "status": outcome["status"],
+                      "ticket_ref": outcome["ticket_ref"], **outcome["operation"]})
             plan = {**plan, "available": False, "reasons": ["already_refreshed"],
                     "reason_labels": [ask_refresh.GRANT_LABELS["already_refreshed"]]}
+            if outcome["headers"]:
+                # The second and last call.  A new request id, because it is a
+                # different prompt and the scheduler is content-addressed on
+                # it; the same day ledger, because it is the same mission's
+                # money. Nothing found means nothing new to read, so the first
+                # answer stands and the owner is told the search came back
+                # empty rather than charged for a second identical call.
+                again = ask_refresh.with_headers(context, outcome["headers"])
+                second = model.call(purpose="ask", request_id=f"{request_id}:refresh",
+                                    prompt=ask_answer.build_prompt(again, mission=mission),
+                                    mission=mission)
+                answer = ask_answer.parse_answer(
+                    unwrap_json_object(second["text"]) or {}, context=again)
+                context = again
+                cost_micros += second["cost_micros"]
+                replayed = replayed and second["replayed"]
 
         shown = [dict(row) for row in context["shown"]]
         result = {
@@ -3179,14 +3192,27 @@ class CockpitPlane:
                 "budget_chars": context["budget_chars"],
                 "spent_chars": context["spent_chars"],
             },
+            # Why the answer policy did or did not govern this question, in the
+            # router's own three words. A refresh shut because the policy is
+            # ``stale`` is a different fix from one shut because there is none.
+            "answer_policy": {"state": policy_state["state"],
+                              "reason": policy_state["reason"],
+                              "mandate_ref": policy_state["mandate_ref"]},
             "refresh": {
                 "available": plan["available"],
                 "reasons": plan["reasons"], "reason_labels": plan["reason_labels"],
                 "suggestion": plan["suggestion"],
-                "ran": bool(refreshed_with),
+                # True whenever a search actually ran, including the run that
+                # found nothing: "we looked and there was nothing" is not the
+                # same answer as "we did not look".
+                "ran": bool(outcome and outcome["ran"]),
+                "status": None if outcome is None else outcome["status"],
+                "status_label": None if outcome is None else outcome["status_label"],
+                "ticket_ref": None if outcome is None else outcome["ticket_ref"],
+                "discovery_ref": None if outcome is None else outcome["discovery_ref"],
             },
-            "refreshed_with": refreshed_with,
-            "refresh_note": refresh_note,
+            "refreshed_with": [] if outcome is None else outcome["headers"],
+            "refresh_note": None if outcome is None else outcome["note"],
             "claims_considered": context["claims_considered"],
             "claims_total": len(everything),
             # How many copies of a fact the index took out before the
@@ -3224,9 +3250,11 @@ class CockpitPlane:
                                         "work_order_ref": call["work_order_ref"]})
         return result
 
-    def _discovery_search(self, login: str, *, company_ref: str, source_ref: str,
-                          spec_ref: str) -> dict[str, Any]:
-        """One governed discovery, through the writer, as the owner themselves.
+    # -- the one bounded look, through the writer -------------------------------------------
+
+    def _start_discovery(self, login: str, *, company_ref: str, source_ref: str,
+                         spec_ref: str) -> dict[str, Any]:
+        """Spawn one governed discovery, as the owner themselves.
 
         The cockpit process holds no Core write handle (ADR-0006) and no
         connector credential; this is the same governance path every other
@@ -3237,25 +3265,81 @@ class CockpitPlane:
         """
 
         actor = _subject_for_login(login)
+        return self._discovery_call(
+            actor, "run_mission_source_discovery",
+            {"company_ref": company_ref, "source_ref": source_ref,
+             "spec_ref": spec_ref, "requested_by": actor})
+
+    def _discovery_status(self, login: str, ticket_ref: str) -> dict[str, Any]:
+        return self._discovery_call(
+            _subject_for_login(login), "mission_source_discovery_status",
+            {"ticket_ref": ticket_ref})
+
+    def _discovery_call(self, actor: str, operation: str,
+                        params: Mapping[str, Any]) -> dict[str, Any]:
         try:
-            ticket = self.governance_call(
+            result = self.governance_call(
                 self.token_config, self.writer_socket, actor_ref=actor,
-                operation="run_mission_source_discovery",
-                params={"company_ref": company_ref, "source_ref": source_ref,
-                        "spec_ref": spec_ref, "requested_by": actor})
-            documents = self.governance_call(
-                self.token_config, self.writer_socket, actor_ref=actor,
-                operation="mission_discovered_documents",
-                params={"company_ref": company_ref, "source_ref": source_ref, "limit": 20})
+                operation=operation, params=dict(params))
         except (GovernanceCliError, RemoteError) as exc:
             raise CockpitConflict(f"这次补搜没有跑成：{_reason(exc)}") from exc
-        found = documents.get("documents") if isinstance(documents, Mapping) else None
-        return {
-            "ticket_ref": (ticket or {}).get("id") if isinstance(ticket, Mapping) else None,
-            "query": (ticket or {}).get("parameters") if isinstance(ticket, Mapping) else None,
-            "documents": list(found or ()),
-            "titles": self._url_map(),
-        }
+        return dict(result) if isinstance(result, Mapping) else {}
+
+    def _discovered_by(self, mission_ref: str, discovery_ref: str) -> list[dict[str, Any]]:
+        """Exactly the documents one discovery recorded, newest search first.
+
+        Read from the discovery record's own ``document_refs`` rather than from
+        "this company's documents": the second cannot tell what this search
+        returned from what was already in the ledger, and an answer that showed
+        the difference as "just fetched" would be lying in the most convincing
+        possible way. Scoped by ``mission_ref`` rather than by the active
+        mission version, because publishing a version must not hide the rows
+        the previous one discovered.
+        """
+
+        with self._core() as core:
+            if not _table_exists(core, "coverage_mission_source_discoveries"):
+                return []
+            row = core.execute(
+                "SELECT d.record_json AS record_json FROM "
+                "coverage_mission_source_discoveries d "
+                "JOIN coverage_mission_versions v "
+                "ON v.mission_version_id=d.mission_version_ref "
+                "WHERE d.record_id=? AND v.mission_ref=?",
+                (discovery_ref, mission_ref),
+            ).fetchone()
+            if row is None:
+                return []
+            record = json.loads(row["record_json"])
+            refs = [str(ref) for ref in record.get("document_refs") or ()]
+            fresh = {str(ref) for ref in record.get("new_document_refs") or ()}
+            if not refs:
+                return []
+            marks = ",".join("?" for _ in refs)
+            rows = {}
+            if _table_exists(core, "coverage_mission_discovered_documents"):
+                for item in core.execute(
+                    f"SELECT document_ref, source_ref, host, status, created_at "
+                    f"FROM coverage_mission_discovered_documents "
+                    f"WHERE discovery_ref=? AND document_ref IN ({marks})",
+                    (discovery_ref, *refs),
+                ).fetchall():
+                    rows[item["document_ref"]] = dict(item)
+        titles = self._url_map()
+        out = []
+        for ref in refs:
+            stored = rows.get(ref, {})
+            known = titles.get(ref) or {}
+            out.append({
+                "document_ref": ref,
+                "source_ref": stored.get("source_ref") or record.get("source_ref"),
+                "host": stored.get("host") or known.get("host"),
+                "title": known.get("title"),
+                "status": stored.get("status") or "discovered",
+                "created_at": stored.get("created_at"),
+                "new": ref in fresh,
+            })
+        return out
 
     # -- goal and steering drafts ---------------------------------------------------------------
 

@@ -18,12 +18,15 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dalton_core import ask_answer, ask_context, ask_refresh
 from dalton_core.analyst_journal import AnalystJournalAuthority
 from dalton_core.catalyst_calendar import CatalystCalendarAuthority
+from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.debate_map import DebateMapAuthority
+from dalton_core.store import DaltonStore, canonical_json, content_hash
 from dalton_core.event_judgement import EventJudgementAuthority
 from dalton_core.market_price import MarketPriceSeriesAuthority
 from dalton_core.model_forecast_driver import ForecastModelAuthority
@@ -456,6 +459,7 @@ class AnswerShapeTests(unittest.TestCase):
             "where_market_is_wrong": "市场把审批延后当成需求消失。",
             "convergence_pathway": "十月的 bookings 会先于收入证伪或证实。",
             "observable_signals": "月度招聘与外包合同公告。",
+            "market_view_available": True, "market_view_reason": None,
             "refs": ["C1"],
         }
 
@@ -511,14 +515,48 @@ class AnswerShapeTests(unittest.TestCase):
         self.assertIn("market_vs_us_present", answer["verification"]["failed_checks"])
 
     def test_a_variant_view_uses_the_dossier_slots_and_reaches_the_body(self):
+        from dalton_core.company_dossier import VARIANT_SLOTS
+
         answer = ask_answer.parse_answer(self.reply(market_vs_us=self.variant()),
                                          context=self.context())
-        self.assertEqual(set(answer["market_vs_us"]) - {"refs"},
-                         set(ask_answer.VARIANT_SLOTS)
-                         if hasattr(ask_answer, "VARIANT_SLOTS")
-                         else set(answer["market_vs_us"]) - {"refs"})
+        self.assertEqual(set(answer["market_vs_us"]),
+                         set(VARIANT_SLOTS) | {"refs", "market_view_available",
+                                               "market_view_reason"})
         self.assertIn("市场向我们靠拢的路径", answer["answer"])
         self.assertNotIn("market_vs_us_present", answer["verification"]["failed_checks"])
+
+    def test_a_variant_view_with_an_empty_slot_fails_and_names_the_slot(self):
+        # The report claims this; the check has to make it true. An answer
+        # that says "we disagree" and leaves the pathway blank has answered
+        # half the owner's question.
+        hollow = {**self.variant(), "convergence_pathway": "  "}
+        answer = ask_answer.parse_answer(self.reply(market_vs_us=hollow),
+                                         context=self.context())
+        self.assertIn("market_vs_us_present", answer["verification"]["failed_checks"])
+        check = next(c for c in answer["verification"]["checks"]
+                     if c["check"] == "market_vs_us_present")
+        self.assertEqual([f["slot"] for f in check["findings"]], ["convergence_pathway"])
+        self.assertIn("市场向我们靠拢的路径", check["detail"])
+
+    def test_no_market_view_is_declared_rather_than_written_as_a_word(self):
+        # P12a's typed shape: "we do not know where the market is" and "the
+        # market agrees with us" have to look different. A bare 未知 with no
+        # reason is not a declaration, and fails.
+        bare = {**self.variant(), "market_view": "未知",
+                "market_view_available": False, "market_view_reason": None}
+        answer = ask_answer.parse_answer(self.reply(market_vs_us=bare),
+                                         context=self.context())
+        check = next(c for c in answer["verification"]["checks"]
+                     if c["check"] == "market_vs_us_present")
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("market_view_reason", [f["slot"] for f in check["findings"]])
+        # Declared, with the reason, it passes and the reason reaches the body.
+        said = {**bare, "market_view_reason": "账本里没有一致预期或评级材料"}
+        answer = ask_answer.parse_answer(self.reply(market_vs_us=said),
+                                         context=self.context())
+        self.assertNotIn("market_vs_us_present", answer["verification"]["failed_checks"])
+        self.assertFalse(answer["market_vs_us"]["market_view_available"])
+        self.assertIn("账本里没有一致预期或评级材料", answer["answer"])
 
     def test_a_factual_question_is_not_asked_for_a_variant_view(self):
         answer = ask_answer.parse_answer(
@@ -575,6 +613,11 @@ class RefreshGrantTests(unittest.TestCase):
         return {"adhoc_research_route": {"enabled": enabled, "max_cost_units": units,
                                          "max_rounds": rounds}}
 
+    def pool(self, *, cap=5_000_000, remaining=5_000_000) -> dict:
+        return {"name": "adhoc", "cap_micros": cap, "cap_usd": "5.000000",
+                "remaining_micros": remaining, "reserved_micros": cap - remaining,
+                "day": TODAY}
+
     def specs(self) -> list[dict]:
         return [{"source_ref": "source:alphaengine", "spec_ref": "sell-side-reports",
                  "company_ref": ACN, "last_used": "2026-09-01T00:00:00+00:00", "runs": 3}]
@@ -582,16 +625,33 @@ class RefreshGrantTests(unittest.TestCase):
     def test_a_granted_mission_with_a_budget_and_a_used_spec_may_look_once(self):
         decision = ask_refresh.grant(
             mission(), policy=self.policy(), slug="alphaengine", specs=self.specs(),
-            company_ref=ACN)
+            company_ref=ACN, pool=self.pool())
         self.assertTrue(decision["granted"], decision["reasons"])
         self.assertEqual(decision["spec_ref"], "sell-side-reports")
         self.assertEqual(decision["budget"]["cost_units_this_refresh"], 1)
+        self.assertEqual(decision["budget"]["adhoc_pool_remaining_micros"], 5_000_000)
+
+    def test_a_pool_the_days_research_tasks_have_emptied_refuses(self):
+        # The 25% share exists for exactly this: a question must never take
+        # the slice a day of ad-hoc research has already reserved. The cap is
+        # unchanged and says nothing; only the balance can say no.
+        decision = ask_refresh.grant(
+            mission(), policy=self.policy(), slug="alphaengine", specs=self.specs(),
+            company_ref=ACN, pool=self.pool(remaining=0))
+        self.assertEqual(decision["reasons"], ["adhoc_pool_spent_today"])
+        self.assertFalse(decision["granted"])
+
+    def test_a_pool_that_could_not_be_read_is_not_a_licence(self):
+        decision = ask_refresh.grant(
+            mission(), policy=self.policy(), slug="alphaengine", specs=self.specs(),
+            company_ref=ACN, pool=None)
+        self.assertIn("mission_budget_leaves_no_adhoc_pool", decision["reasons"])
 
     def test_every_reason_it_cannot_is_reported_at_once(self):
         ungranted = {**mission(), "autonomy": {"may_write": ["claim"]}}
         decision = ask_refresh.grant(
             ungranted, policy=self.policy(enabled=False), slug="sec", specs=(),
-            company_ref=None)
+            company_ref=None, pool=self.pool())
         self.assertFalse(decision["granted"])
         self.assertEqual(set(decision["reasons"]), {
             "mission_does_not_grant_research_task", "adhoc_route_disabled",
@@ -603,24 +663,64 @@ class RefreshGrantTests(unittest.TestCase):
             {"source_ref": "source:alphaengine", "status": "not_connected"}]}
         decision = ask_refresh.grant(
             unconnected, policy=self.policy(), slug="alphaengine", specs=self.specs(),
-            company_ref=ACN)
+            company_ref=ACN, pool=self.pool())
         self.assertIn("source_not_connected", decision["reasons"])
 
     def test_a_source_with_no_spec_this_mission_ever_ran_is_refused(self):
         decision = ask_refresh.grant(
             mission(), policy=self.policy(), slug="alphaengine", specs=(),
-            company_ref=ACN)
+            company_ref=ACN, pool=self.pool())
         self.assertIn("no_discovery_spec_used_yet", decision["reasons"])
 
     def test_the_second_refresh_of_one_question_is_refused_by_name(self):
         decision = ask_refresh.grant(
             mission(), policy=self.policy(), slug="alphaengine", specs=self.specs(),
-            company_ref=ACN, already_refreshed=True)
+            company_ref=ACN, already_refreshed=True, pool=self.pool())
         self.assertEqual(decision["reasons"], ["already_refreshed"])
 
     def test_every_reason_word_has_a_sentence_the_owner_can_read(self):
         self.assertEqual(set(ask_refresh.GRANT_REASONS),
                          set(ask_refresh.GRANT_LABELS))
+        self.assertEqual(set(ask_refresh.REFRESH_OUTCOMES),
+                         set(ask_refresh.OUTCOME_LABELS))
+
+
+class PoolBalanceTests(unittest.TestCase):
+    """The balance is P14e's own pool, read on a handle that cannot write."""
+
+    def test_the_balance_is_the_authoritys_own_numbers(self):
+        from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+        from dalton_core.research_task import pool_state
+        from tests.test_document_extraction import ExtractionHarness
+
+        with tempfile.TemporaryDirectory() as name:
+            h = ExtractionHarness(Path(name))
+            try:
+                store = h.h.core
+                live = pool_state(BoundedPlannerAuthority(store), mission(), day=TODAY)
+                read = ask_refresh.pool_balance(store.connection, mission(), day=TODAY)
+                # One pool, read twice, never two pools.
+                self.assertEqual(read["cap_micros"], live["cap_micros"])
+                self.assertEqual(read["remaining_micros"], live["remaining_micros"])
+                self.assertEqual(read["reserved_micros"], live["reserved_micros"])
+            finally:
+                h.close()
+
+    def test_a_core_where_no_task_ever_ran_has_a_full_pool_not_an_unreadable_one(self):
+        # P14e's lane may simply never have run here. Nothing reserved is a
+        # full pool; refusing on a missing table would shut the door on every
+        # deployment that has not yet used the feature the door leads to.
+        balance = ask_refresh.pool_balance(empty_core(), mission(), day=TODAY)
+        self.assertEqual(balance["reserved_micros"], 0)
+        self.assertEqual(balance["remaining_micros"], balance["cap_micros"])
+        self.assertGreater(balance["cap_micros"], 0)
+
+    def test_a_mission_whose_budget_makes_no_sense_is_no_pool(self):
+        broken = {**mission(), "budget": {"max_daily_cost_usd": "not a number"}}
+        self.assertIsNone(ask_refresh.pool_balance(empty_core(), broken, day=TODAY))
+
+    def test_no_mission_is_no_pool(self):
+        self.assertIsNone(ask_refresh.pool_balance(empty_core(), None, day=TODAY))
 
 
 class RefreshRunTests(unittest.TestCase):
@@ -641,12 +741,35 @@ class RefreshRunTests(unittest.TestCase):
         self.specs = [{"source_ref": "source:alphaengine", "spec_ref": "sell-side-reports",
                        "company_ref": ACN, "last_used": "2026-09-01T00:00:00+00:00",
                        "runs": 3}]
+        self.pool = {"cap_micros": 5_000_000, "cap_usd": "5.000000",
+                     "remaining_micros": 5_000_000, "day": TODAY}
+        self.slept: list[float] = []
+        self.starts: list[dict] = []
+        self.polls: list[str] = []
 
     def plan(self, **kwargs):
         return ask_refresh.plan_refresh(
             self.answer, self.context, mission=kwargs.pop("mission", mission()),
             policy=kwargs.pop("policy", self.policy),
-            specs=kwargs.pop("specs", self.specs), **kwargs)
+            specs=kwargs.pop("specs", self.specs),
+            pool=kwargs.pop("pool", self.pool), **kwargs)
+
+    def run_with(self, tickets, rows=(), **kwargs):
+        """One start, then a scripted sequence of ticket statuses."""
+
+        script = list(tickets)
+
+        def start(**params):
+            self.starts.append(params)
+            return script.pop(0)
+
+        def status(ticket_ref):
+            self.polls.append(ticket_ref)
+            return script.pop(0) if script else {"id": ticket_ref, "status": "running"}
+
+        return ask_refresh.run_refresh(
+            self.plan(), start=start, status=status,
+            documents=lambda ref: list(rows), sleep=self.slept.append, **kwargs)
 
     def test_the_plan_names_the_owners_own_spec_and_never_a_model_written_query(self):
         plan = self.plan()
@@ -661,33 +784,88 @@ class RefreshRunTests(unittest.TestCase):
     def test_an_answer_that_asked_for_nothing_plans_nothing(self):
         answer = {**self.answer, "refresh_suggested": None}
         plan = ask_refresh.plan_refresh(answer, self.context, mission=mission(),
-                                        policy=self.policy, specs=self.specs)
+                                        policy=self.policy, specs=self.specs,
+                                        pool=self.pool)
         self.assertEqual(plan["reasons"], ["answer_suggested_no_refresh"])
         self.assertIsNone(plan["grant"])
 
     def test_a_plan_that_is_not_available_refuses_to_run_rather_than_doing_nothing(self):
         plan = self.plan(already_refreshed=True)
         with self.assertRaises(ask_refresh.AskRefreshError):
-            ask_refresh.run_refresh(plan, search=lambda **_: {"documents": []})
+            ask_refresh.run_refresh(
+                plan, start=lambda **_: {"id": "t", "status": "running"},
+                status=lambda _: {"status": "succeeded"}, documents=lambda _: [])
 
-    def test_one_search_returns_headers_and_says_nobody_has_read_them(self):
-        calls = []
+    def test_a_ticket_that_is_still_running_is_reported_as_pending_not_as_results(self):
+        """The bug this whole path was rewritten for.
 
-        def search(**params):
-            calls.append(params)
-            return {"ticket_ref": "ticket:1", "documents": [
-                {"document_ref": "alphaengine-doc:1", "host": "alphaengine",
-                 "status": "discovered", "created_at": "2026-09-09T00:00:00+00:00"}],
-                "titles": {"alphaengine-doc:1": {"title": "ACN Q4 preview", "url": None}}}
+        ``run_mission_source_discovery`` returns a ticket, not results. Reading
+        the ledger straight afterwards returns whatever was already there, and
+        showing that as the file we just fetched is the failure that looks most
+        like success. Pending is the honest word.
+        """
 
-        outcome = ask_refresh.run_refresh(self.plan(), search=search)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["spec_ref"], "sell-side-reports")
+        outcome = self.run_with(
+            [{"id": "alphaengine-discovery:1", "status": "running"}],
+            rows=[{"document_ref": "alphaengine-doc:old", "new": False}],
+            polls=3)
+        self.assertEqual(outcome["status"], "pending")
+        self.assertEqual(outcome["headers"], [])
+        self.assertTrue(outcome["ran"])
+        self.assertEqual(len(self.polls), 3)
+        self.assertEqual(self.slept, [ask_refresh.STATUS_POLL_SECONDS] * 2)
+        self.assertIn("还在跑", outcome["status_label"])
+
+    def test_a_ticket_that_settles_while_waiting_takes_the_discoverys_own_documents(self):
+        outcome = self.run_with([
+            {"id": "alphaengine-discovery:1", "status": "running"},
+            {"id": "alphaengine-discovery:1", "status": "running"},
+            {"id": "alphaengine-discovery:1", "status": "succeeded",
+             "summary": {"discovery_ref": "mission-source-discovery:new"}},
+        ], rows=[
+            {"document_ref": "alphaengine-doc:old", "new": False, "host": "ae"},
+            {"document_ref": "alphaengine-doc:new", "new": True, "host": "ae",
+             "title": "ACN Q4 preview"},
+        ])
+        self.assertEqual(outcome["status"], "found")
+        self.assertEqual(outcome["discovery_ref"], "mission-source-discovery:new")
+        # Newly discovered first: a search that returned four documents we
+        # already held and one we did not should lead with the one we did not.
+        self.assertEqual([h["document_ref"] for h in outcome["headers"]],
+                         ["alphaengine-doc:new", "alphaengine-doc:old"])
         self.assertEqual(outcome["headers"][0]["title"], "ACN Q4 preview")
         self.assertIn("正文还没有被读", outcome["note"])
-        # Headers, not bodies: there is no field here that could carry one.
-        self.assertNotIn("body", outcome["headers"][0])
-        self.assertNotIn("text", outcome["headers"][0])
+        for header in outcome["headers"]:
+            self.assertNotIn("body", header)
+            self.assertNotIn("text", header)
+
+    def test_a_search_that_found_nothing_still_counts_as_having_looked(self):
+        outcome = self.run_with([
+            {"id": "alphaengine-discovery:1", "status": "running"},
+            {"id": "alphaengine-discovery:1", "status": "succeeded",
+             "summary": {"discovery_ref": "mission-source-discovery:new"}},
+        ], rows=[])
+        self.assertEqual(outcome["status"], "empty")
+        self.assertTrue(outcome["ran"])
+        self.assertEqual(outcome["headers"], [])
+
+    def test_a_failed_child_says_so_with_the_reason_it_gave(self):
+        outcome = self.run_with([
+            {"id": "alphaengine-discovery:1", "status": "running"},
+            {"id": "alphaengine-discovery:1", "status": "failed", "exit_code": 3,
+             "summary": {"failure_reason": "quota exhausted"}},
+        ])
+        self.assertEqual(outcome["status"], "failed")
+        self.assertEqual(outcome["reason"], "quota exhausted")
+        self.assertEqual(outcome["headers"], [])
+
+    def test_a_child_that_succeeded_without_recording_a_discovery_is_pending(self):
+        outcome = self.run_with([
+            {"id": "alphaengine-discovery:1", "status": "running"},
+            {"id": "alphaengine-discovery:1", "status": "succeeded", "summary": {}},
+        ])
+        self.assertEqual(outcome["status"], "pending")
+        self.assertIn("还没落下发现记录", outcome["reason"])
 
     def test_the_second_pass_sees_the_headers_as_their_own_tagged_block(self):
         headers = [{"document_ref": "alphaengine-doc:1", "title": "ACN Q4 preview",
@@ -699,6 +877,9 @@ class RefreshRunTests(unittest.TestCase):
         self.assertEqual(block["block"], "refreshed")
         self.assertEqual(block["rows"][0]["tag"], "H1")
         self.assertIn("H1", {row["tag"] for row in again["shown"]})
+        # A context that gained a block is a different context, and says so.
+        self.assertNotEqual(again["context_hash"], self.context["context_hash"])
+        self.assertEqual(again["context_hash"], ask_context.context_identity(again))
         prompt = ask_answer.build_prompt(again, mission=mission())
         self.assertIn("ACN Q4 preview", prompt)
         self.assertIn("只有标题", prompt)
@@ -755,9 +936,6 @@ class AdhocRouteFlagTests(unittest.TestCase):
         self.assertFalse(adhoc_route_available(
             policy, {**mission(), "autonomy": {"may_write": ["claim"]}}))
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 class DossierVariantReaderTests(unittest.TestCase):
     """The reader for a drafted variant view, against the shape P12a defines.
@@ -898,8 +1076,58 @@ class GoldenAnswerTests(unittest.TestCase):
                 self.assertEqual(found, case["expected"]["quality"])
 
 
+class _FakeChildLauncher:
+    """The real launcher's contract with the subprocess replaced.
+
+    Everything around the child is real: the mission authorization, the
+    dispatch record, the discovery record (validated by the authority's own
+    validator) and its document refs, and a ticket that comes back ``running``
+    and only settles on a later ``status`` call.  What is faked is the one
+    thing a test must not spawn.  That leaves exactly the shape the bug lived
+    in: ``start`` returns before any of this search's documents exist.
+    """
+
+    TICKET_PREFIX = "alphaengine-discovery"
+
+    def __init__(self, case, *, documents, settle_after: int = 1) -> None:
+        self.case = case
+        self.documents = list(documents)
+        self.settle_after = settle_after
+        self.tickets: dict[str, dict] = {}
+        self.polls: dict[str, int] = {}
+        self.starts: list[dict] = []
+
+    def start(self, *, authorization, spec_ref, as_of=None):
+        self.starts.append({"spec_ref": spec_ref,
+                            "company_ref": authorization["company_ref"]})
+        ticket_id = f"{self.TICKET_PREFIX}:{len(self.starts):024x}"
+        self.tickets[ticket_id] = {
+            "id": ticket_id, "status": "running", "exit_code": None, "summary": None,
+        }
+        self.polls[ticket_id] = 0
+        return dict(self.tickets[ticket_id])
+
+    def status(self, ticket_ref):
+        ticket = self.tickets[ticket_ref]
+        self.polls[ticket_ref] += 1
+        if ticket["status"] == "running" and self.polls[ticket_ref] > self.settle_after:
+            record = self.case.record_discovery(
+                document_refs=self.documents, at="2026-09-09T12:00:00.000000+00:00",
+                envelope=f"just-now-{len(self.starts)}")
+            ticket.update({
+                "status": "succeeded", "exit_code": 0,
+                "summary": {"discovery_ref": record["id"],
+                            "new_document_count": len(record["new_document_refs"]),
+                            "failure_reason": None},
+            })
+        return dict(ticket)
+
+
 class CockpitAskV2Tests(unittest.TestCase):
     """The whole path, through the plane the owner actually uses."""
+
+    OLD_DOC = "alphaengine-doc:already-here"
+    NEW_DOC = "alphaengine-doc:found-just-now"
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -907,52 +1135,149 @@ class CockpitAskV2Tests(unittest.TestCase):
         self.c = CockpitHarness(Path(self.temp.name))
         self.addCleanup(self.c.close)
         self.login = OWNER_LOGIN
-        self.searches: list[tuple[str, dict]] = []
+        # The plane answers on a worker thread, and SQLite objects belong to
+        # the thread that made them. Live this is not a question -- the writer
+        # is a different process -- so the test gives the "writer side" its own
+        # connection rather than pretending one connection is two.
+        self.writer = DaltonStore(
+            self.c.h.h.core.path,
+            connection=sqlite3.connect(self.c.h.h.core.path, isolation_level=None,
+                                       check_same_thread=False))
+        self.addCleanup(self.writer.close)
+        self.missions = CoverageMissionAuthority(self.writer)
         self.publish_policy()
-        self.record_a_past_discovery()
+        self.seed_a_previous_discovery()
         self.wire_governance()
 
     # -- what the owner has to have published for a refresh to be allowed ----
 
-    def publish_policy(self) -> None:
+    def publish_policy(self, *, mandate_version_ref=None, effective_until=None) -> None:
         """An answer-sufficiency policy whose ad-hoc route is budgeted.
 
-        Written straight into the two tables: publishing one properly needs a
-        mandate, an agenda cycle and a bounded-planner probe template, none of
-        which this test is about.
+        Written straight into the two tables: publishing one properly needs an
+        agenda cycle this test is not about. The record itself is the
+        authority's -- ``validate_answer_sufficiency_policy`` normalises and
+        hashes it -- and the mandate it names is the live one, because naming a
+        stale one is exactly what the policy check exists to catch.
         """
 
         import dalton_core.answer_routing as routing
+        from dalton_core.answer_routing import validate_answer_sufficiency_policy
 
-        store = self.c.h.h.core
+        store = self.writer
         store.connection.create_function(
             "dalton_answer_routing_authorized", 0, lambda: 1)
         store.connection.executescript(
             (Path(routing.__file__).with_name("answer_routing_schema.sql")
              ).read_text(encoding="utf-8"))
-        record = {"adhoc_research_route": {"enabled": True, "max_cost_units": 2,
-                                           "max_rounds": 1}}
+        mandate = self.c.h.state["mandate"]
+        self.policy_versions = getattr(self, "policy_versions", 0) + 1
+        record = {
+            "schema_version": "0.2",
+            "id": f"answer-policy-version:{self.policy_versions}",
+            "created_at": "2026-09-01T00:00:00.000000+00:00",
+            "policy_ref": "answer-policy:1", "version": self.policy_versions,
+            "prior_version_ref": (
+                None if self.policy_versions == 1
+                else f"answer-policy-version:{self.policy_versions - 1}"),
+            "mandate_ref": mandate["mandate_ref"],
+            "mandate_version_ref": mandate_version_ref or mandate["id"],
+            "mandate_version_hash": mandate["content_hash"],
+            "thresholds": {
+                "min_driver_coverage_bps": 0,
+                "max_evidence_age_days_by_source_type": {"sec-filing": 400},
+                "allowed_contested_claims": 0, "allowed_open_questions": 0,
+                "allowed_unobservable_terminals": 0, "min_formal_claims": 1,
+                "min_formal_evidence": 1,
+            },
+            "refresh_route": {"enabled": False, "max_cost_units": 0,
+                              "probe_template_bindings": []},
+            "adhoc_research_route": {"enabled": True, "max_cost_units": 2,
+                                     "max_rounds": 1},
+            "effective_from": "2026-09-01T00:00:00.000000+00:00",
+            "effective_until": effective_until, "actor_ref": OWNER,
+        }
+        digest = content_hash(record)
+        wire = validate_answer_sufficiency_policy({**record, "content_hash": digest})
         with store._transaction() as cur:
+            # Append a version and move the pointer: the tables refuse deletes,
+            # which is the append-only rule this test has no business bending.
             cur.execute(
                 "INSERT INTO answer_sufficiency_policy_versions(version_id,policy_ref,"
                 "version_number,prior_version_id,mandate_ref,mandate_version_ref,"
                 "mandate_version_hash,record_json,content_hash,actor_ref,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                ("answer-policy-version:1", "answer-policy:1", 1, None, "mandate:1",
-                 "mandate-version:1", "a" * 64, json.dumps(record), "b" * 64,
-                 OWNER, "2026-09-01T00:00:00+00:00"))
+                (wire["id"], wire["policy_ref"], wire["version"],
+                 wire["prior_version_ref"],
+                 wire["mandate_ref"], wire["mandate_version_ref"],
+                 wire["mandate_version_hash"], canonical_json(wire),
+                 wire["content_hash"], OWNER, wire["created_at"]))
             cur.execute(
                 "INSERT INTO answer_sufficiency_policy_pointer(mandate_ref,version_id,"
-                "content_hash,updated_at) VALUES(?,?,?,?)",
-                ("mandate:1", "answer-policy-version:1", "b" * 64,
-                 "2026-09-01T00:00:00+00:00"))
+                "content_hash,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(mandate_ref) DO UPDATE SET version_id=excluded.version_id,"
+                "content_hash=excluded.content_hash,updated_at=excluded.updated_at",
+                (wire["mandate_ref"], wire["id"], wire["content_hash"],
+                 wire["created_at"]))
 
-    def record_a_past_discovery(self) -> None:
-        """One spec this mission has run, which is the only kind it may re-run."""
+    def discovery_plan(self) -> dict:
+        """The owner's plan, built by the builder the deployed one was built by."""
 
-        mission = self.c.h.missions.active_mission("coverage-mission:us-it-services")
-        self.mission_version_ref = mission["id"]
-        store = self.c.h.h.core
+        from dalton_core.mission_source_discovery import build_discovery_plan
+
+        return build_discovery_plan(
+            plan_id="discovery-plan:us-it-services:alphaengine:ask-v2",
+            created_at="2026-09-01T00:00:00.000000+00:00",
+            mission_ref="coverage-mission:us-it-services",
+            companies={ACN: "Accenture ACN"},
+            specs=[{
+                "spec_ref": "sell-side-reports", "document_type": "sell_side_report",
+                "query_template": "{terms} research report", "lookback_days": 180,
+                "rediscovery_interval_days": 7, "retry_interval_days": 1,
+            }],
+        )
+
+    def record_discovery(self, *, document_refs, at: str, envelope: str) -> dict:
+        """One discovery record and its document rows, in the authority's shape.
+
+        Written through the store's own transaction rather than through
+        ``record_source_discovery``: that binds the record to a real connector
+        invocation and SourceEnvelope, which means running a governed search,
+        which is a different test.  The *record* is still the authority's --
+        ``validate_mission_source_discovery`` refuses anything else -- so what
+        the reader reads here is the shape it will read live.
+        """
+
+        from dalton_core.coverage_mission import validate_mission_source_discovery
+
+        mission = self.missions.active_mission("coverage-mission:us-it-services")
+        record = {
+            "schema_version": "0.1",
+            "id": f"mission-source-discovery:{envelope}",
+            "created_at": at,
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "company_ref": ACN, "source_ref": "source:alphaengine",
+            "discovery_plan_ref": self.plan["id"],
+            "discovery_plan_hash": self.plan["content_hash"],
+            "spec_ref": "sell-side-reports",
+            "query_hash": content_hash({"envelope": envelope}),
+            "parameters": {"query": "Accenture ACN research report",
+                           "filters": {"document_type": "sell_side_report",
+                                       "date_from": "2026-03-01", "date_to": TODAY},
+                           "cursor": None},
+            "connector_invocation_ref": f"connector-invocation:alphaengine:{envelope}",
+            "connector_invocation_hash": content_hash({"invocation": envelope}),
+            "source_envelope_ref": f"source-envelope:alphaengine:{envelope}",
+            "source_envelope_hash": content_hash({"source_envelope": envelope}),
+            "document_refs": list(document_refs),
+            "new_document_refs": list(document_refs),
+            "in_authority_document_refs": [],
+            "actor_ref": AUTOMATION, "requested_by": OWNER,
+        }
+        record["content_hash"] = content_hash(record)
+        wire = validate_mission_source_discovery(record)
+        store = self.writer
         store.connection.create_function(
             "dalton_coverage_mission_authorized", 0, lambda: 1)
         with store._transaction() as cur:
@@ -963,11 +1288,36 @@ class CockpitAskV2Tests(unittest.TestCase):
                 "connector_invocation_ref,source_envelope_ref,source_envelope_hash,"
                 "actor_ref,requested_by,record_json,content_hash,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("mission-source-discovery:past", mission["id"], "a" * 64, ACN,
-                 "source:alphaengine", "discovery-plan:1", "b" * 64,
-                 "sell-side-reports", "c" * 64, "connector-invocation:ae:1",
-                 "source-envelope:1", "d" * 64, AUTOMATION, AUTOMATION, "{}",
-                 "e" * 64, "2026-09-01T00:00:00+00:00"))
+                (wire["id"], wire["mission_version_ref"], wire["mission_version_hash"],
+                 ACN, wire["source_ref"], wire["discovery_plan_ref"],
+                 wire["discovery_plan_hash"], wire["spec_ref"], wire["query_hash"],
+                 wire["connector_invocation_ref"], wire["source_envelope_ref"],
+                 wire["source_envelope_hash"], AUTOMATION, OWNER,
+                 canonical_json(wire), wire["content_hash"], at))
+            for index, ref in enumerate(document_refs):
+                cur.execute(
+                    "INSERT INTO coverage_mission_discovered_documents(record_id,"
+                    "mission_version_ref,company_ref,source_ref,document_ref,"
+                    "discovery_ref,status,created_at,updated_at,host) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (f"discovered-document:{envelope}:{index}",
+                     wire["mission_version_ref"], ACN, wire["source_ref"], ref,
+                     wire["id"], "discovered", at, at, "alphaengine"))
+        return wire
+
+    def seed_a_previous_discovery(self) -> None:
+        """A discovery from last week, with a document already in the ledger.
+
+        This is the row the first draft of the refresh showed the owner as the
+        file it had just fetched: same company, same source, older, and nothing
+        to do with the search that had just been started.
+        """
+
+        self.plan = self.discovery_plan()
+        self.record_discovery(document_refs=[self.OLD_DOC],
+                              at="2026-09-01T00:00:00.000000+00:00",
+                              envelope="last-week")
+        self.launcher = _FakeChildLauncher(self, documents=[self.NEW_DOC])
 
     def grant_research_task(self) -> None:
         """The owner's word that lifted the ad-hoc ban, as a new mission version.
@@ -981,7 +1331,7 @@ class CockpitAskV2Tests(unittest.TestCase):
 
         params = mission_params(self.c.h.state)
         mission_ref = params.pop("mission_ref")
-        current = self.c.h.missions.active_mission(mission_ref)
+        current = self.missions.active_mission(mission_ref)
         params["autonomy"] = {
             **current["autonomy"],
             "may_write": sorted(set(current["autonomy"]["may_write"]) | {"research_task"}),
@@ -989,26 +1339,46 @@ class CockpitAskV2Tests(unittest.TestCase):
         params["version_id"] = "coverage-mission-version:ask-v2-grant"
         params["prior_version_ref"] = current["id"]
         params["idempotency_key"] = "coverage-mission:ask-v2-grant"
-        self.c.h.missions.create_mission(mission_ref, **params)
-        self.mission_version_ref = self.c.h.missions.active_mission(mission_ref)["id"]
+        self.missions.create_mission(mission_ref, **params)
 
     def wire_governance(self) -> None:
+        """The two writer ops, running the writer's own bodies.
+
+        ``run_mission_source_discovery`` and ``mission_source_discovery_status``
+        are reproduced here as ``writer_server`` implements them -- authorize,
+        launch, record the dispatch; then read the ticket -- with the real
+        CoverageMissionAuthority and a launcher whose only fake part is the
+        child. Stubbing these two out is what let the first draft look right.
+        """
+
         original = self.c.plane.governance_call
+        self.ops: list[tuple[str, dict]] = []
 
         def governance(token_config, socket, *, actor_ref, operation, params):
+            self.ops.append((operation, dict(params)))
             if operation == "run_mission_source_discovery":
-                self.searches.append((operation, dict(params)))
-                # The second answer is a different reply; the adapter is built
-                # per model call, so swapping it here lands on the second one.
-                self.c.reply = self.second_reply
-                return {"id": "discovery-ticket:1",
-                        "parameters": {"query": "Accenture research report"}}
-            if operation == "mission_discovered_documents":
-                self.searches.append((operation, dict(params)))
-                return {"documents": [
-                    {"document_ref": "alphaengine-doc:new1", "host": "alphaengine",
-                     "status": "discovered", "created_at": "2026-09-09T00:00:00+00:00",
-                     "source_ref": "source:alphaengine"}]}
+                authorization = self.missions.authorize_source_discovery(
+                    company_ref=params["company_ref"],
+                    source_ref=params["source_ref"],
+                    requested_by=params["requested_by"])
+                ticket = self.launcher.start(
+                    authorization=authorization, spec_ref=params["spec_ref"])
+                dispatch = self.missions.record_discovery_dispatch(
+                    authorization=authorization,
+                    discovery_plan_ref=self.plan["id"],
+                    discovery_plan_hash=self.plan["content_hash"],
+                    spec_ref=params["spec_ref"],
+                    query_hash=content_hash({"ticket": ticket["id"]}),
+                    ticket_ref=ticket["id"])
+                return {**ticket, "dispatch_ref": dispatch["dispatch_id"]}
+            if operation == "mission_source_discovery_status":
+                settled = self.launcher.status(params["ticket_ref"])
+                if settled["status"] != "running":
+                    # The second reply is a different one; the adapter is built
+                    # per model call, so swapping it as the ticket settles
+                    # lands it on the refreshed answer.
+                    self.c.reply = self.second_reply
+                return settled
             return original(token_config, socket, actor_ref=actor_ref,
                             operation=operation, params=params)
 
@@ -1027,7 +1397,8 @@ class CockpitAskV2Tests(unittest.TestCase):
                 "our_view": "预算恢复只是被推迟。", "market_view": "卖方在下修。",
                 "where_market_is_wrong": "把签得慢当成不签。",
                 "convergence_pathway": "十月的 bookings 会分岔。",
-                "observable_signals": "招聘与合同披露。", "refs": []},
+                "observable_signals": "招聘与合同披露。",
+                "market_view_available": True, "market_view_reason": None, "refs": []},
             "refresh_suggested": {"content_kind": "sell_side_report",
                                   "source": "alphaengine", "query": "ACN bookings"},
         }, ensure_ascii=False)
@@ -1044,7 +1415,9 @@ class CockpitAskV2Tests(unittest.TestCase):
                 "our_view": "维持乐观一档。", "market_view": "卖方在下修。",
                 "where_market_is_wrong": "把签得慢当成不签。",
                 "convergence_pathway": "读完这份研报再看。",
-                "observable_signals": "十月 bookings。", "refs": ["H1"]},
+                "observable_signals": "十月 bookings。",
+                "market_view_available": True, "market_view_reason": None,
+                "refs": ["H1"]},
             "refresh_suggested": None,
         }, ensure_ascii=False)
 
@@ -1072,50 +1445,87 @@ class CockpitAskV2Tests(unittest.TestCase):
         result = self.ask("你怎么看 ACN？", "v2")
         self.assertFalse(result["refresh"]["available"])
         self.assertIn("mission_does_not_grant_research_task", result["refresh"]["reasons"])
+        self.assertEqual(result["answer_policy"]["state"], "active")
         # The suggestion survives the refusal: it is the sentence that gets
         # the grant published.
         self.assertEqual(result["refresh"]["suggestion"]["source"], "alphaengine")
         self.assertEqual(result["refresh"]["suggestion"]["query_intent"], "ACN bookings")
-        self.assertEqual(self.searches, [])
+        self.assertFalse(result["refresh"]["ran"])
+        self.assertEqual(self.launcher.starts, [])
 
-    def test_one_granted_refresh_searches_once_and_answers_again_from_headers(self):
+    def test_one_granted_refresh_shows_the_document_this_search_found(self):
+        """The regression the review found: not the oldest row already there.
+
+        The ledger holds a document from last week's discovery for the same
+        company and source. The refresh must wait for its own child, then show
+        that child's document -- and only that one.
+        """
+
         self.grant_research_task()
         self.c.reply = self.view_reply()
         result = self.ask("你怎么看 ACN？", "v3", refresh=True)
-        self.assertEqual([op for op, _ in self.searches],
-                         ["run_mission_source_discovery", "mission_discovered_documents"])
+        self.assertEqual([op for op, _ in self.ops][:2],
+                         ["run_mission_source_discovery",
+                          "mission_source_discovery_status"])
+        self.assertEqual(len(self.launcher.starts), 1)
         # The spec is one this mission has actually run, never one invented
-        # here: the harness's own discovery is the newest and wins.
+        # here: the newest of them wins, and the harness has its own.
         with self.c.plane._core() as core:
             known = ask_refresh.known_specs(core, "coverage-mission:us-it-services")
-        self.assertEqual(self.searches[0][1]["spec_ref"], known[0]["spec_ref"])
-        self.assertEqual(self.searches[0][1]["source_ref"], "source:alphaengine")
-        self.assertEqual(result["refreshed_with"][0]["document_ref"], "alphaengine-doc:new1")
+        self.assertEqual(self.launcher.starts[0]["spec_ref"], known[0]["spec_ref"])
+        self.assertEqual(result["refresh"]["status"], "found")
+        self.assertEqual([h["document_ref"] for h in result["refreshed_with"]],
+                         [self.NEW_DOC])
+        self.assertTrue(result["refreshed_with"][0]["new"])
         self.assertIn("正文还没有被读", result["refresh_note"])
         self.assertIn("补搜到一份新的卖方研报", result["answer"])
-        # The second answer cited the header it was shown, and nothing else.
         self.assertEqual([row["tag"] for row in result["citations"]], ["H1"])
-        # And there is no second look, ever.
         self.assertFalse(result["refresh"]["available"])
         self.assertEqual(result["refresh"]["reasons"], ["already_refreshed"])
+
+    def test_a_refreshed_context_is_a_different_context_and_says_so(self):
+        self.grant_research_task()
+        self.c.reply = self.view_reply()
+        plain = self.ask("你怎么看 ACN？", "h1")
+        self.c.reply = self.view_reply()
+        refreshed = self.ask("你怎么看 ACN？", "h2", refresh=True)
+        self.assertEqual(refreshed["refresh"]["status"], "found")
+        self.assertNotEqual(refreshed["context"]["context_hash"],
+                            plain["context"]["context_hash"])
+
+    def test_a_child_that_has_not_finished_says_pending_and_shows_nothing(self):
+        self.grant_research_task()
+        self.launcher.settle_after = 10_000  # never inside the bound
+        self.c.reply = self.view_reply()
+        with mock.patch.object(ask_refresh, "STATUS_POLLS", 2), \
+                mock.patch.object(ask_refresh, "STATUS_POLL_SECONDS", 0.0):
+            result = self.ask("你怎么看 ACN？", "v4", refresh=True)
+        self.assertEqual(result["refresh"]["status"], "pending")
+        self.assertTrue(result["refresh"]["ran"])
+        self.assertEqual(result["refreshed_with"], [])
+        # The first answer stands; no second model call was paid for.
+        self.assertIn("我们比市场乐观一档", result["answer"])
+        self.assertIn("还在跑", result["refresh"]["status_label"])
 
     def test_the_same_question_asked_again_is_refused_a_second_look(self):
         self.grant_research_task()
         self.c.reply = self.view_reply()
-        self.ask("你怎么看 ACN？", "v4", refresh=True)
-        before = len(self.searches)
+        self.ask("你怎么看 ACN？", "v5", refresh=True)
+        before = len(self.launcher.starts)
         self.c.reply = self.view_reply()
-        again = self.ask("你怎么看 ACN？", "v4", refresh=True)
-        self.assertEqual(len(self.searches), before)
+        again = self.ask("你怎么看 ACN？", "v5", refresh=True)
+        self.assertEqual(len(self.launcher.starts), before)
         self.assertIn("already_refreshed", again["refresh"]["reasons"])
 
     def test_a_refresh_writes_no_claim_and_no_score(self):
         self.grant_research_task()
         self.c.reply = self.view_reply()
         store = self.c.h.h.core
-        before = store.connection.execute("SELECT COUNT(*) FROM claim_versions").fetchone()[0]
-        self.ask("你怎么看 ACN？", "v5", refresh=True)
-        after = store.connection.execute("SELECT COUNT(*) FROM claim_versions").fetchone()[0]
+        before = store.connection.execute(
+            "SELECT COUNT(*) FROM claim_versions").fetchone()[0]
+        self.ask("你怎么看 ACN？", "v6", refresh=True)
+        after = store.connection.execute(
+            "SELECT COUNT(*) FROM claim_versions").fetchone()[0]
         self.assertEqual(before, after)
         scores = store.connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
@@ -1123,6 +1533,54 @@ class CockpitAskV2Tests(unittest.TestCase):
         if scores:
             self.assertEqual(store.connection.execute(
                 "SELECT COUNT(*) FROM research_quality_score_versions").fetchone()[0], 0)
+
+    # -- the policy the router itself would read ----------------------------
+
+    def policy_seen_by_the_cockpit(self) -> dict:
+        with self.c.plane._core() as core:
+            return self.c.plane._answer_policy(core, ACN)
+
+    def policy_seen_by_the_authority(self) -> tuple:
+        from dalton_core.agenda import AgendaStore
+        from dalton_core.answer_routing import AnswerRoutingAuthority
+        from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+        from dalton_core.industry_research import IndustryResearchAuthority
+        from dalton_core.research_question_backlog import ResearchQuestionBacklog
+
+        store = self.c.h.h.core
+        authority = AnswerRoutingAuthority(
+            store, AgendaStore(store), ResearchQuestionBacklog(store),
+            BoundedPlannerAuthority(store), IndustryResearchAuthority(store))
+        return authority._policy_state(self.c.h.state["mandate"], self.c.h.h.clock())
+
+    def test_the_cockpit_reads_the_same_policy_state_as_the_router(self):
+        seen = self.policy_seen_by_the_cockpit()
+        state, policy = self.policy_seen_by_the_authority()
+        self.assertEqual(seen["state"], state)
+        self.assertEqual(seen["policy"], policy)
+        self.assertEqual(seen["state"], "active")
+
+    def test_a_policy_written_against_a_superseded_mandate_is_stale_not_active(self):
+        # The condition the cockpit's own first draft dropped: a pointer row is
+        # not a live policy. This one names a mandate version that is not the
+        # active one, and the router calls that ``stale``.
+        self.publish_policy(mandate_version_ref="mandate-version:someone-elses")
+        seen = self.policy_seen_by_the_cockpit()
+        state, _ = self.policy_seen_by_the_authority()
+        self.assertEqual((seen["state"], state), ("stale", "stale"))
+        # And a stale policy budgets nothing: the refresh is shut and says why.
+        self.grant_research_task()
+        self.c.reply = self.view_reply()
+        result = self.ask("你怎么看 ACN？", "v7", refresh=True)
+        self.assertIn("policy_unavailable", result["refresh"]["reasons"])
+        self.assertEqual(result["answer_policy"]["reason"], "policy_stale")
+        self.assertEqual(self.launcher.starts, [])
+
+    def test_a_policy_whose_window_has_closed_is_not_active_either(self):
+        self.publish_policy(effective_until="2026-09-02T00:00:00.000000+00:00")
+        seen = self.policy_seen_by_the_cockpit()
+        state, _ = self.policy_seen_by_the_authority()
+        self.assertEqual((seen["state"], state), ("stale", "stale"))
 
 
 if __name__ == "__main__":

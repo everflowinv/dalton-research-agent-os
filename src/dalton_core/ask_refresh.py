@@ -39,10 +39,11 @@ is: a cockpit artefact.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
-from .ask_context import BLOCK_LABELS, BLOCK_TAGS
+from .ask_context import BLOCK_LABELS, BLOCK_TAGS, context_identity
 from .source_capability_map import CAPABILITIES
 
 SCHEMA_VERSION = "0.1"
@@ -66,6 +67,7 @@ GRANT_REASONS: tuple[str, ...] = (
     "adhoc_route_disabled",
     "adhoc_budget_is_zero",
     "mission_budget_leaves_no_adhoc_pool",
+    "adhoc_pool_spent_today",
     "source_not_searchable",
     "source_not_connected",
     "no_discovery_spec_used_yet",
@@ -81,6 +83,7 @@ GRANT_LABELS: Mapping[str, str] = {
     "adhoc_route_disabled": "策略把临时补搜关着",
     "adhoc_budget_is_zero": "策略给临时补搜的预算是零",
     "mission_budget_leaves_no_adhoc_pool": "研究目标的日预算分给临时研究的额度是零",
+    "adhoc_pool_spent_today": "今天分给临时研究的额度已经被专项研究用光了",
     "source_not_searchable": "这个来源不是可以被检索的发现源",
     "source_not_connected": "研究目标没有接上这个来源",
     "no_discovery_spec_used_yet": "这个来源在这个目标下还没跑过任何检索规格，没有可复用的规格",
@@ -91,6 +94,25 @@ GRANT_LABELS: Mapping[str, str] = {
 
 MAX_HEADERS = 20
 MAX_TITLE_CHARS = 240
+
+# How a refresh ended.  Closed, because the page prints one sentence per word
+# and the answer records it.  ``pending`` is the honest one: the discovery
+# child is still running (or the writer has not settled its dispatch yet), and
+# saying so beats showing whatever happened to be in the ledger already.
+REFRESH_OUTCOMES: tuple[str, ...] = ("found", "empty", "pending", "failed")
+OUTCOME_LABELS: Mapping[str, str] = {
+    "found": "补搜到了新文件，但只有标题",
+    "empty": "补搜跑完了，这个来源没有新的东西",
+    "pending": "补搜还在跑，这次先按账本上已有的材料回答",
+    "failed": "补搜没有跑成",
+}
+
+# How long the answer waits for the discovery child before saying ``pending``.
+# A question is a request the owner is watching, so the wait is short and the
+# fallback is a sentence rather than a spinner: the writer settles the dispatch
+# on its next tick either way, and the documents will be in the next answer.
+STATUS_POLLS = 20
+STATUS_POLL_SECONDS = 0.5
 
 # The block the second pass adds.  Registered in the context module's tables so
 # that the renderer, the tag letters and the labels stay in one place.
@@ -145,6 +167,58 @@ def known_specs(core: Any, mission_ref: str) -> list[dict[str, Any]]:
     return specs
 
 
+class _ReadOnlyLoops:
+    """Just enough of ``BoundedPlannerAuthority`` to count today's reservations.
+
+    Its constructor runs a schema script, which a ``mode=ro`` handle cannot do;
+    ``admitted_loops`` is one SELECT.  Borrowed rather than copied so that the
+    pool this reads is the same pool P14e's lane spends.
+    """
+
+    def __init__(self, connection: Any) -> None:
+        from .bounded_planner_loop import BoundedPlannerAuthority
+
+        self.connection = connection
+        self.admitted_loops = BoundedPlannerAuthority.admitted_loops.__get__(self)
+
+
+def pool_balance(
+    connection: Any, mission: Mapping[str, Any] | None, *, day: str,
+) -> dict[str, Any] | None:
+    """What is left of today's ad-hoc pool, not what the cap would have been.
+
+    The cap is a property of the mission's budget and never moves; the balance
+    is what P14e's tasks have already reserved today, and it is the only one of
+    the two that can say no.  Checking the cap alone would let a question spend
+    a pool the day's research tasks had already emptied -- which is the case
+    the 25% share exists for.
+
+    A Core with no loop tables has reserved nothing, which is a *full* pool and
+    not an unreadable one: P14e's lane may simply never have run here.  Only a
+    budget this cannot make sense of comes back ``None``, and ``None`` is never
+    a licence.
+    """
+
+    if mission is None:
+        return None
+    from .research_task import pool, pool_state
+
+    try:
+        wire = pool(mission)
+    except Exception:  # noqa: BLE001 - a malformed budget is "no pool", said plainly
+        return None
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='bounded_planner_loop_versions'"
+    ).fetchone() is None:
+        return {**wire, "day": day, "reserved_micros": 0,
+                "remaining_micros": wire["cap_micros"]}
+    try:
+        return pool_state(_ReadOnlyLoops(connection), mission, day=day)
+    except Exception:  # noqa: BLE001 - an unreadable ledger is not a full pool
+        return None
+
+
 def grant(
     mission: Mapping[str, Any] | None,
     *,
@@ -153,28 +227,29 @@ def grant(
     specs: Sequence[Mapping[str, Any]] = (),
     company_ref: str | None = None,
     already_refreshed: bool = False,
+    pool: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Whether one refresh may run right now, and every reason it may not.
 
     Every reason, not the first: an owner who has to fix three things learns
     all three at once rather than one per attempt.
+
+    ``pool`` is today's balance from :func:`pool_balance`; ``None`` means the
+    caller could not read it, which is not a licence.
     """
 
-    from .research_task import GRANT_WORD, pool
+    from .research_task import GRANT_WORD
 
     reasons: list[str] = []
-    pool_wire = None
     if mission is None:
         reasons.append("no_active_mission")
     else:
         if GRANT_WORD not in ((mission.get("autonomy") or {}).get("may_write") or ()):
             reasons.append("mission_does_not_grant_research_task")
-        try:
-            pool_wire = pool(mission)
-        except Exception:  # noqa: BLE001 - a malformed budget is "no pool", said plainly
-            pool_wire = None
-        if pool_wire is None or pool_wire["cap_micros"] <= 0:
+        if pool is None or int(pool.get("cap_micros") or 0) <= 0:
             reasons.append("mission_budget_leaves_no_adhoc_pool")
+        elif int(pool.get("remaining_micros") or 0) <= 0:
+            reasons.append("adhoc_pool_spent_today")
     route = None
     if policy is None:
         reasons.append("policy_unavailable")
@@ -218,7 +293,10 @@ def grant(
             "route_max_cost_units": None if route is None else route.get("max_cost_units"),
             "route_max_rounds": None if route is None else route.get("max_rounds"),
             "cost_units_this_refresh": 1,
-            "adhoc_pool_cap_usd": None if pool_wire is None else pool_wire["cap_usd"],
+            "adhoc_pool_cap_usd": None if pool is None else pool.get("cap_usd"),
+            "adhoc_pool_remaining_micros": (
+                None if pool is None else pool.get("remaining_micros")),
+            "adhoc_pool_day": None if pool is None else pool.get("day"),
         },
     }
 
@@ -231,6 +309,7 @@ def plan_refresh(
     policy: Mapping[str, Any] | None,
     specs: Sequence[Mapping[str, Any]] = (),
     already_refreshed: bool = False,
+    pool: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What one refresh would do, whether it may, and why not when it may not.
 
@@ -252,7 +331,7 @@ def plan_refresh(
     company_ref = named[0] if named else None
     decision = grant(
         mission, policy=policy, slug=suggestion.get("source"), specs=specs,
-        company_ref=company_ref, already_refreshed=already_refreshed,
+        company_ref=company_ref, already_refreshed=already_refreshed, pool=pool,
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -286,41 +365,106 @@ def plan_refresh(
 def run_refresh(
     plan: Mapping[str, Any],
     *,
-    search: Callable[..., Mapping[str, Any]],
+    start: Callable[..., Mapping[str, Any]],
+    status: Callable[[str], Mapping[str, Any]],
+    documents: Callable[[str], Sequence[Mapping[str, Any]]],
+    sleep: Callable[[float], Any] = time.sleep,
+    polls: int | None = None,
+    interval: float | None = None,
 ) -> dict[str, Any]:
-    """One discovery call, and the headers it turned up.
+    """One discovery, waited for, and exactly the documents it recorded.
 
-    ``search`` is injected: the cockpit holds no Core write handle, so the real
-    one goes through the writer as the owner's own principal exactly as every
-    other cockpit write does, and a test hands in a fake.  It is called once.
-    A plan that is not available raises rather than quietly doing nothing --
-    "we refreshed" and "we did not" have to be different outcomes.
+    The three calls are injected: the cockpit holds no Core write handle, so
+    the real ``start`` and ``status`` go through the writer as the owner's own
+    principal exactly as every other cockpit write does, and ``documents``
+    reads the Core.  A test hands in the same three against a real launcher
+    with a fake child.
+
+    **Why the wait exists.**  ``run_mission_source_discovery`` spawns a child
+    and returns a *ticket*, not results.  An earlier draft read the mission's
+    discovered documents straight afterwards and got the oldest rows already in
+    the ledger, then showed them to the owner under the heading "just fetched"
+    -- the worst failure available here, because it is the one that looks like
+    success.  So this polls the ticket, and when the child has not finished
+    inside the bound it says ``pending`` rather than showing anything.
+
+    **Why the documents come from the discovery.**  The settled ticket's
+    summary names the ``discovery_ref`` the child recorded, and that record
+    carries the exact document refs *this search* returned.  Reading the
+    company's documents by any other filter cannot distinguish them from what
+    was already there.
     """
 
     if not plan.get("available"):
         raise AskRefreshError(
             "补搜没有被允许：" + "、".join(plan.get("reason_labels") or ["原因未知"]))
-    operation = plan["operation"]["params"]
-    outcome = search(**operation)
-    if not isinstance(outcome, Mapping):
-        raise AskRefreshError("补搜没有返回可用的结果")
-    headers = document_headers(
-        outcome.get("documents") or (),
-        titles=outcome.get("titles") or {},
-        source_ref=operation["source_ref"],
-    )
+    # Read from the module rather than bound as defaults, so a deployment (or
+    # a test) that changes the bound changes it for calls already written.
+    polls = STATUS_POLLS if polls is None else polls
+    interval = STATUS_POLL_SECONDS if interval is None else interval
+    operation = dict(plan["operation"]["params"])
+    ticket = start(**operation)
+    if not isinstance(ticket, Mapping) or not ticket.get("id"):
+        return _outcome("failed", operation, reason="补搜没有拿到票据")
+    ticket_ref = str(ticket["id"])
+    settled: Mapping[str, Any] = ticket
+    for attempt in range(max(1, polls)):
+        if str(settled.get("status")) != "running":
+            break
+        if attempt:
+            sleep(interval)
+        current = status(ticket_ref)
+        if isinstance(current, Mapping):
+            settled = current
+    state = str(settled.get("status") or "running")
+    if state == "running":
+        return _outcome("pending", operation, ticket_ref=ticket_ref,
+                        reason="检索子进程还在跑，写入端会在下一轮把它结掉")
+    if state != "succeeded":
+        summary = settled.get("summary") or {}
+        return _outcome("failed", operation, ticket_ref=ticket_ref,
+                        reason=str(summary.get("failure_reason")
+                                   or f"子进程以 {state} 结束"))
+    discovery_ref = (settled.get("summary") or {}).get("discovery_ref")
+    if not discovery_ref:
+        # Succeeded without a discovery record: the child wrote nothing this
+        # process can point at, and the writer settles the dispatch on its next
+        # tick. Pending is the true word.
+        return _outcome("pending", operation, ticket_ref=ticket_ref,
+                        reason="子进程跑完了但还没落下发现记录")
+    rows = documents(str(discovery_ref))
+    headers = document_headers(rows, source_ref=operation.get("source_ref"))
+    return _outcome(
+        "found" if headers else "empty", operation, ticket_ref=ticket_ref,
+        discovery_ref=str(discovery_ref), headers=headers,
+        documents_found=len(list(rows)))
+
+
+def _outcome(
+    status: str, operation: Mapping[str, Any], *, ticket_ref: str | None = None,
+    discovery_ref: str | None = None, headers: Sequence[Mapping[str, Any]] = (),
+    documents_found: int = 0, reason: str | None = None,
+) -> dict[str, Any]:
+    if status not in REFRESH_OUTCOMES:
+        raise AskRefreshError(f"{status!r} is not a refresh outcome")
     return {
         "schema_version": SCHEMA_VERSION,
-        "ran": True,
+        # The search *ran* whenever a ticket was started, whatever it turned
+        # up. "We looked and found nothing" and "we did not look" are the two
+        # sentences this flag has to keep apart.
+        "ran": ticket_ref is not None,
+        "status": status,
+        "status_label": OUTCOME_LABELS[status],
         "operation": dict(operation),
-        "query": outcome.get("query"),
-        "ticket_ref": outcome.get("ticket_ref"),
-        "discovery_ref": outcome.get("discovery_ref"),
-        "documents_found": len(outcome.get("documents") or ()),
-        "headers": headers,
+        "ticket_ref": ticket_ref,
+        "discovery_ref": discovery_ref,
+        "documents_found": documents_found,
+        "headers": [dict(header) for header in headers],
+        "reason": reason,
         # Said in every place the refresh appears, because it is the one thing
         # a reader will assume otherwise: nobody has read these yet.
-        "note": "只拿到了这些文件的标题，正文还没有被读；抽取是流水线的活，不是这次问答的",
+        "note": ("只拿到了这些文件的标题，正文还没有被读；抽取是流水线的活，不是这次问答的"
+                 if status == "found" else OUTCOME_LABELS[status]),
     }
 
 
@@ -330,11 +474,17 @@ def document_headers(
     titles: Mapping[str, Mapping[str, Any]] | None = None,
     source_ref: str | None = None,
 ) -> list[dict[str, Any]]:
-    """The new documents as headers: what exists, from where, when.  No bodies."""
+    """The new documents as headers: what exists, from where, when.  No bodies.
+
+    Newly discovered rows first: a search that returned four documents this
+    system already held and one it did not should lead with the one it did not.
+    """
 
     known = dict(titles or {})
+    rows = sorted(documents, key=lambda item: (not item.get("new"),
+                                               str(item.get("document_ref") or "")))
     out: list[dict[str, Any]] = []
-    for item in list(documents)[:MAX_HEADERS]:
+    for item in rows[:MAX_HEADERS]:
         ref = str(item.get("document_ref") or "")
         if not ref:
             continue
@@ -346,6 +496,7 @@ def document_headers(
             "host": item.get("host") or extra.get("host"),
             "url": extra.get("url"),
             "status": item.get("status"),
+            "new": bool(item.get("new")),
             "discovered_at": item.get("created_at"),
         })
     return out
@@ -358,7 +509,9 @@ def with_headers(
 
     Appended rather than rebuilt, so the second answer is grounded in exactly
     the material the first one was plus the headers, and a reader comparing the
-    two is looking at one change.
+    two is looking at one change.  The identity is recomputed: a context that
+    kept the first pass's hash after gaining a block would be claiming the two
+    answers were built from the same material.
     """
 
     rows = []
@@ -366,14 +519,16 @@ def with_headers(
     for index, header in enumerate(headers):
         tag = f"{BLOCK_TAGS[REFRESH_BLOCK]}{index + 1}"
         text = header.get("title") or header["document_ref"]
+        period = (header.get("discovered_at") or "")[:10] or None
         rows.append({
             "tag": tag, "ref": header["document_ref"], "text": text,
-            "period": (header.get("discovered_at") or "")[:10] or None,
+            "period": period,
             "detail": {"host": header.get("host"), "source": header.get("source_ref")},
         })
         shown.append({
             "tag": tag, "block": REFRESH_BLOCK, "ref": header["document_ref"],
-            "statement": text, "period": (header.get("discovered_at") or "")[:10] or None,
+            "statement": text, "period": period,
+            "company": "", "at": period or "",
         })
     block = {
         "block": REFRESH_BLOCK, "label": BLOCK_LABELS[REFRESH_BLOCK],
@@ -383,12 +538,14 @@ def with_headers(
                  "所以只能说「存在这样一份材料」，不能引用其中的内容"),
         "rows": rows,
     }
-    return {
+    again = {
         **dict(context),
         "blocks": [*(context.get("blocks") or ()), block],
         "shown": shown,
         "refreshed": True,
     }
+    again["context_hash"] = context_identity(again)
+    return again
 
 
 __all__ = [
@@ -399,8 +556,13 @@ __all__ = [
     "REFRESH_BLOCK",
     "REFRESH_SOURCE_REFS",
     "SCHEMA_VERSION",
+    "OUTCOME_LABELS",
+    "REFRESH_OUTCOMES",
+    "STATUS_POLLS",
+    "STATUS_POLL_SECONDS",
     "document_headers",
     "grant",
+    "pool_balance",
     "known_specs",
     "plan_refresh",
     "run_refresh",

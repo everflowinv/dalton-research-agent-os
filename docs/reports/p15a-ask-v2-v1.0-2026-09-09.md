@@ -1,7 +1,7 @@
 # P15a：问答 v2 —— 上下文、可核查的答案、一次有预算的补搜
 
-日期：2026-09-09
-分支：`w3-ask-v2`（基于 main `ebd2ea8`，3,932 项通过）
+日期：2026-09-09（v1.1：2026-09-10，按 review 修补搜路径与策略读法）
+分支：`w3-ask-v2`（基于 main `ebd2ea8`；已并入 main `eb8e5fb`）
 新增：`ask_context.py`、`ask_answer.py`、`ask_refresh.py`、`tests/test_ask_v2.py`、`tests/ask_v2_golden/`（5 例）
 共享改动（additive）：`cockpit_plane.py` 的 ask 函数、`answer_routing.py` 的一个纯函数与一个只读读法、`tests/test_cockpit_plane.py` 的 ask 用例
 蓝图对应：§3 ⑤「响应 PM」、§5.2 P15a；验收「PM 问 10 个真实问题 ≥8 个可用」
@@ -78,7 +78,9 @@ schema，驾驶舱拿的是 `mode=ro` 连接。所以这里只 import 各权威�
 
 问题类型是 8 个封闭词（`view` / `valuation` / `outlook` / `event_impact` / `debate` / `catalyst` / `fact` / `other`），
 按固定优先级用中英双语词表判定，**并且把命中的那个词一起返回**——判不出来的分类器等于要 owner 无条件信任它。
-同一个问题、同一个 Core 出同一个 `context_hash`。
+同一个问题、同一个 Core 出同一个 `context_hash`；`context_identity()` 被提成函数，
+因为补搜的第二遍加了一个块之后必须**重算**它（review #6）——
+多了一个块还沿用上一遍哈希的上下文，等于声称两次回答用的是同一批材料。
 
 ## 4. `ask_answer.py`：封闭输出 + 七道检查
 
@@ -107,48 +109,112 @@ schema，驾驶舱拿的是 `mode=ro` 连接。所以这里只 import 各权威�
 | `numeric_sentences_cite` | 带数字却没有引用的句子被点名 |
 | `confidence_in_vocabulary` | 按 `low` 记，并说明为什么 |
 | `unknowns_typed` | 内容类型或来源不在 `SourceCapabilityMap` 里，或来源给不出那类内容 → 这条缺口被丢掉 |
-| `market_vs_us_present` | 看法类问题没写差别与路径 |
+| `market_vs_us_present` | 看法类问题没写差别与路径，**或五格里有任何一格是空的（逐格点名）** |
 | `refresh_names_a_capable_source` | 建议的补搜指向一个给不出那类内容的来源 → 建议被丢掉 |
 | `refusal_states_why` | 拒答没有封闭理由或没有一句人话 |
+
+**五格必须格格写满（review #3）**：报告先前只声称了这一点，检查并没有做。
+现在 `market_vs_us` 少任何一格（`our_view` / `market_view` / `where_market_is_wrong` /
+`convergence_pathway` / `observable_signals`）都是失败，并且 detail 里逐格点名
+（「这几格是空的：市场向我们靠拢的路径」）。说了「我们不同意」却把路径留空，
+只回答了 owner 半个问题。
+
+**「未知」要被声明，不能只是写两个字（review #4）**：`market_vs_us` 带上 P12a 自己的
+`market_view_available` / `market_view_reason`。为 false 时 `market_view` 被规整成
+一句明说没有材料的话，并且**必须**给出 `market_view_reason`，否则 `market_view_reason`
+也算一格空的。P12a 分这两个字段的理由在这里同样成立：
+「我们不知道市场在哪」和「市场跟我们一致」必须长得不一样，
+一个光秃秃的「未知」和一个编出来的市场看法在下游是分不开的。
 
 **Q1 的 rubric 确定性层对每一个答案都跑**（不是等谁想起来去评分），结果放在 `result["quality"]`，
 带 `recorded: false`。ADR-0006：答案是驾驶舱产物，永远不是 Claim；分数也是驾驶舱产物，
 这个进程不碰任何 Core 写句柄，`QualityScoreAuthority` 一次也没被调用。
 
-## 5. `ask_refresh.py`：一次，有预算，可重放
+## 5. `ask_refresh.py`：一次，等它跑完，有预算，可重放
 
-**它是什么**：一次 `run_mission_source_discovery`（AlphaEngine `search_library` 或 web-search），
-拿到新文件的**标题**，把它们作为 `H1..Hn` 加进上下文，再问模型一次。就这些。
+**它是什么**：一次 `run_mission_source_discovery`，**等这次检索自己的子进程跑完**，
+拿到**这次发现记录里的**那些文件的标题，把它们作为 `H1..Hn` 加进上下文，再问模型一次。就这些。
 
-**它刻意不是什么**：
+**review 抓到的那个 bug（B1），以及它为什么最危险**：
+`run_mission_source_discovery` 起一个子进程，返回的是**票据**，不是结果。
+第一版拿到票据就立刻读 `mission_discovered_documents`（按活跃版本、`created_at` 升序），
+于是拿到的是账本里**最老的、早就存在的**文件，然后把它们印在「刚补搜到的文件」下面。
+这是这条路上最坏的一种失败：它看起来像成功。
 
-- **驾驶舱不写检索词**。`run_mission_source_discovery` 的 query 是 owner 已发布的 discovery plan
-  （`{terms} earnings call transcript`）加公司的检索词编出来的。模型的 `query` 变成 `query_intent`：
-  记在答案旁边，**永远不发给 connector**。一个由模型写、记在 owner 的 AlphaEngine 配额上的检索词，
-  正是治理层存在的理由。
-- **规格从账本读，不从配置读**。可选的 `spec_ref` 是**这个 mission 已经跑过的**规格，
-  从 `coverage_mission_source_discoveries` join `coverage_mission_versions` 按 `mission_ref` 读出来。
-  按 `mission_ref` 而不是按 `mission_version_ref` 是有意的：授予 `research_task` 本身就是发一个新版本，
-  按版本读会在 owner 刚刚打开这扇门的那一刻回答「没有可用的规格」。
-- **不读正文**。答案里明确写着「只拿到标题，正文还没有被读」，抽取是流水线的活。
-- **不写 Claim**。`refreshed_with` 是一串文件头，答案仍然是驾驶舱产物。
-- **不补第二次**。同一个 `request_id` 补搜过一次就永远不再补；重放同一个问题不会再花一次配额。
+改法有三处，缺一不可：
+
+1. **轮询票据**。`mission_source_discovery_status` 每 0.5 秒问一次，最多 20 次
+   （`STATUS_POLLS` / `STATUS_POLL_SECONDS`，在模块上读取而不是绑成默认参数，
+   所以部署或测试改了就立刻生效）。子进程在这个界限内没跑完，结果就是 `pending`：
+   写入端会在下一轮 tick 把 dispatch 结掉，这次问答如实说「补搜还在跑，先按已有材料回答」，
+   **什么都不展示**。一个人在等答案，短界限加一句实话胜过一个转圈。
+2. **文件来自这次的发现记录**。结掉的票据的 summary 里带 `discovery_ref`，
+   那条记录的 `document_refs` / `new_document_refs` 就是**这次检索**返回的东西。
+   按公司或来源筛选永远分不出「这次找到的」和「本来就有的」。新发现的排在前面。
+3. **按 `mission_ref` 读，不按活跃版本读**。发一个新 mission 版本不能让上一版发现的行消失。
+
+**补搜结果是四个封闭词**（每个带一句中文）：`found` / `empty` / `pending` / `failed`。
+`ran` 在**票据起来了就为真**，包括 `empty`——「我们去看了，没有新东西」和「我们没去看」
+是两句不同的话。`empty` 与 `pending` 都不会再花第二次模型调用：没有新材料就没有新答案。
+
+**它刻意不是什么**（不变）：
+
+- **驾驶舱不写检索词**。query 由 owner 已发布的 discovery plan（`{terms} research report`）
+  加公司检索词编出来；模型的话只作为 `query_intent` 记在答案旁边，永远不发给 connector。
+- **规格从账本读**：这个 mission（按 `mission_ref`，跨版本）已经跑过的规格，优先同公司的那条。
+- **不读正文**，**不写 Claim**，**同一个 `request_id` 不补第二次**。
 
 **闸门**（每一个都返回封闭词与一句人话，且一次报全）：
 
 ```
 mission_does_not_grant_research_task   mission 的 may_write 里没有 research_task
-mission_budget_leaves_no_adhoc_pool    C2 的 adhoc 池（日预算 25%）是零
+mission_budget_leaves_no_adhoc_pool    C2 的 adhoc 池（日预算 25%）上限是零
+adhoc_pool_spent_today                 上限不是零，但今天已经被专项研究预定光了
 policy_unavailable / adhoc_route_disabled / adhoc_budget_is_zero
 source_not_searchable / source_not_connected
 no_discovery_spec_used_yet / company_not_resolved / already_refreshed
 answer_suggested_no_refresh
 ```
 
-**`answer_routing.py` 的改动**（唯一两处）：`adhoc_research_route_available` 从字面量 `False` 变成
-新增的纯函数 `adhoc_route_available(policy, mission)`——策略给了预算 **且** mission 授了
-`research_task`。另加一个只读 `_active_mission()`。现存策略的 adhoc 路由全是关的，所以这个值对它们仍然是
-`False`，没有任何现存断言变化。
+**预算按余额判，不按上限判（review #5）**：`pool_balance` 复用 P14e 自己的
+`research_task.pool_state`（`BoundedPlannerAuthority.admitted_loops` 借到只读连接上，
+不复制那条 SQL），给出 `cap_micros` / `reserved_micros` / `remaining_micros`。
+上限是 mission 预算的属性、永远不动；**只有余额能说不**，而 25% 这个份额就是为
+「今天的专项研究已经把它花完了」这一种情况存在的。
+一个从没跑过 P14e 的 Core 没有 loop 表，那是**满的池子**而不是读不到的池子；
+只有解析不了的预算才回 `None`，而 `None` 从来不是许可。
+
+**`answer_routing.py` 的三处改动**：
+
+1. `adhoc_research_route_available` 从字面量 `False` 变成新增的纯函数
+   `adhoc_route_available(policy, mission)`——策略给了预算 **且** mission 授了 `research_task`。
+2. **合同层的硬禁用被解除**（这是让上面那条能为真的前提）：`_route_budget` 里
+   「ad-hoc research must remain disabled in S5 v0.2」会拒掉**任何**启用了 adhoc 路由的策略，
+   也就是说在此之前根本发不出一份能给补搜预算的策略。这正是 owner 2026-09-09 解除、
+   而代码里一直没有拿掉的那条禁令。替换它的规则与 refresh 路由的完全一样：
+   启用就必须有正的 `max_cost_units` 与 `max_rounds`，停用就不许留预算。
+   **v0.1 合同保留原禁令**，因为那一版是已经发布并被读过的。
+3. `read_policy` / `policy_state` / `active_policy_for_company` 三个模块级只读函数
+   （见下一节）。
+
+## 5.1 策略必须是路由自己读的那一份（review B2）
+
+第一版的 `_answer_policy` 自己写了一遍投影，只问了「有没有 pointer 行」，
+漏掉了 `_policy_state` 的**三个条件**：pointer 的哈希要对得上、策略要是写给**这一版** mandate 的、
+现在要落在生效窗口内。漏掉它们意味着一个问题可能在 owner 早已作废的策略下花掉 connector 配额。
+
+改法是把 `_policy_state` 与 `policy()` 从 authority 上**提成模块级函数**
+（`policy_state` / `read_policy`），authority 的方法改成一行委托，
+再加一个 `active_policy_for_company(connection, company_ref, as_of)`：
+解析活跃 mandate（借 `AgendaStore.active_mandates` 到只读连接上，同样不复制 SQL），
+挑出覆盖这家公司的那一个，然后调同一个 `policy_state`。
+返回路由自己的三个词 `unavailable` / `stale` / `active`，答案把它原样带出来
+（`answer_policy.state` / `.reason`）——因为「策略过期了」和「根本没有策略」是两种不同的修法。
+
+一处实测发现：live 的 mandate 的 `scope_refs` 是 `industry:us-it-services`，不是每家公司。
+所以「公司必须字面出现在 scope_refs 里」会把唯一那份 mandate 下的每家公司都拒掉。
+规则改成：优先取覆盖这家公司的 mandate；没有匹配但只有一份活跃 mandate 时用它
+（行业 mandate 管着行业里的公司）；有多份且都不匹配才是真的缺口。
 
 ## 6. 只读实测：今天这 10 个问题会拿到什么
 
@@ -156,6 +222,20 @@ answer_suggested_no_refresh
 跑上下文装配，**没有任何模型调用**。这个 Core 上 Wave 1/2/3 的表**一张都没有**。
 
 活跃 mission：`coverage-mission:us-it-services` v13，`may_write` 里**没有** `research_task`。
+
+**补搜在 live 上今天为什么一定是灰的**（v1.1 复测，只读）：
+
+| 闸门 | live 现状 |
+| --- | --- |
+| mission 授权 `research_task` | **没有**（v13 的 `may_write` 里没有这个词） |
+| 回答充分性策略 | **一份都没有**（`active_policy_for_company` → `policy_unavailable`） |
+| 合同层允许 adhoc 路由 | 本片之前**不允许**：`_route_budget` 会拒掉任何启用它的策略（已在本片解除） |
+| adhoc 池 | 有额度：日预算 $100 → 上限 $25，今天预定 0 |
+| 跑过的检索规格 | 有：`management-changes` / `industry-demand` 等（web-search），多家公司 |
+
+也就是说 owner 要打开这扇门需要**两个发布动作**：给 mission 加 `research_task`，
+以及发一份 `adhoc_research_route.enabled = true` 的回答充分性策略。
+第三件（合同层的硬禁用）这一片已经拿掉了。
 
 | # | 问题 | 判定的类型 | 今天会拿到的块 | 缺的块 | 预期 confidence |
 | --- | --- | --- | --- | --- | --- |
@@ -197,19 +277,28 @@ answer_suggested_no_refresh
    为 false 时把 `r.refresh.reason_labels` 直接印出来（都是中文整句），
    并且在有 `r.refresh.suggestion` 时印「它想去 X 取 Y」——**闸门关着时这句话最有用**，
    它就是让 owner 去发新 mission 版本的那句话。
-4. **`refreshed_with`**：补搜跑过之后，列出文件标题 + host，并把 `r.refresh_note`
-   （「只拿到标题，正文还没被读」）原样印在旁边。不要把它们渲染成证据。
-5. **`verification` 与 `quality`**：`r.verification.passed` 为 false 时，
+   注意这次请求会**同步等最多 10 秒**（子进程的轮询界限），按钮要有 pending 态。
+4. **`refreshed_with` 与 `r.refresh.status`**：补搜跑过之后，`status` 是四个词之一，
+   `status_label` 是可以直接印的中文。
+   - `found`：列出文件标题 + host，并把 `r.refresh_note`（「只拿到标题，正文还没被读」）
+     原样印在旁边。**不要把它们渲染成证据**。
+   - `empty`：印「补搜跑完了，这个来源没有新的东西」——不要退回成「没补搜」。
+   - `pending`：印「补搜还在跑，这次先按账本上已有的材料回答」，并提示稍后再问一次。
+   - `failed`：印 `status_label` 加 `r.refresh.reason`。
+5. **`r.answer_policy`**：`state` 不是 `active` 时，在补搜被拒的理由旁边补一句
+   （`policy_stale` = 「回答充分性策略过期了」，`policy_unavailable` = 「这个账本上没有策略」）。
+   这两句指向的是两种不同的修法。
+6. **`verification` 与 `quality`**：`r.verification.passed` 为 false 时，
    把 `checks` 里 `status == "fail"` 的 `label` 列出来（例如「有一句带数字的话没有出处」）。
    `r.quality` 与公司卡上已有的 `qualityBlock(doc.quality)` 形状不同（它是
    `run_deterministic` 的原始结果 + `rubric` / `rubric_ref` / `recorded`），
    建议复用 `QUALITY_CHECK_LABELS` 的中文标签，只印 checks 那一段。
-6. 另外，`r.citations[].block_label` 可以印在每条依据后面（「账本里的结论」/「估值快照」/「我们的模型」），
+7. 另外，`r.citations[].block_label` 可以印在每条依据后面（「账本里的结论」/「估值快照」/「我们的模型」），
    这样读者能看出一句话靠的是 filing 还是我们自己的估计。
 
 请求体的唯一新字段是 `refresh`（bool，缺省 false）。**没有新路由。**
 
-## 8. 顺手发现的两个别人的问题（我没有改）
+## 8. 顺手发现的问题
 
 1. **P12a 现在发不出「已起草的 variant_view」**。`company_dossier.validate_variant_view` 的
    drafted 分支返回值里**没有 `gaps` 键**（unavailable 分支有）。输入的闭合形状要求 `gaps` 在，
@@ -220,12 +309,19 @@ answer_suggested_no_refresh
    一行修复（在 drafted 分支的返回值里加回 `"gaps": _gaps(wire["gaps"], f"{name}.gaps")`）。
    我在 `DossierVariantReaderTests` 里用手工构造的行测了读取端，等这条修了就能端到端。
 2. **`coverage_mission_source_discoveries` 只按 mission version 索引**。任何按 mission version
-   读历史 discovery 的读者，在 owner 发新版本的当天会看到空。我在 `known_specs` 里用 join 绕过了；
-   如果别处也这么读，值得一并检查。
+   读历史 discovery 的读者，在 owner 发新版本的当天会看到空。我在 `known_specs` 与
+   `_discovered_by` 里都用 join 按 `mission_ref` 绕过了；如果别处也这么读，值得一并检查。
+3. **合同层还禁着 adhoc 路由**（我改了，见第 5 节）：`answer_routing._route_budget` 里
+   「ad-hoc research must remain disabled in S5 v0.2」拒掉任何启用 adhoc 路由的策略。
+   owner 2026-09-09 解除了这条禁令，但代码里没人拿掉，于是
+   `adhoc_research_route_available` 无论 mission 怎么写都不可能为真。
+   这是补搜这条路上真正的最后一道墙。
+4. **live 的 mandate 按行业而不是按公司划范围**（`scope_refs = ["industry:us-it-services"]`）。
+   任何按「公司是否字面出现在 scope_refs 里」找 mandate 的读者，在 live 上会对每家公司都失败。
 
 ## 9. 验收：全量测试
 
-基线（改动前，main `ebd2ea8`）：
+第一轮（改动前，main `ebd2ea8`）：
 
 ```
 Ran 3932 tests in 538.942s
@@ -233,7 +329,7 @@ Ran 3932 tests in 538.942s
 OK (skipped=1)
 ```
 
-本分支：
+v1.0（本片首次交付）：
 
 ```
 Ran 3988 tests in 623.792s
@@ -241,8 +337,25 @@ Ran 3988 tests in 623.792s
 OK (skipped=1)
 ```
 
-新增测试：`tests/test_ask_v2.py` 56 项（问题判定、旧 Core、全表 Core、预算、答案形状、
-补搜闸门、补搜执行、`known_specs`、`adhoc_route_available`、5 例 golden、驾驶舱端到端）。
+v1.1（并入 main `eb8e5fb` 之后，含 review 修复）：
+
+```
+Ran 4467 tests in 596.760s
+
+OK (skipped=1)
+```
+
+新增测试：`tests/test_ask_v2.py` 73 项——问题判定、旧 Core、全表 Core、预算、
+答案形状（含空格逐格点名、`market_view_available` 的两种写法）、
+补搜闸门与池余额、补搜执行的四种结局（`found` / `empty` / `pending` / `failed`）、
+`known_specs`、`adhoc_route_available`、5 例 golden、以及驾驶舱端到端。
+
+**端到端走的是真的票据生命周期**（review 要求）：`run_mission_source_discovery` 与
+`mission_source_discovery_status` 两个 op 在测试里按 `writer_server` 自己的写法跑
+——真的 `authorize_source_discovery`、真的 `record_discovery_dispatch`、
+真的 discovery 记录（过 `validate_mission_source_discovery`）——
+唯一被替换的是子进程本身。账本里事先放了一条**上周**同公司同来源的发现与它的文件，
+测试断言补搜返回的只有**这次**找到的那一条。第一版会返回上周那条。
 
 **golden 的位置说明**：5 例放在 `tests/ask_v2_golden/`，不是 `tests/golden/ask_answer/`。
 原因是 Q1 的 `tests/test_research_quality_golden.py` 有两条形状断言：
@@ -250,8 +363,7 @@ OK (skipped=1)
 `ask_answer` 已经有 7 例，再加 5 例就是 12。要放进去必须把那个上界从 10 改成 12，
 而那是 D 线的测试文件、不在我的所有权范围内。这 5 例跑的是**真实的两层**：
 本模块的 7 道检查，以及 Q1 `ask_answer` rubric 的确定性层（`run_deterministic`），
-两层的每一项状态都被钉住。集成时若决定合并目录，改动是：把上界改成 12，
-把 5 个 json 移进 `tests/golden/ask_answer/` 并补上 Q1 case 的 `score_ranges` 等字段。
+两层的每一项状态都被钉住。
 
 ## 10. 没做的事
 
@@ -266,9 +378,11 @@ OK (skipped=1)
 
 ## 11. 需要 owner 或主 agent 定夺的
 
-1. **要不要给 live mission 授 `research_task`？** 不授，补搜按钮永远是灰的（会印出原因）。
-   授了之后，一次问答最多花：一次 AlphaEngine `search_library`（占 130/24h 的配额）+ 一次额外的模型调用，
-   两者都在 mission 日预算与 C2 的 adhoc 池（25%）之内。
+1. **要不要打开补搜？** 需要两个发布动作：(a) 给 live mission 的 `may_write` 加 `research_task`；
+   (b) 发一份 `adhoc_research_route` 启用且有正预算的回答充分性策略（live 现在一份都没有）。
+   打开之后，一次问答最多花：一次发现调用（AlphaEngine 占 130/24h 的配额，或 web-search 占它的）
+   + 一次额外的模型调用，都在 mission 日预算与 adhoc 池（$25/天）之内，且同一个问题只补一次。
+   不打开也没关系：答案照样会说「它想去哪取什么」，那句话就是让人决定要不要发这两个版本的依据。
 2. **补搜的 spec 选择规则**：现在选「这个 mission 最近跑过的、优先同公司的那条」。
    另一个选择是让答案的 `content_kind` 决定（`transcript` → 电话会规格，`sell_side_report` → 研报规格），
    但那需要驾驶舱能看到 discovery plan 的 `document_type`，也就是一个新的 writer 只读 op。

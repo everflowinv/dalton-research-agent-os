@@ -1004,11 +1004,26 @@ def build_context(
             for block in ordered_blocks if not block["available"]
         ],
     }
-    context["context_hash"] = content_hash({
-        "question": question, "shown": shown,
-        "missing": context["missing"], "goal": context["goal"],
-    })
+    context["context_hash"] = context_identity(context)
     return context
+
+
+def context_identity(context: Mapping[str, Any]) -> str:
+    """What this context *is*: the question, what was shown, what was missing.
+
+    A function rather than an expression inside the assembler because the
+    refresh's second pass adds a block and has to recompute it.  A context that
+    kept the first pass's hash after gaining a block would be claiming the two
+    answers were built from the same material, which is precisely the thing the
+    hash exists to deny.
+    """
+
+    return content_hash({
+        "question": context.get("question"),
+        "shown": [dict(row) for row in context.get("shown") or ()],
+        "missing": [dict(row) for row in context.get("missing") or ()],
+        "goal": context.get("goal"),
+    })
 
 
 def _block_cost(block: Mapping[str, Any]) -> int:
@@ -1125,6 +1140,7 @@ __all__ = [
     "UNAVAILABLE_REASONS",
     "VIEW_KINDS",
     "build_context",
+    "context_identity",
     "question_kind",
     "render_block",
     "render_context",

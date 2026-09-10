@@ -233,9 +233,29 @@ def _route_budget(
             wire["max_rounds"], "adhoc.max_rounds", minimum=0, maximum=100
         )
     if kind == "adhoc":
-        if wire["enabled"] or wire["max_cost_units"] != 0 or wire["max_rounds"] != 0:
+        # P15a: this used to refuse *every* enabled ad-hoc route -- "ad-hoc
+        # research must remain disabled in S5 v0.2" -- which was the contract
+        # the owner lifted on 2026-09-09 and which nothing had yet removed.
+        # While it stood, no publishable policy could budget the route, so
+        # ``adhoc_research_route_available`` could not become true however the
+        # mission was written. The rule that replaces it is the one the refresh
+        # route already lives under: enabled means a real budget, disabled
+        # means no budget retained. The v0.1 contract keeps its ban, because
+        # that one was published and read.
+        if schema_version == LEGACY_SCHEMA_VERSION:
+            if wire["enabled"] or wire["max_cost_units"] != 0 or wire["max_rounds"] != 0:
+                raise AnswerRoutingValidationError(
+                    "ad-hoc research must remain disabled in S5 v0.1"
+                )
+            return wire
+        if wire["enabled"]:
+            if wire["max_cost_units"] == 0 or wire["max_rounds"] == 0:
+                raise AnswerRoutingValidationError(
+                    "enabled ad-hoc research requires a positive day budget and rounds"
+                )
+        elif wire["max_cost_units"] != 0 or wire["max_rounds"] != 0:
             raise AnswerRoutingValidationError(
-                "ad-hoc research must remain disabled in S5 v0.2"
+                "disabled ad-hoc research cannot retain budget or rounds"
             )
         return wire
     if schema_version == LEGACY_SCHEMA_VERSION:
@@ -331,6 +351,145 @@ def validate_answer_sufficiency_policy(value: Any) -> dict[str, Any]:
         raise AnswerRoutingConflict("answer policy content hash drifted")
     wire["content_hash"] = asserted
     return wire
+
+
+class _ReadOnlyAgenda:
+    """Just enough of :class:`AgendaStore` to call its own reader on a ro handle.
+
+    ``AgendaStore.__init__`` runs its schema script, which a ``mode=ro``
+    connection cannot do; ``active_mandates`` itself is two SELECTs.  Borrowing
+    the method rather than copying its query is the point -- a second spelling
+    of "which mandates are active right now" is exactly the drift this module's
+    extracted readers exist to prevent.
+    """
+
+    active_mandates = AgendaStore.active_mandates
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+
+def read_policy(connection: Any, version_ref: str) -> dict[str, Any]:
+    """One answer-sufficiency policy version, validated against its own row.
+
+    A module function because more than one reader wants it and only one of
+    them can hold a write handle: P15a's cockpit reads the same policy from a
+    ``mode=ro`` connection to decide whether one bounded refresh is budgeted,
+    and a second implementation of "is this policy the live one" is how two
+    answers to that question start disagreeing.
+    """
+
+    version_ref = _text(version_ref, "version_ref", maximum=256)
+    row = connection.execute(
+        "SELECT * FROM answer_sufficiency_policy_versions WHERE version_id=?",
+        (version_ref,),
+    ).fetchone()
+    if row is None:
+        raise AnswerRoutingNotFound("answer policy was not found")
+    wire = validate_answer_sufficiency_policy(
+        _load_record(row["record_json"], row["content_hash"], "answer policy")
+    )
+    if (
+        wire["id"] != row["version_id"]
+        or wire["policy_ref"] != row["policy_ref"]
+        or wire["version"] != row["version_number"]
+        or wire["mandate_ref"] != row["mandate_ref"]
+        or wire["mandate_version_ref"] != row["mandate_version_ref"]
+        or wire["mandate_version_hash"] != row["mandate_version_hash"]
+    ):
+        raise AnswerRoutingConflict("stored answer policy row drifted")
+    return wire
+
+
+def policy_state(
+    connection: Any, mandate: Mapping[str, Any], as_of: datetime
+) -> tuple[str, dict[str, Any] | None]:
+    """``unavailable`` / ``stale`` / ``active``, and the policy behind the word.
+
+    Four conditions, none of them optional: the mandate has a pointer, the
+    pointer's hash is the policy's, the policy was written against *this*
+    version of the mandate, and now is inside its effective window.  A reader
+    that checks only the first is reading a policy that may have been written
+    for a mandate the owner has since replaced.
+    """
+
+    pointer = connection.execute(
+        "SELECT version_id,content_hash FROM answer_sufficiency_policy_pointer "
+        "WHERE mandate_ref=?",
+        (mandate["mandate_ref"],),
+    ).fetchone()
+    if pointer is None:
+        return "unavailable", None
+    policy = read_policy(connection, pointer["version_id"])
+    if policy["content_hash"] != pointer["content_hash"]:
+        raise AnswerRoutingConflict("answer policy pointer hash drifted")
+    active = (
+        policy["mandate_version_ref"] == mandate["id"]
+        and policy["mandate_version_hash"] == mandate["content_hash"]
+        and _datetime(policy["effective_from"], "policy effective_from") <= as_of
+        and (
+            policy["effective_until"] is None
+            or as_of < _datetime(
+                policy["effective_until"], "policy effective_until"
+            )
+        )
+    )
+    return ("active" if active else "stale"), policy
+
+
+def active_policy_for_company(
+    connection: Any, company_ref: str | None, *, as_of: str | None = None,
+) -> dict[str, Any]:
+    """The live answer policy governing one company, read-only, never raising.
+
+    "Which mandate governs this company" is a question the Agenda already
+    answers -- ``active_mandates`` filters by the effective window and the
+    pointer -- and the scope refs say which companies each one covers.  Both
+    reads are plain SELECTs, so this works on the cockpit's read-only handle;
+    what it must not do is invent a fifth condition or drop one of the four.
+
+    Returns ``state`` from the same three words the router uses, so a caller
+    that finds ``stale`` knows the policy exists and was superseded rather
+    than that there is none.
+    """
+
+    when = _datetime(as_of or _now(), "as_of")
+    for table in ("mandate_pointer", "mandate_versions",
+                  "answer_sufficiency_policy_pointer"):
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+        ).fetchone() is None:
+            return {"state": "unavailable", "policy": None, "mandate_ref": None,
+                    "reason": "no_answer_policy_tables"}
+    try:
+        mandates = _ReadOnlyAgenda(connection).active_mandates(at=when.isoformat())
+    except Exception:  # noqa: BLE001 - a malformed mandate is "no policy", said plainly
+        return {"state": "unavailable", "policy": None, "mandate_ref": None,
+                "reason": "mandates_unreadable"}
+    if not mandates:
+        return {"state": "unavailable", "policy": None, "mandate_ref": None,
+                "reason": "no_active_mandate"}
+    scoped = [m for m in mandates
+              if company_ref is None or company_ref in (m.get("scope_refs") or ())]
+    if scoped:
+        chosen = scoped[0]
+    elif len(mandates) == 1:
+        # The live mandate scopes the *industry* (``industry:us-it-services``)
+        # rather than each company in it, so a literal scope match would refuse
+        # every company under the only mandate there is.  One active mandate
+        # governs whatever it governs; several and no match is a real gap.
+        chosen = mandates[0]
+    else:
+        return {"state": "unavailable", "policy": None,
+                "mandate_ref": mandates[0]["mandate_ref"],
+                "reason": "company_outside_every_mandate_scope"}
+    try:
+        state, policy = policy_state(connection, chosen, when)
+    except AnswerRoutingError:
+        return {"state": "unavailable", "policy": None,
+                "mandate_ref": chosen["mandate_ref"], "reason": "policy_drifted"}
+    return {"state": state, "policy": policy, "mandate_ref": chosen["mandate_ref"],
+            "reason": None if state == "active" else f"policy_{state}"}
 
 
 class AnswerRoutingAuthority:
@@ -582,52 +741,12 @@ class AnswerRoutingAuthority:
             return {"status": "fresh", **result}
 
     def policy(self, version_ref: str) -> dict[str, Any]:
-        version_ref = _text(version_ref, "version_ref", maximum=256)
-        row = self.connection.execute(
-            "SELECT * FROM answer_sufficiency_policy_versions WHERE version_id=?",
-            (version_ref,),
-        ).fetchone()
-        if row is None:
-            raise AnswerRoutingNotFound("answer policy was not found")
-        wire = validate_answer_sufficiency_policy(
-            _load_record(row["record_json"], row["content_hash"], "answer policy")
-        )
-        if (
-            wire["id"] != row["version_id"]
-            or wire["policy_ref"] != row["policy_ref"]
-            or wire["version"] != row["version_number"]
-            or wire["mandate_ref"] != row["mandate_ref"]
-            or wire["mandate_version_ref"] != row["mandate_version_ref"]
-            or wire["mandate_version_hash"] != row["mandate_version_hash"]
-        ):
-            raise AnswerRoutingConflict("stored answer policy row drifted")
-        return wire
+        return read_policy(self.connection, version_ref)
 
     def _policy_state(
         self, mandate: Mapping[str, Any], as_of: datetime
     ) -> tuple[str, dict[str, Any] | None]:
-        pointer = self.connection.execute(
-            "SELECT version_id,content_hash FROM answer_sufficiency_policy_pointer "
-            "WHERE mandate_ref=?",
-            (mandate["mandate_ref"],),
-        ).fetchone()
-        if pointer is None:
-            return "unavailable", None
-        policy = self.policy(pointer["version_id"])
-        if policy["content_hash"] != pointer["content_hash"]:
-            raise AnswerRoutingConflict("answer policy pointer hash drifted")
-        active = (
-            policy["mandate_version_ref"] == mandate["id"]
-            and policy["mandate_version_hash"] == mandate["content_hash"]
-            and _datetime(policy["effective_from"], "policy effective_from") <= as_of
-            and (
-                policy["effective_until"] is None
-                or as_of < _datetime(
-                    policy["effective_until"], "policy effective_until"
-                )
-            )
-        )
-        return ("active" if active else "stale"), policy
+        return policy_state(self.connection, mandate, as_of)
 
     def subjects(self, *, as_of: str | None = None) -> list[dict[str, Any]]:
         when = _datetime(as_of or _now(), "as_of")
@@ -2154,6 +2273,9 @@ __all__ = [
     "AnswerRefreshControlPlane", "AnswerRoutingAuthority",
     "AnswerRoutingConflict", "AnswerRoutingError",
     "AnswerRoutingNotFound", "AnswerRoutingValidationError",
+    "active_policy_for_company",
     "adhoc_route_available",
+    "policy_state",
+    "read_policy",
     "validate_answer_sufficiency_policy",
 ]

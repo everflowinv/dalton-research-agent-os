@@ -81,6 +81,20 @@ REFUSAL_LABELS: Mapping[str, str] = {
     "question_not_understood": "这个问题没能被读成一个关于这些公司的问题",
 }
 
+# What the page and the checks call each variant-view slot.  P12a's five words
+# in the owner's language, in one place.
+SLOT_LABELS: Mapping[str, str] = {
+    "our_view": "我们的看法", "market_view": "市场的看法",
+    "where_market_is_wrong": "市场错在哪",
+    "convergence_pathway": "市场向我们靠拢的路径",
+    "observable_signals": "可观察的信号",
+    "market_view_reason": "为什么没有市场的看法",
+}
+# The sentence an answer writes when it has no material on where the market
+# stands.  First entry is the one this module normalises to.
+NO_MARKET_VIEW: tuple[str, ...] = ("未知（没有一致预期、评级、sales note 或大众叙事的材料）",
+                                   "未知", "不知道", "无", "unknown", "n/a")
+
 MAX_SENTENCES = 24
 MAX_SENTENCE_CHARS = 600
 MAX_UNKNOWNS = 6
@@ -171,7 +185,8 @@ def build_prompt(context: Mapping[str, Any], *, mission: Mapping[str, Any] | Non
         ' "unknowns": [{"what": "<缺的是什么>", "content_kind": "<下表中的一个词>",'
         ' "source": "<下表中的一个来源>"}],',
         (' "market_vs_us": {' + ", ".join(f'"{slot}": "..."' for slot in VARIANT_SLOTS)
-         + ', "refs": ["C7"]},'),
+         + ', "market_view_available": true, "market_view_reason": null,'
+         ' "refs": ["C7"]},'),
         ' "refresh_suggested": {"content_kind": "...", "source": "...", "query": "..."}}',
     ]
     lines = [
@@ -199,10 +214,11 @@ def build_prompt(context: Mapping[str, Any], *, mission: Mapping[str, Any] | Non
         lines += [
             "",
             "这是一个「看法」类问题。owner 的原则：跟市场看法一致的判断没有价值。",
-            "market_vs_us 必须写满："
-            + "、".join(VARIANT_SLOTS)
+            "market_vs_us 的五格必须**每一格都写满**，空一格就算没写："
+            + "、".join(f"{slot}（{SLOT_LABELS[slot]}）" for slot in VARIANT_SLOTS)
             + "。其中 market_view 只能来自被展示的一致预期、评级、sales note 或大众叙事；",
-            "没有这些材料时 market_view 写「未知」并说明是没有材料，而不是替市场编一个看法。",
+            "没有这些材料时把 market_view_available 设为 false，并在 market_view_reason 里"
+            "写清是缺什么材料——不要替市场编一个看法，也不要只写一个「未知」了事。",
             "where_market_is_wrong 与 convergence_pathway 要具体：错在哪个假设、",
             "什么事件或数据会让市场改口、我们能提前观察到什么信号。",
         ]
@@ -291,16 +307,29 @@ def parse_answer(payload: Any, *, context: Mapping[str, Any]) -> dict[str, Any]:
     ))
 
     wants_variant = bool(context.get("wants_market_vs_us"))
-    variant, variant_unshown = _market_vs_us(payload.get("market_vs_us"), shown)
+    variant, variant_unshown, empty_slots = _market_vs_us(
+        payload.get("market_vs_us"), shown)
     unshown = sorted(set(unshown) | set(variant_unshown))
-    missing_variant = wants_variant and not refused and variant is None
+    # A variant view with a blank slot is not a variant view. The five slots
+    # are the owner's question -- where do we differ, why is the market wrong,
+    # what brings it round, what will we see -- and an answer that leaves the
+    # pathway empty has answered "we disagree" and stopped.
+    variant_findings: list[dict[str, Any]] = []
+    if wants_variant and not refused:
+        if variant is None:
+            variant_findings.append({"code": "market_vs_us_missing"})
+        else:
+            variant_findings += [{"code": "market_vs_us_slot_empty", "slot": slot}
+                                 for slot in empty_slots]
     checks.append(_result(
         "market_vs_us_present",
-        status="fail" if missing_variant else ("pass" if wants_variant else "skipped"),
-        findings=([{"code": "market_vs_us_missing"}] if missing_variant else []),
+        status="fail" if variant_findings else ("pass" if wants_variant else "skipped"),
+        findings=variant_findings,
         detail=("这不是看法类问题" if not wants_variant
-                else ("写了我们与市场的差别" if not missing_variant
-                      else "看法类问题没有写我们与市场的差别")),
+                else ("写了我们与市场的差别与收敛路径" if not variant_findings
+                      else ("看法类问题没有写我们与市场的差别" if variant is None
+                            else "这几格是空的：" + "、".join(
+                                SLOT_LABELS.get(slot, slot) for slot in empty_slots)))),
     ))
 
     refresh, refresh_findings = _refresh(payload.get("refresh_suggested"))
@@ -368,17 +397,16 @@ def assemble_body(
     body = " ".join(row["text"] for row in sentences).strip()
     if variant is None:
         return body
-    labels = {
-        "our_view": "我们的看法", "market_view": "市场的看法",
-        "where_market_is_wrong": "市场错在哪",
-        "convergence_pathway": "市场向我们靠拢的路径",
-        "observable_signals": "可观察的信号",
-    }
     parts = [body] if body else []
     for slot in VARIANT_SLOTS:
         value = variant.get(slot)
-        if value:
-            parts.append(f"{labels[slot]}：{value}")
+        if not value:
+            continue
+        line = f"{SLOT_LABELS[slot]}：{value}"
+        if slot == "market_view" and not variant.get("market_view_available"):
+            reason = variant.get("market_view_reason")
+            line += f"（{reason}）" if reason else ""
+        parts.append(line)
     return "\n".join(parts)
 
 
@@ -454,14 +482,32 @@ def _unknowns(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
 
 def _market_vs_us(
     value: Any, shown: Mapping[str, Mapping[str, Any]],
-) -> tuple[dict[str, Any] | None, list[str]]:
+) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+    """The variant view, the tags it invented, and the slots it left empty.
+
+    ``market_view_available`` is P12a's own typed shape, carried here for the
+    reason P12a carries it: "we do not know where the market is" and "the
+    market agrees with us" have to look different, and an answer that writes
+    「未知」 into ``market_view`` without saying that is what it means is
+    indistinguishable from one that invented a market view.  So when the flag
+    is false the slot is normalised to the honest sentence and a reason is
+    required; when it is true the slot has to say something.
+    """
+
     if not isinstance(value, Mapping):
-        return None, []
+        return None, [], list(VARIANT_SLOTS)
     slots = {slot: _text(value.get(slot), MAX_SENTENCE_CHARS) for slot in VARIANT_SLOTS}
-    if not slots["our_view"]:
-        # A variant view with no view of our own is the market's view with a
-        # heading on it, which is exactly the thing the owner said is worthless.
-        return None, []
+    available = value.get("market_view_available")
+    if not isinstance(available, bool):
+        # Not stated: infer it from whether a market view was written, and
+        # record the inference rather than pretending it was declared.
+        available = bool(slots["market_view"]) and slots["market_view"] not in NO_MARKET_VIEW
+    reason = _text(value.get("market_view_reason"), 400) or None
+    if not available:
+        slots["market_view"] = NO_MARKET_VIEW[0]
+    empty = [slot for slot in VARIANT_SLOTS if not slots[slot]]
+    if not available and reason is None:
+        empty.append("market_view_reason")
     refs: list[str] = []
     unshown: list[str] = []
     raw = value.get("refs") if isinstance(value.get("refs"), list) else []
@@ -472,7 +518,9 @@ def _market_vs_us(
                 refs.append(tag)
         elif tag:
             unshown.append(tag)
-    return {**slots, "refs": refs}, unshown
+    block = {**slots, "market_view_available": available,
+             "market_view_reason": reason, "refs": refs}
+    return block, unshown, empty
 
 
 def _refresh(value: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -501,7 +549,9 @@ __all__ = [
     "CONFIDENCE",
     "MAX_UNKNOWNS",
     "REFUSAL_LABELS",
+    "NO_MARKET_VIEW",
     "REFUSAL_REASONS",
+    "SLOT_LABELS",
     "SCHEMA_VERSION",
     "VERIFICATION_CHECKS",
     "VIEW_KINDS",
