@@ -236,6 +236,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 凌晨 | 合并演练脚本修正与修订回路 P14b + P14d（含 socket 测试期限在 import 时算死的根因修复）。INT3 与演练修法三文件冲突，交回 INT3 调和。P12d review：三 blocker（重画时旧版 dossier 引用无法解析并反复付费；mission 版本一滚动裁决即失效），已发回修；派出 stage-ladder（阶段记录跨 mission 版本随行）。C1 日历事件与 P14a 合同不一致、lane 调用不存在的 writer 方法——交 C1 作者修桥接 | 进行中 |
 | 09-10 凌晨 | 合并档案 `variant_view` 修复（附「normaliser 输出必须自校验」通用测试）；修订回路两个 schema 补进演练迁移清单。交付在审：S5（SEC 所有权四 op + IR 监视）、ask v2；P15d review 一 blocker（inf/nan 百分比过风险收益标准）已发回并要求补 ADR-0008 版本化 | 进行中 |
 | 09-10 早 | 合并 C1 事件桥接（日历事件真正入 ResearchEvent 账本，payload 合同两侧共享测试）与 INT3（35 条记录 = 32 播种 ∪ 3 明确不播；`sec-filings-index-v1.json` 从合同推导找回；bootstrap 一次开 55 个 schema；演练 27 条 lane 零逃逸）。main 4,213+ 项通过，已 push | 完成 |
+| 09-10 早 | 合并 P15d ConvictionCall（自动化只提案、人裁决；与市场同向不提案；inf/nan 拒绝；提案版本链与 `supersedes_ref`）。在修：P12d、S5、ask v2；在做：stage-ladder、P12e、consensus、P14f、planner 日账本 | 进行中 |
 
 ---
 
