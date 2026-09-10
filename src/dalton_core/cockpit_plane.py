@@ -2623,10 +2623,30 @@ class CockpitPlane:
             ticket.get("exit_code") not in (None, 0)) else "done"
         # Exit zero proves only that the child wrote its summary.  Product
         # refusal/failure remains a failure on the activity page.
-        if state == "done" and any(value in {
+        product_statuses = (
+            summary.get(key) for key in (
+                "map_status", "judgement_status", "dossier_status",
+                "memo_status", "framework_status", "gate_status",
+                "deliverable_status", "forecast_status", "sensitivity_status",
+            )
+        )
+        failures = {
             "failed", "refused", "unverified", "verifier_rejected",
-            "model_unavailable", "not_independent", "rejected",
-        } for value in (summary.get("status"), summary.get("map_status"))):
+            "model_unavailable", "not_independent", "rejected", "gated",
+            "gated:same_family", "verification_failed", "unresolvable_refs",
+            "rubric_refused", "constitution_refused", "binding_drift",
+        }
+        # The process-level status says only whether the child completed.  The
+        # lane-specific field is the authority outcome, and several producers
+        # deliberately exit zero after recording a refusal.
+        if state == "done" and (
+            summary.get("status") in failures or any(
+                isinstance(value, str) and (
+                    value in failures or value.startswith("refused:") or
+                    value.endswith("_refused") or value.endswith("_failed")
+                ) for value in product_statuses
+            )
+        ):
             state = "failed"
         auth = summary.get("authorization") or {}
         company_ref = ticket.get("company_ref") or summary.get("company_ref") or auth.get("company_ref")
