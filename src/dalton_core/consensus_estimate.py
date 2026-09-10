@@ -888,6 +888,122 @@ class ConsensusEstimateAuthority:
         return {"status": "fresh", **stored}
 
 
+# -- the reader P15d resolves by name ---------------------------------------
+#
+# ``conviction_call_cli.consensus_gap`` looks this module up at call time and
+# asks for a module-level ``latest_consensus(store, company_ref)``. It was
+# written while this authority was still Wave 2 work, deliberately by name
+# rather than by import, so that the conviction lane would start working the
+# day the authority landed. This is that day, so the function it names exists
+# here rather than the lane being edited.
+#
+# It answers with *our forecast against the street's*, which needs both sides.
+# The street's side is this authority. Ours is the forecast model, joined on
+# the one thing the two can agree about without a shared vocabulary: the fiscal
+# period **end date**, which this authority computes from the company's own
+# filings and the forecast model carries on every cell. Label matching would
+# not do -- "FY2027" means one thing here and is not what the forecast model
+# calls its columns -- and a join on a guess is how a gap gets computed against
+# the wrong year.
+#
+# No forecast, or no overlapping period, means no metrics and no gap. That is
+# reported as an absence rather than as agreement: a conviction call whose
+# consensus section quietly vanished would read as "we agree with the street",
+# which is the one thing it must never accidentally say.
+_EPS_WORDS = ("eps", "earnings per share")
+_REVENUE_WORDS = ("revenue", "revenues", "net revenue", "sales")
+MAX_GAP_METRICS = 12
+
+
+def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[str, Any], str | None]:
+    """Our own estimate per period end, for the two lines the street quotes."""
+
+    try:
+        from .model_forecast_driver import ForecastModelAuthority
+
+        latest = ForecastModelAuthority(store).latest(company_ref)
+    except Exception:  # noqa: BLE001 - no model here is no gap, not an outage
+        return {}, None
+    if not latest:
+        return {}, None
+    found: dict[str, Any] = {}
+    for line in latest.get("results") or ():
+        if not isinstance(line, Mapping):
+            continue
+        name = f"{line.get('role') or ''} {line.get('label') or ''}".lower()
+        if any(word in name for word in _EPS_WORDS):
+            metric = "eps"
+        elif any(word in name for word in _REVENUE_WORDS):
+            metric = "revenue"
+        else:
+            continue
+        for cell in line.get("cells") or ():
+            if not isinstance(cell, Mapping):
+                continue
+            # An actual is not a forecast, and a cell that could not be
+            # computed is not a number.
+            if cell.get("kind") != "estimate" or cell.get("status") != "computed":
+                continue
+            period = cell.get("period")
+            end = period.get("end") if isinstance(period, Mapping) else None
+            value = cell.get("value")
+            if not isinstance(end, str) or value is None:
+                continue
+            found.setdefault((metric, end), {
+                "value": str(value),
+                "unit": str(line.get("unit") or ""),
+                "label": str(line.get("label") or metric),
+            })
+    return found, str(latest.get("id") or latest.get("version_ref") or "") or None
+
+
+def _gap_percent(ours: str, street: str) -> str | None:
+    try:
+        mine, theirs = Decimal(ours), Decimal(street)
+    except (InvalidOperation, ValueError):
+        return None
+    if not theirs.is_finite() or not mine.is_finite() or theirs == 0:
+        # A gap against zero is not a percentage of anything.
+        return None
+    gap = ((mine - theirs) / abs(theirs) * 100).quantize(Decimal("0.01"))
+    return f"{gap:f}"
+
+
+def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
+    """Our forecast against the street's, for one company. See the note above."""
+
+    try:
+        held = ConsensusEstimateAuthority(store).latest_consensus(company_ref)
+    except Exception:  # noqa: BLE001 - an unreadable street is no street
+        return None
+    if not held:
+        return None
+    ours, forecast_ref = _forecast_cells(store, company_ref)
+    if not ours:
+        return {"metrics": []}
+    refs = [held["version_ref"]] + ([forecast_ref] if forecast_ref else [])
+    rows: list[dict[str, Any]] = []
+    for metric, key in (("eps", "eps_estimates"), ("revenue", "revenue_estimates")):
+        for street in held[key]:
+            mine = ours.get((metric, street["period_end"]))
+            if mine is None or street["avg"] is None:
+                continue
+            percent = _gap_percent(mine["value"], street["avg"])
+            if percent is None:
+                continue
+            rows.append({
+                "metric": mine["label"],
+                "period": street["label"],
+                "ours": mine["value"],
+                "consensus": street["avg"],
+                "unit": mine["unit"] or (street["currency"] or "unit"),
+                "gap_percent": percent,
+                "refs": list(refs),
+            })
+    rows.sort(key=lambda row: (row["period"], row["metric"]))
+    return {"metrics": rows[:MAX_GAP_METRICS]}
+
+
 def validate_report_consensus(value: Any) -> dict[str, Any]:
     """The closed shape of a range computed from sell-side reports."""
 
@@ -970,7 +1086,9 @@ __all__ = [
     "ConsensusEstimateValidationError",
     "FiscalMappingError",
     "consensus_ref_for",
+    "MAX_GAP_METRICS",
     "fiscal_calendar",
+    "latest_consensus",
     "map_estimate_period",
     "map_recommendation_period",
     "validate_report_consensus",
