@@ -242,6 +242,26 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # W3: the fund's own prior work on a company. Smaller than the wiki by
+        # an order of magnitude -- a handful of screens, memos and models per
+        # covered name -- and it changes only when a person adds a file. The
+        # ceilings bound a loop; they are not a budget.
+        ("prior-research", "list_documents"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 200,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("prior-research", "get_document"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                # Onboarding reads every prior document once and then only
+                # what the owner adds. Two hundred is several backfills.
+                "daily_unit_limit": 200,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
         # S4: China / Hong Kong fundamentals. Conservative throughout, and for
         # a reason with a date on it: on 2026-08-21 the OpenClaw skill pressed
         # 东方财富's price-history cluster a dozen times in a row and the

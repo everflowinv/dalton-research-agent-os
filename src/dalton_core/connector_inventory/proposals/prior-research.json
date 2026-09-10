@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:prior-research:0.1",
+  "adapter_source_hash": "3593d7d768a9a9ac091c9cd2d74290719282e43775e280cea7ebb7eccde115ec",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:prior-research:0.1",
+  "connector_ref": "connector:prior-research",
+  "content_hash": "22962739e752deb52e4ffe6009a781cc035378b0feb2cf71b4e9460445a1cd41",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "ee44156d5678af7635a9d87a92db711cea6bf3650a16d354fd9f6c326a9e31e7",
+  "fixture_manifest_ref": "connector-fixture-manifest:prior-research:0.1",
+  "id": "connector-proposal-manifest:prior-research:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "278009e928317269f591a759e0c1a590fdfcd7a91cc0e03d48a2974ac5b35bd9",
+      "input_schema_ref": "schema:connector-inventory:prior-research:list_documents:input:0.1",
+      "operation": "list_documents",
+      "output_schema_hash": "bf424efa578011801236beb398e0bd061e58c3ecdae1bc042498d4f1eaa8c1ad",
+      "output_schema_ref": "schema:connector-inventory:prior-research:list_documents:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "e6bc44dc692e7cf12a96ace793c310f139a752e011a2f22bb85ed560f55ffc57",
+      "input_schema_ref": "schema:connector-inventory:prior-research:get_document:input:0.1",
+      "operation": "get_document",
+      "output_schema_hash": "585890439f85260dcc11742a73972f8bf4b3afe2f43196cd011b177c7297e851",
+      "output_schema_ref": "schema:connector-inventory:prior-research:get_document:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "c8b7a8fdc0e8ce3db0e6e56bb70986aca7b15f17fc30d64ec4290bff178e6144",
+  "profile_template_ref": "connector-profile-template:prior-research:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:prior-research-corpus",
+    "adapter_version": "inventory-0.1",
+    "source": "source:prior-research",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "9e98220e804c21048a4d63bf5945958d4d1fd84f155e3f4f04fff9b40ce24486",
+  "transport_target_ref": "host-tool:prior-research-corpus"
+}

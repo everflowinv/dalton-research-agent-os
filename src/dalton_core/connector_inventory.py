@@ -1533,6 +1533,110 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "next_cursor", "provider_status",
             ),
         )
+    # W3: the fund's own prior work. The header is deliberately close to the
+    # wiki's -- a document, a date, a hash -- with three differences that are
+    # the whole design:
+    #
+    # * `as_of` is required and has no fallback. The manifest says when the
+    #   document is from or the entry is refused; nothing here derives a date
+    #   from a filename or a mtime, because a guessed date silently ages a
+    #   view by however far the guess was wrong.
+    # * `as_of_basis` travels with it, so a reader can tell "the owner wrote
+    #   2026-03-31" from "the folder said Q1".
+    # * `kind` is the owner's own five words, not a classifier's guess. This
+    #   feed does not read titles for cues; the manifest is the answer.
+    if slug == "prior-research":
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        day = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        nullable_day = {"type": ["string", "null"],
+                        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        document = _object_schema(
+            {
+                "document_id": {
+                    "type": "string",
+                    "pattern": "^prior-research-doc:sha256:[0-9a-f]{64}$",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["initial_screen", "memo", "notes", "model_excel", "other"],
+                },
+                "as_of": day,
+                "as_of_basis": {"type": "string", "enum": ["manifest_as_of"]},
+                "author": _string(),
+                "source_note": {"type": "string"},
+                "company": _string(),
+                "relative_path": _string(),
+                # The file's format as one word rather than a media type:
+                # the frozen template may hold no slashes at all (a template
+                # that can carry a path is a template that can carry a
+                # credential), and "markdown" says the same thing.
+                "doc_format": {
+                    "type": "string",
+                    "enum": ["markdown", "text", "pdf", "docx", "xlsx"],
+                },
+                "renderer": _string(),
+                "evidence_tier": {"type": "string", "enum": ["internal_prior"]},
+                "text_sha256": sha256,
+                "text_chars": _integer(0),
+                "file_sha256": sha256,
+                "file_bytes": _integer(0),
+            },
+            (
+                "document_id", "kind", "as_of", "as_of_basis", "author",
+                "source_note", "company", "relative_path", "doc_format",
+                "renderer", "evidence_tier", "text_sha256", "text_chars",
+                "file_sha256", "file_bytes",
+            ),
+        )
+        refusal = _object_schema(
+            {
+                "company": _string(),
+                "relative_path": {"type": "string"},
+                "reason": _string(),
+            },
+            ("company", "relative_path", "reason"),
+        )
+        if operation == "list_documents":
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "since": day,
+                    "until": day,
+                    "company": {"type": ["string", "null"]},
+                    "documents": {"type": "array", "items": document},
+                    "document_count": _integer(0),
+                    # Entries the manifest named and this feed would not
+                    # enumerate, with the reason. On the wire rather than in a
+                    # log: a refused entry is the owner's next action, and an
+                    # enumeration that quietly drops rows is the failure this
+                    # field exists to prevent.
+                    "refused": {"type": "array", "items": refusal},
+                    "refused_count": _integer(0),
+                    "truncated": {"type": "boolean"},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": nullable_day,
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "since", "until", "company", "documents",
+                    "document_count", "refused", "refused_count", "truncated",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "document": document,
+                "text": {"type": "string"},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "document", "text", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
     if slug == "cn-hk-findata":
         # S4: China / Hong Kong fundamentals, read through `akshare`.
         #
@@ -2468,6 +2572,35 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "list_documents", completeness="enumerated",
                 input_fields=("since", "until", "company", "industry", "limit"),
                 optional_fields=("company", "industry", "limit"),
+            ),
+            _operation("get_document", completeness="enumerated",
+                       input_fields=("document_id",)),
+        ),
+        "gate": "host_tool_runner_v0.2",
+    },
+    # W3: the fund's own earlier work on a company -- Initial Screens, memos,
+    # notes and maintained Excel models. Same shape as the wiki and for the
+    # same reason: bytes a person already put on this machine, read-only,
+    # offline, no credential. What differs is the manifest. The wiki has an
+    # index a cron rebuilds; this feed has a `manifest.json` the owner writes
+    # by hand per company folder, because the one thing the feed may not guess
+    # is a document's date -- and the date is the whole point. An undated
+    # prior view cannot be aged, and a view that cannot be aged gets read as
+    # current.
+    {
+        "slug": "prior-research", "connector_ref": "connector:prior-research",
+        "source_ref": "source:prior-research", "source_type": "authenticated_library",
+        "transport": "host_tool", "target": "host-tool:prior-research-corpus",
+        "hosts": (), "auth": "none",
+        # There is no second route into this corpus and there must not be one.
+        # A model asked to summarise the folder is not a reading of it.
+        "forbidden": ("route:prior-research-summariser",),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "list_documents", completeness="enumerated",
+                input_fields=("since", "until", "company", "limit"),
+                optional_fields=("company", "limit"),
             ),
             _operation("get_document", completeness="enumerated",
                        input_fields=("document_id",)),

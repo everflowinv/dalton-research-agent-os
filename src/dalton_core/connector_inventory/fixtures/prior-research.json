@@ -1,0 +1,226 @@
+{
+  "authenticated": false,
+  "cases": [
+    {
+      "case_ref": "fixture:prior-research:list_documents:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "f481111b3ffc7ca7d6fec95cf7a9d106a27b0e3867a13f80c0cb17313b859f24",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:prior-research:list_documents:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:list_documents:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "1045d8d89b2cfa11027d4c7d6ed774910476ce0bf569a81c8f5c5c5d505bda46",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:prior-research:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:prior-research:list_documents:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:list_documents:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:list_documents:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "eaa66ece574259dca72be6d7fa79c8559a4a487e1b6bad3d3c0eef9a76040795",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:prior-research:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:prior-research:list_documents:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "09c589a9d91dce0d633ec59822078db7da699d348da556ef499a51a8fc532be2",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "d122adc88f24b4a2c89adefe1ef5708fb1ae6d366c3ec55f91c226d2b5ce3f74",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:prior-research:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "87059557d7fcefcd8c9df621144d912c0f9ce478590c553bde8bdaee2483b72f",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:prior-research:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:prior-research:get_document:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:prior-research:0.1",
+  "content_hash": "ee44156d5678af7635a9d87a92db711cea6bf3650a16d354fd9f6c326a9e31e7",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:prior-research:0.1",
+  "operations": [
+    {
+      "operation": "list_documents",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "get_document",
+      "pagination_mode": "none"
+    }
+  ],
+  "recording_boundary": "host_gateway",
+  "schema_version": "0.1",
+  "synthetic": true
+}
