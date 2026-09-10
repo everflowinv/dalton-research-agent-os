@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from collections.abc import Collection
 from typing import Any, Mapping
 
 from .cockpit_model import _failed_work_trace, model_failure_trace
@@ -64,7 +65,12 @@ def _already_consumed(connection: Any, request_id: str) -> bool:
             wire = json.loads(row["work_order_json"])
         except (TypeError, ValueError):
             continue
-        if (wire.get("metadata") or {}).get("request_id") != request_id:
+        if not isinstance(wire, Mapping):
+            continue
+        metadata = wire.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        if metadata.get("request_id") != request_id:
             continue
         if (canonical_json(wire) != row["work_order_json"]
                 or content_hash(wire) != row["work_order_hash"]):
@@ -76,6 +82,7 @@ def _already_consumed(connection: Any, request_id: str) -> bool:
 def eligible_controlled_reentries(
     summary: Mapping[str, Any], *, scheduler_db: str | Path,
     budget_db: str | Path, mission: Mapping[str, Any],
+    allowed_purposes: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return exact approved, not-yet-enqueued failed traces without writing."""
 
@@ -92,6 +99,9 @@ def eligible_controlled_reentries(
                 if validated is None:
                     continue
                 trace, formal = validated
+                if (allowed_purposes is not None
+                        and trace["purpose"] not in allowed_purposes):
+                    continue
                 key = trace["work_order_ref"]
                 if key in seen:
                     continue
@@ -107,7 +117,7 @@ def eligible_controlled_reentries(
                     continue
                 eligible.append({"failure_trace": trace,
                                  "authorization_suffix": suffix})
-    except (OSError, ValueError, sqlite3.Error):
+    except (AttributeError, KeyError, OSError, TypeError, ValueError, sqlite3.Error):
         return []
     return eligible
 

@@ -139,11 +139,13 @@ class MissionDossierLaneCoordinator:
 
     def __init__(self, *, connection: Any, launcher: Any,
                  companies: Callable[[], list[str]] | None = None,
+                 mission: Callable[[], Mapping[str, Any] | None] | None = None,
                  failure_ledger_dir: Any | None = None,
                  failure_clock: Callable[[], Any] | None = None) -> None:
         self.connection = connection
         self.launcher = launcher
         self.companies = companies
+        self.mission = mission
         self._open: str | None = None
         # The signature under which the last run found nothing, and the
         # signatures whose runs failed. Held for this process only: a restart
@@ -241,6 +243,11 @@ class MissionDossierLaneCoordinator:
         held_companies = {}
         held_decisions = {}
         quiet_companies = []
+        try:
+            active_mission = self.mission() if self.mission is not None else None
+        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
+            return {"status": "unavailable", "settled": settled,
+                    "reason": f"{type(exc).__name__}: {exc}"}
         for company_ref in companies:
             evidence = (
                 ledger_signature(self.connection) if company_ref is None else
@@ -252,14 +259,25 @@ class MissionDossierLaneCoordinator:
                 quiet_companies.append(company_ref)
                 continue
             held = self.budget.blocked(signature)
+            controlled_reentry = None
             if held is not None:
-                label = str(company_ref or "-")
-                held_companies[label] = held.classification.reason
-                held_decisions[label] = held
-                continue
+                recovery = getattr(self.launcher, "controlled_reentry", None)
+                authorization = (
+                    None if recovery is None or active_mission is None else
+                    recovery(signature=signature, company_ref=company_ref,
+                             mission=dict(active_mission)))
+                if authorization is not None:
+                    held = None
+                    controlled_reentry = authorization
+                else:
+                    label = str(company_ref or "-")
+                    held_companies[label] = held.classification.reason
+                    held_decisions[label] = held
+                    continue
             try:
                 ticket = self.launcher.start(
-                    signature=signature, company_ref=company_ref)
+                    signature=signature, company_ref=company_ref,
+                    controlled_reentry=controlled_reentry)
             except LaneChildConflict as exc:
                 return {"status": "busy", "settled": settled,
                         "reason": f"{type(exc).__name__}: {exc}"}
@@ -293,14 +311,19 @@ class MissionDossierLaneCoordinator:
 def _screened_companies(server: Any) -> list[str]:
     from .company_dossier_cli import screened_companies
 
+    mission = _current_mission(server)
+    if mission is None:
+        return []
+    return screened_companies(server.coverage_mission, mission)
+
+
+def _current_mission(server: Any) -> Mapping[str, Any] | None:
     pointer = server.store.connection.execute(
         "SELECT mission_version_id FROM coverage_mission_pointer "
         "ORDER BY mission_ref LIMIT 1"
     ).fetchone()
-    if pointer is None:
-        return []
-    mission = server.coverage_mission.mission(pointer["mission_version_id"])
-    return screened_companies(server.coverage_mission, mission)
+    return (None if pointer is None else
+            server.coverage_mission.mission(pointer["mission_version_id"]))
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -315,6 +338,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         coordinator = MissionDossierLaneCoordinator(
             connection=server.store.connection, launcher=launcher,
             companies=lambda: _screened_companies(server),
+            mission=lambda: _current_mission(server),
             failure_ledger_dir=getattr(launcher, "state_dir", None))
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

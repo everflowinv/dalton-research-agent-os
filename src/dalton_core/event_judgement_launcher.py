@@ -8,6 +8,7 @@ failure ledger before a retry is considered.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,7 @@ class EventJudgementLauncher(LaneChildLauncher):
 
     def start(self, *, batch_ref: str, company_ref: str,
               event_refs: tuple[str, ...], event_group_hash: str,
-              group_key: str) -> dict[str, Any]:
+              group_key: str, controlled_reentry: str | None = None) -> dict[str, Any]:
         if not isinstance(batch_ref, str) or not batch_ref.strip():
             raise LaneChildRejected("a judgement run needs a batch ref")
         if not self.configured:
@@ -111,12 +112,15 @@ class EventJudgementLauncher(LaneChildLauncher):
         # A writer may restart after the child finished but before the next
         # tick settled it into the durable failure ledger. Adopt that exact
         # ticket instead of truncating its log and paying for the group again.
-        if (self._current is None and ticket_id not in self._adopted_finished
+        if (not controlled_reentry and self._current is None
+                and ticket_id not in self._adopted_finished
                 and self._ticket_path(ticket_id).is_file()):
             adopted = self.status(ticket_id)
             if adopted.get("status") != "running":
                 self._adopted_finished.add(ticket_id)
             return adopted
+        if controlled_reentry is not None:
+            self.claim_controlled_reentry(ticket_id, controlled_reentry)
         return self.spawn(
             digest=digest,
             record={"batch_ref": batch_ref.strip(), "company_ref": company_ref,
@@ -125,6 +129,41 @@ class EventJudgementLauncher(LaneChildLauncher):
             company_ref=company_ref, event_refs=event_refs,
             event_group_hash=event_group_hash,
         )
+
+    def controlled_reentry(self, *, batch_ref: str,
+                           mission: dict[str, Any]) -> str | None:
+        """Whether this exact completed batch has unconsumed redrive authority."""
+        from .controlled_lane_reentry import eligible_controlled_reentries
+
+        digest = hashlib.sha256(
+            f"{self.TICKET_PREFIX}|{batch_ref.strip()}".encode("utf-8")
+        ).hexdigest()[:24]
+        try:
+            ticket = self.status(f"{self.TICKET_PREFIX}:{digest}")
+        except Exception:  # noqa: BLE001 - absence/corruption cannot authorize
+            return None
+        if ticket.get("status") == "running" or self.scheduler_db is None:
+            return None
+        summary = ticket.get("summary") or {}
+        for config_path in (self.judge_model_config, self.verifier_model_config):
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                budget_db = config["budget_db"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            eligible = eligible_controlled_reentries(
+                summary, scheduler_db=self.scheduler_db,
+                budget_db=budget_db, mission=mission,
+                allowed_purposes={
+                    "event_judgement", "event_judgement_verifier",
+                    "thesis_reflection", "thesis_reflection_verifier",
+                },
+            )
+            for entry in eligible:
+                suffix = entry["authorization_suffix"]
+                if not self.controlled_reentry_claimed(ticket["id"], suffix):
+                    return suffix
+        return None
 
 
 __all__ = ["TICKET_PREFIX", "EventJudgementLauncher"]

@@ -130,6 +130,7 @@ class MissionEventJudgementLaneCoordinator:
                     "reason": "the previous judgement batch is still running"}
         held = {}
         chosen = None
+        controlled_reentry = None
         for candidate in candidates:
             candidate = dict(candidate)
             candidate.setdefault("event_refs", (candidate["event_ref"],))
@@ -141,6 +142,14 @@ class MissionEventJudgementLaneCoordinator:
             if decision is None:
                 chosen = candidate
                 break
+            recovery = getattr(self.launcher, "controlled_reentry", None)
+            authorization = (None if recovery is None else recovery(
+                batch_ref=candidate["failure_key"], mission=mission,
+            ))
+            if authorization is not None:
+                chosen = candidate
+                controlled_reentry = authorization
+                break
             held[candidate["failure_key"]] = decision.classification.reason
         if chosen is None:
             return {"status": "held", "settled": settled, "held": held,
@@ -151,7 +160,8 @@ class MissionEventJudgementLaneCoordinator:
                 batch_ref=batch, company_ref=chosen["company_ref"],
                 event_refs=tuple(chosen["event_refs"]),
                 event_group_hash=chosen["group_hash"],
-                group_key=chosen["failure_key"])
+                group_key=chosen["failure_key"],
+                controlled_reentry=controlled_reentry)
         except LaneChildConflict as exc:
             return {"status": "busy", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -162,6 +172,7 @@ class MissionEventJudgementLaneCoordinator:
         return {"status": "launched", "ticket_ref": ticket["id"],
                 "batch_ref": batch, "group_key": chosen["failure_key"],
                 "company_ref": chosen["company_ref"], "held": held,
+                "controlled_reentry": controlled_reentry is not None,
                 "settled": settled}
 
 

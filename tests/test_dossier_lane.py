@@ -1007,15 +1007,24 @@ class CoordinatorTests(unittest.TestCase):
             self.summary = summary or {"dossier_status": "nothing_new"}
             self.capacity_cooldown = capacity_cooldown
             self.started_companies: list[str | None] = []
+            self.reentries: set[tuple[str | None, str]] = set()
+            self.reentry_checks: list[tuple[str | None, str]] = []
+
+        def controlled_reentry(self, *, signature, company_ref, mission):
+            key = (company_ref, signature)
+            self.reentry_checks.append(key)
+            return ":operator-recovery:" + "a" * 16 if key in self.reentries else None
 
         def capacity_probe_interval_seconds(self):
             return self.capacity_cooldown
 
-        def start(self, *, signature, company_ref=None):
+        def start(self, *, signature, company_ref=None,
+                  controlled_reentry=None):
             self.started.append(signature)
             self.started_companies.append(company_ref)
             return {"id": f"company-dossier-run:{run_digest(company_ref, signature)}",
-                    "signature": signature, "company_ref": company_ref}
+                    "signature": signature, "company_ref": company_ref,
+                    "controlled_reentry": controlled_reentry}
 
         def status(self, ticket_ref):
             return {"id": ticket_ref, "status": self.ticket_status,
@@ -1091,6 +1100,29 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(second["company_ref"], second_company)
         self.assertEqual(launcher.started_companies, [ACN, second_company])
         self.assertIn(ACN, second["held"])
+
+    def test_only_the_exact_held_company_signature_with_authority_reenters(self):
+        second_company = "company:sec-cik:0000000002"
+        launcher = self.Launcher(
+            ticket_status="failed",
+            summary={"dossier_status": "rubric_refused",
+                     "failure_reason": "host transport failed"},
+        )
+        mission = {"id": "coverage-mission-version:test:1"}
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher,
+            companies=lambda: [ACN, second_company], mission=lambda: mission,
+        )
+        first = coordinator.dispatch_once()
+        first_key = (ACN, first["signature"])
+        second = coordinator.dispatch_once()
+        second_key = (second_company, second["signature"])
+        self.assertEqual(second["company_ref"], second_company)
+        launcher.reentries.add(first_key)
+        recovered = coordinator.dispatch_once()
+        self.assertEqual(recovered["company_ref"], ACN)
+        self.assertEqual((ACN, recovered["signature"]), first_key)
+        self.assertNotEqual(first_key, second_key)
 
     def test_company_signature_ignores_another_company_claim(self):
         second_company = "company:sec-cik:0000000002"

@@ -54,9 +54,15 @@ class FakeLauncher:
         self.configured = configured
         self.started: list[str] = []
         self.tickets: dict[str, dict] = {}
+        self.reentries: set[str] = set()
+        self.reentry_checks: list[str] = []
+
+    def controlled_reentry(self, *, batch_ref, mission):
+        self.reentry_checks.append(batch_ref)
+        return ":operator-recovery:" + "a" * 16 if batch_ref in self.reentries else None
 
     def start(self, *, batch_ref, company_ref=None, event_refs=(),
-              event_group_hash=None, group_key=None):
+              event_group_hash=None, group_key=None, controlled_reentry=None):
         if not self.configured:
             raise LaneChildRejected("needs a judge and a verifier configuration")
         ticket = {"id": f"event-judgement-run:{len(self.started):024d}",
@@ -65,6 +71,7 @@ class FakeLauncher:
                   "group_key": group_key,
                   "status": "running"}
         self.started.append(batch_ref)
+        ticket["controlled_reentry"] = controlled_reentry
         self.tickets[ticket["id"]] = ticket
         return ticket
 
@@ -243,6 +250,35 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(second["status"], "launched")
         self.assertEqual(second["company_ref"], CTSH)
         self.assertIn("group:a", second["held"])
+
+    def test_only_the_exact_held_group_with_authority_reenters(self):
+        candidates = [
+            {"company_ref": ACN, "event_ref": "event:a", "group_key": "group:a"},
+            {"company_ref": CTSH, "event_ref": "event:b", "group_key": "group:b"},
+        ]
+        coordinator = MissionEventJudgementLaneCoordinator(
+            launcher=self.launcher, mission=lambda: self.mission,
+            pending=lambda mission: candidates,
+        )
+        first = coordinator.dispatch_once()
+        first_key = first["group_key"]
+        self.launcher.settle(first["ticket_ref"], {
+            "judgement_status": "refused", "judged": 0, "refused": 1,
+            "failure_reason": "host transport failed",
+        })
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["company_ref"], CTSH)
+        self.launcher.settle(second["ticket_ref"], {
+            "judgement_status": "refused", "judged": 0, "refused": 1,
+            "failure_reason": "content rejected",
+        })
+        self.launcher.reentries.add(first_key)
+        recovered = coordinator.dispatch_once()
+        self.assertTrue(recovered["controlled_reentry"])
+        self.assertEqual(recovered["company_ref"], ACN)
+        self.assertEqual(recovered["group_key"], first_key)
+        self.assertEqual(self.launcher.tickets[recovered["ticket_ref"]][
+            "controlled_reentry"], ":operator-recovery:" + "a" * 16)
 
     def test_a_refused_newest_group_does_not_starve_older_same_company(self):
         candidates = [

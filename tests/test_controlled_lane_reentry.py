@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
 
 from dalton_core.cockpit_model import _failed_work_trace, build_work
 from dalton_core.controlled_failure_redrive import apply, prepare
-from dalton_core.controlled_lane_reentry import eligible_controlled_reentries
+from dalton_core.controlled_lane_reentry import (
+    _already_consumed,
+    eligible_controlled_reentries,
+)
 from dalton_core.scheduler import ResultEnvelope
 from tests.test_controlled_failure_redrive import ControlledFailureRedriveTests, NOW
 
@@ -91,6 +95,30 @@ class ControlledLaneReentryTests(ControlledFailureRedriveTests):
             {"failed_model_traces": [trace]}, scheduler_db=self.scheduler_db,
             budget_db=self.budget_db, mission=changed,
         ), [])
+
+    def test_a_valid_trace_for_another_lane_purpose_is_not_eligible(self):
+        _work, trace, _suffix = self.cockpit_failure()
+        self.assertEqual(eligible_controlled_reentries(
+            {"failed_model_traces": [trace]}, scheduler_db=self.scheduler_db,
+            budget_db=self.budget_db, mission=self.mission,
+            allowed_purposes={"dossier", "dossier_verifier"},
+        ), [])
+
+    def test_malformed_work_shapes_cannot_crash_consumption_check(self):
+        class Rows:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def execute(self, _sql):
+                return self
+
+            def fetchall(self):
+                return self.rows
+
+        rows = [{"work_order_json": json.dumps(value),
+                 "work_order_hash": "0" * 64}
+                for value in (None, [], {"metadata": []})]
+        self.assertFalse(_already_consumed(Rows(rows), "request:missing"))
 
     def test_missing_or_oversized_trace_list_is_quiet_and_read_only(self):
         before_scheduler = self.scheduler_db.read_bytes()

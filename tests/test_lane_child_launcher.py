@@ -11,6 +11,7 @@ then died.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import time
@@ -88,6 +89,40 @@ class LauncherTests(unittest.TestCase):
         path.with_name("summary.json").write_text(
             json.dumps({"status": "succeeded", "lines": 495}), encoding="utf-8")
         self.assertEqual(launcher.status(ticket["id"])["summary"]["lines"], 495)
+
+    def test_controlled_reentry_claim_is_append_only_and_keeps_summary(self):
+        launcher = self.launcher()
+        ticket = launcher.spawn(
+            digest="e" * 24, record={"signature": "company|input-hash"})
+        launcher.wait(timeout=30)
+        launcher.status(ticket["id"])
+        path = launcher._ticket_path(ticket["id"])
+        summary = b'{"failed_model_traces":[]}\n'
+        path.with_name("summary.json").write_bytes(summary)
+        authorization = ":operator-recovery:" + "a" * 16
+        launcher.claim_controlled_reentry(ticket["id"], authorization)
+        self.assertTrue(launcher.controlled_reentry_claimed(
+            ticket["id"], authorization))
+        self.assertEqual(path.with_name("summary.json").read_bytes(), summary)
+        marker = next(path.parent.glob("controlled-reentry-*.json"))
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(record["ticket_ref"], ticket["id"])
+        self.assertEqual(record["lane_input"], "company|input-hash")
+        self.assertEqual(record["prior_summary_sha256"],
+                         hashlib.sha256(summary).hexdigest())
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(LaneChildRejected):
+            launcher.claim_controlled_reentry(ticket["id"], authorization)
+
+    def test_a_running_child_cannot_claim_controlled_reentry(self):
+        launcher = self.launcher("import time; time.sleep(10)")
+        ticket = launcher.spawn(digest="f" * 24, record={"batch_ref": "group:a"})
+        path = launcher._ticket_path(ticket["id"])
+        path.with_name("summary.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(LaneChildConflict):
+            launcher.claim_controlled_reentry(
+                ticket["id"], ":operator-recovery:" + "b" * 16)
+        self.assertEqual(list(path.parent.glob("controlled-reentry-*.json")), [])
 
     def test_a_torn_summary_is_not_a_crash(self):
         launcher = self.launcher()

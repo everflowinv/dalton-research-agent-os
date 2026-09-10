@@ -106,10 +106,14 @@ class CompanyDossierLauncher(LaneChildLauncher):
             command += ["--max-units", str(self.max_units)]
         return command
 
-    def start(self, *, signature: str, company_ref: str | None = None) -> dict[str, Any]:
+    def start(self, *, signature: str, company_ref: str | None = None,
+              controlled_reentry: str | None = None) -> dict[str, Any]:
         if not isinstance(signature, str) or not signature.strip():
             raise LaneChildRejected("a dossier run needs a ledger signature")
         digest = run_digest(company_ref, signature.strip())
+        if controlled_reentry is not None:
+            self.claim_controlled_reentry(
+                f"{self.TICKET_PREFIX}:{digest}", controlled_reentry)
         return self.spawn(
             digest=digest,
             record={
@@ -120,6 +124,40 @@ class CompanyDossierLauncher(LaneChildLauncher):
             },
             company_ref=company_ref,
         )
+
+    def controlled_reentry(self, *, signature: str, company_ref: str | None,
+                           mission: dict[str, Any]) -> str | None:
+        """Whether the exact persisted company ticket may run once more."""
+        from .controlled_lane_reentry import eligible_controlled_reentries
+
+        if self.scheduler_db is None:
+            return None
+        try:
+            ticket = self.status(
+                f"{self.TICKET_PREFIX}:{run_digest(company_ref, signature)}")
+        except Exception:  # noqa: BLE001 - absence/corruption cannot authorize
+            return None
+        if ticket.get("status") == "running":
+            return False
+        summary = ticket.get("summary") or {}
+        for config_path in (self.model_config_path, self.verifier_model_config_path):
+            if config_path is None:
+                continue
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                budget_db = config["budget_db"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            eligible = eligible_controlled_reentries(
+                summary, scheduler_db=self.scheduler_db,
+                budget_db=budget_db, mission=mission,
+                allowed_purposes={"dossier", "dossier_verifier"},
+            )
+            for entry in eligible:
+                suffix = entry["authorization_suffix"]
+                if not self.controlled_reentry_claimed(ticket["id"], suffix):
+                    return suffix
+        return None
 
 
 __all__ = ["TICKET_PREFIX", "CompanyDossierLauncher", "run_digest"]
