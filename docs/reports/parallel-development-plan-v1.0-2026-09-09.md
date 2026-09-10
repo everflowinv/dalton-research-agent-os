@@ -237,6 +237,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
    `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
 10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
 11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
+13. **演练必须 fail-closed，且不得以能解析到 live 根目录的配置起 driver**（09-10 第二次复演：前置步骤失败后脚本继续，
+    用未改写的 `service.json` 对 live Core 跑了一个 tick；写入被 writer 拒绝，唯一实际写入是 C2 tick 账本的一个文件，已隔离到
+    /tmp。修法：前置失败即中止；driver 配置里任何路径不在临时根下即拒绝；复演时 HOME 指向临时根）。
 12. **自动化冲突解决只允许用于「两边各追加一行」的字典 / 列表 / 元组条目**，且解决后必须先 `python -c "import <module>"`
     再提交（09-10 一次「两边都保留」把嵌套字面量的闭合括号吃掉，主线无法解析，被 P13-M3 agent 发现）。
 
