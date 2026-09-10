@@ -43,6 +43,11 @@ def _latest_rows(connection: Any, table: str, company_ref: str, *, subject_colum
     result = []
     for row in rows:
         record = json.loads(row["record_json"])
+        embedded = record.get("content_hash")
+        calculated = content_hash({key: value for key, value in record.items()
+                                   if key != "content_hash"})
+        if embedded != row["content_hash"] or calculated != row["content_hash"]:
+            continue
         ref = next((str(record.get(key)) for key in (
             "id", "version_id", "projection_id", "event_id", "snapshot_ref",
             "calendar_ref", "consensus_ref", "model_ref") if record.get(key)), "")
@@ -102,30 +107,36 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
             continue
         rows.append({"ref": row["claim_version_id"], "hash": row["content_hash"], "kind": "claim",
                      "text": json.dumps(claim, ensure_ascii=False, sort_keys=True)})
+    from .company_dossier import CompanyDossierAuthority
+    from .forecast_sensitivity import SensitivityProjectionAuthority
+    from .model_forecast_driver import ForecastModelAuthority
+    from .valuation_snapshot import ValuationSnapshotAuthority
+
+    dossier = CompanyDossierAuthority(store).latest(company_ref)
+    forecast = ForecastModelAuthority(store).latest(company_ref)
+    valuation = ValuationSnapshotAuthority(store).latest_version(company_ref)
+    for kind, record in (("company_dossier_versions", dossier),
+                         ("forecast_model_versions", forecast),
+                         ("valuation_snapshot_versions", valuation)):
+        if record is not None:
+            rows.append({"ref": record["id"], "hash": record["content_hash"], "kind": kind,
+                         "text": json.dumps(record, ensure_ascii=False, sort_keys=True)})
     for table in (
-        "company_dossier_versions", "debate_map_versions",
-        "forecast_model_versions", "valuation_snapshot_versions",
+        "debate_map_versions",
         "market_price_series_versions", "catalyst_calendar_versions", "consensus_estimate_versions",
         "prior_model_versions", "event_judgements", "thesis_reflections", "research_events",
     ):
         rows.extend(_latest_rows(store.connection, table, company_ref,
                                 subject_column="subject_ref" if table == "debate_map_versions" else "company_ref",
                                 all_rows=table == "research_events"))
-    forecast_rows = [row for row in rows if row["kind"] == "forecast_model_versions"]
-    if forecast_rows:
-        try:
-            projection = store.connection.execute(
-                "SELECT record_json,content_hash FROM sensitivity_projections "
-                "WHERE company_ref=? AND model_version_ref=? ORDER BY version_number DESC LIMIT 1",
-                (company_ref, forecast_rows[0]["ref"]),
-            ).fetchone()
-        except Exception:
-            projection = None
-        if projection is not None:
-            record = json.loads(projection["record_json"])
-            rows.append({"ref": record["id"], "hash": projection["content_hash"],
-                         "kind": "sensitivity_projections",
-                         "text": json.dumps(record, ensure_ascii=False, sort_keys=True)})
+    projection = SensitivityProjectionAuthority(store).latest(company_ref)
+    if projection is not None and forecast is not None \
+            and projection.get("model_version_ref") == forecast.get("id") \
+            and projection.get("model_version_hash") == forecast.get("content_hash") \
+            and projection.get("inputs_hash") == forecast.get("inputs_hash"):
+        rows.append({"ref": projection["id"], "hash": projection["content_hash"],
+                     "kind": "sensitivity_projections",
+                     "text": json.dumps(projection, ensure_ascii=False, sort_keys=True)})
     for model_row in [row for row in rows if row["kind"] == "forecast_model_versions"]:
         model_record = json.loads(model_row["text"])
         for result in model_record.get("results") or ():
@@ -172,10 +183,19 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
         "mission-deliverable:investment_memo:" + company_ref.rsplit(":", 1)[-1])
     if current is not None and current.get("mission_version_ref") == mission["id"] \
             and (current.get("gate") or {}).get("input_bindings") == bindings:
+        reason = "the frozen memo input is unchanged"
+        skipped = (*_skipped, {"company_ref": company_ref, "reason": reason})
+        if len(candidates) > 1:
+            return collect_frozen_input(store, _excluded=(*_excluded, company_ref),
+                                        _skipped=skipped)
         return {"status": "idle", "memo_status": "nothing_new", "company_ref": company_ref,
-                "reason": "the frozen memo input is unchanged"}
+                "reason": reason, "skipped": list(skipped)}
+    optional = {"debate_map_versions", "market_price_series_versions",
+                "catalyst_calendar_versions", "consensus_estimate_versions", "prior_model_versions",
+                "event_judgements", "thesis_reflections", "research_events"}
     return {"status": "ready", "mission": mission, "playbook": playbook, "company": chosen,
-            "material": rows, "input_bindings": bindings, "skipped": list(_skipped)}
+            "material": rows, "input_bindings": bindings, "skipped": list(_skipped),
+            "optional_missing": sorted(optional - kinds)}
 
 
 def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

@@ -100,13 +100,34 @@ class InvestmentMemoDraftTests(unittest.TestCase):
             def playbook(self, _ref): return playbook
         industry = {"id": "industry-framework:v1", "content_hash": "c" * 64,
                     "kind": "industry_framework", "subject_ref": "industry:it"}
+        latest_memos = {}
         class Deliverables:
             def live_claim_version_refs(self): return {"claim-version:memo:1"}
             def deliverables(self, _ref): return [industry]
-            def latest(self, _ref): return None
+            def latest(self, ref): return latest_memos.get(ref)
+        dossier = {"id": "dossier:v1", "company_ref": "company:READY", "content_hash": "d" * 64}
+        forecast = {"id": "forecast:v2", "company_ref": "company:READY",
+                    "content_hash": "e" * 64, "inputs_hash": "f" * 64, "results": []}
+        valuation = {"id": "valuation:v1", "company_ref": "company:READY", "content_hash": "1" * 64}
+        projection = {"id": "sensitivity:current", "company_ref": "company:READY",
+                      "content_hash": "2" * 64, "model_version_ref": forecast["id"],
+                      "model_version_hash": forecast["content_hash"], "inputs_hash": forecast["inputs_hash"]}
+        class Latest:
+            def __init__(self, records): self.records = records
+            def latest(self, company): return self.records.get(company)
+        class LatestVersion(Latest):
+            def latest_version(self, company): return self.latest(company)
+        dossier_reader = Latest({"company:READY": dossier})
+        forecast_reader = Latest({"company:READY": forecast})
+        valuation_reader = LatestVersion({"company:READY": valuation})
+        projection_reader = Latest({"company:READY": projection})
         with patch("dalton_core.investment_memo_cli.CoverageMissionAuthority", return_value=Missions()), \
              patch("dalton_core.investment_memo_cli.ResearchPlaybookAuthority", return_value=Playbooks()), \
-             patch("dalton_core.investment_memo_cli.MissionDeliverableAuthority", return_value=Deliverables()):
+             patch("dalton_core.investment_memo_cli.MissionDeliverableAuthority", return_value=Deliverables()), \
+             patch("dalton_core.company_dossier.CompanyDossierAuthority", return_value=dossier_reader), \
+             patch("dalton_core.model_forecast_driver.ForecastModelAuthority", return_value=forecast_reader), \
+             patch("dalton_core.valuation_snapshot.ValuationSnapshotAuthority", return_value=valuation_reader), \
+             patch("dalton_core.forecast_sensitivity.SensitivityProjectionAuthority", return_value=projection_reader):
             frozen = collect_frozen_input(store)
         self.assertEqual(frozen["status"], "ready", frozen)
         self.assertEqual(frozen["company"]["company_ref"], "company:READY")
@@ -118,6 +139,52 @@ class InvestmentMemoDraftTests(unittest.TestCase):
         self.assertNotIn("sensitivity:stale", refs)
         claim_row = next(row for row in frozen["material"] if row["kind"] == "claim")
         self.assertEqual(json.loads(claim_row["text"])["context"], "constant currency")
+        projection["inputs_hash"] = "9" * 64
+        with patch("dalton_core.investment_memo_cli.CoverageMissionAuthority", return_value=Missions()), \
+             patch("dalton_core.investment_memo_cli.ResearchPlaybookAuthority", return_value=Playbooks()), \
+             patch("dalton_core.investment_memo_cli.MissionDeliverableAuthority", return_value=Deliverables()), \
+             patch("dalton_core.company_dossier.CompanyDossierAuthority", return_value=dossier_reader), \
+             patch("dalton_core.model_forecast_driver.ForecastModelAuthority", return_value=forecast_reader), \
+             patch("dalton_core.valuation_snapshot.ValuationSnapshotAuthority", return_value=valuation_reader), \
+             patch("dalton_core.forecast_sensitivity.SensitivityProjectionAuthority", return_value=projection_reader):
+            stale = collect_frozen_input(store)
+        self.assertEqual(stale["status"], "held")
+        self.assertIn("sensitivity_projections", stale["reason"])
+
+        # Make the first company complete, publish an unchanged memo marker for
+        # it, and prove the collector continues to the second company.
+        projection["inputs_hash"] = forecast["inputs_hash"]
+        first_gate = {"id": "gate:first", "mission_version_ref": mission["id"]}
+        with store._transaction() as cur:
+            cur.execute("INSERT INTO deep_insight_gate_versions VALUES(?,?,?,?,?)",
+                        (first_gate["id"], "company:FIRST", 1, json.dumps(first_gate), content_hash(first_gate)))
+            cur.execute("INSERT INTO deep_insight_gate_decisions VALUES(?, 'approve')", (first_gate["id"],))
+        first_forecast = {**forecast, "id": "forecast:first", "company_ref": "company:FIRST"}
+        dossier_reader.records["company:FIRST"] = {**dossier, "id": "dossier:first", "company_ref": "company:FIRST"}
+        forecast_reader.records["company:FIRST"] = first_forecast
+        valuation_reader.records["company:FIRST"] = {**valuation, "id": "valuation:first", "company_ref": "company:FIRST"}
+        projection_reader.records["company:FIRST"] = {
+            **projection, "id": "sensitivity:first", "company_ref": "company:FIRST",
+            "model_version_ref": first_forecast["id"]}
+        patches = (
+            patch("dalton_core.investment_memo_cli.CoverageMissionAuthority", return_value=Missions()),
+            patch("dalton_core.investment_memo_cli.ResearchPlaybookAuthority", return_value=Playbooks()),
+            patch("dalton_core.investment_memo_cli.MissionDeliverableAuthority", return_value=Deliverables()),
+            patch("dalton_core.company_dossier.CompanyDossierAuthority", return_value=dossier_reader),
+            patch("dalton_core.model_forecast_driver.ForecastModelAuthority", return_value=forecast_reader),
+            patch("dalton_core.valuation_snapshot.ValuationSnapshotAuthority", return_value=valuation_reader),
+            patch("dalton_core.forecast_sensitivity.SensitivityProjectionAuthority", return_value=projection_reader),
+        )
+        for item in patches: item.start(); self.addCleanup(item.stop)
+        first_ready = collect_frozen_input(store, company_ref="company:FIRST")
+        self.assertEqual(first_ready["status"], "ready", first_ready)
+        latest_memos["mission-deliverable:investment_memo:FIRST"] = {
+            "mission_version_ref": mission["id"],
+            "gate": {"input_bindings": first_ready["input_bindings"]}}
+        after_unchanged = collect_frozen_input(store)
+        self.assertEqual(after_unchanged["status"], "ready", after_unchanged)
+        self.assertEqual(after_unchanged["company"]["company_ref"], "company:READY")
+        self.assertEqual(after_unchanged["skipped"][0]["company_ref"], "company:FIRST")
 
     def test_prompt_keeps_complete_material_and_exact_contract(self):
         rows = [{"ref": "claim-version:1", "kind": "claim", "text": "x" * 12000}]
