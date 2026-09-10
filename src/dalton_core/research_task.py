@@ -616,6 +616,12 @@ def day_settled_micros(
     The reading is C2's own: settled where settled, reserved where a call is
     still open.  A ledger that is absent, unreadable or not yet migrated
     contributes zero -- the pool is still a gate, it just has one fewer input.
+
+    "Unreadable" includes one case worth naming: the ledger is WAL, and C2's
+    read-only open refuses a database with no sidecars, which is a ledger no
+    process is holding open.  In the deployment the writer holds it while this
+    lane reads beside it; with the writer down the reading falls back to
+    reservations alone, which is the pre-C2b number rather than a wrong one.
     """
 
     if budget_db is None:
