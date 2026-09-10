@@ -1,7 +1,7 @@
 # P12d：Deep Insight Gate 十二问草稿与人裁决 v1.0
 
 日期：2026-09-09（v1.1：按 review 修完三个 blocker 与四项意见）
-分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `eb8e5fb`）
+分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `189ab19`）
 蓝图：[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §3 ③ / §5.2 P12d；
 [并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（版本化四条硬规则）、C3、D2
 依赖：P12a 档案（`company_dossier`）、P12c DebateMap、P13-M2 预测行、P11c 估值快照、Q1 rubric/scorer、ADR-0006 / ADR-0008
@@ -110,13 +110,14 @@ approve / reject 之后本 lane 不再重出——重开一个已裁决的门是
 ### 3.1 全量测试（原文）
 
 ```
-Ran 4305 tests in 735.234s
+Ran 4486 tests in 752.945s
 
 OK (skipped=1)
 ```
 
-（对齐当前 main `88a9325` 跑的。本线新增 92 项；另加 cockpit lane 标签一行、
-`rehearse_deploy` 一行 `MigrationSpec`，使既有用例继续通过。）
+（对齐 main `eb8e5fb` 跑的；其后 main 只多了一条 docs 提交，已并入。本线新增 92 项；
+另加 cockpit lane 标签一行、`rehearse_deploy` 一行 `MigrationSpec`、`bootstrap` 一行 schema，
+使既有用例继续通过。）
 
 本线两个文件单独跑：
 
