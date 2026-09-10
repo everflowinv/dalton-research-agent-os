@@ -29,6 +29,11 @@ ROLE_CONFIGS = {
     "earnings_verifier": ("model-routing-policy:dalton-openclaw-earnings-season-verifier", "earnings-season-verifier-model-config.json"),
     "claim_index": ("model-routing-policy:dalton-openclaw-claim-index", "claim-index-model-config.json"),
 }
+MODEL_TIERS = {"cheap", "brain", "verifier"}
+PRESERVED_MISSION_FIELDS = (
+    "title", "objective", "industry_ref", "universe", "research_questions",
+    "deliverables", "source_plan", "bindings", "budget",
+)
 
 
 def checked_json(path: Path, expected_sha256: str) -> dict[str, Any]:
@@ -39,6 +44,49 @@ def checked_json(path: Path, expected_sha256: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return value
+
+
+def validate_model_manifest(manifest: dict[str, Any], approvals: tuple[str, ...]) -> list[str]:
+    if set(manifest) != {"schema_version", "simulation", "roles", "planner", "deliverable", "governance_allowlist"}:
+        raise ValueError("model manifest has an invalid closed shape")
+    if manifest["schema_version"] != "activation-models-0.1" or manifest["simulation"] is not True:
+        raise ValueError("model manifest must explicitly declare simulation=true")
+    roles = manifest["roles"]
+    if not isinstance(roles, dict) or set(roles) != set(ROLE_CONFIGS):
+        raise ValueError("model manifest must name every approved activation role exactly once")
+    all_tiers = [*roles.values(), manifest["planner"], manifest["deliverable"]]
+    if any(type(tier) is not str or tier not in MODEL_TIERS for tier in all_tiers):
+        raise ValueError("model manifest contains an unsupported tier")
+    for prefix in ("event", "zero_base", "dossier", "earnings"):
+        if roles[f"{prefix}_brain"] == roles[f"{prefix}_verifier"]:
+            raise ValueError(f"{prefix} producer and verifier must use different tiers")
+    allowlist = manifest["governance_allowlist"]
+    if (not isinstance(allowlist, list) or any(
+            not isinstance(name, str) or Path(name).name != name
+            or not name.endswith(".json") for name in allowlist)
+            or len(set(allowlist)) != len(allowlist)):
+        raise ValueError("governance_allowlist must contain unique plain JSON filenames")
+    unlisted = sorted(set(approvals) - set(allowlist))
+    if unlisted:
+        raise ValueError("governance approval is not explicitly allowlisted: " + ", ".join(unlisted))
+    return allowlist
+
+
+def validate_mission_candidate(params: dict[str, Any], active: dict[str, Any]) -> None:
+    if params.get("prior_version_ref") != active["id"]:
+        raise ValueError("mission candidate is not based on the active mission version ref")
+    for field in PRESERVED_MISSION_FIELDS:
+        if params.get(field) != active.get(field):
+            raise ValueError(f"mission candidate changes preserved scope field {field}")
+    autonomy = params.get("autonomy") or {}
+    if autonomy.get("automation_principal") != active["autonomy"].get("automation_principal"):
+        raise ValueError("mission candidate changes autonomy.automation_principal")
+    if not set(active["autonomy"].get("may_write") or ()).issubset(
+            set(autonomy.get("may_write") or ())):
+        raise ValueError("mission candidate removes an active write scope")
+    if not set(active["autonomy"].get("human_checkpoints") or ()).issubset(
+            set(autonomy.get("human_checkpoints") or ())):
+        raise ValueError("mission candidate removes an active checkpoint")
 
 
 class ActivationScenarioRehearsal(Rehearsal):
@@ -67,12 +115,13 @@ class ActivationScenarioRehearsal(Rehearsal):
 
         if not self.confined:
             raise RuntimeError("SIMULATION activation requires passed confinement")
+        catalog = next((step for step in self.steps
+                        if step.name == "model catalog sync (copy of model-router.sqlite)"), None)
+        if catalog is None or not catalog.ok:
+            raise RuntimeError("SIMULATION activation requires a successful model catalog sync")
         params = checked_json(self.mission_params_path, self.mission_sha256)
         manifest = checked_json(self.model_manifest_path, self.model_manifest_sha256)
-        if set(manifest) != {"schema_version", "simulation", "roles", "planner", "deliverable"}:
-            raise ValueError("model manifest has an invalid closed shape")
-        if manifest["schema_version"] != "activation-models-0.1" or manifest["simulation"] is not True:
-            raise ValueError("model manifest must explicitly declare simulation=true")
+        validate_model_manifest(manifest, self.approve_governance)
         approved = []
         for name in self.approve_governance:
             if Path(name).name != name or not name.endswith(".json") or self.governance_source is None:
@@ -91,11 +140,11 @@ class ActivationScenarioRehearsal(Rehearsal):
         core = self.temp_state / "core.sqlite"
         with DaltonStore(core) as store:
             ref = params.pop("mission_ref")
+            active = CoverageMissionAuthority(store).active_mission(ref)
+            validate_mission_candidate(params, active)
             mission = CoverageMissionAuthority(store).create_mission(
                 ref, actor_ref=self.simulation_actor, **params)
         roles = manifest["roles"]
-        if set(roles) != set(ROLE_CONFIGS):
-            raise ValueError("model manifest must name every approved activation role exactly once")
         installed: list[str] = []
         for role, (policy_id, filename) in ROLE_CONFIGS.items():
             tier = roles[role]
@@ -135,8 +184,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approve-governance", action="append", default=[])
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
-    if not str(args.temp_root).startswith(("/tmp/", "/private/tmp/", "/var/folders/")):
+    resolved_temp = args.temp_root.expanduser().resolve()
+    if not any(resolved_temp.is_relative_to(Path(root))
+               for root in ("/tmp", "/private/tmp", "/var/folders")):
         raise SystemExit("--temp-root must live under a temporary directory")
+    if resolved_temp == args.live_root.expanduser().resolve():
+        raise SystemExit("--temp-root must differ from --live-root")
     rehearsal = ActivationScenarioRehearsal(
         args.live_root, args.temp_root, source_root=args.source_root,
         openclaw_config=args.openclaw_config, mission_params=args.mission_params,
