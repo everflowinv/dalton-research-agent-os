@@ -145,6 +145,12 @@ class CockpitModelError(RuntimeError):
         self.failure_trace = None if failure_trace is None else dict(failure_trace)
 
 
+class CockpitModelRouteUnavailable(CockpitModelError):
+    """No route was selected, so no model content was produced or refused."""
+
+    lane_status = "model_unavailable"
+
+
 def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
     """Return the bounded immutable-work binding carried by a model failure."""
 
@@ -286,7 +292,7 @@ def lane_status_for(exc: BaseException, fallback: str) -> str:
     kind of work has had its share of today" call for opposite actions.
     """
 
-    if isinstance(exc, CockpitModelPoolExhausted):
+    if isinstance(exc, (CockpitModelPoolExhausted, CockpitModelRouteUnavailable)):
         return exc.lane_status
     return fallback
 
@@ -305,6 +311,8 @@ def _raise_failure(message: str, rejection: Mapping[str, Any] | None, *,
 
     if rejection is not None:
         raise CockpitModelPoolExhausted(message, rejection, failure_trace=failure_trace)
+    if message == "no model route is available right now":
+        raise CockpitModelRouteUnavailable(message, failure_trace=failure_trace)
     raise CockpitModelError(message, failure_trace=failure_trace)
 
 
@@ -931,7 +939,11 @@ class CockpitModel:
             error = envelope.get("error") or {}
             code = error.get("code")
             suffix = f" ({code})" if isinstance(code, str) and code else ""
-            raise CockpitModelError(
+            error_type = (
+                CockpitModelRouteUnavailable
+                if code == "MODEL_ROUTE_REJECTED" else CockpitModelError
+            )
+            raise error_type(
                 f"the model call did not succeed{suffix}",
                 failure_trace=failure_trace,
             )
@@ -1198,6 +1210,7 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
 
 __all__ = [
     "CockpitModel", "CockpitModelError", "CockpitModelPoolExhausted",
+    "CockpitModelRouteUnavailable",
     "WORKER_REF", "admit_day_ledger", "build_work", "call_cost_micros",
     "independent_model_call", "lane_status_for", "pool_refusal_message", "purposes", "register_purpose",
     "settle_day_ledger", "unwrap_json_object",

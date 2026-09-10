@@ -101,6 +101,25 @@ class ChildRecoveryTests(unittest.TestCase):
             self.assertEqual(len(record["verifier_provider_contract"]), 64)
             self.assertEqual(record["verifier_provider_contract"],
                              ticket["verifier_provider_contract"])
+            self.assertEqual(len(record["configuration_signature"]), 64)
+
+    def test_launcher_configuration_signature_changes_with_model_selection(self):
+        with TemporaryDirectory() as directory:
+            state = Path(directory)
+            producer = state / "producer.json"
+            verifier = state / "verifier.json"
+            policy = state / "tracking.json"
+            producer.write_text('{"routing_policy_ref":"policy:a"}', encoding="utf-8")
+            verifier.write_text('{"routing_policy_ref":"policy:v"}', encoding="utf-8")
+            policy.write_text('{"schema_version":"tracking-policy-v1"}', encoding="utf-8")
+            launcher = ZeroBaseReviewLauncher(
+                state_dir=state, model_config=producer,
+                verifier_model_config=verifier, policy_path=policy,
+            )
+            before = launcher.configuration_signature()
+            producer.write_text('{"routing_policy_ref":"policy:b"}', encoding="utf-8")
+            after = launcher.configuration_signature()
+            self.assertNotEqual(before, after)
 
     def test_unchanged_top_grant_does_not_append_every_tick(self):
         with TemporaryDirectory() as directory:

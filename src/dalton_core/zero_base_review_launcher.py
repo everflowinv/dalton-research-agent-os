@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .store import canonical_json
 
 TICKET_PREFIX = "zero-base-review-run"
 
@@ -62,6 +63,28 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
                 and self.verifier_model_config is not None
                 and self.verifier_model_config.is_file())
 
+    def configuration_signature(self) -> str:
+        """Bind a review retry to the exact prompt, route, and policy inputs."""
+        from .cockpit_model import verifier_provider_contract_fingerprint
+
+        material: list[dict[str, str]] = []
+        for role, path in (
+            ("producer", self.model_config),
+            ("verifier", self.verifier_model_config),
+            ("tracking_policy", self.policy_path),
+        ):
+            material.append({
+                "role": role,
+                "content_hash": ("absent" if path is None
+                                 else hashlib.sha256(path.read_bytes()).hexdigest()),
+            })
+        return hashlib.sha256(canonical_json({
+            "schema_version": "zero-base-review-configuration-0.1",
+            "files": material,
+            "verifier_provider_contract": verifier_provider_contract_fingerprint(
+                "zero_base_review_verifier"),
+        }).encode()).hexdigest()
+
     def _command(self, *, ticket_dir: Path, mode: str = "review",
                  company_refs: Sequence[str] = (), **_: Any) -> list[str]:
         command = [
@@ -83,7 +106,8 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         return command
 
     def start(
-        self, *, mode: str, batch_ref: str, company_refs: Sequence[str] = ()
+        self, *, mode: str, batch_ref: str, company_refs: Sequence[str] = (),
+        configuration_signature: str | None = None,
     ) -> dict[str, Any]:
         if mode not in ("review", "checks"):
             raise LaneChildRejected("a zero-base run is a review or a check pass")
@@ -96,14 +120,19 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         from .cockpit_model import verifier_provider_contract_fingerprint
         provider_contract = verifier_provider_contract_fingerprint(
             "zero_base_review_verifier")
+        current_signature = self.configuration_signature()
+        if (configuration_signature is not None
+                and configuration_signature != current_signature):
+            raise LaneChildRejected("zero-base review configuration changed before launch")
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{mode}|{batch_ref.strip()}|{provider_contract}".encode("utf-8")
+            f"{self.TICKET_PREFIX}|{mode}|{batch_ref.strip()}|{current_signature}".encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,
             record={"mode": mode, "batch_ref": batch_ref.strip(),
                     "company_refs": list(company_refs),
-                    "verifier_provider_contract": provider_contract},
+                    "verifier_provider_contract": provider_contract,
+                    "configuration_signature": current_signature},
             mode=mode, company_refs=list(company_refs),
         )
 

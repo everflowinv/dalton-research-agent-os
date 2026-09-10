@@ -70,11 +70,13 @@ def may_write_review(mission: Mapping[str, Any] | None) -> bool:
     return WRITE_SCOPE in set(scopes)
 
 
-def review_item_key(item: Mapping[str, Any], *, provider_contract: str | None = None) -> str:
+def review_item_key(item: Mapping[str, Any], *, provider_contract: str | None = None,
+                    configuration_signature: str | None = None) -> str:
     """A refusal belongs to one company's actual review input, not its month."""
     fingerprint = item.get("inputs_hash") or content_hash(dict(item))
-    contract = (provider_contract if provider_contract is not None
-                else verifier_provider_contract_fingerprint("zero_base_review_verifier"))
+    contract = configuration_signature or (
+        provider_contract if provider_contract is not None
+        else verifier_provider_contract_fingerprint("zero_base_review_verifier"))
     return (f"review:{item['company_ref']}|{item['trigger']}|"
             f"{item['period_label']}|{fingerprint}|{contract}")
 
@@ -140,6 +142,7 @@ class MissionZeroBaseLaneCoordinator:
             "checks_fresh": checks.get("fresh"),
             "checks_digest": checks.get("digest"),
             "verifier_provider_contract": ticket.get("verifier_provider_contract"),
+            "configuration_signature": ticket.get("configuration_signature"),
         }
         reason = summary.get("failure_reason")
         if reason:
@@ -153,6 +156,7 @@ class MissionZeroBaseLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         launch_provider_contract = str(settled.get("verifier_provider_contract") or "legacy")
+        launch_configuration = settled.get("configuration_signature")
         self._open = None
         mode = str(settled.get("mode") or "")
         batch = str(settled.get("batch_ref") or "")
@@ -183,7 +187,11 @@ class MissionZeroBaseLaneCoordinator:
                     "company_ref", "trigger", "period_label", "inputs_hash"
                 )):
                     continue
-                key = review_item_key(outcome, provider_contract=launch_provider_contract)
+                key = review_item_key(
+                    outcome, provider_contract=launch_provider_contract,
+                    configuration_signature=(None if launch_configuration is None
+                                             else str(launch_configuration)),
+                )
                 if outcome.get("status") in {"fresh", "duplicate"}:
                     self.budget.clear(key)
                 else:
@@ -225,10 +233,15 @@ class MissionZeroBaseLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         due = list(state.get("due") or ())
         digest = str(state.get("checks_digest") or "")
+        configuration_signature = (
+            self.launcher.configuration_signature()
+            if callable(getattr(self.launcher, "configuration_signature", None))
+            else verifier_provider_contract_fingerprint("zero_base_review_verifier")
+        )
         eligible = []
         holds = []
         for candidate in due:
-            key = review_item_key(candidate)
+            key = review_item_key(candidate, configuration_signature=configuration_signature)
             scope = f"review:{candidate['company_ref']}|"
             control = permission_key(key, mission, self.launcher, connection=self.connection)
             for row in (self.budget.parked_items() + self.budget.terminal_items()
@@ -244,7 +257,10 @@ class MissionZeroBaseLaneCoordinator:
         if eligible:
             mode = "review"
             companies = [str(item["company_ref"]) for item in eligible]
-            batch = content_hash(sorted(review_item_key(item) for item in eligible))
+            batch = content_hash(sorted(
+                review_item_key(item, configuration_signature=configuration_signature)
+                for item in eligible
+            ))
         elif digest and digest != self._checked:
             mode = "checks"
             companies = []
@@ -265,7 +281,8 @@ class MissionZeroBaseLaneCoordinator:
                     "failure": blocked.as_wire()}
         try:
             ticket = self.launcher.start(
-                mode=mode, batch_ref=batch, company_refs=companies
+                mode=mode, batch_ref=batch, company_refs=companies,
+                configuration_signature=configuration_signature,
             )
         except LaneChildConflict as exc:
             return {"status": "busy", "mode": mode, "settled": settled,

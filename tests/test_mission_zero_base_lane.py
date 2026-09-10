@@ -36,13 +36,17 @@ class FakeLauncher:
         self.tickets = tickets or {}
         self.counter = 0
 
-    def start(self, *, mode, batch_ref, company_refs=()):
+    def configuration_signature(self):
+        return getattr(self, "signature", "a" * 64)
+
+    def start(self, *, mode, batch_ref, company_refs=(), configuration_signature=None):
         from dalton_core.mission_zero_base_lane import verifier_provider_contract_fingerprint
         self.counter += 1
         ticket = {"id": f"zero-base-review-run:{self.counter:024x}", "mode": mode,
                   "batch_ref": batch_ref, "company_refs": list(company_refs),
                   "verifier_provider_contract": verifier_provider_contract_fingerprint(
-                      "zero_base_review_verifier")}
+                      "zero_base_review_verifier"),
+                  "configuration_signature": configuration_signature}
         self.started.append(ticket)
         self.tickets.setdefault(ticket["id"], {"status": "running", **ticket})
         return ticket
@@ -120,15 +124,13 @@ class DispatchTests(unittest.TestCase):
     def test_a_provider_contract_change_retires_an_old_review_refusal(self) -> None:
         launcher = FakeLauncher()
         lane = coordinator(launcher, due=DUE, digest="")
-        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
-                   return_value="a" * 64):
-            old_key = __import__("dalton_core.mission_zero_base_lane", fromlist=["review_item_key"]).review_item_key(DUE[0])
-            lane.budget.record(old_key, classification=Classification(
-                CONTENT_REFUSED, "verifier refused the content", "fixture"))
-            self.assertEqual(lane.dispatch_once()["status"], "terminal")
-        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
-                   return_value="b" * 64):
-            self.assertEqual(lane.dispatch_once()["status"], "launched")
+        old_key = __import__("dalton_core.mission_zero_base_lane", fromlist=["review_item_key"]).review_item_key(
+            DUE[0], configuration_signature=launcher.configuration_signature())
+        lane.budget.record(old_key, classification=Classification(
+            CONTENT_REFUSED, "verifier refused the content", "fixture"))
+        self.assertEqual(lane.dispatch_once()["status"], "terminal")
+        launcher.signature = "b" * 64
+        self.assertEqual(lane.dispatch_once()["status"], "launched")
 
     def test_old_child_failure_is_settled_against_its_launch_contract(self) -> None:
         launcher = FakeLauncher()
@@ -138,10 +140,12 @@ class DispatchTests(unittest.TestCase):
         lane.lane_state = lambda _m, _n: {"due": list(current_due), "checks_digest": ""}
         with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
                    return_value="a" * 64):
+            launcher.signature = "a" * 64
             first = lane.dispatch_once()
         launcher.tickets[first["ticket_ref"]] = {
             "status": "failed", "mode": "review", "batch_ref": launcher.started[-1]["batch_ref"],
             "verifier_provider_contract": "a" * 64,
+            "configuration_signature": "a" * 64,
             "summary": {"failure_reason": "content_refused", "reviews": [{
                 **due[0], "status": "refused",
                 "reason": "content_refused"}]},
@@ -149,6 +153,7 @@ class DispatchTests(unittest.TestCase):
         current_due.clear()
         with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
                    return_value="b" * 64):
+            launcher.signature = "b" * 64
             settled = lane.dispatch_once()
         self.assertEqual(settled["status"], "idle")
         terminal_keys = [row["item_key"] for row in lane.budget.terminal_items()]
@@ -185,6 +190,38 @@ class DispatchTests(unittest.TestCase):
             restarted = build()
             self.assertEqual(len(restarted.budget.parked_items()), 1)
             self.assertEqual(restarted.dispatch_once()["status"], "launched")
+
+    def test_route_unavailable_parks_and_configuration_repair_releases_company(self) -> None:
+        with TemporaryDirectory() as directory:
+            launcher = FakeLauncher()
+            due = [{**DUE[0], "inputs_hash": "input-1"}]
+            lane = MissionZeroBaseLaneCoordinator(
+                launcher=launcher, mission=lambda: MISSION,
+                lane_state=lambda _m, _n: {"due": list(due), "checks_digest": ""},
+                clock=lambda: NOW, failure_ledger_dir=Path(directory),
+            )
+            first = lane.dispatch_once()
+            launcher.tickets[first["ticket_ref"]] = {
+                "status": "succeeded", "mode": "review",
+                "batch_ref": launcher.started[-1]["batch_ref"],
+                "configuration_signature": launcher.configuration_signature(),
+                "summary": {"status": "succeeded", "review_status": "refused",
+                            "reviews": [{**due[0],
+                                         "status": "refused",
+                                         "lane_status": "model_unavailable",
+                                         "reason": "the model call did not succeed: no model route is available right now"}]},
+            }
+            parked = lane.dispatch_once()
+            self.assertEqual(parked["status"], "launched")  # the one bounded probe
+            launcher.tickets[parked["ticket_ref"]] = {
+                **launcher.tickets[parked["ticket_ref"]], "status": "succeeded",
+                "summary": launcher.tickets[first["ticket_ref"]]["summary"],
+            }
+            self.assertEqual(lane.dispatch_once()["status"], "parked")
+            launcher.signature = "b" * 64
+            recovered = lane.dispatch_once()
+            self.assertEqual(recovered["status"], "launched")
+            self.assertEqual(recovered["due"], 1)
 
     def test_a_running_child_keeps_the_slot(self) -> None:
         launcher = FakeLauncher()

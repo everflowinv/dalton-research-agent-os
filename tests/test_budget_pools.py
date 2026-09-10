@@ -546,12 +546,21 @@ class LaneStatusTests(unittest.TestCase):
         )
 
     def test_a_pool_refusal_keeps_its_word_and_anything_else_falls_back(self) -> None:
+        from dalton_core.cockpit_model import CockpitModelRouteUnavailable
+
         self.assertEqual(
             lane_status_for(self.refusal(), "model_unavailable"),
             POOL_EXHAUSTED_STATUS)
         self.assertEqual(
             lane_status_for(CockpitModelError("no route"), "model_unavailable"),
             "model_unavailable")
+        self.assertEqual(
+            lane_status_for(
+                CockpitModelRouteUnavailable("no model route is available right now"),
+                "refused",
+            ),
+            "model_unavailable",
+        )
 
     def test_the_planner_child_reports_a_budget_decision_not_an_outage(self) -> None:
         # End to end through the real child: the cockpit call raises, and the
