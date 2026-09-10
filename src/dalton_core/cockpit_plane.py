@@ -200,9 +200,11 @@ REGISTRY_LANE_LABELS = {
     "mission_reopen": "看已过闸的公司够不够重写一版",
     "catalog_sync": "跟住网关有哪些模型可用",
     "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
+    "zero_base_review": "每月从零重问：今天第一次看会不会建立观点",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
+
 
 # P17d 四格: the six words the lane panel counts by, in the owner's language.
 # The panel is a count of the rows already on the page, not a second reading of
@@ -248,6 +250,49 @@ FAILURE_CLASS_LABELS: dict[str, str] = {
     "content_refused": "内容不可用：读到了但用不了，不再重试",
     "transient": "临时失败：有限次重试",
 }
+
+OUTCOME_LABELS = {
+    "should_have_moved": "当时该动没动（候选）",
+    "held": "按兵不动是对的",
+    "moved_right": "动对了",
+    "moved_wrong": "动反了",
+    "not_confirmed": "方向没被证实",
+    "pending": "还评不出来",
+    "unavailable": "评不了，有理由",
+}
+
+
+def _judgement_outcome_panel(metric: Any) -> dict[str, Any]:
+    """W4: the judgement outcome counts, in the owner's words.
+
+    Answers ``available: false`` with the reason on a Core whose zero-base
+    lane has never run, which is what every other reader on this page does and
+    is the only honest thing to show: a row of zeroes would say every decision
+    we ever made was right.
+    """
+
+    if not isinstance(metric, Mapping):
+        return {"available": False, "reason": "这一版回头看还没有判断结果台账"}
+    if not metric.get("available"):
+        return {"available": False, "reason": metric.get("reason")}
+    to_date = metric.get("to_date") or {}
+    return {
+        "available": True,
+        "checked": metric.get("checked"),
+        "companies": metric.get("companies"),
+        "rows": [
+            {"outcome": outcome, "label": OUTCOME_LABELS.get(outcome, outcome),
+             "to_date": int(to_date.get(outcome) or 0),
+             "this_week": int((metric.get("this_week") or {}).get(outcome) or 0)}
+            for outcome in OUTCOME_LABELS
+            if (to_date.get(outcome) or 0) or
+            ((metric.get("this_week") or {}).get(outcome) or 0)
+        ],
+        "should_have_moved": metric.get("should_have_moved"),
+        "moved_right": metric.get("moved_right"),
+        "note": "这些是候选，不是绩效考核：公式冻结、可重放，没有模型参与。",
+    }
+
 # -- INT2: P14a / C1 / P14e / P14-M / Q2, in the owner's language --------------
 #
 # The same rule as the Wave 1 block above: every reader below answers empty on
@@ -3638,6 +3683,13 @@ class CockpitPlane:
                  "refs": list(item.get("refs") or ())}
                 for item in record.get("backlog_candidates") or ()
             ],
+            # W4 / Chem §3.3: 不动也要能被评价. Counts only -- the rows behind
+            # them are derived by a frozen formula with no model in it, so the
+            # page can show them without the "a model said this" caveat every
+            # other judgement on this page carries.
+            "judgement_outcomes": _judgement_outcome_panel(
+                (record.get("metrics") or {}).get("judgement_outcomes")
+            ),
             # These are sentences for the owner, not decisions: the reflection
             # has no path to change a policy and says so in its own record.
             "policy_suggestions": list(record.get("policy_suggestions") or ()),

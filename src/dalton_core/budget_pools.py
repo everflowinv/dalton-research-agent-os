@@ -155,6 +155,10 @@ LANE_POOLS: dict[str, str] = {
     # preview and a calibration are responses to a dated event, and the day
     # a company reports is the day this pool is meant to be spent.
     "dispatch_earnings_season": "event_response",
+    # W4: the monthly zero-base review is coverage work -- it is the
+    # covering analyst re-reading their own file -- and it is priced like
+    # it, one bounded call per company per month.
+    "dispatch_zero_base_review": "coverage",
     # P14e.
     "dispatch_research_task": "adhoc",
     # P12c: drafting the debate map is coverage work, like the dossier.
@@ -198,6 +202,8 @@ PURPOSE_POOLS: dict[str, str] = {
     "research_task": "adhoc",
     "adhoc_research": "adhoc",
     "tracking": "event_response",
+    # W4: the same pool its lane spends from, or the two would disagree.
+    "zero_base_review": "coverage",
 }
 
 DEFAULT_POOL = "coverage"

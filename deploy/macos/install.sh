@@ -699,6 +699,19 @@ elif [[ -n "$judgement_pin" || -n "$verifier_pin" ]]; then
 else
   print "note: set DALTON_EVENT_JUDGEMENT_MODEL_TIER and DALTON_EVENT_VERIFIER_MODEL_TIER (different families) to install the event-judgement lane."
 fi
+# W4: the monthly zero-base review. One configuration, so all-or-nothing is
+# automatic. Without it the lane is absent from the plist entirely rather than
+# installed and permanently gated -- the argv fragment is gated on this file.
+#
+#   DALTON_ZERO_BASE_REVIEW_MODEL_TIER=brain
+if [[ -n "${DALTON_ZERO_BASE_REVIEW_MODEL_PROFILE:-}" || -n "${DALTON_ZERO_BASE_REVIEW_MODEL_TIER:-}" ]]; then
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-zero-base-review" \
+    "zero-base-review-model-config.json" \
+    "${DALTON_ZERO_BASE_REVIEW_MODEL_PROFILE:-}" "${DALTON_ZERO_BASE_REVIEW_MODEL_TIER:-}"
+else
+  print "note: set DALTON_ZERO_BASE_REVIEW_MODEL_TIER=brain to install the monthly zero-base review lane."
+fi
 # P12b: the claim index. One configuration, so all-or-nothing is automatic.
 # The maintenance pool is the tightest of C2's four at 5% and this is where the
 # index lands, so it is worth turning on deliberately rather than by default.
