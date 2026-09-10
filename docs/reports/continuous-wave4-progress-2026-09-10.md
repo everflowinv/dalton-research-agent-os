@@ -43,3 +43,9 @@ Independent review of `f1d61b8` found remaining read-side defects: bindings reta
 The second frozen full run at `f1d61b8` passed **6,243 tests / 514.522s, 1 skip** (`/tmp/dalton-wave4-final-full-tests.log`). Subsequent bound-router repair `5ad6180` passed 142 integrated focused tests / 25.840s, 1 skip; the previously failing copied-state model page now returns 32 purpose rows, 26 configured, zero binding errors. The full result remains bound to `f1d61b8`, not to later repairs.
 
 Copied-state diagnosis also found a rehearsal gap: extraction model config retained the live absolute router path while newly installed role configs used the temporary router. All direct root reads used read-only router handles and child dispatch was stubbed; no live write/model call occurred. Normal install runs extraction setup first and does not create that mismatch. The rehearsal is being strengthened to rebind and validate internal model-config paths before the final freeze.
+
+## Release checkpoint accepted
+
+`79e0ef7ca9348484bc549cdc36b3846bd404f7b3` passed **6,248 tests / 519.224s, 1 skip**. The same unchanged checkout passed 430 Python/SQL + 3 HTML byte comparisons, JavaScript syntax, the 13-step current-copy rehearsal (all 12 model configs internally confined), and the copied Cockpit model page. Original main's external DeepSeek patch hash remains unchanged. [Final report](continuous-wave4-release-2026-09-10.md) is now the authoritative acceptance record.
+
+Next step is owner deployment and mission v14 signing using the prepared private packet, followed by installed-runtime and actual product acceptance. The packet preserves exact source/wheel/test/rehearsal bindings and includes a read-only postdeploy checker. No live deployment, signature, metadata declaration or paid model call has run. This checkpoint completes predeployment development and acceptance, not live product acceptance.

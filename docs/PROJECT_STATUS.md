@@ -6,13 +6,13 @@
 
 Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 commit/push；部署和人工签署交给 owner。代码在隔离分支 `continuous-integration-wave4` 集成，原 main 中另一会话的四个 DeepSeek 文件完整保留。
 
-**当前候选 `79e0ef7` 正在最终验收，尚未部署。** 前一个冻结点 `f1d61b8` 已通过 6,243 项全量测试 / 514.522s（1 skip）。随后修复了 Cockpit 各环节实际路由库读取、planner 特殊配置字段、多模型候选集合显示，以及演练副本内部路径隔离；配置/Cockpit 142 项重点检查与演练 106 项检查通过。最终候选的全量结果完成后另行记录，不能沿用前一版本的全量结果。
+**当前验收代码 `79e0ef7`：6,248 项全量测试 / 519.224s 通过（1 skip），尚未部署。** 同一冻结代码通过 wheel、页面语法及当前 live 副本 13 步演练，12 份模型配置内部路径全部 confined；模型页成功读取 32 个环节（26 configured / 6 unconfigured）。详见 [最终验收报告](reports/continuous-wave4-release-2026-09-10.md)。前一个 `f1d61b8` 的 6,243 项结果仅保留为历史检查点。
 
 模型路由使用当前 broker 公开目录，别名、价格、容量与凭据变化追加为不可变 profile 版本。Cockpit 按实际消费配置显示并切换各环节模型，生成和独立核验有各自 purpose；动态外部配置明确显示只读或未配置。新别名的模型家族不靠名字猜测，由 owner 在当前页面作 route-bound 声明。切换常驻服务配置会提示需要重启。
 
 最终候选 wheel 已通过 430 个 Python/SQL 文件及 3 个 HTML 文件逐字校验，页面 JavaScript 语法通过。三个 Sol 代理分别完成配置读取交叉修复、最终 wheel 校验、演练路径隔离与当前副本复验；主代理做集成、全量回归、签署包及最终交付。详见 [wave 4 进度](reports/continuous-wave4-progress-2026-09-10.md)。
 
-**当前 next step：** 完成同一冻结代码的全量测试与内部路径隔离后的副本演练，更新部署包的精确代码/wheel/报告绑定。通过后由 owner 执行部署及 mission v14 签署，再对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
+**当前 next step：** 部署包已绑定通过验收的精确代码、wheel 和报告。由 owner 执行部署及 mission v14 签署，再对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
 
 历史验收：wave 3 `d21de7d` 为 6,184 项通过；wave 2 `e7e06bb` 为 6,114 项通过。此前 DeepSeek route drift 已由 wave 4 的 Dalton 目录迁移处理，不再要求另一个仅更新模型的会话承担 Dalton 迁移。
 
