@@ -106,6 +106,18 @@ ASPECT_LABELS = {
     "catalyst_calendar": "日程与催化", "history_of_price_drivers": "股价的历史驱动",
     "industry": "行业", "other": "其他",
 }
+# P15d: the owner's language for a conviction call's three closed fields.
+CALL_DIRECTION_LABELS = {"long": "做多", "short": "做空", "avoid": "回避"}
+CALL_HORIZON_LABELS = {
+    "3_6_months": "3–6 个月", "6_12_months": "6–12 个月",
+    "1_3_years": "1–3 年", "3_5_years": "3–5 年",
+}
+CALL_STANDARD_LABELS = {
+    "met": "达到手册的风险回报标准",
+    "not_met": "没达到手册的风险回报标准",
+    "unavailable": "没给出可对照的数字",
+    "not_applicable": "手册对这类 call 没有回报标准",
+}
 # P11c asked for this one specifically: a percentile computed while the
 # fundamentals never moved is the price's percentile wearing a multiple's
 # clothes, and a reader who is not told cannot know.
@@ -175,6 +187,8 @@ REGISTRY_LANE_LABELS = {
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
+    "conviction_call": "提出值得下注的判断，等你裁决",
+    "mission_reopen": "看已过闸的公司够不够重写一版",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
@@ -279,6 +293,26 @@ CHECKPOINT_TABLES = {
 CHECKPOINT_TITLES = {
     "thesis_revision_candidate": "有事情发生，可能要改我们对这家公司的判断",
     "gate_reopen": "一道已经过掉的闸，现在有证据说可以重开",
+}
+# What each one's buttons say, when this Core can actually decide it. The
+# words are the authorities' own verdict vocabularies -- ``accept / reject /
+# defer`` (P14b) and ``approve / decline`` (P14d) -- so a button cannot offer
+# something the writer would refuse.
+CHECKPOINT_ACTIONS = {
+    "thesis_revision_candidate": (
+        {"decision": "accept", "label": "接受，出新版本"},
+        {"decision": "reject", "label": "不接受"},
+        {"decision": "defer", "label": "先放着，再看看"},
+    ),
+    "gate_reopen": (
+        {"decision": "approve", "label": "重出一版"},
+        {"decision": "decline", "label": "不重出"},
+    ),
+}
+# And what it says instead, on a Core whose writer predates the decision ops.
+CHECKPOINT_UNDECIDABLE_NOTES = {
+    "thesis_revision_candidate": "这一项要人裁决，而这个 Core 上还没有裁决账本（ADR-0007）",
+    "gate_reopen": "这一项要人裁决，而这个 Core 上还没有裁决账本（ADR-0008）",
 }
 # C2: the four pools a day's budget is split into, named for what each buys.
 POOL_LABELS = {
@@ -409,6 +443,50 @@ def _table_exists(connection, name: str) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,),
     ).fetchone() is not None
+
+
+def _column_exists(connection, table: str, column: str) -> bool:
+    """Whether this Core's copy of a table carries a column yet.
+
+    The revision decision ledgers arrived in two shapes -- one that records a
+    ``defer`` as a decision that leaves the candidate open, and an earlier one
+    that had no such distinction -- so the page reads the shape rather than
+    assuming which one it is looking at.
+    """
+
+    return any(
+        row[1] == column
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    )
+
+
+def _gate_reopen_view(record: Mapping[str, Any], summary: str) -> tuple[str, dict[str, Any]]:
+    """P14d: the diff is the whole argument, so it is the summary.
+
+    Tolerant of a record that carries only the little a hand-written or an
+    older row has: the assessment's diff is what makes the case, and where
+    there is none the row still says what it can rather than failing to
+    render.
+    """
+
+    flipped = [
+        f"{entry.get('label')}：{(entry.get('was') or {}).get('mark')}"
+        f"（{(entry.get('was') or {}).get('value')}）"
+        f" → {(entry.get('now') or {}).get('mark')}（{(entry.get('now') or {}).get('value')}）"
+        for entry in record.get("diff") or ()
+        if entry.get("flipped")
+    ]
+    passed_ref = record.get("passed_version_ref")
+    details: dict[str, Any] = {
+        "变化": flipped,
+        "过闸的那一版": (None if passed_ref is None
+                         else f"v{record.get('passed_version_number')}（{passed_ref}）"),
+        "过闸时间": record.get("passed_at"),
+        "改版理由": CHANGE_REASON_LABELS.get(
+            record.get("change_reason"), record.get("change_reason")),
+        "退步的项目": list(record.get("regressed") or ()),
+    }
+    return ("；".join(flipped) or summary or "证据底座有项目从缺变成了有。"), details
 
 
 def _iso(value: datetime) -> str:
@@ -2237,6 +2315,43 @@ class CockpitPlane:
                                 {"decision": "kept", "label": "保留"}],
                     "needs_rationale": False,
                 })
+            # P15d: a conviction call the machine proposed and nobody has
+            # answered yet. Listed with no buttons on purpose: the decision op
+            # exists on the writer, but the cockpit's own decide path and the
+            # three buttons are integration work, and INT1's rule is that a
+            # button which errors when pressed is worse than no button. What
+            # the owner needs from this card today is to know the call is
+            # waiting and what it says.
+            for row in self._rows(core,
+                "SELECT p.* FROM conviction_call_proposals p "
+                "LEFT JOIN conviction_call_decisions d ON d.proposal_ref=p.proposal_id "
+                "WHERE d.decision_id IS NULL ORDER BY p.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                variant = record.get("variant_view") or {}
+                items.append({
+                    "kind": "conviction_call", "ref": row["proposal_id"],
+                    "hash": row["content_hash"], "at": row["created_at"],
+                    "title": "是否采纳这条投资 call："
+                             + CALL_DIRECTION_LABELS.get(row["direction"], row["direction"]),
+                    "who": self._label(members, row["company_ref"]),
+                    "summary": (variant.get("where_market_is_wrong") or {}).get("statement") or "",
+                    "details": {
+                        "我们的看法": (variant.get("our_view") or {}).get("statement"),
+                        "市场的看法": (variant.get("market_view") or {}).get("statement")
+                                      or (variant.get("market_view") or {}).get("reason"),
+                        "时间跨度": CALL_HORIZON_LABELS.get(
+                            row["time_horizon"], row["time_horizon"]),
+                        "信心": row["confidence"],
+                        "风险回报是否达标": CALL_STANDARD_LABELS.get(
+                            row["risk_reward_status"], row["risk_reward_status"]),
+                        "可观察信号": [step.get("signal") for step
+                                       in record.get("event_pathway") or []],
+                        "怎么裁决": "写者操作 decide_conviction_call（accept / reject / defer，要写理由）",
+                    },
+                    "actions": [],
+                    "needs_rationale": False,
+                })
         # INT2 / ADR-0007: the checkpoints the revision loop raises. Rendered
         # from whatever rows exist, with no decision buttons: the ops that
         # decide them are on another branch, and offering a button that goes
@@ -2261,8 +2376,19 @@ class CockpitPlane:
         and no lane may decide. Their rows may or may not be in this Core --
         the judgement lane writes the first and the third only when the
         mission grants them, and the fourth table does not exist yet -- so
-        each is read only when its table is, and a decided one is filtered
-        out only when a decisions table exists to filter against.
+        each is read only when its table is, and a decided one is filtered out
+        only when a decisions table exists to filter against.
+
+        **Whether it gets buttons is read off the Core, not assumed.** P14b and
+        P14d added ``decide_thesis_revision_candidate`` and
+        ``decide_gate_reopen`` and the two append-only decision ledgers those
+        ops write to; a writer that carries the ops has opened those tables, so
+        the presence of the decisions table is the honest, checkable test for
+        "can this actually be decided from here". Where it is there, the row
+        offers its two or three words and asks for a reason. Where it is not --
+        an older Core, a state directory that predates this -- the row still
+        appears, without buttons and saying who owes what, because a button
+        that goes nowhere is worse than an item that says so.
 
         A candidate is shown with its reflection expanded rather than as a
         ref: ADR-0007's candidate and "what we may have missed" are worth
@@ -2277,32 +2403,46 @@ class CockpitPlane:
             for kind, (table, key, decisions, ref_column) in CHECKPOINT_TABLES.items():
                 if not _table_exists(core, table):
                     continue
+                decidable = _table_exists(core, decisions)
                 sql = f"SELECT t.* FROM {table} t "
-                if _table_exists(core, decisions):
-                    sql += (f"LEFT JOIN {decisions} d ON d.{ref_column}=t.{key} "
-                            "WHERE d.rowid IS NULL ")
+                if decidable:
+                    join = f"LEFT JOIN {decisions} d ON d.{ref_column}=t.{key} "
+                    # ``defer`` is a decision that does not close the
+                    # candidate, so on the full ledger only a terminal row
+                    # takes it off the page. A ledger without the column is
+                    # the older shape, where any row means decided.
+                    if _column_exists(core, decisions, "terminal"):
+                        join += "AND d.terminal=1 "
+                    sql += join + "WHERE d.rowid IS NULL "
                 for row in self._rows(core, sql + "ORDER BY t.created_at"):
                     record = json.loads(row["record_json"])
                     decision = record.get("decision")
+                    details = {
+                        "大脑的判断": JUDGEMENT_DECISION_LABELS.get(decision, decision),
+                        "提议改成": record.get("proposed_statement"),
+                        "提议的把握": record.get("proposed_confidence"),
+                        "证伪条件": record.get("falsifier_ref"),
+                        "依据": list(record.get("evidence_refs") or ()),
+                    }
+                    summary = record.get("because") or record.get("rationale") or ""
+                    if kind == "gate_reopen":
+                        summary, extra = _gate_reopen_view(record, summary)
+                        details.update(extra)
                     items.append({
                         "kind": kind, "ref": row[key], "hash": row["content_hash"],
                         "at": row["created_at"],
                         "title": (CHECKPOINT_TITLES.get(kind) or kind),
                         "who": self._label(members, record.get("company_ref")),
-                        "summary": record.get("because") or record.get("rationale") or "",
-                        "details": {
-                            "大脑的判断": JUDGEMENT_DECISION_LABELS.get(decision, decision),
-                            "提议改成": record.get("proposed_statement"),
-                            "提议的把握": record.get("proposed_confidence"),
-                            "证伪条件": record.get("falsifier_ref"),
-                            "依据": list(record.get("evidence_refs") or ()),
-                        },
+                        "summary": summary,
+                        "details": {name: value for name, value in details.items()
+                                    if value not in (None, [], "")},
                         # Both halves, side by side.
                         "reflection": reflections["by_judgement"].get(
                             record.get("judgement_ref")),
-                        "actions": [],
-                        "needs_rationale": False,
-                        "note": "这一项要人裁决，而裁决入口还没有接上（ADR-0007）",
+                        "actions": list(CHECKPOINT_ACTIONS[kind]) if decidable else [],
+                        "needs_rationale": decidable,
+                        **({} if decidable else {
+                            "note": CHECKPOINT_UNDECIDABLE_NOTES[kind]}),
                     })
             if _table_exists(core, "forecast_revision_proposals"):
                 for row in self._rows(core,
@@ -2381,6 +2521,29 @@ class CockpitPlane:
                 "reconciliation_ref": ref, "reconciliation_hash": digest, "decision": decision, "rationale": rationale.strip(),
                 "idempotency_key": f"cockpit-overturn:{ref}:{request_id}"}
             title = ("维持了预测" if decision == "keep_forecast" else "决定修订预测") + f"：{ref}"
+        elif kind == "thesis_revision_candidate":
+            # ADR-0007: automation may never take this branch. The cockpit
+            # mints an ephemeral *human* principal for the call, and the
+            # writer refuses the operation for anything else.
+            if decision not in {"accept", "reject", "defer"}:
+                raise CockpitError("decision must be accept, reject or defer")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_thesis_revision_candidate", {
+                "candidate_ref": ref, "candidate_hash": digest,
+                "verdict": decision, "reason": rationale.strip()}
+            title = {"accept": "接受了论点修订", "reject": "没有接受论点修订",
+                     "defer": "把论点修订放了放"}[decision] + f"：{ref}"
+        elif kind == "gate_reopen":
+            if decision not in {"approve", "decline"}:
+                raise CockpitError("decision must be approve or decline")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_gate_reopen", {
+                "proposal_ref": ref, "proposal_hash": digest,
+                "verdict": decision, "reason": rationale.strip()}
+            title = ("同意重出 Initial Screen" if decision == "approve"
+                     else "不重出 Initial Screen") + f"：{ref}"
         else:
             raise CockpitError("unknown approval kind")
         try:

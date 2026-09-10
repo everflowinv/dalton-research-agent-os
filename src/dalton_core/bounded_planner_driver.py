@@ -20,6 +20,7 @@ from typing import Any, Mapping
 
 from .bounded_probe_executor import (
     WORKER_REF,
+    BoundedProbeExecutionError,
     execute_probe_work_order,
 )
 from .budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
@@ -306,6 +307,100 @@ class BoundedPlannerDriver:
         self.transport = transport or PublicHttpTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    def _advance_round(
+        self, loop: Mapping[str, Any], round_wire: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Execute one admitted round and record its outcome, or hold it.
+
+        Three outcomes, and the difference between the last two is the whole
+        point of this method:
+
+        ``{"kind": "probe", "entry": ...}``
+            The probe ran (or was refused by its own executor, which is a
+            source that could not be read) and the round has an outcome.
+        ``{"kind": "hold", "reason": ...}``
+            The *transport* was transiently unavailable -- the writer is busy
+            or restarting, and the AlphaEngine branch is a writer RPC.  The
+            round keeps its admission and no outcome is written, so the next
+            tick picks it up again.
+
+        A blanket ``except Exception`` used to make those two the same thing:
+        a writer that was restarting turned a coverage item permanently
+        ``source_unavailable``, and it was never retried.  Only the executor's
+        own refusal is terminal now.
+
+        Holding is only honest because this method can resume: a round that
+        already has a formal ResultEnvelope is not executed again, and
+        ``run_once`` calls this for a loop whose latest round never finished.
+        Without that, "hold" would have been a synonym for "stall".
+        """
+
+        entry: dict[str, Any] = {
+            "loop_version_ref": loop["loop_version_ref"],
+            "kind": "probe",
+            "round_ref": round_wire["id"],
+            "work_order_ref": round_wire["work_order_ref"],
+        }
+        probe_refusal: str | None = None
+        with Scheduler(self.config.scheduler_db) as scheduler:
+            work_id = round_wire["work_order_ref"]
+            authority = scheduler.work_order_authority(work_id)
+            if authority is None:
+                raise BoundedPlannerDriverError(
+                    "admitted probe WorkOrder is missing from Scheduler"
+                )
+            work = authority["work_order"]
+            if scheduler.formal_result(work_id) is None:
+                operation = (work.get("metadata") or {}).get("operation")
+                try:
+                    if operation == "alphaengine_get_document":
+                        envelope = self.client.call("bounded_alphaengine_probe", {
+                            "work_order": work,
+                        })
+                    else:
+                        envelope = execute_probe_work_order(
+                            work,
+                            transport=self.transport,
+                            user_agent=self.config.user_agent,
+                            max_response_bytes=int(self.config.max_response_bytes),
+                            timeout_seconds=float(self.config.timeout_seconds),
+                            filed_window_days=int(self.config.filed_window_days),
+                            clock=self.clock,
+                        )
+                except BoundedProbeExecutionError as exc:
+                    # The executor read the WorkOrder and refused it: wrong
+                    # scope, wrong operation, unusable locator.  That is a
+                    # decision about this probe and it will not change on a
+                    # retry, so it is recorded as a round the loop has spent.
+                    envelope = _refused_probe_envelope(work, exc)
+                    probe_refusal = envelope["error"]["message"]
+                except Exception as exc:  # noqa: BLE001 - transient, not terminal
+                    return {
+                        "kind": "hold",
+                        "reason": f"probe_transport_unavailable:{type(exc).__name__}",
+                    }
+                lease = scheduler.claim(WORKER_REF, work_order_id=work_id)
+                if lease is None:
+                    raise BoundedPlannerDriverError(
+                        "admitted probe WorkOrder could not be claimed"
+                    )
+                scheduler.complete(
+                    work_id,
+                    lease["attempt"]["attempt_number"],
+                    WORKER_REF,
+                    lease["lease_token"],
+                    envelope,
+                    idempotency_key=f"bounded-probe-complete:{envelope['id']}",
+                )
+        outcome = self.client.call("bounded_planner_record_outcome", {
+            "round_ref": round_wire["id"],
+        })
+        entry["outcome_status"] = outcome.get("status")
+        entry["outcome_kind"] = (outcome.get("outcome") or {}).get("outcome_kind")
+        if probe_refusal is not None:
+            entry["probe_refused"] = probe_refusal
+        return {"kind": "probe", "entry": entry}
+
     def _model_proposal(self, context: Mapping[str, Any],
                         *, pool: str | None = None) -> dict[str, Any]:
         """One bounded model attempt for a loop that can act on the answer."""
@@ -372,6 +467,7 @@ class BoundedPlannerDriver:
                     "reason": "probe_budget_reached",
                 })
                 continue
+            context = None
             if self.config.doctrine_pack_version_ref is not None:
                 try:
                     context = self.client.call(
@@ -392,17 +488,23 @@ class BoundedPlannerDriver:
                 except Exception as exc:
                     # Materializing is free and refuses outright while a round
                     # is pending, so this is where a stalled loop is learned --
-                    # before any model call.  Naming it as the pending round it
-                    # is keeps it from reading as a broken doctrine pack.
-                    pending = "round is pending" in str(exc)
-                    skipped.append({
-                        "loop_version_ref": loop["loop_version_ref"],
-                        "reason": (
-                            "pending_round" if pending
-                            else f"doctrine_context_unavailable:{type(exc).__name__}"
-                        ),
-                    })
-                    continue
+                    # before any model call.  A pending round is not a doctrine
+                    # failure: it is a round that was admitted and never
+                    # finished, and the deterministic planner below hands it
+                    # back so this tick can finish it.
+                    if "round is pending" not in str(exc):
+                        skipped.append({
+                            "loop_version_ref": loop["loop_version_ref"],
+                            "reason": (
+                                f"doctrine_context_unavailable:{type(exc).__name__}"
+                            ),
+                        })
+                        continue
+            if context is None:
+                proposal = self.client.call("bounded_planner_propose_next", {
+                    "loop_version_ref": loop["loop_version_ref"],
+                })
+            else:
                 remaining = context.get("remaining_budget") or {}
                 if int(remaining.get("rounds_remaining", 1)) < 1:
                     # A loop with no round left cannot probe, so a model asked
@@ -444,12 +546,33 @@ class BoundedPlannerDriver:
                         "bounded_planner_propose_next_with_context",
                         {"planner_context_pack_ref": context["id"]},
                     )
-            else:
-                proposal = self.client.call("bounded_planner_propose_next", {
-                    "loop_version_ref": loop["loop_version_ref"],
-                })
             status = proposal.get("status")
-            if status in {"terminal", "pending_round"}:
+            if status == "pending_round":
+                # The round this loop is waiting on.  Finishing it is the
+                # whole reason a transport failure may hold instead of writing
+                # a terminal outcome: a hold that nothing ever resumed would
+                # be a stall with a friendlier name.
+                round_wire = proposal.get("round")
+                if round_wire is None:
+                    skipped.append({
+                        "loop_version_ref": loop["loop_version_ref"],
+                        "reason": status,
+                    })
+                    continue
+                resumed = self._advance_round(loop, round_wire)
+                if resumed["kind"] == "hold":
+                    skipped.append({
+                        "loop_version_ref": loop["loop_version_ref"],
+                        "reason": resumed["reason"],
+                        "round_ref": round_wire["id"],
+                    })
+                    continue
+                entry = resumed["entry"]
+                entry["resumed"] = True
+                executed.append(entry)
+                probes += 1
+                continue
+            if status == "terminal":
                 skipped.append({
                     "loop_version_ref": loop["loop_version_ref"],
                     "reason": status,
@@ -485,61 +608,15 @@ class BoundedPlannerDriver:
                 })
                 continue
             round_wire = admitted["round"]
-            with Scheduler(self.config.scheduler_db) as scheduler:
-                work_id = round_wire["work_order_ref"]
-                authority = scheduler.work_order_authority(work_id)
-                if authority is None:
-                    raise BoundedPlannerDriverError(
-                        "admitted probe WorkOrder is missing from Scheduler"
-                    )
-                work = authority["work_order"]
-                operation = (work.get("metadata") or {}).get("operation")
-                try:
-                    if operation == "alphaengine_get_document":
-                        envelope = self.client.call("bounded_alphaengine_probe", {
-                            "work_order": work,
-                        })
-                    else:
-                        envelope = execute_probe_work_order(
-                            work,
-                            transport=self.transport,
-                            user_agent=self.config.user_agent,
-                            max_response_bytes=int(self.config.max_response_bytes),
-                            timeout_seconds=float(self.config.timeout_seconds),
-                            filed_window_days=int(self.config.filed_window_days),
-                            clock=self.clock,
-                        )
-                except Exception as exc:  # noqa: BLE001 - see the envelope's docstring
-                    envelope = _refused_probe_envelope(work, exc)
-                    probe_refusal = envelope["error"]["message"]
-                else:
-                    probe_refusal = None
-                lease = scheduler.claim(WORKER_REF, work_order_id=work_id)
-                if lease is None:
-                    raise BoundedPlannerDriverError(
-                        "admitted probe WorkOrder could not be claimed"
-                    )
-                scheduler.complete(
-                    work_id,
-                    lease["attempt"]["attempt_number"],
-                    WORKER_REF,
-                    lease["lease_token"],
-                    envelope,
-                    idempotency_key=f"bounded-probe-complete:{envelope['id']}",
-                )
-            outcome = self.client.call("bounded_planner_record_outcome", {
-                "round_ref": round_wire["id"],
-            })
-            entry = {
-                "loop_version_ref": loop["loop_version_ref"],
-                "kind": "probe",
-                "round_ref": round_wire["id"],
-                "work_order_ref": round_wire["work_order_ref"],
-                "outcome_status": outcome.get("status"),
-                "outcome_kind": (outcome.get("outcome") or {}).get("outcome_kind"),
-            }
-            if probe_refusal is not None:
-                entry["probe_refused"] = probe_refusal
+            advanced = self._advance_round(loop, round_wire)
+            if advanced["kind"] == "hold":
+                skipped.append({
+                    "loop_version_ref": loop["loop_version_ref"],
+                    "reason": advanced["reason"],
+                    "round_ref": round_wire["id"],
+                })
+                continue
+            entry = advanced["entry"]
             if self.config.observation_mandate_version_ref is not None:
                 try:
                     observation = self.client.call(

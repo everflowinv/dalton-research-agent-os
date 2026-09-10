@@ -271,11 +271,39 @@ class TemplateSubsetTests(ResearchTaskFixture):
         entry = self.admissions(plan)[0]
         self.assertEqual(entry["template_refs"], ["probe-template:adhoc-sec-filings-index:v1"])
 
-    def test_an_industry_wide_inquiry_has_nothing_to_look_up(self) -> None:
+    def test_an_industry_wide_inquiry_says_why_it_cannot_be_probed(self) -> None:
+        # Not "no template": there is a template, and it fetches by CIK.  The
+        # planner is allowed to ask an industry-wide question and this system
+        # has no probe that answers one.
         plan = self.record_plan([inquiry(
             question="Has US IT services demand bottomed?", company_ref=None,
         )])
-        self.assertEqual(self.admissions(plan)[0]["reason"], "no_bindable_template")
+        self.assertEqual(
+            self.admissions(plan)[0]["reason"],
+            "industry_inquiry_has_no_company_probe",
+        )
+
+    def test_the_catalogue_advertises_only_what_can_run(self) -> None:
+        retired = [
+            spec for spec in rt.ADHOC_PROBE_TEMPLATES
+            if spec["status"] == rt.RETIRED_STATUS
+        ]
+        self.assertEqual(
+            {spec["template_ref"] for spec in retired},
+            {"probe-template:adhoc-alphaengine-search-library:v1",
+             "probe-template:adhoc-web-search:v1"},
+        )
+        for spec in retired:
+            self.assertTrue(spec["retired_reason"])
+            self.assertNotIn(
+                (spec["operation"], spec["permission_scope"]),
+                rt.executable_probe_contracts(),
+            )
+        # All three are published in this fixture, and the projection still
+        # only tells the cockpit about the one that can run.
+        view = rt.research_task_view(self.store, day=DAY, mission=self.mission)
+        self.assertEqual(view["templates"], ["probe-template:adhoc-sec-filings-index:v1"])
+        self.assertEqual(view["grant"]["template_refs"], view["templates"])
 
     def test_the_deploy_manifest_says_what_the_adapter_publishes(self) -> None:
         manifest = json.loads(
@@ -465,6 +493,67 @@ class DeferralTests(ResearchTaskFixture):
             "Do ACN's margins reconcile?",
         )
         self.assertEqual(record["subject_ref"], ACN)
+
+
+class CockpitResolverTests(ResearchTaskFixture):
+    """The ad-hoc flag was a question with nobody to ask it."""
+
+    def test_a_granted_mission_and_a_published_template_flip_the_switch(self) -> None:
+        from dalton_core.agenda_control import AgendaControlPlane
+
+        self.store.close()
+        resolve = rt.cockpit_grant_resolver(self.state_dir / "core.sqlite")
+        decision = resolve()
+        self.assertTrue(decision["granted"], decision)
+        self.assertEqual(
+            decision["template_refs"], ["probe-template:adhoc-sec-filings-index:v1"])
+        plane = AgendaControlPlane.__new__(AgendaControlPlane)
+        plane.research_task_grant = resolve
+        self.assertTrue(plane.adhoc_research_enabled())
+
+    def test_a_core_it_cannot_read_is_not_a_licence(self) -> None:
+        decision = rt.readonly_grant(self.state_dir / "there-is-no-core.sqlite")
+        self.assertFalse(decision["granted"])
+        self.assertEqual(decision["reasons"], ["core_unreadable"])
+
+    def test_a_retired_catalogue_is_not_advertised_to_the_cockpit(self) -> None:
+        self.store.close()
+        decision = rt.readonly_grant(
+            self.state_dir / "core.sqlite",
+            retired=["probe-template:adhoc-sec-filings-index:v1"],
+        )
+        self.assertFalse(decision["granted"])
+        self.assertEqual(
+            decision["reasons"], ["no_executable_adhoc_template_published"])
+
+    def test_the_cockpit_section_is_where_the_core_path_comes_from(self) -> None:
+        from dalton_core.agenda_control import _research_task_grant
+
+        class Cockpit:
+            core_db = self.state_dir / "core.sqlite"
+            mission_ref = None
+
+        class WithoutCockpit:
+            cockpit = None
+
+        class WithCockpit:
+            cockpit = Cockpit()
+
+        self.assertIsNone(_research_task_grant(WithoutCockpit()))
+        self.store.close()
+        resolve = _research_task_grant(WithCockpit())
+        self.assertTrue(resolve()["granted"])
+
+
+class UngrantedCockpitResolverTests(ResearchTaskFixture):
+    grants_word = False
+
+    def test_a_mission_without_the_word_keeps_the_switch_off(self) -> None:
+        self.store.close()
+        decision = rt.cockpit_grant_resolver(self.state_dir / "core.sqlite")()
+        self.assertFalse(decision["granted"])
+        self.assertEqual(
+            decision["reasons"], ["mission_does_not_grant_research_task"])
 
 
 class SwitchTests(ResearchTaskFixture):
