@@ -132,6 +132,72 @@ class ControlledFailureRedriveTests(unittest.TestCase):
             ":operator-recovery:" + saved["content_hash"][:16],
         )
 
+    def test_apply_provisions_and_holds_missing_wal_sidecars(self):
+        candidate = prepare(
+            scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root,
+        )
+        self.scheduler.close()
+        self.budget.close()
+        sidecars = [
+            Path(str(database) + suffix)
+            for database in (self.scheduler_db, self.budget_db)
+            for suffix in ("-wal", "-shm")
+        ]
+        self.assertTrue(all(not path.exists() for path in sidecars))
+        with self.assertRaisesRegex(sqlite3.OperationalError, "requires existing WAL/SHM"):
+            prepare(
+                scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root,
+            )
+
+        saved = apply(
+            scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+            candidate=candidate, expected_candidate_hash=candidate["candidate_hash"],
+        )
+        self.assertEqual(saved["status"], "fresh")
+        self.assertEqual(
+            apply(
+                scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                candidate=candidate,
+                expected_candidate_hash=candidate["candidate_hash"],
+            )["status"],
+            "duplicate",
+        )
+
+    def test_apply_rejects_before_writable_open_and_never_creates_database(self):
+        candidate = prepare(
+            scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root,
+        )
+        self.scheduler.close()
+        self.budget.close()
+        sidecars = [
+            Path(str(database) + suffix)
+            for database in (self.scheduler_db, self.budget_db)
+            for suffix in ("-wal", "-shm")
+        ]
+        self.assertTrue(all(not path.exists() for path in sidecars))
+        with self.assertRaisesRegex(
+            ControlledFailureRedriveError, "reviewed candidate hash does not match"
+        ):
+            apply(
+                scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                candidate=candidate, expected_candidate_hash="0" * 64,
+            )
+        self.assertTrue(all(not path.exists() for path in sidecars))
+
+        missing = self.scheduler_db.parent / "missing-budget.sqlite"
+        with self.assertRaisesRegex(
+            ControlledFailureRedriveError, "existing writable authority database"
+        ):
+            apply(
+                scheduler_db=self.scheduler_db, budget_db=missing,
+                candidate=candidate,
+                expected_candidate_hash=candidate["candidate_hash"],
+            )
+        self.assertFalse(missing.exists())
+
     def test_prepare_closes_strict_read_only_connections(self):
         from dalton_core.readonly_sqlite import connect_read_only as real_connect
 

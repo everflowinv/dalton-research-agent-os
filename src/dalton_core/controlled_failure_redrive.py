@@ -43,6 +43,34 @@ class ControlledFailureRedriveError(RuntimeError):
     pass
 
 
+def _connect_existing_writable(path: str | Path) -> sqlite3.Connection:
+    """Open an existing authority without permitting SQLite to create it."""
+    if str(path) == ":memory:":
+        raise ControlledFailureRedriveError("apply requires an existing authority database")
+    target = Path(path).absolute()
+    try:
+        with target.open("rb") as stream:
+            if stream.read(16) != b"SQLite format 3\x00":
+                raise ControlledFailureRedriveError(
+                    "apply target is not an SQLite authority database"
+                )
+        connection = sqlite3.connect(
+            target.as_uri() + "?mode=rw", uri=True, isolation_level=None
+        )
+        connection.execute("PRAGMA busy_timeout=5000")
+        # Opening a WAL database for an ordinary read provisions its transient
+        # WAL/SHM pair.  Keep this connection alive across the strict read-only
+        # revalidation and both append-only writes below.
+        connection.execute("SELECT 1").fetchone()
+        return connection
+    except ControlledFailureRedriveError:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise ControlledFailureRedriveError(
+            "apply requires an existing writable authority database"
+        ) from exc
+
+
 def installed_repair(openclaw_root: str | Path) -> dict[str, str]:
     root = Path(openclaw_root).resolve()
     try:
@@ -181,49 +209,61 @@ def apply(*, scheduler_db: str | Path, budget_db: str | Path,
     body.pop("candidate_hash", None)
     if content_hash(body) != expected_candidate_hash:
         raise ControlledFailureRedriveError("reviewed candidate was changed")
-    fresh = prepare(scheduler_db=scheduler_db, budget_db=budget_db,
-                    old_work_order_ref=candidate["old_work_order_ref"],
-                    openclaw_root=candidate["repair"]["openclaw_root"])
-    if fresh != candidate or candidate.get("repair") != installed_repair(candidate["repair"]["openclaw_root"]):
-        raise ControlledFailureRedriveError("failure, mission, cost, or installed repair changed")
-    with ThesisImpactBudgetStore(budget_db) as budget:
-        correction = budget.correct_uncertain_settlement(
-            candidate["admission_id"], settlement_id=candidate["settlement_id"],
-            corrected_micros=candidate["corrected_micros"],
-            evidence_ref="managed-openclaw-bundle:" + candidate["repair"]["openclaw_version"],
-            evidence_hash=candidate["repair"]["bundle_sha256"], actor_ref=ACTOR,
-            idempotency_key="controlled-redrive-cost:" + expected_candidate_hash,
-        )
-    record = {
-        "schema_version": "0.1", "recovery_id": "controlled-redrive:" + expected_candidate_hash[:32],
-        **candidate, "cost_correction_ref": correction["correction_id"],
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-    }
-    record["content_hash"] = content_hash(record)
-    connection = sqlite3.connect(scheduler_db)
-    try:
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.executescript(Path(__file__).with_name("scheduler_schema.sql").read_text())
-        connection.execute("BEGIN IMMEDIATE")
-        prior = connection.execute(
-            "SELECT record_json FROM controlled_failure_redrives WHERE old_work_order_ref=?",
-            (candidate["old_work_order_ref"],),
-        ).fetchone()
-        if prior is not None:
-            saved = json.loads(prior[0])
-            if any(saved.get(k) != record.get(k) for k in (
-                "recovery_id", "candidate_hash", "cost_correction_ref")):
-                raise ControlledFailureRedriveError("old failure already has another recovery")
-            return {**saved, "status": "duplicate"}
-        connection.execute(
-            "INSERT INTO controlled_failure_redrives VALUES(?,?,?,?,?)",
-            (record["recovery_id"], candidate["old_work_order_ref"],
-             canonical_json(record), record["content_hash"], record["created_at"]),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    # Candidate preparation is deliberately strict read-only.  Apply is the
+    # explicit writable operation, so it may provision transient WAL sidecars,
+    # but only after the reviewed candidate hash has passed and only for exact
+    # existing database files opened with SQLite's mode=rw.
+    with closing(_connect_existing_writable(scheduler_db)), closing(
+        _connect_existing_writable(budget_db)
+    ):
+        fresh = prepare(scheduler_db=scheduler_db, budget_db=budget_db,
+                        old_work_order_ref=candidate["old_work_order_ref"],
+                        openclaw_root=candidate["repair"]["openclaw_root"])
+        if (fresh != candidate
+                or candidate.get("repair") != installed_repair(
+                    candidate["repair"]["openclaw_root"]
+                )):
+            raise ControlledFailureRedriveError(
+                "failure, mission, cost, or installed repair changed"
+            )
+        with ThesisImpactBudgetStore(budget_db) as budget:
+            correction = budget.correct_uncertain_settlement(
+                candidate["admission_id"], settlement_id=candidate["settlement_id"],
+                corrected_micros=candidate["corrected_micros"],
+                evidence_ref="managed-openclaw-bundle:" + candidate["repair"]["openclaw_version"],
+                evidence_hash=candidate["repair"]["bundle_sha256"], actor_ref=ACTOR,
+                idempotency_key="controlled-redrive-cost:" + expected_candidate_hash,
+            )
+        record = {
+            "schema_version": "0.1", "recovery_id": "controlled-redrive:" + expected_candidate_hash[:32],
+            **candidate, "cost_correction_ref": correction["correction_id"],
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        }
+        record["content_hash"] = content_hash(record)
+        connection = sqlite3.connect(scheduler_db)
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.executescript(Path(__file__).with_name("scheduler_schema.sql").read_text())
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                "SELECT record_json FROM controlled_failure_redrives WHERE old_work_order_ref=?",
+                (candidate["old_work_order_ref"],),
+            ).fetchone()
+            if prior is not None:
+                saved = json.loads(prior[0])
+                if any(saved.get(k) != record.get(k) for k in (
+                    "recovery_id", "candidate_hash", "cost_correction_ref")):
+                    raise ControlledFailureRedriveError("old failure already has another recovery")
+                return {**saved, "status": "duplicate"}
+            connection.execute(
+                "INSERT INTO controlled_failure_redrives VALUES(?,?,?,?,?)",
+                (record["recovery_id"], candidate["old_work_order_ref"],
+                 canonical_json(record), record["content_hash"], record["created_at"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
     return {**record, "status": "fresh"}
 
 
