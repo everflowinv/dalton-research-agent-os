@@ -362,6 +362,41 @@ if [[ -d "$openclaw_workspace" && -e "$wiki_index_source" ]]; then
 else
   print "note: no wiki index at $wiki_index_source; the company-wiki lane is not installed."
 fi
+# W3: the fund's own earlier work on a company -- old Initial Screens, memos,
+# notes, maintained Excel models. Unlike the two S1 feeds above there is no
+# workspace to discover: the owner declares where the material is, because
+# there is no safe default for "somewhere on this disk there are our old
+# files" and guessing at one would either find nothing or find something that
+# is not ours.
+#
+#   DALTON_PRIOR_RESEARCH_DIR=~/Documents/dalton-prior-research
+#
+# The directory holds one folder per company, each with a manifest.json naming
+# its documents and -- the one thing the feed will not guess -- each one's
+# date. All of it together or none of it: two records and the corpus link, or
+# nothing and a note saying which variable to set. A lane switched on with no
+# corpus refuses every tick, which reads like a fault rather than an absence.
+prior_research_dir=${DALTON_PRIOR_RESEARCH_DIR:-}
+if [[ -n "$prior_research_dir" && -d "$prior_research_dir" ]]; then
+  seed_feed_plan
+  for prior_research_kind in prior-research-list-documents prior-research-get-document; do
+    prior_research_file="$governance_dir/${prior_research_kind}-v1.json"
+    if [[ ! -f "$prior_research_file" && -f "$repo_root/deploy/connector-governance/${prior_research_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${prior_research_kind}-v1.json" "$prior_research_file"
+      chmod 600 "$prior_research_file"
+    fi
+  done
+  mkdir -p "$feeds_dir"
+  chmod 700 "$feeds_dir"
+  # A link, not a copy: the owner keeps adding to this directory and a copy
+  # would be a second, stale truth. The manifest paths are relative to each
+  # company folder, so the link has to be the declared root itself.
+  if [[ ! -e "$feeds_dir/prior-research" ]]; then
+    ln -s "$prior_research_dir" "$feeds_dir/prior-research"
+  fi
+else
+  print "note: set DALTON_PRIOR_RESEARCH_DIR to an existing directory to install the prior-research lane."
+fi
 # S3 / INT2: the three crowd sources. Seven records, a per-company map of
 # handles and queries, and three host tools this Core does not know the
 # location of. All of it together or none of it: the map is the lane's switch,

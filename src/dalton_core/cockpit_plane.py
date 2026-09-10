@@ -185,6 +185,7 @@ REGISTRY_LANE_LABELS = {
     "claim_review": "复核已有结论",
     "sales_notes_feed": "读 sales note",
     "company_wiki_feed": "读公司维基与访谈纪要",
+    "prior_research": "读我们自己以前写过的东西",
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",

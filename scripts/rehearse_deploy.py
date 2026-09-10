@@ -211,12 +211,27 @@ def _gate_company_wiki(env: Mapping[str, str]) -> tuple[bool, str]:
     return (workspace.is_dir() and index.exists()), f"no wiki index at {index}"
 
 
+def _gate_prior_research(env: Mapping[str, str]) -> tuple[bool, str]:
+    """W3: the owner names the directory, because there is no safe default.
+
+    Unlike the two S1 feeds there is nothing to discover: "our old files" has
+    no canonical location, and a guessed one would either find nothing or find
+    something that is not ours.
+    """
+
+    named = env.get("DALTON_PRIOR_RESEARCH_DIR", "")
+    if not named:
+        return False, "DALTON_PRIOR_RESEARCH_DIR is not set"
+    return Path(named).is_dir(), f"no directory at {named}"
+
+
 def _gate_any_feed(env: Mapping[str, str]) -> tuple[bool, str]:
-    """The feed plan is seeded by *either* feed lane, so its gate is the union."""
+    """The feed plan is seeded by *any* feed lane, so its gate is the union."""
 
     digest, _ = _gate_market_digest(env)
     wiki, _ = _gate_company_wiki(env)
-    return (digest or wiki), "neither feed lane is installed, so no feed plan is seeded"
+    prior, _ = _gate_prior_research(env)
+    return (digest or wiki or prior), "no feed lane is installed, so no feed plan is seeded"
 
 
 CROWD_TOOL_VARS: tuple[str, ...] = (
@@ -235,6 +250,7 @@ def _gate_crowd_tools(env: Mapping[str, str]) -> tuple[bool, str]:
 GATES: dict[str, Callable[[Mapping[str, str]], tuple[bool, str]]] = {
     "market-digest": _gate_market_digest,
     "company-wiki": _gate_company_wiki,
+    "prior-research": _gate_prior_research,
     "any-feed": _gate_any_feed,
     "crowd-tools": _gate_crowd_tools,
 }
@@ -449,6 +465,15 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         )
         for kind in ("company-wiki-list-documents", "company-wiki-get-document")
     ),
+    # W3: the fund's own earlier work, behind the directory the owner declares.
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/{kind}-v1.json",
+            f"connector-governance/{kind}-v1.json", optional=True,
+            gate="prior-research",
+        )
+        for kind in ("prior-research-list-documents", "prior-research-get-document")
+    ),
     # S3: seven crowd-source records and the per-company map, all or nothing.
     # The map is the lane's switch, and a lane switched on with no host tool
     # refuses every networked run with "no tool configured" -- which is the
@@ -662,6 +687,11 @@ class LaneSwitch:
 
 
 LANE_SWITCHES: tuple[LaneSwitch, ...] = (
+    LaneSwitch(
+        "prior_research (W3)", "feeds/prior-research", None, True,
+        "a symlink to DALTON_PRIOR_RESEARCH_DIR; seeded with its two records "
+        "or not at all",
+    ),
     LaneSwitch(
         "mission_tracking (P14a)", "tracking-policy.json",
         "deploy/phase9/p14a-tracking-policy-v1.json", True,

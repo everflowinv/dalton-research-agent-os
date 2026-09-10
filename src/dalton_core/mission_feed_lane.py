@@ -48,6 +48,10 @@ from .sales_notes_core import (
     SOURCE_REF as SALES_NOTES_SOURCE_REF,
 )
 from .company_wiki_core import DOCUMENT_REF_PREFIX as WIKI_DOC_REF_PREFIX
+from .prior_research_core import (
+    DOCUMENT_REF_PREFIX as PRIOR_RESEARCH_REF_PREFIX,
+    SOURCE_REF as PRIOR_RESEARCH_SOURCE_REF,
+)
 from .lane_registry import LaneSpec, register_lane
 from .store import canonical_json, content_hash
 
@@ -73,6 +77,18 @@ FEED_DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
         "connector_source_ref": COMPANY_WIKI_SOURCE_REF,
         "operation": "get_document",
         "document_ref_prefix": WIKI_DOC_REF_PREFIX,
+    }),
+    # W3: the fund's own earlier work. Same rule and the same reason -- for a
+    # local feed the acquisition is the discovery -- with one difference worth
+    # naming: this feed *does* know which company each document belongs to
+    # before it reads it, because the manifest is filed per company folder.
+    # It still records the discovery on the document rather than on the
+    # listing, so that a prior view's ``as_of`` is bound to the one document
+    # that carries it.
+    PRIOR_RESEARCH_SOURCE_REF: MappingProxyType({
+        "connector_source_ref": PRIOR_RESEARCH_SOURCE_REF,
+        "operation": "get_document",
+        "document_ref_prefix": PRIOR_RESEARCH_REF_PREFIX,
     }),
 })
 
@@ -1142,6 +1158,9 @@ class FeedDiscoveryCoordinator:
 FEED_IDENTITY = {
     SALES_NOTES_SOURCE_REF: ("sales-notes", "sales_notes_core", "sales_notes_identity"),
     COMPANY_WIKI_SOURCE_REF: ("company-wiki", "company_wiki_core", "company_wiki_identity"),
+    PRIOR_RESEARCH_SOURCE_REF: (
+        "prior-research", "prior_research_core", "prior_research_identity"
+    ),
 }
 
 
@@ -1433,6 +1452,8 @@ __all__ = [
     "DOCUMENT_PAGE_LIMIT",
     "ENUMERATION_WINDOW_DAYS",
     "FEED_DISCOVERY_SOURCES",
+    "PRIOR_RESEARCH_REF_PREFIX",
+    "PRIOR_RESEARCH_SOURCE_REF",
     "MAX_WINDOW_SPLITS",
     "FEED_IDENTITY",
     "MAX_BODY_READS_PER_TICK",
