@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from dalton_core.investment_memo_cli import run_memo
+from dalton_core.investment_memo_cli import collect_frozen_input, run_memo
 from dalton_core.investment_memo_contract import CHECK_REFS
 from dalton_core.investment_memo_draft import (
     GROUPS, InvestmentMemoDraftError, build_group_prompt, parse_group_output, verify_memo,
@@ -44,6 +44,81 @@ class FakeModel:
 
 
 class InvestmentMemoDraftTests(unittest.TestCase):
+    def test_collector_skips_incomplete_company_and_binds_current_model_inputs(self):
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        mission = {"id": "mission:v2", "mission_ref": "mission:coverage",
+                   "content_hash": "a" * 64, "industry_ref": "industry:it",
+                   "bindings": {"playbook_version": {"ref": "playbook:v1", "hash": "b" * 64}},
+                   "deliverables": ["investment_memo"],
+                   "autonomy": {"may_write": ["deliverable"],
+                                "human_checkpoints": ["investment_memo"]},
+                   "universe": [{"company_ref": "company:FIRST"}, {"company_ref": "company:READY"}]}
+        playbook = {"id": "playbook:v1", "content_hash": "b" * 64}
+        with store._transaction() as cur:
+            cur.execute("CREATE TABLE coverage_mission_pointer(mission_ref TEXT)")
+            cur.execute("INSERT INTO coverage_mission_pointer VALUES('mission:coverage')")
+            for table, subject in (("company_dossier_versions", "company_ref"),
+                                   ("forecast_model_versions", "company_ref"),
+                                   ("valuation_snapshot_versions", "company_ref")):
+                cur.execute(f"CREATE TABLE {table}(version_id TEXT,{subject} TEXT,version_number INTEGER,record_json TEXT,content_hash TEXT)")
+            cur.execute("CREATE TABLE sensitivity_projections(projection_id TEXT,company_ref TEXT,model_version_ref TEXT,version_number INTEGER,record_json TEXT,content_hash TEXT)")
+            cur.execute("CREATE TABLE deep_insight_gate_versions(version_id TEXT,company_ref TEXT,version_number INTEGER,record_json TEXT,content_hash TEXT)")
+            cur.execute("CREATE TABLE deep_insight_gate_decisions(gate_version_ref TEXT,decision TEXT)")
+            for table in ("company_dossier_versions", "forecast_model_versions", "valuation_snapshot_versions"):
+                ref = {"company_dossier_versions": "dossier:v1", "forecast_model_versions": "forecast:v2",
+                       "valuation_snapshot_versions": "valuation:v1"}[table]
+                record = {"id": ref, "company_ref": "company:READY", "complete": True}
+                cur.execute(f"INSERT INTO {table} VALUES(?,?,?,?,?)",
+                            (ref, "company:READY", 1, json.dumps(record), content_hash(record)))
+            current_projection = {"id": "sensitivity:current", "company_ref": "company:READY",
+                                  "model_version_ref": "forecast:v2"}
+            stale_projection = {"id": "sensitivity:stale", "company_ref": "company:READY",
+                                "model_version_ref": "forecast:v1"}
+            for version, record in enumerate((current_projection, stale_projection), 1):
+                cur.execute("INSERT INTO sensitivity_projections VALUES(?,?,?,?,?,?)",
+                            (record["id"], "company:READY", record["model_version_ref"], version,
+                             json.dumps(record), content_hash(record)))
+            old_gate = {"id": "gate:old", "mission_version_ref": "mission:v1"}
+            current_gate = {"id": "gate:current", "mission_version_ref": mission["id"]}
+            for version, record in enumerate((old_gate, current_gate), 1):
+                cur.execute("INSERT INTO deep_insight_gate_versions VALUES(?,?,?,?,?)",
+                            (record["id"], "company:READY", version, json.dumps(record), content_hash(record)))
+                cur.execute("INSERT INTO deep_insight_gate_decisions VALUES(?, 'approve')", (record["id"],))
+            claim = {"id": "claim-version:memo:1", "claim_ref": "claim:memo", "version": 1,
+                     "subject_ref": "company:READY", "normalized_statement": "Revenue rose 12%.",
+                     "period": "2026Q2", "basis": "reported", "context": "constant currency"}
+            claim_hash = content_hash(claim)
+            cur.execute("INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,content_hash,created_at) VALUES(?,?,?,?,?,?)",
+                        (claim["id"], claim["claim_ref"], 1, json.dumps(claim), claim_hash,
+                         "2026-09-10T00:00:00+00:00"))
+
+        class Missions:
+            def active_mission(self, _ref): return mission
+            def current_stage_state(self, _ref, _company): return {"next_stage": "investment_memo"}
+        class Playbooks:
+            def playbook(self, _ref): return playbook
+        industry = {"id": "industry-framework:v1", "content_hash": "c" * 64,
+                    "kind": "industry_framework", "subject_ref": "industry:it"}
+        class Deliverables:
+            def live_claim_version_refs(self): return {"claim-version:memo:1"}
+            def deliverables(self, _ref): return [industry]
+            def latest(self, _ref): return None
+        with patch("dalton_core.investment_memo_cli.CoverageMissionAuthority", return_value=Missions()), \
+             patch("dalton_core.investment_memo_cli.ResearchPlaybookAuthority", return_value=Playbooks()), \
+             patch("dalton_core.investment_memo_cli.MissionDeliverableAuthority", return_value=Deliverables()):
+            frozen = collect_frozen_input(store)
+        self.assertEqual(frozen["status"], "ready", frozen)
+        self.assertEqual(frozen["company"]["company_ref"], "company:READY")
+        self.assertEqual(frozen["skipped"][0]["company_ref"], "company:FIRST")
+        refs = {row["ref"] for row in frozen["material"]}
+        self.assertIn("gate:current", refs)
+        self.assertNotIn("gate:old", refs)
+        self.assertIn("sensitivity:current", refs)
+        self.assertNotIn("sensitivity:stale", refs)
+        claim_row = next(row for row in frozen["material"] if row["kind"] == "claim")
+        self.assertEqual(json.loads(claim_row["text"])["context"], "constant currency")
+
     def test_prompt_keeps_complete_material_and_exact_contract(self):
         rows = [{"ref": "claim-version:1", "kind": "claim", "text": "x" * 12000}]
         questions = [{"question_ref": "memo_q01", "question": QUESTIONS[0]}]

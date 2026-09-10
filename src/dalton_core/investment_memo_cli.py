@@ -56,7 +56,9 @@ def _latest_rows(connection: Any, table: str, company_ref: str, *, subject_colum
     return result if all_rows else result[:1]
 
 
-def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None) -> dict[str, Any]:
+def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
+                         _excluded: tuple[str, ...] = (),
+                         _skipped: tuple[Mapping[str, str], ...] = ()) -> dict[str, Any]:
     missions = CoverageMissionAuthority(store)
     pointers = store.connection.execute(
         "SELECT mission_ref FROM coverage_mission_pointer ORDER BY mission_ref").fetchall()
@@ -71,12 +73,21 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None) 
             or "deliverable" not in mission["autonomy"]["may_write"] \
             or "investment_memo" not in mission["autonomy"]["human_checkpoints"]:
         return {"status": "held", "reason": "the mission does not authorize memo candidates"}
-    candidates = [member for member in mission["universe"] if company_ref in (None, member["company_ref"])]
+    candidates = [member for member in mission["universe"]
+                  if company_ref in (None, member["company_ref"])
+                  and member["company_ref"] not in _excluded]
     chosen = next((member for member in candidates
                    if missions.current_stage_state(mission["mission_ref"], member["company_ref"])["next_stage"] == "investment_memo"), None)
     if chosen is None:
         return {"status": "idle", "reason": "no company has passed the folded industry and company model gates"}
     company_ref = chosen["company_ref"]
+
+    def hold_or_continue(reason: str) -> dict[str, Any]:
+        skipped = (*_skipped, {"company_ref": company_ref, "reason": reason})
+        if len(candidates) > 1 and company_ref not in _excluded:
+            return collect_frozen_input(store, _excluded=(*_excluded, company_ref),
+                                        _skipped=skipped)
+        return {"status": "held", "reason": reason, "skipped": list(skipped)}
 
     rows: list[dict[str, Any]] = []
     # Canonical live Claims are the only prose refs MissionDeliverable accepts.
@@ -90,16 +101,31 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None) 
         if claim.get("subject_ref") != company_ref:
             continue
         rows.append({"ref": row["claim_version_id"], "hash": row["content_hash"], "kind": "claim",
-                     "text": claim.get("normalized_statement") or json.dumps(claim, ensure_ascii=False)})
+                     "text": json.dumps(claim, ensure_ascii=False, sort_keys=True)})
     for table in (
         "company_dossier_versions", "debate_map_versions",
-        "forecast_model_versions", "sensitivity_projections", "valuation_snapshot_versions",
+        "forecast_model_versions", "valuation_snapshot_versions",
         "market_price_series_versions", "catalyst_calendar_versions", "consensus_estimate_versions",
         "prior_model_versions", "event_judgements", "thesis_reflections", "research_events",
     ):
         rows.extend(_latest_rows(store.connection, table, company_ref,
                                 subject_column="subject_ref" if table == "debate_map_versions" else "company_ref",
                                 all_rows=table == "research_events"))
+    forecast_rows = [row for row in rows if row["kind"] == "forecast_model_versions"]
+    if forecast_rows:
+        try:
+            projection = store.connection.execute(
+                "SELECT record_json,content_hash FROM sensitivity_projections "
+                "WHERE company_ref=? AND model_version_ref=? ORDER BY version_number DESC LIMIT 1",
+                (company_ref, forecast_rows[0]["ref"]),
+            ).fetchone()
+        except Exception:
+            projection = None
+        if projection is not None:
+            record = json.loads(projection["record_json"])
+            rows.append({"ref": record["id"], "hash": projection["content_hash"],
+                         "kind": "sensitivity_projections",
+                         "text": json.dumps(record, ensure_ascii=False, sort_keys=True)})
     for model_row in [row for row in rows if row["kind"] == "forecast_model_versions"]:
         model_record = json.loads(model_row["text"])
         for result in model_record.get("results") or ():
@@ -110,16 +136,18 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None) 
                              "kind": "forecast_cell",
                              "text": json.dumps(cell, ensure_ascii=False, sort_keys=True)})
     try:
-        approved = store.connection.execute(
+        approved_rows = store.connection.execute(
             "SELECT v.record_json,v.content_hash FROM deep_insight_gate_versions v "
             "JOIN deep_insight_gate_decisions d ON d.gate_version_ref=v.version_id "
-            "WHERE v.company_ref=? AND d.decision='approve' ORDER BY v.version_number DESC LIMIT 1",
+            "WHERE v.company_ref=? AND d.decision='approve' ORDER BY v.version_number DESC",
             (company_ref,),
-        ).fetchone()
+        ).fetchall()
+        approved = next((row for row in approved_rows
+                         if json.loads(row["record_json"]).get("mission_version_ref") == mission["id"]), None)
     except Exception:
         approved = None
     if approved is None:
-        return {"status": "held", "reason": "an owner-approved Deep Insight Gate is required"}
+        return hold_or_continue("an owner-approved Deep Insight Gate is required")
     gate_record = json.loads(approved["record_json"])
     rows.append({"ref": gate_record["id"], "hash": approved["content_hash"],
                  "kind": "deep_insight_gate_versions",
@@ -138,7 +166,7 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None) 
                 "sensitivity_projections", "valuation_snapshot_versions", "industry_framework"}
     missing = sorted(required - kinds)
     if missing:
-        return {"status": "held", "reason": "required memo inputs are missing: " + ", ".join(missing)}
+        return hold_or_continue("required memo inputs are missing: " + ", ".join(missing))
     bindings = [{"ref": row["ref"], "hash": row["hash"], "kind": row["kind"]} for row in rows]
     current = MissionDeliverableAuthority(store).latest(
         "mission-deliverable:investment_memo:" + company_ref.rsplit(":", 1)[-1])
@@ -147,7 +175,7 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None) 
         return {"status": "idle", "memo_status": "nothing_new", "company_ref": company_ref,
                 "reason": "the frozen memo input is unchanged"}
     return {"status": "ready", "mission": mission, "playbook": playbook, "company": chosen,
-            "material": rows, "input_bindings": bindings}
+            "material": rows, "input_bindings": bindings, "skipped": list(_skipped)}
 
 
 def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
