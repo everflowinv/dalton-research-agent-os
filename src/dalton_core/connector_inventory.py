@@ -2427,6 +2427,260 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     *envelope_fields,
                 ),
             )
+    if slug == "hkex-filings":
+        # W4: Hong Kong disclosure. Every figure is the text the document held,
+        # so every figure is a string: the Exchange writes ``100,442,863.00``
+        # and ``0.48676`` and an issuer that reported four decimal places
+        # reported them on purpose. The pattern below admits the thousands
+        # separators rather than stripping them, because a wire that stripped
+        # them would no longer be verbatim and the arithmetic that needs a
+        # bare number happens in the derived context, not here.
+        verbatim = {
+            "type": ["string", "null"],
+            "pattern": "^-?[0-9][0-9,]*([.][0-9]+)?$",
+        }
+        currency = {"type": ["string", "null"], "pattern": "^[A-Z]{3}$"}
+        iso_date = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        nullable_date = {
+            "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+        }
+        nullable_string = {"type": ["string", "null"]}
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        hkex_envelope = {
+            "artifact_hash": sha256,
+            "source_record_refs": _array_of_strings(),
+            "next_cursor": {"type": ["string", "null"]},
+            "provider_status": _integer(100),
+        }
+        hkex_envelope_fields = (
+            "artifact_hash", "source_record_refs", "next_cursor", "provider_status",
+        )
+        if operation == "next_day_disclosure_returns":
+            row = _object_schema(
+                {
+                    "company_name": nullable_string,
+                    "stock_code": {"type": "string", "pattern": "^[0-9]{5}$"},
+                    "security_type": nullable_string,
+                    # The day the purchases happened, which is the day *before*
+                    # the report that carries them. A wire that took the report
+                    # date would file every purchase a day late.
+                    "trading_date": nullable_date,
+                    "shares_repurchased": verbatim,
+                    "highest_price": verbatim,
+                    "lowest_price": verbatim,
+                    "aggregate_price_paid": verbatim,
+                    # Its own field rather than inside the amount: the same
+                    # report carries GBP and USD rows, and two currencies added
+                    # together is a number about nothing.
+                    "currency": currency,
+                    "method_of_repurchase": nullable_string,
+                    "total_shares_repurchased": verbatim,
+                    "shares_repurchased_for_cancellation": verbatim,
+                    "shares_repurchased_for_treasury": verbatim,
+                    "mandate_to_date_shares": verbatim,
+                    "mandate_to_date_pct_of_issued": verbatim,
+                    "caliber_note": nullable_string,
+                    "record_hash": sha256,
+                },
+                (
+                    "company_name", "stock_code", "security_type", "trading_date",
+                    "shares_repurchased", "highest_price", "lowest_price",
+                    "aggregate_price_paid", "currency", "method_of_repurchase",
+                    "total_shares_repurchased",
+                    "shares_repurchased_for_cancellation",
+                    "shares_repurchased_for_treasury", "mandate_to_date_shares",
+                    "mandate_to_date_pct_of_issued", "caliber_note", "record_hash",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "operation": {
+                        "type": "string", "enum": ["next_day_disclosure_returns"],
+                    },
+                    "stock_code": {"type": "string", "pattern": "^[0-9]{5}$"},
+                    "report_printed_on": nullable_date,
+                    "report_url": _string(),
+                    "report_sha256": sha256,
+                    "rows": {"type": "array", "items": row},
+                    "row_count": _integer(0),
+                    # The whole market's row count, for the reason S4 wrote
+                    # down about a market-wide table: without it, "this company
+                    # bought nothing back" and "the table came back short" are
+                    # the same empty answer.
+                    "universe_row_count": _integer(0),
+                    **hkex_envelope,
+                },
+                (
+                    "schema_version", "operation", "stock_code",
+                    "report_printed_on", "report_url", "report_sha256", "rows",
+                    "row_count", "universe_row_count", *hkex_envelope_fields,
+                ),
+            )
+        index_row_properties = {
+            "news_id": nullable_string,
+            "filed_at": _string(),
+            "filed_on": iso_date,
+            # Plural: an issuer with a renminbi counter files one announcement
+            # under two codes and HKEXnews writes both into one cell.
+            "stock_codes": _array_of_strings(),
+            "stock_names": _array_of_strings(),
+            "title": nullable_string,
+            "headline_category": nullable_string,
+            "file_link": nullable_string,
+            "file_type": nullable_string,
+            "file_size": nullable_string,
+            "record_hash": sha256,
+        }
+        index_row_fields = (
+            "news_id", "filed_at", "filed_on", "stock_codes", "stock_names",
+            "title", "headline_category", "file_link", "file_type", "file_size",
+            "record_hash",
+        )
+        if operation == "announcements_index":
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "operation": {"type": "string", "enum": ["announcements_index"]},
+                    "stock_code": {"type": "string", "pattern": "^[0-9]{5}$"},
+                    "since": nullable_date,
+                    "until": nullable_date,
+                    "headline_category": nullable_string,
+                    "search_url": _string(),
+                    "rows": {
+                        "type": "array",
+                        "items": _object_schema(index_row_properties, index_row_fields),
+                    },
+                    "row_count": _integer(0),
+                    # What the servlet said it found, beside what this wire
+                    # kept. They differ when the issuer has a second counter,
+                    # and a zero here with a category of -2 is the silent
+                    # failure this connector exists to notice.
+                    "record_count": _integer(0),
+                    "has_next_row": {"type": "boolean"},
+                    **hkex_envelope,
+                },
+                (
+                    "schema_version", "operation", "stock_code", "since", "until",
+                    "headline_category", "search_url", "rows", "row_count",
+                    "record_count", "has_next_row", *hkex_envelope_fields,
+                ),
+            )
+        if operation == "monthly_returns":
+            monthly_row = _object_schema(
+                {
+                    **index_row_properties,
+                    "period_end": nullable_date,
+                    "caliber_note": nullable_string,
+                },
+                (*index_row_fields, "period_end", "caliber_note"),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "operation": {"type": "string", "enum": ["monthly_returns"]},
+                    "stock_code": {"type": "string", "pattern": "^[0-9]{5}$"},
+                    "since": nullable_date,
+                    "until": nullable_date,
+                    "search_url": _string(),
+                    "rows": {"type": "array", "items": monthly_row},
+                    "row_count": _integer(0),
+                    "record_count": _integer(0),
+                    # Frozen false. HKEXnews serves the Monthly Return only as
+                    # a PDF, so this operation enumerates the returns and
+                    # claims nothing about the figures inside them; the field
+                    # is in the contract so that a later version which does
+                    # read them cannot be mistaken for this one.
+                    "figures_available": {"type": "boolean", "enum": [False]},
+                    **hkex_envelope,
+                },
+                (
+                    "schema_version", "operation", "stock_code", "since", "until",
+                    "search_url", "rows", "row_count", "record_count",
+                    "figures_available", *hkex_envelope_fields,
+                ),
+            )
+        if operation == "disclosure_of_interests":
+            di_row = _object_schema(
+                {
+                    "form_serial_number": _string(),
+                    "form_path": nullable_string,
+                    "form_type": nullable_string,
+                    "is_director_notice": {"type": "boolean"},
+                    "person_name": nullable_string,
+                    "reason_code": nullable_string,
+                    "reason_meaning": nullable_string,
+                    "is_trade": {"type": "boolean"},
+                    "shares_involved": verbatim,
+                    "average_price": verbatim,
+                    "average_price_currency": currency,
+                    "shares_interested": verbatim,
+                    "short_position_interested": verbatim,
+                    "pct_of_issued_voting_shares": verbatim,
+                    "position_marker": nullable_string,
+                    "event_date": nullable_date,
+                    "class_of_shares": nullable_string,
+                    "issued_shares_in_class": verbatim,
+                    "shares_before": verbatim,
+                    "pct_before": verbatim,
+                    "shares_after": verbatim,
+                    "pct_after": verbatim,
+                    "capacity_codes": _array_of_strings(),
+                    "direct_or_indirect": {
+                        "type": ["string", "null"], "enum": ["D", "I", None],
+                    },
+                    "acquired_disposed": {
+                        "type": ["string", "null"], "enum": ["A", "D", None],
+                    },
+                    # Whether the notice's own form was read. False means the
+                    # before-and-after figures are the list's, which has only
+                    # the after.
+                    "detail_read": {"type": "boolean"},
+                    "notes_text": nullable_string,
+                    "notes_text_hash": sha256,
+                    "caliber_note": nullable_string,
+                    "record_hash": sha256,
+                },
+                (
+                    "form_serial_number", "form_path", "form_type",
+                    "is_director_notice", "person_name", "reason_code",
+                    "reason_meaning", "is_trade", "shares_involved",
+                    "average_price", "average_price_currency", "shares_interested",
+                    "short_position_interested", "pct_of_issued_voting_shares",
+                    "position_marker", "event_date", "class_of_shares",
+                    "issued_shares_in_class", "shares_before", "pct_before",
+                    "shares_after", "pct_after", "capacity_codes",
+                    "direct_or_indirect", "acquired_disposed", "detail_read",
+                    "notes_text", "notes_text_hash", "caliber_note", "record_hash",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "operation": {
+                        "type": "string", "enum": ["disclosure_of_interests"],
+                    },
+                    "stock_code": {"type": "string", "pattern": "^[0-9]{5}$"},
+                    "corporation_name": nullable_string,
+                    # The DI database's own key. On the wire because a form
+                    # list is keyed by it and ignores the stock code beside it,
+                    # so which one was used is part of what was read.
+                    "corporation_sid": _integer(1),
+                    "since": nullable_date,
+                    "until": nullable_date,
+                    "list_url": _string(),
+                    "rows": {"type": "array", "items": di_row},
+                    "row_count": _integer(0),
+                    "detail_read_count": _integer(0),
+                    **hkex_envelope,
+                },
+                (
+                    "schema_version", "operation", "stock_code",
+                    "corporation_name", "corporation_sid", "since", "until",
+                    "list_url", "rows", "row_count", "detail_read_count",
+                    *hkex_envelope_fields,
+                ),
+            )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -2734,6 +2988,85 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
             _operation(
                 "ah_premium", completeness="partial",
                 input_fields=("ticker",),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
+    # W4: Hong Kong disclosure, read from HKEX and the SFC rather than from a
+    # vendor.
+    #
+    # Hong Kong is the only market that makes a listed company report its own
+    # share buy-backs *the next morning*, every trading day, and the Exchange
+    # aggregates every one of those returns into one workbook it publishes
+    # itself. That workbook, the SFC's Part XV database and HKEXnews' own
+    # announcement index are the three surfaces here. All three are the
+    # primary publisher; none is a vendor's normalisation, which is why rows
+    # from this connector may carry a filing-grade tier where S4's may not.
+    #
+    # Three hosts because the three surfaces genuinely live in three places:
+    # www3 serves the Exchange reports, www1 serves HKEXnews' search, and the
+    # Disclosure of Interests database is on hkex.com.hk rather than on
+    # hkexnews at all. Nothing else may be reached.
+    {
+        "slug": "hkex-filings", "connector_ref": "connector:hkex-filings",
+        "source_ref": "source:hkex-filings", "source_type": "official_filing",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": (
+            "di.hkex.com.hk",
+            "www1.hkexnews.hk",
+            "www3.hkexnews.hk",
+        ),
+        "auth": "none",
+        "forbidden": (
+            # The trap. `t1code=-1` is accepted by the title search servlet,
+            # answers HTTP 200 and reports zero records for an issuer that
+            # filed two dozen documents in the window. "Every category" is -2.
+            # A route that returns a confident empty answer is worse than one
+            # that fails.
+            "route:hkexnews-title-search-tier-one-minus-one",
+            # The human search page works and is refused: it answers in HTML
+            # behind a JSF ViewState and a session cookie, which is three more
+            # things that can change than the JSON servlet has.
+            "route:hkexnews-jsf-titlesearch-xhtml",
+            # Third parties republish the daily buy-back tape within minutes
+            # and several of them are easier to read than the workbook. They
+            # are transcriptions, and a transcription of a filing is not the
+            # filing; the owner's existing skill already has the rule that only
+            # hkexnews.hk or the company's own IR page may be a final source.
+            "route:third-party-buyback-transcription",
+            "route:arbitrary-attachment-url",
+        ),
+        # No permitted fallback. Each of these three surfaces is the only
+        # publisher of what it publishes; there is nothing to fall back to that
+        # would be the same fact.
+        "fallbacks": (),
+        "operations": (
+            # The only enumerated one, and genuinely: the Exchange publishes
+            # the complete market-wide table for one trading day in one
+            # document with no paging, so a window of days can be reconciled
+            # day by day.
+            _operation(
+                "next_day_disclosure_returns", completeness="enumerated",
+                input_fields=("hk_ticker", "as_of"),
+            ),
+            # `partial` rather than `enumerated`, and the reason is on the
+            # wire: the servlet pages at 100 rows and says so in `hasNextRow`,
+            # and this connector does not follow it.
+            _operation(
+                "monthly_returns", completeness="partial",
+                input_fields=("hk_ticker", "since", "until"),
+            ),
+            # `partial` for the same reason plus one of its own: the notice
+            # list pages at 100 and the adapter reads at most forty notices'
+            # own forms in a run.
+            _operation(
+                "disclosure_of_interests", completeness="partial",
+                input_fields=("hk_ticker", "since", "until"),
+            ),
+            _operation(
+                "announcements_index", completeness="partial",
+                input_fields=("hk_ticker", "since", "until", "headline_category"),
+                optional_fields=("headline_category",),
             ),
         ),
         "gate": "recorded_public_reference_shadow",
@@ -3155,6 +3488,19 @@ def _field_schema(name: str) -> dict[str, Any]:
     # letting a run discover it.
     if name == "a_ticker":
         return {"type": "string", "pattern": "^[0-9]{6}$"}
+    # W4: a Hong Kong stock code, zero-padded to five digits. Its own name
+    # rather than ``ticker``, for the third time this file has had this
+    # lesson: ``ticker`` is free text in the frozen yfinance and cn-hk-findata
+    # contracts and narrowing it here would move approvals nobody asked to
+    # move.
+    if name == "hk_ticker":
+        return {"type": "string", "pattern": "^[0-9]{5}$"}
+    # W4: HKEXnews' headline category. A closed set rather than free text, and
+    # ``-1`` is deliberately not in it: the servlet accepts it, returns 200 and
+    # reports zero records, which is the quietest way this connector could be
+    # wrong. ``-2`` is the value that means every category.
+    if name == "headline_category":
+        return {"type": "string", "enum": ["-2", "10000", "50000", "51500"]}
     # S1: the run a note first appeared in, ``market-digest:<date>:<AM|PM>``.
     # A free-text hint would let a caller point the reader at an arbitrary
     # string; the shape is fixed because the shape is what makes it a locator.

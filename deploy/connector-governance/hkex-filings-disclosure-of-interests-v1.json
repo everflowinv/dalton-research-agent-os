@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:hkex-filings-disclosure-of-interests:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:hkex-filings-disclosure-of-interests:v1",
+  "capability_id": "capability:dalton:connector:hkex-filings-disclosure-of-interests",
+  "content_hash": "e241a87a92c0181860f7dabf10ad09a52d3f45fc966d49e78786c042bd0f8e7c",
+  "decision_ref": "capability-decision:connector-governance:hkex-filings-disclosure-of-interests:v1",
+  "effective_from": "2026-09-10T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "9758a66eadee6f5dc016da69ffd035e75538ef9d25f0921e9026083f79d4f0bc",
+  "expected_source_hash": "af88034399acec7eb6fde36053b94c7b2c3775c8c8dcf5704bebd5450b65ecfd",
+  "id": "connector-governance:hkex-filings-disclosure-of-interests:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:hkex-filings-disclosure-of-interests:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:hkex-filings-disclosure-of-interests@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

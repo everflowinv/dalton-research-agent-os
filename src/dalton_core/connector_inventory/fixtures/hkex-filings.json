@@ -1,0 +1,438 @@
+{
+  "authenticated": false,
+  "cases": [
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "72b23e28990a0c9ecd89239f29261dcb916a86ff165c2118f2b81ab47ee9a4aa",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "b847bfd2d4b489a4d1820dfbba37b6f3a617f78195d5ad853c2cb6dd1fb53127",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "170000bdf43ec508f63d5c340741891801490db03942432d4430c0bc61a857dd",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:next_day_disclosure_returns:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "next_day_disclosure_returns",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:empty:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "24a0a43786b7125075bfde6df11e637c4a0d1b86465674f54b4fc9462761fab2",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "656d0b1c204944beda2af57d405d62ff925e467086e4552974afc5ab85539cf4",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:success:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "69059839ce5b8805d9d473fa2172cae5110adfc14e2e1a72e9a3d0684e207330",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:monthly_returns:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "monthly_returns",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:empty:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "14064af7883e21bc422a27cf0b3d79fe215e07fbd0119eeb0bd2750471b3533c",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "e7ad009e4dc248aad26301125ae610d02c94d818183356fe2604a4bbcb1bbc5e",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:success:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "1357170a80dceaf0b84fd8063a952b50f969ee812fef0e19b8f3ceb84504b608",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:disclosure_of_interests:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "disclosure_of_interests",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:empty:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "d2420997c9b2da62adb18933c4db44ae49da68265b87754d864d8b5afd8563e8",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "c01d6138eaaa3726da60f9f3d96886595f0c3d2c1688d3d1db8d782f31b92e3d",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:success:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "8b451ccbec0997b4f146c82c21ffce669729306c3c488f684c1b14de25bc0d9b",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:hkex-filings:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:hkex-filings:announcements_index:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "announcements_index",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:hkex-filings:0.1",
+  "content_hash": "1931f13dba71f255e389faf2342373745b7354d5457b3addd74153e2f18d1973",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:hkex-filings:0.1",
+  "operations": [
+    {
+      "operation": "next_day_disclosure_returns",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "monthly_returns",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "disclosure_of_interests",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "announcements_index",
+      "pagination_mode": "none"
+    }
+  ],
+  "recording_boundary": "public_provider",
+  "schema_version": "0.1",
+  "synthetic": true
+}

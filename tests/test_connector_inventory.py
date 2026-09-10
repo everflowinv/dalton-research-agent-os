@@ -568,6 +568,9 @@ class ConnectorInventoryTests(unittest.TestCase):
                 # S5: the local changedetection.io instance, watching the
                 # investor-relations pages declared per company.
                 "ir-page-watch",
+                # W4: Hong Kong's daily buy-back tape, the SFC's Disclosure of
+                # Interests database and HKEXnews' announcement index.
+                "hkex-filings",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}
@@ -634,7 +637,10 @@ class ConnectorInventoryTests(unittest.TestCase):
         # one host with no credential anywhere, so it carries a host allowlist
         # like the other public connectors and unlike the host-owned ones.
         public = {"cninfo", "sec", "sec-financials", "roic-transcript",
-                  "yfinance", "cn-hk-findata", "web-fetch", "employee-reviews"}
+                  "yfinance", "cn-hk-findata", "web-fetch", "employee-reviews",
+                  # W4: HKEX and the SFC, plain HTTPS with no credential
+                  # anywhere, so a host allowlist like the other public ones.
+                  "hkex-filings"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]
