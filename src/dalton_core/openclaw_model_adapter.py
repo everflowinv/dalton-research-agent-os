@@ -72,6 +72,20 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "deep_insight_gate_verifier_provider_output_v0_1",
         frozenset({"deep_insight_gate_verifier"}),
     ),
+    "zero-base-review-verifier-provider-output-0.1": (
+        "0.1", "zero-base-review-verifier-provider-output-v0.1.schema.json",
+        "zero_base_review_verifier_provider_output_v0_1",
+        frozenset({"zero_base_review_verifier"}),
+    ),
+    "earnings-verifier-provider-output-0.1": (
+        "0.1", "earnings-verifier-provider-output-v0.1.schema.json",
+        "earnings_verifier_provider_output_v0_1",
+        frozenset({"earnings_preview_verifier", "earnings_calibration_verifier"}),
+    ),
+    "quality-verifier-provider-output-0.1": (
+        "0.1", "quality-verifier-provider-output-v0.1.schema.json",
+        "quality_verifier_provider_output_v0_1", frozenset({"quality_verifier"}),
+    ),
     "event-judgement-verifier-provider-output-0.1": (
         "0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json",

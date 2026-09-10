@@ -4,6 +4,8 @@ from importlib import resources
 
 from dalton_core.company_dossier_draft import VERIFIER_FINDING_CODES as DOSSIER_CODES, validate_verifier_output as validate_dossier
 from dalton_core.deep_insight_gate_draft import VERIFIER_FINDING_CODES as GATE_CODES, validate_verifier_output as validate_gate
+from dalton_core.earnings_preview import VERIFIER_FINDING_CODES as EARNINGS_CODES, validate_verifier_output as validate_earnings
+from dalton_core.research_quality_score import VERIFIER_FINDING_CODES as QUALITY_CODES
 
 
 class VerifierProviderSchemaTests(unittest.TestCase):
@@ -28,3 +30,15 @@ class VerifierProviderSchemaTests(unittest.TestCase):
         item = schema["properties"]["findings"]["items"]
         self.assertEqual(set(item["required"]), set(payload["findings"][0]))
         self.assertEqual(set(item["properties"]["code"]["enum"]), set(GATE_CODES))
+
+    def test_remaining_schema_vocabularies_match_semantic_validators(self):
+        earnings = self.schema("earnings-verifier-provider-output-v0.1.schema.json")
+        payload = {"verdict": "pass", "findings": [{"code": "ok", "detail": "All cited."}]}
+        self.assertEqual(validate_earnings(payload), payload)
+        self.assertEqual(set(earnings["properties"]["findings"]["items"]["properties"]["code"]["enum"]),
+                         set(EARNINGS_CODES))
+        quality = self.schema("quality-verifier-provider-output-v0.1.schema.json")
+        self.assertEqual(set(quality["properties"]["findings"]["items"]["properties"]["code"]["enum"]),
+                         set(QUALITY_CODES))
+        zero = self.schema("zero-base-review-verifier-provider-output-v0.1.schema.json")
+        self.assertEqual(zero["properties"]["findings"]["items"]["maxLength"], 500)

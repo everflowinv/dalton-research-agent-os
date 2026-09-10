@@ -93,8 +93,11 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
             raise LaneChildRejected(
                 "the zero-base review lane needs a model configuration to review"
             )
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        provider_contract = verifier_provider_contract_fingerprint(
+            "zero_base_review_verifier")
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{mode}|{batch_ref.strip()}".encode("utf-8")
+            f"{self.TICKET_PREFIX}|{mode}|{batch_ref.strip()}|{provider_contract}".encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,

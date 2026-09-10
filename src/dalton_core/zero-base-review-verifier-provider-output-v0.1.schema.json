@@ -1,0 +1,26 @@
+{
+  "$id": "https://dalton.local/schemas/zero-base-review-verifier-provider-output-v0.1.schema.json",
+  "title": "ZeroBaseReviewVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    }
+  }
+}

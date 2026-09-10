@@ -567,6 +567,18 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             ("deep_insight_gate_verifier", "deep-insight-gate-verifier-provider-output-0.1",
              "deep-insight-gate-verifier-provider-output-v0.1.schema.json",
              "deep_insight_gate_verifier_provider_output_v0_1", "question_ref"),
+            ("zero_base_review_verifier", "zero-base-review-verifier-provider-output-0.1",
+             "zero-base-review-verifier-provider-output-v0.1.schema.json",
+             "zero_base_review_verifier_provider_output_v0_1", None),
+            ("earnings_preview_verifier", "earnings-verifier-provider-output-0.1",
+             "earnings-verifier-provider-output-v0.1.schema.json",
+             "earnings_verifier_provider_output_v0_1", "code"),
+            ("earnings_calibration_verifier", "earnings-verifier-provider-output-0.1",
+             "earnings-verifier-provider-output-v0.1.schema.json",
+             "earnings_verifier_provider_output_v0_1", "code"),
+            ("quality_verifier", "quality-verifier-provider-output-0.1",
+             "quality-verifier-provider-output-v0.1.schema.json",
+             "quality_verifier_provider_output_v0_1", "criterion_id"),
         )
         for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
             with self.subTest(purpose=purpose):
@@ -587,8 +599,9 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                 broker.close()
                 structured = broker.requests[0]["requiredControls"]["structuredOutput"]
                 self.assertEqual(structured["schemaName"], schema_name)
-                item = structured["jsonSchema"]["properties"]["findings"]["items"]
-                self.assertIn(locator, item["required"])
+                if locator is not None:
+                    item = structured["jsonSchema"]["properties"]["findings"]["items"]
+                    self.assertIn(locator, item["required"])
                 self.assertEqual(structured["schemaHash"], packaged_schema_hash(resource))
                 self.assertTrue(result.metadata["required_provider_controls"])
 

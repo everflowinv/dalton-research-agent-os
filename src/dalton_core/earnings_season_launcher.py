@@ -73,8 +73,11 @@ class EarningsSeasonLauncher(LaneChildLauncher):
             raise LaneChildRejected(
                 "the earnings-season lane needs a writer and a verifier configuration"
             )
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        provider_contract = verifier_provider_contract_fingerprint(
+            "earnings_preview_verifier", "earnings_calibration_verifier")
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{batch_ref.strip()}".encode("utf-8")
+            f"{self.TICKET_PREFIX}|{batch_ref.strip()}|{provider_contract}".encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(digest=digest, record={"batch_ref": batch_ref.strip()})
 

@@ -1,0 +1,49 @@
+{
+  "$id": "https://dalton.local/schemas/quality-verifier-provider-output-v0.1.schema.json",
+  "title": "QualityVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "criterion_id",
+          "code",
+          "detail"
+        ],
+        "properties": {
+          "criterion_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "code": {
+            "enum": [
+              "score_not_supported_by_evidence",
+              "evidence_sentence_does_not_point_at_artefact",
+              "criterion_misread",
+              "deterministic_result_contradicted"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      }
+    }
+  }
+}

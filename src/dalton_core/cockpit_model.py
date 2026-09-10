@@ -73,6 +73,18 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "deep_insight_gate_verifier": (
         "deep-insight-gate-verifier-provider-output-0.1",
         "deep-insight-gate-verifier-provider-output-v0.1.schema.json"),
+    "zero_base_review_verifier": (
+        "zero-base-review-verifier-provider-output-0.1",
+        "zero-base-review-verifier-provider-output-v0.1.schema.json"),
+    "earnings_preview_verifier": (
+        "earnings-verifier-provider-output-0.1",
+        "earnings-verifier-provider-output-v0.1.schema.json"),
+    "earnings_calibration_verifier": (
+        "earnings-verifier-provider-output-0.1",
+        "earnings-verifier-provider-output-v0.1.schema.json"),
+    "quality_verifier": (
+        "quality-verifier-provider-output-0.1",
+        "quality-verifier-provider-output-v0.1.schema.json"),
     "event_judgement_verifier": (
         "event-judgement-verifier-provider-output-0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json"),
