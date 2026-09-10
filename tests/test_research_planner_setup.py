@@ -11,12 +11,14 @@ from pathlib import Path
 from dalton_core.model_deployment import openclaw_broker_profiles
 from dalton_core.model_router import ModelRouter
 from dalton_core.research_planner_setup import (
+    CONFIG_FILE_NAME,
     POLICY_ID,
     PlannerSetupError,
     credential_slots_for,
     ensure_planner_policy,
     install,
 )
+from dalton_core.writer_server import planner_budget_config
 
 NOW = datetime(2026, 9, 8, tzinfo=timezone.utc)
 ASTRA = "profile:gpt-6-astra"
@@ -204,3 +206,78 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(new["version"], old["version"] + 1)
         self.assertEqual(new["prior_version_ref"], old["profile_version_ref"])
         self.assertGreater(new["availability"]["valid_until"], old["availability"]["valid_until"])
+
+
+class PlannerBudgetConfigTests(unittest.TestCase):
+    """C2b: the writer finds the planner's day ledger where the installer put it.
+
+    There is no ``--planner-budget-db`` flag, on purpose.  The writer's argv is
+    built by the launch agent, and a second copy of the budget wiring would be
+    a second thing to repoint when the owner raises a cap -- and the one that
+    was forgotten would be this one.  ``research_planner_setup.install`` already
+    writes ``budget_db`` and ``budget_policy_ref`` into the model configuration
+    beside the Core, and a cap raise already repoints that file, so the writer
+    reads it from there.  The owner step is therefore "re-run install.sh", not
+    "edit a service file".
+    """
+
+    def _install(self, root: Path) -> Path:
+        from tests.test_document_extraction_setup import _service
+
+        config_path = _service(root)
+        install(config_path, tier="cheap", now=NOW)
+        # resolve(): the installer records resolved paths, and on macOS the
+        # temporary directory is reached through a symlink.
+        return Path(json.loads(
+            config_path.read_text(encoding="utf-8"))["core_db"]).resolve().parent
+
+    def test_what_the_installer_writes_is_what_the_writer_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = self._install(root)
+            found = planner_budget_config(state_dir)
+            self.assertEqual(found, {
+                "budget_db": str(state_dir / "budget.sqlite"),
+                "budget_policy_ref":
+                    "thesis-impact-day-budget-policy:production:1",
+            })
+            # The very same two keys the installed configuration carries: one
+            # file, one repoint, and no way for them to disagree.
+            installed = json.loads(
+                (state_dir / CONFIG_FILE_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(installed["budget_db"], found["budget_db"])
+            self.assertEqual(
+                installed["budget_policy_ref"], found["budget_policy_ref"])
+
+    def test_no_configuration_at_all_is_todays_behaviour(self) -> None:
+        # An install that has not re-run the planner setup keeps working. The
+        # writer reports "unbudgeted" in the op result rather than implying a
+        # ledger saw the call.
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(planner_budget_config(Path(directory)), {})
+
+    def test_a_pre_c2b_configuration_file_binds_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / CONFIG_FILE_NAME).write_text(json.dumps({
+                "routing_policy_ref": "model-routing-policy-version:x:1",
+                "broker_client_id": "client:dalton-core",
+            }), encoding="utf-8")
+            self.assertEqual(planner_budget_config(root), {})
+
+    def test_a_relative_ledger_path_is_not_a_ledger(self) -> None:
+        # The writer's working directory is not part of any contract, so a
+        # path it would have to interpret is refused rather than guessed at.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / CONFIG_FILE_NAME).write_text(json.dumps({
+                "budget_db": "state/budget.sqlite",
+                "budget_policy_ref": "thesis-impact-day-budget-policy:x:1",
+            }), encoding="utf-8")
+            self.assertEqual(planner_budget_config(root), {})
+
+    def test_an_unreadable_configuration_is_not_a_writer_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / CONFIG_FILE_NAME).write_text("{not json", encoding="utf-8")
+            self.assertEqual(planner_budget_config(root), {})
