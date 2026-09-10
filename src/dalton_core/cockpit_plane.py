@@ -2136,9 +2136,10 @@ class CockpitPlane:
             with closing(sqlite3.connect(f"file:{config['budget_db']}?mode=ro", uri=True, timeout=5)) as ledger:
                 ledger.row_factory = sqlite3.Row
                 rows = ledger.execute(
-                    "SELECT a.reserved_micros, s.actual_micros AS settled FROM thesis_impact_day_admissions a "
+                    "SELECT a.reserved_micros, COALESCE(c.corrected_micros,s.actual_micros) AS settled FROM thesis_impact_day_admissions a "
                     "JOIN model_mission_budget_bindings b ON b.admission_id=a.admission_id "
                     "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                    "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
                     "WHERE a.day=? AND b.mission_ref=?", (today, mission["mission_ref"]),
                 ).fetchall()
         except sqlite3.Error:

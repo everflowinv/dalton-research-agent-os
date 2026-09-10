@@ -746,7 +746,13 @@ class CockpitModel:
                                     router, timeout_seconds=effective["timeout_seconds"]
                                 ).execute(work, route, profile)
                                 cost_micros, cost_status = _cost_micros(invocation, route, profile, reserved)
-                                failure = None
+                                if result.status == "succeeded":
+                                    failure = None
+                                else:
+                                    if cost_status != "actual":
+                                        cost_micros, cost_status = reserved, "reserved"
+                                    error = result.error or {}
+                                    failure = str(error.get("message") or "the model call failed")
                             except OpenClawModelAdapterError as exc:
                                 result = _failure(work, "MODEL_ADAPTER_REJECTED_OR_FAILED", route["id"])
                                 if isinstance(exc, BrokerDefinitelyNotSent):

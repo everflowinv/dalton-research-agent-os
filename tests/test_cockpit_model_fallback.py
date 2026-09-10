@@ -183,6 +183,20 @@ class CockpitChainTests(unittest.TestCase):
                 "SELECT actual_micros FROM thesis_impact_day_settlements").fetchone()[0]
         self.assertEqual(settlement, admission)
 
+    def test_single_pin_failed_host_envelope_keeps_ceiling_without_cost_telemetry(self) -> None:
+        adapter = ChainAdapter({"profile:gpt-6-astra": {
+            "code": "HOST_COMPLETION_FAILED", "message": "host completion failed"}})
+        with self.assertRaisesRegex(CockpitModelError, "host completion failed"):
+            self._model(adapter, policy_version_ref=self.pinned_policy).call(
+                purpose="plan", request_id="pinned-host-failed", prompt="draft",
+                mission=self.mission)
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            row = ledger.connection.execute(
+                "SELECT a.reserved_micros,s.actual_micros FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id"
+            ).fetchone()
+        self.assertEqual(row["actual_micros"], row["reserved_micros"])
+
     def test_capacity_retry_policy_is_closed_and_install_preserved(self) -> None:
         retry = {"cooldown_seconds": 90, "max_recovery_epochs": 2,
                  "scheduler_max_attempts": 4}

@@ -179,6 +179,8 @@ class DayAdmissionTests(unittest.TestCase):
         correction = self.authority.correct_uncertain_settlement(
             opened["admission_id"], **args)
         self.assertEqual(correction["status"], "fresh")
+        self.assertEqual(correction["admission_hash"], opened["content_hash"])
+        self.assertEqual(correction["settlement_hash"], settled["content_hash"])
         self.assertEqual(self.authority.correct_uncertain_settlement(
             opened["admission_id"], **args)["status"], "duplicate")
         self.assertEqual(self.authority.day_summary(

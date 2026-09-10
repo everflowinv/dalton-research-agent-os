@@ -721,7 +721,8 @@ class ThesisImpactBudgetStore:
         wire["content_hash"] = content_hash(wire)
         with self._transaction() as cur:
             prior = cur.execute(
-                "SELECT a.reserved_micros,s.actual_micros,s.settlement_id "
+                "SELECT a.reserved_micros,a.content_hash AS admission_hash,"
+                "s.actual_micros,s.settlement_id,s.content_hash AS settlement_hash "
                 "FROM thesis_impact_day_admissions a JOIN thesis_impact_day_settlements s "
                 "ON s.admission_id=a.admission_id WHERE a.admission_id=?",
                 (values["admission_id"],),
@@ -730,6 +731,19 @@ class ThesisImpactBudgetStore:
                 raise ThesisImpactBudgetConflict("correction does not bind the exact settlement")
             if corrected_micros <= prior["actual_micros"] or corrected_micros > prior["reserved_micros"]:
                 raise ThesisImpactBudgetConflict("correction must increase cost within the reservation")
+            identity.update({
+                "admission_hash": prior["admission_hash"],
+                "settlement_hash": prior["settlement_hash"],
+            })
+            wire = {
+                "schema_version": SCHEMA_VERSION,
+                "correction_id": "thesis-impact-correction:" + content_hash(identity)[:32],
+                **identity,
+                "corrected_micros": corrected_micros,
+                "reason": "historical_completion_unknown",
+                "created_at": wire["created_at"],
+            }
+            wire["content_hash"] = content_hash(wire)
             existing = cur.execute(
                 "SELECT record_json FROM thesis_impact_settlement_corrections "
                 "WHERE idempotency_key=? OR admission_id=?",
@@ -739,7 +753,8 @@ class ThesisImpactBudgetStore:
                 persisted = json.loads(existing["record_json"])
                 if any(persisted.get(key) != wire.get(key) for key in (
                     "admission_id", "settlement_id", "corrected_micros", "evidence_ref",
-                    "evidence_hash", "actor_ref", "idempotency_key", "reason")):
+                    "evidence_hash", "actor_ref", "idempotency_key", "reason",
+                    "admission_hash", "settlement_hash")):
                     raise ThesisImpactBudgetConflict("settlement correction conflicts")
                 return {**persisted, "status": "duplicate"}
             cur.execute(

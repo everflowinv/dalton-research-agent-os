@@ -1004,9 +1004,10 @@ class DocumentExtractionService:
         work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
         with ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
             row = budget.connection.execute(
-                "SELECT a.admission_id,a.reserved_micros,a.day,s.actual_micros,s.usage_entry_ref "
+                "SELECT a.admission_id,a.reserved_micros,a.day,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros,s.usage_entry_ref "
                 "FROM thesis_impact_day_admissions a LEFT JOIN thesis_impact_day_settlements s "
-                "ON s.admission_id=a.admission_id WHERE a.work_order_ref=?", (work.id,),
+                "ON s.admission_id=a.admission_id LEFT JOIN thesis_impact_settlement_corrections c "
+                "ON c.admission_id=a.admission_id WHERE a.work_order_ref=?", (work.id,),
             ).fetchone()
             if row is not None:
                 return {"status": "reserved" if row["actual_micros"] is None else "settled", **dict(row)}

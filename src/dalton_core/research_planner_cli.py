@@ -118,8 +118,10 @@ def read_spend(store: DaltonStore, mission: Mapping[str, Any], *,
             read = sqlite3.connect(f"file:{Path(budget_db)}?mode=ro", uri=True)
             try:
                 row = read.execute(
-                    "SELECT COUNT(*), COALESCE(SUM(actual_micros),0) "
-                    "FROM thesis_impact_day_settlements WHERE substr(created_at,1,10)=?",
+                    "SELECT COUNT(*), COALESCE(SUM(COALESCE(c.corrected_micros,s.actual_micros)),0) "
+                    "FROM thesis_impact_day_settlements s LEFT JOIN "
+                    "thesis_impact_settlement_corrections c ON c.admission_id=s.admission_id "
+                    "WHERE substr(s.created_at,1,10)=?",
                     (day,),
                 ).fetchone()
             finally:
