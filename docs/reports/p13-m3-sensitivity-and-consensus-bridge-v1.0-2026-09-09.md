@@ -185,12 +185,12 @@ DXC 的净利润在 M2 上就 `unavailable`（营业利润变号，税率没有�
 ## 6. 测试
 
 ```
-Ran 4905 tests in 681.099s
+Ran 5167 tests in 509.598s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `427f684` 之后的本分支。并入前、基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`，其中本片 +112：`test_forecast_sensitivity` 49、`test_consensus_bridge` 38、`test_mission_sensitivity_lane` 25。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `9371e49` 之后的本分支。基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`；其中本片 +112：`test_forecast_sensitivity` 49、`test_consensus_bridge` 38、`test_mission_sensitivity_lane` 25，其余增量来自并入的各片。）
 
 fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，成本份额按 80% / 82% / 78% 循环，**SG&A 恰好是收入的十分之一、税恰好是营业利润的四分之一**——后两条是故意的：两条历史带宽度为零的 driver，逼排序去破平局，而且必须在每台机器上以同样方式破（按 driver ref）。带的期望值都是手算出来写全的。
 
