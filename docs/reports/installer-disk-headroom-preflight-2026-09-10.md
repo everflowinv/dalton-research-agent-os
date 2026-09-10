@@ -12,3 +12,8 @@ The check reads sizes and filesystem capacity only. It does not create the
 Dalton root. Its refusal reports required and available bytes plus the measured
 source, runtime, and database components so the threshold is reviewable rather
 than an unexplained fixed gigabyte allowance.
+
+Database size includes active `-wal` and `-shm` sidecars. An outer deployment
+wrapper can pass `--backup-copies` and `--backup-root` before stopping services:
+backup and restore-check copies are added to the same-volume requirement, or
+checked against the backup volume separately when it differs.

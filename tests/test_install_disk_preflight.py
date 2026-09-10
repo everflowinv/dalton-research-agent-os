@@ -1,7 +1,12 @@
 from __future__ import annotations
 import shutil, tempfile, unittest
 from pathlib import Path
-from dalton_core.install_disk_preflight import BUILD_COPIES, METADATA_FLOOR_BYTES, check_space, required_bytes
+from dalton_core.install_disk_preflight import (
+    BUILD_COPIES,
+    METADATA_FLOOR_BYTES,
+    check_space,
+    required_bytes,
+)
 
 class DiskPreflightTests(unittest.TestCase):
     def test_installer_checks_space_before_its_first_mutation(self):
@@ -34,8 +39,35 @@ class DiskPreflightTests(unittest.TestCase):
             (repo / "source").write_bytes(b"a" * 11)
             (runtime / "installed").write_bytes(b"b" * 13)
             (state / "core.sqlite").write_bytes(b"c" * 17)
+            (state / "core.sqlite-wal").write_bytes(b"d" * 23)
+            (state / "core.sqlite-shm").write_bytes(b"e" * 5)
             result = check_space(repo_root=repo, dalton_root=root / "Dalton", reserve=19,
                                  usage=lambda _: shutil._ntuple_diskusage(1000, 0, 1000))
-            self.assertEqual(result["required_bytes"], 11 * 3 + 13 + 17 + 19)
+            self.assertEqual(result["database_bytes"], 17 + 23 + 5)
+            self.assertEqual(result["required_bytes"], 11 * 3 + 13 + 45 + 19)
+
+    def test_backup_and_restore_copies_share_or_separate_volume_capacity(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            repo = root / "repo"
+            state = root / "Dalton" / "state" / "dalton-core"
+            backup = root / "backup"
+            repo.mkdir()
+            state.mkdir(parents=True)
+            backup.mkdir()
+            (state / "core.sqlite").write_bytes(b"x" * 100)
+            usage = lambda path: shutil._ntuple_diskusage(
+                1000, 0, 250 if path.name == "backup" else 350)
+            combined = check_space(
+                repo_root=repo, dalton_root=root / "Dalton", reserve=0,
+                backup_copies=2, backup_root=backup, usage=usage,
+            )
+            self.assertEqual(combined["required_bytes"], 300)
+            with self.assertRaisesRegex(RuntimeError, "backup disk space"):
+                check_space(
+                    repo_root=repo, dalton_root=root / "Dalton", reserve=0,
+                    backup_copies=3, backup_root=backup, usage=usage,
+                    device=lambda path: 2 if path.name == "backup" else 1,
+                )
 
 if __name__ == "__main__": unittest.main()
