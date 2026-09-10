@@ -176,13 +176,16 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     if max_units < len(GROUPS):
         return {"status": "held", "reason": "run max_units cannot cover the atomic four-group memo"}
     sections, answers, calls = [], [], []
+    cost_micros = 0
     for group, section_indexes, question_indexes in GROUPS:
         outcome = draft_group(model, group=group,
             section_titles=[titles[i] for i in section_indexes],
             questions=[questions[i] for i in question_indexes], material=frozen["material"],
             company=company, mission=mission)
+        cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
         if outcome["status"] != "drafted":
-            return {"status": "refused", "memo_status": "draft_refused", "reason": outcome["reason"]}
+            return {"status": "refused", "memo_status": "draft_refused", "reason": outcome["reason"],
+                    "cost_micros": cost_micros}
         sections.extend(outcome["sections"]); answers.extend(outcome["key_questions"])
         calls.append({"group": group, "work_order_ref": outcome["model"]["work_order_ref"],
                       "route_decision_ref": outcome["model"]["route_decision_ref"],
@@ -197,10 +200,11 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                     for section in sections]
     except MissionDeliverableError as exc:
         return {"status": "refused", "memo_status": "authority_validation_failed",
-                "reason": str(exc)}
+                "reason": str(exc), "cost_micros": cost_micros}
     checks = _checks(sections, answers)
     if any(check["status"] != "pass" for check in checks):
-        return {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks}
+        return {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
+                "cost_micros": cost_micros}
     summary = "Investment Memo candidate; human approval is still required."
     fields = {"kind": "investment_memo", "subject_ref": company["company_ref"],
               "mission_version_ref": mission["id"], "mission_version_hash": mission["content_hash"],
@@ -212,8 +216,10 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     verdict = verify_memo(verifier_model, sections=sections, questions=answers,
         material=frozen["material"], material_hash=digest, mission=mission,
         producer_route_decision_refs=routes)
+    cost_micros += int(verdict.get("model", {}).get("cost_micros") or verdict.get("cost_micros") or 0)
     if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
-        return {"status": "refused", "memo_status": "verification_failed", "verification": verdict}
+        return {"status": "refused", "memo_status": "verification_failed", "verification": verdict,
+                "cost_micros": cost_micros}
     gate = {"schema_version": SCHEMA_VERSION, "passed": True, "checks": checks,
             "verified_body_hash": digest, "key_questions": answers,
             "input_bindings": list(frozen["input_bindings"]), "producer_calls": calls,
@@ -231,11 +237,10 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             idempotency_key="investment-memo:" + content_hash({"company": company["company_ref"], "digest": digest}), gate=gate)
     except MissionDeliverableError as exc:
         return {"status": "refused", "memo_status": "authority_validation_failed",
-                "reason": str(exc)}
+                "reason": str(exc), "cost_micros": cost_micros}
     return {"status": "succeeded", "memo_status": published["status"],
             "company_ref": company["company_ref"], "version_ref": published["id"],
-            "version_hash": published["content_hash"], "cost_micros": sum(
-                int(c.get("cost_micros") or 0) for c in []), "gate": gate}
+            "version_hash": published["content_hash"], "cost_micros": cost_micros, "gate": gate}
 
 
 def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_config_path: Path | None,

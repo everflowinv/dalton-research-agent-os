@@ -72,15 +72,26 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
         raise InvestmentMemoDraftError("draft returned the wrong section titles or order")
     checked_sections = []
     for section in sections:
+        if not isinstance(section, Mapping):
+            raise InvestmentMemoDraftError("each section must be an object")
         if set(section) != {"title", "body", "claim_refs", "numbers", "gaps"}:
             raise InvestmentMemoDraftError("a section has an open or incomplete shape")
+        if not isinstance(section["body"], str):
+            raise InvestmentMemoDraftError("section body must be text")
         refs = section["claim_refs"]
         if not isinstance(refs, list) or any(ref not in allowed_refs or not str(ref).startswith("claim-version:") for ref in refs):
             raise InvestmentMemoDraftError("a section cites material outside the frozen input")
         if not isinstance(section["numbers"], list) or not isinstance(section["gaps"], list):
             raise InvestmentMemoDraftError("section numbers and gaps must be lists")
+        if any(not isinstance(gap, str) for gap in section["gaps"]):
+            raise InvestmentMemoDraftError("section gaps must be text")
         for number in section["numbers"]:
-            refs_for_number = [number.get("claim_version_ref"), (number.get("cell") or {}).get("ref")]
+            if not isinstance(number, Mapping):
+                raise InvestmentMemoDraftError("each section number must be an object")
+            cell = number.get("cell")
+            if cell is not None and not isinstance(cell, Mapping):
+                raise InvestmentMemoDraftError("a section number cell must be an object")
+            refs_for_number = [number.get("claim_version_ref"), (cell or {}).get("ref")]
             if not any(ref in allowed_refs for ref in refs_for_number if ref):
                 raise InvestmentMemoDraftError("a number cites material outside the frozen input")
         checked_sections.append({**dict(section), "body": str(section["body"]).strip(),
@@ -92,8 +103,12 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
         raise InvestmentMemoDraftError("draft returned the wrong key questions or order")
     checked_answers = []
     for answer, expected_question in zip(answers, questions):
+        if not isinstance(answer, Mapping):
+            raise InvestmentMemoDraftError("each key question answer must be an object")
         if set(answer) != {"question_ref", "question", "answer", "refs", "unknown", "falsifier"}:
             raise InvestmentMemoDraftError("a key question has an open or incomplete shape")
+        if not isinstance(answer["answer"], str) or not isinstance(answer["falsifier"], str):
+            raise InvestmentMemoDraftError("answer and falsifier must be text")
         if answer["question"] != expected_question["question"]:
             raise InvestmentMemoDraftError("a key question's text drifted")
         if not isinstance(answer["refs"], list) or any(ref not in allowed_refs for ref in answer["refs"]):
@@ -115,12 +130,14 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
     prompt = build_group_prompt(group=group, section_titles=section_titles, questions=questions,
                                 material=material, company=company)
     request_id = "memo-" + content_hash({"group": group, "prompt": prompt})[:24]
+    call: Mapping[str, Any] = {}
     try:
         call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
         parsed = parse_group_output(unwrap_json_object(call["text"]), section_titles=section_titles,
                                     questions=questions, allowed_refs={str(row["ref"]) for row in material})
     except (CockpitModelError, InvestmentMemoDraftError, KeyError, json.JSONDecodeError) as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}"}
+        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
+                "cost_micros": int(call.get("cost_micros") or 0)}
     return {"status": "drafted", **parsed, "group": group,
             "model": {"work_order_ref": call.get("work_order_ref"),
                       "route_decision_ref": call.get("route_decision_ref"),
@@ -154,19 +171,23 @@ def verify_memo(model: Any, *, sections: Sequence[Mapping[str, Any]], questions:
                 mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str]) -> dict[str, Any]:
     prompt = build_verifier_prompt(sections=sections, questions=questions, material=material,
                                    material_hash=material_hash)
+    call: Mapping[str, Any] = {}
     try:
         call = independent_model_call(model, producer_route_decision_refs=producer_route_decision_refs,
             purpose=VERIFIER_PURPOSE, request_id="memo-verify-" + material_hash[:24], prompt=prompt, mission=mission)
         value = unwrap_json_object(call["text"])
     except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}"}
+        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
+                "cost_micros": int(call.get("cost_micros") or 0)}
     if not isinstance(value, Mapping) or set(value) != {"verdict", "verified_body_hash", "finding_codes"}:
-        return {"status": "refused", "reason": "verifier output has an invalid closed shape"}
+        return {"status": "refused", "reason": "verifier output has an invalid closed shape",
+                "cost_micros": int(call.get("cost_micros") or 0)}
     codes = value["finding_codes"]
     if value["verified_body_hash"] != material_hash or value["verdict"] not in ("pass", "reject") \
             or not isinstance(codes, list) or any(code not in FINDING_CODES for code in codes) \
             or (value["verdict"] == "pass") != (codes == []):
-        return {"status": "refused", "reason": "verifier verdict is inconsistent or unbound"}
+        return {"status": "refused", "reason": "verifier verdict is inconsistent or unbound",
+                "cost_micros": int(call.get("cost_micros") or 0)}
     return {"status": "verified", "verdict": value["verdict"], "verified_body_hash": material_hash,
             "finding_codes": list(codes), "model": {"work_order_ref": call.get("work_order_ref"),
             "route_decision_ref": call.get("route_decision_ref"),

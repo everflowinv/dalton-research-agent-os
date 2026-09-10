@@ -61,6 +61,26 @@ class InvestmentMemoDraftTests(unittest.TestCase):
             parse_group_output(value, section_titles=TITLES[:4], questions=questions,
                                allowed_refs={"claim-version:1", "artifact:not-a-claim"})
 
+    def test_parser_refuses_non_text_and_non_object_numbers(self):
+        questions = [{"question_ref": "memo_q01", "question": QUESTIONS[0]}]
+        for field, invalid in (("body", None), ("gaps", [None])):
+            with self.subTest(field=field):
+                value = group_payload(TITLES[:4], questions)
+                value["sections"][0][field] = invalid
+                with self.assertRaises(InvestmentMemoDraftError):
+                    parse_group_output(value, section_titles=TITLES[:4], questions=questions,
+                                       allowed_refs={"claim-version:1"})
+        value = group_payload(TITLES[:4], questions)
+        value["sections"][0]["numbers"] = [None]
+        with self.assertRaises(InvestmentMemoDraftError):
+            parse_group_output(value, section_titles=TITLES[:4], questions=questions,
+                               allowed_refs={"claim-version:1"})
+        value = group_payload(TITLES[:4], questions)
+        value["key_questions"][0]["answer"] = {"invented": "text"}
+        with self.assertRaises(InvestmentMemoDraftError):
+            parse_group_output(value, section_titles=TITLES[:4], questions=questions,
+                               allowed_refs={"claim-version:1"})
+
     def test_verifier_receives_all_producer_routes_and_full_draft(self):
         model = FakeModel([{"verdict": "pass", "verified_body_hash": "a" * 64,
                             "finding_codes": []}])
@@ -101,6 +121,7 @@ class InvestmentMemoDraftTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded", result)
         self.assertEqual(len(producer.calls), 4)
         self.assertEqual(len(verifier.calls), 1)
+        self.assertEqual(result["cost_micros"], 50)
         gate = authority_type.return_value.publish.call_args.kwargs["gate"]
         self.assertEqual([row["check_ref"] for row in gate["checks"]], list(CHECK_REFS))
         self.assertEqual(authority_type.return_value.publish.call_args.kwargs["model_invocation_refs"],
@@ -114,6 +135,7 @@ class InvestmentMemoDraftTests(unittest.TestCase):
                   "key_questions": QUESTIONS}, "company": {"company_ref": "company:ACN"}, "material": [], "input_bindings": []}
         result = run_memo(store=object(), frozen=frozen, model=producer, verifier_model=FakeModel([]))
         self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["cost_micros"], 10)
         authority_type.return_value.publish.assert_not_called()
 
     def test_success_publishes_through_real_mission_deliverable_authority(self):
