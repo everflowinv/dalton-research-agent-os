@@ -303,6 +303,11 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
         ' "value": "<decimal>", "because": "..."} if and only if action is "revise_forecast".'
     )
     lines.append(
+        'If the value is outside this company\'s filed range, also add '
+        '"outside_band_reason": "<one sentence explaining why the filed range no longer constrains it>" '
+        'inside forecast_change; otherwise publication will be refused.'
+    )
+    lines.append(
         'Add "research_question": "<one question>" if and only if action is "research".'
     )
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
@@ -414,11 +419,13 @@ def validate_judge_output(value: Any, context: Mapping[str, Any]) -> dict[str, A
         )
     if action == "revise_forecast":
         change = value["forecast_change"]
-        if not isinstance(change, Mapping) or set(change) != {
-            "driver_ref", "period_end", "value", "because"
-        }:
+        base_fields = {"driver_ref", "period_end", "value", "because"}
+        if not isinstance(change, Mapping) or set(change) not in (
+            base_fields, base_fields | {"outside_band_reason"},
+        ):
             raise EventJudgementValidationError(
-                "forecast_change must be exactly driver_ref, period_end, value and because"
+                "forecast_change must contain driver_ref, period_end, value and because, "
+                "with optional outside_band_reason"
             )
         driver_ref = _text(change["driver_ref"], "forecast_change.driver_ref")
         if driver_ref not in known_drivers:
@@ -431,6 +438,15 @@ def validate_judge_output(value: Any, context: Mapping[str, Any]) -> dict[str, A
             "value": _text(str(change["value"]), "forecast_change.value", maximum=64),
             "because": _text(change["because"], "forecast_change.because", maximum=MAX_BECAUSE_CHARS),
         }
+        if "outside_band_reason" in change:
+            reason = _text(change["outside_band_reason"],
+                           "forecast_change.outside_band_reason",
+                           maximum=MAX_BECAUSE_CHARS)
+            if len(reason.split()) < 3:
+                raise EventJudgementValidationError(
+                    "forecast_change.outside_band_reason must contain at least 3 words"
+                )
+            result["forecast_change"]["outside_band_reason"] = reason
     return result
 
 
@@ -2066,6 +2082,8 @@ def apply_effect(
                     "value": change["value"],
                     "because": change["because"],
                     "refs": _event_evidence_refs(event),
+                    **({"outside_band": {"reason": change["outside_band_reason"]}}
+                       if change.get("outside_band_reason") else {}),
                 }],
                 change_reason="driver_event",
                 evidence_refs=_event_evidence_refs(event),

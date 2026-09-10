@@ -259,7 +259,12 @@ def run_company_forecast(
             mission_version_ref=mission_version_ref)
     else:
         body = actualize_model(prior, table, actor_ref=actor_ref)
-    stored = models.publish(body)
+    statement_rows = [
+        line
+        for filing in missions.statement_filings(company_ref)
+        for line in missions.statement_lines(filing["ingest_id"])
+    ]
+    stored = models.publish(body, statement_rows=statement_rows)
     published: list[dict[str, Any]] = []
     refused: str | None = None
     if lines is not None:

@@ -461,7 +461,7 @@ function renderOverview(o){
       li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),
         node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});
     w.append(ul);return w}
-  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h);if(c.market)d.append(marketLine(c.market));d.append(node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span><span>数字 <b>${(c.figures&&c.figures.total)||0}</b></span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}if(c.figures&&c.figures.latest&&c.figures.latest.length)d.append(figures(c.figures));if(c.valuation)d.append(valuationBlock(c.valuation));if(c.model)d.append(modelBlock(c));if(c.catalyst)d.append(catalystBlock(c.catalyst));if(c.events)d.append(eventsBlock(c.events));if(c.judgements)d.append(judgementBlock(c.judgements));if(c.reflections&&c.reflections.length)d.append(reflectionBlock(c.reflections));if(c.research_tasks&&c.research_tasks.length)d.append(tasksBlock(c.research_tasks));if(c.cadence&&c.cadence.length)d.append(cadenceBlock(c.cadence));if(c.feedback&&c.feedback.total)d.append(node("div",`你给过 ${c.feedback.total} 条反馈${c.feedback.outstanding?`，其中 ${c.feedback.outstanding} 条还没被满足`:""}`,"hint"));d.append(cardActions(c));return d}));
+  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h);if(c.market)d.append(marketLine(c.market));d.append(node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span><span>数字 <b>${(c.figures&&c.figures.total)||0}</b></span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}if(c.figures&&c.figures.latest&&c.figures.latest.length)d.append(figures(c.figures));if((c.invariants||{}).valuation_snapshot)d.append(invariantRefusal(c.invariants.valuation_snapshot));if(c.valuation)d.append(valuationBlock(c.valuation));if(c.model)d.append(modelBlock(c));if(c.catalyst)d.append(catalystBlock(c.catalyst));if(c.events)d.append(eventsBlock(c.events));if(c.judgements)d.append(judgementBlock(c.judgements));if(c.reflections&&c.reflections.length)d.append(reflectionBlock(c.reflections));if(c.research_tasks&&c.research_tasks.length)d.append(tasksBlock(c.research_tasks));if(c.cadence&&c.cadence.length)d.append(cadenceBlock(c.cadence));if(c.feedback&&c.feedback.total)d.append(node("div",`你给过 ${c.feedback.total} 条反馈${c.feedback.outstanding?`，其中 ${c.feedback.outstanding} 条还没被满足`:""}`,"hint"));d.append(cardActions(c));return d}));
   const m=o.model_available;$("goal-submit").disabled=!m.available;$("ask-submit").disabled=!m.available;$("steer-submit").disabled=!m.available;if(!m.available){$("goal-hint").textContent=m.reason;$("ask-hint").textContent=m.reason}
   svc(o.activity.service_state,o.activity.last_tick_at);
 }
@@ -480,6 +480,9 @@ function valuationBlock(v){const w=node("div");w.append(node("div",`估值 · ${
        fundamentals never moved is the price's own percentile. */
     const basis=m.percentile!=null?m.percentile_basis_label:m.percentile_reason;if(basis)li.append(node("span",basis,"basis"));ul.append(li)});
   w.append(ul);if(v.basis&&v.basis.shares_note)w.append(node("div",v.basis.shares_note,"hint"));return w}
+function invariantRefusal(x){if(!x||x.status!=="unavailable")return null;const d=node("div",null,"gap");
+  d.append(node("b",`${x.output_kind_label||"这项数字"}未发布`));
+  (x.reasons||[]).forEach(reason=>d.append(node("div",reason)));return d}
 function modelBlock(c){const m=c.model,r=m.readiness||{},d=node("div",null,"mdl");
   d.append(node("b",`公司模型 · 第 ${m.version} 版`),node("div",m.note||""));
   const parts=[];if(r.results_computed&&r.results_computed.length)parts.push(`算出 ${r.results_computed.length} 条结果行`);
@@ -488,6 +491,8 @@ function modelBlock(c){const m=c.model,r=m.readiness||{},d=node("div",null,"mdl"
   if(r.superseded_estimates)parts.push(`${r.superseded_estimates} 格估计被取代但保留着`);
   if(parts.length)d.append(node("div",parts.join(" · "),"hint"));
   if(m.change_reason_label)d.append(node("div",`这一版为什么存在：${m.change_reason_label}`,"hint"));
+  const stopped=(c.invariants||{}).forecast_model_version;if(stopped)d.append(invariantRefusal(stopped));
+  const sensitivity=(c.invariants||{}).sensitivity_projection;if(sensitivity)d.append(invariantRefusal(sensitivity));
   const b=node("button","看模型表","ghost");b.style.cssText="padding:4px 10px;font-size:12px;margin-top:8px";b.onclick=()=>openModel(c.company_ref);d.append(b);return d}
 function qualityBlock(q){if(!q)return null;const low=(q.below_passing&&q.below_passing.length)||q.checks_passed===false;
   const d=node("div",null,`qs${low?" low":""}`);d.append(node("b",`质量评分 · ${q.rubric}`));
@@ -744,6 +749,7 @@ async function openModel(company){$("reader").classList.add("show");const sheet=
 function renderModel(sheet,m){sheet.replaceChildren(readerClose(),node("h2",`${m.company} · 公司模型`),
   node("div",`第 ${m.version} 版 · ${fmtDate(m.created_at)}${m.change_reason_label?" · "+m.change_reason_label:""}`,"meta"));
   sheet.append(node("div",m.note||"","hint"));
+  Object.values(m.invariants||{}).forEach(x=>{const refusal=invariantRefusal(x);if(refusal)sheet.append(refusal)});
   const r=m.readiness||{};
   if(r.drivers_without_history&&r.drivers_without_history.length)
     sheet.append(node("div",`没有历史可依的驱动因素：${r.drivers_without_history.join("、")}`,"gap"));

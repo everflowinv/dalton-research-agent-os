@@ -260,6 +260,19 @@ class OutputContractTests(JudgementHarness):
                                 citations=[self.event["id"]],
                                 forecast_change={"driver_ref": "x"}))
 
+    def test_an_outside_band_reason_must_be_more_than_one_word(self):
+        driver_ref = "concept:us-gaap:Revenue"
+        context = {**self.context(), "drivers": [{"ref": driver_ref}]}
+        with self.assertRaises(EventJudgementValidationError) as caught:
+            validate_judge_output(decision(
+                action="revise_forecast", word="THESIS_WEAKENED",
+                driver_refs=[driver_ref], citations=[self.event["id"]],
+                forecast_change={"driver_ref": driver_ref,
+                                 "period_end": "2026-08-31", "value": "0.02",
+                                 "because": "Demand changed.",
+                                 "outside_band_reason": "Dislocation"}), context)
+        self.assertIn("at least 3 words", str(caught.exception))
+
     def test_the_model_returning_prose_is_a_refusal_not_a_crash(self):
         with self.assertRaises(EventJudgementValidationError):
             self.check("I think nothing should change.")
@@ -622,6 +635,33 @@ class ForecastEffectTests(JudgementHarness):
         self.assertEqual(published["decision"], "THESIS_WEAKENED")
         self.assertEqual(published["evidence_refs"][0]["ref"], self.event["id"])
         self.assertEqual(published["version"], 2)
+
+    def test_an_outside_band_reason_reaches_the_published_assumption(self):
+        driver_ref, period_end = self.a_driver_and_period()
+        context = self.context()
+        judged = judge(context, model=FakeModel([decision(
+            action="revise_forecast", word="THESIS_WEAKENED",
+            driver_refs=[driver_ref], citations=[self.event["id"]],
+            forecast_change={"driver_ref": driver_ref, "period_end": period_end,
+                             "value": "0.02", "because": "Demand changed.",
+                             "outside_band_reason":
+                                 "The contract changes the historical relationship."},
+        )]), mission=self.mission, request_id="outside-band")
+        change = judged["forecast_change"]
+        self.assertEqual(change["outside_band_reason"],
+                         "The contract changes the historical relationship.")
+        effect = apply_effect(
+            event=self.event, judgement=judged, context=context, mission=self.mission,
+            playbook=self.playbook, deliverables=None, forecast_models=self.models,
+            model_version=self.model_version, research_admitter=None,
+            actor_ref=AUTOMATION)
+        published = self.models.model(effect["model_version_ref"])
+        assumptions = published["assumptions"]
+        changed = next(a for a in assumptions
+                       if a["driver_ref"] == driver_ref and
+                       a["period"]["end"] == period_end)
+        self.assertEqual(changed["outside_band"]["reason"],
+                         "The contract changes the historical relationship.")
 
     def test_without_the_forecast_grant_the_revision_becomes_a_proposal(self):
         driver_ref, period_end = self.a_driver_and_period()

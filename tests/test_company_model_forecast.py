@@ -51,6 +51,7 @@ from dalton_core.model_forecast_driver import (
     actualize_model,
     build_forecast_model,
 )
+from dalton_core.economic_invariants import EconomicInvariantRefused
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_forecast_reconciliation import (
@@ -278,6 +279,28 @@ class LaneStateTests(unittest.TestCase):
         written = json.loads(
             (self.state_dir / "summary" / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(written["model_version_ref"], summary["model_version_ref"])
+
+    def test_mismatched_filed_segments_refuse_the_model_end_to_end(self):
+        filing = self.missions.statement_filings(ACN)[0]
+        base = self.missions.statement_lines(filing["ingest_id"])[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        rows.extend([
+            {**base, "label": "Consulting", "is_breakdown": True,
+             "dimension_axis": "srt:ProductOrServiceAxis",
+             "dimension_member": "acn:ConsultingMember", "value": "100"},
+            {**base, "label": "Managed Services", "is_breakdown": True,
+             "dimension_axis": "srt:ProductOrServiceAxis",
+             "dimension_member": "acn:ManagedServicesMember", "value": "200"},
+        ])
+        original = self.missions.statement_lines
+        self.missions.statement_lines = lambda ingest_id, **kwargs: (
+            [row for row in rows if not kwargs.get("statement") or
+             row["statement"] == kwargs["statement"]]
+            if ingest_id == filing["ingest_id"] else original(ingest_id, **kwargs))
+        with self.assertRaises(EconomicInvariantRefused):
+            run_company_forecast(self.missions, self.missions.latest_company_model_spec(ACN),
+                                 models=ForecastModelAuthority(self.store))
+        self.assertEqual(ForecastModelAuthority(self.store).versions(ACN), [])
 
     def test_a_second_run_with_nothing_new_does_nothing(self):
         self.child()

@@ -763,6 +763,13 @@ class PageVocabularyTests(unittest.TestCase):
         self.assertIn("/v1/cockpit/claims?", page)
         self.assertIn("/v1/cockpit/model?company=", page)
 
+    def test_invariant_refusals_are_rendered_where_model_numbers_belong(self) -> None:
+        page = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn("function invariantRefusal", page)
+        self.assertIn("forecast_model_version", page)
+        self.assertIn("sensitivity_projection", page)
+        self.assertIn("Object.values(m.invariants||{})", page)
+
     def test_the_buttons_are_drawn_only_when_the_binding_allows_them(self) -> None:
         page = self.PAGE.read_text(encoding="utf-8")
         # One definition and three call sites -- the card, the full-text page
