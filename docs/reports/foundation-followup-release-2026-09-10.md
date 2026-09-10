@@ -35,3 +35,11 @@ This freeze also includes exact controlled child reentry. Only a valid current-m
 The combined 266-test integration regression passed in 15.762 seconds. The final frozen full suite is running. Wheel SHA-256 is `591df3a085967983016469ec2f2fc36dc9361d59ded7fa78e46ff9c35db09ec0`; all 555 runtime files match source bytes (395 Python, 67 SQL, 90 JSON, 3 HTML), and 3 JavaScript checks passed. The r2 current-state copy rehearsal again passed 67/67 schemas, 40 tick entries and zero escaped lanes. Old r1 rehearsal state/home were removed only after confirming completion and no open file handles; all reports, deployment backups and retained release archives remain.
 
 Next: finish the r2 full suite and deploy this complete foundation follow-up once, then measure actual Dossier, event, and forecast outputs. The earlier freeze remains an honest accepted test baseline, not the installed version.
+
+## Final acceptance and deployment start, 23:39 UTC
+
+Frozen b5ee132 completed **6,770 tests in 581.148 seconds, one skip**. Start/end commits are identical and the worktree is clean. Full-suite log SHA-256: `1d4b3ca3d26e7e76272daeb92b947d2da5227f33b7a1acf2e2163eea6e9378be`. The r2 wheel and rehearsal above belong to this same freeze.
+
+The private manifest now binds r2 commit, wheel, full-suite receipt, rehearsal, and five deployment scripts. The staging script was corrected to parse the report's backtick-delimited source binding and assert the reviewed deployment candidate hash before replacing the canonical script. All output destinations are checked before any copy. An independent review initially also claimed a self-colliding backup name; inspection found distinct manifest and script backup names, so that specific claim was not a reproduced bug.
+
+Inert preflight passed without service operations. Twelve model configurations were captured for preservation checks. Disk preflight required 3,537,504,535 bytes with 5,348,712,448 available. Authorized deployment is running; no claim of postdeployment or product success is made yet.
