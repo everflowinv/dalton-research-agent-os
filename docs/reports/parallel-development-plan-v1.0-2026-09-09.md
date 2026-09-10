@@ -181,6 +181,22 @@ owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tra
 - **`TrackingCadenceVersion`**（大脑的调配结果，append-only）：company × source → 频率与理由；基线来自 policy，大脑按覆盖厚度与事件密度提出调整，每版带 `because` 与证据 refs。
 - **事件判断 lane**（判断层）：每个未判定事件一次有界模型调用 → 五词决定之一 + 理由 + 映射到 driver / thesis；决定为 `no_change` 也写事件账本；`note` 出一段带 refs 的短报告（异动归因、新闻 implication）；`research` 调 P14e 入口派专项研究；`revise` 调机制层入口（forecast `revise_assumptions`、dossier / thesis 修订候选）——永远是候选，人裁决。独立 verifier 复用 thesis-impact 的 independence predicate。
 
+### 既有资料的入职处理（owner 2026-09-10 提问，主 agent 定案）
+
+owner：有些公司我们已有资料（以前的 Initial Screen、memo、维护中的 Excel 模型）。Dalton 入职时它们是重要参考、能省时间，
+但 Dalton 仍要从中形成自己的认知、融入迭代流程，仍要独立写 Initial Screen；资料可能过时。
+
+定案：**既有资料是受治理的来源，不是认知本身。**
+1. `prior-research` connector（S1 投喂形态）：从声明目录 + 清单读入旧 screen / memo / 笔记 / Excel；证据层级 `internal_prior`；
+   Claim 一律带 `as_of`（文档日期），超阈值标 `may_be_stale` 并降 importance；旧模型数字全是 `prior_estimate`，永不当 actual。
+2. 旧 Initial Screen 导入为版本链 v0（`change_reason: imported_prior`），Dalton 自己写的是 v1 并 `prior_version_ref` 指向它；
+   起草上下文含「上一版（内部，YYYY-MM）」参考块，提示词要求逐条判断旧关注点与 debate 哪些还成立、不得照抄结论；
+   出口门自评加「相对上一版的变化」（新 filing、股价、debate 转向）。
+3. DebateMap / ThesisReflection 增加带日期的 `prior_view`（我们当时怎么看），与市场立场、当前立场并列。
+4. 旧 Excel → `PriorModelVersion`（假设 `kind: prior_human`，公式存文本），为 driver 模型的假设区间与敏感性提供「团队过去怎么假设」，
+   并与 actual 对账做自我校准；不进报表。
+5. 时效是一等属性：档案、DebateMap、判断层提示词看得到每条 prior Claim 的年龄，「自 prior 日期以来发生了什么」是必答项。
+
 ### Wave 2（Wave 1 合并后开）
 
 P11b consensus 双路（研报抽取走 `document_numeric_claim` 逐字核对，新 grade `broker-research-report`；yfinance 走 A 建好的 connector）、P11d `MarketEvent`、P12a `CompanyDossierVersion`、P12c `DebateMap`、P12f guidance 档案、S 线 Guidepoint lane。cockpit 集成从 Wave 2 起给一个专门的 agent。
