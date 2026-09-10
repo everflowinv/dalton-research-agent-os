@@ -702,6 +702,17 @@ test("cost unavailability is explicit and host failures never echo prompts", asy
   assert.deepEqual(response.cost, { available: false, usd: null });
 });
 
+test("known missing control proof gets a fixed safe host error", async () => {
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    throw new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
+  }), config());
+  const response = await broker.handle(request({ invocationId: "invocation:missing-proof" }));
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "HOST_CONTROL_PROOF_MISSING");
+  assert.equal(response.error.message, "host transport returned no provider-control proof");
+  verifyHash(response);
+});
+
 test("memory journal never turns expired pending uncertainty into a host replay", async () => {
   let now = 1_000;
   let calls = 0;

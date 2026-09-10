@@ -34,6 +34,12 @@ const THINKING_LEVELS = new Set([
   "off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max",
 ]);
 const CONTROLLED_THINKING_LEVELS = new Set(["low"]);
+const SAFE_HOST_FAILURES = new Map([
+  [
+    "Plugin LLM completion failed: provider controls were not enforced by the selected transport.",
+    ["HOST_CONTROL_PROOF_MISSING", "host transport returned no provider-control proof"],
+  ],
+]);
 
 function integer(value, name, fallback, min, max) {
   const selected = value ?? fallback;
@@ -415,10 +421,15 @@ export class ModelBroker {
       const result = await Promise.race([completion, timeout]);
       return this.#success(request, requestHash, result);
     } catch (error) {
-      const code = error instanceof ProtocolError ? error.code : "HOST_COMPLETION_FAILED";
+      const safeHostFailure = error instanceof Error
+        ? SAFE_HOST_FAILURES.get(error.message)
+        : undefined;
+      const code = error instanceof ProtocolError
+        ? error.code
+        : safeHostFailure?.[0] ?? "HOST_COMPLETION_FAILED";
       const message = error instanceof ProtocolError
         ? error.message
-        : "host completion failed";
+        : safeHostFailure?.[1] ?? "host completion failed";
       return this.#failure(request, requestHash, "fresh", code, message);
     } finally {
       if (timer) clearTimeout(timer);
