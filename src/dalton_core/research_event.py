@@ -82,6 +82,22 @@ EVENT_KINDS: tuple[str, ...] = (
     "sales_note",
     "crowd_post",
     "expert_excerpt",
+    # S5 (the ongoing-tracking sources).  A ``filing`` says a document
+    # appeared; these three say *what was in it*, because who bought, who
+    # sold and how much of the company they now hold is the whole reason to
+    # read an ownership filing and none of it survives a document-shaped
+    # event.  They are their own kinds rather than ``filing`` with a richer
+    # payload for the same reason ``sales_note`` is not ``news``: the
+    # judgement prompt renders these fields, and a director's sale and a
+    # 10-K's arrival are not the same question.
+    "insider_transaction",
+    "ownership_change",
+    "holdings_change",
+    # A company's own IR page moved.  Not a filing -- nothing was filed with
+    # anybody and a marketing page is edited without a revision history -- so
+    # it carries a diff hash instead of an accession, and the tier says
+    # ``management_direct`` rather than ``primary_filing``.
+    "ir_page_change",
 )
 
 # How much a reader should believe one event before reading it.  Ordered best
@@ -135,6 +151,39 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     "claim": frozenset({
         "claim_version_ref", "claim_ref", "metric_ref", "period", "statement", "source_ref",
     }),
+    # S5.  Every one of these carries the accession *and* the hash of the
+    # bytes it was parsed from, because a figure about a person's holding
+    # that cannot be taken back to a filing is a rumour with a citation
+    # attached.  ``event_key`` is the emitter's own deterministic name for
+    # the row, so a lane that re-reads yesterday's filing marks it emitted
+    # without having to diff the payload it just built.
+    "insider_transaction": frozenset({
+        "accession", "form", "owner_name", "owner_cik", "role",
+        "transaction_code", "transaction_meaning", "transaction_date",
+        "security_title", "shares", "price_per_share", "acquired_disposed",
+        "shares_owned_following", "direct_or_indirect", "issuer_name",
+        "invocation_ref", "artifact_hash", "event_key",
+    }),
+    "ownership_change": frozenset({
+        "accession", "form", "is_amendment", "amendment_no",
+        "reporting_person", "person_cik", "person_type", "percent_of_class",
+        "aggregate_shares", "sole_voting_power", "shared_voting_power",
+        "event_date", "security_class", "cusip", "purpose_text_hash",
+        "invocation_ref", "artifact_hash", "event_key",
+    }),
+    "holdings_change": frozenset({
+        "accession", "form", "holder_name", "holder_cik", "quarter",
+        "prior_quarter", "cusip", "issuer_name", "title_of_class", "put_call",
+        "action", "shares", "prior_shares", "share_change", "value_usd",
+        "prior_value_usd", "value_unit", "value_unit_basis",
+        "invocation_ref", "artifact_hash", "event_key",
+    }),
+    "ir_page_change": frozenset({
+        "watch_ref", "url", "host", "diff_hash", "previous_snapshot_hash",
+        "current_snapshot_hash", "changed_at", "added_line_count",
+        "removed_line_count", "title", "excerpt", "artifact_hash",
+        "invocation_ref", "event_key",
+    }),
 })
 
 # The tier a kind carries when nothing more specific is known.  ``news`` has
@@ -153,6 +202,15 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     "crowd_post": "crowd",
     "expert_excerpt": "expert_network",
     "news": "news_media",
+    # Filed with a regulator, by name, under penalty.  ``primary_filing`` is
+    # how well attested it is and is not a licence to read it as a statement
+    # of what the business earned: see ``sec_ownership_core.OWNERSHIP_GRADE``,
+    # which is the word that keeps these out of the figure path.
+    "insider_transaction": "primary_filing",
+    "ownership_change": "primary_filing",
+    "holdings_change": "primary_filing",
+    # The company speaking in its own voice on its own site.
+    "ir_page_change": "management_direct",
 })
 
 MAX_PAYLOAD_TEXT = 600

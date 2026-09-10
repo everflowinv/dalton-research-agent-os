@@ -1125,6 +1125,419 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "provider_status", "content_hash",
             ),
         )
+    # -- S5: the ownership filings ------------------------------------------
+    #
+    # Every number on these wires is *text*, and text that is exactly what the
+    # XML said. A Form 4 that reports 1,234.5600 shares reports four decimal
+    # places on purpose, a 13F that reports value in thousands is a different
+    # number from one that reports dollars, and a float would quietly lose the
+    # first and silently mis-scale the second. The parsed-as string and the
+    # interpreted value travel side by side where they differ, and both are
+    # bound to the accession and the raw artifact hash they came from.
+    if slug == "sec" and operation in {
+        "form4_transactions", "beneficial_ownership", "form144_notices",
+        "form13f_holdings",
+    }:
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        accession = {
+            "type": "string", "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+        }
+        cik = {"type": ["string", "null"], "pattern": "^[0-9]{1,10}$"}
+        # As filed: digits, an optional sign, an optional fraction. Nothing
+        # else, so a value that arrived as "1,234" or "approximately 5,000"
+        # is a parse failure the adapter must report rather than a number the
+        # contract quietly accepts.
+        filed_number = {
+            "type": ["string", "null"],
+            "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+        }
+        day = {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        if operation == "form4_transactions":
+            # Codes are §16 transaction codes. Not enumerated here: SEC adds
+            # them, an unknown code is still a fact worth recording, and a
+            # contract that refused one would drop the filing rather than the
+            # code. The single-letter shape is pinned; the meaning is the
+            # adapter's table.
+            transaction = _object_schema(
+                {
+                    "table": {"type": "string",
+                              "enum": ["non_derivative", "derivative"]},
+                    "security_title": _string(),
+                    "transaction_date": day,
+                    "deemed_execution_date": day,
+                    "transaction_code": {"type": ["string", "null"],
+                                         "pattern": "^[A-Z]$"},
+                    "transaction_form_type": {"type": ["string", "null"]},
+                    "equity_swap_involved": {"type": ["boolean", "null"]},
+                    "shares": filed_number,
+                    "price_per_share": filed_number,
+                    "acquired_disposed": {"type": ["string", "null"],
+                                          "pattern": "^[AD]$"},
+                    "shares_owned_following": filed_number,
+                    "direct_or_indirect": {"type": ["string", "null"],
+                                           "pattern": "^[DI]$"},
+                    "nature_of_ownership": {"type": ["string", "null"]},
+                    "underlying_security_title": {"type": ["string", "null"]},
+                    "underlying_shares": filed_number,
+                    "conversion_or_exercise_price": filed_number,
+                    "exercise_date": day,
+                    "expiration_date": day,
+                    "footnote_refs": _array_of_strings(),
+                    "record_hash": sha256,
+                },
+                (
+                    "table", "security_title", "transaction_date",
+                    "deemed_execution_date", "transaction_code",
+                    "transaction_form_type", "equity_swap_involved", "shares",
+                    "price_per_share", "acquired_disposed",
+                    "shares_owned_following", "direct_or_indirect",
+                    "nature_of_ownership", "underlying_security_title",
+                    "underlying_shares", "conversion_or_exercise_price",
+                    "exercise_date", "expiration_date", "footnote_refs",
+                    "record_hash",
+                ),
+            )
+            owner = _object_schema(
+                {
+                    "owner_cik": cik,
+                    "owner_name": _string(),
+                    # The role, as the filer ticked it. Four booleans and a
+                    # title rather than one word, because a person is often
+                    # two of them at once and collapsing that is a judgement
+                    # the filing did not make.
+                    "is_director": {"type": "boolean"},
+                    "is_officer": {"type": "boolean"},
+                    "is_ten_percent_owner": {"type": "boolean"},
+                    "is_other": {"type": "boolean"},
+                    "officer_title": {"type": ["string", "null"]},
+                    "role": _string(),
+                },
+                (
+                    "owner_cik", "owner_name", "is_director", "is_officer",
+                    "is_ten_percent_owner", "is_other", "officer_title", "role",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "accession": accession,
+                    # 3, 4 or 5, and whether it is an amendment as its own
+                    # flag. The form string EDGAR uses for an amended Form 4
+                    # carries a slash, and a contract that pinned that string
+                    # would be a contract with a path separator in it -- which
+                    # the inventory refuses, for a good reason that has
+                    # nothing to do with this filing.
+                    "document_type": {"type": "string", "enum": ["3", "4", "5"]},
+                    "is_amendment": {"type": "boolean"},
+                    "period_of_report": day,
+                    "date_of_original_submission": day,
+                    "issuer_cik": cik,
+                    "issuer_name": {"type": ["string", "null"]},
+                    "issuer_trading_symbol": {"type": ["string", "null"]},
+                    "reporting_owners": {
+                        "type": "array", "minItems": 1, "maxItems": 40,
+                        "items": owner,
+                    },
+                    "transactions": {
+                        "type": "array", "maxItems": 200, "items": transaction,
+                    },
+                    "holdings_only": {"type": "boolean"},
+                    "footnotes": _array_of_strings(),
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                    "content_hash": sha256,
+                },
+                (
+                    "schema_version", "accession", "document_type",
+                    "is_amendment", "period_of_report",
+                    "date_of_original_submission", "issuer_cik", "issuer_name",
+                    "issuer_trading_symbol", "reporting_owners", "transactions",
+                    "holdings_only", "footnotes", "source_record_refs",
+                    "next_cursor", "provider_status", "content_hash",
+                ),
+            )
+        if operation == "beneficial_ownership":
+            person = _object_schema(
+                {
+                    "reporting_person_name": _string(),
+                    "reporting_person_cik": cik,
+                    "citizenship": {"type": ["string", "null"]},
+                    "person_type": {"type": ["string", "null"]},
+                    "sole_voting_power": filed_number,
+                    "shared_voting_power": filed_number,
+                    "sole_dispositive_power": filed_number,
+                    "shared_dispositive_power": filed_number,
+                    "aggregate_shares": filed_number,
+                    # The stake, as filed. A percent is the number the market
+                    # reads this filing for and it is kept as text for the
+                    # same reason every other figure here is.
+                    "percent_of_class": filed_number,
+                    "record_hash": sha256,
+                },
+                (
+                    "reporting_person_name", "reporting_person_cik",
+                    "citizenship", "person_type", "sole_voting_power",
+                    "shared_voting_power", "sole_dispositive_power",
+                    "shared_dispositive_power", "aggregate_shares",
+                    "percent_of_class", "record_hash",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "accession": accession,
+                    # SC 13D, SC 13G and their amendments. The amendment is a
+                    # separate field as well as part of the form, because "the
+                    # fourth amendment" is what a reader needs and digging it
+                    # out of a form string is how it gets lost.
+                    "form_type": {
+                        "type": "string", "enum": ["SC 13D", "SC 13G"],
+                    },
+                    "is_amendment": {"type": "boolean"},
+                    "amendment_no": {"type": ["string", "null"],
+                                     "pattern": "^[0-9]{1,4}$"},
+                    "subject_company_cik": cik,
+                    "subject_company_name": {"type": ["string", "null"]},
+                    "security_class_title": {"type": ["string", "null"]},
+                    "cusip": {"type": ["string", "null"],
+                              "pattern": "^[0-9A-Z]{9}$"},
+                    "event_date": day,
+                    "date_of_signature": day,
+                    "reporting_persons": {
+                        "type": "array", "minItems": 1, "maxItems": 40,
+                        "items": person,
+                    },
+                    # Item 4, hashed rather than carried. The purpose text is
+                    # the part of a 13D that says whether this is a passive
+                    # stake or an activist one, and it is prose -- often
+                    # several pages of it. The hash makes "the purpose changed
+                    # in this amendment" answerable without this connector
+                    # becoming a second copy of the filing.
+                    "purpose_text_hash": {
+                        "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$",
+                    },
+                    "purpose_text_chars": {"type": ["integer", "null"],
+                                           "minimum": 0},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                    "content_hash": sha256,
+                },
+                (
+                    "schema_version", "accession", "form_type", "is_amendment",
+                    "amendment_no", "subject_company_cik",
+                    "subject_company_name", "security_class_title", "cusip",
+                    "event_date", "date_of_signature", "reporting_persons",
+                    "purpose_text_hash", "purpose_text_chars",
+                    "source_record_refs", "next_cursor", "provider_status",
+                    "content_hash",
+                ),
+            )
+        if operation == "form144_notices":
+            notice = _object_schema(
+                {
+                    "seller_name": _string(),
+                    "relationship_to_issuer": {"type": ["string", "null"]},
+                    "security_class_title": {"type": ["string", "null"]},
+                    "shares_to_be_sold": filed_number,
+                    "aggregate_market_value": filed_number,
+                    "shares_outstanding": filed_number,
+                    "approx_sale_date": day,
+                    "exchange_name": {"type": ["string", "null"]},
+                    "broker_name": {"type": ["string", "null"]},
+                    "acquisition_date": day,
+                    "nature_of_acquisition": {"type": ["string", "null"]},
+                    "payment_date": day,
+                    "record_hash": sha256,
+                },
+                (
+                    "seller_name", "relationship_to_issuer",
+                    "security_class_title", "shares_to_be_sold",
+                    "aggregate_market_value", "shares_outstanding",
+                    "approx_sale_date", "exchange_name", "broker_name",
+                    "acquisition_date", "nature_of_acquisition", "payment_date",
+                    "record_hash",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "accession": accession,
+                    "issuer_cik": cik,
+                    "issuer_name": {"type": ["string", "null"]},
+                    "filing_date": day,
+                    "notices": {
+                        "type": "array", "minItems": 1, "maxItems": 50,
+                        "items": notice,
+                    },
+                    "securities_sold_past_3_months": {"type": "boolean"},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                    "content_hash": sha256,
+                },
+                (
+                    "schema_version", "accession", "issuer_cik", "issuer_name",
+                    "filing_date", "notices", "securities_sold_past_3_months",
+                    "source_record_refs", "next_cursor", "provider_status",
+                    "content_hash",
+                ),
+            )
+        holding = _object_schema(
+            {
+                "name_of_issuer": _string(),
+                "title_of_class": {"type": ["string", "null"]},
+                "cusip": {"type": "string", "pattern": "^[0-9A-Z]{9}$"},
+                "figi": {"type": ["string", "null"], "pattern": "^[0-9A-Z]{12}$"},
+                # Both. `value_as_filed` is the digits in the XML; `value_usd`
+                # is those digits scaled by `value_unit`. A reader that wants
+                # to check the scaling can, and a reader that wants dollars
+                # does not have to know the rule changed in 2023.
+                "value_as_filed": filed_number,
+                "value_usd": filed_number,
+                "shares_or_principal_amount": filed_number,
+                "shares_or_principal_type": {"type": ["string", "null"],
+                                             "pattern": "^(SH|PRN)$"},
+                "put_call": {"type": ["string", "null"]},
+                "investment_discretion": {"type": ["string", "null"]},
+                "other_managers": _array_of_strings(),
+                "voting_authority_sole": filed_number,
+                "voting_authority_shared": filed_number,
+                "voting_authority_none": filed_number,
+                "record_hash": sha256,
+            },
+            (
+                "name_of_issuer", "title_of_class", "cusip", "figi",
+                "value_as_filed", "value_usd", "shares_or_principal_amount",
+                "shares_or_principal_type", "put_call", "investment_discretion",
+                "other_managers", "voting_authority_sole",
+                "voting_authority_shared", "voting_authority_none",
+                "record_hash",
+            ),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "accession": accession,
+                "form_type": {"type": "string",
+                              "enum": ["13F-HR", "13F-NT"]},
+                "is_amendment": {"type": "boolean"},
+                "amendment_type": {"type": ["string", "null"]},
+                "holder_cik": {"type": "string", "pattern": "^[0-9]{10}$"},
+                "holder_name": _string(),
+                "report_calendar_or_quarter": day,
+                "quarter": {"type": ["string", "null"],
+                            "pattern": "^[0-9]{4}Q[1-4]$"},
+                # Declared, and how it was decided. SEC's own instruction
+                # changed with the 2023 amendments -- thousands before, whole
+                # dollars after -- and filers were inconsistent across the
+                # boundary, so the rule alone is not enough and the ratio
+                # check alone is not honest. Both are recorded.
+                "value_unit": {"type": "string",
+                               "enum": ["usd", "thousands"]},
+                "value_unit_basis": {
+                    "type": "string",
+                    "enum": ["post_2023_rule", "pre_2023_rule",
+                             "ratio_heuristic", "declared_by_filer"],
+                },
+                "table_entry_total": {"type": ["integer", "null"], "minimum": 0},
+                "table_value_total_as_filed": filed_number,
+                "holdings": {"type": "array", "maxItems": 4000, "items": holding},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+                "content_hash": sha256,
+            },
+            (
+                "schema_version", "accession", "form_type", "is_amendment",
+                "amendment_type", "holder_cik", "holder_name",
+                "report_calendar_or_quarter", "quarter", "value_unit",
+                "value_unit_basis", "table_entry_total",
+                "table_value_total_as_filed", "holdings", "source_record_refs",
+                "next_cursor", "provider_status", "content_hash",
+            ),
+        )
+    # -- S5: the IR-page watcher --------------------------------------------
+    if slug == "ir-page-watch":
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        if operation == "list_watches":
+            watch = _object_schema(
+                {
+                    "watch_id": _string(),
+                    "url": _string(),
+                    "host": _string(),
+                    "title": {"type": ["string", "null"]},
+                    "last_checked": {"type": ["string", "null"]},
+                    "last_changed": {"type": ["string", "null"]},
+                    "snapshot_count": _integer(0),
+                    "paused": {"type": "boolean"},
+                    # Whether this watch is one of the declared IR pages. A
+                    # watch that is not declared is still listed -- an
+                    # operator should see that the shared tool is watching
+                    # something Dalton will not read -- and it is never read.
+                    "declared": {"type": "boolean"},
+                    "company_ref": {"type": ["string", "null"]},
+                },
+                (
+                    "watch_id", "url", "host", "title", "last_checked",
+                    "last_changed", "snapshot_count", "paused", "declared",
+                    "company_ref",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "since": {"type": ["string", "null"]},
+                    "watches": {"type": "array", "maxItems": 500, "items": watch},
+                    "undeclared_count": _integer(0),
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                    "content_hash": sha256,
+                },
+                (
+                    "schema_version", "since", "watches", "undeclared_count",
+                    "source_record_refs", "next_cursor", "provider_status",
+                    "content_hash",
+                ),
+            )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "watch_id": _string(),
+                "url": _string(),
+                "host": _string(),
+                "company_ref": {"type": ["string", "null"]},
+                "title": {"type": ["string", "null"]},
+                "changed_at": {"type": ["string", "null"]},
+                "previous_snapshot_at": {"type": ["string", "null"]},
+                # The name of this change. A function of what the two
+                # snapshots contain, so the same change read twice is the
+                # same diff and the event ledger dedupes on it.
+                "diff_hash": sha256,
+                "previous_snapshot_hash": {"type": ["string", "null"],
+                                           "pattern": "^[0-9a-f]{64}$"},
+                "current_snapshot_hash": sha256,
+                "added_line_count": _integer(0),
+                "removed_line_count": _integer(0),
+                # A short excerpt, bounded. The whole page is spooled; this is
+                # what a person reads in a tick summary.
+                "excerpt": {"type": ["string", "null"], "maxLength": 600},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+                "content_hash": sha256,
+            },
+            (
+                "schema_version", "watch_id", "url", "host", "company_ref",
+                "title", "changed_at", "previous_snapshot_at", "diff_hash",
+                "previous_snapshot_hash", "current_snapshot_hash",
+                "added_line_count", "removed_line_count", "excerpt",
+                "source_record_refs", "next_cursor", "provider_status",
+                "content_hash",
+            ),
+        )
     if (slug, operation) == ("sec-financials", "get_financial_statements"):
         # P13ag: one row per statement line, per period, flat.
         #
@@ -1976,6 +2389,48 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                     "filed_from", "filed_to",
                 ),
             ),
+            # S5: the ongoing-tracking half of EDGAR -- who owns the company,
+            # who is selling it, and what the institutions did last quarter.
+            #
+            # Four operations rather than one ``read_ownership_filing``,
+            # because a schema hash binds one operation and these are four
+            # different documents with four different shapes: an insider's
+            # transaction table, a 5% holder's stake, a restricted-stock sale
+            # notice, and an institution's whole book. An approval to read
+            # what a director sold should not widen into reading what every
+            # institution holds.
+            #
+            # Every one of them reads ``primary_doc.xml`` (and, for 13F, the
+            # information table the same filing's own index names) at a path
+            # *derived from the accession*. That is not the forbidden
+            # ``route:arbitrary-attachment-url``: the caller supplies an
+            # accession and this connector computes the rest, so there is no
+            # input through which a URL can be handed in.
+            #
+            # None of these is a financial statement and none may become one.
+            # See ``sec_ownership_core.OWNERSHIP_GRADE``: they are primary,
+            # regulatory, and about *ownership*, which is a different question
+            # from what the business earned.
+            _operation(
+                "form4_transactions", completeness="enumerated",
+                input_fields=("issuer", "filing_accession"),
+            ),
+            _operation(
+                "beneficial_ownership", completeness="enumerated",
+                input_fields=("issuer", "filing_accession"),
+            ),
+            _operation(
+                "form144_notices", completeness="enumerated",
+                input_fields=("issuer", "filing_accession"),
+            ),
+            # The holder, not the issuer: a 13F is filed by the institution
+            # about everything it holds, so the company this lane cares about
+            # is one row in somebody else's filing.
+            _operation(
+                "form13f_holdings", completeness="enumerated",
+                input_fields=("holder_cik", "filing_accession", "quarter"),
+                optional_fields=("quarter",),
+            ),
         ),
         "gate": "recorded_public_reference_shadow",
     },
@@ -2474,6 +2929,49 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ),
         "gate": "host_tool_runner_v0.2",
     },
+    # S5: the investor-relations pages, watched by the changedetection.io
+    # instance already running on this machine.
+    #
+    # A `host_tool` and not `public_https`, and the distinction is the whole
+    # design. Dalton does not fetch these pages. changedetection.io fetches
+    # them on its own schedule, keeps its own snapshots, and this connector
+    # asks it -- over loopback -- what changed. So the credential surface is
+    # nothing, the politeness burden is somebody else's, and the thing Dalton
+    # holds is a diff with a hash rather than a copy of a company's website.
+    #
+    # `allowed_hosts` is empty because a host tool reaches no host of its own.
+    # Which *pages* may be read is a separate and stricter question, answered
+    # by the declared IR-page map rather than by this template: a watch whose
+    # URL is not in `deploy/phase9/p9-us-it-services-ir-pages-v1.json` is
+    # skipped, and skipping it is reported. A connector that read whatever
+    # watches happened to exist in a shared local tool would be a connector
+    # whose scope is set by whoever last used that tool.
+    {
+        "slug": "ir-page-watch", "connector_ref": "connector:ir-page-watch",
+        "source_ref": "source:ir-page-watch", "source_type": "public_web",
+        "transport": "host_tool", "target": "host-tool:changedetection-io",
+        "hosts": (), "auth": "none",
+        # The upstream offers a "fetch this URL now" route and a "add a watch"
+        # route. Neither is available here: this connector reads what the tool
+        # already collected, and an operation that could create a watch would
+        # be an operation that could point Dalton at any page on the internet.
+        "forbidden": (
+            "route:changedetection-create-watch",
+            "route:changedetection-fetch-now",
+        ),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "list_watches", completeness="enumerated",
+                input_fields=("since",),
+            ),
+            _operation(
+                "get_watch_diff", completeness="enumerated",
+                input_fields=("watch_id",),
+            ),
+        ),
+        "gate": "host_tool_runner_v0.2",
+    },
 )
 
 
@@ -2523,6 +3021,24 @@ def _field_schema(name: str) -> dict[str, Any]:
     if name == "digest_ref":
         return {"type": "string",
                 "pattern": "^market-digest:[0-9]{4}-[0-9]{2}-[0-9]{2}:(AM|PM)$"}
+    # S5: the ownership operations are keyed by one filing and nothing else.
+    # An accession is the only handle EDGAR gives that names exactly one
+    # document set, and pinning its shape here is what makes "this connector
+    # cannot be handed a URL" true rather than merely intended.
+    # ``filing_accession`` and not ``accession``: the frozen SEC attachment
+    # operations already take an ``accession`` as free text, and narrowing that
+    # name here would move three approvals nobody asked to move. Same lesson
+    # S4 wrote down for ``statement`` and ``date_from``.
+    if name == "filing_accession":
+        return {"type": "string", "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$"}
+    if name == "holder_cik":
+        return {"type": "string", "pattern": "^[0-9]{10}$"}
+    if name == "quarter":
+        return {"type": ["string", "null"], "pattern": "^[0-9]{4}Q[1-4]$"}
+    # S5: the identifier changedetection.io gave one watch. Opaque and from
+    # the tool itself; it is never composed by Dalton.
+    if name == "watch_id":
+        return {"type": "string", "pattern": "^[0-9a-zA-Z._:-]{1,128}$"}
     if name == "freshness":
         return {"type": "string", "enum": ["day", "week", "month", "year"]}
     if name in {"allowed_handles", "subreddits", "concept_candidates"}:

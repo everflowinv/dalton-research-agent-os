@@ -157,6 +157,77 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # S5: the ownership filings. One filing per unit, and the unit is a
+        # document because that is what one of these reads -- a single
+        # primary document at a path derived from a single accession.
+        #
+        # The numbers are what a covered universe actually generates, times a
+        # margin, and not round numbers chosen for looking reasonable. Across
+        # the five covered issuers the live filings index holds on the order
+        # of a few hundred Form 4s a year, which is one or two a day; twenty
+        # is a fortnight of them in one tick and a bug that stops before it
+        # becomes a crawl against a free government service that publishes a
+        # ten-per-second limit.
+        #
+        # A 13D/G and a 144 are rarer still -- a handful an issuer a year --
+        # and the 13F is quarterly by construction, filed in a fortnight-long
+        # burst forty-five days after quarter end. Its per-unit ceiling is two
+        # physical calls because a 13F is two documents: the cover page, and
+        # the information table whose file name the cover page's own index
+        # names.
+        ("sec", "form4_transactions"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("sec", "beneficial_ownership"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 10,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("sec", "form144_notices"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 10,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("sec", "form13f_holdings"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                # Quarterly, in a burst. Eight a day covers reading the
+                # holders of one covered company inside the filing window
+                # without ever making this the reason SEC starts refusing.
+                "daily_unit_limit": 8,
+                "max_physical_calls_per_unit": 2,
+            }
+        ),
+        # S5: the IR-page watcher. There is no upstream to be polite to at
+        # all -- changedetection.io is a process on this machine and it does
+        # the fetching -- so these ceilings bound a loop rather than a
+        # relationship. Declared anyway, because admission refuses a route
+        # with no governed policy rather than inventing an unlimited one.
+        ("ir-page-watch", "list_watches"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 200,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("ir-page-watch", "get_watch_diff"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                # One read per declared page per change, with room for the
+                # whole declared set to change in a day and be re-read.
+                "daily_unit_limit": 200,
+                # The tool serves the two snapshots separately.
+                "max_physical_calls_per_unit": 3,
+            }
+        ),
         # P11a: one company's price window per unit.
         #
         # Deliberately modest. Yahoo is an unofficial free source that has not

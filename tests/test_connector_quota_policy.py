@@ -32,10 +32,6 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
-                # S4: the six China / Hong Kong fundamentals operations. Sorted
-                # before gemini-web-search. Conservative throughout, and the
-                # smallest allowance is the one operation that has to touch
-                # 东财's quote cluster: 「不要批量探测东财」 as arithmetic.
                 {
                     "connector_slug": "cn-hk-findata",
                     "operation": "ah_premium",
@@ -109,15 +105,6 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # S3: the crowd sources are all fifty units a day. Fifty is
-                    # not a measurement -- none of the three publishes a rate
-                    # limit -- it is ten times what the lane is for, so a retry
-                    # loop stops at breakfast rather than at the point where an
-                    # account is flagged. The same figure for all seven, because
-                    # a different one for each would imply a measurement behind
-                    # each one. Only the calls-per-unit differ, because paging
-                    # does: one review library is up to twenty page reads, one
-                    # post is one call.
                     "connector_slug": "employee-reviews",
                     "operation": "blind_reviews",
                     "quota_unit": "document",
@@ -136,9 +123,6 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # S2: the smallest search ceiling of any source, because
-                    # the Guidepoint licence permits research reading and
-                    # forbids bulk extraction.
                     "connector_slug": "guidepoint",
                     "operation": "search_library",
                     "quota_unit": "search",
@@ -148,8 +132,24 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # S1: local file reads, so the ceiling is a loop bound
-                    # rather than a courtesy to an upstream.
+                    "connector_slug": "ir-page-watch",
+                    "operation": "get_watch_diff",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 3,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "ir-page-watch",
+                    "operation": "list_watches",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "sales-notes",
                     "operation": "get_note",
                     "quota_unit": "document",
@@ -168,7 +168,42 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # P10p: the SEC filings index. Sorted before web-fetch.
+                    "connector_slug": "sec",
+                    "operation": "beneficial_ownership",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 10,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sec",
+                    "operation": "form13f_holdings",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 8,
+                    "max_physical_calls_per_unit": 2,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sec",
+                    "operation": "form144_notices",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 10,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sec",
+                    "operation": "form4_transactions",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 20,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "sec",
                     "operation": "list_filings",
                     "quota_unit": "search",
@@ -241,11 +276,6 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # P11a: Yahoo is an unofficial free source that never
-                    # agreed to serve us. There is no published rate limit to
-                    # stay under and nobody to appeal to, so these ceilings are
-                    # politeness rather than arithmetic -- five covered
-                    # companies ticking daily need five price units.
                     "connector_slug": "yfinance",
                     "operation": "analyst_estimates",
                     "quota_unit": "search",
@@ -255,10 +285,6 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # C1: one company's dated corporate events. Sorted between
-                    # the two above. Smaller and single-call: an earnings date
-                    # is announced once and then does not move, so the lane
-                    # asks once a day per covered company.
                     "connector_slug": "yfinance",
                     "operation": "calendar",
                     "quota_unit": "search",
