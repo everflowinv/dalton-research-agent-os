@@ -14,7 +14,9 @@ them with recorded results in an isolated canary.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .contracts import ModelInvocation, WorkOrder
@@ -67,6 +69,7 @@ VERIFIER_BUDGET = {
     "max_cost_usd": 0.25,
     "max_seconds": 120,
 }
+THESIS_IMPACT_BUDGET_CONFIG = "thesis-impact-budget-config.json"
 
 
 def _forecast_reconciliations_for_claim(connection: Any, claim_version_ref: str) -> list[dict[str, Any]]:
@@ -118,6 +121,7 @@ class ResearchPlanThesisImpactCoordinator:
         backlog: ResearchQuestionBacklog | None = None,
         scheduler: Scheduler | None = None,
         impact: ThesisImpactAuthority,
+        budget_config_path: Path | None = None,
     ) -> None:
         if closure is not None:
             if any(item is not None for item in (plan, backlog, scheduler)):
@@ -142,6 +146,43 @@ class ResearchPlanThesisImpactCoordinator:
         self.scheduler = scheduler
         self.impact = impact
         self.store = impact.store
+        self.budget_config_path = budget_config_path
+
+    def _call_budget(self, purpose: str, legacy: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+        from .call_budget import budget_fingerprint, resolve_call_budget
+
+        config: Mapping[str, Any] = {}
+        if self.budget_config_path is not None and self.budget_config_path.exists():
+            try:
+                wire = json.loads(self.budget_config_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ResearchPlanThesisImpactConflict(
+                    f"thesis-impact budget config is invalid: {exc}"
+                ) from exc
+            if not isinstance(wire, Mapping) or set(wire) - {"call_budget", "purpose_call_budgets"}:
+                raise ResearchPlanThesisImpactConflict(
+                    "thesis-impact budget config has an invalid closed shape"
+                )
+            config = wire
+        defaults = {
+            "max_input_tokens": legacy["max_input_tokens"],
+            "max_output_tokens": legacy["max_output_tokens"],
+            "max_cost_usd": legacy["max_cost_usd"],
+            "timeout_seconds": legacy["max_seconds"],
+        }
+        try:
+            resolved = resolve_call_budget(config, purpose, defaults=defaults)
+        except ValueError as exc:
+            raise ResearchPlanThesisImpactConflict(
+                f"thesis-impact budget config is invalid: {exc}"
+            ) from exc
+        work = {"max_input_tokens": resolved["max_input_tokens"],
+                "max_output_tokens": resolved["max_output_tokens"],
+                "max_total_tokens": resolved["max_input_tokens"] + resolved["max_output_tokens"],
+                "max_cost_usd": resolved["max_cost_usd"],
+                "max_seconds": resolved["timeout_seconds"]}
+        explicit = bool(config)
+        return work, budget_fingerprint(resolved) if explicit else None
 
     @staticmethod
     def _work_id(phase: str, identity: Mapping[str, Any]) -> str:
@@ -311,6 +352,9 @@ class ResearchPlanThesisImpactCoordinator:
             identity["forecast_reconciliation_hashes"] = [
                 item["content_hash"] for item in reconciliations
             ]
+        budget, budget_hash = self._call_budget("thesis_impact_assessment", ASSESSMENT_BUDGET)
+        if budget_hash is not None:
+            identity["call_budget_fingerprint"] = budget_hash
         work_id = self._work_id_with_redrive("assessment", identity)
         prompt = (
             "Assess whether the exact formal ClaimVersion supports, weakens, leaves "
@@ -341,7 +385,7 @@ class ResearchPlanThesisImpactCoordinator:
             question=prompt,
             requested_capabilities=("research",),
             runtime_profile_ref=RUNTIME_PROFILE_REF,
-            budget=ASSESSMENT_BUDGET,
+            budget=budget,
             idempotency_key="enqueue:" + work_id,
             declared_side_effects=(),
             status="ready",
@@ -384,6 +428,9 @@ class ResearchPlanThesisImpactCoordinator:
             "thesis_version_ref": thesis["id"],
             "thesis_version_hash": thesis["content_hash"],
         }
+        budget, budget_hash = self._call_budget("thesis_impact_verifier", VERIFIER_BUDGET)
+        if budget_hash is not None:
+            identity["call_budget_fingerprint"] = budget_hash
         work_id = self._work_id_with_redrive("verifier", identity)
         prompt = (
             "Independently verify the exact thesis-impact assessment against the exact "
@@ -424,7 +471,7 @@ class ResearchPlanThesisImpactCoordinator:
             question=prompt,
             requested_capabilities=("verify",),
             runtime_profile_ref=RUNTIME_PROFILE_REF,
-            budget=VERIFIER_BUDGET,
+            budget=budget,
             idempotency_key="enqueue:" + work_id,
             declared_side_effects=(),
             status="ready",
@@ -634,6 +681,7 @@ class ResearchPlanThesisImpactCoordinator:
 
 __all__ = [
     "ASSESSMENT_BUDGET",
+    "THESIS_IMPACT_BUDGET_CONFIG",
     "POLICY_SUPERSEDED_STATUS",
     "VERIFIER_BUDGET",
     "VERIFIER_THINKING_LEVEL",

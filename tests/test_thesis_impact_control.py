@@ -112,6 +112,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         self.control = ResearchPlanThesisImpactCoordinator(
             closure=closure, impact=self.impact
         )
+        self.closure = closure
         self.thesis_ref = "thesis:wanhua:operating-leverage"
 
     def _seed_thesis(self) -> dict:
@@ -293,6 +294,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             verifier_work["metadata"]["verifier_decision_schema_version"],
             "0.1",
         )
+
         self.assertIn(
             "Do not return assessment_ref or assessment_hash",
             verifier_work["question"],
@@ -379,6 +381,33 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             ).fetchone()[0],
             "ok",
         )
+
+    def test_configured_phase_budgets_are_independent_and_hash_bound(self) -> None:
+        self._seed_thesis()
+        path = Path(self.temp.name) / "thesis-impact-budget-config.json"
+        path.write_text(json.dumps({"purpose_call_budgets": {
+            "thesis_impact_assessment": {
+                "max_input_tokens": 4100, "max_output_tokens": 600,
+                "max_cost_usd": 0.20, "timeout_seconds": 45,
+            },
+            "thesis_impact_verifier": {
+                "max_input_tokens": 9000, "max_output_tokens": 1700,
+                "max_cost_usd": 0.18, "timeout_seconds": 50,
+            },
+        }}))
+        self.control = ResearchPlanThesisImpactCoordinator(
+            closure=self.closure, impact=self.impact, budget_config_path=path,
+        )
+        started = self._close_and_start()
+        work = started["impact"]["assessment_work_order"]
+        self.assertEqual(work["budget"], {
+            "max_input_tokens": 4100, "max_output_tokens": 600,
+            "max_total_tokens": 4700, "max_cost_usd": 0.20, "max_seconds": 45,
+        })
+        self.assertIn("call_budget_fingerprint", work["metadata"])
+        path.write_text('{"call_budget":{"max_cost_usd":-1}}')
+        with self.assertRaises(ResearchPlanThesisImpactConflict):
+            self.control._call_budget("thesis_impact_verifier", VERIFIER_BUDGET)
 
     def test_policy_rollover_parks_the_target_instead_of_looping(self) -> None:
         """A pass frozen against a replaced policy is reported, never promoted."""

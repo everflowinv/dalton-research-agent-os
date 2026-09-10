@@ -1798,6 +1798,7 @@ class WriterServer:
                 backlog=self._backlog,
                 scheduler=self._scheduler,
                 impact=self._thesis_impact,
+                budget_config_path=self.state_dir / "thesis-impact-budget-config.json",
             )
 
     def serve_forever(self) -> None:
