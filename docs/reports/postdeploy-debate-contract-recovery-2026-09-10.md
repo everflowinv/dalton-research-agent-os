@@ -19,3 +19,23 @@ Verification:
 
 passed 129 tests. `git diff --check` passed. No live state, model, connector, or
 governance operation was performed.
+
+## Model-chain diagnostics follow-up
+
+The live router admitted each verifier profile, but the broker then returned a
+failure and the fallback ledger retained only `model_unavailable`. The broker's
+typed code and message were held briefly in `CockpitModel.call`, then discarded
+when the chain created its aggregate failure. This made three unavailable
+aliases indistinguishable from a generic outage after the fact.
+
+Each attempted link now contributes a bounded diagnostic containing profile,
+failure class, broker code, and message. Credential-like assignments are
+redacted and every field has a hard size bound. The final formal
+`ResultEnvelope` persists these diagnostics and includes their safe text in its
+error message, while immutable route-chain links retain their existing schema.
+Fallback and charging behavior is unchanged.
+
+The combined focused command covering fallback, Cockpit routing, and DebateMap
+passed 176 tests. A real scheduler regression proves that the formal result
+survives replay with both distinct broker causes while a token-like value does
+not reach SQLite.

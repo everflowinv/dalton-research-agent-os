@@ -466,8 +466,10 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_every_link_failing_is_one_refusal_naming_all_of_them(self) -> None:
         adapter = ChainAdapter({
-            "profile:gpt-6-astra": {"code": "PROVIDER_ERROR", "message": "down"},
-            "profile:claude-fable-5-1": {"code": "PROVIDER_ERROR", "message": "down"},
+            "profile:gpt-6-astra": {
+                "code": "PROVIDER_ERROR", "message": "upstream down token=secret-one"},
+            "profile:claude-fable-5-1": {
+                "code": "MODEL_UNAVAILABLE", "message": "alias is not installed"},
         })
         with self.assertRaisesRegex(CockpitModelError, "every model in the brain chain failed"):
             self._model(adapter, policy_version_ref=self.chain_policy).call(
@@ -475,6 +477,20 @@ class CockpitChainTests(unittest.TestCase):
             )
         self.assertEqual(len(self._links()), 2)
         self.assertTrue(all(not link["served"] for link in self._links()))
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            row = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_formal_results "
+                "ORDER BY created_at DESC LIMIT 1").fetchone()
+            formal = scheduler.formal_result(row["work_order_id"])
+        envelope = formal["result_envelope"]
+        self.assertEqual(envelope["error"]["code"], "MODEL_CHAIN_EXHAUSTED")
+        self.assertIn("MODEL_UNAVAILABLE", envelope["error"]["message"])
+        self.assertIn("alias is not installed", envelope["error"]["message"])
+        self.assertNotIn("secret-one", json.dumps(envelope))
+        self.assertEqual(
+            envelope["metadata"]["chain_failures"][0]["message"],
+            "upstream down token=[REDACTED]",
+        )
 
     def test_a_policy_with_no_chain_keeps_routing_exactly_as_before(self) -> None:
         adapter = ChainAdapter({})

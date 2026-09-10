@@ -175,6 +175,21 @@ HALTING_FAILURES: frozenset[str] = frozenset({
     "unclassified_failure",
 })
 
+_SENSITIVE_FAILURE_TEXT = re.compile(
+    r"(?i)(authorization|api[-_ ]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"
+)
+
+
+def safe_failure_detail(profile_id: str, outcome: Mapping[str, Any]) -> dict[str, str]:
+    """Keep an actionable broker error without retaining credentials or bodies."""
+    failure_class = str(outcome.get("failure_class") or "unclassified_failure")[:64]
+    code = str(outcome.get("error_code") or failure_class)[:96]
+    message = " ".join(str(outcome.get("reason") or failure_class).split())
+    message = _SENSITIVE_FAILURE_TEXT.sub(
+        lambda match: match.group(1) + "=[REDACTED]", message)
+    return {"profile_id": str(profile_id)[:160], "failure_class": failure_class,
+            "code": code, "message": message[:300]}
+
 # Broker error codes, by what they mean for the chain. The broker's codes are
 # provider-agnostic uppercase tokens; the substrings below are matched against
 # the whole code so a provider-specific suffix still lands in the right class.
@@ -601,6 +616,7 @@ def execute_chain(
                 "served": None,
             }
     links: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
     previous_decision_ref: str | None = None
     for step in range(1, len(chain) + 1):
         result = router.route(
@@ -702,9 +718,11 @@ def execute_chain(
                 "profile": profile,
                 "value": outcome.get("value"),
                 "links": links,
+                "failures": failures,
                 "served": links[-1],
             }
         failure_class = str(outcome.get("failure_class", ""))
+        failures.append(safe_failure_detail(profile_id, outcome))
         _record(served=False, skip_reason=failure_class or "unclassified")
         if not may_fall_back(failure_class):
             return {
@@ -713,6 +731,7 @@ def execute_chain(
                 "purpose": purpose,
                 "reason": failure_class,
                 "links": links,
+                "failures": failures,
                 "served": None,
             }
     return {
@@ -721,6 +740,7 @@ def execute_chain(
         "purpose": purpose,
         "reason": "every link in the chain was tried and failed",
         "links": links,
+        "failures": failures,
         "served": None,
     }
 

@@ -346,14 +346,18 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
     )
 
 
-def _failure(work: WorkOrder, code: str, route_ref: str | None) -> ResultEnvelope:
+def _failure(work: WorkOrder, code: str, route_ref: str | None,
+             *, message: str | None = None,
+             chain_failures: Sequence[Mapping[str, Any]] = ()) -> ResultEnvelope:
     identity = {"work_order_ref": work.id, "code": code, "route_ref": route_ref}
     return ResultEnvelope(
         schema_version=SCHEMA_VERSION, id=f"result:cockpit-control-{content_hash(identity)[:32]}",
         created_at=_now(), work_order_ref=work.id,
         invocation_ref=f"invocation:not-started:{content_hash(identity)[:32]}", status="failed",
-        outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(), error={"code": code},
-        metadata={"control_plane_failure": True, "route_decision_ref": route_ref},
+        outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(),
+        error={"code": code, **({} if message is None else {"message": message[:1000]})},
+        metadata={"control_plane_failure": True, "route_decision_ref": route_ref,
+                  "chain_failures": list(chain_failures)[:12]},
     )
 
 
@@ -765,6 +769,7 @@ class CockpitModel:
                 spend[route["id"]] = (0, "failed")
                 return {"outcome": "failed",
                         "failure_class": classify_model_failure(envelope.error or {}),
+                        "error_code": (envelope.error or {}).get("code"),
                         "reason": (envelope.error or {}).get("message", "the model call failed"),
                         "value": envelope}
             spend[route["id"]] = _cost_micros(invocation, route, profile, ceiling)
@@ -819,8 +824,17 @@ class CockpitModel:
             f"{link['profile_id']} ({link['skip_reason']})"
             for link in outcome["links"] if not link["served"]
         )
-        return {"result": _failure(work, "MODEL_CHAIN_EXHAUSTED", route_ref),
-                "failure": f"every model in the {tier} chain failed: {skipped}",
+        details = list(outcome.get("failures") or [])
+        detail_text = "; ".join(
+            f"{item['profile_id']} [{item['code']}]: {item['message']}"
+            for item in details)
+        failure = f"every model in the {tier} chain failed: {skipped}"
+        if detail_text:
+            failure += f"; broker details: {detail_text}"
+        return {"result": _failure(
+                    work, "MODEL_CHAIN_EXHAUSTED", route_ref,
+                    message=failure, chain_failures=details),
+                "failure": failure,
                 "cost_micros": 0, "cost_status": "failed",
                 "pool_rejection": None}
 
