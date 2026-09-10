@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
 import tempfile
 from collections import defaultdict
@@ -19,7 +20,8 @@ from .model_forecast_driver import ForecastModelAuthority, validate_forecast_mod
 from .store import DaltonStore, canonical_json, content_hash
 from .valuation_snapshot import ValuationSnapshotAuthority
 
-LAYOUT_VERSION = "fund-xlsx-layout:0.2"
+LAYOUT_VERSION = "fund-xlsx-layout:0.3"
+FUND_MONETARY_DISPLAY_SCALE = 1_000_000
 
 
 class FundWorkbookExportError(RuntimeError):
@@ -90,8 +92,16 @@ def _number_format(unit: str, *, per_share: bool = False) -> str:
     if per_share:
         return '"$"#,##0.00;[Red]("$"#,##0.00);-'
     if unit == "USD":
-        return '"$"#,##0;[Red]("$"#,##0);-'
+        return '"$"#,##0.0,,;[Red]("$"#,##0.0,,);-'
+    if re.fullmatch(r"[A-Z]{3}", unit):
+        return "#,##0.0,,;[Red](#,##0.0,,);-"
     return "#,##0;[Red](#,##0);-"
+
+
+def _display_unit(unit: str) -> str:
+    if re.fullmatch(r"[A-Z]{3}", unit):
+        return f"{unit} millions"
+    return unit
 
 
 def _formula_for(
@@ -305,7 +315,12 @@ def export_fund_workbook(
                       (valuation_ws, "Valuation"), (sources, "Sources and bindings"),
                       (manifest, "Formula map")):
         ws.append([title])
-        ws.append([model["company_ref"], f"As of {model['created_at']}"])
+        company_label = (
+            (mission_binding or {}).get("entity_name")
+            or (mission_binding or {}).get("ticker")
+            or model["company_ref"]
+        )
+        ws.append([company_label, f"As of {model['created_at']}"])
         ws.append([])
 
     for ci, value in enumerate(headers, 1):
@@ -316,7 +331,7 @@ def export_fund_workbook(
     row = 5
     for item in model["drivers"]:
         values = {c["period_end"]: c for c in item.get("history") or []}
-        unit_label = item.get("unit") or "number"
+        unit_label = _display_unit(item.get("unit") or "number")
         driver.cell(row, 1, f"{item['label']} ({unit_label}) — actual")
         for period in periods:
             ci = period_columns[period]
@@ -342,7 +357,8 @@ def export_fund_workbook(
         driver.cell(
             row,
             1,
-            f"{label} ({assumption['unit']}) — {assumption['measure']} — assumption",
+            f"{label} ({_display_unit(assumption['unit'])}) — "
+            f"{assumption['measure']} — assumption",
         )
         period = assumption["period"]["end"]
         if period in periods:
@@ -373,7 +389,7 @@ def export_fund_workbook(
         financials.cell(
             rr,
             1,
-            f"{result['label']} ({result['unit']}) — {role} — "
+            f"{result['label']} ({_display_unit(result['unit'])}) — {role} — "
             f"{result['role'] or 'calculated'}",
         )
         by_period = {c["period"]["end"]: c for c in result["cells"]}
@@ -501,7 +517,7 @@ def export_fund_workbook(
                 raise FundWorkbookExportError(f"valuation scenario {key} must be positive")
         rows = [
             ("Selected multiple", _number(scenario["multiple"]), "owner assumption"),
-            ("Net cash", _number(scenario["net_cash"]), "owner assumption"),
+            ("Net cash (USD millions)", _number(scenario["net_cash"]), "owner assumption"),
             ("Diluted shares", _number(scenario["diluted_shares"]), "owner assumption"),
             ("Required return", _number(scenario["required_return"]), "owner assumption"),
             ("Year fraction", _number(scenario["year_fraction"]), "owner assumption"),
@@ -525,12 +541,12 @@ def export_fund_workbook(
             annual_col = annual_columns[label]
             model_row = result_rows[target_ref]
             base = f"'Financials'!{_col(annual_col)}{model_row}"
-            valuation_ws.append(["Forecast metric", f"={base}", "formula output", target_ref])
+            valuation_ws.append(["Forecast metric (USD millions)", f"={base}", "formula output", target_ref])
             if scenario["multiple_kind"] == "ev_revenue":
-                valuation_ws.append(["Equity value", "=B10*B5+B6", "formula output",
+                valuation_ws.append(["Equity value (USD millions)", "=B10*B5+B6", "formula output",
                                      "forecast revenue * multiple + net cash"])
             else:
-                valuation_ws.append(["Equity value", "=B10*B5", "formula output",
+                valuation_ws.append(["Equity value (USD millions)", "=B10*B5", "formula output",
                                      "forecast net income * multiple"])
             valuation_ws.append(["Future target price", "=B11/B7", "formula output",
                                  "equity value / diluted shares"])
@@ -592,6 +608,8 @@ def export_fund_workbook(
                          "'" + item["formula"], item["model_formula"]])
     manifest.append([])
     manifest.append(["Layout version", LAYOUT_VERSION])
+    manifest.append(["Monetary display scale", FUND_MONETARY_DISPLAY_SCALE])
+    manifest.append(["Monetary display label", "millions; underlying values unchanged"])
     manifest.append(["Formula map SHA-256", formula_digest])
     manifest.append(["Gaps", len(gaps)])
     for gap in gaps:
@@ -695,13 +713,22 @@ def export_company_workbook(
                 raise FundWorkbookExportError(
                     "latest forecast model is not bound to the current mission version")
             inputs = build_model_inputs(missions, spec)
+            member = next(
+                item for item in mission["universe"]
+                if item["company_ref"] == company_ref
+            )
+            annual_filings = [
+                item for item in missions.statement_filings(company_ref)
+                if item["form"] == "10-K"
+            ]
+            latest_annual = (
+                max(annual_filings,
+                    key=lambda item: (item["report_date"], item["accession"]))
+                if annual_filings else None
+            )
             if calendar_binding is None:
-                annual_filings = [item for item in missions.statement_filings(company_ref)
-                                  if item["form"] == "10-K"]
                 if annual_filings:
-                    filing = max(
-                        annual_filings,
-                        key=lambda item: (item["report_date"], item["accession"]))
+                    filing = latest_annual
                     body = {
                         "company_ref": filing["company_ref"], "cik": filing["cik"],
                         "accession": filing["accession"], "form": filing["form"],
@@ -729,7 +756,12 @@ def export_company_workbook(
                 calendar_binding=calendar_binding,
                 mission_binding={"ref": mission["id"],
                                  "content_hash": mission["content_hash"],
-                                 "created_at": mission["created_at"]})
+                                 "created_at": mission["created_at"],
+                                 "ticker": member["ticker"],
+                                 "entity_name": (
+                                     latest_annual["entity_name"]
+                                     if latest_annual else None
+                                 )})
 
 
 def main(argv: Sequence[str] | None = None) -> int:

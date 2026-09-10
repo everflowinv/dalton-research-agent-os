@@ -11,7 +11,10 @@ the dark-blue fill and white text. Hard-coded historical inputs and assumptions
 are blue, formulas that cross sheets are green, and formulas contained within a
 sheet are black. Currency, percentage, per-share, multiple, and ordinary-number
 formats are distinct. Negative values use parentheses and zero displays as a
-dash. Row labels show the underlying unit. Sheets print landscape on tabloid
+dash. Monetary rows display in currency millions through Excel number formats;
+the underlying authority values and formulas remain in raw units. Formula Map
+records the 1,000,000 display scale. Row labels show the currency and scale.
+Sheets print landscape on tabloid
 paper, repeat rows 1–4, fit to one page wide, freeze labels and the annual block,
 and retain the existing incomplete-data blanks and gap records.
 
@@ -28,6 +31,11 @@ Validation:
   an eight-page PDF. The Financials page rendered without `###` overflow at
   1224×792-point tabloid landscape size. The QA fixture is synthetic and remains
   under `/tmp/dalton-fund-format-polish-qa-v3`.
+
+The final scale review is under `/tmp/dalton-fund-format-polish-qa-v5`; its
+Financials page is `financials.png`. It shows readable USD-million values while
+inspection of the saved workbook still reads a raw historical revenue value of
+1,000,000,000 and the original forecast formula.
 
 The exporter does not synthesize missing quarterly data or infer a ratio from its
 label. Unsupported formula families remain explicit gaps.

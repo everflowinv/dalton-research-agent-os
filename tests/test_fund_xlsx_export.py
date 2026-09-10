@@ -134,6 +134,40 @@ class FundXlsxExportTests(unittest.TestCase):
                          "0.0%;(0.0%);-")
         self.assertIn('"$"', book["Valuation"]["B13"].number_format)
 
+    def test_monetary_display_uses_millions_without_scaling_values_or_formulas(self):
+        from openpyxl import load_workbook
+
+        export_fund_workbook(
+            self.path,
+            model=self.model,
+            spec=self.specification,
+            inputs=self.inputs,
+            calendar_binding=self.calendar(),
+            mission_binding={
+                "ref": "coverage-mission-version:test:1",
+                "content_hash": "1" * 64,
+                "created_at": "2026-09-10T00:00:00+00:00",
+                "ticker": "ACN",
+                "entity_name": None,
+            },
+        )
+        book = load_workbook(self.path, data_only=False)
+        financials = book["Financials"]
+        headers = {cell.value: cell.column for cell in financials[4]}
+        revenue = financials.cell(5, headers["Q4 FY2026E"])
+        self.assertIn("(USD millions)", financials["A5"].value)
+        self.assertTrue(revenue.value.startswith("='Driver'!J5*(1+"))
+        self.assertTrue(revenue.number_format.endswith(",,);-"))
+        self.assertEqual(book["Driver"]["G5"].value, 1_000_000_000)
+        self.assertEqual(financials["A2"].value, "ACN")
+        formula_map = book["Formula Map"]
+        scale = next(
+            formula_map.cell(row, 2).value
+            for row in range(1, formula_map.max_row + 1)
+            if formula_map.cell(row, 1).value == "Monetary display scale"
+        )
+        self.assertEqual(scale, 1_000_000)
+
     def test_without_calendar_binding_does_not_guess_annual_columns(self):
         from openpyxl import load_workbook
 
