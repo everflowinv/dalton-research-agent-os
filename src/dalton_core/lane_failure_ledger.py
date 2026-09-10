@@ -404,6 +404,7 @@ class LedgerWriter:
 def lane_budget(
     lane: str, *, state_dir: str | Path | None = None,
     max_transient_failures: int | None = None, clock: Any | None = None,
+    probe_interval_seconds: int | None = None,
 ) -> Any:
     """One lane's failure budget, backed by the ledger and replayed from it.
 
@@ -424,6 +425,8 @@ def lane_budget(
         ledger = LedgerWriter(default_path(state_dir))
     budget = LaneFailureBudget(
         lane, ledger=ledger, clock=clock,
+        **({} if probe_interval_seconds is None else {
+            "probe_interval_seconds": int(probe_interval_seconds)}),
         max_transient_failures=(
             DEFAULT_MAX_TRANSIENT_FAILURES if max_transient_failures is None
             else int(max_transient_failures)),

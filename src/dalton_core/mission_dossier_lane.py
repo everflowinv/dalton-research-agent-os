@@ -126,8 +126,14 @@ class MissionDossierLaneCoordinator:
         # is nearly always a deploy, which is the likeliest thing to have
         # fixed it.
         self._quiet_signature: str | None = None
+        probe_interval = (
+            launcher.capacity_probe_interval_seconds()
+            if hasattr(launcher, "capacity_probe_interval_seconds") else None
+        )
+        kwargs = {} if probe_interval is None else {
+            "probe_interval_seconds": probe_interval}
         self.budget = lane_budget("company_dossier", state_dir=failure_ledger_dir,
-                                  clock=failure_clock)
+                                  clock=failure_clock, **kwargs)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:

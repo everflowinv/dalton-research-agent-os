@@ -143,6 +143,28 @@ class CockpitChainTests(unittest.TestCase):
                                         "max_recovery_epochs": 2,
                                         "scheduler_max_attempts": 4})
 
+    def test_explicit_capacity_policy_versions_base_work_but_default_does_not(self) -> None:
+        default_adapter = ChainAdapter({})
+        kwargs = {"purpose": "plan", "request_id": "capacity-policy-identity",
+                  "prompt": "what next?", "mission": self.mission}
+        default_model = self._model(default_adapter, policy_version_ref=self.chain_policy)
+        first = default_model.call(**kwargs)
+        self.assertTrue(default_model.call(**kwargs)["replayed"])
+        self.assertEqual(len(default_adapter.served), 1)
+
+        explicit_adapter = ChainAdapter({})
+        explicit = self._model(
+            explicit_adapter, policy_version_ref=self.chain_policy,
+            capacity_retry={"cooldown_seconds": 60, "max_recovery_epochs": 1,
+                            "scheduler_max_attempts": 3})
+        second = explicit.call(**kwargs)
+        self.assertNotEqual(second["work_order_ref"], first["work_order_ref"])
+        changed = self._model(
+            explicit_adapter, policy_version_ref=self.chain_policy,
+            capacity_retry={"cooldown_seconds": 120, "max_recovery_epochs": 1,
+                            "scheduler_max_attempts": 3}).call(**kwargs)
+        self.assertNotEqual(changed["work_order_ref"], second["work_order_ref"])
+
     def test_a_legacy_terminal_busy_failure_gets_one_versioned_recovery_identity(self) -> None:
         adapter = BusyThenAvailableAdapter({})
         clock = MutableClock()

@@ -20,6 +20,7 @@ import re
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.claim_index_authority import ClaimIndexAuthority
@@ -917,10 +918,15 @@ class LaneWiringTests(unittest.TestCase):
 
 class CoordinatorTests(unittest.TestCase):
     class Launcher:
-        def __init__(self, ticket_status="succeeded", summary=None):
+        def __init__(self, ticket_status="succeeded", summary=None,
+                     capacity_cooldown=None):
             self.started: list[str] = []
             self.ticket_status = ticket_status
             self.summary = summary or {"dossier_status": "nothing_new"}
+            self.capacity_cooldown = capacity_cooldown
+
+        def capacity_probe_interval_seconds(self):
+            return self.capacity_cooldown
 
         def start(self, *, signature, company_ref=None):
             self.started.append(signature)
@@ -969,6 +975,23 @@ class CoordinatorTests(unittest.TestCase):
         held = coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["reason"], "boom")
+
+    def test_configured_model_capacity_cooldown_controls_lane_probe(self):
+        now = [datetime(2026, 9, 10, tzinfo=timezone.utc)]
+        launcher = self.Launcher(
+            ticket_status="failed", capacity_cooldown=60,
+            summary={"failure_reason": "capacity_busy: broker busy"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher,
+            failure_clock=lambda: now[0])
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        # Settlement parks it, and the dependency budget grants one free probe.
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(coordinator.dispatch_once()["status"], "parked")
+        now[0] += timedelta(seconds=59)
+        self.assertEqual(coordinator.dispatch_once()["status"], "parked")
+        now[0] += timedelta(seconds=1)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
 
     def test_the_signature_moves_when_a_dossier_version_lands(self):
         before = ledger_signature(self.connection)

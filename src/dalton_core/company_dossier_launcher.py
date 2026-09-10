@@ -11,6 +11,7 @@ the lane make progress instead of re-asking a settled question.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,17 @@ class CompanyDossierLauncher(LaneChildLauncher):
         """
 
         return self.model_config_path is not None
+
+    def capacity_probe_interval_seconds(self) -> int | None:
+        """Configured broker-capacity cooldown, or the lane's legacy default."""
+
+        if self.model_config_path is None:
+            return None
+        from .document_extraction import validate_model_config
+        config = validate_model_config(json.loads(
+            self.model_config_path.read_text(encoding="utf-8")))
+        retry = config.get("capacity_retry")
+        return None if retry is None else int(retry["cooldown_seconds"])
 
     def _command(self, *, ticket_dir: Path, company_ref: str | None = None) -> list[str]:
         command = [

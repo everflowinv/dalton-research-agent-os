@@ -493,8 +493,12 @@ class CockpitModel:
              mission: Mapping[str, Any],
              producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
-        base_request_id = request_id
         capacity_retry = _capacity_retry(self.config)
+        base_request_id = request_id
+        if ("capacity_retry" in self.config
+                and ":capacity-policy:" not in base_request_id):
+            base_request_id += ":capacity-policy:" + content_hash(capacity_retry)[:16]
+            request_id = base_request_id
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         legacy_budget = {
             "max_input_tokens": self.max_input_tokens,
