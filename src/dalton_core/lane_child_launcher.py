@@ -20,6 +20,7 @@ under, and the command. Everything below is the part that was never different.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import re
@@ -177,59 +178,68 @@ class LaneChildLauncher:
         return self._ticket_path(ticket_id).with_name(
             f"controlled-reentry-{marker}.json").exists()
 
-    def claim_controlled_reentry(self, ticket_id: str, authorization: str) -> None:
-        """Persist one exact child attempt while retaining its prior summary."""
+    def _claim_controlled_reentry_locked(
+        self, ticket_id: str, authorization: str,
+    ) -> None:
+        """Persist one exact child attempt. Caller holds ``self._lock``."""
         if not isinstance(authorization, str) or not authorization:
             raise LaneChildRejected("controlled reentry needs exact authorization")
+        if self._current is not None and self._current[1].poll() is None:
+            raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
+        for path in sorted(self.tickets_dir.glob("*/ticket.json")):
+            try:
+                persisted = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (isinstance(persisted, Mapping)
+                    and persisted.get("status") == "running"
+                    and process_matches(persisted.get("pid"),
+                                        persisted.get("command"))):
+                raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
+        ticket_path = self._ticket_path(ticket_id)
+        try:
+            ticket = json.loads(ticket_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise LaneChildRejected("controlled reentry ticket is unavailable") from exc
+        if not isinstance(ticket, Mapping) or ticket.get("id") != ticket_id:
+            raise LaneChildRejected("controlled reentry ticket identity is invalid")
+        if ticket.get("status") == "running":
+            raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
+        summary_path = ticket_path.with_name("summary.json")
+        try:
+            summary_bytes = summary_path.read_bytes()
+        except OSError as exc:
+            raise LaneChildRejected("controlled reentry summary is unavailable") from exc
+        marker = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:24]
+        marker_path = ticket_path.with_name(f"controlled-reentry-{marker}.json")
+        record = json.dumps({
+            "schema_version": "0.2", "ticket_ref": ticket_id,
+            "authorization": authorization,
+            "lane_input": ticket.get("signature", ticket.get("batch_ref")),
+            "prior_summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+            # The marker is the immutable owner-only archive. Base64 keeps the
+            # exact old bytes even after the child replaces summary.json.
+            "prior_summary_base64": base64.b64encode(summary_bytes).decode("ascii"),
+            "claimed_at": wire_time(self.clock()),
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        try:
+            descriptor = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                 0o600)
+        except FileExistsError as exc:
+            raise LaneChildRejected("controlled reentry was already attempted") from exc
+        try:
+            os.write(descriptor, record)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def claim_controlled_reentry(self, ticket_id: str, authorization: str) -> None:
+        """Persist a claim without spawning (test/operator compatibility)."""
         with self._lock:
-            if self._current is not None and self._current[1].poll() is None:
-                raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
-            for path in sorted(self.tickets_dir.glob("*/ticket.json")):
-                try:
-                    persisted = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                if (isinstance(persisted, Mapping)
-                        and persisted.get("status") == "running"
-                        and process_matches(persisted.get("pid"),
-                                            persisted.get("command"))):
-                    raise LaneChildConflict(
-                        f"{self.TICKET_PREFIX} child is already running")
-            ticket_path = self._ticket_path(ticket_id)
-            try:
-                ticket = json.loads(ticket_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError) as exc:
-                raise LaneChildRejected("controlled reentry ticket is unavailable") from exc
-            if not isinstance(ticket, Mapping) or ticket.get("id") != ticket_id:
-                raise LaneChildRejected("controlled reentry ticket identity is invalid")
-            if ticket.get("status") == "running":
-                raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
-            summary_path = ticket_path.with_name("summary.json")
-            try:
-                summary_bytes = summary_path.read_bytes()
-            except OSError as exc:
-                raise LaneChildRejected("controlled reentry summary is unavailable") from exc
-            marker = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:24]
-            marker_path = ticket_path.with_name(f"controlled-reentry-{marker}.json")
-            record = json.dumps({
-                "schema_version": "0.1", "ticket_ref": ticket_id,
-                "authorization": authorization,
-                "lane_input": ticket.get("signature", ticket.get("batch_ref")),
-                "prior_summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
-                "claimed_at": wire_time(self.clock()),
-            }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-            try:
-                descriptor = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                                     0o600)
-            except FileExistsError as exc:
-                raise LaneChildRejected("controlled reentry was already attempted") from exc
-            try:
-                os.write(descriptor, record)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            self._claim_controlled_reentry_locked(ticket_id, authorization)
 
     def spawn(self, *, digest: str, record: Mapping[str, Any],
+              _controlled_reentry: tuple[str, str] | None = None,
               **command_kwargs: Any) -> dict[str, Any]:
         """Start one child and return its ticket.
 
@@ -268,6 +278,11 @@ class LaneChildLauncher:
                 validate_child_command(command, state_dir=self.state_dir)
             except WorkspaceRuntimeError as exc:
                 raise LaneChildRejected(str(exc)) from exc
+            if _controlled_reentry is not None:
+                prior_ticket_id, authorization = _controlled_reentry
+                if prior_ticket_id != ticket_id:
+                    raise LaneChildRejected("controlled reentry ticket changed before spawn")
+                self._claim_controlled_reentry_locked(ticket_id, authorization)
             ticket_dir = secure_dir(ticket_dir)
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

@@ -10,6 +10,7 @@ then died.
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import os
@@ -110,9 +111,13 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(record["lane_input"], "company|input-hash")
         self.assertEqual(record["prior_summary_sha256"],
                          hashlib.sha256(summary).hexdigest())
+        self.assertEqual(base64.b64decode(record["prior_summary_base64"]), summary)
         self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
         with self.assertRaises(LaneChildRejected):
             launcher.claim_controlled_reentry(ticket["id"], authorization)
+
+        path.with_name("summary.json").write_bytes(b'{"status":"replacement"}\n')
+        self.assertEqual(base64.b64decode(record["prior_summary_base64"]), summary)
 
     def test_a_running_child_cannot_claim_controlled_reentry(self):
         launcher = self.launcher("import time; time.sleep(10)")
@@ -123,6 +128,30 @@ class LauncherTests(unittest.TestCase):
             launcher.claim_controlled_reentry(
                 ticket["id"], ":operator-recovery:" + "b" * 16)
         self.assertEqual(list(path.parent.glob("controlled-reentry-*.json")), [])
+
+    def test_controlled_claim_and_spawn_share_one_launcher_critical_section(self):
+        launcher = self.launcher("import time; time.sleep(0.2)")
+        digest = "1" * 24
+        old = launcher.spawn(digest=digest, record={"signature": "exact-input"})
+        launcher.wait(timeout=30)
+        launcher.status(old["id"])
+        path = launcher._ticket_path(old["id"])
+        prior = b'{"status":"failed","failed_model_traces":[]}\n'
+        path.with_name("summary.json").write_bytes(prior)
+        authorization = ":operator-recovery:" + "c" * 16
+
+        relaunched = launcher.spawn(
+            digest=digest, record={"signature": "exact-input"},
+            _controlled_reentry=(old["id"], authorization),
+        )
+        self.assertEqual(relaunched["status"], "running")
+        marker = next(path.parent.glob("controlled-reentry-*.json"))
+        archived = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(base64.b64decode(archived["prior_summary_base64"]), prior)
+        # A second start observes the child installed by that same locked
+        # operation; there is no claim/spawn gap in which it can take the slot.
+        with self.assertRaises(LaneChildConflict):
+            launcher.spawn(digest="2" * 24, record={})
 
     def test_a_torn_summary_is_not_a_crash(self):
         launcher = self.launcher()

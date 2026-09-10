@@ -111,9 +111,7 @@ class CompanyDossierLauncher(LaneChildLauncher):
         if not isinstance(signature, str) or not signature.strip():
             raise LaneChildRejected("a dossier run needs a ledger signature")
         digest = run_digest(company_ref, signature.strip())
-        if controlled_reentry is not None:
-            self.claim_controlled_reentry(
-                f"{self.TICKET_PREFIX}:{digest}", controlled_reentry)
+        ticket_id = f"{self.TICKET_PREFIX}:{digest}"
         return self.spawn(
             digest=digest,
             record={
@@ -122,6 +120,8 @@ class CompanyDossierLauncher(LaneChildLauncher):
                 "run_digest": digest,
                 "model_configured": self.configured,
             },
+            _controlled_reentry=(None if controlled_reentry is None else
+                                 (ticket_id, controlled_reentry)),
             company_ref=company_ref,
         )
 
@@ -138,7 +138,7 @@ class CompanyDossierLauncher(LaneChildLauncher):
         except Exception:  # noqa: BLE001 - absence/corruption cannot authorize
             return None
         if ticket.get("status") == "running":
-            return False
+            return None
         summary = ticket.get("summary") or {}
         for config_path in (self.model_config_path, self.verifier_model_config_path):
             if config_path is None:

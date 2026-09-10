@@ -119,13 +119,13 @@ class EventJudgementLauncher(LaneChildLauncher):
             if adopted.get("status") != "running":
                 self._adopted_finished.add(ticket_id)
             return adopted
-        if controlled_reentry is not None:
-            self.claim_controlled_reentry(ticket_id, controlled_reentry)
         return self.spawn(
             digest=digest,
             record={"batch_ref": batch_ref.strip(), "company_ref": company_ref,
                     "event_refs": list(event_refs), "event_group_hash": event_group_hash,
                     "group_key": group_key},
+            _controlled_reentry=(None if controlled_reentry is None else
+                                 (ticket_id, controlled_reentry)),
             company_ref=company_ref, event_refs=event_refs,
             event_group_hash=event_group_hash,
         )
