@@ -731,10 +731,20 @@ def run_judgement(
             })
         summary["cost_micros"] = spent
         summary["formal_authority_writes"] = summary["judged"]
-        summary["status"] = "succeeded"
-        summary["judgement_status"] = summary["judgement_status"] or (
-            "judged" if summary["judged"] else "refused"
-        )
+        if summary["judged"] == 0 and summary["refused"]:
+            reasons = [str(item.get("reason") or "judgement contract refused")
+                       for item in summary["effects"]
+                       if item.get("status") == "refused"][:3]
+            summary["status"] = "failed"
+            summary["judgement_status"] = summary["judgement_status"] or "refused"
+            summary["failure_reason"] = (
+                "all attempted event judgements were refused: " + "; ".join(reasons)
+            )[:500]
+        else:
+            summary["status"] = "succeeded"
+            summary["judgement_status"] = summary["judgement_status"] or (
+                "partial" if summary["refused"] else "judged"
+            )
         return summary
     except EventJudgementError as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"

@@ -494,8 +494,36 @@ class PublishTests(unittest.TestCase):
                 findings=[{"unit": "business_model", "code": "unsupported_sentence",
                            "detail": "这句话超出了它引用的材料"}]))
         self.assertEqual(summary["dossier_status"], "verification_failed")
+        self.assertEqual(summary["status"], "failed")
+        self.assertIn("unsupported_sentence", summary["failure_reason"])
         self.assertEqual(summary["verification"]["verdict"], "reject")
         self.assertEqual(self.authority.versions(ACN), [])
+
+    def test_all_refused_drafts_are_a_failed_run_with_no_formal_write(self):
+        class RefusingModel(FakeModel):
+            def call(self, **kwargs):
+                self.prompts.append(kwargs["prompt"])
+                return self._envelope("not json")
+
+        summary = self.harness.run(model_factory=RefusingModel, max_units=2)
+        self.assertEqual((summary["status"], summary["dossier_status"]),
+                         ("failed", "nothing_drafted"))
+        self.assertEqual(summary["formal_authority_writes"], 0)
+        self.assertIn("all attempted dossier units", summary["failure_reason"])
+
+    def test_one_refused_unit_does_not_hide_a_published_partial_success(self):
+        class FirstRefusedModel(FakeModel):
+            def call(self, **kwargs):
+                if not self.prompts:
+                    self.prompts.append(kwargs["prompt"])
+                    return self._envelope("not json")
+                return super().call(**kwargs)
+
+        summary = self.harness.run(model_factory=FirstRefusedModel, max_units=12)
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["dossier_status"], "published")
+        self.assertTrue(summary["refused"])
+        self.assertTrue(summary["units_drafted"])
 
     def test_a_number_the_material_does_not_carry_is_refused_before_publish(self):
         summary = self.harness.run(

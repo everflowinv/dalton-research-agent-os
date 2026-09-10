@@ -1017,8 +1017,19 @@ def run_dossier(
         summary["cost_micros"] = spent
         summary["units_drafted"] = sorted(blocks)
         if not blocks:
-            summary.update({"status": "succeeded", "dossier_status": (
-                "unverified" if run_bound_blocked else "nothing_drafted")})
+            model_refusals = [item for item in summary["refused"]
+                              if item.get("reason") != "run cost bound reached"]
+            if model_refusals:
+                reasons = [str(item.get("reason") or "draft contract refused")
+                           for item in model_refusals[:3]]
+                summary.update({
+                    "status": "failed", "dossier_status": "nothing_drafted",
+                    "failure_reason": ("all attempted dossier units were refused: "
+                                       + "; ".join(reasons))[:500],
+                })
+            else:
+                summary.update({"status": "succeeded", "dossier_status": (
+                    "unverified" if run_bound_blocked else "nothing_drafted")})
             return summary
 
         resolve = family_resolver or router_family_resolver(config)
@@ -1068,7 +1079,14 @@ def run_dossier(
             "verifier_family": check["verifier_family"],
         }
         if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
-            summary.update({"status": "succeeded", "dossier_status": "verification_failed"})
+            reason = verdict.get("reason")
+            if not reason and verdict.get("findings"):
+                reason = json.dumps(verdict["findings"][:3], ensure_ascii=False)
+            summary.update({
+                "status": "failed", "dossier_status": "verification_failed",
+                "failure_reason": ("dossier verification did not pass: "
+                                   + str(reason or verdict.get("verdict") or "refused"))[:500],
+            })
             return summary
         if not check["independent"]:
             summary.update({"status": "succeeded", "dossier_status": "not_independent"})

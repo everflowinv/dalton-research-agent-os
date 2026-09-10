@@ -441,6 +441,8 @@ class ChildTests(P14aHarness):
         summary = self.run_child(verifier_replies=[REJECT])
         self.assertEqual(summary["judged"], 0)
         self.assertEqual(summary["refused"], 1)
+        self.assertEqual(summary["status"], "failed")
+        self.assertIn("all attempted event judgements", summary["failure_reason"])
         self.assertEqual(summary["effects"][0]["findings"][0]["code"],
                          "decision_not_supported_by_the_event")
         self.assertEqual(self.judgements.judged_count(ACN), 0)
@@ -450,7 +452,18 @@ class ChildTests(P14aHarness):
         summary = self.run_child(judge_replies=["not json at all"])
         self.assertEqual(summary["judged"], 0)
         self.assertEqual(summary["refused"], 1)
+        self.assertEqual(summary["status"], "failed")
         self.assertIn("did not return an object", summary["effects"][0]["reason"])
+
+    def test_mixed_success_and_refusal_remains_a_partial_success(self):
+        self.event(document="alphaengine-doc:1")
+        self.event(document="alphaengine-doc:2")
+        summary = self.run_child(
+            judge_replies=["not json", decision()], verifier_replies=[PASS, PASS])
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["judgement_status"], "partial")
+        self.assertEqual((summary["judged"], summary["refused"]), (1, 1))
+        self.assertEqual(summary["formal_authority_writes"], 1)
 
     def test_the_note_path_publishes_a_deliverable(self):
         self.event()
@@ -722,6 +735,7 @@ class SameFamilyGateTests(P14aHarness):
         )
         self.assertEqual(summary["judged"], 0)
         self.assertEqual(summary["refused"], 1)
+        self.assertEqual(summary["status"], "failed")
         self.assertEqual(summary["cost_micros"], 20_000)
         self.assertEqual(self.judgements.day_cost_micros("2026-09-09"), 20_000)
 
