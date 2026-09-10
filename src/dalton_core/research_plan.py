@@ -210,6 +210,34 @@ SEC_TEMPLATE_REGISTRY: tuple[tuple[str, dict[str, Any]], ...] = (
             },
         },
     ),
+    (
+        # S5: the SEC profile gained four ownership operations -- Form 4,
+        # SC 13D/G, Form 144 and 13F. The profile's own content hash therefore
+        # moved, and this entry is what a template change is supposed to cost.
+        #
+        # Both output contracts below are byte-identical to v3, and that is the
+        # point of the entry rather than an accident of it: nothing about what
+        # a research plan may ask this connector for has changed, so every plan
+        # already bound to v3 still revalidates against v3 and no live record
+        # is disturbed. The four new operations are not reachable from a
+        # ResearchPlan at all -- they produce events, never Claims -- and
+        # `sec_connector_identity` still derives its schema hash from exactly
+        # the two operations named here.
+        "v4",
+        {
+            "connector_profile_hash": (
+                "72c49020093cea5dbd900c5731e1feeaf6fb20a9487b37a55040ff96ad68ceaa"
+            ),
+            "output_contract_hashes": {
+                "list_filings": (
+                    "d832b00d9df34a53a22d54470112af1d9a0646ed1057d747a75ace4aa2f2d979"
+                ),
+                "get_company_facts": (
+                    "7e1dbb47227a27d5326685e1f304e43b7f018dd6d5118257cc73e2d5a2ed147c"
+                ),
+            },
+        },
+    ),
 )
 DEFAULT_REVENUE_CONCEPT_CANDIDATES = (
     "Revenues",

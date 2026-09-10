@@ -1,0 +1,28 @@
+{
+  "watches": {
+    "3f2a-acn-news": {
+      "url": "https://investor.accenture.com/news-and-events/news-releases",
+      "title": "Accenture Newsroom",
+      "last_checked": 1789000000,
+      "last_changed": 1788900000,
+      "paused": false,
+      "history": {"1788800000": "a", "1788900000": "b"}
+    },
+    "8b41-epam-events": {
+      "url": "https://investors.epam.com/events-and-presentations/",
+      "title": "EPAM Events",
+      "last_checked": 1789000100,
+      "last_changed": 0,
+      "paused": false,
+      "history": {"1788000000": "a"}
+    },
+    "cc90-someone-else": {
+      "url": "https://example.com/blog",
+      "title": "Somebody else's watch",
+      "last_checked": 1789000200,
+      "last_changed": 1789000200,
+      "paused": true,
+      "history": {}
+    }
+  }
+}

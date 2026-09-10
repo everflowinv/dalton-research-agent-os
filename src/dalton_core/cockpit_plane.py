@@ -188,6 +188,7 @@ REGISTRY_LANE_LABELS = {
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
     "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",
+    "mission_ownership": "看谁在买卖这家公司",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
 }
