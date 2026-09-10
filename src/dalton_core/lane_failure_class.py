@@ -516,6 +516,25 @@ class LaneFailureBudget:
             return []
         return self.dependency_answered(parked.dependency or UNKNOWN_DEPENDENCY)
 
+    def retire(self, item_key: str, *, reason: str = "input_superseded") -> bool:
+        """This work item is obsolete, without claiming its dependency recovered."""
+
+        item = str(item_key)
+        found = (self._parked.get(item) or self._not_permitted.get(item)
+                 or self._terminal.get(item))
+        if found is None and item not in self._failures:
+            return False
+        found = found or Classification(TRANSIENT, self._reason.get(item, ""), "held")
+        self._append("superseded", item, Classification(
+            found.failure_class, str(reason), "input_superseded", found.dependency,
+            found.status))
+        self._parked.pop(item, None)
+        self._not_permitted.pop(item, None)
+        self._terminal.pop(item, None)
+        self._failures.pop(item, None)
+        self._reason.pop(item, None)
+        return True
+
     def dependency_answered(self, dependency: str) -> list[str]:
         """A probe of this dependency succeeded; resume everything waiting.
 
@@ -734,6 +753,11 @@ class LaneFailureBudget:
                     str(row.get("dependency") or UNKNOWN_DEPENDENCY))
             elif event == "resumed":
                 self._parked.pop(item, None)
+                self._reason.pop(item, None)
+            elif event == "superseded":
+                self._parked.pop(item, None)
+                self._not_permitted.pop(item, None)
+                self._terminal.pop(item, None)
                 self._reason.pop(item, None)
         return self
 

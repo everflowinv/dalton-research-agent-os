@@ -51,7 +51,7 @@ RETENTION_DAYS = 90
 # outage to go and fix.
 PARK_EVENTS: frozenset[str] = frozenset({"parked", "parked_again"})
 CLEAR_EVENTS: frozenset[str] = frozenset({"resumed", "dependency_ok", "permission_ok"})
-EVENTS: frozenset[str] = PARK_EVENTS | CLEAR_EVENTS | {"terminal", "held", "not_permitted"}
+EVENTS: frozenset[str] = PARK_EVENTS | CLEAR_EVENTS | {"terminal", "held", "not_permitted", "superseded"}
 
 _FAILURE_CLASSES = frozenset({DEPENDENCY_UNAVAILABLE, CONTENT_REFUSED, NOT_PERMITTED, TRANSIENT})
 
@@ -328,6 +328,10 @@ def summarise_events(
                 "rule": str(row.get("rule") or ""),
             }
         elif event == "permission_ok":
+            permissions.pop(key, None)
+        elif event == "superseded":
+            parked.pop(key, None)
+            terminal.pop(key, None)
             permissions.pop(key, None)
 
     by_dependency: dict[str, dict[str, Any]] = {}

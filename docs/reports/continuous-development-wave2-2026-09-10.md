@@ -34,3 +34,7 @@ F14 的真实范围是 13 个协调器，按 `resume-failure-ledger-next-2026-09
 ### 签署材料准备
 
 `build_mission_v2_params.py` 新增 `--add-checkpoint`，按封闭词表校验、追加去重、保持原 mission 对象不变；11 项集成测试 / 1.286s 通过，包含真实 authority 发布生成参数。owner runbook 同步删除手改 JSON 步骤。接下来从当前 live 只读生成包含 11 个 may_write 与 3 个 checkpoint 的具体 params，并在副本上验证后交给 owner。
+
+### 失败条目替换语义
+
+新增 `LaneFailureBudget.retire` 和可回放的 `superseded` 事件：输入或权限版本替换时，只撤销对应旧条目，不将共享外部依赖误报为恢复，也不会释放其他公司的等待队列。覆盖重启回放、权限与内容拒绝撤销、同依赖多公司隔离；68 个 focused tests 通过（7.007s）。后续由协调器按实体范围接入。

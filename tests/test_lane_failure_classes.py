@@ -543,6 +543,33 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(budget.record("a", reason=TASK_62).action, "parked")
         self.assertEqual(budget.ledger_status, "unused")
 
+    def test_obsolete_item_does_not_claim_its_shared_dependency_recovered(self) -> None:
+        budget = lane_budget("research_task", state_dir=self.root, clock=self.clock)
+        budget.record("company:a|old", reason=TASK_62)
+        budget.record("company:b|current", reason=TASK_62)
+        self.assertTrue(budget.retire("company:a|old", reason="new company A inputs"))
+        self.assertFalse(budget.retire("company:a|old"))
+        restored = lane_budget("research_task", state_dir=self.root, clock=self.clock)
+        self.assertEqual([r['item_key'] for r in restored.parked_items()], ['company:b|current'])
+        with LaneFailureLedger(default_path(self.root), clock=self.clock) as ledger:
+            rows = ledger.events(now=self.now)
+            self.assertNotIn('dependency_ok', [r['event'] for r in rows])
+            self.assertEqual(ledger.parked_by_dependency(now=self.now)['parked_items'], 1)
+
+    def test_retired_permission_and_content_stay_historical_after_restart(self) -> None:
+        budget = lane_budget("research_task", state_dir=self.root, clock=self.clock)
+        budget.record('permission:old', reason='gated:mission does not grant dossier')
+        budget.record('content:old', reason='the scan is unreadable')
+        budget.retire('permission:old')
+        budget.retire('content:old')
+        restored = lane_budget("research_task", state_dir=self.root, clock=self.clock)
+        self.assertEqual(restored.permission_items(), [])
+        self.assertEqual(restored.terminal_items(), [])
+        with LaneFailureLedger(default_path(self.root), clock=self.clock) as ledger:
+            self.assertEqual(len(ledger.events(now=self.now)), 4)
+            view = ledger.parked_by_dependency(now=self.now)
+            self.assertEqual((view['permission_count'], view['terminal_count']), (0, 0))
+
     def test_the_ledger_file_lands_beside_the_scheduler(self) -> None:
         self.assertEqual(
             default_path(self.root).name, "lane-failure-ledger.sqlite")

@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS lane_failure_events (
     day             TEXT NOT NULL,
     lane            TEXT NOT NULL,
     item_key        TEXT NOT NULL,
-    -- parked | parked_again | resumed | terminal | held | dependency_ok | not_permitted | permission_ok
+    -- parked | parked_again | resumed | terminal | held | dependency_ok | not_permitted | permission_ok | superseded
     event           TEXT NOT NULL,
     -- dependency_unavailable | content_refused | not_permitted | transient
     failure_class   TEXT NOT NULL,
