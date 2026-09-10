@@ -248,6 +248,7 @@ DEPENDENCY_LABELS: dict[str, str] = {
 FAILURE_CLASS_LABELS: dict[str, str] = {
     "dependency_unavailable": "依赖不可用：等它回来，不算重试次数",
     "content_refused": "内容不可用：读到了但用不了，不再重试",
+    "not_permitted": "待授权：权限或治理配置改变后再继续",
     "transient": "临时失败：有限次重试",
 }
 
@@ -2246,6 +2247,7 @@ class CockpitPlane:
                 "reason": "这台机器还没有任何流水线因为依赖不可用而挂起过工作",
                 "dependencies": [], "parked_items": 0,
                 "terminal_items": [], "terminal_count": 0,
+                "permission_items": [], "permission_count": 0,
             }
         backlog = summarise_events(rows)
         dependencies = []
@@ -2266,6 +2268,10 @@ class CockpitPlane:
             {**row, "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"])}
             for row in backlog["terminal_items"]
         ]
+        permissions = [
+            {**row, "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"])}
+            for row in backlog["permission_items"]
+        ]
         return {
             "available": True, "as_of": _iso(self.clock()),
             "window": backlog["window"], "events": backlog["events"],
@@ -2273,9 +2279,11 @@ class CockpitPlane:
             "parked_items": backlog["parked_items"],
             "terminal_items": terminal,
             "terminal_count": backlog["terminal_count"],
+            "permission_items": permissions,
+            "permission_count": backlog["permission_count"],
             "class_labels": dict(FAILURE_CLASS_LABELS),
             "note": ("挂起 = 依赖不可用，等依赖回来自动重试，不消耗重试预算；"
-                     "终态 = 内容读到了但用不了，不会再试"),
+                     "待授权 = 权限或治理配置改变后再继续；终态 = 内容读到了但用不了，不会再试"),
         }
 
     def _panel_lanes(self, lanes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

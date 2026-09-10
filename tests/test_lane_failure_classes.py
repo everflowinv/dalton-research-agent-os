@@ -20,6 +20,7 @@ from dalton_core.lane_failure_class import (
     CONTENT_REFUSED,
     DEPENDENCY_UNAVAILABLE,
     FAILURE_CLASSES,
+    NOT_PERMITTED,
     LANE_RULES,
     PARK_PROBE_INTERVAL_SECONDS,
     RULES,
@@ -42,6 +43,16 @@ TASK_62 = "AlphaEngine Desktop status=no_module_page"
 
 
 class ClassifyTests(unittest.TestCase):
+    def test_governance_gates_wait_for_permission(self) -> None:
+        for reason in (
+            "gated:mission does not grant document_extraction writes",
+            "gated:active governance policy does not list this operation",
+        ):
+            with self.subTest(reason=reason):
+                found = classify(reason, lane="document_extraction")
+                self.assertEqual(found.failure_class, NOT_PERMITTED)
+                self.assertTrue(found.awaits_permission)
+
     def test_the_task_62_reason_is_a_dependency_not_a_bad_task(self) -> None:
         found = classify(TASK_62)
         self.assertEqual(found.failure_class, DEPENDENCY_UNAVAILABLE)
@@ -225,6 +236,18 @@ class LaneVocabularyMigrationTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
+    def test_permission_refusal_spends_no_budget_and_clears_after_success(self) -> None:
+        budget = self.budget()
+        decision = budget.record(
+            "doc:permission",
+            reason="gated:mission does not grant document_extraction writes")
+        self.assertEqual(decision.action, "not_permitted")
+        self.assertEqual(budget.attempts("doc:permission"), 0)
+        self.assertEqual(budget.blocked("doc:permission").action, "not_permitted")
+        self.assertEqual(budget.permission_items()[0]["item_key"], "doc:permission")
+        budget.clear("doc:permission")
+        self.assertIsNone(budget.blocked("doc:permission"))
+
     def setUp(self) -> None:
         self.now = NOW
 

@@ -27,6 +27,7 @@ from typing import Any, Callable, Sequence
 from .child_tickets import adopt_finished_child
 from .coverage_mission import CoverageMissionAuthority
 from .store import canonical_json
+from .lane_failure_ledger import lane_budget
 
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "document-extraction"
@@ -272,6 +273,28 @@ class DocumentExtractionCoordinator:
         self.discovery_windows_per_tick = int(discovery_windows_per_tick)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._latest_path = Path(launcher.tickets_dir) / "latest.json"
+        self._permission_item = "document-extraction:authorization"
+        self._permission_signature_at_refusal: tuple[Any, ...] | None = None
+        self.failure_budget = lane_budget(
+            "document_extraction", state_dir=launcher.state_dir, clock=self.clock)
+
+    def _permission_signature(self) -> tuple[Any, ...]:
+        """Cheap evidence that a grant/configuration may have changed."""
+
+        paths = (self.launcher.model_config_path,
+                 self.launcher.connector_governance,
+                 self.launcher.web_fetch_governance)
+        signature = []
+        for path in paths:
+            if path is None:
+                signature.append(None)
+                continue
+            try:
+                stat = Path(path).stat()
+                signature.append((stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((None, None))
+        return tuple(signature)
 
     def _latest(self) -> dict[str, Any] | None:
         try:
@@ -289,6 +312,19 @@ class DocumentExtractionCoordinator:
     def dispatch_once(self) -> dict[str, Any]:
         latest = self._latest()
         result: dict[str, Any] = {"awaiting": self._awaiting()}
+        permission_changed = False
+        blocked = self.failure_budget.blocked(self._permission_item)
+        if blocked is not None and blocked.action == "not_permitted":
+            current = self._permission_signature()
+            recorded = self._permission_signature_at_refusal
+            if recorded is None and latest is not None and latest.get("permission_signature"):
+                recorded = tuple(tuple(item) if isinstance(item, list) else item
+                                 for item in latest["permission_signature"])
+            if current == recorded:
+                return {**result, "status": "ungranted", "reason": blocked.classification.reason,
+                        "failure_class": blocked.classification.failure_class}
+            self.failure_budget.clear(self._permission_item)
+            permission_changed = True
         if latest is not None:
             try:
                 ticket = self.launcher.status(latest["ticket"])
@@ -327,7 +363,16 @@ class DocumentExtractionCoordinator:
             completed = latest.get("completed_at")
             if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
                 return {**result, "status": "held", "reason": "nothing to draft or read since the last run; queue unchanged"}
-        if latest is not None and latest.get("settled") and str(latest.get("stop_reason", "")).startswith("gated"):
+        if (not permission_changed and latest is not None and latest.get("settled")
+                and str(latest.get("stop_reason", "")).startswith("gated")):
+            decision = self.failure_budget.record(
+                self._permission_item, reason=latest["stop_reason"])
+            if decision.action == "not_permitted":
+                self._permission_signature_at_refusal = self._permission_signature()
+                latest = {**latest, "permission_signature": self._permission_signature_at_refusal}
+                _write_owner_only(self._latest_path, latest)
+                return {**result, "status": "ungranted", "reason": latest["stop_reason"],
+                        "failure_class": decision.classification.failure_class}
             completed = latest.get("completed_at")
             if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
                 return {**result, "status": "held", "reason": latest["stop_reason"]}

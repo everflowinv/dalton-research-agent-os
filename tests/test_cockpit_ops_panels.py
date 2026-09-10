@@ -100,6 +100,15 @@ class OpsBacklogTests(PanelCase):
         self.assertEqual(backlog["terminal_items"][0]["item_key"], "doc:9")
         self.assertEqual(set(backlog["class_labels"]), set(FAILURE_CLASS_LABELS))
 
+    def test_permission_items_have_their_own_authorization_bucket(self) -> None:
+        self.park(item="doc:permission",
+                  reason="gated:mission does not grant document_extraction writes")
+        backlog = self.plane.ops_backlog()
+        self.assertEqual(backlog["permission_count"], 1)
+        self.assertEqual(backlog["permission_items"][0]["item_key"], "doc:permission")
+        self.assertEqual(backlog["parked_items"], 0)
+        self.assertEqual(backlog["terminal_count"], 0)
+
     def test_the_page_carries_no_machine_words_for_a_dependency_it_knows(self) -> None:
         self.park()
         bucket = self.plane.ops_backlog()["dependencies"][0]

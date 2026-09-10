@@ -51,10 +51,11 @@ from typing import Any, Callable, Iterable, Mapping
 
 DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
 CONTENT_REFUSED = "content_refused"
+NOT_PERMITTED = "not_permitted"
 TRANSIENT = "transient"
 
 FAILURE_CLASSES: tuple[str, ...] = (
-    DEPENDENCY_UNAVAILABLE, CONTENT_REFUSED, TRANSIENT,
+    DEPENDENCY_UNAVAILABLE, CONTENT_REFUSED, NOT_PERMITTED, TRANSIENT,
 )
 
 # How much of a reason string is kept.  The lanes already truncate at 500
@@ -102,6 +103,10 @@ class Classification:
     @property
     def parks(self) -> bool:
         return self.failure_class == DEPENDENCY_UNAVAILABLE
+
+    @property
+    def awaits_permission(self) -> bool:
+        return self.failure_class == NOT_PERMITTED
 
     def as_wire(self) -> dict[str, Any]:
         return {
@@ -152,6 +157,13 @@ RULES: tuple[Rule, ...] = (
     Rule("ticket_gone", "lane ticket is no longer on disk", TRANSIENT),
     Rule("child_busy", "child_slot_busy", TRANSIENT),
     Rule("child_conflict", "lanechildconflict", TRANSIENT),
+
+    # Governance is a human/configuration boundary. Repeating the same work
+    # cannot grant it and must consume neither a retry nor model budget.
+    Rule("mission_not_granted", "gated:mission does not grant", NOT_PERMITTED),
+    Rule("policy_not_listed", "gated:active governance policy does not list", NOT_PERMITTED),
+    Rule("governance_not_approved", "gated:governance", NOT_PERMITTED),
+    Rule("permission_denied", "gated:not permitted", NOT_PERMITTED),
 
     # -- dependency: quota and budget -------------------------------------
     Rule("pool_exhausted", "pool_exhausted", DEPENDENCY_UNAVAILABLE, "model_budget"),
@@ -371,7 +383,7 @@ class BudgetDecision:
 
     @property
     def blocks(self) -> bool:
-        return self.action in {"held", "parked", "terminal"}
+        return self.action in {"held", "parked", "terminal", "not_permitted"}
 
     def as_wire(self) -> dict[str, Any]:
         return {
@@ -419,6 +431,7 @@ class LaneFailureBudget:
         self._reason: dict[str, str] = {}
         self._parked: dict[str, Classification] = {}
         self._terminal: dict[str, Classification] = {}
+        self._not_permitted: dict[str, Classification] = {}
         # Per dependency: when it was last seen down, and whether the free
         # probe that follows a park has been spent.  Kept per dependency rather
         # than per item because a source is up or down for all of them, and
@@ -437,6 +450,14 @@ class LaneFailureBudget:
 
         item = str(item_key)
         found = classification or classify(reason, status=status, lane=self.lane)
+        if found.failure_class == NOT_PERMITTED:
+            self._not_permitted[item] = found
+            self._parked.pop(item, None)
+            self._terminal.pop(item, None)
+            self._failures.pop(item, None)
+            self._reason[item] = found.reason
+            self._append("not_permitted", item, found)
+            return BudgetDecision("not_permitted", found, 0)
         if found.failure_class == CONTENT_REFUSED:
             self._terminal[item] = found
             self._parked.pop(item, None)
@@ -487,6 +508,9 @@ class LaneFailureBudget:
         item = str(item_key)
         self._failures.pop(item, None)
         self._reason.pop(item, None)
+        permission = self._not_permitted.pop(item, None)
+        if permission is not None:
+            self._append("permission_ok", item, permission)
         parked = self._parked.get(item)
         if parked is None:
             return []
@@ -527,6 +551,9 @@ class LaneFailureBudget:
         """
 
         item = str(item_key)
+        found = self._not_permitted.get(item)
+        if found is not None:
+            return BudgetDecision("not_permitted", found, 0)
         found = self._terminal.get(item)
         if found is not None:
             return BudgetDecision("terminal", found, 0)
@@ -594,6 +621,11 @@ class LaneFailureBudget:
         rows.sort(key=lambda row: row["item_key"])
         return rows
 
+    def permission_items(self) -> list[dict[str, Any]]:
+        rows = [{"lane": self.lane, "item_key": item, "reason": found.reason,
+                 "rule": found.rule} for item, found in self._not_permitted.items()]
+        return sorted(rows, key=lambda row: row["item_key"])
+
     def dependencies(self) -> tuple[str, ...]:
         return tuple(sorted({
             found.dependency or UNKNOWN_DEPENDENCY
@@ -613,6 +645,7 @@ class LaneFailureBudget:
             "lane": self.lane,
             "parked": len(self._parked),
             "terminal": len(self._terminal),
+            "not_permitted": len(self._not_permitted),
             "held": sum(
                 1 for count in self._failures.values()
                 if count >= self.max_transient_failures
@@ -684,6 +717,12 @@ class LaneFailureBudget:
             elif event == "terminal":
                 self._terminal[item] = found
                 self._parked.pop(item, None)
+            elif event == "not_permitted":
+                self._not_permitted[item] = found
+                self._parked.pop(item, None)
+                self._terminal.pop(item, None)
+            elif event == "permission_ok":
+                self._not_permitted.pop(item, None)
             elif event == "dependency_ok":
                 self.dependency_answered(
                     str(row.get("dependency") or UNKNOWN_DEPENDENCY))
@@ -694,6 +733,7 @@ __all__ = [
     "CONTENT_REFUSED",
     "DEFAULT_MAX_TRANSIENT_FAILURES",
     "DEPENDENCY_UNAVAILABLE",
+    "NOT_PERMITTED",
     "FAILURE_CLASSES",
     "LANE_DEPENDENCIES",
     "LANE_RULES",

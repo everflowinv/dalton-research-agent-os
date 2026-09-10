@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .lane_failure_class import (
     CONTENT_REFUSED,
     DEPENDENCY_UNAVAILABLE,
+    NOT_PERMITTED,
     MAX_REASON_CHARS,
     TRANSIENT,
     UNKNOWN_DEPENDENCY,
@@ -49,10 +50,10 @@ RETENTION_DAYS = 90
 # from "this item is waiting", and the first is what tells an operator which
 # outage to go and fix.
 PARK_EVENTS: frozenset[str] = frozenset({"parked", "parked_again"})
-CLEAR_EVENTS: frozenset[str] = frozenset({"resumed", "dependency_ok"})
-EVENTS: frozenset[str] = PARK_EVENTS | CLEAR_EVENTS | {"terminal", "held"}
+CLEAR_EVENTS: frozenset[str] = frozenset({"resumed", "dependency_ok", "permission_ok"})
+EVENTS: frozenset[str] = PARK_EVENTS | CLEAR_EVENTS | {"terminal", "held", "not_permitted"}
 
-_FAILURE_CLASSES = frozenset({DEPENDENCY_UNAVAILABLE, CONTENT_REFUSED, TRANSIENT})
+_FAILURE_CLASSES = frozenset({DEPENDENCY_UNAVAILABLE, CONTENT_REFUSED, NOT_PERMITTED, TRANSIENT})
 
 
 def _utc(value: datetime) -> str:
@@ -277,6 +278,7 @@ def summarise_events(
 
     parked: dict[tuple[str, str], dict[str, Any]] = {}
     terminal: dict[tuple[str, str], dict[str, Any]] = {}
+    permissions: dict[tuple[str, str], dict[str, Any]] = {}
     events = 0
     for row in rows:
         events += 1
@@ -314,6 +316,17 @@ def summarise_events(
                 "reason": str(row.get("reason") or ""),
                 "rule": str(row.get("rule") or ""),
             }
+            permissions.pop(key, None)
+        elif event == "not_permitted":
+            parked.pop(key, None)
+            terminal.pop(key, None)
+            permissions[key] = {
+                "lane": lane, "item_key": item, "first_seen": at,
+                "reason": str(row.get("reason") or ""),
+                "rule": str(row.get("rule") or ""),
+            }
+        elif event == "permission_ok":
+            permissions.pop(key, None)
 
     by_dependency: dict[str, dict[str, Any]] = {}
     for entry in parked.values():
@@ -337,6 +350,8 @@ def summarise_events(
     )
     terminal_rows = sorted(
         terminal.values(), key=lambda row: (row["lane"], row["item_key"]))
+    permission_rows = sorted(
+        permissions.values(), key=lambda row: (row["lane"], row["item_key"]))
     return {
         "projection_kind": "lane_failure_backlog",
         "schema_version": SCHEMA_VERSION,
@@ -346,6 +361,8 @@ def summarise_events(
         "parked_items": sum(bucket["item_count"] for bucket in dependencies),
         "terminal_items": terminal_rows,
         "terminal_count": len(terminal_rows),
+        "permission_items": permission_rows,
+        "permission_count": len(permission_rows),
     }
 
 

@@ -22,9 +22,9 @@ CREATE TABLE IF NOT EXISTS lane_failure_events (
     day             TEXT NOT NULL,
     lane            TEXT NOT NULL,
     item_key        TEXT NOT NULL,
-    -- parked | parked_again | resumed | terminal | held | dependency_ok
+    -- parked | parked_again | resumed | terminal | held | dependency_ok | not_permitted | permission_ok
     event           TEXT NOT NULL,
-    -- dependency_unavailable | content_refused | transient
+    -- dependency_unavailable | content_refused | not_permitted | transient
     failure_class   TEXT NOT NULL,
     -- The name the parked item waits on; NULL for a class that waits on
     -- nothing.  A later ``dependency_ok`` for this name is what resumes it.

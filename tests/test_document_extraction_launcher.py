@@ -24,6 +24,12 @@ from tests.test_mission_source_discovery import Clock
 class FakeLauncher:
     def __init__(self, root: Path) -> None:
         self.tickets_dir = root / "extractions"; self.tickets_dir.mkdir()
+        self.state_dir = root
+        self.model_config_path = root / "model-config.json"
+        self.model_config_path.write_text("{}", encoding="utf-8")
+        self.connector_governance = root / "connector-governance.json"
+        self.connector_governance.write_text("{}", encoding="utf-8")
+        self.web_fetch_governance = None
         self.starts: list[dict] = []
         self.tickets: dict[str, dict] = {}
         self.next_summary: dict | None = None
@@ -118,6 +124,27 @@ class CoordinatorTests(unittest.TestCase):
         self.launcher.finish({"status": "failed", "drafted": [], "failure_reason": "unexpected X: boom"}, completed_at=self.clock().isoformat())
         tick = self.coordinator.dispatch_once()
         self.assertEqual((tick["status"], tick["last"]["status"], tick["last"]["failure_reason"]), ("launched", "failed", "unexpected X: boom"))
+
+    def test_governance_refusal_waits_without_retry_until_configuration_changes(self) -> None:
+        self._awaiting_review()
+        self.coordinator.dispatch_once()
+        self.launcher.finish(
+            {"status": "succeeded", "drafted": [],
+             "stop_reason": "gated:mission does not grant document_extraction writes",
+             "reviews_complete": 0}, completed_at=self.clock().isoformat())
+        refused = self.coordinator.dispatch_once()
+        self.assertEqual((refused["status"], refused["failure_class"]),
+                         ("ungranted", "not_permitted"))
+        starts = len(self.launcher.starts)
+        self.clock.advance(hours=24)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "ungranted")
+        self.assertEqual(len(self.launcher.starts), starts)
+        restarted = DocumentExtractionCoordinator(
+            missions=self.missions, launcher=self.launcher, clock=self.clock)
+        self.assertEqual(restarted.dispatch_once()["status"], "ungranted")
+        self.assertEqual(len(self.launcher.starts), starts)
+        self.launcher.connector_governance.write_text('{"changed":true}', encoding="utf-8")
+        self.assertEqual(restarted.dispatch_once()["status"], "launched")
 
 
 class LauncherTests(unittest.TestCase):
