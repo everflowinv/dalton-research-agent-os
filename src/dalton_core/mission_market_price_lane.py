@@ -164,6 +164,18 @@ class MissionMarketPriceLaneCoordinator:
             identity = "invalid"
         return f"permission|{company_ref}|governance:{identity}"
 
+    def _retire_legacy_permission(self, company_ref: str) -> None:
+        blocked = self.budget.blocked(company_ref)
+        if blocked is None or "yfinance daily-prices governance record is not approved" not in blocked.classification.reason:
+            return
+        loader = getattr(self.launcher, "load_governance", None)
+        if loader is not None:
+            try:
+                loader()
+            except Exception:
+                return
+            self.budget.retire(company_ref, reason="approved_governance_replaced_legacy_refusal")
+
     def _floor(self) -> date:
         today = self._today()
         try:
@@ -362,6 +374,7 @@ class MissionMarketPriceLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
+            self._retire_legacy_permission(company_ref)
             permission_key = self._permission_key(company_ref)
             permission_blocked = self.budget.blocked(permission_key)
             business_blocked = self.budget.blocked(company_ref)

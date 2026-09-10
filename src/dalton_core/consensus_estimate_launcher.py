@@ -55,7 +55,7 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
             from .consensus_estimate_cli import _load_governance
             governance = _load_governance(self.governance_path)
         except Exception as exc:
-            raise LaneChildRejected(f"invalid yfinance analyst-estimates governance: {exc}") from exc
+            raise LaneChildRejected(f"gated:governance invalid yfinance analyst-estimates governance: {exc}") from exc
         return governance
 
     def governance_identity(self) -> str:
