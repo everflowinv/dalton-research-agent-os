@@ -61,10 +61,18 @@ class ResearchTaskCoordinator:
         *,
         store: Any,
         launcher: Any | None,
+        budget_db: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
+        # C2b: the mission day ledger, so the pool this lane admits against is
+        # read net of what the planner has already spent from it today rather
+        # than of reservations alone. Taken from the writer's own configuration
+        # rather than guessed from a filename beside the Core: the ledger's
+        # location is something the installation decided, and a lane that
+        # guesses it wrong reports a full pool with no way to tell.
+        self.budget_db = budget_db
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     # -- reading the world -------------------------------------------------
@@ -161,7 +169,8 @@ class ResearchTaskCoordinator:
             return {"status": "not_granted", "reasons": decision["reasons"],
                     **settled}
         day = self.clock().astimezone(timezone.utc).date().isoformat()
-        state = pool_state(authority, mission, day=day)
+        state = pool_state(
+            authority, mission, day=day, budget_db=self.budget_db)
         result: dict[str, Any] = {"pool": state, **settled}
         latest = self._latest()
         if latest is not None and latest.get("ticket_ref"):
@@ -249,7 +258,10 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
                 "reason": "no research task lane on this writer"}
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
-        coordinator = ResearchTaskCoordinator(store=server.store, launcher=launcher)
+        coordinator = ResearchTaskCoordinator(
+            store=server.store, launcher=launcher,
+            budget_db=(server._planner_model_config or {}).get("budget_db"),
+        )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
 
