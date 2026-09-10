@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Cockpit model selection now reaches every model configuration the macOS
+Cockpit model selection now repoints every model configuration the macOS
 installer can create. The registry is explicit rather than dependent on which
 CLI modules happened to be imported, and includes document extraction,
 planner, initial screen, claim index, dossier producer/verifier, earnings
@@ -15,6 +15,14 @@ deep insight, industry framework, earnings preview, earnings calibration,
 event judgement, and thesis reflection. Each actual verifier call uses its
 verifier purpose and verifier tier. Existing producer purpose names remain
 unchanged. Zero-base already had separate producer and verifier purposes.
+
+This slice covers calls that resolve a named purpose through the fallback
+router, including the bounded planner's `plan` purpose. Document extraction
+has no Cockpit purpose and resolves its configured cheap tier directly.
+Thesis-impact assessment and verification read single-profile phase policies
+from `service.json`. Repointing their configuration policy does not make those
+legacy paths consume a purpose override; they require separate selector
+integration and are not claimed as switched here.
 
 ## Persistence and failure behavior
 
