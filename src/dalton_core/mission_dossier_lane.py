@@ -267,8 +267,8 @@ def build_launcher(args: Any) -> Any | None:
 
 
 # What this lane needs on disk before it is worth turning on: the drafting
-# configuration (the same file the Initial Screen drafts with -- same route,
-# same broker, same day ledger), the policy that maps the constitution's causal
+# independent drafting configuration (with the old shared Initial Screen path
+# supported for existing installations), the policy mapping the constitution's causal
 # chain to two of the sections, and the verifier's own configuration, without
 # which nothing can be published.
 DOSSIER_MODEL_CONFIG = "dossier-model-config.json"

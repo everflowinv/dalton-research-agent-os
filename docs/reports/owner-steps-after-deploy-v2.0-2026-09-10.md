@@ -739,9 +739,9 @@ SC 13D 的 Item 4 要不要留全文（今天只留 `purpose_text_hash`）。
 
 ---
 
-## 17. 还要手写的几个文件
+## 17. 额外运行配置
 
-`install.sh` 今天不写这些，也没有对应的环境变量。
+公司档案与业绩季的模型配置已支持显式成对安装；公司维基软链仍需单独准备。
 
 ### 17.1 公司维基的软链（S1）
 
@@ -757,35 +757,15 @@ ln -s wiki/vectors.db ~/.openclaw/workspace/wiki-index.sqlite
 跳过：演练里那句 `gate shut, 2 seed(s) not installed -- company-wiki: no wiki index at …`，
 company-wiki 两份记录不种、lane 不装。
 
-### 17.2 公司档案 lane 的两个文件（P12a），也是深度认知门的前置
+### 17.2 公司档案与 Deep Insight Gate
 
-lane 的 `argv_fragment` 两个文件都在才吐参数：
+同次安装设置 `DALTON_DOSSIER_MODEL_TIER=brain` 和 `DALTON_DOSSIER_VERIFIER_MODEL_TIER=verifier`，生成独立的 `dossier-model-config.json` / `company-dossier-verifier-model-config.json`。两条 lane 复用这一对配置，运行时仍校验独立家族。旧 `initial-screen-model-config.json` / `dossier-verifier-model-config.json` 路径作为兼容回退；新安装不会改写 Initial Screen、DebateMap、Industry Framework 或 Conviction Call 的路由。
 
-```
---company-dossier-policy              $STATE/p12a-dossier-policy-v1.json
---company-dossier-verifier-model-config  $STATE/dossier-verifier-model-config.json
-```
+`p12a-dossier-policy-v1.json` 缺失时只播种一次，已有 owner 文件保持。producer/verifier 缺一、相同 pin、未知 tier、同角色同时指定 profile 和 tier，均在停止服务或写文件之前拒绝。
 
-policy 从 `$REPO/deploy/phase9/p12a-dossier-policy-v1.json` 拷过去（源码 checkout 里的默认路径
-在安装环境不成立）。verifier 那一份要**新写**，而且它必须能路由到与起草**不同的 model family**
-——一份配置跑两次调用必然同 family，事后拒绝等于花十二次调用的钱得到同一个答案，
-所以 lane 在第一次起草**之前**就 `held`。
+### 17.3 业绩季模型配置
 
-演练实测：这两个文件都不在，所以 plist 里**根本没有** `--company-dossier-model-config`，
-`company_dossier` 与 `deep_insight_gate` 双双 `unconfigured`。
-缺 policy 报 `held / no_policy`；缺 verifier 报 `held / no_verifier`；两种都不花钱。
-
-### 17.3 业绩季 lane 的两份模型配置（P14f）
-
-```
-$STATE/earnings-season-model-config.json
-$STATE/earnings-season-verifier-model-config.json
-```
-
-两者缺一 `argv_fragment` 返回空，lane 不装（演练实测 `earnings_season unconfigured`）。
-**今天没有 `DALTON_EARNINGS_*` 变量**——照 `initial-screen-model-config.json` 的写法手写，
-或者等有人给 `install.sh` 补一个块。两个 purpose（`earnings_preview` / `earnings_calibration`）
-在 `model_fallback_chain` 里已经是 `brain` 档，不用另外登记。
+同次安装设置 `DALTON_EARNINGS_MODEL_TIER=brain` 和 `DALTON_EARNINGS_VERIFIER_MODEL_TIER=verifier`，生成 `earnings-season-model-config.json` / `earnings-season-verifier-model-config.json`。默认不启用，两份同时存在才加入 lane argv；tracking policy 的版本选择仍按第 4.2 节单独处理。
 
 ### 17.4 四条 lane 共用一份模型配置——知道就好
 

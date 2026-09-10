@@ -532,12 +532,17 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
     # P14a / INT2: the tracking policy is the daily-tracking lane's whole
     # switch. One file, so all-or-nothing is automatic.
     SeedSpec(
-        "deploy/phase9/p14a-tracking-policy-v1.json",
+        "deploy/phase9/p14a-tracking-policy-v2.json",
         "tracking-policy.json",
     ),
     SeedSpec(
         "deploy/phase9/p12a-dossier-policy-v1.json",
         "p12a-dossier-policy-v1.json",
+    ),
+    # An empty, seed-once mapping adds no proxy acquisition or derived claims.
+    SeedSpec(
+        "deploy/phase9/proposed-market-proxy-mappings-v1.json",
+        "market-proxy-mappings.json",
     ),
     # P12e: the industry-framework policy is that lane's whole switch. One
     # file, so all-or-nothing is automatic, and no model configuration beside
@@ -801,7 +806,7 @@ class LaneSwitch:
 LANE_SWITCHES: tuple[LaneSwitch, ...] = (
     LaneSwitch(
         "mission_tracking (P14a)", "tracking-policy.json",
-        "deploy/phase9/p14a-tracking-policy-v1.json", True,
+        "deploy/phase9/p14a-tracking-policy-v2.json", True,
         "INT2 seed block; one file, so all-or-nothing is automatic",
     ),
     LaneSwitch(
