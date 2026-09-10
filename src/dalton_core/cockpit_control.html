@@ -227,17 +227,38 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
 .claimrow .meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:3px}
 pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:12px;padding:14px;white-space:pre}
 .lane .st.wait{background:var(--amber);box-shadow:0 0 0 3px rgba(245,182,74,.15)}
+/* 2026 workspace: calm, legible, and shallow by default. */
+:root{--bg0:#f7f8fb;--bg1:#f4f6fa;--bg2:#edf2f8;--panel:rgba(255,255,255,.82);--panel2:#eef2f7;--line:#e2e7ef;--line2:#cbd4e1;--text:#172033;--muted:#637083;--dim:#8792a3;--teal:#087f73;--violet:#5b5bd6;--amber:#ad6500;--rose:#bd3150;--green:#18864b;--sky:#1769aa;--grad:linear-gradient(120deg,#18a999,#6868e8);--shadow:0 12px 38px rgba(37,50,74,.08)}
+body{background:#f5f7fa;background-image:radial-gradient(800px 520px at 75% -10%,rgba(109,108,232,.10),transparent 65%),radial-gradient(650px 500px at 8% 5%,rgba(26,169,153,.08),transparent 66%);color:var(--text)}
+nav{background:rgba(249,250,252,.86);border-color:var(--line)}
+.brand .logo{color:white;box-shadow:0 8px 24px rgba(77,91,180,.18)}
+.nav-item .ic{background:transparent}.nav-item .ic svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.nav-item.active{background:white;color:#26324a;box-shadow:0 5px 18px rgba(40,56,82,.08),inset 0 0 0 1px #dfe5ee}
+main{max-width:1500px;padding:28px 44px 72px}.card{background:var(--panel);backdrop-filter:blur(18px);box-shadow:var(--shadow)}
+.hero{background:linear-gradient(135deg,rgba(255,255,255,.94),rgba(239,246,252,.82))}.hero .objective{color:#465268}.tag{background:#f3f5f8}.tag.on{color:#08756b;background:#e9f8f5}.tag.off{color:#a92e48;background:#fff0f3}
+.stat,.company,.lane,.qlist li,.appr .it,.a{background:#f8fafc}.latest,.checks{color:#344055}.reader{background:rgba(28,38,55,.35)}.reader .sheet{background:#fff}
+textarea,input,.filters select{background:white;color:var(--text)}button{background:#edf1f6;color:var(--text)}button:hover{background:#e3e9f1}button.primary{color:white}
+:focus-visible{outline:3px solid rgba(35,125,210,.35);outline-offset:2px}
+.mission-fold{margin-top:16px}.mission-fold summary,.ops-fold summary{cursor:pointer;color:var(--sky);font-weight:650;padding:8px 0}
+.journey{overflow:auto;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.68)}
+.journey-grid{min-width:920px;display:grid;grid-template-columns:210px repeat(6,minmax(105px,1fr));align-items:stretch}
+.journey-grid>*{padding:13px 12px;border-bottom:1px solid var(--line)}.journey-grid>:nth-last-child(-n+7){border-bottom:0}
+.journey-head{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.03em;background:#f7f9fc}
+.company-launch{border-radius:0;background:transparent;text-align:left;padding:13px 16px;font-weight:750}.company-launch:hover{background:#f0f5fa}.company-launch small{display:block;color:var(--muted);font-weight:500;margin-top:2px}
+.stage-cell{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}.stage-cell:before{content:"";width:9px;height:9px;border-radius:50%;border:1.5px solid #b9c2cf;flex:none}.stage-cell.done{color:#167a49;background:#f1faf5}.stage-cell.done:before{background:#28a064;border-color:#28a064}.stage-cell.now{color:#4b4bb1;background:#f3f2ff;font-weight:700}.stage-cell.now:before{background:#6868e8;border-color:#6868e8;box-shadow:0 0 0 4px rgba(104,104,232,.12)}
+.company-detail-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.detail-tabs{display:flex;gap:6px;overflow:auto;margin:20px 0 4px;border-bottom:1px solid var(--line)}.detail-tab{background:transparent;border-radius:9px 9px 0 0;white-space:nowrap}.detail-tab[aria-selected="true"]{color:var(--violet);box-shadow:inset 0 -2px var(--violet)}.detail-panel{padding:14px 0}.detail-panel[hidden]{display:none}.detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.detail-box{padding:16px;border:1px solid var(--line);border-radius:14px;background:#fafbfd}.memo-review{margin-top:14px;border-top:1px solid var(--line);padding-top:14px}.memo-section{padding:12px 0;border-bottom:1px solid var(--line)}.memo-section h5{margin:0 0 6px;font-size:14px}.memo-list{margin:6px 0;padding-left:20px}
+@media(max-width:700px){.app{display:block}nav{position:sticky;z-index:8;top:0;height:auto;padding:10px 12px;flex-wrap:nowrap;overflow:auto;border-right:0;border-bottom:1px solid var(--line)}.brand{padding:0}.brand b,.brand small,.nav-foot,.nav-item:not(.active) span:not(.badge){display:none}.nav-item{padding:9px;flex:none}.nav-item .ic{display:grid!important}main{padding:20px 14px 56px;width:100%;overflow:hidden}header.top{align-items:flex-start}.card{padding:18px}.hero .title{font-size:23px}.grid.c2,.grid.c3,.grid.c4{grid-template-columns:1fr}.lanes{grid-template-columns:1fr}.reader{padding:12px}.reader .sheet{padding:22px 18px}.detail-grid{grid-template-columns:1fr}.journey-grid{min-width:820px}}
 </style>
 </head>
 <body>
 <div class="app">
 <nav>
   <div class="brand"><div class="logo">D</div><div><b>Dalton 研究台</b><small>自主研究系统</small></div></div>
-  <div class="nav-item active" data-view="goal"><span class="ic">🎯</span>研究目标</div>
-  <div class="nav-item" data-view="steer"><span class="ic">🧭</span>调整方向</div>
-  <div class="nav-item" data-view="log"><span class="ic">📡</span>研究日志<span class="badge" id="log-badge"></span></div>
-  <div class="nav-item" data-view="ask"><span class="ic">💬</span>随时提问</div>
-  <div class="nav-item" data-view="approve"><span class="ic">✅</span>待你审批<span class="badge" id="approve-badge"></span></div>
+  <div class="nav-item active" data-view="goal"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="m15 9 6-6M17 3h4v4"/></svg></span>研究目标</div>
+  <div class="nav-item" data-view="steer"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/></svg></span>调整方向</div>
+  <div class="nav-item" data-view="log"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12a7 7 0 0 1 7-7m-7 7a7 7 0 0 0 7 7m-1-7a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm4-5a7 7 0 0 1 0 10"/></svg></span>研究日志<span class="badge" id="log-badge"></span></div>
+  <div class="nav-item" data-view="ask"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 3 21v-6a8 8 0 1 1 4 4Z"/><path d="M8 10h8M8 14h5"/></svg></span>随时提问</div>
+  <div class="nav-item" data-view="approve"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-3-6"/><path d="m9 11 3 3 8-9"/></svg></span>待你审批<span class="badge" id="approve-badge"></span></div>
   <div class="nav-foot">只有你能打开这个页面。<br>系统自己搜集、阅读、提炼；你定目标、给方向、做裁决。<br><a href="/legacy">旧版审阅页</a></div>
 </nav>
 <main>
@@ -252,7 +273,8 @@ pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;
       <div class="tags" id="goal-tags"></div>
       <p class="title" id="goal-title">正在读取研究目标…</p>
       <p class="objective" id="goal-objective"></p>
-      <h3>系统要回答的问题</h3>
+      <button class="ghost" id="hero-models">查看模型与预算</button>
+      <details class="mission-fold"><summary>展开研究问题与执行计划</summary><h3>系统要回答的问题</h3>
       <ol class="qlist" id="goal-questions"></ol>
       <h3>资料来源</h3>
       <div class="tags" id="goal-sources"></div>
@@ -266,7 +288,7 @@ pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;
         </div>
         <p class="hint" id="plan-when"></p>
       </div>
-      <details><summary>目标的修改记录</summary><div class="hist" id="goal-history"></div></details>
+      <details><summary>目标的修改记录</summary><div class="hist" id="goal-history"></div></details></details>
     </div>
 
     <!-- P17d 四格. Chem 的健康页说一切正常，同时行业框架有缺口没填、一个任务
@@ -282,6 +304,7 @@ pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;
       <h2>进展</h2>
       <p class="sub" id="totals-sub"></p>
       <div class="grid c4" id="totals"></div>
+      <details class="ops-fold"><summary>展开运行明细</summary>
       <h3>系统此刻在做什么</h3>
       <div class="lanes" id="lanes"></div>
       <div class="running" id="running"></div>
@@ -299,13 +322,13 @@ pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;
         <button class="ghost" id="open-sources">看每个来源能取什么</button>
         <button class="ghost" id="open-reflection">每周回头看</button>
         <button class="ghost" id="open-models">模型</button>
-      </div>
+      </div></details>
     </div>
 
     <div class="card">
       <h2>每家公司的子任务</h2>
       <p class="sub">按团队研究手册，每家公司走同一条路：初步筛选 → 深度认知门 → 行业模型 → 公司模型 → 投资备忘录 → 持续覆盖。下面是每家现在走到哪、手册要求的资料还差什么。</p>
-      <div class="grid c3" id="companies"></div>
+      <div class="journey" id="companies" aria-label="公司研究阶段矩阵"></div>
     </div>
 
     <div class="card">
@@ -397,6 +420,27 @@ let current="goal";
 document.querySelectorAll(".nav-item").forEach(el=>el.onclick=()=>show(el.dataset.view));
 function show(view){current=view;document.querySelectorAll(".nav-item").forEach(e=>e.classList.toggle("active",e.dataset.view===view));document.querySelectorAll(".view").forEach(e=>e.classList.toggle("active",e.id===`view-${view}`));$("page-title").textContent=titles[view][0];$("page-sub").textContent=titles[view][1];if(view==="log"){unseen=0;$("log-badge").classList.remove("show");loadLog(true)}if(view==="approve")loadApprovals();if(view==="steer")loadSteerHistory();if(view==="ask")loadAskHistory();if(view==="goal")loadOverview()}
 
+
+function figures(f){const w=node("div",null,"figs"),ul=node("ul",null,"latest");(f.latest||[]).forEach(x=>ul.append(node("li",`${x.label}：${x.value} ${x.currency||""} · ${x.period}${x.grade_label?" · "+x.grade_label:""}`)));w.append(ul);return w}
+const RESEARCH_STAGES=[
+  ["initial_screen","初步筛选"],["deep_insight_gate","深度认知"],
+  ["industry_model","行业模型"],["company_model","公司模型"],
+  ["investment_memo","投资备忘录"],["active_coverage","持续覆盖"]
+];
+let lastReaderFocus=null;
+function stageState(c,ref,index){const at=RESEARCH_STAGES.findIndex(x=>x[0]===c.stage_ref);if(index<at)return"done";if(index===at)return"now";return"future"}
+function renderCompanyJourney(companies){const grid=node("div",null,"journey-grid");grid.append(node("div","公司","journey-head"),...RESEARCH_STAGES.map(x=>node("div",x[1],"journey-head")));companies.forEach(c=>{const b=node("button",null,"company-launch");b.setAttribute("aria-label",`打开 ${c.name} 研究详情`);b.dataset.companyRef=c.company_ref;b.append(node("span",`${c.ticker} · ${c.name}`),node("small",`${c.stage}${c.stage_status?" · "+c.stage_status:""}`));b.onclick=()=>openCompany(c,b);grid.append(b);RESEARCH_STAGES.forEach((x,i)=>{const state=stageState(c,x[0],i),cell=node("div",state==="now"?(c.stage_status||"当前阶段"):state==="done"?"已完成":"待进入",`stage-cell ${state}`);cell.setAttribute("aria-label",`${x[1]}：${cell.textContent}`);grid.append(cell)})});$("companies").replaceChildren(grid)}
+function detailBox(title,content){const b=node("div",null,"detail-box");b.append(node("h3",title));if(content)b.append(content);else b.append(node("div","暂无已发布内容","empty"));return b}
+function openCompany(c,opener){lastReaderFocus=opener||document.activeElement;$("reader").dataset.returnCompany=c.company_ref;const reader=$("reader"),sheet=$("reader-sheet");reader.classList.add("show");reader.setAttribute("role","dialog");reader.setAttribute("aria-modal","true");reader.setAttribute("aria-label",`${c.name} 研究详情`);sheet.tabIndex=-1;const close=node("button","关闭","ghost close");close.setAttribute("aria-label","关闭公司详情");close.onclick=closeReader;const head=node("div",null,"company-detail-head"),title=node("div");title.append(node("h2",`${c.ticker} · ${c.name}`),node("div",`${c.stage}${c.stage_status?" · "+c.stage_status:""} · ${c.note||""}`,"meta"));head.append(title,close);const tabs=node("div",null,"detail-tabs");tabs.setAttribute("role","tablist");const panels=[];const defs=[
+ ["概览",()=>{const x=node("div",null,"detail-grid");x.append(detailBox("市场",c.market?marketLine(c.market):null),detailBox("阶段清单",c.checklist&&c.checklist.length?checklist(c.checklist):null),detailBox("研究计数",node("div",`资料 ${c.progress.found} · 已读 ${c.progress.read} · 结论 ${c.claims.total} · 数字 ${(c.figures&&c.figures.total)||0}`,"hint")));return x}],
+ ["证据",()=>{const x=node("div");if(c.document)x.append(docCard(c.document));if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(v=>ul.append(node("li",v.statement)));x.append(ul)}if(c.figures&&c.figures.latest.length)x.append(figures(c.figures));return x}],
+ ["模型",()=>{const x=node("div");if(c.model)x.append(modelBlock(c));else ["forecast_model_version","sensitivity_projection","valuation_snapshot"].forEach(k=>{const y=invariantRefusal((c.invariants||{})[k]);if(y)x.append(y)});if(c.valuation)x.append(valuationBlock(c.valuation));return x}],
+ ["事件",()=>{const x=node("div");if(c.catalyst)x.append(catalystBlock(c.catalyst));if(c.events)x.append(eventsBlock(c.events));if(c.judgements)x.append(judgementBlock(c.judgements));return x}],
+ ["产物",()=>{const x=node("div");const products=node("div","正在读取已发布研究产物…","empty");x.append(products);loadResearchProducts(c.company_ref,products);if(c.reflections&&c.reflections.length)x.append(reflectionBlock(c.reflections));if(c.research_tasks&&c.research_tasks.length)x.append(tasksBlock(c.research_tasks));if(c.cadence&&c.cadence.length)x.append(cadenceBlock(c.cadence));x.append(cardActions(c));return x}]
+ ];function select(i){tabs.querySelectorAll("button").forEach((b,j)=>{b.setAttribute("aria-selected",String(i===j));b.tabIndex=i===j?0:-1});panels.forEach((p,j)=>p.hidden=i!==j)}defs.forEach(([label,build],i)=>{const b=node("button",label,"detail-tab");b.setAttribute("role","tab");b.onclick=()=>select(i);b.onkeydown=e=>{if(e.key==="ArrowRight"||e.key==="ArrowLeft"){const n=(i+(e.key==="ArrowRight"?1:-1)+defs.length)%defs.length;tabs.children[n].focus();select(n)}};tabs.append(b);const p=node("div",null,"detail-panel");p.setAttribute("role","tabpanel");p.append(build());panels.push(p)});sheet.replaceChildren(head,tabs,...panels);select(0);sheet.focus()}
+function closeReader(){$("reader").classList.remove("show");if(lastReaderFocus&&lastReaderFocus.isConnected)lastReaderFocus.focus();else{const ref=$("reader").dataset.returnCompany;const target=[...document.querySelectorAll(".company-launch")].find(x=>x.dataset.companyRef===ref);if(target)target.focus()}lastReaderFocus=null}
+async function loadResearchProducts(companyRef,box){try{const r=await getJson(`/v1/cockpit/research?company=${encodeURIComponent(companyRef)}`);const products=r.products||[];if(!products.length){box.className="empty";box.textContent="暂无已发布研究产物";return}box.className="";box.replaceChildren(...products.map(p=>{const d=node("article",null,"detail-box");d.append(node("h3",p.label||p.kind),node("div",p.status==="available"?`第 ${p.version_ref||"—"} 版 · ${fmtDate(p.created_at)}`:`${p.status==="invalid"?"记录无效":"尚未发布"}${p.gaps&&p.gaps.length?" · "+p.gaps.join("；"):""}`,p.status==="available"?"hint":"gap"));(p.sections||[]).forEach(sec=>{const part=node("div",null,"memo-section");part.append(node("h5",sec.title));renderText(part,sec.body||"");(sec.gaps||[]).forEach(g=>part.append(node("div",g,"gap")));if((sec.sources||[]).length)part.append(node("div",`来源：${sec.sources.join(" · ")}`,"hint"));d.append(part)});return d}))}catch(e){box.className="gap";box.textContent=`研究产物暂时读不到：${e.message}`}}
+
 // ---------- overview
 function renderOverview(o){
   const g=o.goal;
@@ -461,7 +505,7 @@ function renderOverview(o){
       li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),
         node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});
     w.append(ul);return w}
-  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h);if(c.market)d.append(marketLine(c.market));d.append(node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span><span>数字 <b>${(c.figures&&c.figures.total)||0}</b></span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}if(c.figures&&c.figures.latest&&c.figures.latest.length)d.append(figures(c.figures));if((c.invariants||{}).valuation_snapshot)d.append(invariantRefusal(c.invariants.valuation_snapshot));if(c.valuation)d.append(valuationBlock(c.valuation));if(c.model)d.append(modelBlock(c));else ["forecast_model_version","sensitivity_projection"].forEach(k=>{const refusal=invariantRefusal((c.invariants||{})[k]);if(refusal)d.append(refusal)});if(c.catalyst)d.append(catalystBlock(c.catalyst));if(c.events)d.append(eventsBlock(c.events));if(c.judgements)d.append(judgementBlock(c.judgements));if(c.reflections&&c.reflections.length)d.append(reflectionBlock(c.reflections));if(c.research_tasks&&c.research_tasks.length)d.append(tasksBlock(c.research_tasks));if(c.cadence&&c.cadence.length)d.append(cadenceBlock(c.cadence));if(c.feedback&&c.feedback.total)d.append(node("div",`你给过 ${c.feedback.total} 条反馈${c.feedback.outstanding?`，其中 ${c.feedback.outstanding} 条还没被满足`:""}`,"hint"));d.append(cardActions(c));return d}));
+  renderCompanyJourney(o.companies);
   const m=o.model_available;$("goal-submit").disabled=!m.available;$("ask-submit").disabled=!m.available;$("steer-submit").disabled=!m.available;if(!m.available){$("goal-hint").textContent=m.reason;$("ask-hint").textContent=m.reason}
   svc(o.activity.service_state,o.activity.last_tick_at);
 }
@@ -622,7 +666,7 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
    chain it will actually reach, what answered last time and what that cost,
    and a selector. Below it the gateway's catalog in three columns, with a
    放行 button on the one column an owner can act on. */
-$("open-models").onclick=openModels;
+$("open-models").onclick=openModels;$("hero-models").onclick=openModels;
 async function openModels(){$("reader").classList.add("show");const sheet=$("reader-sheet");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
@@ -874,10 +918,12 @@ function renderAnswer(a,r){a.replaceChildren();renderText(a,r.answer);if(r.gaps&
 function renderText(el,text){let ul=null;(text||"").split(/\r?\n/).forEach(line=>{const t=line.trim();if(!t){ul=null;return}if(/^[-•*]\s+/.test(t)){if(!ul){ul=node("ul");el.append(ul)}ul.append(node("li",t.replace(/^[-•*]\s+/,"")))}else{ul=null;el.append(node("p",t.replace(/^#+\s*/,"")))}})}
 async function loadAskHistory(){clearTimeout(askHistoryTimer);if(askSubmitting)return;const sequence=++askHistorySequence;try{const h=await getJson("/v1/cockpit/history?kind=ask");if(askSubmitting||sequence!==askHistorySequence)return;const chat=$("chat");if(!h.items.length)return;chat.replaceChildren(...h.items.map(x=>{const qa=node("div",null,"qa");qa.append(node("div",x.request.question,"q"));const a=node("div",null,"a");if(x.status==="done"&&x.result)renderAnswer(a,x.result);else if(x.status==="failed")a.append(node("p",`没能回答：${x.error}`));else a.append(node("p","还在处理…"));qa.append(a);return qa}));if(h.items.some(x=>x.status==="running")&&current==="ask"&&!document.hidden)askHistoryTimer=setTimeout(loadAskHistory,1800)}catch(e){if(sequence===askHistorySequence)$("ask-status").textContent=e.message}}
 
+function memoReviewBlock(m){const box=node("div",null,"memo-review");box.append(node("h4","投资备忘录完整核验"));const groups=m.producer_groups||[];box.append(node("div",`生产组：${groups.length} · 人工签署：${m.human_signature_required?"必须":"未要求"}`,"hint"));(m.key_questions||[]).forEach((q,i)=>{const d=node("div",null,"memo-section");d.append(node("h5",`${i+1}. ${q.question||q.question_ref||"核验问题"}`),node("div",q.answer||"（未回答）"));box.append(d)});if((m.checks||[]).length){const ul=node("ul",null,"memo-list");m.checks.forEach(x=>ul.append(node("li",`${x.label||x.check_ref||x.name||"核验"}：${x.status||x.result||"未确认"}${x.reason?" · "+x.reason:""}`)));box.append(node("h5","分组与形式核验"),ul)}if((m.gaps||[]).length){const ul=node("ul",null,"memo-list");m.gaps.forEach(x=>ul.append(node("li",typeof x==="string"?x:JSON.stringify(x))));box.append(node("h5","明确缺口"),ul)}if((m.input_bindings||[]).length)box.append(node("div",`输入绑定 ${m.input_bindings.length} 项 · 正文哈希 ${m.verified_body_hash||"未提供"}`,"hint"));return box}
+
 // ---------- approvals
 let approvalLoadSequence=0;
 const approvalCards=new Map();
-async function loadApprovals(){const sequence=++approvalLoadSequence;try{const r=await getJson("/v1/cockpit/approvals");if(sequence!==approvalLoadSequence)return;const b=$("approve-badge");if(r.count){b.textContent=String(r.count);b.classList.add("show")}else b.classList.remove("show");$("approve-status").textContent=`更新于 ${clock(r.as_of)}`;const box=$("approvals");if(!r.items.length){const e=node("div",null,"empty");e.append(node("div","🎉","big"),node("div","没有需要你处理的事项。系统在预算和规则内自己推进。"));box.replaceChildren(e);approvalCards.clear();return}const activeKeys=new Set();const cards=r.items.map(it=>{const key=JSON.stringify([it.kind,it.ref,it.hash,it.evaluation_id||null]);activeKeys.add(key);const fingerprint=JSON.stringify(it);const existing=approvalCards.get(key);if(existing&&(existing.fingerprint===fingerprint||existing.pending))return existing.node;const draft=existing?.node.querySelector("textarea")?.value||"";const d=node("div",null,"it");d.append(node("h3",it.title),node("div",`${it.who} · ${fmtDate(it.at)}`,"who"));if(it.summary)d.append(node("p",it.summary,"sm"));const kv=node("div",null,"kv");Object.entries(it.details||{}).forEach(([k,v])=>{if(v==null||v==="")return;kv.append(node("b",k),node("span",Array.isArray(v)?v.join("、"):typeof v==="object"?JSON.stringify(v):String(v)))});if(kv.childNodes.length)d.append(kv);if(it.reflection)d.append(reflectionBlock([it.reflection]));if(it.zero_base_review){const z=it.zero_base_review;d.append(node("h4",z.title||"从零复盘"));(z.sections||[]).forEach(s=>{d.append(node("b",s.heading));renderText(d,s.body||"")});if(z.authority_note)d.append(node("div",z.authority_note,"hint"))}if(it.note)d.append(node("div",it.note,"gap"));let ta=null;if(it.needs_rationale){ta=node("textarea");ta.placeholder="写一句理由（会记入正式记录）";ta.style.minHeight="64px";ta.style.marginTop="12px";ta.value=draft;d.append(ta)}const a=node("div",null,"actions"),st=node("span","","status");const card={node:d,fingerprint,pending:false};approvalCards.set(key,card);it.actions.forEach(ac=>{const btn=node("button",ac.label,ac.decision==="reject"||ac.decision==="discard"?"danger":"primary");if(ac.disabled){btn.disabled=true;if(ac.hint)btn.title=ac.hint}btn.onclick=async()=>{if(it.needs_rationale&&!ta.value.trim()){st.className="status err";st.textContent="请先写一句理由";return}card.pending=true;a.querySelectorAll("button").forEach(x=>x.disabled=true);st.className="status";st.textContent="正在记录你的决定…";try{await postJson("/v1/cockpit/decide",{kind:it.kind,ref:it.ref,hash:it.hash,decision:ac.decision,rationale:ta?ta.value.trim():"",request_id:rid(),evaluation_id:it.evaluation_id||undefined});card.pending=false;approvalCards.delete(key);toast("已记录");loadApprovals();loadOverview()}catch(e){st.className="status err";st.textContent=e.message;card.pending=false;a.querySelectorAll("button").forEach((x,i)=>x.disabled=Boolean(it.actions[i].disabled))}};a.append(btn)});if(it.actions.some(x=>x.hint))a.append(node("span",it.actions.find(x=>x.hint).hint,"hint"));a.append(st);d.append(a);return d});
+async function loadApprovals(){const sequence=++approvalLoadSequence;try{const r=await getJson("/v1/cockpit/approvals");if(sequence!==approvalLoadSequence)return;const b=$("approve-badge");if(r.count){b.textContent=String(r.count);b.classList.add("show")}else b.classList.remove("show");$("approve-status").textContent=`更新于 ${clock(r.as_of)}`;const box=$("approvals");if(!r.items.length){const e=node("div",null,"empty");e.append(node("div","没有需要你处理的事项。系统在预算和规则内自己推进。"));box.replaceChildren(e);approvalCards.clear();return}const activeKeys=new Set();const cards=r.items.map(it=>{const key=JSON.stringify([it.kind,it.ref,it.hash,it.evaluation_id||null]);activeKeys.add(key);const fingerprint=JSON.stringify(it);const existing=approvalCards.get(key);if(existing&&(existing.fingerprint===fingerprint||existing.pending))return existing.node;const draft=existing?.node.querySelector("textarea")?.value||"";const d=node("div",null,"it");d.append(node("h3",it.title),node("div",`${it.who} · ${fmtDate(it.at)}`,"who"));if(it.summary)d.append(node("p",it.summary,"sm"));const kv=node("div",null,"kv");Object.entries(it.details||{}).forEach(([k,v])=>{if(v==null||v==="")return;kv.append(node("b",k),node("span",Array.isArray(v)?v.join("、"):typeof v==="object"?JSON.stringify(v):String(v)))});if(kv.childNodes.length)d.append(kv);if(it.reflection)d.append(reflectionBlock([it.reflection]));if(it.memo_review)d.append(memoReviewBlock(it.memo_review));if(it.zero_base_review){const z=it.zero_base_review;d.append(node("h4",z.title||"从零复盘"));(z.sections||[]).forEach(s=>{d.append(node("b",s.heading));renderText(d,s.body||"")});if(z.authority_note)d.append(node("div",z.authority_note,"hint"))}if(it.note)d.append(node("div",it.note,"gap"));let ta=null;if(it.needs_rationale){ta=node("textarea");ta.placeholder="写一句理由（会记入正式记录）";ta.style.minHeight="64px";ta.style.marginTop="12px";ta.value=draft;d.append(ta)}const a=node("div",null,"actions"),st=node("span","","status");const card={node:d,fingerprint,pending:false};approvalCards.set(key,card);it.actions.forEach(ac=>{const btn=node("button",ac.label,ac.decision==="reject"||ac.decision==="discard"?"danger":"primary");if(ac.disabled){btn.disabled=true;if(ac.hint)btn.title=ac.hint}btn.onclick=async()=>{if(it.needs_rationale&&!ta.value.trim()){st.className="status err";st.textContent="请先写一句理由";return}card.pending=true;a.querySelectorAll("button").forEach(x=>x.disabled=true);st.className="status";st.textContent="正在记录你的决定…";try{await postJson("/v1/cockpit/decide",{kind:it.kind,ref:it.ref,hash:it.hash,decision:ac.decision,rationale:ta?ta.value.trim():"",request_id:rid(),evaluation_id:it.evaluation_id||undefined});card.pending=false;approvalCards.delete(key);toast("已记录");loadApprovals();loadOverview()}catch(e){st.className="status err";st.textContent=e.message;card.pending=false;a.querySelectorAll("button").forEach((x,i)=>x.disabled=Boolean(it.actions[i].disabled))}};a.append(btn)});if(it.actions.some(x=>x.hint))a.append(node("span",it.actions.find(x=>x.hint).hint,"hint"));a.append(st);d.append(a);return d});
 // Reorder only nodes that moved; replacing the entire list loses focus and draft text.
 for(const [index,card] of cards.entries()){if(box.children[index]!==card)box.insertBefore(card,box.children[index]||null)}
 while(box.children.length>cards.length)box.lastElementChild.remove();
@@ -885,8 +931,8 @@ for(const key of approvalCards.keys()){if(!activeKeys.has(key))approvalCards.del
 }catch(e){if(sequence===approvalLoadSequence)$("approve-status").textContent=e.message}}
 
 // ---------- boot
-document.addEventListener("keydown",e=>{if(e.key==="Escape")$("reader").classList.remove("show")});
-$("reader").onclick=e=>{if(e.target.id==="reader")$("reader").classList.remove("show")};
+document.addEventListener("keydown",e=>{if(e.key==="Escape"&&$("reader").classList.contains("show"))closeReader()});
+$("reader").onclick=e=>{if(e.target.id==="reader")closeReader()};
 loadOverview();loadLog(true);loadApprovals();
 setInterval(()=>{if(document.hidden)return;loadLog(false);if(current==="goal")loadOverview()},6000);
 setInterval(()=>{if(!document.hidden)loadApprovals()},30000);
