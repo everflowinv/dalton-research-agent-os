@@ -260,6 +260,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 早 | 合并 P15d ConvictionCall（自动化只提案、人裁决；与市场同向不提案；inf/nan 拒绝；提案版本链与 `supersedes_ref`）。在修：P12d、S5、ask v2；在做：stage-ladder、P12e、consensus、P14f、planner 日账本 | 进行中 |
 | 09-10 早 | 第二次用量上限打断 8 个 agent，全部从上下文恢复。规则：每个新 `*_schema.sql` 须同时登记 `bootstrap.py` 与演练迁移清单（测试强制）。P12d 修完合入（在跑全量）；stage-ladder 完成（阶段状态跨 mission 版本折叠；CTSH 折叠为 v9 `gate_failed`）待合；派出既有资料入职（`prior-research`）与重开账本续篇（reopen 后可再次 `gate_passed`） | 进行中 |
 | 09-10 早 | 合并 P12d（4,486 项通过，已 push）；合入 stage-ladder、S5（SEC 所有权 op：13F 读真正的信息表、联名 Form 4 不丢人）、ask v2（补搜只取本次 discovery 的文档；policy 投影复用 authority；adhoc 路由的旧禁令按 owner 解禁去掉）。P14f 在审 | 进行中 |
+| 09-10 上午 | S5 与 ask v2 合入，main `77ffe45`，4,704 项通过，已 push。consensus review：四 blocker（10-K 后年度期映射死区；新旧目标价取错；lane 喂空券商元数据；lane 序号撞 S5），已发回并定案；P14f 三 blocker 在修；planner 日账本在审 | 进行中 |
 
 ---
 
