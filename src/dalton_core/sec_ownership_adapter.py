@@ -409,6 +409,54 @@ def _form4_transaction(
     return row
 
 
+#: The element the 2023 amendments to Form 4 added: "check this box to indicate
+#: that a transaction was made pursuant to a contract, instruction or written
+#: plan ... intended to satisfy the affirmative defense conditions of Rule
+#: 10b5-1(c)".
+RULE_10B5_1_ELEMENT = "aff10b5One"
+
+
+def rule_10b5_1_checkbox(text: str) -> bool | None:
+    """The Rule 10b5-1 box on one Form 4, or ``None`` when the form has none.
+
+    Deliberately *not* a field of :func:`parse_form4`'s wire. That wire is the
+    governed connector's frozen output contract, its shape is hashed into the
+    approval the running writer holds for ``form4_transactions``, and adding a
+    property to it would invalidate an approval that is in production to carry
+    a fact nothing in the connector needs. So this reads the same bytes for
+    Dalton's own purposes, and the reading is still bound to the filing: the
+    caller has the accession and the artifact hash in its hand when it calls.
+
+    Three answers, and the third is the point. The element arrived with the
+    2023 amendments; schema version X0508 does not have it, and neither do the
+    thousands of filings made under it. Mapping "absent" to False would report
+    every one of those sales as a discretionary sale by an executive who chose
+    their moment -- a different accusation from the one the filing makes, and
+    the one a judgement prompt would act on. Absent is ``None`` and the prompt
+    prints ``unknown``.
+
+    Footnotes are not consulted. "Effected pursuant to a Rule 10b5-1 trading
+    plan adopted on 22 May 2026" is common, is often the only place the plan is
+    named, and is prose a lawyer wrote rather than the box the form asks about.
+    ``insider_context`` reports it separately and says which is which.
+
+    Two elements that disagree is ``None`` as well: a document that ticks the
+    box in one place and unticks it in another has not told us anything, and
+    picking the first would be picking one at random.
+    """
+
+    root = _root(text, what="Form 4 primary document")
+    values = [
+        _boolean(node)
+        for node in root.iter()
+        if _tag(node) == RULE_10B5_1_ELEMENT
+    ]
+    stated = [value for value in values if value is not None]
+    if not stated or len(set(stated)) != 1:
+        return None
+    return stated[0]
+
+
 def parse_form4(
     text: str,
     *,
@@ -1159,6 +1207,7 @@ __all__ = [
     "MAX_REPORTING_PERSONS",
     "MAX_TRANSACTIONS",
     "PROVIDER_STATUS",
+    "RULE_10B5_1_ELEMENT",
     "SCHEMA_VERSION",
     "DECISIVE_THOUSANDS_BELOW",
     "DECISIVE_USD_ABOVE",
@@ -1174,4 +1223,5 @@ __all__ = [
     "parse_form4",
     "purpose_text_digest",
     "quarter_of",
+    "rule_10b5_1_checkbox",
 ]

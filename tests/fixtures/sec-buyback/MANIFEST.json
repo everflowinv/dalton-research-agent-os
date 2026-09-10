@@ -1,0 +1,45 @@
+{
+  "note": "Captured once, from SEC EDGAR, on 2026-09-10, for the W4 insider/buyback slice. Nothing that matters was stripped: the two Form 4s are the exact primary documents byte for byte, and the Item 2 file is the deterministic block rendering (public_web_extraction_source.render_public_web_text, renderer html-visible-blocks:0.1) of the filing's Part II from Item 1A through the end of Item 3, so the section boundaries either side of the issuer-purchases table are in the fixture. Tests read these offline; nothing here reaches the network.",
+  "fixtures": [
+    {
+      "file": "form4-10b5-1-nvda-0001696841-26-000010.xml",
+      "accession": "0001696841-26-000010",
+      "issuer_cik": "0001045810",
+      "issuer": "NVIDIA CORP",
+      "form": "4",
+      "period_of_report": "2026-08-31",
+      "url": "https://www.sec.gov/Archives/edgar/data/1045810/000169684126000010/wk-form4_1788386836.xml",
+      "why": "carries <aff10b5One>1</aff10b5One> against three code-S sales by an officer; the only real example of the Rule 10b5-1 checkbox set in this repository",
+      "capture": "verbatim, whole document"
+    },
+    {
+      "file": "form4-no-plan-acn-0001487630-26-000018.xml",
+      "accession": "0001487630-26-000018",
+      "issuer_cik": "0001467373",
+      "issuer": "Accenture plc",
+      "form": "4",
+      "period_of_report": "2026-09-05",
+      "url": "https://www.sec.gov/Archives/edgar/data/1467373/000148763026000018/wk-form4_1788901812.xml",
+      "why": "carries <aff10b5One>0</aff10b5One>, so 'the box is present and unticked' can be told apart from 'the box is absent'",
+      "capture": "verbatim, whole document"
+    },
+    {
+      "file": "acn-10q-item2-0001467373-26-000032.txt",
+      "accession": "0001467373-26-000032",
+      "issuer_cik": "0001467373",
+      "issuer": "Accenture plc",
+      "form": "10-Q",
+      "period_end": "2026-05-31",
+      "filing_date": "2026-06-18",
+      "url": "https://www.sec.gov/Archives/edgar/data/1467373/000146737326000032/acn-20260531.htm",
+      "why": "a real Item 2 issuer-purchases table: three monthly rows, a total row, a currency column that is only marked in the first row, an em dash for a zero, and the remaining authorisation stated in millions in a header cell",
+      "capture": "block rendering of Part II, Item 1A through Item 3; the table, its four footnotes and both section boundaries are intact"
+    },
+    {
+      "file": "8k-authorisation-synthetic.txt",
+      "accession": "0000000000-00-000000",
+      "why": "SYNTHETIC. Dalton has no authority to fetch an 8-K document (see sec_earnings_release), so no real 8-K body was captured; this file exercises the authorisation reader on wording copied in shape, not in substance, from a repurchase press release",
+      "capture": "synthetic; not filed by anybody"
+    }
+  ]
+}

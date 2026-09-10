@@ -1,0 +1,10 @@
+SYNTHETIC FIXTURE. Not a filing. Written for tests/test_buyback_disclosure.py.
+
+Item 8.01 Other Events
+
+On June 26, 2026, the Board of Directors of Synthetic Testco plc authorized an
+increase of $5.0 billion in the company's existing open-market share repurchase
+program. Following this authorization, the aggregate amount authorized under the
+program since its inception is $59.1 billion, and approximately $8.2 billion
+remains available for repurchases. The program has no expiration date and the
+company is not obligated to acquire any particular amount of ordinary shares.

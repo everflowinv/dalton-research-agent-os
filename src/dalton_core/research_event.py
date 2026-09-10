@@ -93,6 +93,20 @@ EVENT_KINDS: tuple[str, ...] = (
     "insider_transaction",
     "ownership_change",
     "holdings_change",
+    # W4 (the owner's daily-tracking instruction, 2026-09-10): what the company
+    # did with its own shares. Its own kind rather than ``filing`` for the
+    # reason the three above are: a 10-Q's arrival and "we bought 4.3m shares
+    # at $201.51 in March and have $3.2bn of authorisation left" are not the
+    # same question, and only the second one can be read against the price we
+    # think the shares are worth.
+    #
+    # US-only note that the payload cannot carry and a reader has to have:
+    # America has no daily buyback return. A US issuer discloses repurchases in
+    # the Item 2 table of a 10-Q or 10-K, in an 8-K when the board authorises a
+    # programme, and on the call. Hong Kong discloses daily. So a US company's
+    # buyback is *always* stale by up to a quarter here, and the cadence that
+    # matters is the filing calendar, not the day.
+    "buyback_disclosure",
     # A company's own IR page moved.  Not a filing -- nothing was filed with
     # anybody and a marketing page is edited without a revision history -- so
     # it carries a diff hash instead of an accession, and the tier says
@@ -188,6 +202,14 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "security_title", "shares", "price_per_share", "acquired_disposed",
         "shares_owned_following", "direct_or_indirect", "issuer_name",
         "invocation_ref", "artifact_hash", "event_key",
+        # W4. ``plan_10b5_1`` is the Form 4 checkbox verbatim -- ``True``,
+        # ``False`` or absent, and absent means the form did not have the
+        # element (schema X0508 and everything filed before the 2023
+        # amendments), never "no plan". ``footnotes_hash`` names the filing's
+        # footnotes without copying them: "effected pursuant to a Rule 10b5-1
+        # trading plan adopted on 22 May" is prose a lawyer wrote and is not
+        # the box, so it is addressable here and interpreted nowhere.
+        "plan_10b5_1", "footnotes_hash",
     }),
     "ownership_change": frozenset({
         "accession", "form", "is_amendment", "amendment_no",
@@ -201,6 +223,33 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "prior_quarter", "cusip", "issuer_name", "title_of_class", "put_call",
         "action", "shares", "prior_shares", "share_change", "value_usd",
         "prior_value_usd", "value_unit", "value_unit_basis",
+        "invocation_ref", "artifact_hash", "event_key",
+    }),
+    # W4. Two producers write this kind and the payload has to hold both
+    # without either pretending to be the other, which is what
+    # ``disclosure_kind`` is for:
+    #
+    # - ``issuer_purchases_table``: one monthly row of the Item 2 table in a
+    #   10-Q or 10-K. Shares bought, average price paid, how many of them were
+    #   under the announced programme, and what is left to spend. This is what
+    #   the company *did*.
+    # - ``authorisation``: a board authorisation announced in an 8-K. A new
+    #   programme or an increase to one. This is what the company *may* do, and
+    #   the two are read very differently -- an authorisation is a permission
+    #   with no obligation attached and companies let them lapse.
+    #
+    # Every figure is text, because every one of them is a filed number and a
+    # float is not what was filed. ``excerpt`` is the exact rendered text the
+    # numbers were read out of, so the verbatim check can be re-run by anyone
+    # holding the event.
+    "buyback_disclosure": frozenset({
+        "disclosure_kind", "accession", "form", "filing_date", "period_end",
+        "period_label", "shares_purchased", "average_price_paid",
+        "shares_purchased_under_plans", "remaining_authorisation",
+        "remaining_authorisation_unit", "currency",
+        "authorised_amount", "authorised_amount_unit", "authorisation_change",
+        "announced_date", "items", "exhibit",
+        "document_ref", "source_ref", "excerpt", "excerpt_hash",
         "invocation_ref", "artifact_hash", "event_key",
     }),
     "ir_page_change": frozenset({
@@ -239,6 +288,12 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     "insider_transaction": "primary_filing",
     "ownership_change": "primary_filing",
     "holdings_change": "primary_filing",
+    # W4. The Item 2 table is in the 10-Q; the authorisation is in the 8-K.
+    # Both are the company filing with the SEC about its own shares, which is
+    # ``primary_filing`` on the same footing as a Form 4 -- and, like a Form 4,
+    # being well attested is not a licence: nothing here may become a
+    # statement line, because the Item 2 table is not a financial statement.
+    "buyback_disclosure": "primary_filing",
     # The company speaking in its own voice on its own site.
     "ir_page_change": "management_direct",
     # Computed from what was filed and what we had held: derived, like the
