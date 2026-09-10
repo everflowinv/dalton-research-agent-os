@@ -95,6 +95,16 @@ def default_planner_cost_usd(state_dir: str | Path | None = None) -> Decimal:
             return Decimal(str(config.planner_call_budget["max_cost_usd"]))
     return Decimal(str(DEFAULT_PLANNER_MAX_COST_USD))
 
+
+def planner_cost_for_authority(authority: Any) -> Decimal:
+    """Resolve cost for both full authorities and read-only connection adapters."""
+    path = getattr(getattr(authority, "store", None), "path", None)
+    if not path:
+        rows = authority.connection.execute("PRAGMA database_list").fetchall()
+        path = next((row[2] for row in rows if row[1] == "main"), None)
+    return default_planner_cost_usd(
+        None if not path or path == ":memory:" else Path(path).parent)
+
 # A task is a question, not a project.  Four rounds is three probes and one
 # retry; past that the honest terminal is "not answerable within budget".
 from .call_budget import default_run_budget
@@ -609,7 +619,7 @@ def day_reserved_micros(
     if not _DAY_RE.fullmatch(day or ""):
         raise ResearchTaskError("day must be YYYY-MM-DD")
     if planner_cost_usd is None:
-        planner_cost_usd = default_planner_cost_usd(Path(authority.store.path).parent)
+        planner_cost_usd = planner_cost_for_authority(authority)
     total = 0
     for loop in authority.admitted_loops(INQUIRY_ADMISSION_SOURCE):
         if loop["created_at"][:10] != day:
@@ -848,7 +858,7 @@ def plan_admissions(
     """
 
     if planner_cost_usd is None:
-        planner_cost_usd = default_planner_cost_usd(Path(authority.store.path).parent)
+        planner_cost_usd = planner_cost_for_authority(authority)
     if templates is None:
         templates = bindable_templates(authority, retired=retired)
     day = day or datetime.now(timezone.utc).date().isoformat()

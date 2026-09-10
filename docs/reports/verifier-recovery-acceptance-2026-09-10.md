@@ -10,3 +10,9 @@ Frozen source: `a108f0e11750afe4e6fcab1923bcd2fa7fd2775e` at `/Users/everflow/Pr
 Runtime findings remain explicit: disabled thesis-impact's retired verifier pin requires owner action if enabled; optional wiki/crowd/prior-research lanes remain gated. ResearchTask is unconfigured pending executable template publication and inquiry-specific implementation. Rehearsal child launch is not a real product success.
 
 Integration after this freeze contains a source-base readiness projection fix (24 tests) and the remaining deployed purpose schemas (294 integrated tests / 9.007s). Coordinator recovery for the latter remains under review. CTSH's actual current issue is continuation/cadence, not the earlier exhausted quota window; see the live-window correction in `mission-v14-product-acceptance-progress-2026-09-10.md`.
+
+## First full-suite result: candidate not accepted
+
+The frozen `a108f0e` suite completed 6,338 tests / 550.152s with one error and one skip. The Ask pool-balance read adapter deliberately has only a read-only SQLite connection; the new ResearchTask cost resolution incorrectly required `.store.path`, so Ask returned an unreadable balance. Deployment was not attempted and the live manifest remains on `38721e4`.
+
+The integration fix resolves a full authority's store path or a read-only adapter's SQLite main database path. A real read-only installed-layout database test proves Ask reserves the same configured planner cost. All 135 Ask/ResearchTask/coordinator tests pass / 15.693s. A new immutable candidate must undergo full acceptance; the failed frozen worktree is retained as evidence.

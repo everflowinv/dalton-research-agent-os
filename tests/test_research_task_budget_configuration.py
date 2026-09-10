@@ -67,6 +67,29 @@ class ConfiguredTaskTests(ResearchTaskFixture):
             with self.assertRaisesRegex(rt.ResearchTaskError, "configured planner budget"):
                 rt.plan_admissions(self.authority, mission=self.mission, plan=plan)
 
+    def test_readonly_ask_pool_uses_the_same_installed_cost(self):
+        import sqlite3
+        from dalton_core.ask_refresh import pool_balance
+        self.service_budget(2)
+        nested = self.state_dir / "state" / "dalton-core"
+        nested.mkdir(parents=True)
+        plan = self.record_plan([inquiry(question="Check revenue")])
+        entry = self.admissions(plan)[0]
+        self.admit(plan, entry, plan["inquiries"][0])
+        target = nested / "core.sqlite"
+        writer = sqlite3.connect(target)
+        self.store.connection.backup(writer)
+        writer.close()
+        reader = sqlite3.connect(target.as_uri() + "?mode=ro", uri=True)
+        reader.row_factory = sqlite3.Row
+        try:
+            from datetime import datetime, timezone
+            balance = pool_balance(reader, self.mission,
+                day=datetime.now(timezone.utc).date().isoformat())
+            self.assertEqual(balance["reserved_micros"], 4_000_000)
+        finally:
+            reader.close()
+
     def test_configuration_change_rekeys_ticket_and_command(self):
         config = self.state_dir / "research-task-lane.json"
         config.write_text(json.dumps({"max_admissions_per_tick": 5}))
