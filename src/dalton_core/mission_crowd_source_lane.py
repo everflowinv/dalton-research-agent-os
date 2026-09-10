@@ -898,8 +898,19 @@ def argv_fragment(context: Any) -> list[str]:
     governance = context.state / "connector-governance"
     if not source_map.is_file() or not approved_records(governance):
         return []
-    return ["--crowd-source-map", str(source_map),
+    argv = ["--crowd-source-map", str(source_map),
             "--crowd-source-governance-dir", str(governance)]
+    # INT2: install.sh links the three host tools under state/host-tools; a
+    # tool that is not there is a flag that is not passed, and the child
+    # refuses that operation by name rather than guessing a path.
+    tools = context.state / "host-tools"
+    for flag, name in (("--crowd-source-xueqiu-tool", "agent-reach"),
+                       ("--crowd-source-xueqiu-fallback-tool", "xueqiu-hot-rank"),
+                       ("--crowd-source-xreach-tool", "xreach")):
+        tool = tools / name
+        if tool.exists():
+            argv.extend([flag, str(tool)])
+    return argv
 
 
 LANE = register_lane(LaneSpec(

@@ -113,6 +113,21 @@ _PURPOSE_TIERS: dict[str, str] = {
     # a lot of items", which is the cheap tier's whole description.
     "claim_index": TIER_CHEAP,
     "quality": TIER_CHEAP,
+    # The judgement and cognition layers: each call weighs evidence and writes
+    # a position (a decision word, a dossier section, a debate, a call). That
+    # is the brain's job, and the verifier chain is what keeps it honest.
+    "event_judgement": TIER_BRAIN,
+    "thesis_reflection": TIER_BRAIN,
+    "dossier": TIER_BRAIN,
+    "debate_map": TIER_BRAIN,
+    "deep_insight_gate": TIER_BRAIN,
+    "industry_framework": TIER_BRAIN,
+    "earnings_preview": TIER_BRAIN,
+    "earnings_calibration": TIER_BRAIN,
+    "conviction_call": TIER_BRAIN,
+    # Reading a rating and a target price off page one of a broker note is
+    # "apply a stated standard to a lot of items" -- cheap.
+    "street_estimate": TIER_CHEAP,
 }
 
 # A link may be skipped for these and only these, and each one means "the

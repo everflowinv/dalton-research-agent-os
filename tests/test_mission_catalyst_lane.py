@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from dalton_core.catalyst_calendar import UNCONFIRMED_DATE_CAVEAT
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildRejected
+from tests.p14a_fixtures import AUTOMATION, P14aHarness
 from dalton_core.mission_catalyst_lane import (
     MAX_FAILURES_PER_COMPANY,
     WRITE_SCOPE,
@@ -287,11 +288,11 @@ class EventTests(LaneTestCase):
                          ["preview"])
         self.assertEqual(written[0]["kind"], "calendar")
 
-    def test_without_a_writer_the_windows_are_reported_rather_than_lost(self):
+    def test_without_a_writer_the_tick_says_so_and_records_nothing(self):
         _, settled = self.settle_with(authority=FakeAuthority({ACN: version(ACN)}))
         self.assertEqual(settled["events"]["status"], "events_unwired")
-        self.assertEqual(len(settled["events"]["emitted"]), 1)
-        self.assertIn("nothing recorded them", settled["events"]["reason"])
+        self.assertEqual(settled["events"]["emitted"], [])
+        self.assertIn("no window", settled["events"]["reason"])
 
     def test_an_estimated_date_opens_a_labelled_preview_from_the_lane_too(self):
         written = []
@@ -302,7 +303,8 @@ class EventTests(LaneTestCase):
         emitted = settled["events"]["emitted"]
         self.assertEqual([item["window"] for item in emitted], ["preview"])
         self.assertEqual(emitted[0]["date_confidence"], "estimated")
-        self.assertEqual(written[0]["payload"]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
+        self.assertEqual(written[0]["payload"]["date_confidence"], "estimated")
+        self.assertIs(written[0]["payload"]["confirmed"], False)
 
     def test_the_tick_strip_carries_the_caveat_an_operator_needs_to_see(self):
         coordinator = self.coordinator(
@@ -316,22 +318,30 @@ class EventTests(LaneTestCase):
         self.assertEqual(idle["upcoming"][0]["date_confidence"], "estimated")
         self.assertEqual(idle["upcoming"][0]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
 
-    def test_a_window_that_stays_open_is_recorded_once_per_process(self):
-        written = []
+    def test_a_window_that_stays_open_is_asked_for_daily_and_stored_once(self):
+        # De-duplication is the ledger's, not this process's: the payload
+        # carries nothing that changes with the day, so the second morning
+        # comes back as a duplicate. A set held here forgot everything on
+        # restart and re-recorded every open window after a deploy.
+        ledger = {}
+
+        def record(**event):
+            key = (event["company_ref"], tuple(sorted(event["payload"].items())))
+            status = "duplicate" if key in ledger else "fresh"
+            ledger[key] = 1
+            return {"status": status, "id": "research-event:one"}
+
         coordinator, first = self.settle_with(
-            authority=FakeAuthority({ACN: version(ACN)}),
-            record_event=lambda **event: written.append(event),
-        )
-        # Same company, next day, same date: the window is still open and has
-        # already been recorded.
+            authority=FakeAuthority({ACN: version(ACN)}), record_event=record)
         self.now = START + timedelta(days=1)
         launched = coordinator.dispatch_once()
         self.assertEqual(launched["status"], "launched")
         self.launcher.finish(launched["ticket_ref"], calendar_status="duplicate")
         second = coordinator.dispatch_once()["settled"]
-        self.assertEqual(len(first["events"]["emitted"]), 1)
-        self.assertEqual(second["events"]["emitted"], [])
-        self.assertEqual(len(written), 1)
+        self.assertEqual(first["events"]["fresh_count"], 1)
+        self.assertEqual(second["events"]["fresh_count"], 0)
+        self.assertEqual(second["events"]["duplicate_count"], 1)
+        self.assertEqual(len(ledger), 1)
 
     def test_a_writer_that_fails_halfway_does_not_lose_what_it_wrote(self):
         # Two windows open at once -- a preview and a date change -- and the
@@ -518,3 +528,197 @@ class RegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _CalendarWiring:
+    """Setup shared by the two wiring cases. Not a TestCase: subclassing one
+    would re-run every case against the other's grants."""
+
+    def build(self):
+        from dalton_core.catalyst_calendar import CatalystCalendarAuthority
+        from dalton_core.research_event import ResearchEventAuthority
+
+        self.calendar = CatalystCalendarAuthority(self.store)
+        self.events = ResearchEventAuthority(self.store)
+        self.launcher = FakeLauncher()
+        self.now = START
+        harness = self
+
+        class Server:
+            store = harness.store
+            coverage_mission = harness.missions
+            lane_state: dict = {}
+
+            def lane_launcher(self, kwarg):
+                return harness.launcher
+
+        self.server = Server()
+
+    def publish(self, day, *, confidence="estimated"):
+        source = (
+            {"kind": "filing", "ref": "sec:filing:0001467373-26-000031",
+             "source_ref": "source:sec-edgar", "observed_date": day,
+             "observed_at": f"{day}T12:00:00+00:00", "confidence": "confirmed",
+             "note": ""}
+            if confidence == "confirmed" else
+            {"kind": "connector_invocation",
+             "ref": "connector-invocation:yfinance:aaaa",
+             "source_ref": "source:yahoo-finance", "observed_date": day,
+             "observed_at": "2026-09-09T15:00:00+00:00",
+             "confidence": "estimated", "note": ""}
+        )
+        return self.calendar.publish(
+            company_ref=ACN,
+            entries=[{"event_kind": "earnings", "sources": [source], "notes": ""}],
+            change_reason="evidence_thicker", evidence_refs=[source["ref"]],
+            now="2026-09-09",
+        )
+
+    def tick(self):
+        """One dispatch, then take the clock off the coordinator it cached."""
+
+        from dalton_core.mission_catalyst_lane import dispatch
+
+        result = dispatch(self.server, {})
+        coordinator = self.server.lane_state["catalyst_calendar_launcher"]
+        coordinator.clock = lambda: self.now
+        return result
+
+    def rows(self):
+        return self.store.connection.execute(
+            "SELECT * FROM research_events WHERE kind='calendar'"
+        ).fetchall()
+
+    def run_a_full_cycle(self):
+        """Tick until every company in the universe has been asked today.
+
+        The mission carries five and the lane takes one a tick, so a test that
+        only settled the first left a child open and the next day's tick came
+        back ``busy``. Returns what the tick said about Accenture, which is the
+        only one these tests give a calendar to.
+        """
+
+        found = None
+        for _ in range(2 * len(self.mission["universe"]) + 2):
+            result = self.tick()
+            settled = result.get("settled")
+            if settled and settled.get("company_ref") == ACN:
+                found = {"settled": settled}
+            if result["status"] == "launched":
+                self.launcher.finish(result["ticket_ref"], calendar_status="fresh")
+                continue
+            if result["status"] in ("idle", "ungranted", "unconfigured"):
+                break
+        assert found is not None, "the tick never settled a child for ACN"
+        return found
+
+
+class WiringTests(P14aHarness, _CalendarWiring):
+    """The bridge itself: a real store, a real ledger, and ``dispatch``.
+
+    Every other test in this file uses a fake writer, which is what let the
+    bridge be broken for its whole life without a red test: ``dispatch`` read
+    ``record_research_event`` off the server, no writer has ever had that
+    attribute, so the lane resolved ``None`` and reported ``events_unwired``
+    every tick -- a fallback that looked exactly like wiring. So this one goes
+    through ``dispatch`` and asserts a row in the table.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.build()
+
+    def test_a_preview_window_puts_a_calendar_event_in_the_ledger(self):
+        import json
+
+        self.publish("2026-10-01")
+        settled = self.run_a_full_cycle()["settled"]
+        self.assertEqual(settled["events"]["status"], "recorded")
+        self.assertEqual(settled["events"]["fresh_count"], 1)
+
+        rows = self.rows()
+        self.assertEqual(len(rows), 1)
+        record = json.loads(rows[0]["record_json"])
+        self.assertEqual(record["company_ref"], ACN)
+        self.assertEqual(record["kind"], "calendar")
+        self.assertEqual(record["evidence_tier"], "derived")
+        self.assertEqual(record["actor_ref"], AUTOMATION)
+        payload = record["payload"]
+        self.assertEqual(payload["window"], "preview")
+        self.assertEqual(payload["event_kind"], "earnings")
+        self.assertEqual(payload["expected_date"], "2026-10-01")
+        # The plan's requirement, on the row as stored rather than on the
+        # dictionary the emitter built.
+        self.assertEqual(payload["date_confidence"], "estimated")
+        self.assertIs(payload["confirmed"], False)
+        self.assertTrue(payload["calendar_version_ref"].startswith(
+            "catalyst-calendar-version:"))
+
+    def test_running_it_again_tomorrow_writes_no_second_row(self):
+        self.publish("2026-10-01")
+        self.run_a_full_cycle()
+        self.now = START + timedelta(days=1)
+        launched = self.tick()
+        self.assertEqual(launched["status"], "launched")
+        self.launcher.finish(launched["ticket_ref"], calendar_status="duplicate")
+        settled = self.tick()["settled"]
+        self.assertEqual(settled["events"]["duplicate_count"], 1)
+        self.assertEqual(settled["events"]["fresh_count"], 0)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_confirmation_writes_a_second_row(self):
+        import json
+
+        self.publish("2026-10-01")
+        self.run_a_full_cycle()
+        # The company files its Item 2.02 for the same date.
+        self.publish("2026-10-01", confidence="confirmed")
+        self.now = START + timedelta(days=1)
+        launched = self.tick()
+        self.launcher.finish(launched["ticket_ref"], calendar_status="fresh")
+        self.tick()
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            sorted(json.loads(row["record_json"])["payload"]["date_confidence"]
+                   for row in rows),
+            ["confirmed", "estimated"],
+        )
+
+    def test_a_calibration_row_is_confirmed_and_says_so(self):
+        import json
+
+        self.publish("2026-09-09", confidence="confirmed")
+        settled = self.run_a_full_cycle()["settled"]
+        self.assertEqual(settled["events"]["fresh_count"], 1)
+        payload = json.loads(self.rows()[0]["record_json"])["payload"]
+        self.assertEqual(payload["window"], "calibration")
+        self.assertEqual(payload["date_confidence"], "confirmed")
+        self.assertIs(payload["confirmed"], True)
+
+
+class UngrantedEventScopeTests(P14aHarness, _CalendarWiring):
+    """A mission that may publish the calendar and may not record events.
+
+    Which is exactly the state the live Core is in: it grants ``observation``
+    and not ``market_event``. That is a permission the owner has not given yet,
+    not a lane that is failing, and it must not spend the company's retry
+    budget.
+    """
+
+    grants = ("observation", "stage_record")
+
+    def setUp(self):
+        super().setUp()
+        self.build()
+
+    def test_the_tick_says_ungranted_and_charges_nothing(self):
+        self.publish("2026-10-01")
+        settled = self.run_a_full_cycle()["settled"]
+        self.assertEqual(settled["events"]["status"], "events_ungranted")
+        self.assertIn("market_event", settled["events"]["reason"])
+        self.assertEqual(self.rows(), [])
+        coordinator = self.server.lane_state["catalyst_calendar_launcher"]
+        self.assertEqual(coordinator._failures, {})
+        # And the calendar itself is unaffected: the company was asked today.
+        self.assertFalse(coordinator.due(ACN))

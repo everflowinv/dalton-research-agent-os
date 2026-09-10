@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import plistlib
 import tempfile
@@ -22,6 +24,7 @@ from dalton_core.macos_launchagent import (
     render,
 )
 from dalton_core.health import check
+from dalton_core.agenda_coordinator import AgendaCoordinator
 from dalton_core.service import DaltonService, ServiceConfig, ServiceConfigError
 from dalton_core.store import DaltonStore
 from dalton_core.writer_server import (
@@ -102,23 +105,341 @@ class InstallerSeedTests(unittest.TestCase):
         self.assertIn(
             '"${repo_root}[deploy,pdf,sec-financials,market-data]"', self.script())
 
-    def test_a_lane_is_seeded_all_or_nothing(self) -> None:
-        # Copying half of what a lane needs gives the owner an approval to make
-        # and a lane that starts and refuses every tick. The feed lanes want a
-        # feed plan and a workspace directory besides their records, and the
-        # Guidepoint lane wants a discovery plan this repo does not ship, so
-        # none of the three is seeded here even though their records exist.
-        # Comments are stripped first: the script explains by name which
-        # connectors it deliberately leaves alone, and that sentence is the
-        # point rather than a violation of it.
+    # INT2: what each block below puts on disk, and what that switches on.
+    # The value is the files the installer copies (relative to the state
+    # directory) and the writer argument the lane's own fragment emits once
+    # they are all there. A lane whose entry is ``None`` is one this script
+    # deliberately does not install; the reason is in the comment beside it.
+    LANE_SEEDS = {
+        "catalyst": (
+            ["connector-governance/yfinance-calendar-v1.json"],
+            "--catalyst-calendar-governance",
+        ),
+        "guidepoint": (
+            ["connector-governance/guidepoint-search-library-v1.json",
+             "discovery-plans/us-it-services-guidepoint-v1.json"],
+            "--guidepoint-discovery-plan",
+        ),
+        "sales_notes": (
+            ["feed-plans/p9-us-it-services-feeds-v1.json",
+             "connector-governance/sales-notes-list-notes-v1.json",
+             "connector-governance/sales-notes-get-note-v1.json"],
+            "--sales-notes-digest-dir",
+        ),
+        "company_wiki": (
+            ["feed-plans/p9-us-it-services-feeds-v1.json",
+             "connector-governance/company-wiki-list-documents-v1.json",
+             "connector-governance/company-wiki-get-document-v1.json"],
+            "--company-wiki-corpus-root",
+        ),
+        "tracking": (["tracking-policy.json"], "--tracking-policy"),
+    }
+
+    def lane_argv(self, state: Path) -> list[str]:
+        from dalton_core.lane_registry import LaunchAgentContext, lane_argv
+
+        return lane_argv(LaunchAgentContext(state=state))
+
+    def test_the_calendar_and_tracking_lanes_are_one_file_each(self) -> None:
+        text = self.script()
+        self.assertIn("yfinance-calendar-v1.json", text)
+        self.assertIn("p14a-tracking-policy-v1.json", text)
+        record = (self.INSTALL.parents[1] / "connector-governance"
+                  / "yfinance-calendar-v1.json")
+        # Seeded as proposed: the installer never approves anything.
+        self.assertEqual(
+            json.loads(record.read_text(encoding="utf-8"))["status"], "proposed")
+
+    def test_each_seeded_lane_is_switched_on_by_exactly_what_is_seeded(self) -> None:
+        # The all-or-nothing rule, checked against the lanes rather than
+        # against the script's prose: put down what the block puts down and
+        # the lane's own fragment has to turn it on. Half of it and the lane
+        # must stay absent, because a lane that starts and refuses every tick
+        # reads like a fault rather than an absence.
+        repo = self.INSTALL.parents[2]
+        sources = {
+            "connector-governance/yfinance-calendar-v1.json":
+                repo / "deploy/connector-governance/yfinance-calendar-v1.json",
+            "connector-governance/guidepoint-search-library-v1.json":
+                repo / "deploy/connector-governance/guidepoint-search-library-v1.json",
+            "discovery-plans/us-it-services-guidepoint-v1.json":
+                repo / "deploy/phase9/p9-us-it-services-guidepoint-v1.json",
+            "feed-plans/p9-us-it-services-feeds-v1.json":
+                repo / "deploy/phase9/p9-us-it-services-feeds-v1.json",
+            "connector-governance/sales-notes-list-notes-v1.json":
+                repo / "deploy/connector-governance/sales-notes-list-notes-v1.json",
+            "connector-governance/sales-notes-get-note-v1.json":
+                repo / "deploy/connector-governance/sales-notes-get-note-v1.json",
+            "connector-governance/company-wiki-list-documents-v1.json":
+                repo / "deploy/connector-governance/company-wiki-list-documents-v1.json",
+            "connector-governance/company-wiki-get-document-v1.json":
+                repo / "deploy/connector-governance/company-wiki-get-document-v1.json",
+            "tracking-policy.json":
+                repo / "deploy/phase9/p14a-tracking-policy-v1.json",
+        }
+        for lane, (needs, flag) in self.LANE_SEEDS.items():
+            with tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                for name in needs:
+                    target = state / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(sources[name].read_bytes())
+                if lane == "sales_notes":
+                    (state / "feeds" / "market-digest-output").mkdir(parents=True)
+                if lane == "company_wiki":
+                    corpus = state / "feeds" / "company-wiki"
+                    corpus.mkdir(parents=True)
+                    (corpus / "wiki-index.sqlite").write_bytes(b"")
+                self.assertIn(flag, self.lane_argv(state), f"{lane} did not switch on")
+                # And one file short is the whole lane absent.
+                (state / needs[-1]).unlink()
+                self.assertNotIn(flag, self.lane_argv(state),
+                                 f"{lane} switched on with a file missing")
+
+    def test_the_crowd_lane_needs_the_owner_to_approve_before_it_runs(self) -> None:
+        # The seven records ship proposed and the lane reads the *status*, not
+        # the file's presence, so seeding them switches nothing on. That is
+        # deliberate and this pins it: the installer's job is to put the
+        # decision in front of the owner, not to make it.
+        repo = self.INSTALL.parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            governance = state / "connector-governance"
+            governance.mkdir(parents=True)
+            (state / "phase9").mkdir()
+            (state / "phase9" / "p9-us-it-services-crowd-sources-v1.json").write_bytes(
+                (repo / "deploy/phase9/p9-us-it-services-crowd-sources-v1.json").read_bytes())
+            for name in ("xueqiu-search-posts", "xueqiu-get-post", "xueqiu-hot-rank",
+                         "x-xreach-user-timeline", "x-xreach-search", "x-xreach-thread",
+                         "employee-reviews-blind"):
+                source = repo / f"deploy/connector-governance/{name}-v1.json"
+                self.assertTrue(source.is_file(), f"{name} record is not in the repo")
+                record = json.loads(source.read_text(encoding="utf-8"))
+                self.assertEqual(record["status"], "proposed")
+                (governance / f"{name}-v1.json").write_text(
+                    json.dumps(record), encoding="utf-8")
+            self.assertNotIn("--crowd-source-map", self.lane_argv(state))
+            approved = json.loads(
+                (governance / "xueqiu-search-posts-v1.json").read_text(encoding="utf-8"))
+            approved["status"] = "approved"
+            (governance / "xueqiu-search-posts-v1.json").write_text(
+                json.dumps(approved), encoding="utf-8")
+            self.assertIn("--crowd-source-map", self.lane_argv(state))
+
+    def test_the_lanes_this_script_will_not_install(self) -> None:
+        # Three deliberate absences, each for the same reason: the installer
+        # cannot supply the other half.
         code = "\n".join(line for line in self.script().splitlines()
                           if not line.lstrip().startswith("#"))
-        for absent in ("xueqiu", "x-xreach", "employee-reviews", "sales-notes",
-                       "company-wiki", "cn-hk-findata"):
-            self.assertNotIn(absent, code)
-        repo = self.INSTALL.parents[2]
-        self.assertFalse((repo / "deploy" / "discovery-plans").exists())
-        self.assertFalse((repo / "deploy" / "feed-plans").exists())
+        # P14a's judgement lane wants two model configurations pointing at
+        # different model families; a judge verified by its own model is not
+        # verified, and which two is the owner's decision.
+        self.assertNotIn("event-judgement-model-config", code)
+        self.assertNotIn("event-verifier-model-config", code)
+        # P14e's lane switch, withheld until a template has been published.
+        self.assertNotIn("research-task-lane.json", code)
+        # S4 has no lane in this wave at all, so its six records switch
+        # nothing on and cannot half-switch-on anything.
+        self.assertIn("cn-hk-findata", code)
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            governance = state / "connector-governance"
+            governance.mkdir(parents=True)
+            repo = self.INSTALL.parents[2]
+            for kind in ("financial-statements", "shareholders", "buybacks",
+                         "margin-balance", "northbound-flow", "ah-premium"):
+                source = repo / f"deploy/connector-governance/cn-hk-findata-{kind}-v1.json"
+                self.assertTrue(source.is_file())
+                self.assertEqual(
+                    json.loads(source.read_text(encoding="utf-8"))["status"], "proposed")
+                (governance / source.name).write_bytes(source.read_bytes())
+            self.assertNotIn("cn-hk", " ".join(self.lane_argv(state)))
+
+    def test_the_feed_and_crowd_lanes_are_off_without_their_environment(self) -> None:
+        # A Core installed without OpenClaw has no feeds and no host tools, and
+        # must end up with no feed lane and no crowd lane rather than with
+        # three that refuse every tick. The gate is an environment variable
+        # with a documented default, not an assumption about the host.
+        text = self.script()
+        self.assertIn("DALTON_OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace", text)
+        for name in ("DALTON_AGENT_REACH_TOOL", "DALTON_XUEQIU_HOT_RANK_TOOL",
+                     "DALTON_XREACH_TOOL"):
+            self.assertIn(name, text)
+        # Each guarded block prints why it did nothing rather than being silent.
+        self.assertIn("the sales-note lane is not installed", text)
+        self.assertIn("the company-wiki lane is not installed", text)
+        self.assertIn("to install the crowd-source lane", text)
+
+    def test_the_narrowing_record_is_not_put_where_a_lane_would_load_it(self) -> None:
+        # It is the note the owner reads before deciding what to do with an
+        # approval for an operation the upstream does not have. Nothing loads
+        # it, and a permanently-proposed record sitting in the runtime
+        # directory is an approval to make about nothing.
+        text = self.script()
+        block = text.split("decisions_dir=", 1)[1].split("\nfi\n", 1)[0]
+        self.assertIn("governance-decisions", block)
+        self.assertIn("guidepoint-get-transcript-narrowing-v1.json", block)
+        self.assertNotIn("$governance_dir", block)
+        # And it never lands in the directory the cockpit and the lanes read.
+        self.assertNotIn(
+            '$governance_dir/guidepoint-get-transcript-narrowing-v1.json', text)
+
+    def test_the_probe_template_manifest_is_publication_material(self) -> None:
+        text = self.script()
+        self.assertIn("p14e-adhoc-probe-templates-v1.json", text)
+        manifest = (self.INSTALL.parents[2]
+                    / "deploy/phase8/p14e-adhoc-probe-templates-v1.json")
+        self.assertTrue(manifest.is_file())
+        # The installer signs nothing: every template is published by the
+        # owner under a human: principal.
+        self.assertNotIn("publish_probe_template", text)
+
+    def test_the_cockpit_is_told_where_the_gateway_catalog_is(self) -> None:
+        # The control process must not go looking through the host's home
+        # directory on its own, so the path is written into the config it
+        # already reads -- and only when the gateway is actually installed.
+        text = self.script()
+        head, body = text.split("<<'PYBROKER'", 1)
+        guard = head.rsplit("if [[ -f", 1)[1]
+        self.assertIn(".openclaw/openclaw.json", guard)
+        block = body.split("PYBROKER", 1)[0]
+        self.assertIn("openclaw_config_path", block)
+        self.assertIn('"cockpit"', block)
+
+    def test_the_script_parses(self) -> None:
+        import subprocess
+
+        for shell in ("bash", "zsh"):
+            result = subprocess.run(
+                [shell, "-n", str(self.INSTALL)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
+    """ADR-0009: the daily agenda/perception run is off unless asked for by name."""
+
+    def raw(self, root: Path) -> dict:
+        return {
+            "schema_version": "0.1",
+            "core_db": str(root / "core.sqlite"),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "projection_db": str(root / "projection.sqlite"),
+            "model_router_db": None,
+            "capability_catalog_db": None,
+            "heartbeat_path": str(root / "run" / "heartbeat.json"),
+            "writer_socket": str(root / "run" / "writer.sock"),
+            "tick_seconds": 1,
+            "projection_min_interval_seconds": 1,
+            "plugin_retry_seconds": 1,
+            "plugins": [],
+            "agenda": {
+                "enabled": True,
+                "interval_seconds": 86400,
+                "config": {
+                    "scheduler_db": str(root / "scheduler.sqlite"),
+                    "model_router_db": str(root / "router.sqlite"),
+                    "writer_socket": str(root / "run" / "writer.sock"),
+                    "core_token_config": str(root / "tokens.json"),
+                    "broker_socket": str(root / "run" / "broker.sock"),
+                    "broker_auth_key": str(root / "broker.key"),
+                    "perception_source_db": str(root / "legacy-coverage.sqlite"),
+                    "perception_snapshot_path": str(root / "perception.json"),
+                    "company_ref": "wanhua",
+                    "routing_policy_ref": "routing-policy:agenda",
+                    "credential_slot_refs": ["slot:openclaw"],
+                    "broker_client_id": "client:dalton-core",
+                    "expected_agent_id": "chem",
+                    "timeout_seconds": 180.0,
+                },
+            },
+        }
+
+    def test_an_enabled_agenda_block_alone_no_longer_builds_the_coordinator(self) -> None:
+        # The retirement has to survive the config that is already on the live
+        # machine. ``enabled: true`` was the whole switch before ADR-0009, so
+        # if it still worked the plane would come back on the next restart
+        # without anyone deciding that.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with DaltonStore(root / "core.sqlite") as store:
+                ObservabilityStore(store)
+            config = ServiceConfig.from_mapping(self.raw(root))
+            self.assertFalse(config.legacy_agenda_plane)
+            self.assertIsNone(config.agenda)
+            self.assertIsNone(config.agenda_interval_seconds)
+            service = DaltonService(config)
+            try:
+                self.assertIsNone(service._agenda)
+                self.assertEqual("retired", service._agenda_state["state"])
+                with contextlib.redirect_stderr(io.StringIO()) as captured:
+                    service.start()
+                    service.start()
+                self.assertIsNone(service._agenda_executor)
+                self.assertEqual(
+                    ["legacy agenda plane retired (ADR-0009)"],
+                    captured.getvalue().splitlines(),
+                )
+                heartbeat = service.run_once(force_projection=True)
+            finally:
+                service.close()
+            self.assertEqual("retired", heartbeat["agenda"]["state"])
+            self.assertIsNone(heartbeat["agenda"]["last_started_at"])
+            self.assertEqual("running", heartbeat["state"])
+
+    def test_the_named_opt_in_restores_the_plane_unchanged(self) -> None:
+        # Reversible by one key: with the opt-in the coordinator is built from
+        # the same block, on the same interval, with its own single-thread
+        # executor -- and no retirement line is logged.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = self.raw(root)
+            raw["legacy_agenda_plane"] = True
+            config = ServiceConfig.from_mapping(raw)
+            self.assertTrue(config.legacy_agenda_plane)
+            self.assertEqual(86400.0, config.agenda_interval_seconds)
+            self.assertEqual("wanhua", config.agenda.company_ref)
+            self.assertEqual(
+                root / "legacy-coverage.sqlite", config.agenda.perception_source_db
+            )
+            service = DaltonService(config)
+            try:
+                self.assertIsInstance(service._agenda, AgendaCoordinator)
+                self.assertEqual("pending", service._agenda_state["state"])
+                with contextlib.redirect_stderr(io.StringIO()) as captured:
+                    service.start()
+                self.assertEqual("", captured.getvalue())
+                self.assertIsNotNone(service._agenda_executor)
+            finally:
+                service.close()
+
+    def test_the_opt_in_is_boolean_and_the_block_shape_is_still_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = self.raw(root)
+            raw["legacy_agenda_plane"] = "true"
+            with self.assertRaises(ServiceConfigError):
+                ServiceConfig.from_mapping(raw)
+            # Retired does not mean unread: a malformed block is still a
+            # config error rather than something the retirement swallows.
+            broken = self.raw(root)
+            broken["agenda"].pop("interval_seconds")
+            with self.assertRaises(ServiceConfigError):
+                ServiceConfig.from_mapping(broken)
+            # And an unknown top-level key is still refused, so the opt-in
+            # cannot be smuggled in under a near-miss spelling.
+            typo = self.raw(root)
+            typo["legacy_agenda_planes"] = True
+            with self.assertRaises(ServiceConfigError):
+                ServiceConfig.from_mapping(typo)
+
+    def test_a_fresh_install_never_writes_the_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = bootstrap(root / "state", root / "config" / "service.json")
+            written = json.loads(Path(result["config"]).read_text(encoding="utf-8"))
+            self.assertNotIn("legacy_agenda_plane", written)
+            self.assertNotIn("agenda", written)
+            self.assertFalse(ServiceConfig.from_mapping(written).legacy_agenda_plane)
 
 
 class ServiceTests(unittest.TestCase):

@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -66,6 +67,17 @@ def _positive_number(value: Any, name: str) -> float:
     return float(value)
 
 
+# ADR-0009: the Perception/Agenda plane is retired.  ``perception.py`` reads a
+# legacy Coverage sqlite belonging to a product that was itself retired on
+# 2026-09-04, so the plane has no input; ``ResearchEvent`` is the one event
+# plane.  Nothing is deleted -- the modules, the tests and the delivered
+# history all stay -- but the daily run is constructed only when the config
+# says ``legacy_agenda_plane: true``.  An ``agenda`` block left behind in an
+# old service.json therefore cannot start the run by accident.
+LEGACY_AGENDA_PLANE_KEY = "legacy_agenda_plane"
+LEGACY_AGENDA_RETIRED_LINE = "legacy agenda plane retired (ADR-0009)"
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
     core_db: Path
@@ -108,6 +120,10 @@ class ServiceConfig:
     # P12d: the AlphaEngine safety cap. In the config so a plain re-install
     # keeps the owner's number, exactly as the window settings are.
     alphaengine_owner_call_cap: int | None = None
+    # ADR-0009: the one key that can bring the retired plane back. Default
+    # false, so a config that never heard of the retirement gets the
+    # retirement.
+    legacy_agenda_plane: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -120,7 +136,7 @@ class ServiceConfig:
         optional = {
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
             "backup", "thesis_impact", "document_extraction",
-            "alphaengine_owner_call_cap",
+            "alphaengine_owner_call_cap", LEGACY_AGENDA_PLANE_KEY,
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
@@ -136,6 +152,9 @@ class ServiceConfig:
             plugins.append(StaticDashboardPlugin.from_mapping(plugin_raw))
         if len({plugin.name for plugin in plugins}) != len(plugins):
             raise ServiceConfigError("plugin names must be unique")
+        legacy_agenda_plane = raw.get(LEGACY_AGENDA_PLANE_KEY, False)
+        if not isinstance(legacy_agenda_plane, bool):
+            raise ServiceConfigError(f"{LEGACY_AGENDA_PLANE_KEY} must be boolean")
         agenda_config = None
         agenda_interval = None
         agenda_raw = raw.get("agenda")
@@ -146,7 +165,10 @@ class ServiceConfig:
                 raise ServiceConfigError("agenda service config is invalid")
             if not isinstance(agenda_raw["enabled"], bool):
                 raise ServiceConfigError("agenda.enabled must be boolean")
-            if agenda_raw["enabled"]:
+            # ADR-0009: ``enabled`` is no longer enough. The retired plane runs
+            # only when the config also opts in by name, and the shape above is
+            # still checked either way so a stale block stays legible.
+            if agenda_raw["enabled"] and legacy_agenda_plane:
                 if not isinstance(agenda_raw["config"], Mapping):
                     raise ServiceConfigError("agenda.config must be an object")
                 try:
@@ -329,6 +351,7 @@ class ServiceConfig:
             document_extraction_numeric_windows=extraction_numeric_windows,
             document_extraction_discovery_windows=extraction_discovery_windows,
             alphaengine_owner_call_cap=owner_call_cap,
+            legacy_agenda_plane=legacy_agenda_plane,
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
             projection_db=_absolute_path(raw["projection_db"], "projection_db"),
@@ -436,7 +459,14 @@ class DaltonService:
         self._agenda_future: concurrent.futures.Future[dict[str, Any]] | None = None
         self._agenda_last_launch_monotonic = 0.0
         self._agenda_state: dict[str, Any] = {
-            "state": "disabled" if self._agenda is None else "pending",
+            # ADR-0009: "retired" rather than "disabled" when the opt-in is
+            # absent, so the heartbeat says the plane is gone rather than
+            # merely switched off this run.
+            "state": (
+                "pending" if self._agenda is not None
+                else "disabled" if config.legacy_agenda_plane
+                else "retired"
+            ),
             "last_started_at": None, "last_completed_at": None,
             "last_result": None, "last_error": None,
         }
@@ -500,6 +530,10 @@ class DaltonService:
             return
         self.config.scheduler_db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._scheduler = Scheduler(self.config.scheduler_db)
+        if not self.config.legacy_agenda_plane:
+            # ADR-0009: one line, once, at start. launchd captures stderr, so
+            # the log says why no agenda cycle will ever appear again.
+            print(LEGACY_AGENDA_RETIRED_LINE, file=sys.stderr, flush=True)
         if self._agenda is not None:
             self._agenda_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-agenda"

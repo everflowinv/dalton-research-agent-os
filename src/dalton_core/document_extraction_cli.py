@@ -31,6 +31,7 @@ from typing import Any
 from .alphaengine_acquisition_launcher import AlphaEngineAcquisitionLauncher
 from .connector import ConnectorStore
 from .coverage_mission import CoverageMissionAuthority
+from .extraction_priority import review_sort_key as evidence_review_sort_key
 from .mission_stage import company_priority_order, review_sort_key
 from .document_extraction import (
     DocumentExtractionModelWorker,
@@ -266,6 +267,16 @@ def run_extraction(
         "metrics_observed": 0,
         "max_discovery_windows": max_discovery_windows,
         "skipped": [],
+        # P10x: what past searches said about the documents they returned --
+        # publisher and company list -- kept rather than dropped. Best effort:
+        # a pruned artefact is one skipped envelope, never a failed run.
+        "provenance": [],
+        # P10x: a review whose original cannot be read at all -- an encrypted
+        # PDF, bytes that are not UTF-8, an acquisition whose ticket is gone.
+        # Live, six of fourteen open reviews were of this kind and stayed open
+        # forever, so the lane relaunched hourly against work that can never
+        # complete and the queue depth never told anyone why.
+        "unreadable_reviews": [],
         "admitted": [],
         "resolved_reviews": [],
         "stop_reason": None,
@@ -321,19 +332,37 @@ def run_extraction(
             # P10a: read in the mission's own order — the P0 company before the
             # P2 one, and management's own words before someone else's summary
             # of them.  Age only breaks ties.
+            #
+            # P10x: which company a document is *about* matters less than what
+            # kind of document it is, so evidence value leads and company
+            # priority breaks ties inside a kind. Between two documents of one
+            # kind the thinner company reads first: the live shape this was
+            # written for is Cognizant holding 149 sell-side Claims while
+            # Accenture holds five, because Cognizant's queries returned more
+            # of the same brokers' notes first.
             specs: dict[str, str] = {}
             rank: dict[str, int] = {}
+            summary["provenance"].append(
+                {"mission_version_ref": mission["id"], **_record_provenance(host)})
             try:
                 rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
                 specs = host.coverage_mission.document_spec_refs(mission["id"])
-                reviews = sorted(reviews, key=lambda review: review_sort_key(
-                    review, company_rank=rank, spec_by_document=specs))
+                thin = _thinness_ranks(host, mission)
+                reviews = sorted(reviews, key=lambda review: evidence_review_sort_key(
+                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin,
+                    now=datetime.now(timezone.utc)))
             except Exception:  # noqa: BLE001 - ordering is not a gate
-                pass
+                thin = {}
+                try:
+                    reviews = sorted(reviews, key=lambda review: review_sort_key(
+                        review, company_rank=rank, spec_by_document=specs))
+                except Exception:  # noqa: BLE001 - nor is its fallback
+                    pass
             lanes.append((actor, reviews, specs))
             try:
-                held = sorted(held, key=lambda review: review_sort_key(
-                    review, company_rank=rank, spec_by_document=specs))
+                held = sorted(held, key=lambda review: evidence_review_sort_key(
+                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin,
+                    now=datetime.now(timezone.utc)))
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 pass
             held_lanes.append((actor, held, specs))
@@ -354,8 +383,19 @@ def run_extraction(
                         # manifest, unreadable original) must not end the run
                         # for the rest; it is reported with its reason.  Live,
                         # one such review aborted a whole run.
+                        reason = f"{type(exc).__name__}: {exc}"
                         summary["skipped"].append({"review_id": review["review_id"], "offset": offset,
-                                                   "reason": f"{type(exc).__name__}: {exc}"})
+                                                   "reason": reason})
+                        # P10x: separate "could not be read this time" from
+                        # "cannot be read at all". The second kind never
+                        # completes, so it never resolves, so it holds the
+                        # queue open forever without anyone being told.
+                        if _permanently_unreadable(reason):
+                            summary["unreadable_reviews"].append({
+                                "review_id": review["review_id"], "company_ref": review["company_ref"],
+                                "source_ref": review["source_ref"], "document_ref": review["document_ref"],
+                                "spec_ref": specs.get(review["document_ref"]), "reason": reason,
+                            })
                         complete = False
                         break
                     context = view["context"]
@@ -441,6 +481,74 @@ def run_extraction(
     finally:
         _write_owner_only(out / "summary.json", summary)
         host.close()
+
+
+# The refusals that will still refuse tomorrow.  Every one of them is about
+# the bytes themselves -- an encrypted PDF stays encrypted, a page that is not
+# UTF-8 will not become UTF-8, an acquisition whose ticket is gone is not
+# coming back -- so retrying is not patience, it is a loop.  Anything else is
+# assumed transient and keeps its retry.
+_PERMANENT_UNREADABLE = (
+    "is not valid UTF-8",
+    "is encrypted and is not rendered",
+    "no completed acquisition ticket",
+    "no completed fetch ticket",
+    # S5: a rendering that came back empty.  Offset zero is the only offset a
+    # first read uses, and it is refused when the text has no characters at
+    # all, so this is "the document rendered to nothing", not "the caller
+    # asked for a silly window".
+    "source offset must be a valid bounded window",
+)
+
+
+def _permanently_unreadable(reason: str) -> bool:
+    """Whether this refusal is about the bytes rather than about the moment."""
+
+    return any(marker in reason for marker in _PERMANENT_UNREADABLE)
+
+
+def _record_provenance(host: ExtractionHost) -> dict[str, Any]:
+    """Keep what the searches said about the documents they returned.
+
+    P10x: publisher and named companies were on the wire and were dropped, so a
+    broker note naming four covered vendors could only ever be one company's
+    and two notes from one house looked like two independent sources.  Best
+    effort: never a reason to stop reading.
+    """
+
+    from .extraction_backlog import backfill_provenance
+
+    try:
+        return backfill_provenance(host.store.connection, host._transcript_spool)
+    except Exception as exc:  # noqa: BLE001 - provenance is not a gate
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _thinness_ranks(host: ExtractionHost, mission: Mapping[str, Any]) -> dict[tuple[str, str], int]:
+    """Which company holds fewest Claims of each provenance tier, thinnest first.
+
+    Counted from the documents each company's Claims were read out of, which is
+    the same join the backlog reader uses, so "thin in sell-side" means the
+    same thing in the queue as it does in the projection.
+    """
+
+    from .document_provenance import tier_for_spec
+    from .extraction_priority import thinness_ranks
+
+    companies = [member["company_ref"] for member in mission.get("universe") or ()]
+    counts: dict[str, dict[str, int]] = {company: {} for company in companies}
+    rows = host.store.connection.execute(
+        "SELECT r.company_ref AS company_ref, s.spec_ref AS spec_ref, COUNT(*) AS n "
+        "FROM coverage_mission_document_reviews r "
+        "JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
+        "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+        "WHERE r.state='extraction_staged' GROUP BY 1,2"
+    ).fetchall()
+    for row in rows:
+        tier = tier_for_spec(row["spec_ref"])
+        bucket = counts.setdefault(row["company_ref"], {})
+        bucket[tier] = bucket.get(tier, 0) + int(row["n"])
+    return thinness_ranks(counts, companies=companies or sorted(counts))
 
 
 def _secondary_sweep(

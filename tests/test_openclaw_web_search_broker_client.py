@@ -34,19 +34,23 @@ from dalton_core.store import canonical_json, content_hash
 ROOT = Path(__file__).resolve().parents[1]
 BROKER_DIR = ROOT / "integrations" / "openclaw-web-search-broker"
 KEY = "a" * 64
-# S5: taken per call rather than once at import.  This was a module
-# constant, and a module constant is evaluated when ``unittest discover``
-# imports the file -- minutes before this file's turn to run.  The suite
-# crossed five minutes and every socket test in here began failing with
-# "web search deadline has already passed", which is the deadline check
-# working correctly against a deadline the test had let go stale.  The
-# note on ``test_python_client_and_node_broker_agree_on_the_wire`` below
-# is the same lesson, learned once already on the clamp.
-def future() -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(
-        timespec="microseconds"
-    )
 
+
+def future(minutes: int = 5) -> str:
+    """A deadline that is still in the future when the *test* runs.
+
+    This was a module-level constant, and a constant computed at import is a
+    deadline that expires while the suite is running. The Node-broker test
+    below already hit it once and took its own deadline locally (see its
+    comment); with the suite past ten minutes the pure-Python tests reached it
+    too and every one of them failed with "web search deadline has already
+    passed" -- a fixture expiring, not a client misbehaving. Called rather
+    than stored, so the clock is read where the deadline is used.
+    """
+
+    return (
+        datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    ).isoformat(timespec="microseconds")
 
 CITATIONS = [{"url": "https://Example.com/investors?q=ai#top", "title": "IR"},
              {"url": "https://news.example.org/demand", "title": "News"}]

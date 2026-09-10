@@ -10,8 +10,11 @@ from datetime import timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from dalton_core import agenda_control
 from dalton_core.agenda import AgendaStore
 from dalton_core.agenda_control import (
+    AGENDA_PLANE_RETIREMENT_NOTE,
+    AGENDA_PLANE_RETIREMENT_REF,
     AgendaControlApplication,
     AgendaControlConfig,
     AgendaControlError,
@@ -645,6 +648,26 @@ class AgendaControlTests(unittest.TestCase):
         self.assertEqual(rows[0]["subject_ref"], "automation:timeout")
         self.assertEqual(rows[0]["source"], "auto_accept_timeout")
         self.assertEqual(rows[0]["verdict"], "agree")
+
+    def test_retired_agenda_view_still_serves_history_and_says_it_is_retired(self):
+        # ADR-0009: the plane is retired, not deleted. ``/legacy`` keeps
+        # answering with the decisions that were delivered -- an append-only
+        # history is not emptied because its producer stopped -- and the same
+        # payload carries the retirement so the page cannot read as a live
+        # queue somebody is still filling.
+        view = self.plane.view(LOGIN)
+        self.assertTrue(view["retired"])
+        self.assertEqual(view["retirement_ref"], AGENDA_PLANE_RETIREMENT_REF)
+        self.assertEqual(view["retirement_note"], AGENDA_PLANE_RETIREMENT_NOTE)
+        self.assertIn("ADR-0009", view["retirement_note"])
+        self.assertEqual([item["company_ref"] for item in view["items"]], ["wanhua"])
+        self.assertEqual(view["items"][0]["decision_ref"], self.decision["id"])
+        legacy = (
+            Path(agenda_control.__file__).with_name("cockpit_control_legacy.html")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("ADR-0009", legacy)
+        self.assertIn("data.retirement_note", legacy)
 
     def test_confirmed_effects_route_through_original_writer_principals(self):
         governance_calls = []
