@@ -38,7 +38,7 @@ from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.lane_registry import lane_for_operation, registered_lanes
 from dalton_core.mission_dossier_lane import (
     LANE, LAUNCHER_KWARG, MissionDossierLaneCoordinator, build_launcher,
-    dispatch, ledger_signature,
+    company_ledger_signature, dispatch, ledger_signature,
 )
 from dalton_core.store import content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -1006,18 +1006,22 @@ class CoordinatorTests(unittest.TestCase):
             self.ticket_status = ticket_status
             self.summary = summary or {"dossier_status": "nothing_new"}
             self.capacity_cooldown = capacity_cooldown
+            self.started_companies: list[str | None] = []
 
         def capacity_probe_interval_seconds(self):
             return self.capacity_cooldown
 
         def start(self, *, signature, company_ref=None):
             self.started.append(signature)
+            self.started_companies.append(company_ref)
             return {"id": f"company-dossier-run:{run_digest(company_ref, signature)}",
-                    "signature": signature}
+                    "signature": signature, "company_ref": company_ref}
 
         def status(self, ticket_ref):
             return {"id": ticket_ref, "status": self.ticket_status,
-                    "signature": self.started[-1], "summary": self.summary}
+                    "signature": self.started[-1],
+                    "company_ref": self.started_companies[-1],
+                    "summary": self.summary}
 
     def setUp(self):
         self.harness = Harness()
@@ -1069,6 +1073,40 @@ class CoordinatorTests(unittest.TestCase):
         held = coordinator.dispatch_once()
         self.assertEqual(held["status"], "terminal")
         self.assertEqual(len(launcher.started), 1)
+
+    def test_one_company_content_refusal_does_not_starve_the_next_company(self):
+        second_company = "company:sec-cik:0000000002"
+        launcher = self.Launcher(
+            ticket_status="failed",
+            summary={"dossier_status": "rubric_refused",
+                     "failure_reason": "unsupported sentence"},
+        )
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher,
+            companies=lambda: [ACN, second_company],
+        )
+        self.assertEqual(coordinator.dispatch_once()["company_ref"], ACN)
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["status"], "launched")
+        self.assertEqual(second["company_ref"], second_company)
+        self.assertEqual(launcher.started_companies, [ACN, second_company])
+        self.assertIn(ACN, second["held"])
+
+    def test_company_signature_ignores_another_company_claim(self):
+        second_company = "company:sec-cik:0000000002"
+        acn_before = company_ledger_signature(self.connection, ACN)
+        other_before = company_ledger_signature(self.connection, second_company)
+        claim = self.harness.fixture.add_claim(
+            "other-company-claim", subject_ref=second_company,
+            statement="另一家公司的新材料。",
+        )
+        self.harness.index.record_entry(**entry_args(
+            claim, subject_ref=second_company,
+            dedupe_group_key=f"qual|{second_company}|other-company-claim",
+        ))
+        self.assertEqual(company_ledger_signature(self.connection, ACN), acn_before)
+        self.assertNotEqual(
+            company_ledger_signature(self.connection, second_company), other_before)
 
     def test_a_failed_verifier_transport_is_not_mislabeled_as_content(self):
         launcher = self.Launcher(

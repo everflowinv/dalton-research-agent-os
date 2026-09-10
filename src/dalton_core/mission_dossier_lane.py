@@ -74,9 +74,15 @@ def permission_key(connection: Any, launcher: Any, signature: str) -> str:
     return f"{signature}|permission:v2:{hashlib.sha256('|'.join(parts).encode()).hexdigest()[:16]}"
 
 
-def clear_obsolete_permissions(budget: Any, current: str, signature: str) -> None:
+def clear_obsolete_permissions(
+    budget: Any, current: str, company_ref: str | None = None,
+) -> None:
     for row in budget.permission_items():
-        if row["item_key"] != current:
+        same_company = (
+            company_ref is None
+            or str(row["item_key"]).startswith(f"{company_ref}|")
+        )
+        if same_company and row["item_key"] != current:
             budget.retire(row["item_key"])
 
 
@@ -114,20 +120,64 @@ def ledger_signature(connection: Any) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
+def company_ledger_signature(connection: Any, company_ref: str) -> str:
+    """Digest only the authority inputs that can change one company's file."""
+    from .cockpit_model import verifier_provider_contract_fingerprint
+    from .company_dossier_draft import draft_contract_fingerprint
+
+    parts = [company_ref, verifier_provider_contract_fingerprint("dossier_verifier"),
+             draft_contract_fingerprint()]
+    try:
+        rows = connection.execute(
+            "SELECT source.entry_ref,source.version_number,source.content_hash,"
+            "source.claim_version_ref,source.claim_version_hash "
+            "FROM claim_index_entry_versions AS source JOIN ("
+            " SELECT entry_ref,MAX(version_number) AS version_number "
+            " FROM claim_index_entry_versions WHERE subject_ref=? GROUP BY entry_ref"
+            ") AS latest ON latest.entry_ref=source.entry_ref "
+            "AND latest.version_number=source.version_number "
+            "WHERE source.subject_ref=? ORDER BY source.entry_ref",
+            (company_ref, company_ref),
+        ).fetchall()
+        parts.extend(
+            f"index:{row['entry_ref']}:{row['version_number']}:"
+            f"{row['content_hash']}:{row['claim_version_ref']}:"
+            f"{row['claim_version_hash']}"
+            for row in rows
+        )
+    except Exception:  # noqa: BLE001 - absent index is valid pre-bootstrap state
+        parts.append("index:none")
+    try:
+        head = connection.execute(
+            "SELECT version_id,version_number,content_hash FROM company_dossier_versions "
+            "WHERE company_ref=? ORDER BY version_number DESC LIMIT 1",
+            (company_ref,),
+        ).fetchone()
+        parts.append(
+            "dossier:none" if head is None else
+            f"dossier:{head['version_id']}:{head['version_number']}:{head['content_hash']}"
+        )
+    except Exception:  # noqa: BLE001 - no dossier table yet is a valid state
+        parts.append("dossier:none")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
 class MissionDossierLaneCoordinator:
     """Launch and settle the dossier lane."""
 
     def __init__(self, *, connection: Any, launcher: Any,
+                 companies: Callable[[], list[str]] | None = None,
                  failure_ledger_dir: Any | None = None,
                  failure_clock: Callable[[], Any] | None = None) -> None:
         self.connection = connection
         self.launcher = launcher
+        self.companies = companies
         self._open: str | None = None
         # The signature under which the last run found nothing, and the
         # signatures whose runs failed. Held for this process only: a restart
         # is nearly always a deploy, which is the likeliest thing to have
         # fixed it.
-        self._quiet_signature: str | None = None
+        self._quiet_signatures: set[str] = set()
         probe_interval = (
             launcher.capacity_probe_interval_seconds()
             if hasattr(launcher, "capacity_probe_interval_seconds") else None
@@ -200,7 +250,7 @@ class MissionDossierLaneCoordinator:
                                reason=settled.get("failure_reason") or status)
         elif status in QUIET_STATUSES and signature:
             settled["resumed"] = self.budget.clear(str(signature))
-            self._quiet_signature = str(signature)
+            self._quiet_signatures.add(str(signature))
         elif signature:
             self.budget.clear(str(signature))
         return settled
@@ -212,31 +262,73 @@ class MissionDossierLaneCoordinator:
         try:
             # Bind ticket identity before launch. A child may finish after a
             # new mission is signed; its refusal belongs to its launch state.
-            signature = permission_key(
-                self.connection, self.launcher, ledger_signature(self.connection))
+            companies = self.companies() if self.companies is not None else [None]
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
-        if signature == self._quiet_signature:
-            return {"status": "idle", "settled": settled, "signature": signature,
-                    "reason": "nothing has moved since the last run found nothing"}
-        clear_obsolete_permissions(self.budget, signature, signature)
-        held = self.budget.blocked(signature)
-        if held is not None:
-            return {"status": held.action, "settled": settled, "signature": signature,
-                    "reason": held.classification.reason,
+        held_companies = {}
+        held_decisions = {}
+        quiet_companies = []
+        for company_ref in companies:
+            evidence = (
+                ledger_signature(self.connection) if company_ref is None else
+                f"{company_ref}|{company_ledger_signature(self.connection, company_ref)}"
+            )
+            signature = permission_key(self.connection, self.launcher, evidence)
+            clear_obsolete_permissions(self.budget, signature, company_ref)
+            if signature in self._quiet_signatures:
+                quiet_companies.append(company_ref)
+                continue
+            held = self.budget.blocked(signature)
+            if held is not None:
+                label = str(company_ref or "-")
+                held_companies[label] = held.classification.reason
+                held_decisions[label] = held
+                continue
+            try:
+                ticket = self.launcher.start(
+                    signature=signature, company_ref=company_ref)
+            except LaneChildConflict as exc:
+                return {"status": "busy", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            except LaneChildRejected as exc:
+                return {"status": "rejected", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            self._open = ticket["id"]
+            return {"status": "launched", "ticket_ref": ticket["id"],
+                    "company_ref": company_ref, "signature": signature,
+                    "settled": settled, "held": held_companies}
+        if not companies:
+            return {"status": "idle", "settled": settled,
+                    "reason": "no screened company needs a dossier"}
+        if held_companies:
+            if len(held_decisions) == 1 and len(companies) == 1:
+                decision = next(iter(held_decisions.values()))
+                return {"status": decision.action, "settled": settled,
+                        "reason": decision.classification.reason,
+                        "held": held_companies,
+                        "failure_budget": self.budget.summary()}
+            return {"status": "held", "settled": settled, "held": held_companies,
+                    "reason": "; ".join(
+                        f"{company}: {reason}"
+                        for company, reason in held_companies.items()),
                     "failure_budget": self.budget.summary()}
-        try:
-            ticket = self.launcher.start(signature=signature)
-        except LaneChildConflict as exc:
-            return {"status": "busy", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        except LaneChildRejected as exc:
-            return {"status": "rejected", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        self._open = ticket["id"]
-        return {"status": "launched", "ticket_ref": ticket["id"],
-                "signature": signature, "settled": settled}
+        return {"status": "idle", "settled": settled,
+                "companies": quiet_companies,
+                "reason": "nothing has moved since each company's last quiet run"}
+
+
+def _screened_companies(server: Any) -> list[str]:
+    from .company_dossier_cli import screened_companies
+
+    pointer = server.store.connection.execute(
+        "SELECT mission_version_id FROM coverage_mission_pointer "
+        "ORDER BY mission_ref LIMIT 1"
+    ).fetchone()
+    if pointer is None:
+        return []
+    mission = server.coverage_mission.mission(pointer["mission_version_id"])
+    return screened_companies(server.coverage_mission, mission)
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -250,6 +342,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     if coordinator is None:
         coordinator = MissionDossierLaneCoordinator(
             connection=server.store.connection, launcher=launcher,
+            companies=lambda: _screened_companies(server),
             failure_ledger_dir=getattr(launcher, "state_dir", None))
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -358,6 +451,7 @@ __all__ = [
     "add_arguments",
     "argv_fragment",
     "build_launcher",
+    "company_ledger_signature",
     "dispatch",
     "ledger_signature",
 ]
