@@ -389,3 +389,5 @@ owner 已要求继续开发、并行 GPT-5.6 Sol、及时 commit/push。六条�
 最终复演（冻结代码 `48cc315`，旧 live 快照副本）：66 schemas、35 lanes、38 entries、0 escaped；缺授权/开关与 retired verifier pin 仍需运行激活时解决。本轮未部署。下一步优先当前 live 新快照复演与五家公司产物验收，再做 F14 / F13 / W5；主线全量结果与 push 状态以集成报告及 PROJECT_STATUS 顶部为准。
 
 补充：首轮主线完整 6,055 项发现两个集成遗漏（ZeroBase 中文阶段名、旧抽取 test double 缺 state_dir），`2f64b3a` 已修，85 项相关测试通过并重跑全量。同版对当前 live 的只读新快照也已复演通过（827 MB、66 schemas、35 lanes、0 escaped），仍未部署。
+
+**最终验收**：`2f64b3a` 主线完整重跑 6,055 项 / 503.007s，OK（skipped=1）；之后只改文档。当前 live 只读新快照演练、wheel、inventory 与静态检查通过。开发提交及当前进度文档统一推送 main，本轮未部署。

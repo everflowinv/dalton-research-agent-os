@@ -6,9 +6,9 @@
 
 W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，最终验证代码为 `2f64b3a`。完成预测不变量接线、分部 filing 去重、跨 US/HK 回购契约与港股行情、月度回购判断分组及费用/评分去重、首版档案先分类、独立 ZeroBase verifier、待授权分类及恢复、来源计划补行与 ask 契约。详见 [本轮集成报告](reports/resume-w4-integration-2026-09-10.md) 与 [清单当前状态 §6d](reports/parallel-development-plan-v1.0-2026-09-09.md#6d-2026-09-10-恢复后的集成进度覆盖-6b--6c-历史状态)。
 
-**验证**：最终聚焦 277 项 + 57 项通过；首次完整主线 6,055 项发现 1 failure / 1 error，已修 ZeroBase 中文阶段名与旧测试替身目录属性，正重跑全量。最终隔离复演全部 12 步通过：66/66 schemas、35 lanes、38 tick entries、0 escaped。Python wheel 构建、connector inventory 一致性、cockpit JavaScript 语法均通过。此外已对当前 live 做只读新快照并重新通过全部演练步骤（827 MB 副本）；没有部署或修改 live，缺授权/开关不计作已激活功能。
+**验证**：最终聚焦 277 项 + 57 项通过；**完整主线 6,055 项 / 503.007s，OK（skipped=1）**；首轮两个集成遗漏已修复并由完整重跑验证。最终隔离复演全部 12 步通过：66/66 schemas、35 lanes、38 tick entries、0 escaped。Python wheel 构建、connector inventory 一致性、cockpit JavaScript 语法均通过。此外已对当前 live 做只读新快照并重新通过全部演练步骤（827 MB 副本）；没有部署或修改 live，缺授权/开关不计作已激活功能。
 
-**Git**：已按功能及时提交；完整主线绿后统一 push。起点 `694471c` 之前尚未推送的 11 个提交保留在历史中。
+**Git**：已按功能及时提交；主线全量通过，代码与交付文档统一推送至 `origin/main`。验收代码基准 `2f64b3a`，之后只有文档变更；起点 `694471c` 之前的 11 个提交保留在历史中。
 
 ## 下一步（本节覆盖此前暂停安排）
 

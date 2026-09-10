@@ -1,5 +1,7 @@
 # W4 恢复集成与修复（2026-09-10）
 
+**最终结果**：六条 W4 待合分支与三条 GPT-5.6 Sol 修复线已合入。最终代码 `2f64b3a` 完整 discovery **6,055 项 / 503.007s，OK（skipped=1）**；当前 live 的只读副本复演 **66 schemas / 35 lanes / 0 escaped**，wheel 与静态检查通过。代码及本报告统一交付至 `origin/main`，本轮没有部署。后续优先运行激活与五家公司产物验收，F14 的 13 个协调器、F13 acquisition/view 缓存和 HK 周调度已有明确待办。下文保留审查与修复过程。
+
 本轮 owner 要求继续开发、并行使用 GPT-5.6 Sol、及时记录与 commit/push。基线 main `694471c`，fetch 后领先 origin/main 11 个提交且工作区干净；保留原有提交与所有旧 worktree。三个新 worktree 承接预测 F1–F3、insider F6–F8、ZeroBaseReview F16–F17；主 agent 审读并集成。
 
 ## 已集成
@@ -14,7 +16,7 @@
 - **F18**：`--set-source-status` 对 inventory 中已知但 mission 缺行的来源追加 source_plan 行，不再要求手改 JSON。闭合行契约不加字段，`role` 写 `created_by=set-source-status` 及 connector 名；五个来源实测下一版可由 CoverageMissionAuthority 发布。原 mission 对象不变，未知来源拒绝，重复执行不重复加行。
 - **F19**：ask v0.2 schema 的 enabled 改 boolean/default false；同时修正 max_cost_units/max_rounds 的 const 0（仅改 enabled 仍无法描述合法开启状态），开启必须正预算、正轮数，关闭两项为 0。运行时原有授权规则不变。
 
-## 当前验证
+## 初次聚焦验证（历史过程）
 
 主 agent 聚焦回归（本轮契约、档案、HK 两条生产路径、US 回购、contracts）：
 
@@ -25,7 +27,7 @@ OK
 
 connector inventory `--check` 通过，`git diff --check` 通过。此前两次聚焦测试命令/新增测试存在测试 harness 名称与字段名错误，已修正并重跑；不计作产品缺陷。全量与最终复演结果待集成全部修复后补记。当前没有宣称已 push 或部署。
 
-## Next step
+## 恢复时计划（当前下一步见后文）
 
 1. 集成并审查三个子代理修复；重点复核多份 filing 的分部行重复累计、ZeroBase verifier 是否能看到引用正文。
 2. F15 待授权失败分类与 F13 港股日缓存在独立后续 worktree 处理；F14 十六条 lane 接账本为后续覆盖扩展，不以旧报告的“已分类”冒充“已接线”。
@@ -89,3 +91,17 @@ PYTHONPATH=src .venv/bin/python scripts/rehearse_deploy.py \
 全部 12 步通过，23 个文件 / 827 MB，66/66 schemas、27 seeds、35 lanes、38 entries、0 escaped，tick 3.9s。当前快照仍有同样的 11 个 may_write / 3 个 checkpoint 缺项、5/11 模型开关与 retired verifier pin，故下一步是运行配置/授权激活与产物验收。所有 child 已退出，live 只被读取，部署与治理版本未改变。新快照结果更新了上文的时效限制；未来真正部署时仍须以当时状态核对配置。
 
 首轮全量遗漏修正后的模型选择/抽取相关 85 项测试（0.989s）通过；最终完整 discovery 正在 `2f64b3a` 上重跑。Python wheel 已重新构建，确保包括最新中文阶段名。
+
+## 最终完整验证
+
+```
+PYTHONPATH=src .venv/bin/python -u -m unittest discover -s tests -t . -v
+Ran 6055 tests in 503.007s
+OK (skipped=1)
+```
+
+验证代码 `2f64b3a`；测试期间与之后仅改文档，未改 src/tests/scripts/deploy/contracts。完整逐项日志 `/tmp/dalton-resume-main-full-final.log`。首次失败日志 `/tmp/dalton-resume-main-full.log` 保留，不以新结果抹去曾发现的问题。测试仍有既有 SQLite ResourceWarning，未造成失败。
+
+最终 wheel 验证包含全部 66 schemas，`model_selection.py` 与 cockpit asset 字节等于主线；wheel SHA-256 `5953792cc851aa42a37baec4a7a3fad8f45bd137173c6acc4e639bb231050536`。connector inventory `--check`、cockpit JavaScript `node --check`、`git diff --check` 均通过。当前 live 只读新快照的 12 步演练通过，所有演练 child 已退出。
+
+Git 交付：所有功能与文档分批 commit，完整验证通过后统一推送 main；没有改写原有历史，没有部署 live。远端同步回执由本轮最终回复记录。
