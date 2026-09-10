@@ -171,6 +171,22 @@ class CoordinatorTests(unittest.TestCase):
         self.assertIsNone(restarted.failure_budget.blocked(
             "document-extraction:authorization"))
 
+    def test_an_active_governance_policy_change_resumes_without_file_changes(self) -> None:
+        self._awaiting_review()
+        self.coordinator.dispatch_once()
+        self.launcher.finish(
+            {"status": "succeeded", "drafted": [],
+             "stop_reason": "gated:active governance policy does not list extraction",
+             "reviews_complete": 0}, completed_at=self.clock().isoformat())
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "ungranted")
+        restarted = DocumentExtractionCoordinator(
+            missions=self.missions, launcher=self.launcher, clock=self.clock)
+        self.assertEqual(restarted.dispatch_once()["status"], "ungranted")
+        with self.core._transaction() as cur:
+            cur.execute("UPDATE governance_policy_pointer SET updated_at=? WHERE pointer_id=1",
+                        ("2026-09-10T12:34:56.000000+00:00",))
+        self.assertEqual(restarted.dispatch_once()["status"], "launched")
+
 
 class LauncherTests(unittest.TestCase):
     def test_launcher_refuses_before_spawning(self) -> None:

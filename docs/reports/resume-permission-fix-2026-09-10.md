@@ -22,4 +22,4 @@ The focused tests distinguish governance refusal from drained work, verify zero 
 
 ## Limits
 
-Configuration change detection covers exact active Core mission bindings, the model configuration, and the two governance files already passed to the extraction launcher. A permission source stored elsewhere must update one of those installed bindings or files to signal the coordinator.
+Configuration change detection covers exact active Core mission and governance-policy pointer bindings, the model configuration, and the two connector-governance files already passed to the extraction launcher. A permission source stored elsewhere must update one of those installed bindings or files to signal the coordinator.

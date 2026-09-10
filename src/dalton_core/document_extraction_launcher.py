@@ -292,6 +292,11 @@ class DocumentExtractionCoordinator:
                 "SELECT mission_ref, mission_version_id FROM coverage_mission_pointer "
                 "ORDER BY mission_ref").fetchall()
         )
+        policy_bindings = tuple(
+            tuple(row) for row in self.missions.connection.execute(
+                "SELECT pointer_id, policy_version_id, updated_at "
+                "FROM governance_policy_pointer ORDER BY pointer_id").fetchall()
+        )
         paths = (self.launcher.model_config_path,
                  self.launcher.connector_governance,
                  self.launcher.web_fetch_governance)
@@ -305,7 +310,7 @@ class DocumentExtractionCoordinator:
                 signature.append((stat.st_mtime_ns, stat.st_size))
             except OSError:
                 signature.append((None, None))
-        return (mission_bindings, *signature)
+        return (mission_bindings, policy_bindings, *signature)
 
     def _latest(self) -> dict[str, Any] | None:
         try:
