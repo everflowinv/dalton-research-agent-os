@@ -275,6 +275,59 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json",
         "discovery-plans/us-it-services-sec-filings-v1.json", optional=True,
     ),
+    # INT2: the second batch of lane seeds (env-var gated lanes are optional).
+    SeedSpec(
+        "deploy/connector-governance/company-wiki-get-document-v1.json",
+        "connector-governance/company-wiki-get-document-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/company-wiki-list-documents-v1.json",
+        "connector-governance/company-wiki-list-documents-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/employee-reviews-blind-v1.json",
+        "connector-governance/employee-reviews-blind-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json",
+        "connector-governance/guidepoint-get-transcript-narrowing-v1.json",
+    ),
+    SeedSpec(
+        "deploy/connector-governance/sales-notes-get-note-v1.json",
+        "connector-governance/sales-notes-get-note-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/sales-notes-list-notes-v1.json",
+        "connector-governance/sales-notes-list-notes-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/x-xreach-search-v1.json",
+        "connector-governance/x-xreach-search-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/x-xreach-thread-v1.json",
+        "connector-governance/x-xreach-thread-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/x-xreach-user-timeline-v1.json",
+        "connector-governance/x-xreach-user-timeline-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/xueqiu-get-post-v1.json",
+        "connector-governance/xueqiu-get-post-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/xueqiu-hot-rank-v1.json",
+        "connector-governance/xueqiu-hot-rank-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/xueqiu-search-posts-v1.json",
+        "connector-governance/xueqiu-search-posts-v1.json", optional=True,
+    ),
+    SeedSpec(
+        "deploy/connector-governance/yfinance-calendar-v1.json",
+        "connector-governance/yfinance-calendar-v1.json",
+    ),
 )
 
 
