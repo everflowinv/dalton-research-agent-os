@@ -203,7 +203,6 @@ _FAILURE_CODES: tuple[tuple[tuple[str, ...], str], ...] = (
     # word ``UNAVAILABLE`` in the specific code must never make the chain try
     # another profile that lacks the same mandatory controls.
     (("REQUIRED_CONTROLS_UNAVAILABLE",), "contract_violation"),
-    (("BUSY", "CONCURRENCY_LIMIT"), "capacity_busy"),
     (("TIMEOUT", "TIMED_OUT", "DEADLINE"), "transport_failure"),
     (("CONNECTION", "NETWORK", "SOCKET", "TRANSPORT", "BROKEN_PIPE", "EOF"),
      "transport_failure"),
@@ -276,6 +275,8 @@ def classify_model_failure(failure: Any) -> str:
         code = failure.upper()
 
     if code:
+        if code in {"BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT"}:
+            return "capacity_busy"
         for needles, outcome in _FAILURE_CODES:
             if any(needle in code for needle in needles):
                 return outcome

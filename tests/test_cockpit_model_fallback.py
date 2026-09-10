@@ -116,6 +116,28 @@ class BusyThenAvailableAdapter(ChainAdapter):
 
 
 class CockpitChainTests(unittest.TestCase):
+    def test_a_legacy_terminal_busy_failure_gets_one_versioned_recovery_identity(self) -> None:
+        adapter = BusyThenAvailableAdapter({})
+        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        kwargs = {"purpose": "plan", "request_id": "legacy-busy-recovery",
+                  "prompt": "what next?", "mission": self.mission}
+        with patch("dalton_core.model_fallback_chain.classify_model_failure",
+                   return_value="unclassified_failure"):
+            with self.assertRaisesRegex(CockpitModelError, "unclassified_failure"):
+                model.call(**kwargs)
+        answer = model.call(**kwargs)
+        self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            rows = list(scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders "
+                "ORDER BY created_at,work_order_id"
+            ))
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["work_order_id"], rows[1]["work_order_id"])
+        replay = model.call(**kwargs)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(adapter.served), 2)
+
     def test_broker_busy_retries_same_work_without_fallback_or_double_charge(self) -> None:
         adapter = BusyThenAvailableAdapter({})
         model = self._model(adapter, policy_version_ref=self.chain_policy)

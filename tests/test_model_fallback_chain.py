@@ -163,6 +163,8 @@ class TierMapTests(unittest.TestCase):
             ({"code": "REQUIRED_CONTROLS_UNAVAILABLE"}, "contract_violation"),
             ({"code": "BUSY"}, "capacity_busy"),
             ({"code": "BROKER_CONCURRENCY_LIMIT"}, "capacity_busy"),
+            ({"code": "NOT_BUSY"}, "unclassified_failure"),
+            ({"code": "BUSY_UNKNOWN"}, "unclassified_failure"),
             ({"code": "PROVIDER_OVERLOADED"}, "model_unavailable"),
             ({"code": "RATE_LIMITED"}, "provider_failure"),
             ({"code": "UPSTREAM_TIMEOUT"}, "transport_failure"),

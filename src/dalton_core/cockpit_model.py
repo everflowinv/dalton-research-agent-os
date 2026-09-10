@@ -379,6 +379,30 @@ def _failure(work: WorkOrder, code: str, route_ref: str | None,
     )
 
 
+def _legacy_broker_busy_failure(formal: Mapping[str, Any] | None) -> bool:
+    """Recognize only the old signed chain envelope that misclassified BUSY."""
+
+    if not isinstance(formal, Mapping) or formal.get("terminal_state") != "failed":
+        return False
+    envelope = formal.get("result_envelope")
+    if not isinstance(envelope, Mapping):
+        return False
+    error = envelope.get("error")
+    metadata = envelope.get("metadata")
+    if (not isinstance(error, Mapping)
+            or error.get("code") != "MODEL_CHAIN_EXHAUSTED"
+            or not isinstance(metadata, Mapping)):
+        return False
+    failures = metadata.get("chain_failures")
+    return (
+        isinstance(failures, list)
+        and len(failures) == 1
+        and isinstance(failures[0], Mapping)
+        and failures[0].get("code") == "BUSY"
+        and failures[0].get("failure_class") == "unclassified_failure"
+    )
+
+
 def call_cost_micros(invocation: Any, route: Mapping[str, Any],
                      profile: Mapping[str, Any], reserved: int) -> tuple[int, str]:
     """What the link that actually served this call cost, and how we know.
@@ -443,6 +467,7 @@ class CockpitModel:
              mission: Mapping[str, Any],
              producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
+        base_request_id = request_id
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         legacy_budget = {
             "max_input_tokens": self.max_input_tokens,
@@ -522,6 +547,16 @@ class CockpitModel:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            recovery_suffix = ":legacy-broker-busy-recovery:1"
+            if (_legacy_broker_busy_failure(formal)
+                    and not base_request_id.endswith(recovery_suffix)):
+                return self.call(
+                    purpose=purpose,
+                    request_id=base_request_id + recovery_suffix,
+                    prompt=prompt,
+                    mission=mission,
+                    producer_route_decision_refs=producer_refs,
+                )
             replayed = formal is not None
             cost_micros, cost_status = 0, "replayed"
             if formal is None:

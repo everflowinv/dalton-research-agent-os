@@ -12,6 +12,8 @@ The broker's closed `BUSY` response (`broker concurrency limit reached`) crossed
 
 The retry remains bounded by the Scheduler policy (`max_attempts`, currently three for this Cockpit scheduler). Each attempt gets a distinct route decision and budget admission; the failed BUSY attempt settles at zero and the successful attempt settles once at measured or governed fallback cost. Unknown broker codes remain `unclassified_failure` and terminal. Lane failure classification parks `capacity_busy` against `model_capacity`, using the existing dependency probe cadence rather than a busy loop.
 
+The upgrade path recognizes only the exact legacy terminal envelope: `MODEL_CHAIN_EXHAUSTED` with one structured chain failure whose code is exactly `BUSY` and whose old class is `unclassified_failure`. It derives one versioned recovery request identity. It does not reopen or mutate the old Scheduler record, retry arbitrary historical failures, or recursively mint recovery identities. Codes merely containing `BUSY` remain unclassified.
+
 No live model call, configuration change, deployment, or budget increase was made.
 
 ## Verification
