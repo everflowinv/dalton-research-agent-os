@@ -967,6 +967,7 @@ def run_dossier(
         input_fingerprints = {unit: None for unit in UNITS}
         spent = 0
         run_bound_blocked = False
+        attempted_outcomes: list[str] = []
         prior_sections = {item["aspect"]: item
                           for item in (prior or {}).get("sections") or []}
         for unit in wanted:
@@ -1008,6 +1009,7 @@ def run_dossier(
                 market_view_available=market_view_available,
             )
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
+            attempted_outcomes.append(str(outcome.get("status") or ""))
             if outcome["status"] != "drafted":
                 summary["refused"].append({"unit": unit, "reason": outcome["reason"]})
                 continue
@@ -1023,7 +1025,11 @@ def run_dossier(
                 reasons = [str(item.get("reason") or "draft contract refused")
                            for item in model_refusals[:3]]
                 summary.update({
-                    "status": "failed", "dossier_status": "nothing_drafted",
+                    "status": "failed", "dossier_status": (
+                        "rubric_refused"
+                        if attempted_outcomes and all(
+                            status == "refused" for status in attempted_outcomes)
+                        else "nothing_drafted"),
                     "failure_reason": ("all attempted dossier units were refused: "
                                        + "; ".join(reasons))[:500],
                 })

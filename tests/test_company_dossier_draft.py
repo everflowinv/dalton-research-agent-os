@@ -19,7 +19,10 @@ from __future__ import annotations
 import json
 import unittest
 
-from dalton_core.company_dossier import CLASSIFICATION_SLOTS, VARIANT_SLOTS
+from dalton_core.company_dossier import (
+    CLASSIFICATION_SLOTS, MAX_GAP_CHARS, MAX_GAPS, MAX_SENTENCE_CHARS,
+    MAX_SOURCES_PER_SECTION, VARIANT_SLOTS,
+)
 from dalton_core.company_dossier_draft import (
     DRAFT_PURPOSE,
     SLOT_SENTENCE_CAP,
@@ -27,6 +30,7 @@ from dalton_core.company_dossier_draft import (
     build_unit_prompt,
     build_verifier_prompt,
     draft_hash,
+    draft_contract_fingerprint,
     draft_unit,
     independence,
     independence_precheck,
@@ -118,6 +122,18 @@ class PromptTests(unittest.TestCase):
         self.assertIn("NEVER write a C or N tag inside a sentence's text", prompt)
         self.assertIn("Every sentence must cite at least one tag", prompt)
         self.assertIn(f"At most {SLOT_SENTENCE_CAP} sentences in a slot", prompt)
+        self.assertIn(f"Return at most {MAX_GAPS} gaps", prompt)
+        self.assertIn(f"at most {MAX_GAP_CHARS} characters", prompt)
+        self.assertIn(f"at most {MAX_SENTENCE_CHARS} characters", prompt)
+        self.assertIn(f"at most {MAX_SOURCES_PER_SECTION} distinct material tags", prompt)
+
+    def test_the_contract_fingerprint_is_stable_and_bound_to_the_limits(self):
+        self.assertRegex(draft_contract_fingerprint(), r"^[0-9a-f]{64}$")
+        prompt = build_unit_prompt(unit="demand_drivers", structure=STRUCTURE,
+                                   material=material(), company=COMPANY)
+        for limit in (MAX_GAPS, MAX_GAP_CHARS, MAX_SENTENCE_CHARS,
+                      MAX_SOURCES_PER_SECTION, SLOT_SENTENCE_CAP):
+            self.assertIn(str(limit), prompt)
 
     def test_the_classification_prompt_carries_the_closed_vocabulary(self):
         prompt = build_unit_prompt(

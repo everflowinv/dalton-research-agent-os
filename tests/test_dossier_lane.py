@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.claim_index_authority import ClaimIndexAuthority
 from dalton_core.company_dossier import (
@@ -508,7 +509,7 @@ class PublishTests(unittest.TestCase):
 
         summary = self.harness.run(model_factory=RefusingModel, max_units=2)
         self.assertEqual((summary["status"], summary["dossier_status"]),
-                         ("failed", "nothing_drafted"))
+                         ("failed", "rubric_refused"))
         self.assertEqual(summary["formal_authority_writes"], 0)
         self.assertIn("all attempted dossier units", summary["failure_reason"])
 
@@ -988,6 +989,25 @@ class CoordinatorTests(unittest.TestCase):
         held = coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["reason"], "boom")
+
+    def test_a_contract_refusal_is_terminal_for_the_unchanged_signature(self):
+        launcher = self.Launcher(
+            ticket_status="failed",
+            summary={"dossier_status": "rubric_refused",
+                     "failure_reason": "demand_drivers.gaps must be at most 6 short strings"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        held = coordinator.dispatch_once()
+        self.assertEqual(held["status"], "terminal")
+        self.assertEqual(len(launcher.started), 1)
+
+    def test_a_draft_contract_change_moves_the_lane_signature_once(self):
+        before = ledger_signature(self.connection)
+        with patch("dalton_core.company_dossier_draft.draft_contract_fingerprint",
+                   return_value="f" * 64):
+            after = ledger_signature(self.connection)
+        self.assertNotEqual(before, after)
 
     def test_configured_model_capacity_cooldown_controls_lane_probe(self):
         now = [datetime(2026, 9, 10, tzinfo=timezone.utc)]

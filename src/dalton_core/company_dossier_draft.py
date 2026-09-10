@@ -48,6 +48,9 @@ from .company_dossier import (
     MAX_GAPS as MAX_DOSSIER_GAPS,
     CLASSIFICATION_DEFINITIONS,
     INDUSTRY_CLASSIFICATIONS,
+    MAX_GAP_CHARS,
+    MAX_GAPS,
+    MAX_SENTENCE_CHARS,
     MAX_SOURCES_PER_SECTION,
     SECTION_SENTENCE_CAP,
     SECTIONS,
@@ -81,6 +84,24 @@ VERIFIER_PURPOSE = register_purpose("dossier_verifier")
 # Initial Screen it sits above.  A separate configuration would only be worth
 # its wiring if the dossier needed its own rate limit.
 MODEL_CONFIG_NAME = "initial-screen-model-config.json"
+
+# This identity changes only when the producer reply contract changes.  The
+# prompt SHA already binds every WorkOrder; the exported fingerprint also lets
+# the lane retire a terminal refusal after a reviewed contract repair without
+# pretending that the underlying company evidence changed.
+DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.2"
+
+
+def draft_contract_fingerprint() -> str:
+    return content_hash({
+        "version": DRAFT_CONTRACT_VERSION,
+        "max_gaps": MAX_GAPS,
+        "max_gap_chars": MAX_GAP_CHARS,
+        "max_sentence_chars": MAX_SENTENCE_CHARS,
+        "max_sources": MAX_SOURCES_PER_SECTION,
+        "slot_sentence_cap": SLOT_SENTENCE_CAP,
+        "section_sentence_cap": SECTION_SENTENCE_CAP,
+    })
 
 # Bounded like ``company_model_cli``'s constants and for the same reason: the
 # router estimates on prompt bytes, so a bound that looks frugal buys nothing
@@ -266,6 +287,12 @@ def build_unit_prompt(
         "- Copy any figure verbatim from the tag that carries it. Do not convert units",
         "  or scales, do not round, do not recompute a percentage.",
         f"- At most {SLOT_SENTENCE_CAP} sentences in a slot and {SECTION_SENTENCE_CAP} in this part.",
+        f"- Return at most {MAX_GAPS} gaps. Each gap must be a non-empty string of at most "
+        f"{MAX_GAP_CHARS} characters; combine related missing evidence rather than adding "
+        "another item.",
+        f"- Every sentence text and every unknown string must be non-empty and at most "
+        f"{MAX_SENTENCE_CHARS} characters.",
+        f"- Cite at most {MAX_SOURCES_PER_SECTION} distinct material tags across this part.",
         "- If the material does not answer a slot, return that slot as",
         '  {"slot_id": "<id>", "unknown": "<what is missing to answer it>"} instead of',
         "  writing something plausible. An honest unknown is worth more than a guess.",
@@ -724,6 +751,7 @@ def rendered_bodies(blocks: Mapping[str, Any]) -> dict[str, str]:
 
 
 __all__ = [
+    "DRAFT_CONTRACT_VERSION",
     "DRAFT_PURPOSE",
     "VERIFIER_PURPOSE",
     "MAX_CLAIM_ROWS",
@@ -744,6 +772,7 @@ __all__ = [
     "build_unit_prompt",
     "build_verifier_prompt",
     "draft_hash",
+    "draft_contract_fingerprint",
     "draft_unit",
     "independence",
     "independence_precheck",

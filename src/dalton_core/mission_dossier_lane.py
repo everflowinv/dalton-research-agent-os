@@ -89,11 +89,13 @@ def ledger_signature(connection: Any) -> str:
     """
 
     from .cockpit_model import verifier_provider_contract_fingerprint
+    from .company_dossier_draft import draft_contract_fingerprint
     row = connection.execute(
         "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM claim_versions"
     ).fetchone()
     parts = [str(row["n"]), str(row["newest"] or "-"),
-             verifier_provider_contract_fingerprint("dossier_verifier")]
+             verifier_provider_contract_fingerprint("dossier_verifier"),
+             draft_contract_fingerprint()]
     try:
         heads = connection.execute(
             "SELECT dossier_ref, MAX(version_number) AS v "
@@ -174,12 +176,12 @@ class MissionDossierLaneCoordinator:
             self.budget.record(str(signature),
                                status="gated:not permitted",
                                reason="gated:mission does not grant dossier")
-        elif settled.get("status") != "succeeded" and settled.get("status") != "orphaned":
-            if signature:
-                self.budget.record_settled(str(signature), settled)
         elif status in CONTENT_TERMINAL_STATUSES and signature:
             self.budget.record(str(signature), status=f"content_refused:{status}",
                                reason=settled.get("failure_reason") or status)
+        elif settled.get("status") != "succeeded" and settled.get("status") != "orphaned":
+            if signature:
+                self.budget.record_settled(str(signature), settled)
         elif status in QUIET_STATUSES and signature:
             settled["resumed"] = self.budget.clear(str(signature))
             self._quiet_signature = str(signature)
