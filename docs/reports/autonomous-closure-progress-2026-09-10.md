@@ -51,3 +51,11 @@ Next step：接受完整运行候选后备份部署、health与逐字核对、�
 18:32只读扩展验收：五家公司都没有价格、consensus、估值记录。最新价格/consensus child明确在网络前拒绝“governance record is not approved”；三份yfinance治理仍proposed，不是依赖安装成功就已接入。已在私有owner包准备逐项能力/hash/权限审阅清单与未执行的owner命令；不代签。这也解释了真正估值和价格异动产品仍然缺失。
 
 最后交付开发继续交叉审查：导入已覆盖18sheet/41634模型cell和Word396块/52media/15嵌入对象，正补实际CLI artifact留存与日历识别；HTML禁止正文猜数字，改typed authority序列；XLSX须有可证明财年边界才合年度，不能把ACN的连续四季误标为财年。Cockpit下载入口正在接线。
+
+## Owner追加：最后的最后做多分析师workspace
+
+用户明确希望同一Dalton覆盖完全不同行业，倾向一份程序、多profile/数据库/进度记录，每个分析师独立Cockpit，并发互不干扰。执行顺序放在当前交付与部署之后。
+
+方向：共享版本化程序和运行依赖；独立workspace根目录、数据库、source spool、模型配置、任务/进度、预算、日志、socket、锁和端口；每个Cockpit固定绑定workspace，另可提供只读fleet总览。共享外部模型/数据源的实际账户额度需要全局reservation/并发协调，不能把独立本地预算当成额外供应商配额。
+
+验收至少两个不同行业workspace并行运行：同名任务/相同公司ID不串数据，停止/重启/升级其中一个不影响另一个；Cockpit请求无法跨workspace，单实例锁只阻止本workspace重复controller；全局共享源限额与各workspace任务预算都被实际执行。先审计现有单实例路径假设，再分片实现，不能复制仓库冒充隔离。
