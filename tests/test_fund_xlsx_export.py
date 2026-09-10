@@ -168,6 +168,33 @@ class FundXlsxExportTests(unittest.TestCase):
         )
         self.assertEqual(scale, 1_000_000)
 
+    def test_financial_lines_are_reader_labels_and_audit_keeps_originals(self):
+        from openpyxl import load_workbook
+
+        self.export()
+        book = load_workbook(self.path, data_only=False)
+        financials = book["Financials"]
+        labels = [financials.cell(row, 1).value
+                  for row in range(5, financials.max_row + 1)]
+        self.assertIn("Revenue (USD millions)", labels)
+        self.assertIn("Selling, general & administrative (USD millions)", labels)
+        self.assertIn("Free cash flow (USD millions) — Not available", labels)
+        self.assertEqual(financials["A4"].value, "Financial line")
+        for label in labels:
+            self.assertNotIn("formula output", label)
+            self.assertNotIn("calculated", label)
+            self.assertNotIn("SellingGeneralAndAdministrativeExpense", label)
+            self.assertLessEqual(len(label), 54)
+
+        formula_map = book["Formula Map"]
+        headers = {cell.value: cell.column for cell in formula_map[4]}
+        originals = [formula_map.cell(row, headers["Original model label"]).value
+                     for row in range(5, formula_map.max_row + 1)]
+        self.assertIn("SellingGeneralAndAdministrativeExpense", originals)
+        formulas = [formula_map.cell(row, headers["Excel formula"]).value
+                    for row in range(5, formula_map.max_row + 1)]
+        self.assertTrue(any(str(value).startswith("'=") for value in formulas))
+
     def test_without_calendar_binding_does_not_guess_annual_columns(self):
         from openpyxl import load_workbook
 

@@ -104,6 +104,38 @@ def _display_unit(unit: str) -> str:
     return unit
 
 
+_FINANCIAL_LINE_LABELS = {
+    "result:revenue": "Revenue",
+    "result:cost_of_revenue": "Cost of revenue",
+    "result:gross_profit": "Gross profit",
+    "result:operating_income": "Operating income",
+    "result:income_tax_expense": "Income tax expense",
+    "result:net_income": "Net income",
+    "result:operating_cash_flow": "Operating cash flow",
+    "result:capital_expenditure": "Capital expenditures",
+    "result:free_cash_flow": "Free cash flow",
+}
+
+
+def _financial_line_label(result: Mapping[str, Any]) -> str:
+    ref = str(result["ref"])
+    if ref in _FINANCIAL_LINE_LABELS:
+        return _FINANCIAL_LINE_LABELS[ref]
+    if ref.startswith("result:operating_expense:"):
+        concept = ref.rsplit(":", 1)[-1]
+        known = {
+            "SellingGeneralAndAdministrativeExpense":
+                "Selling, general & administrative",
+            "ResearchAndDevelopmentExpense": "Research & development",
+        }
+        if concept in known:
+            return known[concept]
+    label = str(result.get("label") or "Financial line").strip()
+    humanized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", label)
+    humanized = humanized.replace("_", " ").strip()
+    return humanized[:1].upper() + humanized[1:] if humanized else "Financial line"
+
+
 def _formula_for(
     result: Mapping[str, Any], cell: Mapping[str, Any], period: str,
     result_cells: Mapping[tuple[str, str], str], assumption_cells: Mapping[str, str],
@@ -303,7 +335,7 @@ def export_fund_workbook(
     period_columns = {
         period: quarter_start + index for index, period in enumerate(periods)
     }
-    headers = ["Line / role", *[label for label, _ in annual_groups]]
+    headers = ["Financial line", *[label for label, _ in annual_groups]]
     if annual_groups:
         headers.append(None)
     headers.extend(
@@ -385,12 +417,11 @@ def export_fund_workbook(
         gaps.append("annual columns unavailable: no bound fiscal calendar")
     for result in model["results"]:
         rr = result_rows[result["ref"]]
-        role = ("formula output" if result["status"] == "computed" else "unavailable")
         financials.cell(
             rr,
             1,
-            f"{result['label']} ({_display_unit(result['unit'])}) — {role} — "
-            f"{result['role'] or 'calculated'}",
+            f"{_financial_line_label(result)} ({_display_unit(result['unit'])})"
+            + (" — Not available" if result["status"] != "computed" else ""),
         )
         by_period = {c["period"]["end"]: c for c in result["cells"]}
         for period in periods:
@@ -454,7 +485,8 @@ def export_fund_workbook(
             financials.cell(rr, ci).number_format = _number_format(result["unit"])
             formula_map.append({"cell": f"Financials!{_col(ci)}{rr}",
                                 "model_cell_ref": model_cell_ref, "formula": formula,
-                                "model_formula": result["formula"]})
+                                "model_formula": result["formula"],
+                                "model_label": result["label"]})
         for label, group in annual_groups:
             annual_i = annual_columns[label]
             quarter_cols = [period_columns[p] for p in group
@@ -476,7 +508,8 @@ def export_fund_workbook(
                 )
                 formula_map.append({"cell": f"Financials!{target.coordinate}",
                                     "model_cell_ref": None, "formula": target.value,
-                                    "model_formula": "annual_from_four_fiscal_quarters"})
+                                    "model_formula": "annual_from_four_fiscal_quarters",
+                                    "model_label": result["label"]})
             else:
                 target.value = None
                 target.comment = None
@@ -599,13 +632,16 @@ def export_fund_workbook(
     for values in source_rows:
         sources.append(values)
     formula_digest = content_hash({"layout_version": LAYOUT_VERSION, "formulas": formula_map})
-    for ci, value in enumerate(["Cell", "Model cell", "Excel formula", "Internal formula"], 1):
+    for ci, value in enumerate(
+            ["Cell", "Model cell", "Excel formula", "Internal formula",
+             "Original model label"], 1):
         manifest.cell(4, ci, value)
     for item in formula_map:
         # Formula Map is an audit table. Keep the formula literal instead of
         # executing a second, context-free copy of it on this sheet.
         manifest.append([item["cell"], item["model_cell_ref"],
-                         "'" + item["formula"], item["model_formula"]])
+                         "'" + item["formula"], item["model_formula"],
+                         item.get("model_label")])
     manifest.append([])
     manifest.append(["Layout version", LAYOUT_VERSION])
     manifest.append(["Monetary display scale", FUND_MONETARY_DISPLAY_SCALE])
