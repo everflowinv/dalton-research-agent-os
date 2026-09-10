@@ -43,3 +43,13 @@ Frozen b5ee132 completed **6,770 tests in 581.148 seconds, one skip**. Start/end
 The private manifest now binds r2 commit, wheel, full-suite receipt, rehearsal, and five deployment scripts. The staging script was corrected to parse the report's backtick-delimited source binding and assert the reviewed deployment candidate hash before replacing the canonical script. All output destinations are checked before any copy. An independent review initially also claimed a self-colliding backup name; inspection found distinct manifest and script backup names, so that specific claim was not a reproduced bug.
 
 Inert preflight passed without service operations. Twelve model configurations were captured for preservation checks. Disk preflight required 3,537,504,535 bytes with 5,348,712,448 available. Authorized deployment is running; no claim of postdeployment or product success is made yet.
+
+## Installed and runtime verified, 23:42 UTC
+
+Deployment exited successfully. Backup `deploy-backup-20260910T233849Z` verified all 15 authority databases before installation. Retained source `.release-source.xVfbS1` matches all 1,828 tracked files in the accepted commit; all 555 installed runtime files match it and the reviewed wheel. Mission v14 remains semantically and hash verified, and all 12 model configurations preserve selections, budget overrides, prior credentials and actual selected credential admission.
+
+Three health samples at 23:40:48, 23:41:09 and 23:41:29 UTC passed with the same controller PID 29734 and heartbeat ages 5.276 / 1.334 / 0.491 seconds. Private runtime verification receipt SHA-256: `94986162c0c2810c851fd0f78580cdb0927c947ec63573565a57519299c46005`. The manifest explicitly records `installed_and_runtime_verified_products_incomplete`.
+
+At 23:42:20 UTC IBM had a fresh current-task specification with persisted cost-template metadata and a working real input table; four companies were still awaiting new specifications. No formal forecast model was yet present. A pure read-only IBM build can compute revenue/income over 12 quarters, while explicitly reporting uncalibrated operating drivers and unavailable FCF; this is a diagnostic, not publication or analyst-quality model acceptance.
+
+Completed r2 rehearsal state/home were removed only after both lsof checks showed no open handles. Its report, configuration/logs, all deployment backups, and all retained release source archives remain. Next: actual Dossier/event and formal forecast acceptance; keep genuine source/content/human blocks explicit.
