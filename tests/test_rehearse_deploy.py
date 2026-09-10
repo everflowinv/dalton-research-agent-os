@@ -634,19 +634,24 @@ class MissionAndSwitchTests(unittest.TestCase):
                 self.assertTrue((REPO_ROOT / switch.repo_source).is_file())
 
     def test_the_switch_install_sh_does_write_is_the_one_it_names(self) -> None:
-        # Two now: extraction's model config, and P14a's tracking policy,
-        # which INT2 gave a seed block. Each has to be traceable to the line
-        # in install.sh that writes it.
+        # Three now: extraction's model config, P14a's tracking policy, and
+        # P12e's framework policy. Each has to be traceable to the line in
+        # install.sh that writes it -- a switch that claims install seeds a
+        # file it does not is worse than a switch that admits it is missing.
         seeded = {switch.state_file for switch in LANE_SWITCHES
                   if switch.seeded_by_install}
         code = _install_script_code()
         self.assertEqual(
             seeded,
-            {"document-extraction-model-config.json", "tracking-policy.json"},
+            {"document-extraction-model-config.json", "tracking-policy.json",
+             "p12e-industry-framework-policy-v1.json"},
         )
         self.assertIn("document_extraction_setup", code)
         self.assertIn("p14a-tracking-policy-v1.json", code)
-        self.assertIn("tracking-policy.json", [spec.state for spec in INSTALL_SEEDS])
+        self.assertIn("p12e-industry-framework-policy-v1.json", code)
+        states = [spec.state for spec in INSTALL_SEEDS]
+        self.assertIn("tracking-policy.json", states)
+        self.assertIn("p12e-industry-framework-policy-v1.json", states)
 
     def test_the_three_model_config_switches_are_written_when_named(self) -> None:
         # INT3: the judgement pair and the claim index were switches nothing

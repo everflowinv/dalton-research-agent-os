@@ -414,6 +414,18 @@ if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking
   cp "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" "$tracking_policy_file"
   chmod 600 "$tracking_policy_file"
 fi
+# P12e: the industry-framework policy is that lane's whole switch -- it titles
+# the Constitution's causal-chain links, files each driver under a horizon, and
+# carries the gap checklist. One file, so all-or-nothing is automatic. No model
+# configuration is written here on purpose: this is the one drafting lane whose
+# product is half deterministic, so a Core with the policy alone still computes
+# and reports the five-company comparison table every week, and only the prose
+# waits for a model.
+framework_policy_file="$state_dir/p12e-industry-framework-policy-v1.json"
+if [[ ! -f "$framework_policy_file" && -f "$repo_root/deploy/phase9/p12e-industry-framework-policy-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p12e-industry-framework-policy-v1.json" "$framework_policy_file"
+  chmod 600 "$framework_policy_file"
+fi
 # P14e / INT2: the three ProbeTemplates the ad-hoc research lane may bind. The
 # manifest is publication material -- the owner publishes each template with a
 # `human:` principal, and this script never signs anything -- so it is put

@@ -189,6 +189,7 @@ REGISTRY_LANE_LABELS = {
     "company_dossier": "写公司档案",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
+    "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})

@@ -418,6 +418,13 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/phase9/p14a-tracking-policy-v1.json",
         "tracking-policy.json",
     ),
+    # P12e: the industry-framework policy is that lane's whole switch. One
+    # file, so all-or-nothing is automatic, and no model configuration beside
+    # it: the comparison table needs none.
+    SeedSpec(
+        "deploy/phase9/p12e-industry-framework-policy-v1.json",
+        "p12e-industry-framework-policy-v1.json",
+    ),
     # P14e / INT2: publication material, put where the owner reads it and no
     # lane looks. It is not the ad-hoc lane's switch and does not turn it on.
     SeedSpec(
@@ -696,11 +703,10 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
     ),
     LaneSwitch(
         "industry_framework (P12e)", "p12e-industry-framework-policy-v1.json",
-        "deploy/phase9/p12e-industry-framework-policy-v1.json", False,
-        "declared, not yet seeded: install.sh does not copy it. The P12e branch "
-        "does not touch install.sh, so the seed line is an integration item and "
-        "this switch reports missing until it is added. The lane is on with the "
-        "policy alone -- the comparison table needs no model.",
+        "deploy/phase9/p12e-industry-framework-policy-v1.json", True,
+        "INT3 seed block; one file, so all-or-nothing is automatic. The lane is "
+        "on with the policy alone -- the comparison table needs no model, so "
+        "there is no second file to be half-installed with.",
     ),
 )
 
