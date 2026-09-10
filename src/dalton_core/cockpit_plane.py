@@ -446,15 +446,22 @@ class CockpitConfig:
     journal_path: Path
     model_config_path: Path | None = None
     mission_ref: str | None = None
+    # INT2 / P14-M: the broker's own catalog, so the page can say whether the
+    # models this Core holds are the models the gateway offers. A path rather
+    # than a convention: this process must not go looking for the host's
+    # configuration on its own, and a Core installed without the gateway has
+    # no catalog to compare against and says so.
+    openclaw_config_path: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CockpitConfig":
         fields = {"core_db", "state_dir", "heartbeat_path", "scheduler_db", "journal_path",
-                  "model_config_path", "mission_ref"}
+                  "model_config_path", "mission_ref", "openclaw_config_path"}
         if not isinstance(raw, Mapping) or set(raw) - fields or not {"core_db", "state_dir", "heartbeat_path",
                                                                        "scheduler_db", "journal_path"} <= set(raw):
             raise CockpitError("cockpit config has an invalid shape")
         model = raw.get("model_config_path")
+        broker = raw.get("openclaw_config_path")
         mission = raw.get("mission_ref")
         if mission is not None and (not isinstance(mission, str) or not mission.startswith("coverage-mission:")):
             raise CockpitError("mission_ref must name a coverage mission")
@@ -464,6 +471,8 @@ class CockpitConfig:
             scheduler_db=_path(raw["scheduler_db"], "scheduler_db"),
             journal_path=_path(raw["journal_path"], "journal_path"),
             model_config_path=None if model is None else _path(model, "model_config_path"),
+            openclaw_config_path=(None if broker is None
+                                  else _path(broker, "openclaw_config_path")),
             mission_ref=mission,
         )
 
@@ -2591,8 +2600,8 @@ class CockpitPlane:
         from .model_fallback_chain import FallbackChainError, routing_overview
         from .model_router import ModelRouter
 
-        openclaw = Path.home() / ".openclaw" / "openclaw.json"
-        broker = _load_json(openclaw)
+        broker = (None if self.config.openclaw_config_path is None
+                  else _load_json(self.config.openclaw_config_path))
         try:
             with closing(ModelRouter(str(path), read_only=True)) as router:
                 overview = routing_overview(
@@ -2657,7 +2666,7 @@ class CockpitPlane:
                 "not_in_broker": list(catalog["not_in_broker_profile_ids"]),
             },
             "catalog_note": (None if catalog is not None else
-                             "没有找到 OpenClaw 配置，所以无法比对模型目录"),
+                             "没有配置 OpenClaw 网关的位置，所以无法比对模型目录"),
         }
 
     def cycle_reflection(self) -> dict[str, Any]:

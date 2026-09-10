@@ -468,6 +468,28 @@ fi
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.
 "$venv_dir/bin/python" -m dalton_core.cockpit_setup --config "$config_path"
+# INT2 / P14-M: tell the cockpit where the gateway's own model catalog is, so
+# the page can say whether the models this Core holds are the models the broker
+# offers -- and which way they differ, because "out of sync" on its own tells
+# nobody what to do. A path rather than a convention: the control process must
+# not go looking through the host's home directory on its own, and a Core
+# installed without the gateway simply gets no catalog block.
+if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "$HOME/.openclaw/openclaw.json" <<'PYBROKER'
+import json, sys
+from pathlib import Path
+
+path, broker = Path(sys.argv[1]), sys.argv[2]
+config = json.loads(path.read_text(encoding="utf-8"))
+cockpit = ((config.get("control") or {}).get("config") or {}).get("cockpit")
+if isinstance(cockpit, dict):
+    cockpit["openclaw_config_path"] = broker
+    path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+    print("cockpit.openclaw_config_path=" + broker)
+PYBROKER
+fi
 # P10f/P10h: DALTON_EXTRACTION_MAX_WINDOWS raises reading throughput. Each
 # window is one paid model call against the mission's max_daily_paid_calls, so
 # raise the mission budget first.

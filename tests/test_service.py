@@ -291,6 +291,18 @@ class InstallerSeedTests(unittest.TestCase):
         # owner under a human: principal.
         self.assertNotIn("publish_probe_template", text)
 
+    def test_the_cockpit_is_told_where_the_gateway_catalog_is(self) -> None:
+        # The control process must not go looking through the host's home
+        # directory on its own, so the path is written into the config it
+        # already reads -- and only when the gateway is actually installed.
+        text = self.script()
+        head, body = text.split("<<'PYBROKER'", 1)
+        guard = head.rsplit("if [[ -f", 1)[1]
+        self.assertIn(".openclaw/openclaw.json", guard)
+        block = body.split("PYBROKER", 1)[0]
+        self.assertIn("openclaw_config_path", block)
+        self.assertIn('"cockpit"', block)
+
     def test_the_script_parses(self) -> None:
         import subprocess
 
