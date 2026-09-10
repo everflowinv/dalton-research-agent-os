@@ -81,7 +81,7 @@ def validate_model_config(value):
     """Pure closed installation shape check; never reads a credential file."""
     required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
-    optional = {"call_budget", "purpose_call_budgets"}
+    optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -95,12 +95,14 @@ def validate_model_config(value):
         raise ResearchVerificationError("invalid broker client or dedicated agent identity syntax")
     if any(not Path(config[k]).is_absolute() for k in ("model_router_db", "budget_db", "broker_socket", "broker_auth_key")):
         raise ResearchVerificationError("document extraction authority and broker paths must be absolute")
-    from .call_budget import CallBudgetError, resolve_call_budget
+    from .call_budget import (CallBudgetError, resolve_call_budget,
+                              resolve_run_budget)
     try:
         resolve_call_budget(config, "validation", defaults={
             "max_input_tokens": 1, "max_output_tokens": 1,
             "max_cost_usd": 1.0, "timeout_seconds": 1,
         })
+        resolve_run_budget(config, "validation", defaults={"max_units": 1})
     except CallBudgetError as exc:
         raise ResearchVerificationError(f"invalid model call budget: {exc}") from exc
     return config

@@ -3,7 +3,8 @@ import unittest
 
 from dalton_core.call_budget import (
     CallBudgetError, budget_fingerprint, default_call_budget,
-    resolve_call_budget, validate_budget_overrides,
+    resolve_call_budget, resolve_run_budget, validate_budget_overrides,
+    validate_run_budget_overrides,
 )
 
 
@@ -65,6 +66,21 @@ class CallBudgetTests(unittest.TestCase):
             "max_input_tokens": 60_000, "max_output_tokens": 1_500,
             "max_cost_usd": 1.0, "timeout_seconds": 180,
         })
+
+    def test_run_budget_resolves_general_then_purpose(self):
+        config = {
+            "run_budget": {"max_cost_usd": 4.0, "max_units": 3},
+            "purpose_run_budgets": {"dossier": {"max_units": 2, "max_calls": 5}},
+        }
+        self.assertEqual(resolve_run_budget(
+            config, "dossier", defaults={"max_cost_usd": 5.0, "max_units": 4}),
+            {"max_cost_usd": 4.0, "max_units": 2, "max_calls": 5})
+
+    def test_run_budget_rejects_unknown_nonpositive_and_nonfinite(self):
+        for value in ({"other": 1}, {"max_events": 0},
+                      {"max_calls": True}, {"max_cost_usd": math.nan}):
+            with self.subTest(value=value), self.assertRaises(CallBudgetError):
+                validate_run_budget_overrides(value)
 
 
 if __name__ == "__main__":
