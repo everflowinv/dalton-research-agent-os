@@ -23,7 +23,7 @@ from pathlib import Path
 
 from dalton_core.claim_index_authority import ClaimIndexAuthority
 from dalton_core.company_dossier import (
-    CompanyDossierAuthority, causal_chain_hash, validate_policy,
+    VARIANT_SLOTS, CompanyDossierAuthority, causal_chain_hash, validate_policy,
 )
 from dalton_core.company_dossier_cli import (
     build_parser, granted_scope, run_dossier, screened_companies, stale_units,
@@ -150,16 +150,29 @@ class Harness:
 
     def tag(self, ref, aspect, *, statement, metric="demand environment",
             kind="qualitative", value=None, unit=None, group=None,
-            period="2026-03-01..2026-05-31"):
+            period="2026-03-01..2026-05-31", importance="filing"):
         claim = self.fixture.add_claim(
             ref, kind=kind, value=value, unit=unit, metric=metric,
             statement=statement, period=period)
         self.index.record_entry(**entry_args(
             claim, aspect=aspect, metric_or_aspect=metric, period_key=period,
             dedupe_group_key=group or f"qual|{ACN}|{ref}",
-            claim_kind=kind, importance="filing",
+            claim_kind=kind, importance=importance,
             importance_basis="document_spec:sec-10q"))
         return claim
+
+    def add_market_view(self):
+        """Sell-side material, which is what a variant view is allowed to rest on.
+
+        The fixture had none, so every run left the variant view
+        ``unavailable`` -- which is why nothing here ever published a drafted
+        one, and why a validator that dropped a field from that shape went
+        unnoticed for a whole review cycle.
+        """
+
+        return self.tag("m-1", "history_of_price_drivers",
+                        statement="卖方在报告里把估值倍数的回落归因于联邦支出。",
+                        metric="street view", importance="sell_side")
 
     def add_guidance_pair(self, period="2026-03-01..2026-05-31", actual=8.0):
         """A guide and the settled number that answered it, both as Claims."""
@@ -496,6 +509,34 @@ class GuidanceThroughTheCoreTests(unittest.TestCase):
                        if item["aspect"] == "guidance_style")
         self.assertEqual(section["profile"]["classification"], "mixed")
         self.assertEqual(section["profile"]["settled"], 4)
+
+
+class VariantViewLaneTests(unittest.TestCase):
+    """The variant view, drafted and published through the whole path."""
+
+    def setUp(self):
+        self.harness = Harness()
+        self.addCleanup(self.harness.close)
+        self.harness.add_market_view()
+        self.authority = CompanyDossierAuthority(self.harness.store)
+
+    def test_sell_side_material_gets_the_variant_view_drafted_and_published(self):
+        summary = self.harness.run(max_units=12)
+        self.assertEqual(summary["dossier_status"], "published")
+        self.assertIn("variant_view", summary["units_drafted"])
+        record = self.authority.latest(ACN)
+        block = record["variant_view"]
+        self.assertEqual(block["status"], "drafted")
+        self.assertTrue(block["market_view_available"])
+        self.assertEqual([slot["slot_id"] for slot in block["slots"]],
+                         list(VARIANT_SLOTS))
+        # And it reads back through the same door a reader would use.
+        self.assertEqual(self.authority.dossier(record["id"])["variant_view"], block)
+
+    def test_the_variant_view_is_planned_as_ready_once_the_street_is_in_the_ledger(self):
+        planned = self.harness.run(dry_run=True)["units_planned"]
+        self.assertEqual(planned["variant_view"]["status"], "ready")
+        self.assertEqual(planned["variant_view"]["slots"], len(VARIANT_SLOTS))
 
 
 class GateTests(unittest.TestCase):

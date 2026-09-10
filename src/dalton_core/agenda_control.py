@@ -57,6 +57,15 @@ _LEGACY_HTML_PATH = Path(__file__).with_name("cockpit_control_legacy.html")
 MAX_BODY_BYTES = 16384
 SESSION_TTL_SECONDS = 3600
 AUTOMATION_SUBJECT = "automation:timeout"
+# ADR-0009: the Perception/Agenda plane is retired.  ``/legacy`` keeps serving
+# the delivered decisions -- they are history and history is not deleted -- but
+# the view says so rather than presenting itself as a live queue that someone
+# is still filling.
+AGENDA_PLANE_RETIREMENT_REF = "adr:0009-one-event-plane"
+AGENDA_PLANE_RETIREMENT_NOTE = (
+    "议程/感知平面已退役（ADR-0009）。这里只读已送达的历史，不会再有新的议程；"
+    "事件平面是 ResearchEvent 与判断车道。"
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -424,6 +433,9 @@ class AgendaControlPlane:
             "as_of": now.isoformat(timespec="seconds"),
             "timeout_seconds": self.config.feedback_timeout_seconds,
             "items": rows,
+            "retired": True,
+            "retirement_ref": AGENDA_PLANE_RETIREMENT_REF,
+            "retirement_note": AGENDA_PLANE_RETIREMENT_NOTE,
         }
 
     def record(self, login: str, decision_ref: str, verdict: str) -> dict[str, Any]:
@@ -823,6 +835,14 @@ class AgendaControlApplication:
         # renderer rather than re-laid-out here.
         if path == "/v1/cockpit/model":
             return {**plane.company_model(query.get("company", "")), "enabled": True}
+        # INT2 / P14a: what every connector can actually hand over, at what
+        # tier, under what quota and how often -- plus the same question about
+        # the model side. The owner asked for the first table by name.
+        if path == "/v1/cockpit/sources":
+            return {**plane.sources(), "enabled": True}
+        # INT2 / Q2: 每周回头看 -- the latest week's "我们把时间花在哪".
+        if path == "/v1/cockpit/reflection":
+            return {**plane.cycle_reflection(), "enabled": True}
         if path == "/v1/cockpit/history":
             kind = query.get("kind", "ask")
             if kind not in {"ask", "goal", "steer"}:
@@ -1111,10 +1131,32 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
     return Handler
 
 
+def _research_task_grant(config: AgendaControlConfig) -> Any:
+    """The resolver ``adhoc_research_enabled`` needs, or None when it cannot be.
+
+    P14e made the flag a question and left nobody to ask: the plane accepted a
+    resolver, no caller passed one, and ``adhoc_research_enabled`` therefore
+    answered False for a reason that had nothing to do with the owner's
+    grant.  The cockpit section is where this process learns the Core's path,
+    so a Core configured without it still answers False -- but now because the
+    path is unknown rather than because the wiring was never finished.
+    """
+
+    if config.cockpit is None:
+        return None
+    from .research_task import cockpit_grant_resolver
+
+    return cockpit_grant_resolver(
+        config.cockpit.core_db, mission_ref=config.cockpit.mission_ref,
+    )
+
+
 def serve(config: AgendaControlConfig) -> None:
     if config.host not in {"127.0.0.1", "::1"}:
         raise AgendaControlError("Agenda control must bind loopback")
-    plane = AgendaControlPlane(config)
+    plane = AgendaControlPlane(
+        config, research_task_grant=_research_task_grant(config),
+    )
     review_plane = (
         None
         if config.research_review is None

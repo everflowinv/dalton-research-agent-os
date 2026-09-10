@@ -201,3 +201,132 @@ class MetricDiscoveryAttributionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiSubjectAdmissionTests(unittest.TestCase):
+    """P10x/S1: one window, a two-subject plan, through the real admission loop.
+
+    The unit tests decide *who* a statement is about.  This one asserts what
+    the loop does with that answer: two candidates rather than one, distinct
+    pair keys so the second does not collide with the first, and a replay that
+    is a duplicate rather than a second Claim.
+    """
+
+    def setUp(self):
+        from dalton_core.extraction_backlog import DocumentProvenanceStore
+        from dalton_core.research_review import HumanReviewAuthority
+        from dalton_core.research_verification import CandidateStagingStore
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.h = ExtractionHarness(Path(self.temp.name))
+        self.addCleanup(self.h.close)
+        params = mission_params(self.h.state)
+        params["autonomy"]["may_write"] = list(params["autonomy"]["may_write"]) + ["source_discovery"]
+        for item in params["source_plan"]:
+            if item["source_ref"] == "source:alphaengine":
+                item["status"] = "connected"
+        params.update({"version_id": "coverage-mission-version:us-it-services:2",
+                       "prior_version_ref": self.h.mission["id"],
+                       "idempotency_key": "coverage-mission:us-it-services:2"})
+        ref = params.pop("mission_ref")
+        self.v2 = self.h.missions.create_mission(ref, **params)
+        self.h.missions.carry_forward_superseded_documents(ref)
+        self.h.missions.backfill_document_reviews(ref)
+        self.review = self.h.missions.document_reviews(
+            self.v2["id"], state="awaiting_human_extraction", limit=1)[0]
+        self.actor = self.v2["autonomy"]["automation_principal"]
+        staging = str(Path(self.temp.name) / "staging.sqlite")
+        self.h.writer._candidate_staging = CandidateStagingStore(staging)
+        self.h.writer._candidate_review = HumanReviewAuthority(staging)
+        self.addCleanup(self.h.writer._candidate_staging.close)
+        # Point the harness at the v2 review, which is the active one, and
+        # generate the one fixture suggestion this window will admit.
+        self.h.params = {"review_id": self.review["review_id"],
+                         "expected_review_hash": content_hash(self.review),
+                         "offset": 0, "actor_ref": self.actor}
+        self.h.enable_fixture()
+        self.h.service.generate(**self.h.params,
+                                expected_context_hash=self.h.context()["content_hash"])
+        self._policy_with_document_rule()
+        self.store = DocumentProvenanceStore(self.h.h.core.connection)
+        self.members = [m["company_ref"] for m in self.v2["universe"]]
+
+    def _policy_with_document_rule(self):
+        from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
+        from tests.test_document_extraction import OWNER
+
+        core = self.h.h.core
+        core.create_policy(
+            {**core.active_policy_version().policy,
+             "research_candidate_auto_commit": {
+                 "enabled": True, "max_records": 20,
+                 "rules": [DOCUMENT_QUALITATIVE_RULE_REF]}},
+            policy_version_id="policy:synthetic-document-qualitative:2", actor_ref=OWNER,
+            change_reason="ADR-0005 fixture: list the mission document qualitative rule",
+        )
+        self.rule_ref = DOCUMENT_QUALITATIVE_RULE_REF
+
+    def _plan(self, subjects):
+        return patch.object(type(self.h.service), "statement_subjects",
+                            return_value=lambda statement: {"subjects": list(subjects),
+                                                            "basis": "test"})
+
+    def admit(self):
+        review = self.h.missions.document_review(self.review["review_id"])
+        return self.h.service.admit_suggestions(
+            review_id=review["review_id"], expected_review_hash=content_hash(review),
+            offset=0, actor_ref=self.actor)
+
+    def test_two_subjects_mint_two_candidates_with_distinct_keys(self):
+        primary, other = self.review["company_ref"], next(
+            ref for ref in self.members if ref != self.review["company_ref"])
+        before = self.h.counts()
+        with self._plan([primary, other]):
+            result = self.admit()
+        self.assertEqual(result["status"], "admitted", result)
+        admitted = result["admitted"]
+        self.assertEqual([entry["subject_ref"] for entry in admitted], [primary, other])
+        self.assertEqual([entry["status"] for entry in admitted], ["admitted", "admitted"])
+        # Distinct candidate identity, or the second collides with the first.
+        self.assertEqual(len({entry["candidate_claim_ref"] for entry in admitted}), 2)
+        self.assertEqual(len({entry["claim_version_ref"] for entry in admitted}), 2)
+        after = self.h.counts()
+        self.assertEqual(after["claim_versions"] - before["claim_versions"], 2)
+        self.assertEqual(after["evidence_versions"] - before["evidence_versions"], 2)
+        # One quote, so one correction set shared by both.
+        self.assertEqual(
+            after["transcript_correction_set_versions"]
+            - before["transcript_correction_set_versions"], 1)
+        subjects = {self.h.h.core.get_claim(entry["claim_version_ref"])["claim"]["subject_ref"]
+                    for entry in admitted}
+        self.assertEqual(subjects, {primary, other})
+
+    def test_replaying_the_same_two_subject_window_writes_nothing_new(self):
+        primary, other = self.review["company_ref"], next(
+            ref for ref in self.members if ref != self.review["company_ref"])
+        with self._plan([primary, other]):
+            first = self.admit()
+            settled = self.h.counts()
+            again = self.admit()
+        self.assertEqual([entry["status"] for entry in again["admitted"]],
+                         ["duplicate", "duplicate"])
+        self.assertEqual([entry["candidate_claim_ref"] for entry in again["admitted"]],
+                         [entry["candidate_claim_ref"] for entry in first["admitted"]])
+        self.assertEqual(self.h.counts(), settled)
+
+    def test_the_single_subject_key_is_the_one_it_has_always_been(self):
+        # B3: the review's own company must keep byte-identical identity, or
+        # every Claim already admitted on live would be minted a second time.
+        primary = self.review["company_ref"]
+        with self._plan([primary]):
+            alone = self.admit()
+        settled = self.h.counts()
+        with self._plan([primary, next(r for r in self.members if r != primary)]):
+            widened = self.admit()
+        self.assertEqual(widened["admitted"][0]["candidate_claim_ref"],
+                         alone["admitted"][0]["candidate_claim_ref"])
+        self.assertEqual(widened["admitted"][0]["status"], "duplicate")
+        self.assertEqual(widened["admitted"][1]["status"], "admitted")
+        after = self.h.counts()
+        self.assertEqual(after["claim_versions"] - settled["claim_versions"], 1)

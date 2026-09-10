@@ -145,14 +145,38 @@ for yfinance_kind in yfinance-daily-prices yfinance-analyst-estimates; do
     chmod 600 "$yfinance_file"
   fi
 done
-# Not seeded here: the S1 feed connectors (sales-notes, company-wiki) and the
-# Guidepoint lane's own record. Their governance records are in the repo now,
-# but a record alone does not turn any of them on -- the feed lanes also want
-# a feed plan and an OpenClaw workspace directory, and the Guidepoint lane
-# wants a discovery plan this repo does not ship. Copying half of what a lane
-# needs gives the owner an approval to make and a lane that starts and refuses
-# every tick, which reads like a fault rather than an absence. Seeding them is
-# one block each, once whoever owns those lanes says what the other half is.
+# INT2: the rule INT1 wrote down and this block keeps -- a lane is seeded all
+# or nothing. Copying half of what a lane needs gives the owner an approval to
+# make and a lane that starts and refuses every tick, which reads like a fault
+# rather than an absence. So each block below either puts down everything its
+# lane switches on, or puts down nothing and says why.
+#
+# C1: the catalyst calendar reads Yahoo's diary for the covered companies. Its
+# own record, because a schema hash binds one operation and an approval to read
+# prices is not an approval to read anything else Yahoo serves. This one record
+# is the whole switch: without it the writer's plist carries no
+# --catalyst-calendar-governance and the lane is not installed. Seeded once as
+# *proposed*; the owner approves in place with `dalton-connector-governance
+# approve`. The lane needs no new mission version -- the live mission already
+# grants `observation`.
+calendar_governance_file="$governance_dir/yfinance-calendar-v1.json"
+if [[ ! -f "$calendar_governance_file" && -f "$repo_root/deploy/connector-governance/yfinance-calendar-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/yfinance-calendar-v1.json" "$calendar_governance_file"
+  chmod 600 "$calendar_governance_file"
+fi
+# S4: the six China / Hong Kong fundamentals records. There is no lane for them
+# in this wave -- the mission universe is US-listed -- so seeding them turns
+# nothing on and cannot half-turn-on anything. They are here so the owner can
+# read and approve them in place; six schema hashes, six separate approvals,
+# because approving statements is not approving northbound flow.
+for cn_hk_kind in financial-statements shareholders buybacks margin-balance \
+                  northbound-flow ah-premium; do
+  cn_hk_file="$governance_dir/cn-hk-findata-${cn_hk_kind}-v1.json"
+  if [[ ! -f "$cn_hk_file" && -f "$repo_root/deploy/connector-governance/cn-hk-findata-${cn_hk_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/cn-hk-findata-${cn_hk_kind}-v1.json" "$cn_hk_file"
+    chmod 600 "$cn_hk_file"
+  fi
+done
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound
@@ -201,6 +225,165 @@ sec_plan_file="$plan_dir/us-it-services-sec-filings-v1.json"
 if [[ ! -f "$sec_plan_file" && -f "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" ]]; then
   cp "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" "$sec_plan_file"
   chmod 600 "$sec_plan_file"
+fi
+# S2 / INT2: the Guidepoint expert-network lane. Its two governance records are
+# already seeded above (P13ae); what it also wants is a discovery plan, and the
+# lane's argv fragment requires *both* files -- the plan being on disk is the
+# other half of the switch. Seeded together with the records, so the pair is
+# never half present. The narrowing record is deliberately NOT put in
+# connector-governance/: nothing loads it, it is the note the owner reads
+# before deciding what to do with the approval for an operation the upstream
+# does not have, and a permanently-proposed record in the runtime directory is
+# an approval to make about nothing.
+gp_plan_file="$plan_dir/us-it-services-guidepoint-v1.json"
+if [[ ! -f "$gp_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-guidepoint-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p9-us-it-services-guidepoint-v1.json" "$gp_plan_file"
+  chmod 600 "$gp_plan_file"
+fi
+decisions_dir="$state_dir/governance-decisions"
+mkdir -p "$decisions_dir"
+chmod 700 "$decisions_dir"
+gp_narrowing_file="$decisions_dir/guidepoint-get-transcript-narrowing-v1.json"
+if [[ ! -f "$gp_narrowing_file" && -f "$repo_root/deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json" "$gp_narrowing_file"
+  chmod 600 "$gp_narrowing_file"
+fi
+# S1 / INT2: the two human-feed lanes read files a host skill already wrote to
+# this disk. Neither one is a network connector, so what turns them on is the
+# feed plan, their approved records, and the source directory *being there*.
+# The workspace is named by an environment variable rather than assumed,
+# because a Core installed without OpenClaw has no feeds and should end up
+# with no feed lane rather than with two lanes that refuse every tick.
+#
+#   DALTON_OPENCLAW_WORKSPACE=~/.openclaw/workspace   (the default)
+#
+# The two lanes are seeded independently: sales notes and the company wiki are
+# separate approvals, separate directories and separate LaneSpecs, so one
+# being absent must not take the other with it.
+openclaw_workspace=${DALTON_OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}
+feed_plan_dir="$state_dir/feed-plans"
+feeds_dir="$state_dir/feeds"
+digest_source="$openclaw_workspace/skills/market-digest/output"
+wiki_index_source="$openclaw_workspace/wiki-index.sqlite"
+seed_feed_plan() {
+  mkdir -p "$feed_plan_dir"
+  chmod 700 "$feed_plan_dir"
+  feed_plan_file="$feed_plan_dir/p9-us-it-services-feeds-v1.json"
+  if [[ ! -f "$feed_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" ]]; then
+    cp "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" "$feed_plan_file"
+    chmod 600 "$feed_plan_file"
+  fi
+}
+if [[ -d "$digest_source" ]]; then
+  seed_feed_plan
+  for sales_notes_kind in sales-notes-list-notes sales-notes-get-note; do
+    sales_notes_file="$governance_dir/${sales_notes_kind}-v1.json"
+    if [[ ! -f "$sales_notes_file" && -f "$repo_root/deploy/connector-governance/${sales_notes_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${sales_notes_kind}-v1.json" "$sales_notes_file"
+      chmod 600 "$sales_notes_file"
+    fi
+  done
+  mkdir -p "$feeds_dir"
+  chmod 700 "$feeds_dir"
+  # A link, not a copy: the digest directory is the skill's own output and
+  # gets a new file twice a day. A copy would be a second, stale truth.
+  if [[ ! -e "$feeds_dir/market-digest-output" ]]; then
+    ln -s "$digest_source" "$feeds_dir/market-digest-output"
+  fi
+else
+  print "note: no market-digest output at $digest_source; the sales-note lane is not installed."
+fi
+# The wiki corpus is 258 MB and its index rows carry paths relative to the
+# workspace root, so the corpus root has to *be* the workspace: a link to a
+# subdirectory would make every document path escape the root and be refused.
+# The index therefore has to be reachable as <workspace>/wiki-index.sqlite,
+# which is the owner's one line to run (see the owner-steps document); this
+# script does not write inside the OpenClaw workspace.
+if [[ -d "$openclaw_workspace" && -e "$wiki_index_source" ]]; then
+  seed_feed_plan
+  for company_wiki_kind in company-wiki-list-documents company-wiki-get-document; do
+    company_wiki_file="$governance_dir/${company_wiki_kind}-v1.json"
+    if [[ ! -f "$company_wiki_file" && -f "$repo_root/deploy/connector-governance/${company_wiki_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${company_wiki_kind}-v1.json" "$company_wiki_file"
+      chmod 600 "$company_wiki_file"
+    fi
+  done
+  mkdir -p "$feeds_dir"
+  chmod 700 "$feeds_dir"
+  if [[ ! -e "$feeds_dir/company-wiki" ]]; then
+    ln -s "$openclaw_workspace" "$feeds_dir/company-wiki"
+  fi
+else
+  print "note: no wiki index at $wiki_index_source; the company-wiki lane is not installed."
+fi
+# S3 / INT2: the three crowd sources. Seven records, a per-company map of
+# handles and queries, and three host tools this Core does not know the
+# location of. All of it together or none of it: the map is the lane's switch,
+# and a lane switched on with no tool refuses every networked run with "no
+# tool configured", which is the failure this rule exists to prevent.
+#
+#   DALTON_AGENT_REACH_TOOL=/opt/homebrew/bin/agent-reach   (Xueqiu channel)
+#   DALTON_XUEQIU_HOT_RANK_TOOL=...                         (the hot-rank shim)
+#   DALTON_XREACH_TOOL=/opt/homebrew/bin/xreach             (X timelines)
+#
+# Xueqiu's hot rank is not a subcommand of agent-reach, so it needs its own
+# small shim; the other two subcommands are agent-reach's own. Even with all
+# three present the lane stays off until the owner approves a record: all seven
+# ship *proposed* and the lane reads the status rather than the file's presence.
+crowd_tools_dir="$state_dir/host-tools"
+if [[ -x "${DALTON_AGENT_REACH_TOOL:-}" && -x "${DALTON_XUEQIU_HOT_RANK_TOOL:-}" \
+   && -x "${DALTON_XREACH_TOOL:-}" ]]; then
+  mkdir -p "$crowd_tools_dir"
+  chmod 700 "$crowd_tools_dir"
+  ln -sfn "$DALTON_AGENT_REACH_TOOL" "$crowd_tools_dir/agent-reach"
+  ln -sfn "$DALTON_XUEQIU_HOT_RANK_TOOL" "$crowd_tools_dir/xueqiu-hot-rank"
+  ln -sfn "$DALTON_XREACH_TOOL" "$crowd_tools_dir/xreach"
+  for crowd_kind in xueqiu-search-posts xueqiu-get-post xueqiu-hot-rank \
+                    x-xreach-user-timeline x-xreach-search x-xreach-thread \
+                    employee-reviews-blind; do
+    crowd_file="$governance_dir/${crowd_kind}-v1.json"
+    if [[ ! -f "$crowd_file" && -f "$repo_root/deploy/connector-governance/${crowd_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${crowd_kind}-v1.json" "$crowd_file"
+      chmod 600 "$crowd_file"
+    fi
+  done
+  phase9_dir="$state_dir/phase9"
+  mkdir -p "$phase9_dir"
+  chmod 700 "$phase9_dir"
+  crowd_map_file="$phase9_dir/p9-us-it-services-crowd-sources-v1.json"
+  if [[ ! -f "$crowd_map_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-crowd-sources-v1.json" ]]; then
+    cp "$repo_root/deploy/phase9/p9-us-it-services-crowd-sources-v1.json" "$crowd_map_file"
+    chmod 600 "$crowd_map_file"
+  fi
+else
+  print "note: set DALTON_AGENT_REACH_TOOL, DALTON_XUEQIU_HOT_RANK_TOOL and DALTON_XREACH_TOOL to install the crowd-source lane."
+fi
+# P14a / INT2: the tracking policy is the daily-tracking lane's whole switch --
+# a tracking lane with no baselines has no opinion about how often to look at
+# anything. One file, so all-or-nothing is automatic. The *judgement* lane is
+# deliberately not installed here: it needs two model configurations pointing
+# at routing policies of different families, and a judge whose verifier is the
+# same model is not a verifier. That pair is the owner's decision and is in the
+# owner-steps document.
+tracking_policy_file="$state_dir/tracking-policy.json"
+if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" "$tracking_policy_file"
+  chmod 600 "$tracking_policy_file"
+fi
+# P14e / INT2: the three ProbeTemplates the ad-hoc research lane may bind. The
+# manifest is publication material -- the owner publishes each template with a
+# `human:` principal, and this script never signs anything -- so it is put
+# where the owner can read it and nowhere a lane looks. The lane's own config
+# file (research-task-lane.json) is *not* written here: it is the lane's
+# switch, and switching the lane on before any template is published gives a
+# lane that answers no_executable_adhoc_template_published every tick.
+phase8_dir="$state_dir/phase8"
+mkdir -p "$phase8_dir"
+chmod 700 "$phase8_dir"
+adhoc_templates_file="$phase8_dir/p14e-adhoc-probe-templates-v1.json"
+if [[ ! -f "$adhoc_templates_file" && -f "$repo_root/deploy/phase8/p14e-adhoc-probe-templates-v1.json" ]]; then
+  cp "$repo_root/deploy/phase8/p14e-adhoc-probe-templates-v1.json" "$adhoc_templates_file"
+  chmod 600 "$adhoc_templates_file"
 fi
 # ADR-0005 / P9d-17a: the writer needs an approved extraction model
 # configuration for drafting to run as mission automation.  Idempotent: appends
@@ -285,6 +468,28 @@ fi
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.
 "$venv_dir/bin/python" -m dalton_core.cockpit_setup --config "$config_path"
+# INT2 / P14-M: tell the cockpit where the gateway's own model catalog is, so
+# the page can say whether the models this Core holds are the models the broker
+# offers -- and which way they differ, because "out of sync" on its own tells
+# nobody what to do. A path rather than a convention: the control process must
+# not go looking through the host's home directory on its own, and a Core
+# installed without the gateway simply gets no catalog block.
+if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "$HOME/.openclaw/openclaw.json" <<'PYBROKER'
+import json, sys
+from pathlib import Path
+
+path, broker = Path(sys.argv[1]), sys.argv[2]
+config = json.loads(path.read_text(encoding="utf-8"))
+cockpit = ((config.get("control") or {}).get("config") or {}).get("cockpit")
+if isinstance(cockpit, dict):
+    cockpit["openclaw_config_path"] = broker
+    path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+    print("cockpit.openclaw_config_path=" + broker)
+PYBROKER
+fi
 # P10f/P10h: DALTON_EXTRACTION_MAX_WINDOWS raises reading throughput. Each
 # window is one paid model call against the mission's max_daily_paid_calls, so
 # raise the mission budget first.
