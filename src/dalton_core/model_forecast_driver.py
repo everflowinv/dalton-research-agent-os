@@ -2297,11 +2297,16 @@ class ForecastModelAuthority:
             "ORDER BY version_number DESC LIMIT 1", (model_ref,),
         ).fetchone()
         duplicate_existing = latest is not None and latest["body_hash"] == digest
-        if duplicate_existing and self.connection.execute(
-            "SELECT 1 FROM forecast_model_filing_proofs WHERE model_version_id=?",
-            (latest["version_id"],),
-        ).fetchone() is not None:
-            return {**self.model(latest["version_id"]), "status": "duplicate"}
+        if duplicate_existing:
+            existing_proof = self.connection.execute(
+                "SELECT 1 FROM forecast_model_filing_proofs WHERE model_version_id=?",
+                (latest["version_id"],),
+            ).fetchone()
+            # Legacy callers that are only checking model idempotence do not
+            # owe filing evidence.  Backfill is entered only by a caller that
+            # supplies the exact statement rows needed to construct a proof.
+            if existing_proof is not None or not statement_rows:
+                return {**self.model(latest["version_id"]), "status": "duplicate"}
         # Lost update. A caller computed this from some version; if the chain
         # has moved since, appending it would quietly undo whatever moved it --
         # and the record would carry the *caller's* change_reason for a change
