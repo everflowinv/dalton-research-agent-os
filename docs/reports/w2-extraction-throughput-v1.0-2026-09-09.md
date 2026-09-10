@@ -466,6 +466,13 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
    **但今天它没有在坏任何东西**：live 的 `may_write` 里没有 `research_task`、
    已发布的 ad-hoc 模板是 0，这条车道在两个 owner 动作上都还是停的。
    它是**授权打开的那一天**才会咬人，咬五家里的一家——值得在开闸前修，不是正在冒烟。
+
+   **这三条不是 P14e review 的全部。** 上面列的是与本报告有交叉引用的那几条；
+   code-review 那一轮总共 7 条（还有 `bounded_planner_driver.py:465` 的裸 `except` 把瞬时
+   写入失败变成永久 `source_unavailable`、`agenda_control.py:290` 的 `research_task_grant`
+   从未被 `serve()` 接线所以开关恒为 False，以及两条模板绑不上的低危项）。
+   那四条**只存在于本次会话的 transcript 里**——`ReportFindings` 当时不可用，
+   而写不写成文件是 owner 的决定，不是本片能替它做的。开 ad-hoc 闸之前应当先把它们捞出来。
    诊断见第四节，均由 code-review 复核确认，修在 P14e / C2 的切片里。
 
    **注意不要把第 1 条和第 5 条连起来读。** DXC 那 17 份卡在 `discovered` 的研报是
