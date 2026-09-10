@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import plistlib
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
@@ -96,12 +97,27 @@ def render(
     extraction_numeric_windows: int | None = None,
     extraction_discovery_windows: int | None = None,
     alphaengine_owner_call_cap: int | None = None,
+    label_namespace: str | None = None,
 ) -> dict[str, str]:
     destination = Path(launch_agents_dir).expanduser().resolve()
     bin_dir = Path(python_env_bin).expanduser().resolve()
     state = Path(state_dir).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
     logs = Path(log_dir).expanduser().resolve()
+    if label_namespace is None:
+        labels = {
+            "writer": WRITER_LABEL,
+            "controller": CONTROLLER_LABEL,
+            "control": CONTROL_LABEL,
+            "thesis_impact": THESIS_IMPACT_LABEL,
+        }
+    else:
+        if not re.fullmatch(r"space\.lumos\.dalton\.workspace\.[a-z0-9][a-z0-9-]{0,62}", label_namespace):
+            raise ValueError("workspace LaunchAgent namespace is invalid")
+        labels = {
+            role: f"{label_namespace}.{role.replace('_', '-')}"
+            for role in ("writer", "controller", "control", "thesis_impact")
+        }
     sec_discovery_plan = _sec_discovery_plan(state)
     logs.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(logs, 0o700)
@@ -161,7 +177,7 @@ def render(
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
     }
     writer = common | {
-        "Label": WRITER_LABEL,
+        "Label": labels["writer"],
         # S7d: the writer hosts CPU-bound children (AlphaEngine acquisition,
         # SEC company-facts lane) that inherit its launchd process type.
         # Measured 2026-08-26: ``Background`` runs CPU work ~6x slower than
@@ -298,20 +314,20 @@ def render(
                 ["--alphaengine-owner-call-cap", str(int(alphaengine_owner_call_cap))]
             )
     controller = common | {
-        "Label": CONTROLLER_LABEL,
+        "Label": labels["controller"],
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],
         "StandardOutPath": str(logs / "controller.stdout.log"),
         "StandardErrorPath": str(logs / "controller.stderr.log"),
     }
-    writer_path = destination / f"{WRITER_LABEL}.plist"
-    controller_path = destination / f"{CONTROLLER_LABEL}.plist"
+    writer_path = destination / f"{labels['writer']}.plist"
+    controller_path = destination / f"{labels['controller']}.plist"
     _atomic_plist(writer_path, writer)
     _atomic_plist(controller_path, controller)
     result = {"writer": str(writer_path), "controller": str(controller_path)}
-    control_path = destination / f"{CONTROL_LABEL}.plist"
+    control_path = destination / f"{labels['control']}.plist"
     if service_config is not None and service_config.control is not None:
         control = common | {
-            "Label": CONTROL_LABEL,
+            "Label": labels["control"],
             "ProgramArguments": [str(bin_dir / "dalton-control"), "--config", str(config)],
             "StandardOutPath": str(logs / "control.stdout.log"),
             "StandardErrorPath": str(logs / "control.stderr.log"),
@@ -320,12 +336,12 @@ def render(
         result["control"] = str(control_path)
     elif control_path.exists():
         control_path.unlink()
-    thesis_impact_path = destination / f"{THESIS_IMPACT_LABEL}.plist"
+    thesis_impact_path = destination / f"{labels['thesis_impact']}.plist"
     if service_config is not None and service_config.thesis_impact is not None:
         thesis_impact = {
             key: value for key, value in common.items() if key != "KeepAlive"
         } | {
-            "Label": THESIS_IMPACT_LABEL,
+            "Label": labels["thesis_impact"],
             "StartInterval": int(service_config.thesis_impact_interval_seconds or 300),
             "ProgramArguments": [
                 str(bin_dir / "dalton-thesis-impact"),
