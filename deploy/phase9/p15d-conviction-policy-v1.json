@@ -1,0 +1,73 @@
+{
+ "content_hash": "c65fb6d19194323e7f291fb265eb24e8874f969ffc32016e72f59a02804e2837",
+ "market_view_sources": [
+  "consensus",
+  "sell_side_rating",
+  "debate_market_position",
+  "sales_note",
+  "crowd_narrative",
+  "management_framing"
+ ],
+ "max_calls_per_company_per_week": 1,
+ "min_consensus_gap_percent": "10",
+ "min_event_pathway": 1,
+ "min_falsifiers": 1,
+ "policy_ref": "conviction-policy:p15d:v1",
+ "risk_reward_standards": [
+  {
+   "directions": [
+    "long"
+   ],
+   "horizons": [
+    "6_12_months"
+   ],
+   "playbook_text": "价值型：6–12 个月 50% upside",
+   "rule": "min_upside_percent",
+   "standard_ref": "risk-reward:value:6-12m",
+   "threshold": "50"
+  },
+  {
+   "directions": [
+    "long"
+   ],
+   "horizons": [
+    "3_5_years"
+   ],
+   "playbook_text": "长期复利型：目标盈利增速 + 内在价值；长期核心持仓 3–5 年 3–5x",
+   "rule": "min_upside_percent",
+   "standard_ref": "risk-reward:compounder:3-5y",
+   "threshold": "200"
+  },
+  {
+   "directions": [
+    "long"
+   ],
+   "horizons": [
+    "3_6_months",
+    "1_3_years"
+   ],
+   "playbook_text": "周期反转 + 催化型：对了赚多少（盈利 + 估值）/ 错了亏多少；回报必须补偿波动",
+   "rule": "min_reward_to_risk",
+   "standard_ref": "risk-reward:cycle-catalyst",
+   "threshold": "2"
+  },
+  {
+   "directions": [
+    "short"
+   ],
+   "horizons": [
+    "3_6_months"
+   ],
+   "playbook_text": "做空：3–6 个月 30% downside；交易时间跨度必须写明",
+   "rule": "min_downside_percent",
+   "standard_ref": "risk-reward:short:3-6m",
+   "threshold": "30"
+  }
+ ],
+ "time_horizons": [
+  "3_6_months",
+  "6_12_months",
+  "1_3_years",
+  "3_5_years"
+ ]
+}

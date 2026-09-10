@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import plistlib
+import re
 import shutil
 import socket
 import sqlite3
@@ -311,14 +312,11 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/connector-governance/sec-company-facts-v3.json",
         "connector-governance/sec-company-facts-v3.json",
     ),
-    SeedSpec(
-        "deploy/connector-governance/roic-list-transcripts-v1.json",
-        "connector-governance/roic-list-transcripts-v1.json",
-    ),
-    SeedSpec(
-        "deploy/connector-governance/roic-get-transcript-v1.json",
-        "connector-governance/roic-get-transcript-v1.json",
-    ),
+    # INT3: the two roic.ai records are committed and install.sh deliberately
+    # does not seed them -- see DELIBERATELY_UNSEEDED in the script. roic
+    # answers 403 site-wide and nothing in the writer loads either record, so
+    # a seed here would be two approvals to make about a source that answers
+    # nothing.
     SeedSpec(
         "deploy/connector-governance/guidepoint-search-library-v1.json",
         "connector-governance/guidepoint-search-library-v1.json",
@@ -363,6 +361,14 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/phase9/p9d4-us-it-services-web-search-plan-v3.json",
         "discovery-plans/us-it-services-web-search-v3.json",
     ),
+    # P10u / INT3: the filings lane is a record *and* a plan, seeded as one
+    # block. The writer's plist names the record unconditionally, so a Core
+    # without it gets ``--sec-filings-governance`` pointing at nothing -- which
+    # is what it did until the record was recovered into the repository.
+    SeedSpec(
+        "deploy/connector-governance/sec-filings-index-v1.json",
+        "connector-governance/sec-filings-index-v1.json",
+    ),
     SeedSpec(
         "deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json",
         "discovery-plans/us-it-services-sec-filings-v1.json",
@@ -405,6 +411,18 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
     SeedSpec(
         "deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json",
         "governance-decisions/guidepoint-get-transcript-narrowing-v1.json",
+    ),
+    # P14a / INT2: the tracking policy is the daily-tracking lane's whole
+    # switch. One file, so all-or-nothing is automatic.
+    SeedSpec(
+        "deploy/phase9/p14a-tracking-policy-v1.json",
+        "tracking-policy.json",
+    ),
+    # P14e / INT2: publication material, put where the owner reads it and no
+    # lane looks. It is not the ad-hoc lane's switch and does not turn it on.
+    SeedSpec(
+        "deploy/phase8/p14e-adhoc-probe-templates-v1.json",
+        "phase8/p14e-adhoc-probe-templates-v1.json",
     ),
     # S1: the two human-feed lanes.  Both gated on the OpenClaw workspace
     # actually containing what they read, and seeded independently -- sales
@@ -464,22 +482,149 @@ def seeded_repo_records(seeds: Sequence[SeedSpec] = INSTALL_SEEDS) -> frozenset[
     )
 
 
-def unseeded_governance_records(repo_root: Path) -> tuple[str, ...]:
-    """Committed governance records no install path copies anywhere.
+# ---------------------------------------------------------------------------
+# pure: reading the seeds back out of install.sh itself
+# ---------------------------------------------------------------------------
 
-    A record in the repo that install.sh never seeds is not automatically a
-    bug -- install.sh says in comments that the S1 feed connectors are left out
-    on purpose -- but it is always something the owner has to be told, because
-    the lane it belongs to will report ``unconfigured`` for ever otherwise.
+_GOVERNANCE_SOURCE = "$repo_root/deploy/connector-governance/"
+
+
+def strip_shell_comments(text: str) -> str:
+    """``install.sh`` with its comment lines removed.
+
+    Half the connector names in that file appear only in a comment explaining
+    why they are *not* seeded, so reading the raw text would report every
+    deliberately-absent lane as installed.
     """
+
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def expand_for_loops(code: str) -> str:
+    """Unroll ``for VAR in a b c; do ... done`` so the file names are literal.
+
+    Several seed blocks are written as ``${roic_kind}-v1.json`` inside a loop,
+    so the name of the record being copied appears nowhere in the script's
+    text.  Reading the text without this reported six ``cn-hk-findata-*``
+    records as unseeded while install.sh was seeding them -- a gap that was
+    invisible because it *skipped* rather than failed.  These loops are never
+    nested, so a non-greedy match to the first ``done`` is exact.
+    """
+
+    joined = re.sub(r"\\\n\s*", " ", code)
+    pattern = re.compile(
+        r"^ *for +(\w+) +in +(.+?); *do\n(.*?)^ *done *$",
+        re.DOTALL | re.MULTILINE,
+    )
+    while True:
+        match = pattern.search(joined)
+        if match is None:
+            return joined
+        variable, words, body = match.group(1), match.group(2).split(), match.group(3)
+        unrolled = "".join(
+            body.replace("${" + variable + "}", word).replace("$" + variable, word)
+            for word in words
+        )
+        joined = joined[: match.start()] + unrolled + joined[match.end():]
+
+
+def install_script_code(install_sh: Path) -> str:
+    """``install.sh`` with its comments gone and its seed loops unrolled."""
+
+    return expand_for_loops(strip_shell_comments(
+        install_sh.read_text(encoding="utf-8")))
+
+
+def install_seeded_records(install_sh: Path) -> frozenset[str]:
+    """Every committed record install.sh copies *into the runtime governance
+    directory*.
+
+    Read out of the script rather than transcribed, because a transcription is
+    what drifts.  A record copied somewhere else -- the Guidepoint narrowing
+    note goes to ``governance-decisions/`` -- is not seeded for this purpose:
+    the question this answers is "which approvals will the owner be shown",
+    and a file no lane and no cockpit loads is not one of them.
+    """
+
+    code = install_script_code(install_sh)
+    assignments: dict[str, str] = {}
+    seeded: set[str] = set()
+    assign = re.compile(r'^\s*(\w+)="([^"]*)"\s*$')
+    copy = re.compile(r'^\s*cp +"([^"]+)" +"\$(\w+)"\s*$')
+    for line in code.splitlines():
+        found = assign.match(line)
+        if found is not None:
+            assignments[found.group(1)] = found.group(2)
+            continue
+        found = copy.match(line)
+        if found is None:
+            continue
+        source, destination = found.group(1), assignments.get(found.group(2), "")
+        if source.startswith("$") and not source.startswith("$repo_root"):
+            # ``cp "$repo_record" "$sec_financials_file"``: the source is a
+            # variable too, so resolve it the same way as the destination.
+            source = assignments.get(source.lstrip("$"), source)
+        if not source.startswith(_GOVERNANCE_SOURCE):
+            continue
+        if not destination.startswith("$governance_dir/"):
+            continue
+        seeded.add(source[len(_GOVERNANCE_SOURCE):])
+    return frozenset(seeded)
+
+
+def deliberately_unseeded_records(install_sh: Path) -> frozenset[str]:
+    """The ``DELIBERATELY_UNSEEDED`` array install.sh declares, with reasons.
+
+    The array is read by nothing at runtime.  It is there so that "every
+    committed record is either seeded or deliberately not" can be *checked*
+    rather than asserted in a comment, which is what stops the next record
+    from being committed and forgotten.
+    """
+
+    text = install_sh.read_text(encoding="utf-8")
+    match = re.search(r"^DELIBERATELY_UNSEEDED=\(\n(.*?)^\)\s*$",
+                      text, re.DOTALL | re.MULTILINE)
+    if match is None:
+        return frozenset()
+    return frozenset(
+        word
+        for line in match.group(1).splitlines()
+        if not line.lstrip().startswith("#")
+        for word in line.split()
+    )
+
+
+def committed_governance_records(repo_root: Path) -> frozenset[str]:
+    """Every record file ``deploy/connector-governance`` ships."""
 
     directory = repo_root / "deploy" / "connector-governance"
     if not directory.is_dir():
+        return frozenset()
+    return frozenset(path.name for path in directory.glob("*.json"))
+
+
+def unseeded_governance_records(
+    repo_root: Path, install_sh: Path | None = None
+) -> tuple[str, ...]:
+    """Committed governance records install.sh seeds nowhere *and* has not
+    named as a deliberate absence.
+
+    This should be empty.  A record here is one whose lane will report
+    ``unconfigured`` for ever with nobody having decided that -- which is how
+    fifteen records, ``yfinance-calendar-v1.json`` among them, sat in the repo
+    switching nothing on.  Fix it by seeding it in its lane's block, or by
+    naming it in ``DELIBERATELY_UNSEEDED`` with the reason.
+    """
+
+    script = install_sh or (repo_root / "deploy" / "macos" / "install.sh")
+    if not script.is_file():
         return ()
-    seeded = seeded_repo_records()
-    return tuple(
-        sorted(path.name for path in directory.glob("*.json") if path.name not in seeded)
-    )
+    remaining = (committed_governance_records(repo_root)
+                 - install_seeded_records(script)
+                 - deliberately_unseeded_records(script))
+    return tuple(sorted(remaining))
 
 
 def orphan_live_records(live_governance_dir: Path, repo_root: Path) -> tuple[str, ...]:
@@ -519,21 +664,23 @@ class LaneSwitch:
 LANE_SWITCHES: tuple[LaneSwitch, ...] = (
     LaneSwitch(
         "mission_tracking (P14a)", "tracking-policy.json",
-        "deploy/phase9/p14a-tracking-policy-v1.json", False,
-        "P14a report §9.5: install.sh needs a seed block for this and has none",
+        "deploy/phase9/p14a-tracking-policy-v1.json", True,
+        "INT2 seed block; one file, so all-or-nothing is automatic",
     ),
     LaneSwitch(
         "event_judgement (P14a)", "event-judgement-model-config.json", None, False,
-        "written by a model-config setup module install.sh does not call",
+        "INT3: written when DALTON_EVENT_JUDGEMENT_MODEL_PROFILE/TIER is set, "
+        "and only together with the verifier",
     ),
     LaneSwitch(
         "event_judgement verifier (P14a)", "event-verifier-model-config.json", None, False,
-        "must point at a routing policy in a different family, or every "
-        "judgement fails closed",
+        "INT3: written when DALTON_EVENT_VERIFIER_MODEL_PROFILE/TIER is set; "
+        "must be a different family, or every judgement comes back "
+        "gated:same_family",
     ),
     LaneSwitch(
         "claim_index (P12b)", "claim-index-model-config.json", None, False,
-        "no setup module call in install.sh",
+        "INT3: written when DALTON_CLAIM_INDEX_MODEL_PROFILE/TIER is set",
     ),
     LaneSwitch(
         "document_extraction", "document-extraction-model-config.json", None, True,
@@ -629,9 +776,13 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("claim_retirement_schema.sql", "dalton_core.claim_retirement", "ClaimRetirementAuthority", "core"),
     MigrationSpec("company_dossier_schema.sql", "dalton_core.company_dossier", "CompanyDossierAuthority", "core"),
     MigrationSpec("connector_schema.sql", "dalton_core.connector", "ConnectorStore", "core"),
+    # P11b: what the street expects, from the vendor daily.
+    MigrationSpec("consensus_estimate_schema.sql", "dalton_core.consensus_estimate", "ConsensusEstimateAuthority", "core"),
+    MigrationSpec("conviction_call_schema.sql", "dalton_core.conviction_call", "ConvictionCallAuthority", "core"),
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),
+    MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
     MigrationSpec("event_judgement_schema.sql", "dalton_core.event_judgement", "EventJudgementAuthority", "core"),
     MigrationSpec("forecast_driver_schema.sql", "dalton_core.model_forecast_driver", "ForecastModelAuthority", "core"),
     MigrationSpec("forecast_reconciliation_schema.sql", "dalton_core.forecast_reconciliation", "ForecastReconciliationAuthority", "core"),
@@ -648,24 +799,21 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("research_question_backlog_schema.sql", "dalton_core.research_question_backlog", "ResearchQuestionBacklog", "core"),
     MigrationSpec("runner_journal_schema.sql", "dalton_core.runner_journal", "RunnerJournal", "core"),
     MigrationSpec("statement_snapshot_schema.sql", "dalton_core.statement_snapshot", "StatementSnapshotAuthority", "core"),
+    # P11b: the broker notes those expectations were read out of.
+    MigrationSpec("street_estimate_schema.sql", "dalton_core.street_estimate", "StreetEstimateStore", "core"),
     MigrationSpec("tracking_cadence_schema.sql", "dalton_core.tracking_cadence", "TrackingCadenceAuthority", "core"),
     MigrationSpec("transcript_correction_schema.sql", "dalton_core.transcript_correction", "TranscriptCorrectionAuthority", "core"),
     MigrationSpec("transcript_polish_schema.sql", "dalton_core.transcript_polish", "TranscriptPolishAuthority", "core"),
     MigrationSpec("valuation_snapshot_schema.sql", "dalton_core.valuation_snapshot", "ValuationSnapshotAuthority", "core"),
     MigrationSpec("weekly_brief_schema.sql", "dalton_core.weekly_brief", "WeeklyBriefAuthority", "core"),
     MigrationSpec("answer_routing_schema.sql", "dalton_core.answer_routing", "AnswerRoutingAuthority", "core"),
+    MigrationSpec("thesis_revision_schema.sql", "dalton_core.thesis_revision", "ThesisRevisionAuthority", "core"),
     MigrationSpec("thesis_impact_schema.sql", "dalton_core.thesis_impact", "ThesisImpactAuthority", "core"),
     # P10x: the only Core authority that takes the store's *connection* rather
     # than the store.  It lives in core.sqlite all the same -- it reads the
     # discovered-document rows the debate map's independence ladder reads --
     # so it belongs here and not among the sidecars.
     MigrationSpec("extraction_backlog_schema.sql", "dalton_core.extraction_backlog", "DocumentProvenanceStore", "core"),
-    # P11b: what the street expects, and the broker notes it was read out of.
-    MigrationSpec("consensus_estimate_schema.sql", "dalton_core.consensus_estimate", "ConsensusEstimateAuthority", "core"),
-    MigrationSpec("street_estimate_schema.sql", "dalton_core.street_estimate", "StreetEstimateStore", "core"),
-    # P14b / P14d: the revision loop's two decision ledgers, both on the shared store.
-    MigrationSpec("thesis_revision_schema.sql", "dalton_core.thesis_revision", "ThesisRevisionAuthority", "core"),
-    MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
 )
 
 SIDECAR_MIGRATIONS: tuple[MigrationSpec, ...] = (
@@ -1167,8 +1315,17 @@ class Rehearsal:
         unseeded = unseeded_governance_records(REPO_ROOT)
         if unseeded:
             findings.append(
-                "committed governance records install.sh never seeds (their "
-                "lanes stay unconfigured): " + ", ".join(unseeded)
+                "committed governance records install.sh neither seeds nor "
+                "names in DELIBERATELY_UNSEEDED (their lanes stay "
+                "unconfigured with nobody having decided that): "
+                + ", ".join(unseeded)
+            )
+        named = deliberately_unseeded_records(
+            REPO_ROOT / "deploy" / "macos" / "install.sh")
+        if named:
+            findings.append(
+                "deliberately not seeded, with a reason in install.sh: "
+                + ", ".join(sorted(named))
             )
         return (
             f"{seeded} seeded, {present} already present, "
