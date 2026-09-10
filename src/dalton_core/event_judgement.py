@@ -66,11 +66,13 @@ _SCHEMA_PATH = Path(__file__).with_name("event_judgement_schema.sql")
 # Registered at import: anything that can call ``judge()`` has already run this
 # line, and a purpose registered after the call that uses it is not registered.
 PURPOSE = register_purpose("event_judgement")
+VERIFIER_PURPOSE = register_purpose("event_judgement_verifier")
 # Named separately from the judgement because it is a different question with a
 # different output shape, and because the owner should be able to read what the
 # reflection layer costs as its own line in the day ledger rather than as part
 # of the judgement's.
 REFLECTION_PURPOSE = register_purpose("thesis_reflection")
+REFLECTION_VERIFIER_PURPOSE = register_purpose("thesis_reflection_verifier")
 
 #: W3: the three things that can have happened to a prior view. The same three
 #: words the Initial Screen drafter is told to sort prior questions into, so a
@@ -907,7 +909,7 @@ def verify_reflection(
             producer_route_decision_refs=[
                 (reflection.get("model") or {}).get("route_decision_ref")
             ],
-            purpose=REFLECTION_PURPOSE, request_id=request_id, prompt=prompt,
+            purpose=REFLECTION_VERIFIER_PURPOSE, request_id=request_id, prompt=prompt,
             mission=mission,
         )
     except CockpitModelError as exc:
@@ -915,7 +917,7 @@ def verify_reflection(
                 "lane_status": lane_status_for(exc, "refused"),
                 "reason": f"the reflection verifier call did not succeed: {exc}"}
     provenance = _provenance(call)
-    provenance["purpose"] = REFLECTION_PURPOSE
+    provenance["purpose"] = REFLECTION_VERIFIER_PURPOSE
     verifier_family = family_resolver(provenance.get("route_decision_ref"))
     independence = {"producer_family": producer_family,
                     "verifier_family": verifier_family,
@@ -1094,12 +1096,13 @@ def verify(
             producer_route_decision_refs=[
                 (judgement.get("model") or {}).get("route_decision_ref")
             ],
-            purpose=PURPOSE, request_id=request_id, prompt=prompt, mission=mission
+            purpose=VERIFIER_PURPOSE, request_id=request_id, prompt=prompt, mission=mission
         )
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"the verifier call did not succeed: {exc}",
                 "lane_status": lane_status_for(exc, "refused"), "model": None}
     provenance = _provenance(call)
+    provenance["purpose"] = VERIFIER_PURPOSE
     verifier_family = family_resolver(provenance.get("route_decision_ref"))
     independence = {
         "producer_family": producer_family,
@@ -2207,8 +2210,10 @@ __all__ = [
     "POOL_NAME",
     "POOL_SHARE",
     "PURPOSE",
+    "VERIFIER_PURPOSE",
     "REFLECTION_ACTIONS",
     "REFLECTION_PURPOSE",
+    "REFLECTION_VERIFIER_PURPOSE",
     "REFLECTION_TRIGGER_KINDS",
     "SCHEMA_VERSION",
     "VERIFIER_FINDING_CODES",

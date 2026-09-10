@@ -225,11 +225,29 @@ class PlannerBudgetConfigTests(unittest.TestCase):
         from tests.test_document_extraction_setup import _service
 
         config_path = _service(root)
+        service = json.loads(config_path.read_text(encoding="utf-8"))
+        with ModelRouter(service["model_router_db"]) as router:
+            for profile in openclaw_broker_profiles(checked_at=NOW):
+                router.register_profile(profile)
         install(config_path, tier="cheap", now=NOW)
         # resolve(): the installer records resolved paths, and on macOS the
         # temporary directory is reached through a symlink.
         return Path(json.loads(
             config_path.read_text(encoding="utf-8"))["core_db"]).resolve().parent
+
+    def test_setup_does_not_resurrect_the_static_catalog(self) -> None:
+        from tests.test_document_extraction_setup import _service
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = _service(Path(directory))
+            service = json.loads(config_path.read_text(encoding="utf-8"))
+            with self.assertRaisesRegex(PlannerSetupError, "not registered"):
+                install(config_path, profile_ids=[ASTRA], now=NOW)
+            with ModelRouter(service["model_router_db"]) as router:
+                count = router.connection.execute(
+                    "SELECT COUNT(*) FROM model_endpoint_profile_versions"
+                ).fetchone()[0]
+            self.assertEqual(count, 0)
 
     def test_what_the_installer_writes_is_what_the_writer_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

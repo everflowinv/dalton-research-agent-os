@@ -27,15 +27,23 @@ class ModelConfigurationError(RuntimeError):
 
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.json$")
-# The seed: the three configurations this Core installs today.
+# Every state-directory model configuration the installer can create. Keeping
+# this explicit makes Cockpit selection independent of incidental import order:
+# a CLI module should not have to be imported before its policy pin is updated.
 _SEED_NAMES = (
     "document-extraction-model-config.json",
     "research-planner-model-config.json",
-    # P13am: the deliverable-drafting configuration, which the company model
-    # specification lane also runs on. It was left out when it was added, so
-    # the last cap raise repointed two of three configurations and this one
-    # would have kept naming a superseded policy version.
     "initial-screen-model-config.json",
+    "claim-index-model-config.json",
+    "dossier-model-config.json",
+    "company-dossier-verifier-model-config.json",
+    "dossier-verifier-model-config.json",
+    "earnings-season-model-config.json",
+    "earnings-season-verifier-model-config.json",
+    "event-judgement-model-config.json",
+    "event-verifier-model-config.json",
+    "zero-base-review-model-config.json",
+    "zero-base-review-verifier-model-config.json",
 )
 _NAMES: list[str] = list(_SEED_NAMES)
 

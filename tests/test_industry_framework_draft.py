@@ -379,6 +379,7 @@ class VerifierTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "pass")
         self.assertEqual(len(result["verified_draft_hash"]), 64)
         self.assertEqual(model.calls[0]["producer_route_decision_refs"], ("route:draft",))
+        self.assertEqual(model.calls[0]["purpose"], "industry_framework_verifier")
 
     def test_a_pass_verdict_with_findings_is_refused(self):
         with self.assertRaises(Exception):

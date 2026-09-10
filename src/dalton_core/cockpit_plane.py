@@ -3535,9 +3535,14 @@ class CockpitPlane:
                 {
                     "model": profile_id,
                     "family": profile.get("family"),
+                    "capabilities": list(profile.get("capabilities") or []),
                     "unpriced": bool(profile.get("unpriced")),
-                    "note": ("未定价：只能放在链的最后一位"
-                             if profile.get("unpriced") else None),
+                    "note": (
+                        "未声明可核验的模型家族：不能承担独立核验"
+                        if str(profile.get("family") or "").startswith("unclassified:")
+                        else "未定价：只能放在链的最后一位"
+                        if profile.get("unpriced") else None
+                    ),
                 }
                 for profile_id, profile in catalogue.items()
                 if profile.get("status") != "retired"

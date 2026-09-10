@@ -26,6 +26,7 @@ import copy
 import json
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +53,7 @@ from dalton_core.model_selection import (
     retirement_fallbacks,
     set_model_selection,
 )
+from dalton_core.model_configurations import model_config_names
 from dalton_core.openclaw_allow_patch import (
     AllowPatchError,
     apply_allow_patch,
@@ -501,6 +503,62 @@ class StateDirectoryCase(RouterCase):
 
 
 class SetSelectionTests(StateDirectoryCase):
+    def test_registry_covers_every_installed_role_configuration(self) -> None:
+        self.assertEqual(set(model_config_names()), {
+            "document-extraction-model-config.json",
+            "research-planner-model-config.json",
+            "initial-screen-model-config.json",
+            "claim-index-model-config.json",
+            "dossier-model-config.json",
+            "company-dossier-verifier-model-config.json",
+            "dossier-verifier-model-config.json",
+            "earnings-season-model-config.json",
+            "earnings-season-verifier-model-config.json",
+            "event-judgement-model-config.json",
+            "event-verifier-model-config.json",
+            "zero-base-review-model-config.json",
+            "zero-base-review-verifier-model-config.json",
+        })
+
+    def test_a_selection_repoints_two_real_role_configs_together(self) -> None:
+        verifier = self.root / "event-verifier-model-config.json"
+        verifier.write_text(json.dumps(self.model_config), encoding="utf-8")
+        result = set_model_selection(
+            self.root, purpose="event_judgement_verifier", mode="tier", now=NOW)
+        self.assertEqual(result["model_configs_repointed"], [
+            "research-planner-model-config.json", "event-verifier-model-config.json"])
+        first = self.stored()["routing_policy_ref"]
+        second = json.loads(verifier.read_text("utf-8"))["routing_policy_ref"]
+        self.assertEqual(first, second)
+        policy = self.router.get_policy(first)
+        self.assertEqual(
+            policy["purpose_overrides"]["event_judgement_verifier"],
+            {"mode": "tier"},
+        )
+
+    def test_a_config_replace_failure_restores_every_role_pin(self) -> None:
+        verifier = self.root / "event-verifier-model-config.json"
+        verifier.write_text(json.dumps(self.model_config), encoding="utf-8")
+        before = {path: path.read_bytes() for path in (self.config_path, verifier)}
+        real_replace = __import__("os").replace
+        replacements = 0
+
+        def fail_second(source, target):
+            nonlocal replacements
+            if str(source).endswith(".model-selection.tmp"):
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("disk refused the second replacement")
+            return real_replace(source, target)
+
+        with mock.patch("dalton_core.model_selection.os.replace", side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, "second replacement"):
+                set_model_selection(
+                    self.root, purpose="event_judgement_verifier",
+                    mode="tier", now=NOW)
+        self.assertEqual(
+            {path: path.read_bytes() for path in (self.config_path, verifier)}, before)
+
     def test_every_pinned_configuration_moves_to_the_new_version(self) -> None:
         result = set_model_selection(
             self.root, purpose=BRAIN_PURPOSE, mode="explicit",
@@ -1297,6 +1355,8 @@ class CockpitModelPageTests(unittest.TestCase):
         )
         self.assertTrue(row["label"] and row["tier_label"])
         self.assertTrue(view["choices"])
+        self.assertIn("family", view["choices"][0])
+        self.assertIsInstance(view["choices"][0]["capabilities"], list)
         catalog = view["catalog"]
         self.assertTrue(catalog["available"])
         for key in ("in_openclaw_not_allowed", "allowed_not_in_dalton",

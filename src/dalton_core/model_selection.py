@@ -69,15 +69,22 @@ PURPOSE_LABELS: dict[str, str] = {
     "claim_index": "给结论打标签",
     "quality": "给产出打分",
     "event_judgement": "判断新发生的事",
+    "event_judgement_verifier": "核验事件判断",
     "zero_base_review": "从零复盘研究判断",
     "zero_base_review_verifier": "核验从零复盘",
     "thesis_reflection": "回看论点还成不成立",
+    "thesis_reflection_verifier": "核验论点复盘",
     "dossier": "写公司档案",
+    "dossier_verifier": "核验公司档案",
     "debate_map": "整理市场在吵什么",
     "deep_insight_gate": "回答深度认知门的十二问",
+    "deep_insight_gate_verifier": "核验深度认知门",
     "industry_framework": "写行业框架",
+    "industry_framework_verifier": "核验行业框架",
     "earnings_preview": "写业绩前瞻",
+    "earnings_preview_verifier": "核验业绩前瞻",
     "earnings_calibration": "业绩后对账",
+    "earnings_calibration_verifier": "核验业绩对账",
     "conviction_call": "提出值得下注的判断",
     "street_estimate": "读研报里的目标价",
 }
@@ -122,6 +129,40 @@ def _write_owner_only(path: Path, value: Any) -> None:
     )
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def _write_configs_atomically(items: Sequence[tuple[Path, Mapping[str, Any]]]) -> None:
+    """Stage every changed config, then replace them as one recoverable set."""
+
+    staged: list[tuple[Path, Path, bytes, int]] = []
+    try:
+        for path, value in items:
+            tmp = path.with_name(f".{path.name}.model-selection.tmp")
+            tmp.write_text(
+                json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(tmp, 0o600)
+            staged.append((path, tmp, path.read_bytes(), path.stat().st_mode & 0o777))
+        replaced: list[tuple[Path, bytes, int]] = []
+        for path, tmp, original, mode in staged:
+            os.replace(tmp, path)
+            replaced.append((path, original, mode))
+    except Exception:
+        # A policy version may have been appended, but no lane may be left on
+        # a mixed set of policy pins. Restore every file already replaced.
+        for path, original, mode in reversed(locals().get("replaced", [])):
+            restore = path.with_name(f".{path.name}.model-selection.restore")
+            restore.write_bytes(original)
+            os.chmod(restore, mode)
+            os.replace(restore, path)
+        raise
+    finally:
+        for _, tmp, _, _ in staged:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def model_configs(state_dir: str | Path) -> list[dict[str, Any]]:
@@ -296,6 +337,22 @@ def set_model_selection(
     published: dict[tuple[str, str], dict[str, Any]] = {}
     repointed: list[str] = []
     unchanged: list[str] = []
+    # Validate every router and pinned policy before appending any immutable
+    # version. An invalid late config must not leave half the roles selected.
+    for item in configs:
+        config = item["config"]
+        router_db = config.get("model_router_db")
+        if not isinstance(router_db, str) or not Path(router_db).is_file():
+            raise ModelSelectionError(
+                f"{item['name']} names a model router database that is not here"
+            )
+        with ModelRouter(router_db, read_only=True) as router:
+            router.get_policy(config["routing_policy_ref"])
+            try:
+                validate_selection(
+                    router, purpose=purpose, mode=mode, chain=chain)
+            except FallbackChainError as exc:
+                raise ModelSelectionError(str(exc)) from exc
     for item in configs:
         config = item["config"]
         router_db = config.get("model_router_db")
@@ -321,8 +378,11 @@ def set_model_selection(
             unchanged.append(item["name"])
             continue
         config["routing_policy_ref"] = new_ref
-        _write_owner_only(item["path"], config)
         repointed.append(item["name"])
+    _write_configs_atomically([
+        (item["path"], item["config"])
+        for item in configs if item["name"] in repointed
+    ])
     versions = sorted(
         {
             (outcome["policy_id"], outcome["policy_version_ref"], outcome["status"])

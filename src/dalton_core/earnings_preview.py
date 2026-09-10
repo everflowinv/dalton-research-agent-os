@@ -37,6 +37,7 @@ from .earnings_season import (
     MAX_THESES,
     PREVIEW_KIND,
     PREVIEW_PURPOSE,
+    PREVIEW_VERIFIER_PURPOSE,
     EarningsSeasonValidationError,
     bounded_text,
     citable_refs,
@@ -583,7 +584,7 @@ def verify_preview(
             producer_route_decision_refs=[
                 (draft.get("model") or {}).get("route_decision_ref")
             ],
-            purpose=PREVIEW_PURPOSE, request_id=request_id, prompt=prompt,
+            purpose=PREVIEW_VERIFIER_PURPOSE, request_id=request_id, prompt=prompt,
             mission=mission,
         )
     except CockpitModelError as exc:

@@ -123,13 +123,20 @@ _PURPOSE_TIERS: dict[str, str] = {
     # a position (a decision word, a dossier section, a debate, a call). That
     # is the brain's job, and the verifier chain is what keeps it honest.
     "event_judgement": TIER_BRAIN,
+    "event_judgement_verifier": TIER_VERIFIER,
     "thesis_reflection": TIER_BRAIN,
+    "thesis_reflection_verifier": TIER_VERIFIER,
     "dossier": TIER_BRAIN,
+    "dossier_verifier": TIER_VERIFIER,
     "debate_map": TIER_BRAIN,
     "deep_insight_gate": TIER_BRAIN,
+    "deep_insight_gate_verifier": TIER_VERIFIER,
     "industry_framework": TIER_BRAIN,
+    "industry_framework_verifier": TIER_VERIFIER,
     "earnings_preview": TIER_BRAIN,
+    "earnings_preview_verifier": TIER_VERIFIER,
     "earnings_calibration": TIER_BRAIN,
+    "earnings_calibration_verifier": TIER_VERIFIER,
     "conviction_call": TIER_BRAIN,
     # W4: asking, from a zero position, whether we would form this view
     # today is the hardest question in the set -- there is no event to

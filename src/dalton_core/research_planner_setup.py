@@ -32,7 +32,7 @@ from typing import Any
 
 from .document_extraction import validate_model_config
 from .model_configurations import register_model_config_name
-from .model_deployment import ADAPTER_REF, ensure_broker_profiles
+from .model_deployment import ADAPTER_REF
 from .model_router import ModelRouter
 from .store import canonical_json, content_hash
 
@@ -203,11 +203,9 @@ def install(
     state_dir = Path(service["core_db"]).parent
     router_db = str(Path(service["model_router_db"]).resolve())
     with ModelRouter(router_db) as router:
-        # A profile the router has never seen cannot be pinned, and nothing in
-        # the deploy registered them: the live catalog arrived from canary
-        # scripts. Register what is missing first, then pin.
-        catalog = ensure_broker_profiles(
-            router, checked_at=now or datetime.now(timezone.utc))
+        # The installer synchronises the broker's live catalog before setup.
+        # Seeding a static catalog here would resurrect models the gateway no
+        # longer offers and make a later setup run override catalog authority.
         policy = ensure_planner_policy(router, profile_ids=list(profile_ids), now=now,
                                        policy_id=policy_id, tier=tier)
         slots = credential_slots_for(router, list(profile_ids))
@@ -233,7 +231,7 @@ def install(
     return {
         "policy": policy,
         "tier": tier,
-        "catalog_profiles_added": catalog["added"],
+        "catalog_profiles_added": [],
         "profile_ids": list(profile_ids),
         "credential_slot_refs": slots,
         "model_config_path": str(target),

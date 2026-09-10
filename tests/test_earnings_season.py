@@ -995,6 +995,8 @@ class VocabularyTests(unittest.TestCase):
 
         self.assertIn("earnings_preview", purposes())
         self.assertIn("earnings_calibration", purposes())
+        self.assertIn("earnings_preview_verifier", purposes())
+        self.assertIn("earnings_calibration_verifier", purposes())
 
     def test_both_purposes_are_brain_tier(self):
         from dalton_core.model_fallback_chain import TIER_BRAIN, tier_for

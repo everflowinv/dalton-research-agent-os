@@ -55,6 +55,7 @@ from .earnings_season import (
     CALIBRATION_EVENT_KIND,
     CALIBRATION_KIND,
     CALIBRATION_PURPOSE,
+    CALIBRATION_VERIFIER_PURPOSE,
     MAX_THESES,
     EarningsSeasonValidationError,
     citable_refs,
@@ -951,7 +952,7 @@ def verify_calibration(
             producer_route_decision_refs=[
                 (draft.get("model") or {}).get("route_decision_ref")
             ],
-            purpose=CALIBRATION_PURPOSE, request_id=request_id, prompt=prompt,
+            purpose=CALIBRATION_VERIFIER_PURPOSE, request_id=request_id, prompt=prompt,
             mission=mission,
         )
     except CockpitModelError as exc:

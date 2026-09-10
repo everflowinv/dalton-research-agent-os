@@ -661,7 +661,7 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     d.append(c);stages.append(d)});
   sheet.append(stages);
   const avail=node("section");avail.append(node("h3","可以选的模型"));
-  avail.append(node("div",r.choices.map(c=>`${c.model}${c.unpriced?"（未定价）":""}`).join("、")||"没有","raw"));
+  avail.append(node("div",r.choices.map(c=>`${c.model} · 家族 ${c.family||"未声明"} · 能力 ${(c.capabilities||[]).join("/")||"未声明"}${c.note?"（"+c.note+"）":""}`).join("、")||"没有","raw"));
   sheet.append(avail);
   const cat=r.catalog,box=node("section");box.append(node("h3","网关上有什么"));
   if(!cat.available){box.append(node("div",cat.reason,"empty"));sheet.append(box);return}

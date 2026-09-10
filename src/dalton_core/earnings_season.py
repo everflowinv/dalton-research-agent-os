@@ -60,6 +60,8 @@ PREVIEW_KIND = "earnings_preview"
 CALIBRATION_KIND = "earnings_calibration"
 PREVIEW_PURPOSE = register_purpose(PREVIEW_KIND)
 CALIBRATION_PURPOSE = register_purpose(CALIBRATION_KIND)
+PREVIEW_VERIFIER_PURPOSE = register_purpose("earnings_preview_verifier")
+CALIBRATION_VERIFIER_PURPOSE = register_purpose("earnings_calibration_verifier")
 
 # What this slice emits into P14a's ledger when a calibration is written.  It is
 # not a ``reconciliation`` event -- those are one per metric row and are
@@ -804,6 +806,7 @@ __all__ = [
     "CALIBRATION_EVENT_KIND",
     "CALIBRATION_KIND",
     "CALIBRATION_PURPOSE",
+    "CALIBRATION_VERIFIER_PURPOSE",
     "CONFIRMED",
     "CONFIRMED_ONLY_WINDOWS",
     "EarningsSeasonError",
@@ -812,6 +815,7 @@ __all__ = [
     "MAX_THESES",
     "PREVIEW_KIND",
     "PREVIEW_PURPOSE",
+    "PREVIEW_VERIFIER_PURPOSE",
     "SCHEMA_VERSION",
     "WINDOWS",
     "already_done",

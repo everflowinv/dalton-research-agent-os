@@ -58,9 +58,11 @@ class FakeModel:
         self.route = route
         self.cost_micros = cost_micros
         self.prompts: list[str] = []
+        self.purposes: list[str] = []
 
     def call(self, *, purpose, request_id, prompt, mission):
         self.prompts.append(prompt)
+        self.purposes.append(purpose)
         if not self.replies:
             raise CockpitModelError("the fake model has nothing left to say")
         reply = self.replies.pop(0)
@@ -333,6 +335,7 @@ class VerifierTests(JudgementHarness):
         )
         self.assertEqual(checked["status"], "verified")
         self.assertEqual(checked["verdict"], "pass")
+        self.assertEqual(checked["model"]["purpose"], "event_judgement_verifier")
         self.assertEqual(checked["independence"]["producer_family"], "anthropic")
         self.assertEqual(checked["independence"]["verifier_family"], "google")
 

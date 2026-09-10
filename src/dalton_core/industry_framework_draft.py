@@ -75,7 +75,7 @@ from .industry_framework import (
     validate_driver_block,
     validate_section,
 )
-from .model_fallback_chain import TIER_BRAIN, register_purpose_tier
+from .model_fallback_chain import TIER_BRAIN, TIER_VERIFIER, register_purpose_tier
 from .store import content_hash
 
 # P14-0's registry: a lane names its own purpose from its own module rather
@@ -85,6 +85,8 @@ from .store import content_hash
 # work, which is what forming a view about an industry is.
 DRAFT_PURPOSE = "industry_framework"
 register_purpose_tier(DRAFT_PURPOSE, TIER_BRAIN)
+VERIFIER_PURPOSE = "industry_framework_verifier"
+register_purpose_tier(VERIFIER_PURPOSE, TIER_VERIFIER)
 
 # The framework drafts on the deliverable-drafting configuration, which is
 # already in the registry: same route, same broker, same day ledger as the
@@ -539,7 +541,7 @@ def verify(
     try:
         call = independent_model_call(
             model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
+            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
@@ -582,6 +584,7 @@ def rendered_bodies(blocks: Mapping[str, Any]) -> dict[str, str]:
 
 __all__ = [
     "DRAFT_PURPOSE",
+    "VERIFIER_PURPOSE",
     "MAX_CELL_ROWS",
     "MAX_CLAIM_ROWS",
     "MAX_COST_USD",

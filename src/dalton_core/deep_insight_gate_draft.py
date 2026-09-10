@@ -68,6 +68,7 @@ from .store import content_hash
 # editing a set in ``cockpit_model``.  Registered at import because importing
 # this module is what makes the drafter reachable.
 DRAFT_PURPOSE = register_purpose("deep_insight_gate")
+VERIFIER_PURPOSE = register_purpose("deep_insight_gate_verifier")
 
 # The gate drafts on the deliverable-drafting configuration, which is already in
 # the registry: same route, same broker, same day ledger as the dossier it reads
@@ -698,7 +699,7 @@ def verify(
     try:
         call = independent_model_call(
             model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
+            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
@@ -740,6 +741,7 @@ def rendered_answers(answers: Mapping[str, Any]) -> dict[str, str]:
 
 __all__ = [
     "DRAFT_PURPOSE",
+    "VERIFIER_PURPOSE",
     "GROUP_PURPOSE",
     "MAX_COST_USD",
     "MAX_DEBATE_ROWS",

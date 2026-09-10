@@ -74,6 +74,7 @@ from .store import content_hash
 # than editing a set in ``cockpit_model``.  Registered at import because
 # importing this module is what makes the drafter reachable.
 DRAFT_PURPOSE = register_purpose("dossier")
+VERIFIER_PURPOSE = register_purpose("dossier_verifier")
 
 # The dossier drafts on the deliverable-drafting configuration, which is
 # already in the registry: same route, same broker, same day ledger as the
@@ -680,7 +681,7 @@ def verify(
     try:
         call = independent_model_call(
             model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
+            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
@@ -721,6 +722,7 @@ def rendered_bodies(blocks: Mapping[str, Any]) -> dict[str, str]:
 
 __all__ = [
     "DRAFT_PURPOSE",
+    "VERIFIER_PURPOSE",
     "MAX_CLAIM_ROWS",
     "MAX_COST_USD",
     "MAX_INPUT_TOKENS",

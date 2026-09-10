@@ -199,7 +199,8 @@ class EndToEndTests(P14aHarness):
 
         writer = FakeModel(writer_answers, family="alpha", prefix="writer")
         verifier = FakeModel(
-            {"earnings_preview": PASS, "earnings_calibration": PASS},
+            {"earnings_preview_verifier": PASS,
+             "earnings_calibration_verifier": PASS},
             family="beta", prefix="verifier")
         with mock.patch(
             "dalton_core.earnings_season_cli.company_theses",
@@ -254,7 +255,7 @@ class EndToEndTests(P14aHarness):
         self.calendar(expected="2026-10-01", confirmed=False)
         writer = FakeModel({"earnings_preview": self.preview_answer},
                            family="alpha", prefix="writer")
-        verifier = FakeModel({"earnings_preview": {
+        verifier = FakeModel({"earnings_preview_verifier": {
             "verdict": "reject",
             "findings": [{"code": "invented_number", "detail": "a figure with no Claim"}],
         }}, family="beta", prefix="verifier")

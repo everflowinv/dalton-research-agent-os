@@ -301,6 +301,7 @@ class VerifierTests(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], "verified")
         self.assertEqual(verdict["verified_draft_hash"], draft_hash(blocks))
+        self.assertEqual(model.purposes, ["dossier_verifier"])
 
     def test_the_verifier_sees_the_sentences_and_the_rows_they_cite(self):
         blocks = {"demand_drivers": self.block()}
