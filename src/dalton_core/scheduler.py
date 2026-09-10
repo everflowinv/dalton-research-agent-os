@@ -25,7 +25,7 @@ from .recorded_completion import (
     build_recorded_parent_response,
     build_recorded_parent_result,
 )
-from .store import canonical_json, content_hash
+from .store import authorization_flag, authorized_flag, canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
@@ -130,6 +130,8 @@ class Scheduler:
     keeps worker-reported timestamps out of lease decisions.
     """
 
+    _authorized = authorized_flag()
+
     def __init__(
         self,
         path: str | Path = ":memory:",
@@ -185,16 +187,14 @@ class Scheduler:
             )
         self._trusted_journal_reader = trusted_journal_reader
         self._trusted_completion_reader = trusted_completion_reader
-        self._authorized = False
         self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
         if connection is None and self.path != ":memory:":
             os.chmod(self.path, 0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
-        self.connection.create_function(
-            "dalton_scheduler_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_scheduler_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._ensure_schema_migrations()
         self._ensure_policy()

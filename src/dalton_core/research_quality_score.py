@@ -60,7 +60,7 @@ from .research_quality_rubrics import (
     Rubric,
     rubric as get_rubric,
 )
-from .store import DaltonStore, content_hash
+from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
 
 SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("research_quality_schema.sql")
@@ -1463,14 +1463,14 @@ class ScoringIdentity:
 class QualityScoreAuthority:
     """Append-only quality scores, one version chain per artefact and rubric."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore, *, clock: Callable[[], str] | None = None) -> None:
         self.store = store
         self.connection = store.connection
         self.clock = clock or _now
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_research_quality_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_research_quality_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager

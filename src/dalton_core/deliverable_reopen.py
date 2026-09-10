@@ -462,17 +462,32 @@ def reopen_assessment(
     Returns a status rather than raising when there is nothing to diff: a
     company that never passed is not an error, it is the ordinary case, and a
     weekly lane that raised on it would stop on the first company it met.
+
+    ``not_passed`` covers two different situations and says which: a company
+    that never passed, and one whose gate is open right now because somebody
+    approved re-opening it and the re-issued screen has not been decided yet.
+    They read the same on the ladder -- neither has a current passed version --
+    and they mean opposite things to whoever is reading.
     """
 
     company_ref = _text(company_ref, "company_ref")
     settings = dict(policy or DEFAULT_POLICY)
     passed = passed_version(connection, company_ref=company_ref)
     if passed is None:
+        folded = fold_stage_status(
+            folded_stage_history(connection, company_ref=company_ref)
+        )
+        reopened = folded == STAGE_REOPENED
         return {
             "schema_version": SCHEMA_VERSION,
             "status": "not_passed",
             "company_ref": company_ref,
-            "reason": "这家公司还没有任何一版 Initial Screen 过闸",
+            "stage_status": folded,
+            "reopened": reopened,
+            "reason": (
+                "这道门已经重开了，正在等重出的那一版被裁决" if reopened
+                else "这家公司还没有任何一版 Initial Screen 过闸，没有门可以重开"
+            ),
         }
     section_count = max(1, len(passed["record"].get("sections") or ()))
     baseline = evidence_items(
@@ -549,6 +564,31 @@ def reopen_assessment(
 # ---------------------------------------------------------------------------
 # the authority
 # ---------------------------------------------------------------------------
+
+
+def _no_proposal_reason(assessment: Mapping[str, Any]) -> str:
+    """Why there is nothing to propose, in the terms the caller can act on.
+
+    Three different situations used to arrive as one sentence about items not
+    flipping, and only one of them was about items.  A gate that is already
+    open is the one that matters: the assessment reports ``not_passed``
+    because ``passed_version`` refuses to hand back a superseded version, and
+    "no item flipped" sent the reader looking at the evidence base for a
+    problem that is a pending decision on their own desk.
+    """
+
+    status = assessment.get("status")
+    if status == "not_passed":
+        reason = str(assessment.get("reason") or "")
+        if assessment.get("reopened"):
+            return (
+                "这道门已经重开了，先把重出的那一版裁决掉，再谈下一次重开"
+                "（gate_reopen 已批准，等 Initial Screen 重出并过闸）"
+            )
+        return reason or "这家公司没有任何一版 Initial Screen 过闸，没有门可以重开"
+    if status == "no_flip":
+        return "a reopen proposal needs at least one item that flipped 缺 → 有"
+    return f"this assessment is {status!r}, which is not something to propose"
 
 
 class GateReopenAuthority:
@@ -649,9 +689,7 @@ class GateReopenAuthority:
         """One proposal per (company, assessment hash).  Automation may write it."""
 
         if assessment.get("status") != "reopen_proposed":
-            raise DeliverableReopenConflict(
-                "a reopen proposal needs at least one item that flipped 缺 → 有"
-            )
+            raise DeliverableReopenConflict(_no_proposal_reason(assessment))
         actor_ref = _text(actor_ref, "actor_ref")
         if actor_ref.startswith("automation:") and (
             actor_ref != mission["autonomy"]["automation_principal"]

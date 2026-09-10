@@ -51,7 +51,9 @@ from .research_playbook import (
     ResearchPlaybookNotFound,
     read_exact_playbook_version,
 )
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 
 SCHEMA_VERSION = "0.1"
@@ -792,24 +794,13 @@ def _document_hosts(value: Any) -> dict[str, str]:
 class CoverageMissionAuthority:
     """Publish missions, record stage progress and project mission state."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore):
         self.store = store
         self.connection = store.connection
-        # The authorization flag belongs to the *connection*, not to this
-        # object.  ``create_function`` replaces the connection's function, so a
-        # second authority opened on the same store used to silently take the
-        # flag with it and the first one's writes started failing their own
-        # trigger -- which is exactly what happens now that the gate-reopen
-        # authority needs a ladder to write to.  Shared, the nesting guard
-        # below also does what it says across both of them.
-        flag = getattr(store, "_coverage_mission_flag", None)
-        if flag is None:
-            flag = {"authorized": False}
-            store._coverage_mission_flag = flag
-        self._flag: dict[str, bool] = flag
-        self.connection.create_function(
-            "dalton_coverage_mission_authorized", 0, lambda: int(flag["authorized"])
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_coverage_mission_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_discovered_document_host()
         self._migrate_settlement_failure_reason()
@@ -884,14 +875,6 @@ class CoverageMissionAuthority:
                 yield cur
         finally:
             self._authorized = False
-
-    @property
-    def _authorized(self) -> bool:
-        return self._flag["authorized"]
-
-    @_authorized.setter
-    def _authorized(self, value: bool) -> None:
-        self._flag["authorized"] = bool(value)
 
     @staticmethod
     def _request_hash(operation: str, request: Mapping[str, Any]) -> str:
@@ -3817,7 +3800,7 @@ class CoverageMissionAuthority:
             "SELECT r.record_id AS record_id, r.mission_version_ref AS mission_version_ref, "
             "r.company_ref AS company_ref, r.stage_ref AS stage_ref, r.status AS status, "
             "r.actor_ref AS actor_ref, r.created_at AS created_at, r.record_json AS record_json, "
-            "v.version_number AS version_number, 0 AS is_reopen "
+            "v.version_number AS version_number, 'stage' AS record_kind "
             "FROM coverage_mission_stage_records r "
             "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
             "WHERE v.mission_ref=?"
@@ -3828,10 +3811,9 @@ class CoverageMissionAuthority:
         # ladder and there is no other place it could be read from.
         reopens = (
             "SELECT o.record_id AS record_id, o.mission_version_ref AS mission_version_ref, "
-            "o.company_ref AS company_ref, o.stage_ref AS stage_ref, "
-            f"'{STAGE_REOPENED}' AS status, "
+            "o.company_ref AS company_ref, o.stage_ref AS stage_ref, ? AS status, "
             "o.actor_ref AS actor_ref, o.created_at AS created_at, o.record_json AS record_json, "
-            "v.version_number AS version_number, 1 AS is_reopen "
+            "v.version_number AS version_number, 'reopen' AS record_kind "
             "FROM coverage_mission_stage_reopens o "
             "JOIN coverage_mission_versions v ON v.mission_version_id=o.mission_version_ref "
             "WHERE v.mission_ref=?"
@@ -3840,6 +3822,10 @@ class CoverageMissionAuthority:
         if company_ref is not None:
             records += " AND r.company_ref=?"
             params.append(company_ref)
+        # The reopen arm's ``status`` is a bound parameter rather than an
+        # interpolated constant: nothing here is caller-supplied, but SQL built
+        # by f-string is a habit worth not having in a file this size.
+        params.append(STAGE_REOPENED)
         params.append(mission_ref)
         if company_ref is not None:
             reopens += " AND o.company_ref=?"
@@ -3897,6 +3883,12 @@ class CoverageMissionAuthority:
             entry = stages.setdefault(row["stage_ref"], {"history": []})
             entry["history"].append({
                 "status": row["status"],
+                # Which ledger this came from: a stage record, or the reopen
+                # marker that supersedes one. Two rows can carry the same
+                # ``status`` for different reasons, and a reader deciding
+                # whether to offer a decision needs to know which it is
+                # looking at without re-deriving it from the status.
+                "record_kind": row["record_kind"],
                 "at": row["created_at"],
                 "record_ref": row["record_id"],
                 "actor_ref": row["actor_ref"],

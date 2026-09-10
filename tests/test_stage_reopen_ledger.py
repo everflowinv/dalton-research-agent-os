@@ -298,11 +298,49 @@ class ApprovePathTests(LadderHarness):
 
     def test_an_approval_whose_gate_is_not_passed_is_refused_before_it_is_written(self):
         self.approve()
-        # A second proposal, approved while the first reopen is still open:
-        # there is nothing to re-open, and nothing at all should be written.
+        # A second proposal, while the first reopen is still open: there is
+        # nothing to re-open, and nothing at all should be written.
         self.thicken(lines=140)
         second_assessment = reopen_assessment(self.store.connection, company_ref=ACN)
         self.assertEqual(second_assessment["status"], "not_passed")
+
+    def test_an_open_reopen_says_so_instead_of_blaming_the_evidence(self):
+        """Three situations used to arrive as one sentence about items.
+
+        "No item flipped" sent a reader to look at the evidence base for
+        something that is a pending decision on their own desk. The assessment
+        now says which of the two ``not_passed`` cases it is, and ``propose``
+        repeats it.
+        """
+
+        self.approve()
+        self.thicken(lines=140)
+        assessment = reopen_assessment(self.store.connection, company_ref=ACN)
+        self.assertEqual(assessment["status"], "not_passed")
+        self.assertTrue(assessment["reopened"])
+        self.assertEqual(assessment["stage_status"], STAGE_REOPENED)
+        self.assertIn("重开", assessment["reason"])
+        with self.assertRaisesRegex(DeliverableReopenConflict, "先把重出的那一版裁决掉"):
+            self.reopens.propose(
+                assessment=assessment, mission=self.mission, actor_ref=AUTOMATION)
+        self.assertEqual(len(self.reopens.proposals(ACN)), 1)
+
+        # A company that simply never passed still gets the other sentence.
+        never = reopen_assessment(self.store.connection, company_ref=CTSH)
+        self.assertEqual(never["status"], "not_passed")
+        self.assertFalse(never["reopened"])
+        with self.assertRaisesRegex(DeliverableReopenConflict, "没有门可以重开"):
+            self.reopens.propose(
+                assessment=never, mission=self.mission, actor_ref=AUTOMATION)
+
+        # And once the re-issued screen has passed, the ordinary refusal is
+        # the ordinary one again.
+        self.decide_again(self.reissue())
+        quiet = reopen_assessment(self.store.connection, company_ref=ACN)
+        self.assertEqual(quiet["status"], "no_flip")
+        with self.assertRaisesRegex(DeliverableReopenConflict, "flipped"):
+            self.reopens.propose(
+                assessment=quiet, mission=self.mission, actor_ref=AUTOMATION)
 
     def test_a_reopen_can_only_be_spent_once(self):
         decision = self.approve()

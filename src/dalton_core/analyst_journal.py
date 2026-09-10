@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .store import DaltonStore, content_hash
+from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
 
 SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("analyst_journal_schema.sql")
@@ -130,14 +130,14 @@ def validate_score_override(value: Any) -> dict[str, Any] | None:
 class AnalystJournalAuthority:
     """Append-only PM feedback on any artefact, bound to what was read."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore, *, clock: Callable[[], str] | None = None) -> None:
         self.store = store
         self.connection = store.connection
         self.clock = clock or _now
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_analyst_journal_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_analyst_journal_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager

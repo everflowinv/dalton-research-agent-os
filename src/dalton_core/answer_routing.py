@@ -30,7 +30,9 @@ from .research_question_backlog import (
     ResearchQuestionBacklog,
     question_ref_for,
 )
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 
 SCHEMA_VERSION = "0.2"
@@ -495,6 +497,8 @@ def active_policy_for_company(
 class AnswerRoutingAuthority:
     """Human-policy authority plus deterministic, non-writing answer reader."""
 
+    _authorized = authorized_flag()
+
     def __init__(
         self,
         store: DaltonStore,
@@ -517,12 +521,8 @@ class AnswerRoutingAuthority:
         self.backlog = backlog
         self.bounded = bounded
         self.industry = industry
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_answer_routing_authorized",
-            0,
-            lambda: int(self._authorized),
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_answer_routing_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager

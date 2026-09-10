@@ -474,3 +474,65 @@ coverage_mission_stage_reopens(
 2. **`cockpit_control.html` 的 `stage_history` 仍只来自 stage record 表**，所以那个二值的「出口门：通过/未通过」不会被标记误标——但也就看不到重开。approvals 页已经把 `gate_reopen` 提案与裁决显示出来了，够用；要在文档卡片上看到版本链，是 cockpit 的下一片。
 3. **一道 stage 只有一个「开着」的重开。** 同一 stage 上的第二次批准要等第一次被重出的门裁决掉——`_assert_reopenable` 会以「只有判过的门才能重开」拒掉，措辞是对的但不够直白；如果这在实际里出现，值得换一句专门的话。
 4. **`deep_insight_gate` 用的是原始 membership**（`("initial_screen","gate_passed") in statuses`），也就是「有没有过过」，所以重开期间深研门仍认为筛选过过。这与常驻的单调性一致，是刻意的；但它和 `company_dossier_cli` 用折叠（重开期间不可起草档案）不一致，两者哪个对要 owner 定。
+
+---
+
+## 附录 B：授权标志归连接，与两句说清楚的拒绝（2026-09-10）
+
+分支 `w3-authority-flags`，起于 main `00f22be`（附录 A 已合入）。全量：
+
+```
+Ran 4845 tests in 447.739s
+
+OK (skipped=1)
+```
+
+复核给了三条跟进，都是附录 A 顺手发现的那个地雷的正解。
+
+### B.1 标志挂在连接上，不是挂在对象上
+
+附录 A 把 `CoverageMissionAuthority` 的授权标志从**实例**挪到了 **store**，够用但不够：`DaltonStore(path, connection=…)` 是受支持的构造方式，两个 store 罩同一个连接时，同一个洞在上一层原样重现。`create_function` 是**连接**级的，所以标志也该是。
+
+`sqlite3.Connection` 既没有 `__dict__` 也没有 `__weakref__`——属性挂不上去，`WeakKeyDictionary` 也建不了（复核建议的那种）。所以改成**通过连接**来键：每个连接注册一个 `dalton_authorization_registry()` 函数返回一个 uuid4 令牌，模块级 `dict` 按令牌存标志。问连接要令牌就是在问连接，这正是要的性质；令牌永不复用，所以死连接的条目不可能被后来的连接捡到。`DaltonStore.close()` 顺手删掉自己那条。
+
+`store.py` 里三样东西：`authorization_flag(connection, function_name)`（装函数、返回标志）、`AuthorizationFlag`（一个视图，不是一个值）、`authorized_flag()`（描述符，让 `self._authorized` 的读写行为一字不变，只是位置变了）。
+
+### B.2 十九个权威改用同一份
+
+`store` 自己、`coverage_mission`，以及复核点名的十八个：`research_playbook`、`model_forecast_driver`、`deep_insight_gate`、`mission_deliverable`、`forecast_reconciliation`、`model_input`、`industry_research`、`company_dossier`、`analyst_journal`、`claim_retirement`、`answer_routing`、`model_forecast`、`weekly_brief`、`research_cycle_reflection`、`research_quality_score`、`scheduler`、`research_constitution`、`model_router`。
+
+每处两行换两行，行为不变：
+
+```python
+self._authorization_flag = authorization_flag(
+    self.connection, "dalton_x_authorized")
+```
+外加类上一行 `_authorized = authorized_flag()`。`_transaction()` 一个字没改。
+
+### B.3 拒绝的话分成三句
+
+`propose` 以前对三种情况说同一句「没有任何一项从缺变有」，其中只有一种真的和证据有关。最要紧的那种是**这道门已经开着**：`passed_version` 不肯交出一个被取代的版本，评估因此回 `not_passed`，而「没有一项翻」把读的人支去查证据底座，问题其实是他自己桌上一个还没做的决定。
+
+`reopen_assessment` 的 `not_passed` 现在带 `stage_status` 与 `reopened`，两种情况分开说；`propose` 照搬：
+
+| 情况 | 说的话 |
+| --- | --- |
+| 门已重开、等重出的那版被裁决 | 这道门已经重开了，先把重出的那一版裁决掉，再谈下一次重开 |
+| 从来没过过闸 | 这家公司还没有任何一版 Initial Screen 过闸，没有门可以重开 |
+| 过了闸但没有一项翻 | a reopen proposal needs at least one item that flipped 缺 → 有 |
+
+### B.4 两个 nit
+
+折叠出来的行多带一个 `record_kind`（`stage` / `reopen`）——两条行可以带同样的 `status` 而来路不同，判断要不要给按钮的读者不该从状态反推来路。`_folded_rows` 里那句 f-string 拼进 SQL 的 `'reopened'` 改成绑定参数：这里没有任何调用方输入，但在这么大的文件里，用 f-string 拼 SQL 是个不值得养成的习惯。
+
+### B.5 测试
+
+`tests/test_authority_flags.py` 九项：
+
+- **一个连接两个 store**：`FlagPlumbingTests.test_two_stores_over_one_connection_share_the_flag`（附录 A 的做法在这条上会挂）
+- **注册表按连接键**：`…test_the_registry_is_keyed_through_the_connection_not_the_object`、`…test_a_second_connection_gets_its_own_registry`、`…test_closing_a_store_drops_its_registry`
+- **每一类权威开两个都还能写**：`TwoOfEachKindTests.test_every_authority_kind_survives_a_second_instance`（十七类，改之前第二个实例会把连接上的函数带走，第一个的下一次写入撞自己的触发器）
+- **拿路径的那两个**：`PathAuthorityTests.test_two_of_each_share_the_flag_and_a_bare_write_is_refused`（`ModelRouter` / `Scheduler`）
+- **裸连接写不进任何一张受守的表**：`BareConnectionTests.test_every_guarded_table_refuses_a_bare_connection`——受守的表是从 `sqlite_master` 里**认出来**的，不是列出来的，所以新加一张带守卫的表当天就被这条盖住（现在 30 张以上）；外加 `…test_the_reopen_ledger_is_one_of_them` 单独钉住最新的那张。
+
+`tests/test_stage_reopen_ledger.py` 加一项：`ApprovePathTests.test_an_open_reopen_says_so_instead_of_blaming_the_evidence`，三句话各断言一次。
