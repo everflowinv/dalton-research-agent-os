@@ -250,9 +250,17 @@ CTSH 读了 18 份卖方 → 149 条，ACN 读了 2 份 → 5 条。**每份文�
 ## 四、测试
 
 ```
-Ran 3992 tests in 455.652s
+Ran 3992 tests in 385.675s
 
 FAILED (failures=1, skipped=1)
+```
+
+把那一条 main 的时间依赖测试排除后：
+
+```
+Ran 3991 tests in 464.457s
+
+OK (skipped=1)
 ```
 
 （`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，merge main `7011104` 之后。
