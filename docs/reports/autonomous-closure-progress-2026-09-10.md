@@ -110,3 +110,14 @@ Frozen `811d8cd0786b7327c4206d281249bb2b30a2ca8f`: 6,551 tests / 460.112s, 2 fai
 Wheel byte/JS checks and 67-schema/40-tick/zero-escape copied-state rehearsal passed for the rejected freeze but do not override full-suite failure. Live remains 7bdccd8. Final XLSX work is limited to readable financial statement labels; arithmetic/provenance remain unchanged.
 
 Owner reasserted implementation order: finish foundational capabilities and their real runtime closure first; higher-level investment/Bayesian methods remain documented future work.
+
+## 20:08 UTC — foundation recovery frozen
+
+- Runtime candidate frozen at `2dadff58115f0254525695b6d69870d3426de8fc`. Full-suite runner now records start/end commit, clean tree, exact command, log hash and exit code in a machine receipt. Acceptance still pending.
+- All previously failing downstream groups plus XLSX: 213 tests / 138.300s passed. Explicit verifier purpose/route exclusion changes: 208 focused passed; broader purpose/registry/budget set 177 passed.
+- Found and repaired DebateMap/ConvictionCall calling their producer route again for verification: separate Cockpit purposes now exclude the actual producer route/family before spending. Remaining model verification consumers were independently audited with no additional routing blocker.
+- Wheel matches 548 source files (390 Python, 67 SQL, 3 HTML, 88 JSON); three JavaScript checks pass. Current copied-state rehearsal again has 67 schemas/40 tick entries/zero escape.
+- Eleven-purpose operator selection has been rehearsed with rollback and no broker calls. Actual macOS Python launcher process detection was tested against the running live services; it correctly refuses a live apply.
+- Old thesis-impact verification remains bound to policy-3 while current governance is policy-11. This is a separate human policy-redrive decision; the stopped service will not be silently enabled by this release or profile repair.
+
+Next: accept final full-suite receipt, deploy and verify installed bytes/mission/health, then run the exact stopped-window verifier selection and observe real scheduled output. Advanced investment methods remain queued behind this foundation work.
