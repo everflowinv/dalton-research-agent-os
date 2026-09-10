@@ -143,6 +143,38 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(command[command.index("--event-ref") + 1],
                              "research-event:chosen")
 
+    def test_launcher_adopts_an_exact_finished_ticket_after_restart(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            judge, verifier = state / "judge.json", state / "verifier.json"
+            judge.write_text("{}")
+            verifier.write_text("{}")
+            first_launcher = EventJudgementLauncher(
+                state_dir=state, judge_model_config=judge,
+                verifier_model_config=verifier,
+            )
+            first = first_launcher.start(
+                batch_ref="group|configuration:x", company_ref=ACN,
+                event_ref="research-event:chosen", group_key="group")
+            first_launcher.wait(timeout=30)
+            settled = first_launcher.status(first["id"])
+            first_launcher.close()
+            log = Path(settled["command"][settled["command"].index("--summary-dir") + 1]) / "run.log"
+            before = log.read_bytes()
+
+            restarted = EventJudgementLauncher(
+                state_dir=state, judge_model_config=judge,
+                verifier_model_config=verifier,
+            )
+            self.addCleanup(restarted.close)
+            adopted = restarted.start(
+                batch_ref="group|configuration:x", company_ref=ACN,
+                event_ref="research-event:chosen", group_key="group")
+            self.assertEqual(adopted["id"], first["id"])
+            self.assertNotEqual(adopted["status"], "running")
+            self.assertEqual(log.read_bytes(), before)
+
 
 class CoordinatorTests(unittest.TestCase):
     def setUp(self):

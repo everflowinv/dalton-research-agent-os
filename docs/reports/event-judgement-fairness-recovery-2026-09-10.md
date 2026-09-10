@@ -26,6 +26,9 @@ transient failures retain the shared probe and bounded retry behavior. Held
 groups are skipped, so a refused newest event cannot starve another company.
 A changed group evidence hash or configuration gets a new bounded identity;
 an unchanged refusal does not create a paid loop across writer restarts.
+If a writer restarts after an exact child finished but before its settlement
+tick, the event launcher adopts that persisted ticket without truncating its
+log or spawning the child again; the next tick records its durable outcome.
 
 Existing event grouping remains unchanged: US monthly buyback disclosures,
 closed HK ISO weeks, and individual events retain their current evidence
@@ -35,9 +38,9 @@ semantics.
 
 `PYTHONPATH=src python3 -m unittest tests.test_mission_event_judgement_lane tests.test_event_judgement_config_retry tests.test_event_judgement`
 
-Result: 145 tests passed. Added coverage proves mission and universe exclusion,
+Result: 146 tests passed. Added coverage proves mission and universe exclusion,
 newest-refusal fairness across companies, persistent restart holds, bounded
 busy retries, exact child group selection with zero model calls, configuration
-recovery, and launcher argv binding.
+recovery, launcher argv binding, and finished-ticket adoption across restart.
 
 No live state was changed and no model or network call was made.

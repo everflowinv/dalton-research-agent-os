@@ -98,6 +98,12 @@ class EventJudgementLauncher(LaneChildLauncher):
         digest = hashlib.sha256(
             f"{self.TICKET_PREFIX}|{batch_ref.strip()}".encode("utf-8")
         ).hexdigest()[:24]
+        ticket_id = f"{self.TICKET_PREFIX}:{digest}"
+        # A writer may restart after the child finished but before the next
+        # tick settled it into the durable failure ledger. Adopt that exact
+        # ticket instead of truncating its log and paying for the group again.
+        if self._ticket_path(ticket_id).is_file():
+            return self.status(ticket_id)
         return self.spawn(
             digest=digest,
             record={"batch_ref": batch_ref.strip(), "company_ref": company_ref,
