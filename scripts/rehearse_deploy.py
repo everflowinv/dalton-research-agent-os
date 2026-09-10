@@ -184,18 +184,110 @@ def invert(replacements: Mapping[str, str]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+#: The conditions install.sh checks before it reaches a gated seed block, as
+#: predicates over the environment rather than as prose.  Each returns
+#: ``(open, why)``; ``why`` is what the rehearsal prints when the gate is shut,
+#: and it names the variable or path the owner would have to provide.
+#:
+#: These read the environment the rehearsal was started with, which is the
+#: point: the question is not "could this lane exist" but "would install.sh
+#: install it on this machine, today".
+
+
+def _openclaw_workspace(env: Mapping[str, str]) -> Path:
+    named = env.get("DALTON_OPENCLAW_WORKSPACE")
+    return Path(named) if named else Path.home() / ".openclaw" / "workspace"
+
+
+def _gate_market_digest(env: Mapping[str, str]) -> tuple[bool, str]:
+    source = _openclaw_workspace(env) / "skills" / "market-digest" / "output"
+    return source.is_dir(), f"no market-digest output at {source}"
+
+
+def _gate_company_wiki(env: Mapping[str, str]) -> tuple[bool, str]:
+    workspace = _openclaw_workspace(env)
+    index = workspace / "wiki-index.sqlite"
+    return (workspace.is_dir() and index.exists()), f"no wiki index at {index}"
+
+
+def _gate_any_feed(env: Mapping[str, str]) -> tuple[bool, str]:
+    """The feed plan is seeded by *either* feed lane, so its gate is the union."""
+
+    digest, _ = _gate_market_digest(env)
+    wiki, _ = _gate_company_wiki(env)
+    return (digest or wiki), "neither feed lane is installed, so no feed plan is seeded"
+
+
+CROWD_TOOL_VARS: tuple[str, ...] = (
+    "DALTON_AGENT_REACH_TOOL", "DALTON_XUEQIU_HOT_RANK_TOOL", "DALTON_XREACH_TOOL",
+)
+
+
+def _gate_crowd_tools(env: Mapping[str, str]) -> tuple[bool, str]:
+    absent = [
+        name for name in CROWD_TOOL_VARS
+        if not (env.get(name) and os.access(env[name], os.X_OK))
+    ]
+    return not absent, "not set to an executable: " + ", ".join(absent)
+
+
+GATES: dict[str, Callable[[Mapping[str, str]], tuple[bool, str]]] = {
+    "market-digest": _gate_market_digest,
+    "company-wiki": _gate_company_wiki,
+    "any-feed": _gate_any_feed,
+    "crowd-tools": _gate_crowd_tools,
+}
+
+
+def gate_open(gate: str, env: Mapping[str, str]) -> tuple[bool, str]:
+    """Whether install.sh would reach a seed behind ``gate`` in this environment."""
+
+    if not gate:
+        return True, ""
+    return GATES[gate](env)
+
+
 @dataclass(frozen=True)
 class SeedSpec:
     """One seed-once copy install.sh performs.
 
     ``repo`` is relative to the repo root, ``state`` to the state directory.
-    ``optional`` mirrors install.sh's ``[[ -f "$repo_record" ]]`` guard: a
-    record the repo does not carry is skipped rather than failing the install.
+
+    ``optional`` means *gated*: install.sh only reaches this copy when some
+    condition outside the repository holds -- an environment variable naming a
+    host tool, a directory the OpenClaw workspace is supposed to contain.  A
+    gated seed that does not land is the script working as designed, and the
+    rehearsal reports it as a note rather than a fault.  ``gate`` names which
+    condition, as a key into :data:`GATES`, because "this lane is not
+    installed" is only useful to an owner who is also told what would install
+    it -- and because the rehearsal has to *evaluate* the gate rather than
+    seed through it.  Copying a gated record anyway would leave the lane half
+    installed: the crowd-source records with none of the three host tools they
+    need, which is precisely the state install.sh's all-or-nothing rule
+    exists to prevent.
+
+    Every block in install.sh is additionally guarded by
+    ``[[ -f "$repo_record" ]]``, so a seed whose source is missing from the
+    repository is skipped rather than fatal.  That guard is not what this flag
+    records: ``SeedTests`` asserts that *every* seed source exists, gated or
+    not, because a seed pointing at a file nobody committed is a lane that can
+    never be installed no matter what the owner sets.
     """
 
     repo: str
     state: str
     optional: bool = False
+    gate: str = ""
+
+    def __post_init__(self) -> None:
+        if bool(self.optional) != bool(self.gate):
+            raise ValueError(
+                f"{self.repo}: a gated seed needs a gate and an ungated one "
+                "must not have a gate; the two say the same thing and may not "
+                "disagree"
+            )
+        if self.gate and self.gate not in GATES:
+            raise ValueError(f"{self.repo}: {self.gate!r} is not a known gate")
 
 
 #: Exactly what ``deploy/macos/install.sh`` copies, in its order.  Kept as data
@@ -209,124 +301,156 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
     ),
     SeedSpec(
         "deploy/connector-governance/sec-company-facts-v1.json",
-        "connector-governance/sec-company-facts-v1.json", optional=True,
+        "connector-governance/sec-company-facts-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/sec-company-facts-v2.json",
-        "connector-governance/sec-company-facts-v2.json", optional=True,
+        "connector-governance/sec-company-facts-v2.json",
     ),
     SeedSpec(
         "deploy/connector-governance/sec-company-facts-v3.json",
-        "connector-governance/sec-company-facts-v3.json", optional=True,
+        "connector-governance/sec-company-facts-v3.json",
     ),
     SeedSpec(
         "deploy/connector-governance/roic-list-transcripts-v1.json",
-        "connector-governance/roic-list-transcripts-v1.json", optional=True,
+        "connector-governance/roic-list-transcripts-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/roic-get-transcript-v1.json",
-        "connector-governance/roic-get-transcript-v1.json", optional=True,
+        "connector-governance/roic-get-transcript-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/guidepoint-search-library-v1.json",
-        "connector-governance/guidepoint-search-library-v1.json", optional=True,
+        "connector-governance/guidepoint-search-library-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/guidepoint-get-transcript-v1.json",
-        "connector-governance/guidepoint-get-transcript-v1.json", optional=True,
+        "connector-governance/guidepoint-get-transcript-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/sec-financial-statements-v1.json",
-        "connector-governance/sec-financial-statements-v1.json", optional=True,
+        "connector-governance/sec-financial-statements-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/sec-financial-statements-v2.json",
-        "connector-governance/sec-financial-statements-v2.json", optional=True,
+        "connector-governance/sec-financial-statements-v2.json",
     ),
     SeedSpec(
         "deploy/connector-governance/yfinance-daily-prices-v1.json",
-        "connector-governance/yfinance-daily-prices-v1.json", optional=True,
+        "connector-governance/yfinance-daily-prices-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/yfinance-analyst-estimates-v1.json",
-        "connector-governance/yfinance-analyst-estimates-v1.json", optional=True,
+        "connector-governance/yfinance-analyst-estimates-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/alphaengine-search-library-v1.json",
-        "connector-governance/alphaengine-search-library-v1.json", optional=True,
+        "connector-governance/alphaengine-search-library-v1.json",
     ),
     SeedSpec(
         "deploy/phase9/p9d-us-it-services-discovery-plan-v1.json",
-        "discovery-plans/us-it-services-alphaengine-v1.json", optional=True,
+        "discovery-plans/us-it-services-alphaengine-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/gemini-web-search-v1.json",
-        "connector-governance/gemini-web-search-v1.json", optional=True,
+        "connector-governance/gemini-web-search-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/web-fetch-v1.json",
-        "connector-governance/web-fetch-v1.json", optional=True,
+        "connector-governance/web-fetch-v1.json",
     ),
     SeedSpec(
         "deploy/phase9/p9d4-us-it-services-web-search-plan-v3.json",
-        "discovery-plans/us-it-services-web-search-v3.json", optional=True,
+        "discovery-plans/us-it-services-web-search-v3.json",
     ),
     SeedSpec(
         "deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json",
-        "discovery-plans/us-it-services-sec-filings-v1.json", optional=True,
+        "discovery-plans/us-it-services-sec-filings-v1.json",
     ),
-    # INT2: the second batch of lane seeds (env-var gated lanes are optional).
-    SeedSpec(
-        "deploy/connector-governance/company-wiki-get-document-v1.json",
-        "connector-governance/company-wiki-get-document-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/company-wiki-list-documents-v1.json",
-        "connector-governance/company-wiki-list-documents-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/employee-reviews-blind-v1.json",
-        "connector-governance/employee-reviews-blind-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json",
-        "connector-governance/guidepoint-get-transcript-narrowing-v1.json",
-    ),
-    SeedSpec(
-        "deploy/connector-governance/sales-notes-get-note-v1.json",
-        "connector-governance/sales-notes-get-note-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/sales-notes-list-notes-v1.json",
-        "connector-governance/sales-notes-list-notes-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/x-xreach-search-v1.json",
-        "connector-governance/x-xreach-search-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/x-xreach-thread-v1.json",
-        "connector-governance/x-xreach-thread-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/x-xreach-user-timeline-v1.json",
-        "connector-governance/x-xreach-user-timeline-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/xueqiu-get-post-v1.json",
-        "connector-governance/xueqiu-get-post-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/xueqiu-hot-rank-v1.json",
-        "connector-governance/xueqiu-hot-rank-v1.json", optional=True,
-    ),
-    SeedSpec(
-        "deploy/connector-governance/xueqiu-search-posts-v1.json",
-        "connector-governance/xueqiu-search-posts-v1.json", optional=True,
-    ),
+    # -- INT2's second batch -------------------------------------------------
+    # C1: the catalyst calendar's one record is the whole switch for that lane.
+    # Ungated: install.sh seeds it on every machine.
     SeedSpec(
         "deploy/connector-governance/yfinance-calendar-v1.json",
         "connector-governance/yfinance-calendar-v1.json",
+    ),
+    # S4: six China / Hong Kong fundamentals records with no lane in this wave.
+    # Ungated and harmless -- seeding them turns nothing on, and cannot
+    # half-turn-on anything, because there is nothing to turn on.  They are on
+    # disk so the owner can read and approve six schema hashes separately.
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/cn-hk-findata-{kind}-v1.json",
+            f"connector-governance/cn-hk-findata-{kind}-v1.json",
+        )
+        for kind in (
+            "financial-statements", "shareholders", "buybacks",
+            "margin-balance", "northbound-flow", "ah-premium",
+        )
+    ),
+    # S2 / INT2: the Guidepoint lane's discovery plan.  The two records were
+    # already seeded further up; the plan is the other half of the switch and
+    # its argv fragment requires both, so they are seeded together.
+    SeedSpec(
+        "deploy/phase9/p9-us-it-services-guidepoint-v1.json",
+        "discovery-plans/us-it-services-guidepoint-v1.json",
+    ),
+    # The narrowing record goes to ``governance-decisions/``, NOT to
+    # ``connector-governance/``.  install.sh is explicit about this and the
+    # distinction matters: nothing loads this record, it is the note the owner
+    # reads before deciding what to do about an operation the upstream does not
+    # have.  Seeding it into the runtime governance directory would put a
+    # permanently-``proposed`` record where the cockpit looks, and the owner
+    # would be shown a lane waiting for an approval about nothing.
+    SeedSpec(
+        "deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json",
+        "governance-decisions/guidepoint-get-transcript-narrowing-v1.json",
+    ),
+    # S1: the two human-feed lanes.  Both gated on the OpenClaw workspace
+    # actually containing what they read, and seeded independently -- sales
+    # notes and the company wiki are separate approvals and separate
+    # directories, so one being absent must not take the other with it.
+    SeedSpec(
+        "deploy/phase9/p9-us-it-services-feeds-v1.json",
+        "feed-plans/p9-us-it-services-feeds-v1.json", optional=True,
+        gate="any-feed",
+    ),
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/{kind}-v1.json",
+            f"connector-governance/{kind}-v1.json", optional=True,
+            gate="market-digest",
+        )
+        for kind in ("sales-notes-list-notes", "sales-notes-get-note")
+    ),
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/{kind}-v1.json",
+            f"connector-governance/{kind}-v1.json", optional=True,
+            gate="company-wiki",
+        )
+        for kind in ("company-wiki-list-documents", "company-wiki-get-document")
+    ),
+    # S3: seven crowd-source records and the per-company map, all or nothing.
+    # The map is the lane's switch, and a lane switched on with no host tool
+    # refuses every networked run with "no tool configured" -- which is the
+    # failure the all-or-nothing rule exists to prevent.
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/{kind}-v1.json",
+            f"connector-governance/{kind}-v1.json", optional=True,
+            gate="crowd-tools",
+        )
+        for kind in (
+            "xueqiu-search-posts", "xueqiu-get-post", "xueqiu-hot-rank",
+            "x-xreach-user-timeline", "x-xreach-search", "x-xreach-thread",
+            "employee-reviews-blind",
+        )
+    ),
+    SeedSpec(
+        "deploy/phase9/p9-us-it-services-crowd-sources-v1.json",
+        "phase9/p9-us-it-services-crowd-sources-v1.json", optional=True,
+        gate="crowd-tools",
     ),
 )
 
@@ -531,6 +655,11 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("weekly_brief_schema.sql", "dalton_core.weekly_brief", "WeeklyBriefAuthority", "core"),
     MigrationSpec("answer_routing_schema.sql", "dalton_core.answer_routing", "AnswerRoutingAuthority", "core"),
     MigrationSpec("thesis_impact_schema.sql", "dalton_core.thesis_impact", "ThesisImpactAuthority", "core"),
+    # P10x: the only Core authority that takes the store's *connection* rather
+    # than the store.  It lives in core.sqlite all the same -- it reads the
+    # discovered-document rows the debate map's independence ladder reads --
+    # so it belongs here and not among the sidecars.
+    MigrationSpec("extraction_backlog_schema.sql", "dalton_core.extraction_backlog", "DocumentProvenanceStore", "core"),
 )
 
 SIDECAR_MIGRATIONS: tuple[MigrationSpec, ...] = (
@@ -1002,6 +1131,7 @@ class Rehearsal:
     def run_seeds(self) -> tuple[str, list[str]]:
         seeded = present = missing = 0
         findings: list[str] = []
+        shut: dict[str, list[str]] = {}
         for spec in INSTALL_SEEDS:
             source = REPO_ROOT / spec.repo
             destination = self.temp_state / spec.state
@@ -1009,21 +1139,36 @@ class Rehearsal:
                 present += 1
                 continue
             if not source.exists():
-                if not spec.optional:
-                    findings.append(f"install.sh would fail: {spec.repo} is not in the repo")
+                findings.append(f"install.sh would fail: {spec.repo} is not in the repo")
                 missing += 1
+                continue
+            # A gated seed is skipped exactly as install.sh skips it.  Copying
+            # it anyway would install half a lane and give the rehearsal a tick
+            # table this machine will never produce.
+            is_open, why = gate_open(spec.gate, os.environ)
+            if not is_open:
+                shut.setdefault(f"{spec.gate}: {why}", []).append(Path(spec.state).name)
                 continue
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             shutil.copy2(source, destination)
             os.chmod(destination, 0o600)
             seeded += 1
+        for why, names in sorted(shut.items()):
+            findings.append(
+                f"gate shut, {len(names)} seed(s) not installed -- {why} "
+                f"({', '.join(sorted(names))})"
+            )
         unseeded = unseeded_governance_records(REPO_ROOT)
         if unseeded:
             findings.append(
                 "committed governance records install.sh never seeds (their "
                 "lanes stay unconfigured): " + ", ".join(unseeded)
             )
-        return f"{seeded} seeded, {present} already present, {missing} absent from repo", findings
+        return (
+            f"{seeded} seeded, {present} already present, "
+            f"{sum(len(n) for n in shut.values())} gated out, {missing} absent from repo",
+            findings,
+        )
 
     def _check_plist_referenced_seeds(self) -> list[str]:
         """Governance records the writer's plist names but nothing seeds.
@@ -1410,6 +1555,8 @@ def _construct_core_authority(symbol: Any, store: Any, scheduler: Any) -> Any:
     # raises is both honest and safe: if one of them ever started reading
     # during construction, this would say so rather than silently sample live
     # artefacts.
+    if name in _CONNECTION_AUTHORITIES:
+        return symbol(store.connection)
     if name in _RESOLVER_KWARGS:
         kwargs: dict[str, Any] = {}
         for keyword in _RESOLVER_KWARGS[name]:
@@ -1438,6 +1585,12 @@ def _rehearsal_raw_spool(directory: Path) -> Any:
 
 
 #: Keyword-only collaborators that are pure call-time resolvers.
+#: Core authorities constructed on ``store.connection`` rather than ``store``.
+#: Same database, same migration, different constructor -- worth naming rather
+#: than sniffing, so that a class that grows a store argument later fails here
+#: instead of quietly being handed the wrong object.
+_CONNECTION_AUTHORITIES: frozenset[str] = frozenset({"DocumentProvenanceStore"})
+
 _RESOLVER_KWARGS: dict[str, tuple[str, ...]] = {
     "CredentialAuthorityStore": ("handle_resolver",),
     "StatementSnapshotAuthority": ("artifact_resolver",),
