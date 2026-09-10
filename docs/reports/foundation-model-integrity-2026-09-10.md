@@ -8,12 +8,7 @@ The four published forecast attempts blocked by `segment_sum` exposed a code def
 
 The repair checks only duration facts on known business-segment, geography, product/service, or generic segment axes. It also requires one unique row per member. A repeated member means the one-axis projection lost another dimension, so the group is unavailable rather than passed or failed. A genuine unique-member business segment mismatch is still refused with the existing tolerance and reason. No fiscal-period, unit, source, or numeric rule changed.
 
-A read-only replay over the current statement structures produced:
-
-- ACN: 71 additive groups checked, all pass. The prior false refusals were exclusively non-additive axes.
-- CTSH: 32 additive groups checked, all pass after excluding attribute/consolidation axes.
-- DXC: 11 additive groups checked, all pass after excluding consolidation/equity axes.
-- EPAM: 28 additive groups check successfully. Eight prior residual findings were geographic cash balance instants representing only selected jurisdictions, not a complete duration-flow partition; instant facts are now outside this invariant.
+Current persisted rows do not carry the full XBRL context or an explicit dimension count. Therefore the live structures cannot prove that even a unique-looking member list is a complete one-dimensional partition. The gate now reports segment sum as `not_applicable` for those legacy/current rows. Direct inputs carrying `dimension_count=1` still enforce the unchanged arithmetic and tolerance; a mismatched complete business-segment group still fails. A future source-contract revision can preserve the full dimension set and set this provenance without rewriting old facts.
 
 ## IBM
 
@@ -27,4 +22,4 @@ The existing governed model-spec lane can produce a new specification when its b
 
 `PYTHONPATH=src python3 -m unittest tests.test_economic_invariants tests.test_company_model_forecast tests.test_model_forecast_driver`
 
-Result: 156 tests passed. Added regressions cover non-additive XBRL axes, collapsed multi-dimensional duplicate members, geographic balance instants, and retain the existing real business-segment mismatch refusal.
+Result: 156 tests passed. Added regressions cover non-additive XBRL axes, missing single-dimension provenance, collapsed multi-dimensional duplicate members, geographic balance instants, honest `not checked` report text, and retain the complete business-segment mismatch refusal.

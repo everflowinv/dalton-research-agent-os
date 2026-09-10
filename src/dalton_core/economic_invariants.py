@@ -291,6 +291,13 @@ class InvariantReport:
 
     def message(self) -> str:
         if not self.failures:
+            not_checked = [item.invariant for item in self.results
+                           if item.status == NOT_APPLICABLE]
+            if not_checked:
+                return (
+                    f"{self.output_ref} has no economic-invariant failure; "
+                    f"not checked: {', '.join(not_checked)}"
+                )
             return f"{self.output_ref} satisfies every economic invariant"
         return (
             f"{self.output_ref} is unavailable: "
@@ -793,7 +800,8 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         key = (concept, start, end)
         if not axis and not row.get("is_breakdown"):
             consolidated[key] = row.get("value")
-        elif start and axis and str(axis) in ADDITIVE_SEGMENT_AXES:
+        elif (start and axis and str(axis) in ADDITIVE_SEGMENT_AXES
+              and row.get("dimension_count") == 1):
             parts.setdefault((*key, str(axis)), []).append({
                 "member": str(row.get("dimension_member") or ""),
                 "value": row.get("value"),

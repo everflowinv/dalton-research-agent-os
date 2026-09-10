@@ -244,11 +244,11 @@ class SegmentSumTests(unittest.TestCase):
         {"concept": "us-gaap:Revenues", "period_start": "2026-06-01",
          "period_end": "2026-08-31", "value": "600", "is_breakdown": True,
          "dimension_axis": "srt:StatementBusinessSegmentsAxis",
-         "dimension_member": "Consulting"},
+         "dimension_member": "Consulting", "dimension_count": 1},
         {"concept": "us-gaap:Revenues", "period_start": "2026-06-01",
          "period_end": "2026-08-31", "value": "400", "is_breakdown": True,
          "dimension_axis": "srt:StatementBusinessSegmentsAxis",
-         "dimension_member": "Outsourcing"},
+         "dimension_member": "Outsourcing", "dimension_count": 1},
     ]
 
     def test_the_parts_adding_to_the_whole_passes(self):
@@ -274,11 +274,11 @@ class SegmentSumTests(unittest.TestCase):
             {"concept": "us-gaap:Revenues", "period_start": "2026-06-01",
              "period_end": "2026-08-31", "value": "1000", "is_breakdown": True,
              "dimension_axis": "srt:StatementGeographicalAxis",
-             "dimension_member": "US"},
+             "dimension_member": "US", "dimension_count": 1},
             {"concept": "us-gaap:Revenues", "period_start": "2026-06-01",
              "period_end": "2026-08-31", "value": "0", "is_breakdown": True,
              "dimension_axis": "srt:StatementGeographicalAxis",
-             "dimension_member": "RestOfWorld"},
+             "dimension_member": "RestOfWorld", "dimension_count": 1},
         ]
         groups = ei.segment_groups(rows)
         self.assertEqual(len(groups), 2)
@@ -333,6 +333,11 @@ class SegmentSumTests(unittest.TestCase):
             result_of(check({"segments": groups}), SEGMENT_SUM).status,
             NOT_APPLICABLE,
         )
+
+    def test_a_single_projected_axis_without_dimension_count_is_not_proof(self):
+        rows = [{key: value for key, value in row.items()
+                 if key != "dimension_count"} for row in self.ROWS]
+        self.assertEqual(ei.segment_groups(rows), [])
 
 
 class PeriodBasisTests(unittest.TestCase):
@@ -434,6 +439,14 @@ class ShapeTests(unittest.TestCase):
 
     def test_an_empty_subject_is_not_a_pass(self):
         self.assertTrue(all(item.status == NOT_APPLICABLE for item in check({})))
+
+    def test_a_report_names_checks_that_were_not_applicable(self):
+        report = ei.evaluate(
+            output_kind=ei.FORECAST_MODEL, output_ref="forecast-model-version:x",
+            company_ref="company:x", subject={})
+        self.assertEqual(report.status, AVAILABLE)
+        self.assertIn("not checked:", report.message())
+        self.assertNotIn("satisfies every", report.message())
 
     def test_a_subject_key_nobody_reads_is_refused_rather_than_ignored(self):
         with self.assertRaises(EconomicInvariantValidationError):
@@ -649,11 +662,11 @@ class ForecastGateTests(unittest.TestCase):
             {"concept": REVENUE_CONCEPT, "period_start": "2026-03-01",
              "period_end": "2026-05-31", "value": "800000000",
              "is_breakdown": True, "dimension_axis": "srt:SegmentAxis",
-             "dimension_member": "Consulting"},
+             "dimension_member": "Consulting", "dimension_count": 1},
             {"concept": REVENUE_CONCEPT, "period_start": "2026-03-01",
              "period_end": "2026-05-31", "value": "400000000",
              "is_breakdown": True, "dimension_axis": "srt:SegmentAxis",
-             "dimension_member": "Outsourcing"},
+             "dimension_member": "Outsourcing", "dimension_count": 1},
         ]
         with self.assertRaises(EconomicInvariantRefused) as caught:
             self.authority.publish(forecast_body(), statement_rows=rows)

@@ -296,10 +296,12 @@ class LaneStateTests(unittest.TestCase):
         rows.extend([
             {**base, "label": "Consulting", "is_breakdown": True,
              "dimension_axis": "srt:ProductOrServiceAxis",
-             "dimension_member": "acn:ConsultingMember", "value": "100"},
+             "dimension_member": "acn:ConsultingMember", "dimension_count": 1,
+             "value": "100"},
             {**base, "label": "Managed Services", "is_breakdown": True,
              "dimension_axis": "srt:ProductOrServiceAxis",
-             "dimension_member": "acn:ManagedServicesMember", "value": "200"},
+             "dimension_member": "acn:ManagedServicesMember", "dimension_count": 1,
+             "value": "200"},
         ])
         original = self.missions.statement_lines
         self.missions.statement_lines = lambda ingest_id, **kwargs: (
