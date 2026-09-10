@@ -1,0 +1,21 @@
+{
+  "purposes": {
+    "deep_insight_gate": {
+      "max_cost_usd": 3.0,
+      "max_units": 4
+    },
+    "dossier": {
+      "max_cost_usd": 2.5,
+      "max_units": 3
+    },
+    "event_judgement": {
+      "max_events": 8,
+      "max_events_per_company": 3
+    },
+    "industry_framework": {
+      "max_cost_usd": 2.5,
+      "max_units": 3
+    }
+  },
+  "schema_version": "0.1"
+}
