@@ -23,7 +23,7 @@ _FIELDS = {
     "config_path", "log_dir", "spool_dir", "writer_socket", "cockpit_port",
     "release_ref", "release_path", "shared_readonly_paths", "content_hash",
 }
-_OPTIONAL_FIELDS = {"shared_capacity"}
+_OPTIONAL_FIELDS = {"shared_capacity", "shared_connector_capacity"}
 
 
 class WorkspaceError(RuntimeError):
@@ -64,6 +64,7 @@ class WorkspacePaths:
     release_path: Path
     shared_readonly_paths: tuple[Path, ...]
     shared_capacity: Mapping[str, str] | None
+    shared_connector_capacity: tuple[Mapping[str, str], ...]
     content_hash: str
     manifest_path: Path | None = None
 
@@ -148,6 +149,28 @@ class WorkspacePaths:
                     or _SHA.fullmatch(capacity["policy_hash"]) is None):
                 raise WorkspaceError("shared_capacity.policy_hash must be lowercase SHA-256")
             capacity = dict(capacity)
+        connector_capacity = value.get("shared_connector_capacity", [])
+        if not isinstance(connector_capacity, list):
+            raise WorkspaceError("shared_connector_capacity must be an array")
+        connector_bindings: list[Mapping[str, str]] = []
+        seen_bindings: set[tuple[str, str]] = set()
+        for item in connector_capacity:
+            if not isinstance(item, Mapping) or set(item) != {
+                    "database", "policy_ref", "policy_hash"}:
+                raise WorkspaceError("shared connector capacity binding has an invalid closed shape")
+            database = _absolute(item["database"], "shared_connector_capacity.database")
+            if database.parent != (host_root / "fleet-capacity").resolve():
+                raise WorkspaceError(
+                    "shared connector capacity database must be directly under host fleet-capacity")
+            if (not isinstance(item["policy_ref"], str) or ":" not in item["policy_ref"]
+                    or not isinstance(item["policy_hash"], str)
+                    or _SHA.fullmatch(item["policy_hash"]) is None):
+                raise WorkspaceError("shared connector capacity policy binding is invalid")
+            identity_key = (item["policy_ref"], item["policy_hash"])
+            if identity_key in seen_bindings:
+                raise WorkspaceError("shared connector capacity bindings must be unique")
+            seen_bindings.add(identity_key)
+            connector_bindings.append(dict(item))
         manifest = None if manifest_path is None else _absolute(str(manifest_path), "manifest_path")
         if manifest is not None:
             _inside(manifest, root, "manifest_path")
@@ -155,6 +178,7 @@ class WorkspacePaths:
                 raise WorkspaceError("manifest_path is not workspace_root/workspace.json")
         return cls(workspace_id, slug, root, state, config, logs, spool, socket,
                    port, release_ref, release, shared_paths, capacity,
+                   tuple(connector_bindings),
                    value["content_hash"], manifest)
 
     def service_binding(self) -> dict[str, str]:
@@ -220,6 +244,7 @@ def workspace_manifest(
     release_path: str | Path, *, workspace_id: str | None = None,
     shared_readonly_paths: Sequence[str | Path] = (),
     shared_capacity: Mapping[str, str] | None = None,
+    shared_connector_capacity: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     if not isinstance(slug, str) or _SLUG.fullmatch(slug) is None:
         raise WorkspaceError("workspace slug is invalid")
@@ -241,6 +266,8 @@ def workspace_manifest(
     }
     if shared_capacity is not None:
         body["shared_capacity"] = dict(shared_capacity)
+    if shared_connector_capacity:
+        body["shared_connector_capacity"] = [dict(item) for item in shared_connector_capacity]
     wire = {**body, "content_hash": content_hash(body)}
     WorkspacePaths.from_manifest(wire)
     return wire
@@ -275,12 +302,14 @@ def create_workspace_manifest(
     release_path: str | Path, *, workspace_id: str | None = None,
     shared_readonly_paths: Sequence[str | Path] = (),
     shared_capacity: Mapping[str, str] | None = None,
+    shared_connector_capacity: Sequence[Mapping[str, str]] = (),
 ) -> WorkspacePaths:
     host = Path(host_root).expanduser().resolve()
     wire = workspace_manifest(host, slug, cockpit_port, release_ref, release_path,
                               workspace_id=workspace_id,
                               shared_readonly_paths=shared_readonly_paths,
-                              shared_capacity=shared_capacity)
+                              shared_capacity=shared_capacity,
+                              shared_connector_capacity=shared_connector_capacity)
     host.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(host, 0o700)
     lock_path = host / ".workspace-registry.lock"

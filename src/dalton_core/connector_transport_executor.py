@@ -27,6 +27,7 @@ from .raw_spool import (
 )
 from .runner_journal import RunnerJournal, RunnerJournalConflict, RunnerJournalNotFound
 from .store import content_hash
+from .workspace_runtime import ENVIRONMENT_KEY
 
 
 class ConnectorTransportError(Exception):
@@ -136,6 +137,113 @@ class _CommitContext:
     binding_side_effects: tuple[str, ...]
 
 
+class _SharedConnectorReservation:
+    """Validated optional host binding; opens the shared DB only per barrier."""
+
+    def __init__(self, admission: ValidatedRunnerAdmission, *, clock: Callable[[], datetime]):
+        import os
+        from .shared_connector_capacity import SharedConnectorCapacityAuthority
+        from .workspace import load_workspace_manifest
+        path = os.environ.get(ENVIRONMENT_KEY)
+        self.binding = None
+        self.workspace_id = None
+        self.policy = None
+        self.clock = clock
+        self.ref = None
+        if not path:
+            return
+        workspace = load_workspace_manifest(path)
+        matches = []
+        for binding in workspace.shared_connector_capacity:
+            # Every declaration must resolve, even when it scopes another connector.
+            with SharedConnectorCapacityAuthority(
+                    binding["database"], policy_ref=binding["policy_ref"],
+                    policy_hash=binding["policy_hash"], clock=clock) as authority:
+                if authority.matches(
+                    connector_ref=admission.profile["connector_ref"],
+                    capability_ref=admission.profile["capability_id"],
+                    credential_slot_refs=admission.profile["credential_slot_refs"],
+                ):
+                    matches.append((dict(binding), dict(authority.policy)))
+        if len(matches) > 1:
+            raise ConnectorTransportError("multiple shared connector policies match one attempt")
+        if matches:
+            self.binding, self.policy = matches[0]
+            self.workspace_id = workspace.workspace_id
+
+    def _authority(self):
+        from .shared_connector_capacity import SharedConnectorCapacityAuthority
+        assert self.binding is not None
+        return SharedConnectorCapacityAuthority(
+            self.binding["database"], policy_ref=self.binding["policy_ref"],
+            policy_hash=self.binding["policy_hash"], clock=self.clock)
+
+    def reserve(self, admission: ValidatedRunnerAdmission, local: Mapping[str, Any]) -> str | None:
+        if self.binding is None:
+            return None
+        maximum = int(local["reserved"]["cost_micros"])
+        maximum = maximum or int(self.policy["max_cost_micros_per_call"])
+        with self._authority() as authority:
+            row = authority.reserve(
+                workspace_id=self.workspace_id,
+                invocation_ref=admission.invocation["id"],
+                attempt_number=int(local["physical_attempt_number"]),
+                maximum_cost_micros=maximum,
+                expires_at=_parse_time(local["expires_at"]),
+            )
+        self.ref = row["reservation_ref"]
+        return self.ref
+
+    def release(self) -> None:
+        if self.ref:
+            with self._authority() as authority: authority.release_undispatched(self.ref)
+
+    def dispatched(self) -> None:
+        if self.ref:
+            with self._authority() as authority: authority.mark_dispatched(self.ref)
+
+    def settle(self, observation: Mapping[str, Any] | None, outcome: str) -> None:
+        if not self.ref: return
+        usage = None if observation is None else observation.get("provider_usage")
+        actual = usage.get("cost_micros") if isinstance(usage, Mapping) else None
+        if isinstance(actual, bool) or not isinstance(actual, int) or actual < 0:
+            actual = None
+        unknown = outcome in {"timeout", "indeterminate"}
+        with self._authority() as authority:
+            authority.settle(
+                self.ref, actual_cost_micros=None if unknown else actual,
+                outcome="transport_or_protocol_unknown" if unknown else outcome)
+
+
+def _shared_recovery(reservation_ref: str | None, *, clock: Callable[[], datetime],
+                     dispatched: bool) -> None:
+    if not reservation_ref: return
+    import os
+    from .shared_connector_capacity import SharedConnectorCapacityAuthority
+    from .workspace import load_workspace_manifest
+    manifest = os.environ.get(ENVIRONMENT_KEY)
+    if not manifest:
+        raise ConnectorTransportError("shared connector reservation lost its workspace binding")
+    workspace = load_workspace_manifest(manifest)
+    found = 0
+    for binding in workspace.shared_connector_capacity:
+        with SharedConnectorCapacityAuthority(
+                binding["database"], policy_ref=binding["policy_ref"],
+                policy_hash=binding["policy_hash"], clock=clock) as authority:
+            row = authority.connection.execute(
+                "SELECT 1 FROM shared_connector_capacity_reservations WHERE reservation_ref=?",
+                (reservation_ref,)).fetchone()
+            if row:
+                found += 1
+                if dispatched:
+                    authority.settle(reservation_ref, actual_cost_micros=None,
+                                     outcome="transport_or_protocol_unknown")
+                else:
+                    authority.release_undispatched(reservation_ref)
+    if found != 1:
+        raise ConnectorTransportError("shared connector recovery binding is unavailable")
+
+
 class ConnectorTransportExecutor:
     """Execute operator-injected recorded adapters behind durable barriers."""
 
@@ -191,6 +299,7 @@ class ConnectorTransportExecutor:
         admission = self._gate.validate(
             request_wire, scheduler_lease_token=scheduler_lease_token
         )
+        shared_capacity = _SharedConnectorReservation(admission, clock=self._clock)
         begun = self._journal.begin_request(admission.request)
         if begun["state"] != "admitted":
             raise RunnerRecoveryRequired(
@@ -199,10 +308,16 @@ class ConnectorTransportExecutor:
         self._barrier("after_admitted")
 
         reservation = self._gate.reserve_for_admission(
-            admission,
-            scheduler_lease_token=scheduler_lease_token,
-            idempotency_key=self._key(admission, "reserve"),
-        )
+            admission, scheduler_lease_token=scheduler_lease_token,
+            idempotency_key=self._key(admission, "reserve"))
+        try:
+            shared_reservation_ref = shared_capacity.reserve(admission, reservation)
+        except Exception:
+            self._authority.settle_quota(
+                reservation["id"], "released", usage_entry_ref=None,
+                cost_entry_ref=None,
+                idempotency_key=self._recovery_key(reservation["id"], "settle-released"))
+            raise
         self._barrier("after_quota_reserved")
         self._journal.append(
             admission.request["id"],
@@ -211,6 +326,7 @@ class ConnectorTransportExecutor:
                 "reservation_ref": reservation["id"],
                 "reservation_hash": reservation["content_hash"],
                 "physical_attempt_number": reservation["physical_attempt_number"],
+                "shared_capacity_reservation_ref": shared_reservation_ref,
             },
         )
         self._barrier("after_reserved")
@@ -224,6 +340,7 @@ class ConnectorTransportExecutor:
                 max_response_bytes=adapter_request["max_response_bytes"],
             )
         except RawSpoolCapacityError:
+            shared_capacity.release()
             settlement = self._authority.settle_quota(
                 reservation["id"],
                 "released",
@@ -247,6 +364,7 @@ class ConnectorTransportExecutor:
         self._barrier("after_sink_opened")
 
         started_at = _wire_time(self._clock())
+        shared_capacity.dispatched()
         self._journal.append(
             admission.request["id"],
             "transport_started",
@@ -258,6 +376,7 @@ class ConnectorTransportExecutor:
                 "adapter_request_hash": adapter_request["content_hash"],
                 "started_at": started_at,
                 "raw_sink_ref": adapter_request["raw_sink_ref"],
+                "shared_capacity_reservation_ref": shared_reservation_ref,
             },
             event_at=started_at,
         )
@@ -329,6 +448,7 @@ class ConnectorTransportExecutor:
                 _parse_time(completed_at)
                 + timedelta(milliseconds=int(observation["retry_after_ms"]))
             )
+        shared_capacity.settle(observation, attempt_outcome)
         observed_payload = {
             "reservation_ref": reservation["id"],
             "reservation_hash": reservation["content_hash"],
@@ -380,6 +500,9 @@ class ConnectorTransportExecutor:
             return {"status": "no-op", "state": "admitted"}
         if latest["state"] == "reserved":
             reservation_ref = latest["payload"]["reservation_ref"]
+            _shared_recovery(
+                latest["payload"].get("shared_capacity_reservation_ref"),
+                clock=self._clock, dispatched=False)
             settlement = self._authority.settle_quota(
                 reservation_ref,
                 "released",
@@ -448,6 +571,8 @@ class ConnectorTransportExecutor:
         self, runner_request_ref: str, latest: Mapping[str, Any]
     ) -> dict[str, Any]:
         payload = latest["payload"]
+        _shared_recovery(payload.get("shared_capacity_reservation_ref"),
+                         clock=self._clock, dispatched=True)
         reservation = self._connector_reader.get_reservation(payload["reservation_ref"])
         result = self._record_indeterminate(
             connector_invocation_ref=self._journal.request(runner_request_ref)[
