@@ -227,6 +227,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 夜 | 派出 Wave 3 首批：P14f 业绩季工作流、P14b + P14d 修订候选裁决与版本化重出、INT2 第二批接线；抽取吞吐诊断在跑 | 进行中 |
 | 09-09 深夜 | 合并 C2 预算池 + tick 账本、P12c DebateMap、P12a/P12f 档案 + guidance 档案、P14e 测试修复。main `64d3f94`，3,932 项通过。用量上限中断 5 个 agent 一次，全部从上下文恢复 | 完成 |
 | 09-09 深夜 | 派出：planner 日账本（C2 发现 BoundedPlannerLoop 模型调用绕过日账本）、P12d Deep Insight Gate 12 问、P12e 行业框架、P15a ask v2、P15d ConvictionCall | 进行中 |
+| 09-10 凌晨 | 合并 INT2（事件 / 判断 / 反思 / 催化剂 / 频率 / 专项研究面板、来源能力地图与模型路由视图、预算池面板、第二批 install 种子、owner 部署后步骤清单）+ 两处跟进修复。main `1fc7c5f`，3,983 项通过 | 完成 |
+| 09-10 凌晨 | 派出：S5 SEC 内幕交易 / 13F op + IR 页监视、D3 perception 显式退役（ADR-0009）、部署演练（临时副本上跑迁移 / 种子 / 目录同步 / 一个 tick，产出 owner runbook） | 进行中 |
+| 09-10 凌晨 | 交付待合：P14b + P14d 修订回路（与 INT2 审批列表调和中）、抽取吞吐（三 blocker 已修；DXC CIK 补零待集成修） | 进行中 |
 
 ---
 
