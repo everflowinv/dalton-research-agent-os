@@ -176,6 +176,7 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_reflection_lane",
     "dalton_core.mission_debate_map_lane",
     "dalton_core.mission_dossier_lane",
+    "dalton_core.mission_deep_insight_lane",
     "dalton_core.mission_conviction_lane",
 )
 

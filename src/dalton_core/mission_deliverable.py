@@ -51,12 +51,19 @@ DELIVERABLE_KINDS: tuple[str, ...] = (
     # deliverable rather than a new object precisely so that it inherits the
     # rule that a figure with no live Claim behind it is refused.
     "event_note",
+    # P12d: the Deep Insight Gate's twelve answers, rendered for a reader.  The
+    # record of truth is the gate authority's own chain -- that is what the
+    # owner's decision binds by hash and what replays by version -- and this is
+    # the reader's copy, published through the machinery every other document in
+    # this system already appears in.  It is a deliverable rather than a second
+    # object precisely so that it inherits the rule that a figure with no live
+    # Claim behind it is refused.
+    "deep_insight_gate",
     # P14f: the two windows of an earnings season.  One chain per company per
     # kind, gaining a version per occurrence, so "what did we say before the
     # print and what did we say after it" is a version walk like every other
-    # output (ADR-0008).  Deliverables rather than new objects for the reason
-    # the event note is one: they inherit the rule that a figure with no live
-    # Claim behind it is refused.
+    # output (ADR-0008).  Deliverables rather than new objects for the same
+    # reason as the two above.
     "earnings_preview",
     "earnings_calibration",
 )
@@ -328,12 +335,14 @@ class MissionDeliverableAuthority:
         including the foreign-key check afterwards, because a rebuild that
         silently orphaned the pointer would be worse than the constraint.
 
-        P14a wrote this for ``event_note`` and keyed it on that one literal.
-        P14f needs two more, and a second copy of the same rebuild keyed on a
-        second literal would leave a Core that has had one migration and not
-        the other -- so the condition is now "every kind in
-        :data:`DELIVERABLE_KINDS` appears in the table's SQL", and the rebuilt
-        CHECK is generated from that tuple.  Adding a kind is a line again.
+        P14a wrote this for ``event_note`` and keyed it on that one literal;
+        P12d added ``deep_insight_gate`` and moved the sentinel to it.  A
+        sentinel is one kind, and three slices adding kinds in the same week is
+        how a Core ends up having had one migration and not the next: whichever
+        sentinel it already carries, it is left alone.  So the condition is now
+        *every* kind in :data:`DELIVERABLE_KINDS`, and the rebuilt CHECK is
+        generated from that tuple rather than written out again.  Adding a kind
+        is a line in one place.
         """
 
         row = self.connection.execute(

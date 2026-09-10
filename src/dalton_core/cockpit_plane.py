@@ -188,6 +188,7 @@ REGISTRY_LANE_LABELS = {
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
+    "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
 }
@@ -291,6 +292,42 @@ CHECKPOINT_TABLES = {
     "gate_reopen": ("gate_reopen_proposals", "proposal_id",
                     "gate_reopen_decisions", "proposal_ref"),
 }
+# P12d: the three words the gate authority accepts, so a button cannot offer
+# something the writer would refuse.
+GATE_ACTIONS = (
+    {"decision": "approve", "label": "通过"},
+    {"decision": "return_for_more_work", "label": "退回补充"},
+    {"decision": "reject", "label": "否决"},
+)
+
+
+def _gate_answer_line(item: Mapping[str, Any]) -> str:
+    """One gate answer as one line of text, for the details renderer."""
+
+    from .deep_insight_gate import answer_body
+
+    head = str(item["question"])
+    if item["status"] == "answered":
+        refs = len(item["sources"])
+        return (f"{head} —— {answer_body(item)}"
+                f"（把握 {item['confidence']}，{refs} 条引用）")
+    unknown = item["unknown"]
+    return (f"{head} —— 未答：{unknown['missing']}。"
+            f"能定它的证据：{unknown['evidence_that_would_answer']}")
+
+
+def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Whether the stage ladder would accept this gate's decision today.
+
+    One predicate, shared with the writer operation behind the button, so the
+    page and the door can never disagree about whether it opens.
+    """
+
+    from .deep_insight_gate import decidability
+
+    return decidability(core, record)
+
+
 CHECKPOINT_TITLES = {
     "thesis_revision_candidate": "有事情发生，可能要改我们对这家公司的判断",
     "gate_reopen": "一道已经过掉的闸，现在有证据说可以重开",
@@ -1724,10 +1761,16 @@ class CockpitPlane:
     def _stage_rows(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
         """P10a:每家公司的阶段与资料底座清单，全部从任务自己的表里数出来。"""
 
+        # P14-S: every version of this mission_ref, in time order. Scoped to
+        # the active version, the whole page reset itself on every publish --
+        # live, v7..v13 each hold their own copy of the same five ``entered``
+        # rows, and only v13 holds the four ``gate_passed``.
         state: dict[str, dict[str, list[str]]] = {}
         for row in self._rows(core,
             "SELECT company_ref, stage_ref, status FROM coverage_mission_stage_records "
-            "WHERE mission_version_ref=? ORDER BY created_at", (mission["id"],),
+            "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
+            "coverage_mission_versions WHERE mission_ref=?) ORDER BY created_at, record_id",
+            (mission["mission_ref"],),
         ):
             state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(row["status"])
         specs = planned_spec_refs_from_directory(self.config.state_dir / "discovery-plans")
@@ -1775,14 +1818,23 @@ class CockpitPlane:
             # record, not in a column. Selecting it as one made this whole page
             # raise "no such column: rationale" the first time a deliverable
             # existed to open -- which is why nothing had noticed.
+            # P14-S: the history of this company's screen across every
+            # version of the mission, with the version each entry was written
+            # under carried as provenance -- that is what makes the list
+            # readable as a history rather than as a fragment of one.
             stage = [
                 {"status": row["status"],
                  "rationale": json.loads(row["record_json"]).get("rationale"),
-                 "at": row["created_at"]}
+                 "at": row["created_at"],
+                 "mission_version_ref": row["mission_version_ref"]}
                 for row in self._rows(core,
-                    "SELECT status, record_json, created_at FROM coverage_mission_stage_records "
-                    "WHERE mission_version_ref=? AND company_ref=? AND stage_ref='initial_screen' "
-                    "ORDER BY created_at", (record["mission_version_ref"], record["subject_ref"]))
+                    "SELECT status, record_json, created_at, mission_version_ref "
+                    "FROM coverage_mission_stage_records WHERE mission_version_ref IN "
+                    "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref="
+                    "(SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?)) "
+                    "AND company_ref=? AND stage_ref='initial_screen' "
+                    "ORDER BY created_at, record_id",
+                    (record["mission_version_ref"], record["subject_ref"]))
             ]
             claims = {claim["ref"]: claim for claim in self._claims(core)}
             quality = self._quality(core).get(ref)
@@ -2293,6 +2345,54 @@ class CockpitPlane:
                     "actions": [{"decision": "keep_forecast", "label": "维持预测"}, {"decision": "revise_forecast", "label": "修订预测"}],
                     "needs_rationale": True,
                 })
+            # P12d: the Deep Insight Gate's twelve answers, waiting for you.
+            # It is the Playbook's own human checkpoint between a first screen
+            # and full coverage, and automation never passes it: approving is
+            # what writes the ``gate_passed`` stage record and lets the company
+            # go on. The answers travel with the item because a gate you have to
+            # open another view to read is a gate you decide without reading.
+            #
+            # Whether it gets buttons is read off the Core, the same way the
+            # revision checkpoints above do it: the mission stage ledger is
+            # scoped by version and the live mission rolls, so a draft can stop
+            # being decidable without anybody touching it. It still appears --
+            # it is still what the owner has to deal with -- and it says why,
+            # because a button that goes nowhere is worse than an item that
+            # says so.
+            for row in self._rows(core,
+                "SELECT v.* FROM deep_insight_gate_versions v "
+                "LEFT JOIN deep_insight_gate_decisions d "
+                "ON d.gate_version_ref=v.version_id "
+                "WHERE d.decision_id IS NULL ORDER BY v.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                verdict = _gate_decidability(core, record)
+                answered = [item for item in record["answers"]
+                            if item["status"] == "answered"]
+                items.append({
+                    "kind": "deep_insight_gate", "ref": row["version_id"],
+                    "hash": row["content_hash"], "at": row["created_at"],
+                    "title": "深度认知门十二问：是否让这家公司进入完整覆盖",
+                    "who": self._label(members, row["company_ref"]),
+                    "summary": (f"第 {row['version_number']} 版；十二问答了 "
+                                f"{len(answered)} 问，其余写明缺什么、下一步取什么。"),
+                    # One string per question, keyed by its number. The details
+                    # renderer joins an array with 、 and stringifies an object,
+                    # so a list of twelve answer objects would arrive as twelve
+                    # "[object Object]" run together -- the page has one shape
+                    # for a value and it is a line of text.
+                    "details": {
+                        "行业分类": record["classification"],
+                        **{item["question_ref"]: _gate_answer_line(item)
+                           for item in record["answers"]},
+                        "档案版本": record["bindings"]["dossier_version_ref"],
+                        "争议图版本": record["bindings"]["debate_map_version_ref"],
+                    },
+                    "actions": list(GATE_ACTIONS) if verdict["decidable"] else [],
+                    "needs_rationale": verdict["decidable"],
+                    **({} if verdict["decidable"]
+                       else {"note": "暂时不能裁决：" + verdict["reason"]}),
+                })
         with self._core() as core:
             # P10b: a Claim the detectors flagged, waiting for you to retire or keep it.
             for row in self._rows(core,
@@ -2513,6 +2613,17 @@ class CockpitPlane:
                 "challenge_ref": ref, "challenge_hash": digest, "decision": decision,
                 "rationale": rationale.strip() or ("你确认退役这条结论" if decision == "retired" else "你确认保留这条结论")}
             title = ("退役了一条结论" if decision == "retired" else "保留了一条被标记的结论")
+        elif kind == "deep_insight_gate":
+            if decision not in {"approve", "return_for_more_work", "reject"}:
+                raise CockpitError(
+                    "decision must be approve, return_for_more_work or reject")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_deep_insight_gate", {
+                "gate_version_ref": ref, "gate_version_hash": digest,
+                "decision": decision, "reason": rationale.strip()}
+            title = {"approve": "通过了深度认知门", "return_for_more_work": "把深度认知门退回补充",
+                     "reject": "否决了深度认知门"}[decision] + f"：{ref.split(':', 1)[-1]}"
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")
