@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import unittest
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from dalton_core.debate_map import (
     validate_version,
 )
 from dalton_core.store import DaltonStore
+from dalton_core.coverage_mission import CoverageMissionAuthority
+from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_FILE = ROOT / "deploy/phase9/p12c-debate-policy-v1.json"
@@ -458,6 +461,16 @@ class DebateMapAuthorityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = DaltonStore(":memory:")
         self.addCleanup(self.store.close)
+        state = bootstrap_method_authorities(self.store)
+        params = mission_params(state)
+        may_write = list(params["autonomy"]["may_write"])
+        if "debate_map" not in may_write:
+            may_write.append("debate_map")
+        params["autonomy"] = {**params["autonomy"], "may_write": may_write}
+        self.params = copy.deepcopy(params)
+        create = copy.deepcopy(params)
+        self.mission = CoverageMissionAuthority(self.store).create_mission(
+            create.pop("mission_ref"), **create)
         self.authority = DebateMapAuthority(self.store)
 
     def publish(self, debates, *, refs, created_at="2026-09-09T00:00:00+00:00", **kwargs):
@@ -469,8 +482,10 @@ class DebateMapAuthorityTests(unittest.TestCase):
             "constitution_ref": "constitution-version:x:1",
             "constitution_hash": "a" * 64,
             "evidence_fingerprint": evidence_fingerprint(["cv-a", "cv-b"]),
+            "mission_version_ref": self.mission["id"],
+            "mission_version_hash": self.mission["content_hash"],
             "debates": debates,
-            "actor_ref": "automation:dalton",
+            "actor_ref": self.mission["autonomy"]["automation_principal"],
             "created_at": created_at,
         }
         params.update(kwargs)
@@ -492,6 +507,67 @@ class DebateMapAuthorityTests(unittest.TestCase):
         self.assertEqual(again["status"], "duplicate")
         self.assertEqual(again["id"], first["id"])
         self.assertEqual(self.authority.counts()["versions"], 1)
+
+    def test_a_new_active_mission_is_a_new_version_with_unchanged_claims(self) -> None:
+        first = self.publish([valid_debate()], refs=["cv-a"])
+        params = copy.deepcopy(self.params)
+        params.update({
+            "version_id": self.mission["id"].rsplit(":", 1)[0] + ":2",
+            "prior_version_ref": self.mission["id"],
+            "idempotency_key": "mission:debate-map-binding:2",
+        })
+        mission = CoverageMissionAuthority(self.store).create_mission(
+            params.pop("mission_ref"), **params)
+        second = self.publish(
+            [valid_debate()], refs=["cv-a"], change_reason="mission_rebind",
+            mission_version_ref=mission["id"],
+            mission_version_hash=mission["content_hash"],
+            created_at="2026-09-10T00:00:00+00:00",
+        )
+        self.assertEqual(second["status"], "fresh")
+        self.assertEqual(second["reason"], "mission_changed")
+        self.assertEqual(second["version"], 2)
+        self.assertEqual(second["prior_version_ref"], first["id"])
+
+    def test_the_authority_refuses_a_caller_supplied_mission_hash(self) -> None:
+        with self.assertRaisesRegex(Exception, "active mission"):
+            self.publish(
+                [valid_debate()], refs=["cv-a"],
+                mission_version_hash="0" * 64,
+            )
+
+    def test_the_mission_industry_is_an_authorized_subject(self) -> None:
+        published = self.publish(
+            [valid_debate()], refs=["cv-a"],
+            subject_ref=self.mission["industry_ref"], subject_kind="industry",
+        )
+        self.assertEqual(published["subject_ref"], self.mission["industry_ref"])
+
+    def test_a_subject_outside_the_mission_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "outside the mission"):
+            self.publish(
+                [valid_debate()], refs=["cv-a"],
+                subject_ref="company:sec-cik:9999999999",
+            )
+
+    def test_a_legacy_record_reads_without_rewriting_its_wire_or_hash(self) -> None:
+        legacy = DebateMapContractTests().version()
+        encoded = __import__("dalton_core.store", fromlist=["canonical_json"]).canonical_json(
+            legacy)
+        with self.store._transaction() as cur:
+            cur.execute(
+                "INSERT INTO debate_map_versions(version_id,map_ref,version_number,"
+                "prior_version_id,subject_ref,subject_kind,change_reason,"
+                "evidence_fingerprint,debate_count,live_count,rejected_count,"
+                "record_json,content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (legacy["id"], legacy["map_ref"], 1, None, legacy["subject_ref"],
+                 legacy["subject_kind"], legacy["change_reason"],
+                 legacy["evidence_fingerprint"], 1, 1, 0, encoded,
+                 legacy["content_hash"], legacy["actor_ref"], legacy["created_at"]),
+            )
+        read = self.authority.version(legacy["id"])
+        self.assertEqual(read, legacy)
+        self.assertNotIn("mission_version_ref", read)
 
     def test_a_new_reference_is_a_new_version(self) -> None:
         self.publish([valid_debate()], refs=["cv-a"])
@@ -562,6 +638,14 @@ class DebateMapReaderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = DaltonStore(":memory:")
         self.addCleanup(self.store.close)
+        state = bootstrap_method_authorities(self.store)
+        params = mission_params(state)
+        params["autonomy"] = {
+            **params["autonomy"],
+            "may_write": list(params["autonomy"]["may_write"]) + ["debate_map"],
+        }
+        self.mission = CoverageMissionAuthority(self.store).create_mission(
+            params.pop("mission_ref"), **params)
         self.authority = DebateMapAuthority(self.store)
         base = {
             "subject_ref": SUBJECT, "subject_kind": "company",
@@ -569,7 +653,9 @@ class DebateMapReaderTests(unittest.TestCase):
             "constitution_ref": "constitution-version:x:1",
             "constitution_hash": "a" * 64,
             "evidence_fingerprint": evidence_fingerprint(["cv-a"]),
-            "actor_ref": "automation:dalton",
+            "actor_ref": self.mission["autonomy"]["automation_principal"],
+            "mission_version_ref": self.mission["id"],
+            "mission_version_hash": self.mission["content_hash"],
         }
         self.first = self.authority.publish_map(
             **base, change_evidence_refs=["cv-a"],

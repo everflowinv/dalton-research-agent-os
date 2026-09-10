@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS debate_map_versions (
     subject_kind TEXT NOT NULL CHECK(subject_kind IN ('company', 'industry')),
     change_reason TEXT NOT NULL CHECK(change_reason IN (
         'filing_actual', 'driver_event', 'assumption_review',
-        'evidence_thicker', 'human_revision')),
+        'evidence_thicker', 'human_revision', 'mission_rebind')),
     evidence_fingerprint TEXT NOT NULL,
     debate_count INTEGER NOT NULL CHECK(debate_count >= 0),
     live_count INTEGER NOT NULL CHECK(live_count >= 0),

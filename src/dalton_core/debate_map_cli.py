@@ -26,6 +26,7 @@ from .debate_map import (
     POLICY_HASH,
     POLICY_REF,
     contested_aspects,
+    cited_refs,
     evidence_fingerprint,
 )
 from .debate_map_draft import (
@@ -67,6 +68,21 @@ def granted(mission: Any) -> bool:
 
 def subject_kind_for(subject_ref: str) -> str:
     return "industry" if subject_ref.startswith("industry:") else "company"
+
+
+def can_rebind(previous: Any, mission: Any, constitution: Any,
+               fingerprint: str) -> bool:
+    """Whether only the mission identity moved, requiring no new judgement."""
+
+    return bool(
+        previous is not None
+        and previous.get("mission_version_ref") != mission["id"]
+        and previous["evidence_fingerprint"] == fingerprint
+        and previous["constitution_ref"] == constitution["id"]
+        and previous["constitution_hash"] == constitution["content_hash"]
+        and previous["policy_ref"] == POLICY_REF
+        and previous["policy_hash"] == POLICY_HASH
+    )
 
 
 def run_debate_map(
@@ -139,6 +155,8 @@ def run_debate_map(
         summary["contested_aspects"] = len(seeds)
         authority = DebateMapAuthority(store)
         previous = authority.current(subject_ref)
+        current_fingerprint = evidence_fingerprint(
+            row["claim_version_ref"] for row in rows)
         table = build_input_table(
             subject_ref=subject_ref,
             subject_kind=subject_kind_for(subject_ref),
@@ -152,6 +170,33 @@ def run_debate_map(
         summary["prompt_bytes"] = len(build_prompt(table).encode("utf-8"))
         if dry_run:
             summary.update({"status": "succeeded", "map_status": "dry_run"})
+            return summary
+        rebindable = can_rebind(previous, mission, constitution, current_fingerprint)
+        if rebindable:
+            # A mission version moved while the research inputs did not. Bind
+            # the already verified map to the newly authorized mission without
+            # buying the identical draft and verifier calls again.
+            published = authority.publish_map(
+                subject_ref=subject_ref,
+                subject_kind=subject_kind_for(subject_ref),
+                change_reason="mission_rebind",
+                change_evidence_refs=sorted(cited_refs(previous)),
+                constitution_ref=previous["constitution_ref"],
+                constitution_hash=previous["constitution_hash"],
+                policy_ref=previous["policy_ref"], policy_hash=previous["policy_hash"],
+                evidence_fingerprint=current_fingerprint,
+                mission_version_ref=mission["id"],
+                mission_version_hash=mission["content_hash"],
+                debates=previous["debates"],
+                rejected_by_constitution=previous["rejected_by_constitution"],
+                drafted_by=previous["drafted_by"], verified_by=previous["verified_by"],
+                actor_ref=actor_ref, created_at=_now(),
+            )
+            summary.update({
+                "status": "succeeded", "map_status": published["status"],
+                "version_ref": published["id"], "version": published["version"],
+                "debates": len(published["debates"]),
+            })
             return summary
         if model_config_path is None:
             summary.update({"status": "succeeded", "map_status": "gated",
@@ -191,6 +236,13 @@ def run_debate_map(
         # in the map, and the reader is the one who decides whether it matters.
         summary["template_gaps"] = debate_map_gaps(debates, classification)
         refs = change_evidence(debates, previous)
+        mission_changed = (
+            previous is not None
+            and (previous.get("mission_version_ref") != mission["id"]
+                 or previous.get("mission_version_hash") != mission["content_hash"])
+        )
+        if not refs and mission_changed:
+            refs = sorted(cited_refs({"debates": debates}))
         if not refs:
             summary.update({"status": "succeeded", "map_status": "duplicate",
                             "failure_reason": "no reference the current version "
@@ -199,13 +251,14 @@ def run_debate_map(
         published = authority.publish_map(
             subject_ref=subject_ref,
             subject_kind=subject_kind_for(subject_ref),
-            change_reason=change_reason_for(previous),
+            change_reason=("mission_rebind" if mission_changed
+                           else change_reason_for(previous)),
             change_evidence_refs=refs,
             constitution_ref=constitution["id"],
             constitution_hash=constitution["content_hash"],
-            evidence_fingerprint=evidence_fingerprint(
-                row["claim_version_ref"] for row in rows
-            ),
+            evidence_fingerprint=current_fingerprint,
+            mission_version_ref=mission["id"],
+            mission_version_hash=mission["content_hash"],
             debates=debates,
             rejected_by_constitution=drafted["rejected"],
             drafted_by=drafted["drafted_by"],

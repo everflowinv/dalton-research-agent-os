@@ -101,7 +101,7 @@ def fake_family(_config, route_decision_ref):
 class ConvictionHarness(P14aHarness):
     """A Core with a passed screen, an admitted thesis and a debate we differ on."""
 
-    grants = ("observation", "stage_record")
+    grants = ("observation", "stage_record", "debate_map")
 
     def setUp(self):
         super().setUp()
@@ -158,6 +158,8 @@ class ConvictionHarness(P14aHarness):
                        .company_theses(self.store.connection, subject)]
         claim = self.claim(subject=subject, statement="需求在改善。")
         return DebateMapAuthority(self.store).publish_map(
+            mission_version_ref=self.mission["id"],
+            mission_version_hash=self.mission["content_hash"],
             subject_ref=subject, subject_kind="company",
             change_reason="evidence_thicker", change_evidence_refs=[claim],
             constitution_ref=self.state["constitution"]["id"],
@@ -182,7 +184,8 @@ class ConvictionHarness(P14aHarness):
                 "first_seen_at": "2026-09-09T00:00:00+00:00",
                 "source_independence": {"bull_sources": 2, "bear_sources": 2},
             }],
-            actor_ref="automation:dalton", created_at="2026-09-09T00:00:00+00:00",
+            actor_ref=self.mission["autonomy"]["automation_principal"],
+            created_at="2026-09-09T00:00:00+00:00",
         )
 
     def eligible_company(self):

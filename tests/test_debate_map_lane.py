@@ -10,6 +10,7 @@ invariant a lane keyed on anything other than the evidence itself would break.
 from __future__ import annotations
 
 import json
+import copy
 import sqlite3
 import tempfile
 import unittest
@@ -19,7 +20,7 @@ from unittest.mock import patch
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.debate_map import DebateMapAuthority, evidence_fingerprint
 from dalton_core.debate_map_cli import (
-    WRITE_SCOPE, build_parser, granted, run_debate_map, subject_kind_for,
+    WRITE_SCOPE, build_parser, can_rebind, granted, run_debate_map, subject_kind_for,
 )
 from dalton_core.debate_map_draft import (
     document_attribution, subject_claim_refs, subject_claim_rows, subject_driver_rows,
@@ -96,7 +97,23 @@ class ChildHarness:
             "may_write": list(may_write if may_write is not None
                               else list(params["autonomy"]["may_write"]) + [WRITE_SCOPE]),
         }
+        self.params = copy.deepcopy(params)
         self.mission = self.missions.create_mission(params.pop("mission_ref"), **params)
+
+    def roll_mission(self, *, grant=True):
+        params = copy.deepcopy(self.params)
+        if not grant:
+            params["autonomy"]["may_write"] = [
+                item for item in params["autonomy"]["may_write"]
+                if item != WRITE_SCOPE]
+        params.update({
+            "version_id": self.mission["id"].rsplit(":", 1)[0] + ":2",
+            "prior_version_ref": self.mission["id"],
+            "idempotency_key": "fixture:debate-map:mission:2",
+        })
+        self.mission = self.missions.create_mission(
+            params.pop("mission_ref"), **params)
+        return self.mission
 
     def add_claims(self):
         self.fixture.add_claim(
@@ -194,6 +211,41 @@ class ChildRunTests(unittest.TestCase):
         # The drafting prompt showed the claims and the constitution's lists.
         self.assertIn("Discretionary demand is decelerating.", model.prompts[0])
         self.assertIn("Bookings lead revenue", model.prompts[0])
+
+    def test_mission_only_rebind_appends_without_another_model_call(self):
+        self.test_a_verified_draft_becomes_a_first_version()
+        mission = self.harness.roll_mission()
+        with patch("dalton_core.debate_map_cli.CockpitModel",
+                   side_effect=AssertionError("must not call a model")):
+            summary = self.harness.run(dry_run=False, model_config_path=None)
+        self.assertEqual(summary["map_status"], "fresh")
+        self.assertEqual(summary["cost_micros"], 0)
+        current = DebateMapAuthority(self.harness.store).current(ACN)
+        self.assertEqual(current["version"], 2)
+        self.assertEqual(current["change_reason"], "mission_rebind")
+        self.assertEqual(current["mission_version_ref"], mission["id"])
+
+    def test_rebind_requires_the_same_constitution_and_policy(self):
+        previous = {
+            "mission_version_ref": "mission:old", "evidence_fingerprint": "f",
+            "constitution_ref": "constitution:1", "constitution_hash": "1" * 64,
+            "policy_ref": "wrong-policy", "policy_hash": "2" * 64,
+        }
+        mission = {"id": "mission:new"}
+        constitution = {"id": "constitution:1", "content_hash": "1" * 64}
+        self.assertFalse(can_rebind(previous, mission, constitution, "f"))
+        previous["policy_ref"] = "debate-policy:p12c:v1"
+        previous["policy_hash"] = __import__(
+            "dalton_core.debate_map", fromlist=["POLICY_HASH"]).POLICY_HASH
+        constitution["content_hash"] = "3" * 64
+        self.assertFalse(can_rebind(previous, mission, constitution, "f"))
+
+    def test_a_new_mission_without_the_grant_cannot_rebind(self):
+        self.test_a_verified_draft_becomes_a_first_version()
+        self.harness.roll_mission(grant=False)
+        summary = self.harness.run(dry_run=False, model_config_path=None)
+        self.assertEqual(summary["map_status"], "not_authorized")
+        self.assertEqual(DebateMapAuthority(self.harness.store).counts()["versions"], 1)
 
     def test_the_same_evidence_twice_publishes_one_version(self):
         self.harness.add_claims()
@@ -371,6 +423,8 @@ class LaneCoordinatorTests(unittest.TestCase):
         rows = subject_claim_rows(self.harness.store, ACN)
         fingerprint = evidence_fingerprint(row["claim_version_ref"] for row in rows)
         DebateMapAuthority(self.harness.store).publish_map(
+            mission_version_ref=self.harness.mission["id"],
+            mission_version_hash=self.harness.mission["content_hash"],
             subject_ref=ACN, subject_kind="company", change_reason="evidence_thicker",
             change_evidence_refs=[rows[0]["claim_version_ref"]],
             constitution_ref="constitution-version:x:1", constitution_hash="a" * 64,
@@ -391,9 +445,21 @@ class LaneCoordinatorTests(unittest.TestCase):
                 "first_seen_at": "2026-09-09T00:00:00+00:00",
                 "source_independence": {"bull_sources": 1, "bear_sources": 1},
             }],
-            actor_ref="automation:dalton", created_at="2026-09-09T00:00:00+00:00",
+            actor_ref=self.harness.mission["autonomy"]["automation_principal"],
+            created_at="2026-09-09T00:00:00+00:00",
         )
         self.assertEqual(self.coordinator.dispatch_once()["status"], "idle")
+
+    def test_a_new_mission_launches_even_when_the_claim_fingerprint_is_unchanged(self):
+        self.test_a_map_drawn_from_the_evidence_we_hold_is_left_alone()
+        self.harness.mission = {
+            **self.harness.mission,
+            "id": "coverage-mission-version:us-it-services:next",
+            "content_hash": "9" * 64,
+        }
+        result = self.coordinator.dispatch_once()
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(result["subject_ref"], ACN)
 
     def test_a_failed_run_holds_that_evidence_back_but_not_forever(self):
         self.harness.add_claims()

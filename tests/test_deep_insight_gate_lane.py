@@ -191,6 +191,8 @@ class Harness:
                   else list(may_write))
         if may_write is None and "deliverable" not in scopes:
             scopes.append("deliverable")
+        if "debate_map" not in scopes:
+            scopes.append("debate_map")
         params["autonomy"] = {**params["autonomy"], "may_write": scopes}
         self.mission = self.missions.create_mission(params.pop("mission_ref"), **params)
         if screened:
@@ -300,6 +302,8 @@ class Harness:
 
         authority = DebateMapAuthority(self.store)
         return authority.publish_map(
+            mission_version_ref=self.mission["id"],
+            mission_version_hash=self.mission["content_hash"],
             subject_ref=ACN, subject_kind="company", change_reason="evidence_thicker",
             change_evidence_refs=[self.claims["c-compete"]],
             constitution_ref=self.constitution["id"],
@@ -328,7 +332,8 @@ class Harness:
                 "reasons": ["no_bear_evidence"],
                 "observed_at": "2026-09-01T00:00:00+00:00",
             }],
-            actor_ref=AUTOMATION, created_at="2026-09-02T00:00:00+00:00",
+            actor_ref=self.mission["autonomy"]["automation_principal"],
+            created_at="2026-09-02T00:00:00+00:00",
         )
 
     def retire_claim(self, claim_version_ref):

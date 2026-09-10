@@ -67,6 +67,7 @@ class MissionDebateMapLaneCoordinator:
         self.launcher = launcher
         self.mission = mission
         self._open: str | None = None
+        self._open_business_key: str | None = None
         # Runs that failed, keyed by (subject, fingerprint), so a doomed
         # subject does not consume the slot every five minutes.  Held for this
         # process only: a restart is nearly always a deploy, which is the most
@@ -111,6 +112,8 @@ class MissionDebateMapLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         self._open = None
+        business_key = self._open_business_key
+        self._open_business_key = None
         map_status = settled.get("map_status")
         published = (
             settled.get("status") == "succeeded" and map_status == PUBLISHED_STATUS
@@ -134,7 +137,7 @@ class MissionDebateMapLaneCoordinator:
         subject_ref = settled.get("subject_ref")
         fingerprint = settled.get("evidence_fingerprint")
         if hold and subject_ref and fingerprint:
-            key = f"{subject_ref}|{fingerprint}"
+            key = business_key or f"{subject_ref}|{fingerprint}"
             reason = settled.get("failure_reason") or f"last run: {map_status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
@@ -143,7 +146,8 @@ class MissionDebateMapLaneCoordinator:
                     getattr(self, "models", None)), status=str(map_status or settled.get("status")),
             ).as_wire()
         elif subject_ref and fingerprint:
-            settled["resumed"] = self.budget.clear(f"{subject_ref}|{fingerprint}")
+            settled["resumed"] = self.budget.clear(
+                business_key or f"{subject_ref}|{fingerprint}")
         return settled
 
     # -- the tick ---------------------------------------------------------
@@ -187,9 +191,19 @@ class MissionDebateMapLaneCoordinator:
                 continue
             fingerprint = evidence_fingerprint(refs)
             current = authority.current(subject_ref)
-            if current is not None and current["evidence_fingerprint"] == fingerprint:
+            if (current is not None
+                    and current["evidence_fingerprint"] == fingerprint
+                    and current.get("mission_version_ref") == mission.get("id")
+                    and current.get("mission_version_hash") == mission.get("content_hash")):
                 continue
-            business_key = f"{subject_ref}|{fingerprint}"
+            # A mission roll is a distinct authorized input even when its
+            # claim set is byte-identical.  Keeping it in the persistent
+            # signature also prevents an old terminal/permission outcome from
+            # suppressing the rebind.
+            business_key = (
+                f"{subject_ref}|{fingerprint}|{mission['id']}|"
+                f"{mission['content_hash']}"
+            )
 
             permission = current_permission(
 
@@ -238,6 +252,10 @@ class MissionDebateMapLaneCoordinator:
             return {"status": "rejected", "subject_ref": subject_ref,
                     "settled": settled, "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
+        self._open_business_key = (
+            f"{subject_ref}|{fingerprint}|{mission['id']}|"
+            f"{mission['content_hash']}"
+        )
         return {
             "status": "launched", "subject_ref": subject_ref,
             "evidence_fingerprint": fingerprint, "ticket_ref": ticket["id"],

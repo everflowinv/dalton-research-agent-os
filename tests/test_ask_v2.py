@@ -226,6 +226,20 @@ class ContextOnAFullCoreTests(unittest.TestCase):
         self.c = CockpitHarness(self.root)
         self.addCleanup(self.c.close)
         self.store = self.c.h.h.core
+        current = self.c.h.mission
+        autonomy = {**current["autonomy"], "may_write": list(dict.fromkeys(
+            list(current["autonomy"]["may_write"]) + ["debate_map"]))}
+        self.c.h.mission = self.c.h.missions.create_mission(
+            current["mission_ref"], title=current["title"],
+            version_id=current["id"].rsplit(":", 1)[0] + ":2",
+            idempotency_key="fixture:ask-v2:debate-map-grant",
+            objective=current["objective"], industry_ref=current["industry_ref"],
+            universe=current["universe"], research_questions=current["research_questions"],
+            deliverables=current["deliverables"], source_plan=current["source_plan"],
+            bindings=current["bindings"], autonomy=autonomy, budget=current["budget"],
+            prior_version_ref=current["id"],
+            actor_ref=current["actor_ref"],
+        )
         self.publish_everything()
 
     def publish_everything(self) -> None:
@@ -266,11 +280,14 @@ class ContextOnAFullCoreTests(unittest.TestCase):
             # reader below is tested against the shape P12a will produce.
             company_ref=ACN))
         DebateMapAuthority(self.store).publish_map(
+            mission_version_ref=self.c.h.mission["id"],
+            mission_version_hash=self.c.h.mission["content_hash"],
             subject_ref=ACN, subject_kind="company", change_reason="evidence_thicker",
             change_evidence_refs=["cv-a"],
             constitution_ref="constitution-version:us-it-services:1",
             constitution_hash="c" * 64, evidence_fingerprint="f" * 64,
-            debates=[debate_row()], actor_ref=AUTOMATION,
+            debates=[debate_row()],
+            actor_ref=self.c.h.mission["autonomy"]["automation_principal"],
             created_at="2026-09-09T00:00:00+00:00")
         CatalystCalendarAuthority(self.store).publish(
             company_ref=ACN, entries=[catalyst_entry("2026-10-01")],
