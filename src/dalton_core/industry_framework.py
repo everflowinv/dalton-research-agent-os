@@ -445,20 +445,33 @@ def validate_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     bindings = []
     for index, item in enumerate(wire["output_rubric_bindings"] or []):
         if not isinstance(item, Mapping) or set(item) != {
-            "criterion_hash", "check", "reason"
+            "criterion_hash", "checks", "reason"
         }:
             raise IndustryFrameworkValidationError(
                 f"output_rubric_bindings[{index}] has an invalid closed shape")
-        check = item["check"]
-        if check is not None:
-            _one_of(check, OUTPUT_RUBRIC_CHECKS,
-                    f"output_rubric_bindings[{index}].check")
-        elif not str(item["reason"] or "").strip():
+        # A list rather than the dossier's single ``check``, because one of
+        # this Constitution's criteria genuinely wants two structural readings.
+        # "A good research output reduces the open question set" is both "cite
+        # something new" and "say what is still missing"; a framework version
+        # that did the first and not the second has not reduced the open
+        # question set, and a shape that made the policy pick one would have
+        # made that unenforceable.
+        checks = item["checks"]
+        if not isinstance(checks, list):
+            raise IndustryFrameworkValidationError(
+                f"output_rubric_bindings[{index}].checks must be an array")
+        named = [_one_of(check, OUTPUT_RUBRIC_CHECKS,
+                         f"output_rubric_bindings[{index}].checks[]")
+                 for check in checks]
+        if len(set(named)) != len(named):
+            raise IndustryFrameworkValidationError(
+                f"output_rubric_bindings[{index}].checks repeats a check")
+        if not named and not str(item["reason"] or "").strip():
             raise IndustryFrameworkValidationError(
                 f"output_rubric_bindings[{index}] declares no check and no reason")
         bindings.append({
             "criterion_hash": _sha256(item["criterion_hash"], "criterion_hash"),
-            "check": check,
+            "checks": named,
             "reason": str(item["reason"] or ""),
         })
     wire["output_rubric_bindings"] = bindings
@@ -2083,36 +2096,38 @@ def output_rubric_findings(
                 "criterion_hash": digest,
             })
             continue
-        check = binding["check"]
-        if check is None:
-            continue
-        if check == "numbers_trace_to_refs":
-            for part in parts:
-                for token in unsourced_numbers(part["body"], part["numbers"]):
-                    findings.append({
-                        "code": "number_without_source", "criterion_index": index,
-                        "section": part["title"], "figure": token,
-                    })
-        elif check == "not_a_restatement":
-            if prior is not None and not new_refs(record, prior):
-                findings.append({"code": "no_new_evidence", "criterion_index": index})
-        elif check == "no_investment_conclusion":
-            for part in parts:
-                for pattern in _CONCLUSION_PATTERNS:
-                    if pattern in part["body"]:
+        for check in binding["checks"]:
+            if check == "numbers_trace_to_refs":
+                for part in parts:
+                    for token in unsourced_numbers(part["body"], part["numbers"]):
                         findings.append({
-                            "code": "investment_conclusion", "criterion_index": index,
-                            "section": part["title"], "phrase": pattern,
+                            "code": "number_without_source", "criterion_index": index,
+                            "section": part["title"], "figure": token,
                         })
-        elif check == "open_gaps_name_a_source":
-            for gap in record.get("gaps") or []:
-                if gap["status"] == "covered":
-                    continue
-                if not gap["candidate_sources"] and "no source" not in gap["cost_note"]:
-                    findings.append({
-                        "code": "gap_without_a_source", "criterion_index": index,
-                        "gap_ref": gap["gap_ref"],
-                    })
+            elif check == "not_a_restatement":
+                if prior is not None and not new_refs(record, prior):
+                    findings.append({"code": "no_new_evidence",
+                                     "criterion_index": index})
+            elif check == "no_investment_conclusion":
+                for part in parts:
+                    for pattern in _CONCLUSION_PATTERNS:
+                        if pattern in part["body"]:
+                            findings.append({
+                                "code": "investment_conclusion",
+                                "criterion_index": index,
+                                "section": part["title"], "phrase": pattern,
+                            })
+            elif check == "open_gaps_name_a_source":
+                for gap in record.get("gaps") or []:
+                    if gap["status"] == "covered":
+                        continue
+                    if not gap["candidate_sources"] and (
+                        "no source" not in gap["cost_note"]
+                    ):
+                        findings.append({
+                            "code": "gap_without_a_source",
+                            "criterion_index": index, "gap_ref": gap["gap_ref"],
+                        })
     return findings
 
 
