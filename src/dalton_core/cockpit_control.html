@@ -663,6 +663,26 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
         st.className="status ok";st.textContent=message;toast(message);if(!out.requires_restart)openModels()}
       catch(e){st.className="status err";st.textContent=e.message;save.disabled=false}};
     row.append(mode,picked,save,st);c.append(row);
+    for(const kind of ["call","run"]){const budget=pp[`${kind}_budget`];
+    if(budget&&budget.editable){
+      const section=node("details"),summary=node("summary",kind==="call"?"调用预算":"每轮任务预算");section.append(summary);
+      section.append(node("small","留空沿用默认值。日预算和预算池仍会限制实际开销。","meta"));
+      const fields=kind==="call"?[["max_cost_usd","单次费用上限（美元）","any"],["max_input_tokens","输入额度（按 UTF-8 字节预估）","1"],
+        ["max_output_tokens","输出额度（token）","1"],["timeout_seconds","单次超时（秒）","1"]]:
+        [["max_cost_usd","每轮费用上限（美元）","any"],["max_units","每轮处理单元数","1"],
+         ["max_events","每轮事件数","1"],["max_events_per_company","每家公司事件数","1"],
+         ["max_calls","每轮调用数","1"]].filter(([key])=>(budget.fields||[]).includes(key));
+      const inputs={};fields.forEach(([key,label,step])=>{const wrap=node("label",label),input=document.createElement("input");
+        input.type="number";input.min="0";input.step=step;input.value=budget.overrides[key]??"";
+        input.placeholder=String((budget.effective||budget.general||{})[key]??"沿用运行配置");inputs[key]=input;wrap.append(input);section.append(wrap)});
+      const apply=node("button","保存预算","ghost"),message=node("span","","status");
+      apply.onclick=async()=>{const value={};for(const [key,input] of Object.entries(inputs)){if(input.value.trim())value[key]=Number(input.value)}
+        apply.disabled=true;message.textContent="正在保存预算…";
+        try{const out=await postJson("/v1/cockpit/model_budget",{purpose:pp.purpose,kind,budget:value,expected_config_hash:budget.config_hash});
+          toast(out.requires_restart?"预算已保存，重启相关服务后生效":"预算已保存，下次任务使用新配置");openModels()}
+        catch(e){message.textContent=e.message;message.className="status err";apply.disabled=false}};
+      section.append(apply,message);c.append(section);
+    }}
     d.append(c);stages.append(d)});
   sheet.append(stages);
   const avail=node("section");avail.append(node("h3","可以选的模型"));

@@ -807,6 +807,8 @@ class AgendaControlApplication:
         # handle to the Core or to the host configuration (ADR-0006).
         if action == "model_select":
             return plane.select_model(login, value)
+        if action == "model_budget":
+            return plane.set_call_budget(login, value)
         if action == "model_allow":
             return plane.allow_model(login, value)
         if action == "model_metadata":

@@ -81,7 +81,7 @@ SQLITE_SUBDIRS: tuple[str, ...] = ("", "cockpit", "research-review")
 STATE_TREES: tuple[str, ...] = ("connector-governance", "discovery-plans", "run")
 
 #: Loose files beside the databases.
-STATE_GLOBS: tuple[str, ...] = ("*-model-config.json",)
+STATE_GLOBS: tuple[str, ...] = ("*-model-config.json", "*-budget-config.json")
 
 #: Sockets and lock files never travel: a copied ``writer.sock`` is a dead
 #: inode that would make the temp writer refuse to bind.

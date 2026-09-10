@@ -415,6 +415,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # may ever do. Listed here and nowhere else, so an automation principal is
     # refused before either operation runs.
     "set_model_selection",
+    "set_model_call_budget",
     "allow_openclaw_model",
     "declare_model_profile_metadata",
     # And the third: reading a notice that a model a stage was using has gone.
@@ -736,6 +737,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     # selection validator refuses the two together in the other direction, so
     # a page that sent both would be told which one it meant.
     "set_model_selection": frozenset({"purpose", "mode", "chain", "actor_ref"}),
+    "set_model_call_budget": frozenset({"purpose", "kind", "budget", "expected_config_hash", "actor_ref"}),
     # No path parameter. The file this writes is named by the writer's own
     # ``--model-catalog-config``, not by the caller: an operation that took the
     # path to write would be an operation that writes anywhere.
@@ -1021,6 +1023,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
     "set_model_selection": "actor_ref",
+    "set_model_call_budget": "actor_ref",
     "allow_openclaw_model": "actor_ref",
     "declare_model_profile_metadata": "actor_ref",
     "acknowledge_model_fallback_notice": "actor_ref",
@@ -2621,6 +2624,20 @@ class WriterServer:
             )
         except (ModelSelectionError, KeyError, ValueError) as exc:
             raise WriterServerError(str(exc)) from exc
+
+    def _op_set_model_call_budget(self, p: Mapping[str, Any]) -> Any:
+        from .model_budget_configuration import set_model_call_budget, BudgetConfigurationConflict
+        from .model_selection import ModelSelectionError
+        try:
+            return set_model_call_budget(
+                self.state_dir, purpose=p["purpose"], budget=p["budget"],
+                expected_config_hash=p["expected_config_hash"], actor_ref=p["actor_ref"],
+                kind=p.get("kind", "call"),
+            )
+        except BudgetConfigurationConflict as exc:
+            raise IdempotencyConflict(str(exc)) from exc
+        except (KeyError, ValueError, ModelSelectionError) as exc:
+            raise ValidationError(str(exc)) from exc
 
     def _model_router_db(self) -> str:
         """Where this Core's model catalog lives, read off what pins it.

@@ -3456,6 +3456,7 @@ class CockpitPlane:
             ModelSelectionError, PURPOSE_LABELS, SELECTION_MODES,
             purpose_policy_bindings,
         )
+        from .model_budget_configuration import call_budget_view
 
         path = self._model_router_db()
         if path is None:
@@ -3576,6 +3577,8 @@ class CockpitPlane:
                 "policy_version_ref": policy_ref,
                 "requires_restart": bool(binding.get("requires_restart")),
                 "editable": bool(binding.get("editable")),
+                "call_budget": call_budget_view(self.config.state_dir, purpose, binding=binding),
+                "run_budget": call_budget_view(self.config.state_dir, purpose, binding=binding, kind="run"),
                 "chain": chain,
                 "superseded_chain": row["superseded_chain"],
                 "superseded_note": (
@@ -3893,6 +3896,27 @@ class CockpitPlane:
         except GovernanceCliError as exc:
             raise CockpitConflict(f"{failure}：{_reason(exc)}") from exc
         return result if isinstance(result, dict) else {"status": "done"}
+
+    def set_call_budget(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        from .call_budget import validate_budget_overrides, validate_run_budget_overrides
+        if not isinstance(value, Mapping):
+            raise CockpitError("预算配置必须是一个对象")
+        purpose = _text(value.get("purpose"), "purpose", maximum=64)
+        kind = value.get("kind", "call")
+        if kind not in {"call", "run"}:
+            raise CockpitError("预算类型必须是单次调用或每轮任务")
+        try:
+            budget = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(value.get("budget"))
+        except ValueError as exc:
+            raise CockpitError(str(exc)) from exc
+        result = self._governance(login, "set_model_call_budget", {
+            "purpose": purpose, "budget": budget, "kind": kind,
+            "expected_config_hash": _text(value.get("expected_config_hash"), "配置版本", maximum=64),
+        }, failure="预算没有保存")
+        self.journal.record_event(kind="model_budget", title=f"已调整「{purpose}」的调用预算",
+                                  detail=json.dumps(budget, ensure_ascii=False), login=login,
+                                  refs={"purpose": purpose, "revision": result.get("revision")})
+        return result
 
     def select_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         """P14-M2: the owner points one calling stage at a model, or at its tier."""
