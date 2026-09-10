@@ -187,3 +187,16 @@ The first foundation freeze `925e50c` completed 6,661 tests in 546.467s with 13 
 - A read-only lineage audit found retired canonical claims can still reach Dossier's paid prompt before the final retirement check. A narrow read-side filter is being built. Unretired wrong-issuer claims and IBM's historical screen citations are separate bound review items, not authorization to rewrite facts or make human decisions.
 
 Next: close these explicit regressions and the Dossier input filter, independently review, create a new immutable freeze and rerun complete acceptance. No higher-order investment-method development is being added.
+
+
+## 22:33 UTC — installed foundation and actual runtime recovery
+
+Accepted d297c0f passed 6,671 tests (544.909s, one skip); all 553 installed package files match the reviewed wheel, and retained `.release-source.V10mSj` matches all 1,806 tracked archive files. The actual three-artifact controlled host transport repair is installed and proved. All 12 configuration selections/budgets and selected credential admission are preserved, with the original mission v14 signature unchanged.
+
+The installer final health step failed after code install because SQLite projection and heartbeat writes exhausted disk. Verified backup `deploy-backup-20260910T221859Z` and its snapshot `20260910T222002.700101Z` are retained. No database rollback or second install was attempted. Only completed /tmp simulation copies were removed; their reports and all live backups remain. Free space recovered to about 3.8 GiB and PID17146 resumed running. Independent sampling traced one subsequent stale heartbeat to SQLite disk reads under pressure; repeated later observations show normal 10–13s intervals, so health thresholds were not weakened.
+
+The actual product audit now observes 1/15 (ACN DebateMap, current mission/input binding); this is progress, not complete research acceptance. The old CTSH non-additive segment failure is a 15:43 summary from the lossy v2 projection; current code correctly skips unsupported dimensional evidence. Its durable retry identity is being checked rather than editing historical results.
+
+Nineteen exact host-failure candidates (16 event verifier, three dossier verifier) passed installed repair, old task/result, mission and admission/settlement binding. Operator recovery appended conservative corrections totalling 229,715 micros of corrected reservations and one recovery authority per old work. No direct model calls or human decisions were made. Initial apply encountered missing idle WAL sidecars after some earlier items had already applied; holding existing mode=rw connections during the explicitly writable operation allowed safe idempotent completion. Dedicated regression is in progress; strict readonly prepare is unchanged.
+
+Next: observe genuine recovery outcomes, finish stale forecast-contract recovery and deployment headroom/WAL-lifecycle regression, then update accepted release evidence. Source approvals and human research judgments remain separate; advanced investment methods stay deferred.
