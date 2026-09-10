@@ -30,6 +30,7 @@ from dalton_core.conviction_call import (
     validate_consensus_gap,
     validate_event_pathway,
     validate_proposal,
+    validate_risk_reward,
     validate_variant_view,
     week_key,
     wide_consensus_gaps,
@@ -134,6 +135,8 @@ def proposal_kwargs(**overrides) -> dict:
                         "thesis_version_ref": THESIS}],
         "thesis_refs": [THESIS], "debate_refs": [DEBATE],
         "evidence_fingerprint": evidence_fingerprint([THESIS, DEBATE]),
+        "change_reason": "evidence_thicker",
+        "change_evidence_refs": [DEBATE],
         "precheck_record": gate(),
         "rubric": {"rubric_ref": CONVICTION_CALL.rubric_ref,
                    "rubric_hash": CONVICTION_CALL.content_hash, "findings": []},
@@ -216,6 +219,69 @@ class RiskRewardTests(unittest.TestCase):
         self.assertNotEqual(found["status"], "met")
 
 
+class PlaybookDriftTests(unittest.TestCase):
+    """The standards table is a reading of the Playbook. Pin what it read."""
+
+    def test_every_standard_quotes_a_line_the_playbook_actually_contains(self):
+        published = json.loads(
+            (ROOT / "deploy/phase9/p9a-research-playbook-v1.json")
+            .read_text(encoding="utf-8"))
+        lines = set(published["risk_reward_standards"])
+        for row in CONVICTION_POLICY["risk_reward_standards"]:
+            with self.subTest(standard=row["standard_ref"]):
+                # Verbatim, not "contains": a paraphrase drifting away from the
+                # sentence it claims to implement is exactly what this catches,
+                # and it is silent otherwise -- the reading lives in a JSON file
+                # nobody rereads once the numbers look right.
+                self.assertIn(row["playbook_text"], lines)
+
+    def test_the_one_standard_with_no_number_is_deliberately_not_in_the_table(self):
+        # "Dalton 只提出研究观点和仓位建议，人类团队决定交易" is not a threshold;
+        # it is the reason this whole module ends in a human decision.
+        published = json.loads(
+            (ROOT / "deploy/phase9/p9a-research-playbook-v1.json")
+            .read_text(encoding="utf-8"))
+        read = {row["playbook_text"] for row in CONVICTION_POLICY["risk_reward_standards"]}
+        unread = [line for line in published["risk_reward_standards"] if line not in read]
+        self.assertEqual(unread, [
+            "Dalton 只提出研究观点和仓位建议，人类团队决定交易"])
+
+
+class NonFiniteNumberTests(unittest.TestCase):
+    """Infinity clears every threshold; NaN raises out of the comparison."""
+
+    def test_the_authority_refuses_an_infinite_or_undefined_percentage(self):
+        for value in ("Infinity", "inf", "-Infinity", "NaN", "nan", "1e999",
+                      float("inf"), float("nan")):
+            with self.subTest(value=value):
+                with self.assertRaises(ConvictionCallValidationError):
+                    check_risk_reward(direction="long", time_horizon="6_12_months",
+                                      upside_percent=value, downside_percent="20")
+
+    def test_an_infinite_upside_never_reads_as_meeting_the_standard(self):
+        with self.assertRaises(ConvictionCallValidationError):
+            check_risk_reward(direction="long", time_horizon="3_5_years",
+                              upside_percent="Infinity")
+
+    def test_a_ratio_against_an_undefined_downside_is_refused_not_computed(self):
+        with self.assertRaises(ConvictionCallValidationError):
+            check_risk_reward(direction="long", time_horizon="1_3_years",
+                              upside_percent="60", downside_percent="NaN")
+
+    def test_a_stored_call_carrying_one_is_refused_by_the_contract(self):
+        for value in ("Infinity", "NaN", "1e999"):
+            with self.subTest(value=value):
+                with self.assertRaises(ConvictionCallValidationError):
+                    validate_risk_reward(risk_reward(up=value), direction="long",
+                                         time_horizon="6_12_months")
+
+    def test_a_consensus_gap_of_an_absurd_size_is_refused_too(self):
+        with self.assertRaises(ConvictionCallValidationError):
+            validate_consensus_gap(consensus("1e999"))
+        with self.assertRaises(ConvictionCallValidationError):
+            validate_consensus_gap(consensus("NaN"))
+
+
 class GateTests(unittest.TestCase):
     def test_a_company_with_a_thesis_and_a_disagreement_is_eligible(self):
         found = gate()
@@ -280,6 +346,23 @@ class GateTests(unittest.TestCase):
                       gate(open_debates=[debate_row(lean="bull", side="bull")])):
             for reason in found["reasons"]:
                 self.assertIn(reason, GATE_REASONS)
+
+    def test_declining_to_pick_a_side_is_not_a_disagreement(self):
+        # P12c's ``neither`` means "we hold a view and it is that neither camp
+        # is right". That is a position but not a direction, and a call is a
+        # direction. Without this the string comparison would come out unequal
+        # against a bear market and the company would be admitted.
+        found = gate(open_debates=[debate_row(lean="bear", side="neither")])
+        self.assertFalse(found["eligible"])
+        self.assertIn("we_agree_with_the_market", found["reasons"])
+        self.assertEqual(divergent_debates([debate_row(lean="bear", side="neither")]), [])
+
+    def test_a_split_market_is_something_we_can_differ_from(self):
+        # Deliberately kept: holding bull against a genuinely divided street is
+        # the ordinary shape of an early call.
+        found = gate(open_debates=[debate_row(lean="split", side="bull")])
+        self.assertTrue(found["eligible"])
+        self.assertEqual(found["divergent_debates"][0]["market_lean"], "split")
 
     def test_a_debate_that_is_not_live_is_not_a_disagreement_here(self):
         # ``open_debates`` already filters to open and shifting; the predicate
@@ -518,6 +601,147 @@ class DecisionTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.store.connection.execute(
                 "UPDATE conviction_call_decisions SET decision='accept'")
+
+
+class VersionChainTests(unittest.TestCase):
+    """ADR-0008 on a call: no terminal version, and the mind change is legible."""
+
+    def setUp(self):
+        self.store = DaltonStore(":memory:")
+        self.addCleanup(self.store.close)
+        self.authority = ConvictionCallAuthority(self.store)
+        self.first = self.authority.propose(**proposal_kwargs())
+
+    def second(self, **overrides):
+        params = {"evidence_fingerprint": "a-later-fingerprint",
+                  "created_at": "2026-09-16T00:00:00+00:00",
+                  "change_evidence_refs": [CATALYST]}
+        params.update(overrides)
+        return self.authority.propose(**proposal_kwargs(**params))
+
+    def test_a_company_s_calls_are_one_chain(self):
+        self.assertEqual((self.first["version"], self.first["prior_version_ref"]),
+                         (1, None))
+        later = self.second()
+        self.assertEqual(later["version"], 2)
+        self.assertEqual(later["prior_version_ref"], self.first["id"])
+        self.assertEqual([item["version"] for item in self.authority.versions(ACN)],
+                         [1, 2])
+        self.assertEqual(self.authority.current(ACN)["id"], later["id"])
+        self.assertIsNone(self.authority.current("company:nobody"))
+
+    def test_a_version_names_why_it_exists_and_what_it_learned(self):
+        self.assertEqual(self.first["change_reason"], "evidence_thicker")
+        self.assertEqual(self.first["change_evidence_refs"], [DEBATE])
+        with self.assertRaises(ConvictionCallValidationError):
+            self.second(change_reason="because_i_said_so")
+        # The refs have to be refs the call actually stands on.
+        with self.assertRaises(ConvictionCallValidationError):
+            self.second(change_evidence_refs=["claim-version:some-other-document"])
+        with self.assertRaises(ConvictionCallValidationError):
+            self.second(change_evidence_refs=[])
+
+    def test_accepting_a_newer_call_supersedes_the_one_that_was_standing(self):
+        self.authority.decide(
+            proposal_ref=self.first["id"], proposal_hash=self.first["content_hash"],
+            decision="accept", reason="the lag argument holds", actor_ref="human:owner",
+            created_at="2026-09-10T00:00:00+00:00")
+        self.assertEqual(len(self.authority.accepted_calls()), 1)
+        later = self.second()
+        recorded = self.authority.decide(
+            proposal_ref=later["id"], proposal_hash=later["content_hash"],
+            decision="accept", reason="the print moved the horizon",
+            actor_ref="human:owner", created_at="2026-09-17T00:00:00+00:00")
+        # The mark lives on the act that caused it; nothing was rewritten.
+        self.assertEqual(recorded["supersedes_ref"], self.first["id"])
+        self.assertEqual(self.authority.superseded_by(self.first["id"]), later["id"])
+        self.assertIsNone(self.authority.superseded_by(later["id"]))
+        self.assertEqual(self.authority.status_of(self.first["id"]), "superseded")
+        # The brief sees one view of one company, not two.
+        accepted = self.authority.accepted_calls()
+        self.assertEqual([item["id"] for item in accepted], [later["id"]])
+
+    def test_a_superseded_call_is_still_in_the_chain_and_still_readable(self):
+        self.authority.decide(
+            proposal_ref=self.first["id"], proposal_hash=self.first["content_hash"],
+            decision="accept", reason="held", actor_ref="human:owner",
+            created_at="2026-09-10T00:00:00+00:00")
+        later = self.second()
+        self.authority.decide(
+            proposal_ref=later["id"], proposal_hash=later["content_hash"],
+            decision="accept", reason="replaced", actor_ref="human:owner",
+            created_at="2026-09-17T00:00:00+00:00")
+        replay = self.authority.replay(ACN)
+        self.assertEqual([row["version"] for row in replay], [1, 2])
+        self.assertEqual([row["status"] for row in replay], ["superseded", "accepted"])
+        self.assertEqual(replay[0]["superseded_by"], later["id"])
+        self.assertEqual(replay[0]["decision_reason"], "held")
+        # And the record itself is untouched: same bytes as when it was written.
+        self.assertEqual(self.authority.proposal(self.first["id"])["content_hash"],
+                         self.first["content_hash"])
+
+    def test_a_rejection_supersedes_nothing(self):
+        self.authority.decide(
+            proposal_ref=self.first["id"], proposal_hash=self.first["content_hash"],
+            decision="accept", reason="held", actor_ref="human:owner",
+            created_at="2026-09-10T00:00:00+00:00")
+        later = self.second()
+        recorded = self.authority.decide(
+            proposal_ref=later["id"], proposal_hash=later["content_hash"],
+            decision="reject", reason="not convinced", actor_ref="human:owner",
+            created_at="2026-09-17T00:00:00+00:00")
+        self.assertIsNone(recorded["supersedes_ref"])
+        self.assertEqual([item["id"] for item in self.authority.accepted_calls()],
+                         [self.first["id"]])
+
+    def test_the_weekly_cap_is_in_the_schema_as_well_as_the_authority(self):
+        # The authority refuses first, with a reason a lane can report. This is
+        # the constraint that holds when two processes race past that read.
+        self.assertEqual(CONVICTION_POLICY["max_calls_per_company_per_week"], 1)
+        indexes = self.store.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='conviction_call_proposals'").fetchone()[0]
+        self.assertIn("UNIQUE(company_ref, week_key)", indexes)
+        self.assertIn("UNIQUE(call_ref, version_number)", indexes)
+
+
+class DecisionIdempotencyTests(unittest.TestCase):
+    def setUp(self):
+        self.store = DaltonStore(":memory:")
+        self.addCleanup(self.store.close)
+        self.authority = ConvictionCallAuthority(self.store)
+        self.call = self.authority.propose(**proposal_kwargs())
+
+    def defer(self, **overrides):
+        params = {"proposal_ref": self.call["id"],
+                  "proposal_hash": self.call["content_hash"],
+                  "decision": "defer", "reason": "after the print",
+                  "actor_ref": "human:owner", "idempotency_key": "cockpit:req-1",
+                  "created_at": "2026-09-10T00:00:00+00:00"}
+        params.update(overrides)
+        return self.authority.decide(**params)
+
+    def test_a_retried_deferral_is_the_same_deferral(self):
+        first = self.defer()
+        self.assertEqual(first["status"], "recorded")
+        again = self.defer(created_at="2026-09-10T00:05:00+00:00")
+        self.assertEqual(again["status"], "duplicate")
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual(len(self.authority.decisions(self.call["id"])), 1)
+
+    def test_a_different_key_is_a_different_decision(self):
+        self.defer()
+        self.defer(idempotency_key="cockpit:req-2",
+                   created_at="2026-09-11T00:00:00+00:00")
+        self.assertEqual([item["decision"] for item
+                          in self.authority.decisions(self.call["id"])],
+                         ["defer", "defer"])
+
+    def test_a_key_never_smuggles_a_second_decision_past_a_settled_call(self):
+        self.defer(decision="accept", reason="taking it")
+        with self.assertRaises(ConvictionCallConflict):
+            self.defer(idempotency_key="cockpit:req-9", decision="reject",
+                       reason="changed my mind")
 
 
 class RubricTests(unittest.TestCase):

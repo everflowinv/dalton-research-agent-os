@@ -52,6 +52,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Sequence
 
+# ADR-0008's closed vocabulary, imported rather than restated: the forecast
+# layer owns the list and every output authority binds the same one.
+from .model_forecast_driver import CHANGE_REASONS
 from .research_playbook import DECISION_VOCABULARY
 from .store import canonical_json, content_hash
 
@@ -108,6 +111,15 @@ SETTLING_DECISIONS: frozenset[str] = frozenset({"accept", "reject"})
 RISK_REWARD_STATUSES: tuple[str, ...] = (
     "met", "not_met", "unavailable", "not_applicable",
 )
+
+# The largest return, up or down, a call may claim, as a percentage. Not a
+# view about what is achievable -- it is the line past which a number stops
+# being an argument and starts being a parsing accident. ``Decimal`` is happy
+# with ``1e999``: it is finite, so a finiteness check alone lets it through,
+# and it clears every threshold in the Playbook's table. A hundred-fold is far
+# above the Playbook's own top standard (3-5x) and far below anything a
+# float-shaped accident produces.
+MAX_PERCENT = 10_000
 
 MAX_STATEMENT_CHARS = 800
 MAX_REASON_CHARS = 2000
@@ -284,9 +296,26 @@ def _decimal(value: Any, name: str) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ConvictionCallValidationError(f"{name} must be a decimal string")
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ConvictionCallValidationError(f"{name} is not a number") from exc
+    # ``Decimal`` parses "Infinity" and "NaN" happily, and both are poison
+    # downstream: an infinity clears every threshold in the Playbook's table
+    # and a NaN raises ``InvalidOperation`` out of a comparison that has
+    # already been paid for. Refused here rather than in the caller, so that a
+    # record reaching this module from anywhere -- a draft, a fixture, a row
+    # read back off disk -- is checked once and in one place.
+    if not number.is_finite():
+        raise ConvictionCallValidationError(
+            f"{name} must be a finite decimal; got {value!r}")
+    if abs(number) > MAX_PERCENT:
+        # Finiteness is not enough. Decimal's exponent range is enormous, so
+        # "1e999" arrives here perfectly well formed and then clears every bar
+        # in the standards table.
+        raise ConvictionCallValidationError(
+            f"{name} is {value!r}, over the {MAX_PERCENT}% bound; a number that "
+            "large is a parsing accident, not a claim about a company")
+    return number
 
 
 def week_key(when: Any) -> str:
@@ -434,10 +463,21 @@ def divergent_debates(
 ) -> list[dict[str, Any]]:
     """The live debates where we are not standing where the market is.
 
-    Both positions have to be *stated*: a debate whose market position is
-    ``available: false`` is one where nobody has told us where the street is,
-    and calling that a disagreement would be inventing the other side of an
-    argument in order to win it.
+    Both positions have to be *stated*, and ours has to be a side.
+
+    ``available: false`` is a debate where nobody has told us where the street
+    is, and calling that a disagreement would be inventing the other side of an
+    argument in order to win it.  ``our_position.side == "neither"`` is the
+    mirror image and the subtler one: P12c's vocabulary uses ``neither`` for
+    "we hold a view and it is that neither camp is right", which is a real
+    position but not a *direction*.  A call is a direction, so a company whose
+    only disagreement with the market is that it declines to pick a side has
+    nothing to be long or short of, and it must not be admitted by the string
+    comparison happening to come out unequal.
+
+    ``split`` on the market side is deliberately kept: a street that is
+    genuinely divided is one we can differ from, and holding ``bull`` against a
+    split market is the ordinary shape of an early call.
     """
 
     found: list[dict[str, Any]] = []
@@ -445,6 +485,8 @@ def divergent_debates(
         market = debate.get("market_position") or {}
         ours = debate.get("our_position") or {}
         if not market.get("available") or ours.get("state") != "held":
+            continue
+        if ours.get("side") not in ("bull", "bear"):
             continue
         if ours.get("side") == market.get("lean"):
             continue
@@ -608,7 +650,9 @@ _ATTRIBUTION_FIELDS = {
 }
 _RUBRIC_FIELDS = {"rubric_ref", "rubric_hash", "findings"}
 _PROPOSAL_FIELDS = frozenset({
-    "schema_version", "id", "created_at", "call_ref", "company_ref", "week_key",
+    "schema_version", "id", "created_at", "call_ref", "version",
+    "prior_version_ref", "change_reason", "change_evidence_refs",
+    "company_ref", "week_key",
     "direction", "decision", "confidence", "time_horizon", "variant_view",
     "consensus_gap", "event_pathway", "risk_reward", "falsifiers",
     "thesis_refs", "debate_refs", "evidence_fingerprint", "precheck", "rubric",
@@ -618,7 +662,8 @@ _PROPOSAL_FIELDS = frozenset({
 })
 _DECISION_FIELDS = frozenset({
     "schema_version", "id", "created_at", "proposal_ref", "proposal_hash",
-    "decision_number", "decision", "reason", "actor_ref", "content_hash",
+    "decision_number", "decision", "reason", "supersedes_ref", "actor_ref",
+    "content_hash",
 })
 
 WINDOW_KINDS: tuple[str, ...] = ("date", "range", "unknown")
@@ -915,6 +960,18 @@ def normalise_proposal(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["policy_hash"] = _hash(wire["policy_hash"], "policy_hash")
     wire["mission_version_hash"] = _hash(
         wire["mission_version_hash"], "mission_version_hash")
+    wire["prior_version_ref"] = _optional_text(
+        wire["prior_version_ref"], "prior_version_ref", maximum=512)
+    if isinstance(wire["version"], bool) or not isinstance(wire["version"], int) \
+            or wire["version"] < 1:
+        raise ConvictionCallValidationError("version must be a positive integer")
+    if (wire["version"] == 1) != (wire["prior_version_ref"] is None):
+        raise ConvictionCallValidationError(
+            "a first version has no prior and every later one has exactly one")
+    wire["change_reason"] = _one_of(
+        wire["change_reason"], CHANGE_REASONS, "change_reason")
+    wire["change_evidence_refs"] = _refs(
+        wire["change_evidence_refs"], "change_evidence_refs", nonempty=True)
     wire["direction"] = _one_of(wire["direction"], DIRECTIONS, "direction")
     wire["decision"] = _one_of(wire["decision"], DECISION_VOCABULARY, "decision")
     wire["confidence"] = _one_of(wire["confidence"], CONFIDENCES, "confidence")
@@ -973,6 +1030,15 @@ def normalise_proposal(value: Mapping[str, Any]) -> dict[str, Any]:
 
     wire["drafted_by"] = _attribution(wire["drafted_by"], "drafted_by")
     wire["verified_by"] = _attribution(wire["verified_by"], "verified_by")
+
+    # ADR-0008: the reason has to point at evidence this version actually uses.
+    # A reason citing a ref that appears nowhere in the call is a reason about
+    # some other document.
+    unused = set(wire["change_evidence_refs"]) - cited_refs(wire)
+    if unused:
+        raise ConvictionCallValidationError(
+            "change_evidence_refs name refs this call does not cite: "
+            + ", ".join(sorted(unused)))
     return wire
 
 
@@ -1007,6 +1073,13 @@ def validate_decision(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["proposal_hash"] = _hash(wire["proposal_hash"], "proposal_hash")
     wire["decision"] = _one_of(wire["decision"], DECISIONS, "decision")
     wire["reason"] = _text(wire["reason"], "reason", maximum=MAX_REASON_CHARS)
+    wire["supersedes_ref"] = _optional_text(
+        wire["supersedes_ref"], "supersedes_ref", maximum=512)
+    if wire["supersedes_ref"] is not None and wire["decision"] != "accept":
+        raise ConvictionCallValidationError(
+            "only an acceptance supersedes a call; a rejection replaces nothing")
+    if wire["supersedes_ref"] == wire["proposal_ref"]:
+        raise ConvictionCallValidationError("a call cannot supersede itself")
     wire["actor_ref"] = _human(wire["actor_ref"])
     number = wire["decision_number"]
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
@@ -1179,6 +1252,9 @@ def _decode_proposal(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
         raise ConvictionCallConflict(f"{name} identity columns drifted")
     columns = {
         "call_ref": record["call_ref"],
+        "version_number": record["version"],
+        "prior_version_id": record["prior_version_ref"],
+        "change_reason": record["change_reason"],
         "company_ref": record["company_ref"],
         "week_key": record["week_key"],
         "direction": record["direction"],
@@ -1209,6 +1285,9 @@ def _decode_decision(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
     record = validate_decision(wire)
     if record["content_hash"] != row["content_hash"] or record["id"] != row["decision_id"]:
         raise ConvictionCallConflict(f"{name} identity columns drifted")
+    keys = set(row.keys())
+    if "supersedes_ref" in keys and row["supersedes_ref"] != record["supersedes_ref"]:
+        raise ConvictionCallConflict(f"{name} column supersedes_ref drifted")
     return record
 
 
@@ -1253,6 +1332,50 @@ class ConvictionCallAuthority:
             ).fetchall()
         return [_decode_proposal(row, "ConvictionCallProposal") for row in rows]
 
+    def _latest_row(self, call_ref: str) -> sqlite3.Row | None:
+        return self.connection.execute(
+            f"SELECT * FROM {PROPOSAL_TABLE} WHERE call_ref=? "
+            "ORDER BY version_number DESC LIMIT 1",
+            (call_ref,),
+        ).fetchone()
+
+    def current(self, company_ref: str) -> dict[str, Any] | None:
+        """The head of a company's call chain, or ``None``."""
+
+        row = self._latest_row(call_ref_for(
+            _text(company_ref, "company_ref", maximum=256)))
+        if row is None:
+            return None
+        return _decode_proposal(row, f"ConvictionCallProposal for {company_ref}")
+
+    def versions(self, company_ref: str) -> list[dict[str, Any]]:
+        """A company's whole call chain, in order.
+
+        What the owner reads to see the view change: 3 月做多、6 月降到观望、
+        9 月做空 is a mind moving, and it is only legible as a chain.
+        """
+
+        rows = self.connection.execute(
+            f"SELECT * FROM {PROPOSAL_TABLE} WHERE call_ref=? ORDER BY version_number",
+            (call_ref_for(_text(company_ref, "company_ref", maximum=256)),),
+        ).fetchall()
+        return [_decode_proposal(row, "ConvictionCallProposal") for row in rows]
+
+    def superseded_by(self, proposal_ref: str) -> str | None:
+        """The call that replaced this one, or ``None`` if it still stands.
+
+        Read forward off the decisions rather than stored on the proposal:
+        nothing here is ever rewritten, and the act that supersedes a call is a
+        person accepting the next one, so the mark belongs on that act.
+        """
+
+        row = self.connection.execute(
+            f"SELECT proposal_ref FROM {DECISION_TABLE} WHERE supersedes_ref=? "
+            "ORDER BY created_at, decision_number LIMIT 1",
+            (_text(proposal_ref, "proposal_ref", maximum=512),),
+        ).fetchone()
+        return None if row is None else row["proposal_ref"]
+
     def decisions(self, proposal_ref: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             f"SELECT * FROM {DECISION_TABLE} WHERE proposal_ref=? "
@@ -1266,13 +1389,16 @@ class ConvictionCallAuthority:
         return chain[-1] if chain else None
 
     def status_of(self, proposal_ref: str) -> str:
-        """``open``, ``deferred``, ``accepted`` or ``rejected``."""
+        """``open``, ``deferred``, ``accepted``, ``superseded`` or ``rejected``."""
 
         latest = self.latest_decision(proposal_ref)
         if latest is None:
             return "open"
-        return {"accept": "accepted", "reject": "rejected",
-                "defer": "deferred"}[latest["decision"]]
+        status = {"accept": "accepted", "reject": "rejected",
+                  "defer": "deferred"}[latest["decision"]]
+        if status == "accepted" and self.superseded_by(proposal_ref) is not None:
+            return "superseded"
+        return status
 
     def open_calls(self) -> list[dict[str, Any]]:
         """Every proposal nobody has answered yet, oldest first.
@@ -1307,6 +1433,11 @@ class ConvictionCallAuthority:
         "what did we decide this week", not "what did the machine draft".  A
         call proposed in August and accepted this morning belongs in this
         week's brief.
+
+        A call the owner has since replaced with a newer one for the same
+        company is not returned.  ADR-0008 keeps it -- it is still in the chain
+        and still readable -- but a brief that listed both would be telling the
+        owner they hold two views of one name.
         """
 
         since = until = None
@@ -1320,6 +1451,8 @@ class ConvictionCallAuthority:
         for record in self.proposals():
             latest = self.latest_decision(record["id"])
             if latest is None or latest["decision"] != "accept":
+                continue
+            if self.superseded_by(record["id"]) is not None:
                 continue
             when = latest["created_at"]
             if since is not None and when < since:
@@ -1365,6 +1498,8 @@ class ConvictionCallAuthority:
         thesis_refs: Sequence[str],
         debate_refs: Sequence[str] = (),
         evidence_fingerprint: str,
+        change_reason: str,
+        change_evidence_refs: Sequence[str],
         precheck_record: Mapping[str, Any],
         rubric: Mapping[str, Any],
         mission: Mapping[str, Any],
@@ -1372,22 +1507,25 @@ class ConvictionCallAuthority:
         created_at: str,
         drafted_by: Mapping[str, Any] | None = None,
         verified_by: Mapping[str, Any] | None = None,
-        max_per_week: int | None = None,
     ) -> dict[str, Any]:
-        """Write one proposal, or refuse it.
+        """Append one version to a company's call chain, or refuse it.
 
         Three refusals and they are different: ``duplicate`` when this exact
         evidence already produced a call for this company, ``rate_limited``
         when the week's allowance is spent, and a raised validation error when
         the record is not a call at all.  The first two are answers a lane
         reports; the third is a bug.
+
+        ADR-0008's shape: the caller supplies the ``change_reason`` and the
+        refs that occasioned this version, and the authority never decides on
+        its own that a company's call should change.  ``version`` and
+        ``prior_version_ref`` are the chain's, not the caller's.
         """
 
         company_ref = _text(company_ref, "company_ref", maximum=256)
         created_at = _text(created_at, "created_at", maximum=64)
         fingerprint = _text(evidence_fingerprint, "evidence_fingerprint", maximum=128)
-        allowance = (CONVICTION_POLICY["max_calls_per_company_per_week"]
-                     if max_per_week is None else int(max_per_week))
+        allowance = int(CONVICTION_POLICY["max_calls_per_company_per_week"])
         existing = self.connection.execute(
             f"SELECT * FROM {PROPOSAL_TABLE} WHERE company_ref=? AND evidence_fingerprint=?",
             (company_ref, fingerprint),
@@ -1407,8 +1545,15 @@ class ConvictionCallAuthority:
                                f"{week}; the allowance is {allowance}"),
                     "week_key": week, "company_ref": company_ref}
 
+        latest = self._latest_row(call_ref_for(company_ref))
+        prior = None if latest is None else _decode_proposal(
+            latest, f"ConvictionCallProposal for {company_ref}")
         body = {
             "call_ref": call_ref_for(company_ref),
+            "version": 1 if prior is None else prior["version"] + 1,
+            "prior_version_ref": None if prior is None else prior["id"],
+            "change_reason": change_reason,
+            "change_evidence_refs": list(change_evidence_refs),
             "company_ref": company_ref,
             "week_key": week,
             "direction": direction,
@@ -1445,12 +1590,15 @@ class ConvictionCallAuthority:
         record = {**wire, "content_hash": content_hash(wire)}
         with self.store._transaction() as cur:
             cur.execute(
-                f"INSERT INTO {PROPOSAL_TABLE}(proposal_id,call_ref,company_ref,week_key,"
+                f"INSERT INTO {PROPOSAL_TABLE}(proposal_id,call_ref,version_number,"
+                "prior_version_id,change_reason,company_ref,week_key,"
                 "direction,decision_word,confidence,time_horizon,risk_reward_status,"
                 "evidence_fingerprint,record_json,content_hash,actor_ref,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    record["id"], record["call_ref"], record["company_ref"],
+                    record["id"], record["call_ref"], record["version"],
+                    record["prior_version_ref"], record["change_reason"],
+                    record["company_ref"],
                     record["week_key"], record["direction"], record["decision"],
                     record["confidence"], record["time_horizon"],
                     record["risk_reward"]["standard"]["status"],
@@ -1472,6 +1620,7 @@ class ConvictionCallAuthority:
         reason: str,
         actor_ref: str,
         created_at: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """A person answers one call.  Append-only, bound to the exact bytes.
 
@@ -1480,6 +1629,16 @@ class ConvictionCallAuthority:
         and then quietly did not" is precisely the history this record exists
         to make unavailable.  ``defer`` leaves it open, and the chain shows
         both the pause and what ended it.
+
+        ``idempotency_key`` makes a retry the same decision.  Without it a
+        dropped reply on ``defer`` -- the one decision that does not settle,
+        and therefore the one a caller can repeat without hitting the conflict
+        above -- would append a second deferral each time the owner pressed
+        again, and the chain would read as indecision that never happened.
+
+        Accepting supersedes whichever call for this company the owner had
+        accepted before.  The authority resolves that, not the caller: which
+        call was standing is a fact about the chain.
         """
 
         proposal_ref = _text(proposal_ref, "proposal_ref", maximum=512)
@@ -1490,11 +1649,30 @@ class ConvictionCallAuthority:
             raise ConvictionCallConflict(
                 "the decision names a different version of this call than the "
                 "one stored; nothing here is rewritten, so this is a stale read")
+        key = (None if idempotency_key is None
+               else _text(idempotency_key, "idempotency_key", maximum=512))
+        if key is not None:
+            seen = self.connection.execute(
+                f"SELECT * FROM {DECISION_TABLE} WHERE proposal_ref=? AND "
+                "idempotency_key=?", (proposal_ref, key),
+            ).fetchone()
+            if seen is not None:
+                return {"status": "duplicate",
+                        **_decode_decision(seen, "conviction call decision"),
+                        "call_status": self.status_of(proposal_ref)}
         chain = self.decisions(proposal_ref)
         if chain and chain[-1]["decision"] in SETTLING_DECISIONS:
             raise ConvictionCallConflict(
                 f"{proposal_ref} was already {chain[-1]['decision']}ed")
         number = len(chain) + 1
+        supersedes = None
+        if decision == "accept":
+            supersedes = next(
+                (record["id"] for record in self.versions(proposal["company_ref"])
+                 if record["id"] != proposal_ref
+                 and self.status_of(record["id"]) == "accepted"),
+                None,
+            )
         record = {
             "schema_version": SCHEMA_VERSION,
             "id": "conviction-call-decision:" + content_hash(
@@ -1505,6 +1683,7 @@ class ConvictionCallAuthority:
             "decision_number": number,
             "decision": decision,
             "reason": _text(reason, "reason", maximum=MAX_REASON_CHARS),
+            "supersedes_ref": supersedes,
             "actor_ref": actor_ref,
         }
         record["content_hash"] = content_hash(record)
@@ -1512,11 +1691,13 @@ class ConvictionCallAuthority:
         with self.store._transaction() as cur:
             cur.execute(
                 f"INSERT INTO {DECISION_TABLE}(decision_id,proposal_ref,proposal_hash,"
-                "decision_number,decision,reason,record_json,content_hash,actor_ref,"
-                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "decision_number,decision,reason,supersedes_ref,idempotency_key,"
+                "record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     checked["id"], checked["proposal_ref"], checked["proposal_hash"],
                     checked["decision_number"], checked["decision"], checked["reason"],
+                    checked["supersedes_ref"], key,
                     canonical_json(checked), checked["content_hash"],
                     checked["actor_ref"], checked["created_at"],
                 ),
@@ -1532,8 +1713,36 @@ class ConvictionCallAuthority:
         return {"status": "recorded", **written,
                 "call_status": self.status_of(proposal_ref)}
 
+    def replay(self, company_ref: str) -> list[dict[str, Any]]:
+        """A company's calls with what happened to each, oldest first.
+
+        ADR-0008's fourth rule: 认知迭代要能从版本链上读出来.  One row per
+        version -- what we said, when, and whether the owner took it -- so the
+        weekly review can answer "what did the machine keep proposing that the
+        analyst kept declining" without joining two tables by hand.
+        """
+
+        found: list[dict[str, Any]] = []
+        for record in self.versions(company_ref):
+            latest = self.latest_decision(record["id"])
+            found.append({
+                "proposal_ref": record["id"],
+                "version": record["version"],
+                "created_at": record["created_at"],
+                "change_reason": record["change_reason"],
+                "direction": record["direction"],
+                "time_horizon": record["time_horizon"],
+                "confidence": record["confidence"],
+                "status": self.status_of(record["id"]),
+                "decided_at": None if latest is None else latest["created_at"],
+                "decision_reason": None if latest is None else latest["reason"],
+                "superseded_by": self.superseded_by(record["id"]),
+            })
+        return found
+
 
 __all__ = [
+    "CHANGE_REASONS",
     "CHECKPOINT_KIND",
     "CONFIDENCES",
     "CONVICTION_POLICY",
@@ -1542,6 +1751,7 @@ __all__ = [
     "DIRECTIONS",
     "GATE_REASONS",
     "MARKET_VIEW_SOURCES",
+    "MAX_PERCENT",
     "POLICY_HASH",
     "POLICY_REF",
     "PROPOSAL_TABLE",

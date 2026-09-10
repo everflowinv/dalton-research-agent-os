@@ -8,6 +8,7 @@ import unittest
 from dalton_core.cockpit_model import CockpitModelError, purposes
 from dalton_core.conviction_call import precheck, rubric_findings
 from dalton_core.conviction_call_draft import (
+    MAX_PERCENT,
     MAX_PROMPT_BYTES,
     PURPOSE,
     ConvictionDraftRefused,
@@ -254,6 +255,33 @@ class ParseDraftTests(unittest.TestCase):
             parse_draft(draft_reply(downside={"statement": "x", "percent": "-20",
                                               "refs": ["D1"]}), self.table)
 
+    def test_a_non_finite_percentage_refuses_the_whole_draft(self):
+        # The blocker this test was written for: ``inf`` and ``1e999`` clear
+        # every threshold in the Playbook's table, so the standard check would
+        # come back ``met`` on a reply that said nothing; ``nan`` compares false
+        # against all of them and raises out of the ratio rule. All three reach
+        # ``float()`` intact, so nothing upstream catches them.
+        for value in ("inf", "Infinity", "-inf", "nan", "NaN", "1e999"):
+            with self.subTest(value=value):
+                with self.assertRaises(ConvictionDraftRefused):
+                    parse_draft(draft_reply(upside={
+                        "statement": "x", "percent": value, "refs": ["D1"]}),
+                        self.table)
+                with self.assertRaises(ConvictionDraftRefused):
+                    parse_draft(draft_reply(downside={
+                        "statement": "x", "percent": value, "refs": ["D1"]}),
+                        self.table)
+
+    def test_a_percentage_past_the_bound_refuses_the_whole_draft(self):
+        with self.assertRaises(ConvictionDraftRefused):
+            parse_draft(draft_reply(upside={
+                "statement": "x", "percent": str(MAX_PERCENT + 1), "refs": ["D1"]}),
+                self.table)
+        # And the bound itself is fine, so this is a bound and not an off-by-one.
+        parsed = parse_draft(draft_reply(upside={
+            "statement": "x", "percent": str(MAX_PERCENT), "refs": ["D1"]}), self.table)
+        self.assertEqual(parsed["risk_reward"]["upside"]["percent"], str(MAX_PERCENT))
+
     def test_a_market_view_source_outside_the_ladder_is_refused(self):
         with self.assertRaises(ConvictionDraftRefused):
             parse_draft(draft_reply(market_view={
@@ -279,6 +307,35 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(call["debate_refs"], [DEBATE])
         self.assertEqual(call["thesis_refs"], [THESIS])
         self.assertEqual(rubric_findings(call), [])
+
+
+class ShownConsensusTests(unittest.TestCase):
+    """A call may only carry the metrics the drafter was actually shown."""
+
+    def gap(self, count, *, refs=("forecast-model-version:1",)):
+        return {"status": "available", "reason": None, "metrics": [{
+            "metric": f"metric:line-{index}", "period": "FY2027", "ours": "82000",
+            "consensus": "69000", "unit": "USDm", "gap_percent": "18",
+            "refs": list(refs)} for index in range(count)]}
+
+    def test_metrics_past_the_table_bound_do_not_reach_the_record(self):
+        built = table(consensus_gap=self.gap(12))
+        self.assertEqual(len(built["metrics"]), 8)
+        self.assertEqual(len(built["consensus_gap"]["metrics"]), 8)
+        call = assemble_call(parse_draft(draft_reply(), built), built)
+        self.assertEqual(len(call["consensus_gap"]["metrics"]), 8)
+        self.assertNotIn("row_id", call["consensus_gap"]["metrics"][0])
+
+    def test_a_metric_with_nothing_behind_it_is_dropped_from_both(self):
+        built = table(consensus_gap=self.gap(1, refs=()))
+        self.assertEqual(built["metrics"], [])
+        # And an "available" gap whose every row was dropped becomes an honest
+        # unavailable rather than an empty available, which the contract
+        # refuses and which would read as "we agree with the street".
+        self.assertEqual(built["consensus_gap"]["status"], "unavailable")
+        self.assertIn("cites nothing", built["consensus_gap"]["reason"])
+        call = assemble_call(parse_draft(draft_reply(), built), built)
+        self.assertEqual(call["consensus_gap"]["metrics"], [])
 
 
 class VerifierTests(unittest.TestCase):

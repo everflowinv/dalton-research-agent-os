@@ -38,8 +38,10 @@ from .conviction_call import (
     POLICY_REF,
     WRITE_SCOPE,
     ConvictionCallAuthority,
+    ConvictionCallValidationError,
     evidence_fingerprint,
     precheck,
+    validate_consensus_gap,
 )
 from .conviction_call_draft import (
     MAX_COST_USD,
@@ -48,6 +50,8 @@ from .conviction_call_draft import (
     TIMEOUT_SECONDS,
     build_input_table,
     build_prompt,
+    change_evidence,
+    change_reason_for,
     draft_conviction_call,
     route_family,
 )
@@ -197,8 +201,21 @@ def consensus_gap(store: Any, company_ref: str) -> dict[str, Any]:
     if not found or not (found.get("metrics") or ()):
         return {"status": "unavailable", "metrics": [],
                 "reason": f"no consensus estimate is held for {company_ref}"}
-    return {"status": "available", "reason": None,
-            "metrics": [dict(row) for row in found["metrics"]]}
+    gap = {"status": "available", "reason": None,
+           "metrics": [dict(row) for row in found["metrics"]]}
+    # Checked here, before the gate reads it and long before a model call is
+    # paid for. The consensus authority is on the other side of a name lookup
+    # and is not this slice's code; a row of the wrong shape reaching the gate
+    # would either open a call on a number nobody can validate, or -- worse --
+    # be discovered by the authority *after* two model calls had been spent.
+    # Any shape problem degrades to the honest answer rather than raising: a
+    # malformed street is a street we cannot read.
+    try:
+        return validate_consensus_gap(gap)
+    except ConvictionCallValidationError as exc:
+        return {"status": "unavailable", "metrics": [],
+                "reason": f"the consensus authority returned a shape this Core "
+                          f"cannot read: {exc}"}
 
 
 def gate_inputs(store: Any, company_ref: str) -> dict[str, Any]:
@@ -255,6 +272,7 @@ def run_conviction_call(
         "company_ref": company_ref,
         "call_status": None,
         "proposal_ref": None,
+        "version": None,
         "direction": None,
         "eligible": None,
         "gate_reasons": [],
@@ -344,8 +362,16 @@ def run_conviction_call(
             return summary
 
         authority = ConvictionCallAuthority(store)
+        previous = authority.current(company_ref)
         config = json.loads(
             Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        # Fail closed on a configuration with no router: ``route_family`` reads
+        # the routing authority to establish which family each call ran on, and
+        # a missing key here would raise out of the lambda *after* the drafting
+        # call was paid for. ``None`` makes the family unknowable, and an
+        # unknowable family is refused by the independence predicate -- which
+        # is the outcome we want when we cannot tell.
+        router_db = config.get("model_router_db")
         model = CockpitModel(
             config, scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
             max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
@@ -355,7 +381,8 @@ def run_conviction_call(
         try:
             drafted = draft_conviction_call(
                 table=table, model=model, mission=mission,
-                family_of=lambda ref: route_family(config["model_router_db"], ref),
+                family_of=(lambda ref: None if router_db is None
+                           else route_family(router_db, ref)),
                 rubric_ref=CONVICTION_CALL.rubric_ref,
                 rubric_hash=CONVICTION_CALL.content_hash,
             )
@@ -374,6 +401,13 @@ def run_conviction_call(
                             "failure_reason": drafted.get("reason")})
             return summary
         call = drafted["call"]
+        refs = change_evidence(call, previous)
+        if not refs:
+            # ADR-0008: a version exists only when it can say what it learned.
+            summary.update({"status": "succeeded", "call_status": "duplicate",
+                            "failure_reason": "this call cites nothing the "
+                                              "standing one does not already cite"})
+            return summary
         published = authority.propose(
             company_ref=company_ref,
             direction=call["direction"],
@@ -388,6 +422,8 @@ def run_conviction_call(
             thesis_refs=call["thesis_refs"],
             debate_refs=call["debate_refs"],
             evidence_fingerprint=fingerprint,
+            change_reason=change_reason_for(previous),
+            change_evidence_refs=refs,
             precheck_record=gate,
             rubric=drafted["rubric"],
             mission=mission,
@@ -399,6 +435,7 @@ def run_conviction_call(
         summary.update({
             "status": "succeeded", "call_status": published["status"],
             "proposal_ref": published.get("id"),
+            "version": published.get("version"),
             "direction": published.get("direction"),
             "failure_reason": published.get("reason"),
         })

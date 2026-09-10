@@ -32,10 +32,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
 from .conviction_call import (
+    CHANGE_REASONS,
     CONFIDENCES,
     CONVICTION_POLICY,
     DIRECTIONS,
     MARKET_VIEW_SOURCES,
+    MAX_PERCENT,
     POLICY_HASH,
     POLICY_REF,
     TIME_HORIZONS,
@@ -177,6 +179,7 @@ def build_input_table(
                                  "reason": "no consensus authority on this Core",
                                  "metrics": []})
     metric_rows: list[dict[str, Any]] = []
+    shown_metrics: list[dict[str, Any]] = []
     for row in (gap.get("metrics") or ())[:MAX_METRIC_ROWS]:
         refs = list(row.get("refs") or ())
         if not refs:
@@ -189,6 +192,18 @@ def build_input_table(
             "unit": row.get("unit"), "gap_percent": row.get("gap_percent"),
             "refs": refs,
         })
+        shown_metrics.append(dict(row))
+    # The gap that goes into the record is the gap that went into the prompt.
+    # The table is bounded and drops rows with nothing behind them, so the
+    # authority's copy has to be the *shown* rows: a call carrying a metric
+    # the drafter never saw is a number nobody weighed, and it would be
+    # indistinguishable in the record from one that was argued over.
+    if gap.get("status") == "available" and not shown_metrics:
+        gap = {"status": "unavailable", "metrics": [],
+               "reason": "a consensus estimate exists but none of its rows could "
+                         "be shown (every one of them cites nothing)"}
+    elif gap.get("status") == "available":
+        gap = {"status": "available", "reason": None, "metrics": shown_metrics}
 
     catalyst_rows: list[dict[str, Any]] = []
     for row in list(catalyst_entries)[:MAX_CATALYST_ROWS]:
@@ -422,12 +437,26 @@ def _percent(value: Any, name: str) -> str | None:
         number = float(text)
     except ValueError as exc:
         raise ConvictionDraftRefused(f"{name} must be a decimal or null") from exc
+    if number != number or number in (float("inf"), float("-inf")):
+        # NaN and the infinities are the dangerous ones. NaN compares false
+        # against every threshold, so it would read as ``not_met``; an infinity
+        # compares true against all of them, so it would read as ``met``.
+        # Neither is a claim about the company.
+        raise ConvictionDraftRefused(
+            f"{name} must be a finite decimal; got {text!r}")
     if number < 0:
         # A downside written as "-30" and a downside written as "30" would sort
         # differently against the same standard.  The prompt says unsigned and
         # the parser does not silently repair it.
         raise ConvictionDraftRefused(
             f"{name} is a magnitude without a sign; a 30% drawdown is \"30\"")
+    if number > MAX_PERCENT:
+        # The same bound the authority enforces, imported rather than restated:
+        # a parser that let through what the authority refuses would pay for a
+        # verifying call and then throw the result away.
+        raise ConvictionDraftRefused(
+            f"{name} is {text}, over the {MAX_PERCENT}% bound; a return that "
+            "large is a parsing accident, not an argument")
     return text
 
 
@@ -864,10 +893,45 @@ def draft_conviction_call(
     return result
 
 
+def change_evidence(
+    call: Mapping[str, Any], previous: Mapping[str, Any] | None
+) -> list[str]:
+    """The refs that occasioned this version, per ADR-0008.
+
+    The refs this call cites that the current head of the chain does not.  With
+    no previous version everything is new; with a previous version and nothing
+    new the caller must not publish, because a call that learned nothing is the
+    same call written twice.
+    """
+
+    from .conviction_call import cited_refs
+
+    fresh = cited_refs(call)
+    if previous is not None:
+        fresh = fresh - cited_refs(previous)
+    return sorted(fresh)
+
+
+def change_reason_for(previous: Mapping[str, Any] | None) -> str:
+    """``evidence_thicker`` is the only reason a drafting run can honestly give.
+
+    The others in ADR-0008's vocabulary are assertions about the world -- a
+    filing landed, a driver moved, a person decided -- and a lane that reads
+    theses, a debate map and a forecast and writes a call knows only that there
+    is more to stand on than there was.  Naming one of the others would be a
+    lie the chain would then preserve.  A human revision arriving through some
+    later entry point may say ``human_revision``; this one may not.
+    """
+
+    assert set(CHANGE_REASONS)  # the vocabulary is ADR-0008's, not this module's
+    return "evidence_thicker"
+
+
 __all__ = [
     "MAX_COST_USD",
     "MAX_INPUT_TOKENS",
     "MAX_OUTPUT_TOKENS",
+    "MAX_PERCENT",
     "MAX_PROMPT_BYTES",
     "PURPOSE",
     "SCHEMA_VERSION",
@@ -882,6 +946,8 @@ __all__ = [
     "build_input_table",
     "build_prompt",
     "build_verifier_prompt",
+    "change_evidence",
+    "change_reason_for",
     "draft_conviction_call",
     "independent",
     "parse_draft",

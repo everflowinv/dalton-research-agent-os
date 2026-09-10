@@ -698,6 +698,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     # could be inherited by something else later.
     "decide_conviction_call": frozenset({
         "proposal_ref", "proposal_hash", "decision", "reason", "actor_ref",
+        # ``defer`` is the one decision that does not settle a call, so it is
+        # the one a client can retry; without a key a dropped reply would
+        # append a second deferral every time the owner pressed again.
+        "idempotency_key",
     }),
     "record_backlog_question": frozenset({"mandate_version_ref", "company_ref", "question", "answer_criteria", "source_refs", "actor_ref", "idempotency_key"}),
     "publish_probe_template": frozenset({"template_ref", "capability_ref", "operation", "runtime_profile_ref", "parameter_contract", "output_contract_ref", "verifier_ref", "permission_scope", "declared_side_effects", "cost", "actor_ref", "prior_version_ref"}),

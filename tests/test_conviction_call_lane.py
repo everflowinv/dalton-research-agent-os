@@ -282,6 +282,69 @@ class GateRunTests(ConvictionHarness):
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("P11b", found["reason"])
 
+    def test_a_consensus_reader_of_the_wrong_shape_degrades_to_unavailable(self):
+        # P11b is on the other side of a name lookup and is not this slice's
+        # code. A row of the wrong shape must not reach the gate -- and must
+        # certainly not be discovered by the authority after two model calls
+        # have been paid for.
+        import sys
+        import types
+
+        cases = {
+            "an extra key": [{"metric": "m", "period": "FY2027", "ours": "1",
+                              "consensus": "2", "unit": "x", "gap_percent": "18",
+                              "refs": ["r"], "confidence": "high"}],
+            "no refs": [{"metric": "m", "period": "FY2027", "ours": "1",
+                         "consensus": "2", "unit": "x", "gap_percent": "18",
+                         "refs": []}],
+            "too many rows": [{"metric": f"m{n}", "period": "FY2027", "ours": "1",
+                               "consensus": "2", "unit": "x", "gap_percent": "18",
+                               "refs": ["r"]} for n in range(13)],
+            "a percentage that is not one": [
+                {"metric": "m", "period": "FY2027", "ours": "1", "consensus": "2",
+                 "unit": "x", "gap_percent": "Infinity", "refs": ["r"]}],
+        }
+        for label, metrics in cases.items():
+            with self.subTest(shape=label):
+                module = types.ModuleType("dalton_core.consensus_estimate")
+                module.latest_consensus = lambda store, company: {"metrics": metrics}
+                sys.modules["dalton_core.consensus_estimate"] = module
+                self.addCleanup(sys.modules.pop, "dalton_core.consensus_estimate", None)
+                found = consensus_gap(self.store, ACN)
+                self.assertEqual(found["status"], "unavailable")
+                self.assertEqual(found["metrics"], [])
+                self.assertTrue(found["reason"])
+
+    def test_a_well_shaped_consensus_reader_is_carried_through(self):
+        import sys
+        import types
+
+        module = types.ModuleType("dalton_core.consensus_estimate")
+        module.latest_consensus = lambda store, company: {"metrics": [{
+            "metric": "metric:revenue-usd", "period": "FY2027", "ours": "82000",
+            "consensus": "69000", "unit": "USDm", "gap_percent": "18",
+            "refs": ["forecast-model-version:1"]}]}
+        sys.modules["dalton_core.consensus_estimate"] = module
+        self.addCleanup(sys.modules.pop, "dalton_core.consensus_estimate", None)
+        found = consensus_gap(self.store, ACN)
+        self.assertEqual(found["status"], "available")
+        self.assertEqual(found["metrics"][0]["gap_percent"], "18")
+
+    def test_a_consensus_reader_that_raises_is_no_street_not_an_outage(self):
+        import sys
+        import types
+
+        def boom(store, company):
+            raise RuntimeError("the vendor is down")
+
+        module = types.ModuleType("dalton_core.consensus_estimate")
+        module.latest_consensus = boom
+        sys.modules["dalton_core.consensus_estimate"] = module
+        self.addCleanup(sys.modules.pop, "dalton_core.consensus_estimate", None)
+        found = consensus_gap(self.store, ACN)
+        self.assertEqual(found["status"], "unavailable")
+        self.assertIn("could not be read", found["reason"])
+
     def test_reading_a_core_with_no_debate_map_leaves_no_debate_map_behind(self):
         self.assertEqual(open_debates(self.store, ACN), [])
         row = self.store.connection.execute(
@@ -331,6 +394,14 @@ class ProposalRunTests(ConvictionHarness):
         self.assertEqual(summary["call_status"], "duplicate")
         self.assertEqual(ConvictionCallAuthority(self.store).counts()["proposals"], 1)
 
+    def test_the_first_call_is_version_one_of_the_company_s_chain(self):
+        summary, _ = self.draft([draft_reply(), PASS])
+        self.assertEqual(summary["version"], 1)
+        call = ConvictionCallAuthority(self.store).current(ACN)
+        self.assertEqual(call["change_reason"], "evidence_thicker")
+        self.assertTrue(call["change_evidence_refs"])
+        self.assertIsNone(call["prior_version_ref"])
+
     def test_a_short_with_the_wrong_horizon_is_refused_before_verifying(self):
         summary, model = self.draft([draft_reply(direction="short",
                                                  time_horizon="6_12_months")])
@@ -344,6 +415,18 @@ class ProposalRunTests(ConvictionHarness):
         summary, _ = self.draft([draft_reply(
             our_view={"statement": "x", "refs": ["T9"]})])
         self.assertEqual(summary["call_status"], "refused")
+        self.assertEqual(ConvictionCallAuthority(self.store).counts()["proposals"], 0)
+
+    def test_a_configuration_with_no_router_publishes_nothing(self):
+        # Fail closed: the family of a call is read from the routing authority,
+        # and a configuration that names no router makes it unknowable. An
+        # unknowable family is not an independent verification.
+        config = self.state_dir / "no-router.json"
+        config.write_text("{}", encoding="utf-8")
+        model = FakeModel([draft_reply(), PASS])
+        with patch("dalton_core.conviction_call_cli.CockpitModel", model):
+            summary = self.run_child(dry_run=False, model_config_path=config)
+        self.assertEqual(summary["call_status"], "not_independent")
         self.assertEqual(ConvictionCallAuthority(self.store).counts()["proposals"], 0)
 
     def test_a_verifier_on_the_producers_family_publishes_nothing(self):
@@ -559,7 +642,7 @@ class WriterOperationTests(unittest.TestCase):
         self.assertEqual(
             writer_server.OPERATION_FIELDS["decide_conviction_call"],
             frozenset({"proposal_ref", "proposal_hash", "decision", "reason",
-                       "actor_ref"}))
+                       "actor_ref", "idempotency_key"}))
 
     def test_the_actor_is_bound_by_the_server_not_supplied_by_the_caller(self):
         from dalton_core import writer_server
