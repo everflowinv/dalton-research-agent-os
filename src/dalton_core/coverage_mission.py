@@ -251,6 +251,15 @@ REQUIRED_CHECKPOINTS: frozenset[str] = frozenset({
 STAGE_STATUSES: tuple[str, ...] = ("entered", "gate_passed", "gate_failed")
 # The two statuses that decide a stage.  ``entered`` opens it; these close it.
 STAGE_DECISIONS: frozenset[str] = frozenset({"gate_passed", "gate_failed"})
+# P14d sequel: the fourth thing a folded stage can be, and the only one that is
+# not a ``coverage_mission_stage_records`` status.  A reopen is its own record
+# in its own ledger (``coverage_mission_stage_reopens``) because the three
+# statuses were right and the live rows should keep their hashes; what was
+# missing was a way to say that a person un-decided a decided gate.  It is a
+# *folded* status only -- ``record_stage`` still takes one of three.
+STAGE_REOPENED: str = "reopened"
+# Every value ``fold_stage_status`` can return, for the readers that label it.
+FOLDED_STAGE_STATUSES: tuple[str, ...] = (*STAGE_STATUSES, STAGE_REOPENED)
 
 
 def fold_stage_status(statuses: Sequence[str]) -> str | None:
@@ -268,18 +277,24 @@ def fold_stage_status(statuses: Sequence[str]) -> str | None:
     - ``entered`` never supersedes a decision.  Publishing a new mission
       version and re-seeding ``entered`` under it therefore cannot walk a
       passed gate backwards; a stage that has been decided stays decided.
+    - A ``reopened`` marker supersedes the decision before it, and is itself
+      superseded by the decision after it.  A company between the two is at
+      the stage, ``reopened``: its screen was passed, a person approved
+      re-opening it, and the re-issued one has not been decided yet.  This is
+      the one status that does not come from a stage record; see
+      ``record_stage_reopen``.
     - No record at all means the stage was never reached: ``None``.
     """
 
-    decision: str | None = None
-    seen = False
+    state: str | None = None
     for status in statuses:
-        seen = True
-        if status in STAGE_DECISIONS:
-            decision = status
-    if decision is not None:
-        return decision
-    return "entered" if seen else None
+        if status in STAGE_DECISIONS or status == STAGE_REOPENED:
+            state = status
+        elif state is None:
+            # ``entered`` opens a stage and never re-opens one: after a
+            # decision or a reopen it is bookkeeping, not a state change.
+            state = "entered"
+    return state
 
 
 _BINDING_FIELDS = frozenset({"playbook_version", "constitution_version", "mandate_version"})
@@ -294,6 +309,12 @@ _VERSION_FIELDS = _BODY_FIELDS | frozenset({
 _STAGE_RECORD_FIELDS = frozenset({
     "schema_version", "id", "created_at", "mission_version_ref", "mission_version_hash",
     "company_ref", "stage_ref", "status", "evidence_refs", "rationale", "actor_ref",
+    "content_hash",
+})
+_STAGE_REOPEN_FIELDS = frozenset({
+    "schema_version", "id", "created_at", "status", "mission_version_ref",
+    "mission_version_hash", "company_ref", "stage_ref", "reopen_decision_ref",
+    "reopen_proposal_ref", "reopened_version_ref", "rationale", "actor_ref",
     "content_hash",
 })
 _STAGE_CLAIM_FIELDS = frozenset({
@@ -561,6 +582,39 @@ def validate_mission_stage_record(value: Mapping[str, Any]) -> dict[str, Any]:
     return wire
 
 
+def validate_mission_stage_reopen(value: Mapping[str, Any]) -> dict[str, Any]:
+    """The closed shape of a reopen marker.
+
+    Its ``status`` is fixed rather than a vocabulary: a row in this ledger says
+    exactly one thing, and a marker that could say something else would be a
+    second way to write a stage status.
+    """
+
+    wire = dict(value)
+    if set(wire) != _STAGE_REOPEN_FIELDS or wire.get("schema_version") != SCHEMA_VERSION:
+        raise CoverageMissionValidationError("mission stage reopen has an invalid closed shape")
+    for field in (
+        "id", "created_at", "mission_version_ref", "company_ref", "rationale",
+        "reopen_decision_ref", "reopen_proposal_ref", "reopened_version_ref",
+    ):
+        wire[field] = _text(wire[field], field)
+    wire["mission_version_hash"] = _sha256(wire["mission_version_hash"], "mission_version_hash")
+    wire["stage_ref"] = _vocabulary(wire["stage_ref"], STAGE_ORDER, "stage_ref")
+    if wire["status"] != STAGE_REOPENED:
+        raise CoverageMissionValidationError("a stage reopen's status is always 'reopened'")
+    wire["actor_ref"] = _actor(wire["actor_ref"])
+    if not wire["actor_ref"].startswith("human:"):
+        raise CoverageMissionValidationError(
+            "re-opening a decided gate is a human checkpoint (ADR-0008)"
+        )
+    wire["content_hash"] = _sha256(wire["content_hash"], "content_hash")
+    base = dict(wire)
+    expected_hash = base.pop("content_hash")
+    if content_hash(base) != expected_hash:
+        raise CoverageMissionValidationError("mission stage reopen content_hash is invalid")
+    return wire
+
+
 def validate_mission_stage_claim(value: Mapping[str, Any]) -> dict[str, Any]:
     wire = dict(value)
     if set(wire) != _STAGE_CLAIM_FIELDS or wire.get("schema_version") != SCHEMA_VERSION:
@@ -741,9 +795,20 @@ class CoverageMissionAuthority:
     def __init__(self, store: DaltonStore):
         self.store = store
         self.connection = store.connection
-        self._authorized = False
+        # The authorization flag belongs to the *connection*, not to this
+        # object.  ``create_function`` replaces the connection's function, so a
+        # second authority opened on the same store used to silently take the
+        # flag with it and the first one's writes started failing their own
+        # trigger -- which is exactly what happens now that the gate-reopen
+        # authority needs a ladder to write to.  Shared, the nesting guard
+        # below also does what it says across both of them.
+        flag = getattr(store, "_coverage_mission_flag", None)
+        if flag is None:
+            flag = {"authorized": False}
+            store._coverage_mission_flag = flag
+        self._flag: dict[str, bool] = flag
         self.connection.create_function(
-            "dalton_coverage_mission_authorized", 0, lambda: int(self._authorized)
+            "dalton_coverage_mission_authorized", 0, lambda: int(flag["authorized"])
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_discovered_document_host()
@@ -819,6 +884,14 @@ class CoverageMissionAuthority:
                 yield cur
         finally:
             self._authorized = False
+
+    @property
+    def _authorized(self) -> bool:
+        return self._flag["authorized"]
+
+    @_authorized.setter
+    def _authorized(self, value: bool) -> None:
+        self._flag["authorized"] = bool(value)
 
     @staticmethod
     def _request_hash(operation: str, request: Mapping[str, Any]) -> str:
@@ -3740,20 +3813,38 @@ class CoverageMissionAuthority:
         and a version roll is not an event in a company's ladder.
         """
 
-        query = (
+        records = (
             "SELECT r.record_id AS record_id, r.mission_version_ref AS mission_version_ref, "
             "r.company_ref AS company_ref, r.stage_ref AS stage_ref, r.status AS status, "
             "r.actor_ref AS actor_ref, r.created_at AS created_at, r.record_json AS record_json, "
-            "v.version_number AS version_number "
+            "v.version_number AS version_number, 0 AS is_reopen "
             "FROM coverage_mission_stage_records r "
             "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
             "WHERE v.mission_ref=?"
         )
+        # The reopens fold in as a fourth status without being one: they are a
+        # separate append-only ledger, read here in the same time order,
+        # because "a person un-decided this gate" is an event in the company's
+        # ladder and there is no other place it could be read from.
+        reopens = (
+            "SELECT o.record_id AS record_id, o.mission_version_ref AS mission_version_ref, "
+            "o.company_ref AS company_ref, o.stage_ref AS stage_ref, "
+            f"'{STAGE_REOPENED}' AS status, "
+            "o.actor_ref AS actor_ref, o.created_at AS created_at, o.record_json AS record_json, "
+            "v.version_number AS version_number, 1 AS is_reopen "
+            "FROM coverage_mission_stage_reopens o "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=o.mission_version_ref "
+            "WHERE v.mission_ref=?"
+        )
         params: list[Any] = [mission_ref]
         if company_ref is not None:
-            query += " AND r.company_ref=?"
+            records += " AND r.company_ref=?"
             params.append(company_ref)
-        query += " ORDER BY r.created_at,r.record_id"
+        params.append(mission_ref)
+        if company_ref is not None:
+            reopens += " AND o.company_ref=?"
+            params.append(company_ref)
+        query = f"{records} UNION ALL {reopens} ORDER BY created_at,record_id"
         return cur.execute(query, params).fetchall()
 
     def _folded_statuses(
@@ -3956,8 +4047,12 @@ class CoverageMissionAuthority:
             # version rolls; what the company did does not un-happen.
             state = self._folded_statuses(cur, mission["mission_ref"], company_ref)
             index = STAGE_ORDER.index(stage_ref)
+            folded = fold_stage_status(state[stage_ref])
             if status == "entered":
-                if state[stage_ref]:
+                # P14d sequel: an approved reopen is what makes a second
+                # ``entered`` legal, and the only thing that does. Without one
+                # this is still "you already entered it".
+                if state[stage_ref] and folded != STAGE_REOPENED:
                     raise CoverageMissionConflict(f"{stage_ref} was already entered for this company")
                 if index > 0 and fold_stage_status(state[STAGE_ORDER[index - 1]]) != "gate_passed":
                     raise CoverageMissionConflict(
@@ -3966,7 +4061,11 @@ class CoverageMissionAuthority:
             else:
                 if "entered" not in state[stage_ref]:
                     raise CoverageMissionConflict(f"{stage_ref} must be entered before its gate is decided")
-                if fold_stage_status(state[stage_ref]) == "gate_passed":
+                # Still refused on a decided stage -- the ladder is right to
+                # refuse a second decision on a settled gate. What changed is
+                # that an approved reopen unsettles it, so ``folded`` is
+                # ``reopened`` here and the re-issued screen's gate lands.
+                if folded == "gate_passed":
                     raise CoverageMissionConflict(f"{stage_ref} gate was already passed for this company")
             identity = dict(request)
             record_id = _ref("mission-stage-record", identity)
@@ -3998,6 +4097,165 @@ class CoverageMissionAuthority:
             self._save_idem(cur, idempotency_key, "record_stage", request_hash, result, created_at)
             return result
 
+    def record_stage_reopen(
+        self,
+        *,
+        mission_version_ref: str,
+        mission_version_hash: str,
+        company_ref: str,
+        stage_ref: str,
+        reopen_decision_ref: str,
+        reopen_proposal_ref: str,
+        reopened_version_ref: str,
+        rationale: str,
+        actor_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Un-decide a decided gate, on one person's recorded say-so (ADR-0008).
+
+        This is the write the stage ladder was missing.  A gate that has been
+        passed is settled and ``record_stage`` is right to refuse a second
+        decision on it; the thing that was impossible to say was that a person
+        had decided it should stop being settled.  Saying it here, once, in its
+        own append-only ledger, is what makes the re-issued screen's gate
+        writable -- and it leaves the record of the first pass exactly where it
+        was, which is the whole of ADR-0008.
+
+        ``human:`` only, and not because the playbook says the stage is a human
+        checkpoint: ``gate_reopen`` is a human checkpoint *by construction*
+        (ADR-0008), whatever any stage is marked, so the rule is here and not
+        conditional.  The two refs are what make the row checkable rather than
+        a story: the ``gate_reopen`` decision that authorised it, and the
+        deliverable version whose gate it re-opens.
+        """
+
+        mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        mission_version_hash = _sha256(mission_version_hash, "mission_version_hash")
+        company_ref = _text(company_ref, "company_ref")
+        stage_ref = _vocabulary(stage_ref, STAGE_ORDER, "stage_ref")
+        reopen_decision_ref = _text(reopen_decision_ref, "reopen_decision_ref")
+        reopen_proposal_ref = _text(reopen_proposal_ref, "reopen_proposal_ref")
+        reopened_version_ref = _text(reopened_version_ref, "reopened_version_ref")
+        rationale = _text(rationale, "rationale")
+        actor_ref = _actor(actor_ref)
+        idempotency_key = _text(idempotency_key, "idempotency_key")
+        if not actor_ref.startswith("human:"):
+            raise CoverageMissionConflict(
+                "re-opening a decided gate is a human checkpoint (ADR-0008)"
+            )
+        request = {
+            "mission_version_ref": mission_version_ref,
+            "mission_version_hash": mission_version_hash,
+            "company_ref": company_ref,
+            "stage_ref": stage_ref,
+            "reopen_decision_ref": reopen_decision_ref,
+            "reopen_proposal_ref": reopen_proposal_ref,
+            "reopened_version_ref": reopened_version_ref,
+            "rationale": rationale,
+            "actor_ref": actor_ref,
+        }
+        request_hash = self._request_hash("record_stage_reopen", request)
+        with self._transaction() as cur:
+            duplicate = self._idem(
+                cur, idempotency_key, "record_stage_reopen", request_hash,
+                marker="status_marker",
+            )
+            if duplicate is not None:
+                return duplicate
+            mission = self.mission(mission_version_ref)
+            if mission["content_hash"] != mission_version_hash:
+                raise CoverageMissionConflict("mission version hash binding failed")
+            pointer = cur.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+                (mission["mission_ref"],),
+            ).fetchone()
+            if pointer is None or pointer["mission_version_id"] != mission_version_ref:
+                raise CoverageMissionConflict("stage records must bind the active mission version")
+            if company_ref not in {member["company_ref"] for member in mission["universe"]}:
+                raise CoverageMissionConflict("company is not in the mission universe")
+            state = self._folded_statuses(cur, mission["mission_ref"], company_ref)
+            folded = fold_stage_status(state[stage_ref])
+            if folded != "gate_passed":
+                raise CoverageMissionConflict(
+                    f"{stage_ref} is {folded or 'not reached'} for this company; only a "
+                    "passed gate can be re-opened"
+                )
+            identity = dict(request)
+            record_id = _ref("mission-stage-reopen", identity)
+            existing = cur.execute(
+                "SELECT record_json FROM coverage_mission_stage_reopens WHERE record_id=?",
+                (record_id,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    **_canonical_record(existing["record_json"], "mission stage reopen"),
+                    "status_marker": "duplicate",
+                }
+            spent = cur.execute(
+                "SELECT record_id FROM coverage_mission_stage_reopens "
+                "WHERE company_ref=? AND stage_ref=? AND reopen_decision_ref=?",
+                (company_ref, stage_ref, reopen_decision_ref),
+            ).fetchone()
+            if spent is not None:
+                raise CoverageMissionConflict(
+                    "this gate_reopen decision has already re-opened this stage"
+                )
+            created_at = _now()
+            record = {
+                "schema_version": SCHEMA_VERSION,
+                "id": record_id,
+                "created_at": created_at,
+                "status": STAGE_REOPENED,
+                **identity,
+            }
+            wire = dict(record)
+            wire["content_hash"] = content_hash(record)
+            validate_mission_stage_reopen(wire)
+            cur.execute(
+                "INSERT INTO coverage_mission_stage_reopens"
+                "(record_id,mission_version_ref,company_ref,stage_ref,reopen_decision_ref,"
+                "reopen_proposal_ref,reopened_version_ref,record_json,content_hash,actor_ref,"
+                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record_id, mission_version_ref, company_ref, stage_ref,
+                    reopen_decision_ref, reopen_proposal_ref, reopened_version_ref,
+                    canonical_json(wire), wire["content_hash"], actor_ref, created_at,
+                ),
+            )
+            result = {**wire, "status_marker": "fresh"}
+            self._save_idem(
+                cur, idempotency_key, "record_stage_reopen", request_hash, result, created_at
+            )
+            return result
+
+    def stage_reopens(
+        self, mission_ref: str, company_ref: str | None = None, stage_ref: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Every reopen ever approved for one mission, oldest first.
+
+        Keyed on ``mission_ref`` rather than on a version, for the same reason
+        the ladder is: a reopen is a fact about the company, and the version it
+        binds is provenance.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        query = (
+            "SELECT o.record_json AS record_json FROM coverage_mission_stage_reopens o "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=o.mission_version_ref "
+            "WHERE v.mission_ref=?"
+        )
+        params: list[Any] = [mission_ref]
+        if company_ref is not None:
+            query += " AND o.company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        if stage_ref is not None:
+            query += " AND o.stage_ref=?"
+            params.append(_vocabulary(stage_ref, STAGE_ORDER, "stage_ref"))
+        query += " ORDER BY o.created_at,o.record_id"
+        return [
+            _canonical_record(row["record_json"], "mission stage reopen")
+            for row in self.connection.execute(query, params).fetchall()
+        ]
     def stage_records(self, mission_version_ref: str, company_ref: str | None = None) -> list[dict[str, Any]]:
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
         query = "SELECT * FROM coverage_mission_stage_records WHERE mission_version_ref=?"
@@ -4211,11 +4469,13 @@ __all__ = [
     "DELIVERABLE_KINDS",
     "DISCOVERED_DOCUMENT_STATUSES",
     "DISCOVERY_DISPATCH_STATUSES",
+    "FOLDED_STAGE_STATUSES",
     "MAX_FAILURE_REASON_CHARS",
     "REQUIRED_CHECKPOINTS",
     "SEC_RUN_SUCCEEDED",
     "SOURCE_STATUSES",
     "STAGE_DECISIONS",
+    "STAGE_REOPENED",
     "STAGE_STATUSES",
     "fold_stage_status",
     "sec_run_failure_reason",
@@ -4227,6 +4487,7 @@ __all__ = [
     "validate_coverage_mission_version",
     "validate_mission_body",
     "validate_mission_stage_record",
+    "validate_mission_stage_reopen",
     "validate_mission_stage_claim",
     "validate_mission_source_discovery",
 ]

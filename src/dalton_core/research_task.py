@@ -602,22 +602,71 @@ def day_reserved_micros(
     return total
 
 
+def day_settled_micros(
+    mission: Mapping[str, Any], *, day: str, budget_db: str | Path | None,
+) -> int:
+    """What the day ledger has actually booked to the ad-hoc pool today.
+
+    C2b closes P14e's open item: until the planner's model calls were admitted
+    against the day ledger there was nothing here to read, so the pool was a
+    reservation and only a reservation.  Now every ``llm_planner_execute`` call
+    carries its pool into ``thesis_impact_day_admissions`` and its settlement
+    inherits that pool, so this is the other half of the same number.
+
+    The reading is C2's own: settled where settled, reserved where a call is
+    still open.  A ledger that is absent, unreadable or not yet migrated
+    contributes zero -- the pool is still a gate, it just has one fewer input.
+
+    "Unreadable" includes one case worth naming: the ledger is WAL, and C2's
+    read-only open refuses a database with no sidecars, which is a ledger no
+    process is holding open.  In the deployment the writer holds it while this
+    lane reads beside it; with the writer down the reading falls back to
+    reservations alone, which is the pre-C2b number rather than a wrong one.
+    """
+
+    if budget_db is None:
+        return 0
+    from .budget_pools import day_pool_spend_at
+
+    spend = day_pool_spend_at(
+        budget_db, day=day, mission_ref=mission["mission_ref"])
+    return int(spend.get(POOL_NAME, 0))
+
+
 def pool_state(
     authority: BoundedPlannerAuthority,
     mission: Mapping[str, Any],
     *,
     day: str,
     planner_cost_usd: Decimal | None = None,
+    budget_db: str | Path | None = None,
 ) -> dict[str, Any]:
+    """The ad-hoc pool today: its cap, what is reserved, what is spent.
+
+    ``remaining`` subtracts both, which is deliberately conservative and
+    deliberately not exact.  The two numbers measure different things -- a
+    reservation is every round today's tasks may still run, a settlement is
+    money already gone -- and they overlap wherever a task admitted today has
+    already made a call.  The alternative to double counting that overlap is
+    to admit against a cap that has already been spent, and of the two errors
+    only one of them can exceed the owner's boundary.
+
+    ``budget_db`` absent keeps the pre-C2b reading (reservations only), so an
+    installation whose planner is still unbudgeted is not told it has spent
+    money nobody can find.
+    """
+
     wire = pool(mission)
     reserved = day_reserved_micros(
         authority, day=day, planner_cost_usd=planner_cost_usd
     )
+    settled = day_settled_micros(mission, day=day, budget_db=budget_db)
     return {
         **wire,
         "day": day,
         "reserved_micros": reserved,
-        "remaining_micros": max(wire["cap_micros"] - reserved, 0),
+        "settled_micros": settled,
+        "remaining_micros": max(wire["cap_micros"] - reserved - settled, 0),
     }
 
 
@@ -756,6 +805,7 @@ def plan_admissions(
     scope: frozenset[str] | None = None,
     limit: int | None = None,
     retired: Sequence[str] = (),
+    budget_db: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """What this plan's inquiries would become, in the plan's own order.
 
@@ -774,7 +824,8 @@ def plan_admissions(
         templates = bindable_templates(authority, retired=retired)
     day = day or datetime.now(timezone.utc).date().isoformat()
     state = pool_state(
-        authority, mission, day=day, planner_cost_usd=planner_cost_usd
+        authority, mission, day=day, planner_cost_usd=planner_cost_usd,
+        budget_db=budget_db,
     )
     if scope is None:
         scope = mandate_scope_refs(authority, mission)
@@ -932,6 +983,7 @@ def research_task_view(
     day: str | None = None,
     mission: Mapping[str, Any] | None = None,
     retired: Sequence[str] = (),
+    budget_db: str | Path | None = None,
 ) -> dict[str, Any]:
     """"正在专项研究 X / 预算用了多少 / 结论或缺口", per company.
 
@@ -1006,7 +1058,8 @@ def research_task_view(
     bindable = bindable_templates(authority, retired=retired)
     view["templates"] = sorted(bindable)
     if mission is not None:
-        view["pool"] = pool_state(authority, mission, day=day)
+        view["pool"] = pool_state(
+            authority, mission, day=day, budget_db=budget_db)
         view["grant"] = grant(mission, bindable)
     return view
 
@@ -1045,6 +1098,7 @@ __all__ = [
     "cockpit_grant_resolver",
     "coverage_item_ref",
     "day_reserved_micros",
+    "day_settled_micros",
     "default_planner_cost_usd",
     "executable_probe_contracts",
     "deploy_manifest",

@@ -64,26 +64,25 @@ def passed_companies(connection: Any, mission: Mapping[str, Any]) -> list[str]:
     In the mission's own priority order, so a week that is cut short by
     anything reads the same companies first that everything else does.
 
-    P14-S: folded, so a company whose gate was already reopened -- a
-    ``gate_failed`` after its ``gate_passed`` -- is not offered for reopening a
-    second time.  ``DISTINCT ... status='gate_passed'`` could not see that: a
-    superseded pass is still a row.
+    P14-S: folded, so a company whose gate was already reopened is not offered
+    for reopening a second time.  ``DISTINCT ... status='gate_passed'`` could
+    not see that: a superseded pass is still a row.  Since the P14d sequel the
+    reopen is a marker in its own ledger, so the fold is read through
+    ``folded_stage_history`` -- otherwise an approved-but-not-yet-re-issued
+    gate would look passed and this lane would propose re-opening it again.
     """
+
+    from .deliverable_reopen import folded_stage_history
 
     members = [member["company_ref"] for member in mission.get("universe") or ()]
     if not members:
         return []
-    ladder: dict[str, list[str]] = {}
-    for row in connection.execute(
-        "SELECT company_ref, status FROM coverage_mission_stage_records "
-        "WHERE stage_ref='initial_screen' ORDER BY created_at,record_id"
-    ).fetchall():
-        ladder.setdefault(row["company_ref"], []).append(row["status"])
-    passed = {
-        company for company, statuses in ladder.items()
-        if fold_stage_status(statuses) == "gate_passed"
-    }
-    return [member for member in members if member in passed]
+    return [
+        member for member in members
+        if fold_stage_status(
+            folded_stage_history(connection, company_ref=member, stage_ref="initial_screen")
+        ) == "gate_passed"
+    ]
 
 
 class MissionReopenLaneCoordinator:
@@ -265,16 +264,23 @@ def main(argv: list[str] | None = None) -> int:
             companies = list(args.company)
         else:
             # P14-S: folded, for the same reason ``passed_companies`` is --
-            # a pass that a reopen superseded is not a pass.
-            ladder: dict[str, list[str]] = {}
-            for row in connection.execute(
-                "SELECT company_ref, status FROM coverage_mission_stage_records "
-                "WHERE stage_ref='initial_screen' ORDER BY created_at,record_id"
-            ).fetchall():
-                ladder.setdefault(row["company_ref"], []).append(row["status"])
+            # a pass that a reopen superseded is not a pass -- and through the
+            # same helper, so the CLI and the lane never disagree about which
+            # gates are open.
+            from .deliverable_reopen import folded_stage_history
+
+            seen = {
+                row["company_ref"] for row in connection.execute(
+                    "SELECT DISTINCT company_ref FROM coverage_mission_stage_records "
+                    "WHERE stage_ref='initial_screen'"
+                ).fetchall()
+            }
             companies = sorted(
-                company for company, statuses in ladder.items()
-                if fold_stage_status(statuses) == "gate_passed"
+                company for company in seen
+                if fold_stage_status(
+                    folded_stage_history(
+                        connection, company_ref=company, stage_ref="initial_screen")
+                ) == "gate_passed"
             )
         assessments = [
             reopen_assessment(connection, company_ref=company_ref, policy=policy)
