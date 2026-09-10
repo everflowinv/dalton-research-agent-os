@@ -10,6 +10,7 @@ tick's arithmetic is tested rather than the Ledger's.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,6 +21,7 @@ from dalton_core.mission_zero_base_lane import (
     build_launcher,
     may_write_review,
 )
+from dalton_core.lane_failure_class import Classification, CONTENT_REFUSED
 
 from tests.zero_base_fixtures import MISSION
 
@@ -68,14 +70,14 @@ class DispatchTests(unittest.TestCase):
         launcher = FakeLauncher()
         result = coordinator(launcher, due=(), digest="digest-1").dispatch_once()
         self.assertEqual((result["status"], result["mode"]), ("launched", "checks"))
-        self.assertEqual(launcher.started[0]["batch_ref"], "digest-1")
+        self.assertEqual(len(launcher.started[0]["batch_ref"]), 64)
 
     def test_a_settled_check_pass_makes_the_lane_idle_until_it_moves(self) -> None:
         launcher = FakeLauncher()
         lane = coordinator(launcher, due=(), digest="digest-1")
         ticket = lane.dispatch_once()
         launcher.tickets[ticket["ticket_ref"]] = {
-            "status": "succeeded", "mode": "checks", "batch_ref": "digest-1",
+            "status": "succeeded", "mode": "checks", "batch_ref": launcher.started[-1]["batch_ref"],
             "summary": {"review_status": "checks_only",
                         "checks": {"checked": 3, "fresh": 1, "digest": "digest-1"}},
         }
@@ -92,7 +94,7 @@ class DispatchTests(unittest.TestCase):
         lane = coordinator(launcher, due=(), digest="digest-1")
         ticket = lane.dispatch_once()
         launcher.tickets[ticket["ticket_ref"]] = {
-            "status": "failed", "mode": "checks", "batch_ref": "digest-1",
+            "status": "failed", "mode": "checks", "batch_ref": launcher.started[-1]["batch_ref"],
             "summary": {"failure_reason": "boom",
                         "checks": {"checked": 3, "fresh": 1, "digest": "digest-1"}},
         }
@@ -105,12 +107,25 @@ class DispatchTests(unittest.TestCase):
         lane = coordinator(launcher, due=(), digest="digest-1")
         ticket = lane.dispatch_once()
         launcher.tickets[ticket["ticket_ref"]] = {
-            "status": "failed", "mode": "checks", "batch_ref": "digest-1",
+            "status": "failed", "mode": "checks", "batch_ref": launcher.started[-1]["batch_ref"],
             "summary": {"failure_reason": "boom"},
         }
         self.assertEqual(lane.dispatch_once()["status"], "held")
         lane.lane_state = lambda _m, _n: {"due": [], "checks_digest": "digest-2"}
         self.assertEqual(lane.dispatch_once()["status"], "launched")
+
+    def test_a_provider_contract_change_retires_an_old_review_refusal(self) -> None:
+        launcher = FakeLauncher()
+        lane = coordinator(launcher, due=DUE, digest="")
+        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
+                   return_value="a" * 64):
+            old_key = __import__("dalton_core.mission_zero_base_lane", fromlist=["review_item_key"]).review_item_key(DUE[0])
+            lane.budget.record(old_key, classification=Classification(
+                CONTENT_REFUSED, "verifier refused the content", "fixture"))
+            self.assertEqual(lane.dispatch_once()["status"], "terminal")
+        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
+                   return_value="b" * 64):
+            self.assertEqual(lane.dispatch_once()["status"], "launched")
 
     def test_dependency_park_replays_and_same_batch_gets_a_probe(self) -> None:
         with TemporaryDirectory() as directory:

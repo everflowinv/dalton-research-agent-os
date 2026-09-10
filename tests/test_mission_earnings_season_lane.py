@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from dalton_core import earnings_season as season
@@ -73,6 +74,15 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(second["status"], "idle")
         self.assertEqual(second["settled"]["previews"], 1)
         self.assertEqual(len(self.launcher.started), 1)
+
+    def test_contract_change_reopens_the_same_window(self):
+        coordinator = self.coordinator("earnings-occurrence:abc:preview")
+        with patch.object(lane, "verifier_provider_contract_fingerprint", return_value="a" * 64):
+            first = coordinator.dispatch_once()
+            self.launcher.finish(first["ticket_ref"], season_status="refused")
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        with patch.object(lane, "verifier_provider_contract_fingerprint", return_value="b" * 64):
+            self.assertEqual(coordinator.dispatch_once()["status"], "launched")
 
     def test_no_mission_is_unconfigured_rather_than_a_crash(self):
         self.mission = None

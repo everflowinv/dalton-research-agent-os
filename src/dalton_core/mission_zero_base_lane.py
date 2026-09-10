@@ -45,6 +45,7 @@ from .lane_permission_control import (
     permission_key, clear_obsolete_permissions, record_controlled_failure,
 )
 from .zero_base_review import WRITE_SCOPE
+from .cockpit_model import verifier_provider_contract_fingerprint
 
 LAUNCHER_KWARG = "zero_base_review_launcher"
 REVIEW_MODEL_CONFIG = "zero-base-review-model-config.json"
@@ -72,8 +73,9 @@ def may_write_review(mission: Mapping[str, Any] | None) -> bool:
 def review_item_key(item: Mapping[str, Any]) -> str:
     """A refusal belongs to one company's actual review input, not its month."""
     fingerprint = item.get("inputs_hash") or content_hash(dict(item))
+    contract = verifier_provider_contract_fingerprint("zero_base_review_verifier")
     return (f"review:{item['company_ref']}|{item['trigger']}|"
-            f"{item['period_label']}|{fingerprint}")
+            f"{item['period_label']}|{fingerprint}|{contract}")
 
 
 class MissionZeroBaseLaneCoordinator:
@@ -243,7 +245,8 @@ class MissionZeroBaseLaneCoordinator:
         elif digest and digest != self._checked:
             mode = "checks"
             companies = []
-            batch = digest
+            batch = content_hash({"checks_digest": digest, "verifier_provider_contract":
+                verifier_provider_contract_fingerprint("zero_base_review_verifier")})
         elif holds:
             return {"status": holds[0].action, "mode": "review", "settled": settled,
                     "failure": holds[0].as_wire(), "blocked_reviews": len(holds)}

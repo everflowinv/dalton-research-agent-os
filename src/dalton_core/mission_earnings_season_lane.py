@@ -28,6 +28,7 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .cockpit_model import verifier_provider_contract_fingerprint
 
 MAX_FAILURE_DETAIL_CHARS = 500
 LAUNCHER_KWARG = "earnings_season_launcher"
@@ -102,7 +103,9 @@ class MissionEarningsSeasonLaneCoordinator:
             return {"status": "idle", "settled": settled,
                     "reason": "no covered company has an unwritten preview or "
                               "calibration window open"}
-        batch = f"{mission['id']}:{newest}"
+        contract = verifier_provider_contract_fingerprint(
+            "earnings_preview_verifier", "earnings_calibration_verifier")
+        batch = f"{mission['id']}:{newest}:{contract}"
         if batch == self._last_batch:
             return {"status": "idle", "settled": settled, "batch_ref": batch,
                     "reason": "this batch has already been dispatched"}
