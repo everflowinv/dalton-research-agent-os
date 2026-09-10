@@ -15,7 +15,9 @@ from typing import Any, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dalton_core.connector_governance import ConnectorGovernance  # noqa: E402
+from dalton_core.connector_governance import (
+    ConnectorGovernance, SEC_FILINGS_INDEX_CAPABILITY_ID, build_governance_record,
+)  # noqa: E402
 from dalton_core.coverage_mission import CoverageMissionAuthority, validate_coverage_mission_version  # noqa: E402
 from dalton_core.mission_source_discovery import (  # noqa: E402
     SEC_SOURCE_REF,
@@ -48,6 +50,8 @@ def build_candidate_plan(
     active = validate_discovery_plan(active_plan)
     if active["source_ref"] != SEC_SOURCE_REF:
         raise ValueError("active plan is not the SEC filings discovery plan")
+    if spec.get("form") != "8-K":
+        raise ValueError("this proposal builder only adds form 8-K")
     if any(row["form"].upper() == "8-K" for row in active["specs"]):
         raise ValueError("active SEC discovery plan already contains an 8-K spec")
     if any(row["spec_ref"] == spec.get("spec_ref") for row in active["specs"]):
@@ -91,10 +95,26 @@ def build_review_bundle(
     active = validate_discovery_plan(active_plan)
     candidate = validate_discovery_plan(candidate_plan)
     approved = ConnectorGovernance(governance)
+    expected = build_governance_record("sec-filings-index", approved_by="human:review")
+    if (approved.capability_id != SEC_FILINGS_INDEX_CAPABILITY_ID
+            or any(governance[key] != expected[key] for key in (
+                "expected_source_hash", "expected_schema_hash", "allowed_permissions"))):
+        raise ValueError("governance does not bind the packaged SEC filings capability")
     if approved.status != "approved":
         raise ValueError("SEC filings governance is not approved")
     if active["mission_ref"] != mission["mission_ref"] or candidate["mission_ref"] != mission["mission_ref"]:
         raise ValueError("plan and active mission are not bound to the same mission_ref")
+    preserved = set(active) - {"id", "created_at", "content_hash", "specs"}
+    if (any(candidate[key] != active[key] for key in preserved)
+            or candidate["id"] != _next_plan_id(active["id"])
+            or candidate["specs"][:-1] != active["specs"]
+            or len(candidate["specs"]) != len(active["specs"]) + 1
+            or candidate["specs"][-1]["form"] != "8-K"):
+        raise ValueError("candidate changes more than the reviewed 8-K addition")
+    covered = {member["company_ref"] for member in mission["universe"]}
+    if not set(candidate["companies"]).issubset(covered):
+        raise ValueError("candidate contains companies outside the active mission")
+    version = candidate["id"].rsplit(":", 1)[-1]
     base = {
         "schema_version": "sec-discovery-proposal-0.1",
         "created_at": created_at,
@@ -106,8 +126,8 @@ def build_review_bundle(
         "governance_binding": {"ref": governance["id"], "hash": governance["content_hash"]},
         "governance_change": None,
         "publication": {
-            "source_path": "deploy/phase10/p10-us-it-services-sec-filings-plan-v2.candidate.json",
-            "target_path": "discovery-plans/us-it-services-sec-filings-v2.json",
+            "source_path": f"deploy/phase10/p10-us-it-services-sec-filings-plan-v{version}.candidate.json",
+            "target_path": f"discovery-plans/us-it-services-sec-filings-v{version}.json",
         },
     }
     return {**base, "content_hash": content_hash(base)}
@@ -127,15 +147,15 @@ def verify_mission_authority_on_backup(source_core: Path, mission: Mapping[str, 
         store = DaltonStore(str(Path(tmp) / "core.sqlite"))
         try:
             authority = CoverageMissionAuthority(store)
-            authorization = authority.authorize_source_discovery(
-                company_ref=mission["universe"][0]["company_ref"],
-                source_ref=SEC_SOURCE_REF,
-                requested_by=mission["autonomy"]["automation_principal"],
-                mission_version_ref=mission["id"],
-                mission_version_hash=mission["content_hash"],
-            )
-            if authorization["mission_version_hash"] != mission["content_hash"]:
-                raise RuntimeError("mission authority returned a different binding")
+            for company in mission["universe"]:
+                authorization = authority.authorize_source_discovery(
+                    company_ref=company["company_ref"], source_ref=SEC_SOURCE_REF,
+                    requested_by=mission["autonomy"]["automation_principal"],
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                )
+                if authorization["mission_version_hash"] != mission["content_hash"]:
+                    raise RuntimeError("mission authority returned a different binding")
         finally:
             store.close()
 
@@ -149,6 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan-output", type=Path, required=True)
     parser.add_argument("--bundle-output", type=Path, required=True)
     args = parser.parse_args(argv)
+    outputs = (args.plan_output.resolve(), args.bundle_output.resolve())
+    protected = {args.active_plan.resolve(), args.source_core.resolve(), args.governance.resolve()}
+    state_root = args.source_core.resolve().parent
+    if outputs[0] == outputs[1] or any(
+            path in protected or path.is_relative_to(state_root) for path in outputs):
+        raise ValueError("proposal outputs must be distinct and outside the source state directory")
     active = load_discovery_plan(args.active_plan)
     candidate = build_candidate_plan(active, created_at=args.created_at)
     mission = read_active_mission(args.source_core, active["mission_ref"])
@@ -159,8 +185,9 @@ def main(argv: list[str] | None = None) -> int:
         governance=governance, created_at=args.created_at,
     )
     for path, value in ((args.plan_output, candidate), (args.bundle_output, bundle)):
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        path.chmod(0o600)
     return 0
 
 

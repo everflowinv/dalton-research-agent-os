@@ -10,7 +10,7 @@ from dalton_core.connector_governance import build_governance_record
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.mission_source_discovery import validate_discovery_plan
 from dalton_core.store import DaltonStore, content_hash
-from scripts.build_sec_8k_discovery_proposal import build_candidate_plan, build_review_bundle
+from scripts.build_sec_8k_discovery_proposal import build_candidate_plan, build_review_bundle, main
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
 
@@ -40,6 +40,18 @@ class Sec8KDiscoveryProposalTests(unittest.TestCase):
         self.assertEqual(candidate["specs"][-1]["form"], "8-K")
         self.assertEqual(candidate["specs"][-1]["rediscovery_interval_days"], 1)
 
+    def test_cli_cannot_overwrite_its_live_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active = root / "state" / "plan.json"
+            active.parent.mkdir()
+            active.write_text("original")
+            with self.assertRaisesRegex(ValueError, "outside the source state"):
+                main(["--active-plan", str(active), "--source-core", str(active.parent / "core.sqlite"),
+                      "--governance", str(active.parent / "gov.json"),
+                      "--plan-output", str(active), "--bundle-output", str(root / "review.json")])
+            self.assertEqual(active.read_text(), "original")
+
     def test_duplicate_8k_is_refused(self):
         candidate = build_candidate_plan(self.active_plan(), created_at="2026-09-10T00:00:00+00:00")
         with self.assertRaisesRegex(ValueError, "already contains"):
@@ -64,6 +76,19 @@ class Sec8KDiscoveryProposalTests(unittest.TestCase):
             self.assertEqual(bundle["prior_plan"]["hash"], active["content_hash"])
             self.assertEqual(bundle["mission_binding"]["hash"], mission["content_hash"])
             self.assertIsNone(bundle["governance_change"])
+            for bad_governance in (
+                build_governance_record("yfinance-daily-prices", approved_by="human:lumos", status="approved"),
+                {**governance, "expected_source_hash": "a" * 64},
+            ):
+                with self.assertRaises((ValueError, RuntimeError)):
+                    build_review_bundle(active_plan=active, candidate_plan=candidate,
+                        mission=mission, governance=bad_governance, created_at=candidate["created_at"])
+            altered = {**candidate, "budget": {"max_calls_24h": 500}}
+            altered["content_hash"] = content_hash({k: v for k, v in altered.items() if k != "content_hash"})
+            with self.assertRaisesRegex(ValueError, "more than"):
+                build_review_bundle(active_plan=active, candidate_plan=altered,
+                    mission=mission, governance=governance, created_at=candidate["created_at"])
+
             self.assertEqual(bundle["content_hash"], content_hash({k: v for k, v in bundle.items() if k != "content_hash"}))
 
 

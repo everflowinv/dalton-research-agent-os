@@ -57,3 +57,5 @@ first approved catch-up. The existing SEC adapter and downstream acquisition
 remain responsible for deduplicating filings by accession. Approval enables
 discovery of all 8-K current reports; downstream parsers decide which archived
 documents contain earnings releases or buyback authorization text.
+
+Root review strengthened the approval boundary: only the packaged SEC filings capability can bind the proposal; source/schema/permissions must match, arbitrary candidate budget/universe/spec changes are refused, all covered companies are checked through the real authority on a temporary backup, and versioned publication paths follow the actual next version. CLI output paths cannot overlap the source state or one another. Four focused builder tests passed; the hardened builder also regenerated the local owner packet from current live read-only state successfully, without publishing it.
