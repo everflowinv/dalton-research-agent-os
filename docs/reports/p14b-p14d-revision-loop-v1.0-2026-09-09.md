@@ -361,3 +361,178 @@ OK (skipped=1)
 5. **`NEW_THESIS` 候选目前只能 reject / defer。** accept 要走 `propose_thesis_admission`，而那条路要人手工填 template / driver refs / mandate 绑定。把候选的内容预填进一份 admission candidate 是个明显的下一步，但它是 ADR-0001 的准入路径，不该由这一片顺手扩。
 6. **`thesis_impact_reopen.route_impact_to_candidate` 还没有 lane 在调。** 它是接线与契约，调用点是 `thesis_impact_production` 的 runner——那是 `thesis_impact*.py` 的主流程，改它要动停泊中的生产路径。等 §7 的 canary 跑完、开关打开时一起接，那时才有东西可跑。
 7. **`_target` 现在对 universe 里每家公司各查一次 `approved_reopen`。** 五家公司五次查询，没问题；universe 大到几十家时应该改成一次查询。
+
+---
+
+## 附录 A：重开的阶梯表示（P14d 续集，2026-09-10）
+
+分支 `w3-reopen-ledger`（起于 main `e4b452c` + `w3-stage-ladder`；交付前已 `git merge` 到 main `0d8e21e`，那时 `w3-stage-ladder` 已在 main 上）。全量：
+
+```
+Ran 4729 tests in 456.540s
+
+OK (skipped=1)
+```
+
+### A.1 补的是哪个洞
+
+[阶梯折叠片](w3-stage-ladder-v1.0-2026-09-09.md) §4 明确留了一个口子：**被重开之后的第二次过闸写不进去**。折叠**读**得对——一条晚于 `gate_passed` 的 `gate_failed` 会赢——但没有任何代码路径能**写**出那一条，因为 `record_stage` 对一个已裁决的 stage 拒绝第二次裁决，而那条拒绝是对的：一道判过的门不该被自动再判一次。缺的不是放宽，是**一句谁也说不出的话**：有人决定让这道门不再算判过。
+
+于是本片给重开一个阶梯上的表示，并且**不动 `coverage_mission_stage_records`**：它的三个状态含义没变，live 的 41 行也该保留自己的哈希。重开是自己的一张 append-only 账本。
+
+### A.2 记录形状
+
+新表（`coverage_mission_schema.sql` 里加法，不改任何既有表、不放宽任何 CHECK、不新增 schema 文件因而不需要新的 `MigrationSpec`）：
+
+```
+coverage_mission_stage_reopens(
+  record_id PK, mission_version_ref → coverage_mission_versions,
+  company_ref, stage_ref,
+  reopen_decision_ref,    -- 授权它的那条 gate_reopen 人类裁决
+  reopen_proposal_ref,
+  reopened_version_ref,   -- 它重开的是哪一版 deliverable 的门
+  record_json, content_hash, actor_ref, created_at,
+  UNIQUE(company_ref, stage_ref, reopen_decision_ref))
+```
+
+三个触发器（`dalton_coverage_mission_authorized()` 插入门、禁改、禁删），与既有表同款。
+
+写入口 `CoverageMissionAuthority.record_stage_reopen(...)`：只认 `human:`（`gate_reopen` 按 ADR-0008 **就是**人类检查点，与 playbook 把这个 stage 标成什么无关，所以规则写死不带条件）；绑活跃 mission 版本作 provenance；公司必须在 universe 里；**该 stage 折叠后必须正是 `gate_passed`**——只有判过的门才谈得上重开；一条 `gate_reopen` 裁决只能花一次。读入口 `stage_reopens(mission_ref, company_ref=None, stage_ref=None)`。
+
+### A.3 折叠：第四个状态，但只在折叠里
+
+`fold_stage_status` 现在按时间序走一个状态机：裁决与 `reopened` 都置位，`entered` 只在还没有任何状态时置位。于是
+
+| 历史 | 折叠 |
+| --- | --- |
+| `entered, gate_passed` | `gate_passed` |
+| `entered, gate_passed, reopened` | **`reopened`** |
+| `entered, gate_passed, reopened, entered` | `reopened`（重开期间再 `entered` 是记账，不是状态变化） |
+| `entered, gate_passed, reopened, gate_passed` | `gate_passed` |
+| `entered, gate_passed, reopened, gate_failed` | `gate_failed` |
+
+三状态时代的每一条行为逐字不变（`[]`→`None`、`entered`→`entered`、后来的裁决赢、`entered` 永不推翻裁决）。
+
+`STAGE_STATUSES` 仍然是三个——**能写进 stage record 的还是三个**；新加的 `FOLDED_STAGE_STATUSES` 是四个，`STAGE_REOPENED` 是那第四个。这个区分是本片的全部安全性所在，也补了一条以前不存在的词表测试（`VERDICTS` / `IMPACT_DECISIONS` 都有，stage 状态没有）。
+
+`record_stage` 的两处放宽，都只由 `reopened` 触发：重开期间允许再写一次 `entered`；决定分支原样保留「已过闸就拒」，只是折叠此时是 `reopened` 而不是 `gate_passed`，所以重出那一版的门落得进去。
+
+### A.4 批准路径写这条记录
+
+`GateReopenAuthority.decide(verdict="approve")` 现在：**先**只读地检查这道门此刻确实是 `gate_passed`（不是的话一个字节都不写，人当场看到理由）→ 写裁决 → 写阶梯标记，绑**活跃**版本（提案等人回答期间 mission 可能已经滚版，而 stage record 按契约绑活跃版本；提案自己那一版留在提案里，它说的是「评估是什么时候做的」）。
+
+顺序是故意的：标记在裁决之后，所以半写状态是**安全的那一半**——没有标记就重出不了，人会发现；反过来会是一道没人批准过的门被打开。同一条批准重放会重算出同一个标记 id，`duplicate` 路径顺手把它补上（自愈）。`decline` 对阶梯一个字都不写。
+
+### A.5 一个顺手修掉的地雷
+
+`CoverageMissionAuthority` 把授权标志放在**实例**上，而 `create_function` 是**连接**级的：同一个 store 上开第二个 authority，SQL 里的 `dalton_coverage_mission_authorized()` 会跟着新实例走，第一个实例的写入从此撞自己的触发器。以前没人在一个连接上开两个，现在 `GateReopenAuthority` 需要一个阶梯来写，就撞上了。标志改成挂在 store 上、两个实例共享（`_authorized` 变成 property，行为不变），顺带让「不可嵌套」的守卫跨实例也真的成立。
+
+### A.6 四个折叠入口，一个答案
+
+除 `_folded_rows`（已 UNION 进标记）外，还有三处各自从 `coverage_mission_stage_records` 折叠，都得看得见标记，否则「已批准但还没重出」的门在它们眼里仍是 `gate_passed`：
+
+- `deliverable_reopen.folded_stage_history()`（新增的只读孪生），被 `passed_version()` 用 → 重开期间没有可 diff 的过闸版本，`reopen_assessment` 回 `not_passed`；
+- `mission_reopen_lane.passed_companies()` 与它的 CLI → 不会把一道已经开着的门再提一次；
+- `cockpit_plane._stage_rows()` → 页面不会在 lane 正在重写的时候显示「已通过」。
+
+`companies_at_or_past` **保持单调**：标记不会让一个到过的 stage 变成没到过，`tracking_cadence` 的常驻判定因此不动——公司靠人把它移出 universe 才离开覆盖，不靠一道门被重开。`mission_stage.STAGE_STATUS_LABELS` 加了一行「已通过，但要重出一版」，因为那个 `.get(status or "", "还没开始")` 的兜底会把没见过的状态显示成「还没开始」。
+
+### A.7 live 副本核对
+
+把 live 只读副本拷到 `/tmp`，开一次 `CoverageMissionAuthority`（deploy 就是这么做的）：
+
+| 项 | 结果 |
+| --- | --- |
+| stage record 条数 | 41 → 41 |
+| content_hash 移动的 | **0** |
+| record_json 变化的 | **0** |
+| 任何表的行数变化 | 无 |
+| 任何表的列变化 | 无 |
+| 新增表 | `coverage_mission_stage_reopens`（空） |
+| 每条记录仍与自己的 hash 自洽 | 41/41 |
+
+折叠后的 live 阶梯不变：ACN / EPAM / IBM / DXC 是 `gate_passed`，CTSH 是 `gate_failed`。
+
+### A.8 测试
+
+25 项，`tests/test_stage_reopen_ledger.py`：
+
+- **重开 → v2 → 再次过闸**：`SecondDecisionTests.test_reopen_then_a_second_screen_then_a_second_pass`（含重开期间是 `reopened`、`completed_stages` 空、`next_stage` 回到 `initial_screen`、事后历史正是 `entered, gate_passed, reopened, gate_passed`、两条 `gate_passed` 哈希不同）
+- **没有批准就还是拒**：`…test_without_a_reopen_the_second_decision_is_still_refused`
+- **lane 自己那条路**：`…test_the_lane_s_own_gate_evaluation_writes_the_second_decision`（走 `evaluate_mission` → `_target` → `assess_exit_gate` → `record_stage`，状态不是手挑的）
+- **第二次也可以不过**：`…test_a_reopened_gate_can_also_fail_the_second_time`
+- **批准路径与 provenance**：`ApprovePathTests.test_the_marker_names_the_decision_and_the_version_it_re_issues`、`…test_the_same_approval_replayed_heals_a_missing_marker`、`…test_a_reopen_can_only_be_spent_once`
+- **拒绝的重开什么都不写**：`ApprovePathTests.test_a_declined_reopen_writes_nothing_to_the_ladder`
+- **标记的拒绝清单**：`MarkerRefusalTests`（automation、没过闸的 stage、universe 外的公司、非活跃版本、append-only 三触发器、闭合形状）
+- **读者**：`ReadersTests`（常驻单调、weekly lane 不重复提、重开期间没有可 diff 的版本、只读孪生与权威一致、checklist 说人话）
+- **live 那条性质**：`ExistingRowsTests.test_opening_the_authority_again_moves_no_hash`
+- **词表**：`VocabularyTests`（写三个、折四个、每个折叠状态都有名字、折叠语义逐条）
+
+### A.9 留下的口子
+
+1. **`research_cycle_reflection.open_human_checkpoints` 看不见重开。** 它按 `(company, stage)` 取最后一条 stage record，重开之后那条仍是 `gate_passed`，所以一个「已批准重开、等着重出」的检查点既不算 open 也不算 closed。行为与本片之前一致（它只读 stage record 表），但现在有一个更诚实的答案可给。没改，因为周报的口径是另一片的事。
+2. **`cockpit_control.html` 的 `stage_history` 仍只来自 stage record 表**，所以那个二值的「出口门：通过/未通过」不会被标记误标——但也就看不到重开。approvals 页已经把 `gate_reopen` 提案与裁决显示出来了，够用；要在文档卡片上看到版本链，是 cockpit 的下一片。
+3. **一道 stage 只有一个「开着」的重开。** 同一 stage 上的第二次批准要等第一次被重出的门裁决掉——`_assert_reopenable` 会以「只有判过的门才能重开」拒掉，措辞是对的但不够直白；如果这在实际里出现，值得换一句专门的话。
+4. **`deep_insight_gate` 用的是原始 membership**（`("initial_screen","gate_passed") in statuses`），也就是「有没有过过」，所以重开期间深研门仍认为筛选过过。这与常驻的单调性一致，是刻意的；但它和 `company_dossier_cli` 用折叠（重开期间不可起草档案）不一致，两者哪个对要 owner 定。
+
+---
+
+## 附录 B：授权标志归连接，与两句说清楚的拒绝（2026-09-10）
+
+分支 `w3-authority-flags`，起于 main `00f22be`（附录 A 已合入）。全量：
+
+```
+Ran 4845 tests in 447.739s
+
+OK (skipped=1)
+```
+
+复核给了三条跟进，都是附录 A 顺手发现的那个地雷的正解。
+
+### B.1 标志挂在连接上，不是挂在对象上
+
+附录 A 把 `CoverageMissionAuthority` 的授权标志从**实例**挪到了 **store**，够用但不够：`DaltonStore(path, connection=…)` 是受支持的构造方式，两个 store 罩同一个连接时，同一个洞在上一层原样重现。`create_function` 是**连接**级的，所以标志也该是。
+
+`sqlite3.Connection` 既没有 `__dict__` 也没有 `__weakref__`——属性挂不上去，`WeakKeyDictionary` 也建不了（复核建议的那种）。所以改成**通过连接**来键：每个连接注册一个 `dalton_authorization_registry()` 函数返回一个 uuid4 令牌，模块级 `dict` 按令牌存标志。问连接要令牌就是在问连接，这正是要的性质；令牌永不复用，所以死连接的条目不可能被后来的连接捡到。`DaltonStore.close()` 顺手删掉自己那条。
+
+`store.py` 里三样东西：`authorization_flag(connection, function_name)`（装函数、返回标志）、`AuthorizationFlag`（一个视图，不是一个值）、`authorized_flag()`（描述符，让 `self._authorized` 的读写行为一字不变，只是位置变了）。
+
+### B.2 十九个权威改用同一份
+
+`store` 自己、`coverage_mission`，以及复核点名的十八个：`research_playbook`、`model_forecast_driver`、`deep_insight_gate`、`mission_deliverable`、`forecast_reconciliation`、`model_input`、`industry_research`、`company_dossier`、`analyst_journal`、`claim_retirement`、`answer_routing`、`model_forecast`、`weekly_brief`、`research_cycle_reflection`、`research_quality_score`、`scheduler`、`research_constitution`、`model_router`。
+
+每处两行换两行，行为不变：
+
+```python
+self._authorization_flag = authorization_flag(
+    self.connection, "dalton_x_authorized")
+```
+外加类上一行 `_authorized = authorized_flag()`。`_transaction()` 一个字没改。
+
+### B.3 拒绝的话分成三句
+
+`propose` 以前对三种情况说同一句「没有任何一项从缺变有」，其中只有一种真的和证据有关。最要紧的那种是**这道门已经开着**：`passed_version` 不肯交出一个被取代的版本，评估因此回 `not_passed`，而「没有一项翻」把读的人支去查证据底座，问题其实是他自己桌上一个还没做的决定。
+
+`reopen_assessment` 的 `not_passed` 现在带 `stage_status` 与 `reopened`，两种情况分开说；`propose` 照搬：
+
+| 情况 | 说的话 |
+| --- | --- |
+| 门已重开、等重出的那版被裁决 | 这道门已经重开了，先把重出的那一版裁决掉，再谈下一次重开 |
+| 从来没过过闸 | 这家公司还没有任何一版 Initial Screen 过闸，没有门可以重开 |
+| 过了闸但没有一项翻 | a reopen proposal needs at least one item that flipped 缺 → 有 |
+
+### B.4 两个 nit
+
+折叠出来的行多带一个 `record_kind`（`stage` / `reopen`）——两条行可以带同样的 `status` 而来路不同，判断要不要给按钮的读者不该从状态反推来路。`_folded_rows` 里那句 f-string 拼进 SQL 的 `'reopened'` 改成绑定参数：这里没有任何调用方输入，但在这么大的文件里，用 f-string 拼 SQL 是个不值得养成的习惯。
+
+### B.5 测试
+
+`tests/test_authority_flags.py` 九项：
+
+- **一个连接两个 store**：`FlagPlumbingTests.test_two_stores_over_one_connection_share_the_flag`（附录 A 的做法在这条上会挂）
+- **注册表按连接键**：`…test_the_registry_is_keyed_through_the_connection_not_the_object`、`…test_a_second_connection_gets_its_own_registry`、`…test_closing_a_store_drops_its_registry`
+- **每一类权威开两个都还能写**：`TwoOfEachKindTests.test_every_authority_kind_survives_a_second_instance`（十七类，改之前第二个实例会把连接上的函数带走，第一个的下一次写入撞自己的触发器）
+- **拿路径的那两个**：`PathAuthorityTests.test_two_of_each_share_the_flag_and_a_bare_write_is_refused`（`ModelRouter` / `Scheduler`）
+- **裸连接写不进任何一张受守的表**：`BareConnectionTests.test_every_guarded_table_refuses_a_bare_connection`——受守的表是从 `sqlite_master` 里**认出来**的，不是列出来的，所以新加一张带守卫的表当天就被这条盖住（现在 30 张以上）；外加 `…test_the_reopen_ledger_is_one_of_them` 单独钉住最新的那张。
+
+`tests/test_stage_reopen_ledger.py` 加一项：`ApprovePathTests.test_an_open_reopen_says_so_instead_of_blaming_the_evidence`，三句话各断言一次。

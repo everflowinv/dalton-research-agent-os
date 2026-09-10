@@ -149,6 +149,43 @@ CREATE TABLE IF NOT EXISTS coverage_mission_idempotency (
     created_at TEXT NOT NULL
 );
 
+
+-- P14d sequel (ADR-0008): a gate that was passed, and then re-opened.
+--
+-- ``coverage_mission_stage_records`` is untouched: its three statuses still
+-- mean exactly what they meant, and the live rows keep their hashes. What was
+-- missing was any way to say the fourth thing -- *a person approved re-opening
+-- this decided gate* -- and without it a second ``gate_passed`` could not be
+-- written, because the stage was already decided and the ladder is right to
+-- refuse a decision on a decided stage.
+--
+-- So the reopen is its own record in its own ledger, folded into the same
+-- time-ordered history: it supersedes the decision before it and is itself
+-- superseded by the decision after it. It carries the two refs that make it
+-- checkable -- the human ``gate_reopen`` decision that authorised it, and the
+-- deliverable version whose gate it re-opens -- so "why is this company back
+-- at its screen" is answerable from the row rather than from a story.
+--
+-- One reopen per (company, stage, decision): the approval is spent once, the
+-- same way the deliverable lane spends it.
+CREATE TABLE IF NOT EXISTS coverage_mission_stage_reopens (
+    record_id TEXT PRIMARY KEY,
+    mission_version_ref TEXT NOT NULL REFERENCES coverage_mission_versions(mission_version_id),
+    company_ref TEXT NOT NULL,
+    stage_ref TEXT NOT NULL,
+    reopen_decision_ref TEXT NOT NULL,
+    reopen_proposal_ref TEXT NOT NULL,
+    reopened_version_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(company_ref, stage_ref, reopen_decision_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_stage_reopens_by_company
+ON coverage_mission_stage_reopens(company_ref, stage_ref, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_coverage_mission_history
 ON coverage_mission_versions(mission_ref, version_number);
 CREATE INDEX IF NOT EXISTS idx_coverage_mission_stage_by_company
@@ -202,6 +239,13 @@ BEFORE UPDATE ON coverage_mission_pointer WHEN dalton_coverage_mission_authorize
 CREATE TRIGGER IF NOT EXISTS coverage_mission_stage_records_authorized_insert
 BEFORE INSERT ON coverage_mission_stage_records WHEN dalton_coverage_mission_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'coverage mission stage record insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_stage_reopens_authorized_insert
+BEFORE INSERT ON coverage_mission_stage_reopens WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'coverage mission stage reopen insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_stage_reopens_no_update
+BEFORE UPDATE ON coverage_mission_stage_reopens BEGIN SELECT RAISE(ABORT, 'coverage mission stage reopens are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_stage_reopens_no_delete
+BEFORE DELETE ON coverage_mission_stage_reopens BEGIN SELECT RAISE(ABORT, 'coverage mission stage reopens are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_stage_claims_authorized_insert
 BEFORE INSERT ON coverage_mission_stage_claims WHEN dalton_coverage_mission_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'coverage mission stage claim insert requires CoverageMissionAuthority'); END;

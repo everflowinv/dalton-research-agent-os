@@ -16,6 +16,7 @@ from dalton_core.bounded_planner_driver import (
     BoundedPlannerDriverError,
 )
 from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+from dalton_core.budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
 from dalton_core.bounded_probe_executor import (
     BoundedProbeExecutionError,
     execute_probe_work_order,
@@ -28,6 +29,7 @@ from dalton_core.writer_server import (
     HUMAN_GOVERNANCE_OPERATIONS,
     Principal,
     WriterServer,
+    WriterServerError,
 )
 from dalton_core.sec_lane_launcher import LaneLaunchConflict
 
@@ -815,6 +817,363 @@ class StalledLoopTests(unittest.TestCase):
         self.assertEqual(
             float(default_planner_cost_usd()), DEFAULT_PLANNER_MAX_COST_USD)
 
+
+
+
+class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
+    """C2b: the Core decides which pool a planner call spends from.
+
+    The driver may declare one -- it reads it out of the projection -- but the
+    loop record is the authority, exactly as the doctrine pack hash is.  A
+    driver able to name its own pool could name the cheapest one and the 25%
+    ad-hoc boundary would be advisory.
+    """
+
+    UNBUDGETED = {
+        "routing_policy_ref": "model-routing-policy-version:test:1",
+        "credential_slot_refs": ["credential-slot:openclaw:test"],
+        "model_router_db": "/nonexistent/model-router.sqlite",
+        "broker_socket": "/nonexistent/broker.sock",
+        "broker_auth_key": "/nonexistent/broker.sock.key",
+        "broker_client_id": "client:dalton-core",
+        "expected_agent_id": "chem",
+    }
+
+    def _context_ref(self) -> str:
+        pack = self.governance.call("publish_doctrine_pack", {
+            "doctrine_pack_ref": "doctrine-pack:driver-pool",
+            "title": "Driver Doctrine Pool",
+            "default_lens_ref": "lens:demand",
+            "lenses": [{
+                "lens_ref": "lens:demand",
+                "label": "Demand",
+                "objective": "Track demand.",
+                "priority_topics": ["bookings"],
+                "evidence_standard": {
+                    "preferred_source_classes": ["source:sec-edgar"],
+                    "minimum_independent_sources": 1,
+                    "negative_claim_rule": (
+                        "candidate_only_until_separate_claim_admission"
+                    ),
+                },
+            }],
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        return self.core.call("materialize_bounded_planner_context", {
+            "loop_version_ref": self.loop["id"],
+            "doctrine_pack_version_ref": pack["id"],
+            "doctrine_pack_version_hash": pack["content_hash"],
+            "as_of": NOW.isoformat(timespec="microseconds"),
+        })["id"]
+
+    def test_the_projection_tells_the_driver_which_pool_the_loop_drinks_from(
+            self) -> None:
+        loops = self.core.call("bounded_planner_active_loops", {})["loops"]
+        # A loop the owner created directly is the mission's own coverage
+        # work; only P14e's inquiry admissions are ad-hoc.
+        self.assertEqual(loops[0]["pool"], "coverage")
+
+    def test_the_wire_contract_accepts_pool_and_never_requires_it(self) -> None:
+        from dalton_core.writer_server import OPERATION_FIELDS
+
+        # OPERATION_FIELDS is the closed set of *allowed* field names, so
+        # adding "pool" to it is additive by construction: a driver that has
+        # not been upgraded sends what it always sent. The driver tests cover
+        # the other half -- a projection with no pool sends no pool.
+        self.assertIn("pool", OPERATION_FIELDS["llm_planner_execute"])
+
+    def _budget_binding(self) -> dict:
+        from dalton_core.budget_pools import mission_pool_scope
+
+        mission = {
+            "mission_ref": "coverage-mission:c2b",
+            "id": "coverage-mission-version:c2b:1",
+            "content_hash": content_hash({"mission": "c2b"}),
+            "budget": {"max_daily_paid_calls": 100, "max_daily_cost_usd": 10.0},
+        }
+        return {
+            "mission_ref": mission["mission_ref"],
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "max_daily_paid_calls": 100,
+            "max_daily_cost_micros": 10_000_000,
+            **mission_pool_scope(
+                mission, pool="adhoc", lane="llm_planner_execute"),
+        }
+
+    def _local(self, *, budget_db: str | None = None,
+               policy: str | None = None) -> WriterServer:
+        """A second server on the same Core, in this thread, with a planner.
+
+        The op is read directly rather than over the socket because the wire
+        deliberately answers every refusal with one opaque sentence, and the
+        thing under test here is *which* refusal it was.  SQLite connections
+        belong to the thread that opened them, so the served instance cannot
+        be called from the test.
+        """
+
+        config = dict(self.UNBUDGETED)
+        if budget_db is not None:
+            config["budget_db"] = budget_db
+            config["budget_policy_ref"] = policy
+        server = WriterServer(
+            self.root / "core.sqlite", str(self.root / "local.sock"),
+            dict(self.server.principals), scheduler_path=self.scheduler_path,
+            planner_model_config=config,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+        return server
+
+    def _op(self, params: dict):
+        """Run one op the way the server runs it: on its own store thread.
+
+        Every Core connection belongs to the single ``dalton-store`` worker a
+        WriterServer opens, so an op called from anywhere else is a SQLite
+        thread error rather than an answer.  ``Future.result`` re-raises what
+        the op raised, which is the message under test.
+        """
+
+        server = self._local()
+        return server._store_executor.submit(
+            server._op_llm_planner_execute, params).result(timeout=30)
+
+    def test_a_pool_that_is_not_one_of_the_four_is_refused(self) -> None:
+        context_ref = self._context_ref()
+        with self.assertRaisesRegex(WriterServerError, "capacity pools"):
+            self._op({"context_pack_ref": context_ref,
+                      "max_cost_usd": 0.5, "pool": "petty_cash"})
+
+    def test_a_driver_that_names_a_cheaper_pool_than_its_loop_is_refused(
+            self) -> None:
+        context_ref = self._context_ref()
+        with self.assertRaisesRegex(
+                WriterServerError, "coverage pool, not maintenance"):
+            self._op({"context_pack_ref": context_ref,
+                      "max_cost_usd": 0.5, "pool": "maintenance"})
+
+    def test_an_unbudgeted_planner_config_binds_nothing_and_says_so(self) -> None:
+        # The pre-C2b shape: no budget_db, so no mission binding, so the call
+        # runs exactly as it did before and the op result says "unbudgeted"
+        # rather than implying a ledger saw it.
+        server = self._local()
+        self.assertIsNone(server._store_executor.submit(
+            server._planner_budget_binding, "coverage").result(timeout=30))
+
+    def test_the_writer_holds_the_ledger_so_settled_spend_is_readable(
+            self) -> None:
+        """The failure this branch nearly shipped.
+
+        The ledger is WAL and C2's read-only open refuses a database with no
+        sidecars.  Opening it per op meant the sidecars existed only while a
+        planner call was in flight, and P14e's admission lane reads *between*
+        calls -- so ``settled_micros`` would have been zero in every real
+        deployment and the cap enforced would still have been the pre-C2b one.
+        """
+
+        from dalton_core.budget_pools import day_pool_spend_at
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        budget_db = self.root / "thesis-impact-budget.sqlite"
+        policy = "thesis-impact-day-budget-policy:c2b-writer:1"
+        server = self._local(budget_db=str(budget_db), policy=policy)
+        def book() -> None:
+            # On the store thread, because that is the thread the writer's
+            # ledger connection belongs to -- and the only one an op runs on.
+            ledger = server._planner_budget_ledger()
+            ledger.register_policy(
+                policy_version_id=policy, day_cap_micros=100_000_000)
+            admitted = ledger.admit(
+                policy_version_id=policy, day="2026-08-23",
+                work_order_ref="work:llm-research-planner-held",
+                attempt_number=1, phase="assessment",
+                route_decision_ref="route:1", reserved_micros=500_000,
+                mission_binding=self._budget_binding(),
+            )
+            ledger.settle(admitted["admission_id"], actual_micros=300_000)
+
+        server._store_executor.submit(book).result(timeout=30)
+
+        # No op in flight, and the reading still works -- which is only true
+        # because somebody is holding the ledger open.
+        spend = day_pool_spend_at(
+            budget_db, day="2026-08-23", mission_ref="coverage-mission:c2b")
+        self.assertEqual(spend.get("adhoc"), 300_000)
+
+        # And when the writer lets go, the sidecars go with it: this asserts
+        # the mechanism rather than the wish.
+        server.stop()
+        self.assertEqual(
+            day_pool_spend_at(budget_db, day="2026-08-23"), {})
+
+    def test_pool_for_loop_reads_why_the_loop_exists(self) -> None:
+        from dalton_core.budget_pools import pool_for_loop
+
+        self.assertEqual(pool_for_loop({"admission": {"source": "inquiry"}}),
+                         "adhoc")
+        # A loop with no admission block predates P14e and is coverage, and so
+        # is one admitted by anything the map does not name.
+        self.assertEqual(pool_for_loop({}), "coverage")
+        self.assertEqual(pool_for_loop(None), "coverage")
+        self.assertEqual(pool_for_loop({"admission": {"source": "mandate"}}),
+                         "coverage")
+
+class PlannerPoolHoldTests(unittest.TestCase):
+    """C2b: a spent capacity pool holds the loop; it does not spend a round.
+
+    The writer refuses before it leases anything, so the honest thing for the
+    driver to do is nothing at all.  What it must *not* do is fall through to
+    the free deterministic planner: that would consume the round the pool just
+    said no to, and the loop would arrive at tomorrow with one fewer round and
+    nothing to show for it.
+    """
+
+    class _Client:
+        def __init__(self, *, pool: str | None = "adhoc",
+                     rejected: bool = True, budget: dict | None = None) -> None:
+            self.pool = pool
+            self.rejected = rejected
+            self.budget = budget
+            self.calls: list[str] = []
+            self.planner_params: dict | None = None
+
+        def call(self, operation, params=None):
+            self.calls.append(operation)
+            if operation == "bounded_planner_active_loops":
+                loop = {
+                    "loop_version_ref": "bounded-planner-loop-version:1",
+                    "loop_ref": "bounded-loop:1",
+                }
+                if self.pool is not None:
+                    loop["pool"] = self.pool
+                return {"loops": [loop]}
+            if operation == "materialize_bounded_planner_context":
+                return {
+                    "id": "planner-context-pack-version:1",
+                    "remaining_budget": {
+                        "rounds_remaining": 2, "cost_units_remaining": 4,
+                        "seconds_remaining": 600,
+                    },
+                }
+            if operation == "llm_planner_execute":
+                self.planner_params = dict(params or {})
+                if self.rejected:
+                    return {
+                        "status": "rejected", "reason": POOL_EXHAUSTED_REASON,
+                        "lane_status": POOL_EXHAUSTED_STATUS,
+                        "pool": "adhoc", "day": "2026-09-09",
+                        "spent": 2_500_000, "cap": 2_500_000,
+                    }
+                answer = {"status": "model_failed"}
+                if self.budget is not None:
+                    answer["budget"] = self.budget
+                return answer
+            if operation in {
+                "bounded_planner_propose_next",
+                "bounded_planner_propose_next_with_context",
+            }:
+                return {"status": "pending_round"}
+            return {"status": "idle"}
+
+    def _run(self, client, *, root: Path | None = None) -> dict:
+        with tempfile.TemporaryDirectory() as name:
+            root = root or Path(name)
+            config = BoundedPlannerDriverConfig(
+                writer_socket=root / "writer.sock",
+                token_config=root / "tokens.json",
+                scheduler_db=root / "scheduler.sqlite", user_agent="Dalton Test",
+                max_response_bytes=1_000_000, timeout_seconds=10.0,
+                max_probes_per_tick=1, filed_window_days=400,
+                observation_mandate_version_ref=None,
+                doctrine_pack_version_ref="doctrine-pack-version:1",
+                doctrine_pack_version_hash="d" * 64,
+                planner_routing_policy_ref=None,
+                planner_credential_slot_refs=None,
+                planner_model_router_db=None, planner_broker_socket=None,
+                planner_broker_auth_key=None,
+                planner_broker_client_id="client:dalton-core",
+                planner_expected_agent_id="chem", planner_max_cost_usd=0.5,
+            )
+            return BoundedPlannerDriver(
+                config, client=client, transport=object(), clock=lambda: NOW,
+            ).run_once()
+
+    def test_a_spent_pool_holds_the_loop_without_consuming_its_round(self) -> None:
+        client = self._Client()
+        result = self._run(client)
+
+        held = result["skipped"][0]
+        self.assertEqual(held["reason"], POOL_EXHAUSTED_REASON)
+        self.assertEqual(held["pool"], "adhoc")
+        self.assertEqual(held["lane_status"], POOL_EXHAUSTED_STATUS)
+        self.assertEqual(held["loop_version_ref"],
+                         "bounded-planner-loop-version:1")
+        # The deterministic fallback is for a planner that failed, not for a
+        # pool that refused: reaching it here would spend the round.
+        self.assertNotIn("bounded_planner_propose_next_with_context",
+                         client.calls)
+        self.assertNotIn("bounded_planner_propose_next", client.calls)
+
+    def test_the_pool_the_projection_named_travels_with_the_call(self) -> None:
+        client = self._Client(pool="adhoc")
+        self._run(client)
+        self.assertEqual(client.planner_params["pool"], "adhoc")
+
+    def test_a_projection_without_a_pool_sends_no_pool_at_all(self) -> None:
+        # An older writer's projection has no "pool" key. The driver must not
+        # invent one: the loop record is what decides, and a guess that
+        # disagreed with it would be refused.
+        client = self._Client(pool=None, rejected=False)
+        self._run(client)
+        self.assertNotIn("pool", client.planner_params)
+
+    def test_the_hold_and_the_budget_word_reach_the_tick_ledger(self) -> None:
+        # A summary the next tick overwrites cannot answer "is the 25%
+        # boundary doing anything" or "is the planner on the ledger yet".
+        from dalton_core.tick_ledger import TickLedger
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            summary = self._run(self._Client(), root=root)
+
+            reported = summary["planner_budget"]
+            self.assertEqual(reported["pool_holds"], 1)
+            self.assertEqual(reported["held_pools"], ["adhoc"])
+            self.assertEqual(summary["tick_ledger"]["status"], "recorded")
+
+            with TickLedger(root / "tick-ledger.sqlite", read_only=True) as led:
+                row = led.connection.execute(
+                    "SELECT planner_budget_json FROM tick_ledger_ticks"
+                ).fetchone()
+            self.assertEqual(json.loads(row["planner_budget_json"]), reported)
+
+    def test_an_unbudgeted_planner_is_a_standing_condition_the_tick_records(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            summary = self._run(
+                self._Client(pool="coverage", rejected=False,
+                             budget={"status": "unbudgeted"}),
+                root=root)
+            self.assertEqual(summary["planner_budget"]["status"], "unbudgeted")
+            self.assertEqual(summary["planner_budget"]["pool_holds"], 0)
+
+    def test_planner_budget_is_not_mistaken_for_a_lane(self) -> None:
+        # It is a Mapping in the tick summary, and every Mapping in the
+        # summary that is not reserved becomes a lane row -- which would put
+        # the driver's own work into the idle ratio.
+        from dalton_core.lane_registry import RESERVED_DRIVER_KEYS
+
+        self.assertIn("planner_budget", RESERVED_DRIVER_KEYS)
+
+    def test_a_model_failure_still_falls_through_to_the_free_planner(self) -> None:
+        # The hold is narrow: only "rejected/pool_exhausted" holds. Every
+        # other planner outcome keeps P14e's behaviour.
+        client = self._Client(pool="coverage", rejected=False)
+        result = self._run(client)
+        self.assertIn("bounded_planner_propose_next_with_context", client.calls)
+        self.assertNotEqual(result["skipped"][0]["reason"],
+                            POOL_EXHAUSTED_REASON)
 
 if __name__ == "__main__":
     unittest.main()

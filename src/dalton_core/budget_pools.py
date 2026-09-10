@@ -150,6 +150,10 @@ LANE_POOLS: dict[str, str] = {
     "dispatch_mission_tracking": "event_response",
     "dispatch_mission_catalyst_calendar": "event_response",
     "dispatch_event_judgement": "event_response",
+    # P14f: the earnings season. The same pool for the same reason -- a
+    # preview and a calibration are responses to a dated event, and the day
+    # a company reports is the day this pool is meant to be spent.
+    "dispatch_earnings_season": "event_response",
     # P14e.
     "dispatch_research_task": "adhoc",
     # P12c: drafting the debate map is coverage work, like the dossier.
@@ -219,6 +223,40 @@ def pool_for_purpose(purpose: str) -> str:
     """The pool a cockpit-shaped model call spends from."""
 
     return PURPOSE_POOLS.get(purpose, DEFAULT_POOL)
+
+
+# C2b: the third shape of a paid model call.  A cockpit call is admitted by
+# purpose and a tick lane by operation; a Tier-1 bounded planner loop is
+# neither -- it is one loop's model call, and which pool it spends from is a
+# property of why the loop exists.  P14e's inquiry loops are the ad-hoc
+# research the 25% pool was sized for; every other loop is the coverage work
+# the mission was written to do.
+def _inquiry_admission_source() -> str:
+    # Imported lazily: bounded_planner_loop reads this module for pool names,
+    # and the admission source is one string that must not be two.
+    from .bounded_planner_loop import INQUIRY_ADMISSION_SOURCE
+
+    return INQUIRY_ADMISSION_SOURCE
+
+
+LOOP_ADMISSION_POOLS: dict[str, str] = {
+    _inquiry_admission_source(): "adhoc",
+}
+
+
+def pool_for_loop(loop: Mapping[str, Any] | None) -> str:
+    """The pool one bounded planner loop's model calls spend from.
+
+    A loop with no ``admission`` block predates P14e and is the owner's own
+    Tier-1 research, which is coverage.  Taking the source from the loop record
+    rather than from the caller is what keeps the driver from being able to
+    name a cheaper pool than the loop belongs to.
+    """
+
+    admission = (loop or {}).get("admission") or {}
+    if not isinstance(admission, Mapping):
+        return DEFAULT_POOL
+    return LOOP_ADMISSION_POOLS.get(admission.get("source"), DEFAULT_POOL)
 
 
 def lane_pools() -> dict[str, str]:
@@ -813,6 +851,7 @@ __all__ = [
     "DEFAULT_POOL",
     "DEFAULT_SHARES",
     "LANE_POOLS",
+    "LOOP_ADMISSION_POOLS",
     "MAX_EXHAUSTED_LANES",
     "MISSION_POOLS_FIELD",
     "POOL_EXHAUSTED_REASON",
@@ -834,6 +873,7 @@ __all__ = [
     "mission_pool_scope",
     "pool_caps",
     "pool_decision",
+    "pool_for_loop",
     "pool_for_operation",
     "pool_for_purpose",
     "pool_rejection_wire",

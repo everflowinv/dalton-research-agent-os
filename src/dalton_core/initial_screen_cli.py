@@ -363,11 +363,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             return summary
         playbook = _playbook(store, mission)
-        stage_state: dict[str, dict[str, list[str]]] = {}
-        for record in missions.stage_records(mission["id"]):
-            stage_state.setdefault(record["company_ref"], {}).setdefault(record["stage_ref"], []).append(
-                record["status"]
-            )
+        # P14-S: folded across every version of the mission_ref, not read off
+        # the active version. Read per-version, the four Initial Screens that
+        # passed under v13 come back as ``entered`` the moment v14 exists, and
+        # the selection rule below -- which skips a company whose gate has
+        # passed -- would re-draft all four.
+        stage_state = missions.stage_state_by_company(mission["mission_ref"])
         stage_rows = evaluate_mission(
             store.connection, mission,
             planned_specs=planned_spec_refs_from_directory(state / "discovery-plans"),

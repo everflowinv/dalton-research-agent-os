@@ -30,3 +30,20 @@ The owner clarified the constraint that makes this safe in the same session: **v
 - ADR-0007's split holds at a second layer: automation proposes a revision to a thesis and a person accepts it; automation calls `revise` on a forecast line or a dossier under a mission grant, but only because a judgement step decided to, and the decision is recorded either way.
 - ADR-0001 is untouched. A thesis chain is versioned like everything else, and admission to it is still human-only.
 - Nothing here is implemented yet. The decision is recorded; the first authority to carry the contract is Wave 1C's, and the reopen policy that unblocks the four passed gates is Wave 3.
+
+## Addendum, 2026-09-09 (P14-S): a stage state carries across mission versions; the version is provenance
+
+The same confusion this ADR names — a state of a *version* read as a state of the *object* — was live in the stage ladder in the opposite direction. A `coverage_mission_stage_record` binds the mission version it was written under, and every reader scoped its query to that version, so a company's ladder emptied itself every time the owner published a mission version. The live mission rolled v7 → v13 in two days: each roll wrote five fresh `initial_screen entered` rows for the same five companies (35 of the 41 stage records in the Ledger), and the four gates that actually passed live only under v13. Publishing v14 would make all four read as never-screened. It had already been hit twice — P14a's residency had to query `gate_passed` across every version of the `mission_ref` to keep four companies in daily tracking, and P12d's Deep Insight Gate decision died after a roll because `deep_insight_gate cannot be entered before initial_screen gate_passed` refused a gate that had demonstrably passed.
+
+**A stage state is a fact about `(mission_ref, company_ref)`, not about `(mission_version_ref, company_ref)`.** It carries forward across versions until something supersedes it. The mission version each record binds is **provenance** — it says under what mission, and when, the state was reached, and it is reported per stage for exactly that reason — and it is not scope. A version roll is not an event in a company's ladder; the owner changing the autonomy grant does not un-screen Accenture.
+
+The fold has four ordering rules, and `coverage_mission.fold_stage_status` is the only place they live:
+
+- Records fold in **time order across every version** of the `mission_ref`, by `created_at`.
+- The **last decision wins**. A later `gate_failed` supersedes an earlier `gate_passed` — that is how a reopened gate reads — and a later `gate_passed` supersedes an earlier `gate_failed`, which is how the ordinary retry has always worked inside one version.
+- **`entered` never supersedes a decision.** Re-seeding `entered` under a new version cannot walk a passed gate backwards.
+- No record at all means the stage was never reached.
+
+`record_stage` validates the ladder against the fold and still writes the record against the **active** version, so the ordering rules and the provenance are both exact. Two readers express the two different questions and must not be confused: `current_stage_state(mission_ref, company_ref)` answers "where does this company stand *now*" and is supersession-aware; `companies_at_or_past(stage, mission_ref)` answers "did this ever happen" and is deliberately **monotone**, because residency (P14a) leaves by a human removing a company from the universe and not by a gate being reopened.
+
+This is a reading rule, not a new object: no table, no column and no stored hash changes, and every stage record already written stays exactly as it is. It is also why `mission_stage.run_once` no longer re-seeds `entered` on a version roll — a second `entered` says nothing the first did not, cannot move the folded state, and was growing an append-only ledger by five rows per publish.

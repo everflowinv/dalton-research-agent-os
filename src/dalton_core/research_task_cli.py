@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .bounded_planner_driver import BUDGET_LEDGER_FILENAME
 from .bounded_planner_loop import BoundedPlannerAuthority, BoundedPlannerError
 from .research_question_backlog import ResearchQuestionBacklog, ResearchQuestionError
 from .research_task import (
@@ -81,6 +82,12 @@ def run_admissions(
         "failure_reason": None,
         "formal_authority_writes": 0,
     }
+    # C2b: the same day ledger the planner's model calls are now admitted
+    # against, so the pool this lane reserves from is read net of what has
+    # already been spent from it today rather than of reservations alone.  A
+    # state directory without the ledger reads as zero spend, which is the
+    # pre-C2b number.
+    budget_db = state_dir / BUDGET_LEDGER_FILENAME
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
         from .coverage_mission import CoverageMissionAuthority
@@ -99,7 +106,8 @@ def run_admissions(
         decision = grant(mission, templates)
         summary["grant"] = decision
         day = now.date().isoformat()
-        summary["pool"] = pool_state(authority, mission, day=day)
+        summary["pool"] = pool_state(
+            authority, mission, day=day, budget_db=budget_db)
         if not decision["granted"]:
             # Not a failure: an ungranted lane is a lane the owner has not
             # turned on, and saying so every tick is how it stays visible.
@@ -113,7 +121,7 @@ def run_admissions(
         entries = plan_admissions(
             authority, mission=mission, plan=plan, templates=templates, day=day,
             # Only what this pass will actually create spends the day's pool.
-            limit=max_admissions,
+            limit=max_admissions, budget_db=budget_db,
         )
         summary["considered"] = len(entries)
         summary["refused"] = [
@@ -171,7 +179,8 @@ def run_admissions(
             "status": "succeeded",
             "admitted": sum(1 for item in admitted if item["status"] == "fresh"),
             "tasks": admitted,
-            "pool": pool_state(authority, mission, day=day),
+            "pool": pool_state(
+                authority, mission, day=day, budget_db=budget_db),
         })
         return summary
     except Exception as exc:  # unexpected: record for the parent, then surface

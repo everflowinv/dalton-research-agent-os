@@ -59,7 +59,19 @@ class CockpitHarness:
             "weekly_brief": {"state": "ready", "last_error": None},
         }), encoding="utf-8")
         self.calls: list[tuple[str, dict]] = []
-        self.reply = json.dumps({"answer": "Fixture answer.", "citations": ["C1"], "confidence": "medium", "gaps": ["nothing on margins"]})
+        # P15a: the ask v2 reply shape -- sentences carrying their own refs,
+        # typed unknowns, a closed confidence word.
+        self.reply = json.dumps({
+            # No refs: this harness's Core holds no Claims, so an answer that
+            # cited one would be citing something it was never shown -- which
+            # is what the verification layer says when it does.
+            "sentences": [{"text": "Fixture answer.", "refs": []}],
+            "confidence": "medium", "refused": False,
+            "refusal_reason": None, "refusal_detail": None,
+            "unknowns": [{"what": "nothing on margins", "content_kind": "sell_side_report",
+                          "source": "alphaengine"}],
+            "market_vs_us": None, "refresh_suggested": None,
+        })
         self.adapter = None
         self.config = CockpitConfig.from_mapping({
             "core_db": str(self.core_path), "state_dir": str(root), "heartbeat_path": str(self.heartbeat),
@@ -151,9 +163,23 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertEqual(done["status"], "done", done["error"])
         result = done["result"]
         self.assertEqual(result["answer"], "Fixture answer.")
-        self.assertEqual(result["gaps"], ["nothing on margins"])
+        self.assertEqual(result["gaps"],
+                         ["nothing on margins（sell_side_report → alphaengine）"])
+        self.assertEqual(result["unknowns"][0]["content_kind"], "sell_side_report")
         self.assertEqual(result["confidence"], "medium")
         self.assertEqual(len(result["citations"]), min(1, result["claims_considered"]))
+        # P15a: a Core without the Wave 1/2 authorities says so, block by
+        # block, rather than showing the same blank for "no table here" and
+        # "nothing for this company".
+        missing = {item["block"]: item["reason"] for item in result["context"]["missing"]}
+        self.assertEqual(missing["valuation"], "no_authority_on_this_core")
+        self.assertEqual(missing["consensus"], "reader_not_available")
+        self.assertEqual(result["context"]["question_kind"], "other")
+        self.assertFalse(result["context"]["wants_market_vs_us"])
+        # Q1's deterministic layer ran, and its result is a cockpit artefact.
+        self.assertEqual(result["quality"]["rubric_ref"], "rubric:ask-answer")
+        self.assertFalse(result["quality"]["recorded"])
+        self.assertTrue(result["verification"]["passed"], result["verification"])
         self.assertFalse(result["replayed"])
         self.assertEqual(self.c.adapter.calls, 1)
         # The call was admitted in the day ledger against the mission's caps and settled.

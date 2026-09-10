@@ -565,6 +565,9 @@ class ConnectorInventoryTests(unittest.TestCase):
                 # widened shadow template, so the 2026-08-14 hashes the owner
                 # has seen do not move.
                 "xueqiu-posts", "x-xreach-crowd", "employee-reviews",
+                # S5: the local changedetection.io instance, watching the
+                # investor-relations pages declared per company.
+                "ir-page-watch",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}

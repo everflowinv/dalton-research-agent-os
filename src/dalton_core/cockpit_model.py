@@ -129,6 +129,81 @@ def _raise_failure(message: str, rejection: Mapping[str, Any] | None) -> None:
         raise CockpitModelPoolExhausted(message, rejection)
     raise CockpitModelError(message)
 
+
+def pool_refusal_message(rejection: Mapping[str, Any]) -> str:
+    """The sentence a spent pool is reported as, wherever it is refused."""
+
+    return _pool_refusal_message(rejection)
+
+
+def admit_day_ledger(
+    budget: Any,
+    *,
+    policy_version_id: str,
+    day: str,
+    work_order_ref: str,
+    attempt_number: int,
+    phase: str,
+    route_decision_ref: str,
+    reserved_micros: int,
+    mission_binding: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """One reservation in the shared day ledger, with C2's pool as the gate.
+
+    C2b extracted this from :meth:`CockpitModel.call` because a second kind of
+    paid call -- the Tier-1 bounded planner loop, which runs inside the writer
+    rather than in the cockpit -- has to be admitted by exactly the same rules
+    against exactly the same ledger.  Two copies of "admit, then read the three
+    ways it can say no" would have drifted, and the way they drift is that one
+    of them stops checking the pool.
+
+    Returns one of three shapes, and never raises for a budget answer:
+
+    ``{"status": "admitted", "admission": {...}}``
+        the reservation is open and its ``admission_id`` must be settled.
+    ``{"status": "pool_exhausted", "rejection": {...}, "failure": str}``
+        this kind of work has had its share of the day.  A decision, not a
+        fault: the pool refills at midnight and the identity is not poisoned.
+    ``{"status": "refused", "failure": str}``
+        the day cap itself refused, which is the mission out of money.
+    """
+
+    try:
+        admission = budget.admit(
+            policy_version_id=policy_version_id,
+            day=day,
+            work_order_ref=work_order_ref,
+            attempt_number=attempt_number,
+            phase=phase,
+            route_decision_ref=route_decision_ref,
+            reserved_micros=reserved_micros,
+            mission_binding=mission_binding,
+        )
+    except ThesisImpactBudgetError as exc:
+        return {
+            "status": "refused",
+            "failure": f"today's research budget refused the call: {exc}",
+        }
+    if admission.get("status") == "rejected":
+        return {
+            "status": "pool_exhausted",
+            "rejection": dict(admission),
+            "failure": _pool_refusal_message(admission),
+        }
+    return {"status": "admitted", "admission": admission}
+
+
+def settle_day_ledger(budget: Any, admission: Mapping[str, Any], *,
+                      actual_micros: int) -> dict[str, Any]:
+    """Bind an open reservation to what the link that served it actually cost.
+
+    The pool is not passed: :meth:`ThesisImpactBudgetStore.settle` copies it
+    from the admission row inside the same transaction, which is what makes
+    "the pool and the ledger cannot disagree" a property of the schema.
+    """
+
+    return budget.settle(admission["admission_id"], actual_micros=actual_micros)
+
 def register_purpose(name: str) -> str:
     """Name one more thing a cockpit-shaped model call may be for.
 
@@ -190,6 +265,19 @@ def _failure(work: WorkOrder, code: str, route_ref: str | None) -> ResultEnvelop
         outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(), error={"code": code},
         metadata={"control_plane_failure": True, "route_decision_ref": route_ref},
     )
+
+
+def call_cost_micros(invocation: Any, route: Mapping[str, Any],
+                     profile: Mapping[str, Any], reserved: int) -> tuple[int, str]:
+    """What the link that actually served this call cost, and how we know.
+
+    Provider telemetry when the broker reported it, else the rate card of the
+    route that served -- never the rate card of the route that was asked for
+    first, and never the reservation while a better number exists.  C2b made
+    this public because the planner worker settles by the same rule.
+    """
+
+    return _cost_micros(invocation, route, profile, reserved)
 
 
 def _cost_micros(invocation: Any, route: Mapping[str, Any], profile: Mapping[str, Any], reserved: int) -> tuple[int, str]:
@@ -335,25 +423,25 @@ class CockpitModel:
                     else:
                         profile = router.get_profile(route["selected_profile_version_ref"])
                         reserved = int(Decimal(str(self.max_cost_usd)) * 1_000_000)
-                        try:
-                            admission = budget.admit(
-                                policy_version_id=self.config["budget_policy_ref"],
-                                day=self.clock().astimezone(timezone.utc).date().isoformat(),
-                                work_order_ref=work.id, attempt_number=attempt, phase="assessment",
-                                route_decision_ref=route["id"], reserved_micros=reserved, mission_binding=scope,
-                            )
-                        except ThesisImpactBudgetError as exc:
-                            admission = None
+                        decision = admit_day_ledger(
+                            budget,
+                            policy_version_id=self.config["budget_policy_ref"],
+                            day=self.clock().astimezone(timezone.utc).date().isoformat(),
+                            work_order_ref=work.id, attempt_number=attempt, phase="assessment",
+                            route_decision_ref=route["id"], reserved_micros=reserved,
+                            mission_binding=scope,
+                        )
+                        admission = decision.get("admission")
+                        if decision["status"] == "refused":
                             result = _failure(work, "BUDGET_REFUSED", route["id"])
-                            failure = f"today's research budget refused the call: {exc}"
-                        if admission is not None and admission.get("status") == "rejected":
+                            failure = decision["failure"]
+                        elif decision["status"] == "pool_exhausted":
                             # A spent pool is returned rather than raised: this
                             # kind of work has had its share of the day, which
                             # is a decision and not a fault.
-                            pool_rejection = admission
-                            admission = None
+                            pool_rejection = decision["rejection"]
                             result = _failure(work, "POOL_EXHAUSTED", route["id"])
-                            failure = _pool_refusal_message(pool_rejection)
+                            failure = decision["failure"]
                         if admission is not None:
                             try:
                                 invocation, result = self._adapter(router).execute(work, route, profile)
@@ -363,7 +451,7 @@ class CockpitModel:
                                 result = _failure(work, "MODEL_ADAPTER_REJECTED_OR_FAILED", route["id"])
                                 cost_micros, cost_status = 0, "failed"
                                 failure = f"the model call failed: {exc}"
-                            budget.settle(admission["admission_id"], actual_micros=cost_micros)
+                            settle_day_ledger(budget, admission, actual_micros=cost_micros)
                     completion = scheduler.complete(work.id, attempt, WORKER_REF, lease["lease_token"], result,
                                                     idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
                     if completion["status"] == "conflict":
@@ -580,6 +668,7 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
 
 __all__ = [
     "CockpitModel", "CockpitModelError", "CockpitModelPoolExhausted",
-    "WORKER_REF", "build_work",
-    "purposes", "register_purpose", "unwrap_json_object",
+    "WORKER_REF", "admit_day_ledger", "build_work", "call_cost_micros",
+    "lane_status_for", "pool_refusal_message", "purposes", "register_purpose",
+    "settle_day_ledger", "unwrap_json_object",
 ]

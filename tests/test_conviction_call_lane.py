@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+
+import dalton_core
 from pathlib import Path
 from unittest.mock import patch
 
@@ -276,11 +278,33 @@ class GateRunTests(ConvictionHarness):
         self.assertEqual(summary["policy_ref"], "conviction-policy:p15d:v1")
         self.assertEqual(summary["rubric_ref"], "rubric:conviction-call")
 
-    def test_there_is_no_consensus_on_a_core_that_has_no_consensus_authority(self):
-        # The honest answer, and it must never look like agreement.
+    def inject(self, module):
+        """Stand a fake consensus module in front of the real one.
+
+        Both places: ``from . import consensus_estimate`` resolves through the
+        package attribute once the real module has been imported, so replacing
+        only the ``sys.modules`` entry leaves the real one in the way. That was
+        invisible while P11b did not exist and became visible the day it did.
+        """
+
+        import sys
+
+        from dalton_core import consensus_estimate as real
+
+        sys.modules["dalton_core.consensus_estimate"] = module
+        setattr(dalton_core, "consensus_estimate", module)
+        self.addCleanup(setattr, dalton_core, "consensus_estimate", real)
+        self.addCleanup(sys.modules.__setitem__, "dalton_core.consensus_estimate", real)
+
+    def test_there_is_no_consensus_on_a_core_that_holds_none(self):
+        # The honest answer, and it must never look like agreement. P11b has
+        # since landed, so the reason is no longer "the authority does not
+        # exist" but "it holds nothing for this company" -- which is the same
+        # answer for the same reason, and still not agreement.
         found = consensus_gap(self.store, ACN)
         self.assertEqual(found["status"], "unavailable")
-        self.assertIn("P11b", found["reason"])
+        self.assertEqual(found["metrics"], [])
+        self.assertIn(ACN, found["reason"])
 
     def test_a_consensus_reader_of_the_wrong_shape_degrades_to_unavailable(self):
         # P11b is on the other side of a name lookup and is not this slice's
@@ -308,8 +332,7 @@ class GateRunTests(ConvictionHarness):
             with self.subTest(shape=label):
                 module = types.ModuleType("dalton_core.consensus_estimate")
                 module.latest_consensus = lambda store, company: {"metrics": metrics}
-                sys.modules["dalton_core.consensus_estimate"] = module
-                self.addCleanup(sys.modules.pop, "dalton_core.consensus_estimate", None)
+                self.inject(module)
                 found = consensus_gap(self.store, ACN)
                 self.assertEqual(found["status"], "unavailable")
                 self.assertEqual(found["metrics"], [])
@@ -324,8 +347,7 @@ class GateRunTests(ConvictionHarness):
             "metric": "metric:revenue-usd", "period": "FY2027", "ours": "82000",
             "consensus": "69000", "unit": "USDm", "gap_percent": "18",
             "refs": ["forecast-model-version:1"]}]}
-        sys.modules["dalton_core.consensus_estimate"] = module
-        self.addCleanup(sys.modules.pop, "dalton_core.consensus_estimate", None)
+        self.inject(module)
         found = consensus_gap(self.store, ACN)
         self.assertEqual(found["status"], "available")
         self.assertEqual(found["metrics"][0]["gap_percent"], "18")
@@ -339,8 +361,7 @@ class GateRunTests(ConvictionHarness):
 
         module = types.ModuleType("dalton_core.consensus_estimate")
         module.latest_consensus = boom
-        sys.modules["dalton_core.consensus_estimate"] = module
-        self.addCleanup(sys.modules.pop, "dalton_core.consensus_estimate", None)
+        self.inject(module)
         found = consensus_gap(self.store, ACN)
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("could not be read", found["reason"])

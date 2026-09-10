@@ -161,6 +161,8 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_market_price_lane",
     "dalton_core.mission_tracking_lane",
     "dalton_core.mission_catalyst_lane",
+    "dalton_core.mission_consensus_lane",
+    "dalton_core.mission_ownership_lane",
     "dalton_core.mission_model_spec_lane",
     "dalton_core.mission_guidepoint_lane",
     "dalton_core.mission_model_forecast_lane",
@@ -171,10 +173,12 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_feed_lane",
     "dalton_core.mission_research_task_lane",
     "dalton_core.mission_event_judgement_lane",
+    "dalton_core.mission_earnings_season_lane",
     "dalton_core.mission_reopen_lane",
     "dalton_core.mission_reflection_lane",
     "dalton_core.mission_debate_map_lane",
     "dalton_core.mission_dossier_lane",
+    "dalton_core.mission_deep_insight_lane",
     "dalton_core.mission_conviction_lane",
     "dalton_core.mission_prior_research_lane",
 )
@@ -191,6 +195,10 @@ RESERVED_DRIVER_KEYS: frozenset[str] = frozenset({
     # summary rather than only in a log because a tick whose own bookkeeping
     # failed must not be indistinguishable from a tick that had nothing to do.
     "tick_ledger",
+    # C2b: what the mission day ledger did with this tick's Tier-1 planner
+    # calls.  Not a lane -- the bounded planner is the driver's own work --
+    # so it must not be counted as one in the idle ratio.
+    "planner_budget",
 })
 
 _LANES: dict[str, LaneSpec] = {}

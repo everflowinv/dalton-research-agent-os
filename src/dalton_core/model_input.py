@@ -18,7 +18,9 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
 
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 
 SCHEMA_VERSION = "0.1"
@@ -55,6 +57,22 @@ VALUATION_AUTHORITY_ROLES = frozenset({
 # convenience; it belongs in a diff with a reason, which is why it is a named
 # constant rather than a literal in the check below.
 REQUIRED_VALUATION_AUTHORITY_ROLES = frozenset({"price", "shares"})
+# P11b: the authority a ``consensus`` role can actually be bound to.
+#
+# The role has been in the vocabulary since P11c and there was nothing in the
+# system it could name: an actual input's ``source_authorities`` could only be
+# an evidence version or a claim version, and what the street expects is
+# neither. It is an observation of a vendor's aggregate, versioned per company,
+# and it now exists -- so it becomes a third kind of source authority rather
+# than being smuggled in as one of the other two.
+#
+# Additive on purpose. Nothing that resolved before resolves differently; a
+# binding of this kind is looked up in ``consensus_estimate_versions`` and is
+# hash-checked there exactly as the other two are in their own tables.
+CONSENSUS_AUTHORITY_KIND = "consensus_estimate_version"
+SOURCE_AUTHORITY_KINDS = frozenset({
+    "evidence_version", "claim_version", CONSENSUS_AUTHORITY_KIND,
+})
 _SCHEMA_PATH = Path(__file__).with_name("model_input_schema.sql")
 _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -192,7 +210,7 @@ def _source_bindings(value: Any, name: str) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     for row in rows:
         row = _closed(row, {"authority_kind", "version_ref", "content_hash"}, f"{name}[]")
-        if row["authority_kind"] not in {"evidence_version", "claim_version"}:
+        if row["authority_kind"] not in SOURCE_AUTHORITY_KINDS:
             raise ModelInputValidationError(f"{name}.authority_kind is invalid")
         row["version_ref"] = _text(row["version_ref"], f"{name}.version_ref")
         row["content_hash"] = _hash(row["content_hash"], f"{name}.content_hash")
@@ -249,13 +267,13 @@ def _canonical_record(raw: Any, name: str) -> dict[str, Any]:
 class ModelInputLedger:
     """Append-only model authority embedded in the Dalton Core database."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore):
         self.store = store
         self.connection = store.connection
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_model_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_model_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager
@@ -345,6 +363,19 @@ class ModelInputLedger:
                 "FROM evidence_versions WHERE evidence_version_id=?",
                 (binding["version_ref"],),
             ).fetchone()
+        elif binding["authority_kind"] == CONSENSUS_AUTHORITY_KIND:
+            # P11b. The table may not exist on a Core that has never run the
+            # consensus lane, and a missing table is a missing authority rather
+            # than a crash: the caller is told the binding did not resolve, in
+            # the same words it would be told for a ref that was simply absent.
+            try:
+                row = cur.execute(
+                    "SELECT version_id AS version_ref,content_hash "
+                    "FROM consensus_estimate_versions WHERE version_id=?",
+                    (binding["version_ref"],),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
         else:
             row = cur.execute(
                 "SELECT claim_version_id AS version_ref,content_hash "

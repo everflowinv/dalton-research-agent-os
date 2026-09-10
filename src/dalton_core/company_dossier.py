@@ -62,7 +62,9 @@ from .claim_aspect_vocabulary import ASPECTS, DEFINITIONS
 # authority, and two closed lists claiming to be the same list is how a
 # contract stops being one.
 from .model_forecast_driver import CHANGE_REASONS
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("company_dossier_schema.sql")
@@ -1043,13 +1045,13 @@ class CompanyDossierAuthority:
     the judgement about whether the file should move lives one layer up.
     """
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore):
         self.store = store
         self.connection = store.connection
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_company_dossier_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_company_dossier_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager

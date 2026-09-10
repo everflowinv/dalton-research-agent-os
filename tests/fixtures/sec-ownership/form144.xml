@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <headerData><submissionType>144</submissionType></headerData>
+  <formData>
+    <issuerInfo>
+      <issuerCik>0001058290</issuerCik>
+      <issuerName>COGNIZANT TECHNOLOGY SOLUTIONS CORP</issuerName>
+    </issuerInfo>
+    <filingDate>2026-09-02</filingDate>
+    <securitiesToBeSold>
+      <nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>SYNTHETIC TESTPERSON B</nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>
+      <relationshipToIssuer>Officer</relationshipToIssuer>
+      <securityClassTitle>Class A Common Stock</securityClassTitle>
+      <noOfUnitsSold>25,000</noOfUnitsSold>
+      <aggregateMarketValue>2,145,000.00</aggregateMarketValue>
+      <noOfUnitsOutstanding>489,000,000</noOfUnitsOutstanding>
+      <approxSaleDate>2026-09-05</approxSaleDate>
+      <nameOfExchange>NASDAQ</nameOfExchange>
+      <brokerOrMarketmakerDetails>SYNTHETIC BROKERAGE LLC</brokerOrMarketmakerDetails>
+      <acquiredInfo>
+        <dateAcquired>2023-03-01</dateAcquired>
+        <natureOfAcquisitionTransaction>Restricted stock vesting</natureOfAcquisitionTransaction>
+        <paymentDate>2023-03-01</paymentDate>
+      </acquiredInfo>
+    </securitiesToBeSold>
+    <securitiesSoldInPast3Months>
+      <securitiesSoldDetails>
+        <sellerName>SYNTHETIC TESTPERSON B</sellerName>
+        <noOfUnitsSold>10,000</noOfUnitsSold>
+      </securitiesSoldDetails>
+    </securitiesSoldInPast3Months>
+  </formData>
+</edgarSubmission>

@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterator
 
 from .cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
 from .claim_retirement import REASON_LABELS as CLAIM_REASON_LABELS
+from .coverage_mission import STAGE_REOPENED
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory, retired_claim_refs
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .store import content_hash
@@ -173,12 +174,14 @@ REGISTRY_LANE_LABELS = {
     "mission_market_prices": "取每日股价",
     "mission_tracking": "每天盯着已覆盖的公司",
     "mission_catalyst_calendar": "记下公司下次开口的日子",
+    "mission_consensus": "看街上预期什么",
     "company_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
     "claim_index": "给结论建索引",
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",
     "event_judgement": "判断新发生的事要不要动",
+    "earnings_season": "业绩前写前瞻、业绩后对账",
     "debate_map": "整理市场在吵什么、我们站哪边",
     "mission_crowd_sources": "看散户与员工在说什么",
     "mission_stage": "记录研究阶段",
@@ -189,6 +192,8 @@ REGISTRY_LANE_LABELS = {
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
+    "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",
+    "mission_ownership": "看谁在买卖这家公司",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
 }
@@ -292,6 +297,42 @@ CHECKPOINT_TABLES = {
     "gate_reopen": ("gate_reopen_proposals", "proposal_id",
                     "gate_reopen_decisions", "proposal_ref"),
 }
+# P12d: the three words the gate authority accepts, so a button cannot offer
+# something the writer would refuse.
+GATE_ACTIONS = (
+    {"decision": "approve", "label": "通过"},
+    {"decision": "return_for_more_work", "label": "退回补充"},
+    {"decision": "reject", "label": "否决"},
+)
+
+
+def _gate_answer_line(item: Mapping[str, Any]) -> str:
+    """One gate answer as one line of text, for the details renderer."""
+
+    from .deep_insight_gate import answer_body
+
+    head = str(item["question"])
+    if item["status"] == "answered":
+        refs = len(item["sources"])
+        return (f"{head} —— {answer_body(item)}"
+                f"（把握 {item['confidence']}，{refs} 条引用）")
+    unknown = item["unknown"]
+    return (f"{head} —— 未答：{unknown['missing']}。"
+            f"能定它的证据：{unknown['evidence_that_would_answer']}")
+
+
+def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Whether the stage ladder would accept this gate's decision today.
+
+    One predicate, shared with the writer operation behind the button, so the
+    page and the door can never disagree about whether it opens.
+    """
+
+    from .deep_insight_gate import decidability
+
+    return decidability(core, record)
+
+
 CHECKPOINT_TITLES = {
     "thesis_revision_candidate": "有事情发生，可能要改我们对这家公司的判断",
     "gate_reopen": "一道已经过掉的闸，现在有证据说可以重开",
@@ -336,8 +377,10 @@ MAX_CLAIMS_IN_VIEW = 300
 
 JOB_TTL_SECONDS = 6 * 3600
 MAX_JOBS = 200
-MAX_CLAIMS_IN_PROMPT = 400
-MAX_PROMPT_CHARS = 90_000
+# P15a moved the answer's own bounds into ``ask_context`` (the byte budget and
+# the claim-row cap live with the priority order that spends them).  These two
+# stay as the names other readers import.
+from .ask_context import DEFAULT_BUDGET_CHARS as MAX_PROMPT_CHARS, MAX_CLAIM_ROWS as MAX_CLAIMS_IN_PROMPT
 
 
 def _ticket_still_running(ticket: Mapping[str, Any]) -> bool:
@@ -1725,12 +1768,39 @@ class CockpitPlane:
     def _stage_rows(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
         """P10a:每家公司的阶段与资料底座清单，全部从任务自己的表里数出来。"""
 
+        # P14-S: every version of this mission_ref, in time order. Scoped to
+        # the active version, the whole page reset itself on every publish --
+        # live, v7..v13 each hold their own copy of the same five ``entered``
+        # rows, and only v13 holds the four ``gate_passed``.
+        #
+        # P14d sequel: the reopen markers fold in beside the records, in one
+        # time order. Without them a company whose passed screen a person has
+        # re-opened would read "已通过" on this page while the lane was
+        # drafting its replacement -- the one state the page exists to show.
         state: dict[str, dict[str, list[str]]] = {}
-        for row in self._rows(core,
-            "SELECT company_ref, stage_ref, status FROM coverage_mission_stage_records "
-            "WHERE mission_version_ref=? ORDER BY created_at", (mission["id"],),
-        ):
-            state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(row["status"])
+        ordered = [
+            (row["created_at"], row["record_id"], row["company_ref"], row["stage_ref"],
+             row["status"])
+            for row in self._rows(core,
+                "SELECT company_ref, stage_ref, status, created_at, record_id "
+                "FROM coverage_mission_stage_records "
+                "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
+                "coverage_mission_versions WHERE mission_ref=?)",
+                (mission["mission_ref"],),
+            )
+        ] + [
+            (row["created_at"], row["record_id"], row["company_ref"], row["stage_ref"],
+             STAGE_REOPENED)
+            for row in self._rows(core,
+                "SELECT company_ref, stage_ref, created_at, record_id "
+                "FROM coverage_mission_stage_reopens "
+                "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
+                "coverage_mission_versions WHERE mission_ref=?)",
+                (mission["mission_ref"],),
+            )
+        ]
+        for _at, _id, company_ref, stage_ref, status in sorted(ordered):
+            state.setdefault(company_ref, {}).setdefault(stage_ref, []).append(status)
         specs = planned_spec_refs_from_directory(self.config.state_dir / "discovery-plans")
         return evaluate_mission(core, mission, planned_specs=specs, stage_state=state)
 
@@ -1776,14 +1846,23 @@ class CockpitPlane:
             # record, not in a column. Selecting it as one made this whole page
             # raise "no such column: rationale" the first time a deliverable
             # existed to open -- which is why nothing had noticed.
+            # P14-S: the history of this company's screen across every
+            # version of the mission, with the version each entry was written
+            # under carried as provenance -- that is what makes the list
+            # readable as a history rather than as a fragment of one.
             stage = [
                 {"status": row["status"],
                  "rationale": json.loads(row["record_json"]).get("rationale"),
-                 "at": row["created_at"]}
+                 "at": row["created_at"],
+                 "mission_version_ref": row["mission_version_ref"]}
                 for row in self._rows(core,
-                    "SELECT status, record_json, created_at FROM coverage_mission_stage_records "
-                    "WHERE mission_version_ref=? AND company_ref=? AND stage_ref='initial_screen' "
-                    "ORDER BY created_at", (record["mission_version_ref"], record["subject_ref"]))
+                    "SELECT status, record_json, created_at, mission_version_ref "
+                    "FROM coverage_mission_stage_records WHERE mission_version_ref IN "
+                    "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref="
+                    "(SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?)) "
+                    "AND company_ref=? AND stage_ref='initial_screen' "
+                    "ORDER BY created_at, record_id",
+                    (record["mission_version_ref"], record["subject_ref"]))
             ]
             claims = {claim["ref"]: claim for claim in self._claims(core)}
             quality = self._quality(core).get(ref)
@@ -2294,6 +2373,54 @@ class CockpitPlane:
                     "actions": [{"decision": "keep_forecast", "label": "维持预测"}, {"decision": "revise_forecast", "label": "修订预测"}],
                     "needs_rationale": True,
                 })
+            # P12d: the Deep Insight Gate's twelve answers, waiting for you.
+            # It is the Playbook's own human checkpoint between a first screen
+            # and full coverage, and automation never passes it: approving is
+            # what writes the ``gate_passed`` stage record and lets the company
+            # go on. The answers travel with the item because a gate you have to
+            # open another view to read is a gate you decide without reading.
+            #
+            # Whether it gets buttons is read off the Core, the same way the
+            # revision checkpoints above do it: the mission stage ledger is
+            # scoped by version and the live mission rolls, so a draft can stop
+            # being decidable without anybody touching it. It still appears --
+            # it is still what the owner has to deal with -- and it says why,
+            # because a button that goes nowhere is worse than an item that
+            # says so.
+            for row in self._rows(core,
+                "SELECT v.* FROM deep_insight_gate_versions v "
+                "LEFT JOIN deep_insight_gate_decisions d "
+                "ON d.gate_version_ref=v.version_id "
+                "WHERE d.decision_id IS NULL ORDER BY v.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                verdict = _gate_decidability(core, record)
+                answered = [item for item in record["answers"]
+                            if item["status"] == "answered"]
+                items.append({
+                    "kind": "deep_insight_gate", "ref": row["version_id"],
+                    "hash": row["content_hash"], "at": row["created_at"],
+                    "title": "深度认知门十二问：是否让这家公司进入完整覆盖",
+                    "who": self._label(members, row["company_ref"]),
+                    "summary": (f"第 {row['version_number']} 版；十二问答了 "
+                                f"{len(answered)} 问，其余写明缺什么、下一步取什么。"),
+                    # One string per question, keyed by its number. The details
+                    # renderer joins an array with 、 and stringifies an object,
+                    # so a list of twelve answer objects would arrive as twelve
+                    # "[object Object]" run together -- the page has one shape
+                    # for a value and it is a line of text.
+                    "details": {
+                        "行业分类": record["classification"],
+                        **{item["question_ref"]: _gate_answer_line(item)
+                           for item in record["answers"]},
+                        "档案版本": record["bindings"]["dossier_version_ref"],
+                        "争议图版本": record["bindings"]["debate_map_version_ref"],
+                    },
+                    "actions": list(GATE_ACTIONS) if verdict["decidable"] else [],
+                    "needs_rationale": verdict["decidable"],
+                    **({} if verdict["decidable"]
+                       else {"note": "暂时不能裁决：" + verdict["reason"]}),
+                })
         with self._core() as core:
             # P10b: a Claim the detectors flagged, waiting for you to retire or keep it.
             for row in self._rows(core,
@@ -2514,6 +2641,17 @@ class CockpitPlane:
                 "challenge_ref": ref, "challenge_hash": digest, "decision": decision,
                 "rationale": rationale.strip() or ("你确认退役这条结论" if decision == "retired" else "你确认保留这条结论")}
             title = ("退役了一条结论" if decision == "retired" else "保留了一条被标记的结论")
+        elif kind == "deep_insight_gate":
+            if decision not in {"approve", "return_for_more_work", "reject"}:
+                raise CockpitError(
+                    "decision must be approve, return_for_more_work or reject")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_deep_insight_gate", {
+                "gate_version_ref": ref, "gate_version_hash": digest,
+                "decision": decision, "reason": rationale.strip()}
+            title = {"approve": "通过了深度认知门", "return_for_more_work": "把深度认知门退回补充",
+                     "reject": "否决了深度认知门"}[decision] + f"：{ref.split(':', 1)[-1]}"
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")
@@ -3030,9 +3168,15 @@ class CockpitPlane:
     def ask(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         question = _text(value.get("question"), "question", maximum=2000)
         request_id = _text(value.get("request_id"), "request_id", maximum=128)
+        # P15a: the owner asking for the one bounded look is a second click,
+        # never a default.  A panel that searched whenever the model said it
+        # would like to would spend the mission's connector quota on curiosity.
+        refresh = bool(value.get("refresh"))
         model = self._model_instance()
-        return self._start_job("ask", login, {"question": question, "request_id": request_id},
-                               lambda: self._answer(model, login, question, request_id))
+        return self._start_job("ask", login, {"question": question, "request_id": request_id,
+                                              "refresh": refresh},
+                               lambda: self._answer(model, login, question, request_id,
+                                                    refresh=refresh))
 
     def _indexed_claims(self, core: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The answer context, read through P12b's index.
@@ -3054,107 +3198,286 @@ class CockpitPlane:
 
         return annotate_with_index(core, rows, ref_key="ref")
 
-    def _answer(self, model: CockpitModel, login: str, question: str, request_id: str) -> dict[str, Any]:
+    def _answer_policy(self, core: Any, company_ref: str | None) -> dict[str, Any]:
+        """The live answer-sufficiency policy, as the router itself reads it.
+
+        Not re-implemented here.  ``answer_routing.active_policy_for_company``
+        is the router's own projection lifted to a module function: it resolves
+        the active mandate, checks the pointer hash, checks that the policy was
+        written against *this* version of the mandate, and checks the effective
+        window.  An earlier draft of this method asked only "is there a pointer
+        row", which would have let a question spend the mission's connector
+        quota under a policy the owner had already superseded.
+        """
+
+        from .answer_routing import active_policy_for_company
+
+        return active_policy_for_company(
+            core, company_ref, as_of=_iso(self.clock()))
+
+    def _already_refreshed(self, request_id: str) -> bool:
+        """Whether this exact question has already spent its one look."""
+
+        rows = self.journal.rows(
+            "SELECT refs_json FROM cockpit_events WHERE kind='refresh'")
+        return any(json.loads(row["refs_json"]).get("request_id") == request_id
+                   for row in rows)
+
+    def _answer(self, model: CockpitModel, login: str, question: str, request_id: str,
+                *, refresh: bool = False) -> dict[str, Any]:
+        from . import ask_answer, ask_context, ask_refresh
+
+        today = _iso(self.clock())[:10]
         with self._core() as core:
             mission = self._mission(core)
             everything = self._claims(core)
             claims = self._indexed_claims(core, everything)
-            theses = [json.loads(r["content_json"]) for r in core.execute("SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
+            theses = [json.loads(r["content_json"]) for r in core.execute(
+                "SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
             journal_enabled = _table_exists(core, "analyst_journal_entries")
-        members = self._members(mission)
-        selected = self._select_claims(question, claims, members)
-        prompt = self._ask_prompt(question, mission, members, selected, theses)
+            members = self._members(mission)
+            context = ask_context.build_context(
+                core, question=question, mission=mission, members=members,
+                claims=claims, theses=theses, company_names=COMPANY_NAMES,
+                label=lambda ref: self._label(members, ref),
+                today=today,
+                duplicates_dropped=len(everything) - len(claims),
+            )
+            # The policy governs a company, so it is read after the question's
+            # subjects are resolved rather than before.
+            named = list(context["subjects"]["companies"])
+            policy_state = self._answer_policy(core, named[0] if named else None)
+            specs = ask_refresh.known_specs(core, mission["mission_ref"])
+            pool = ask_refresh.pool_balance(core, mission, day=today)
+        prompt = ask_answer.build_prompt(context, mission=mission)
         call = model.call(purpose="ask", request_id=request_id, prompt=prompt, mission=mission)
-        parsed = unwrap_json_object(call["text"]) or {}
-        answer = parsed.get("answer") if isinstance(parsed.get("answer"), str) else call["text"].strip()
-        cited: list[dict[str, Any]] = []
-        raw_refs = parsed.get("citations") if isinstance(parsed.get("citations"), list) else []
-        index = {f"C{i + 1}": c for i, c in enumerate(selected)}
-        for item in raw_refs:
-            claim = index.get(str(item).strip())
-            if claim is not None and claim not in cited:
-                cited.append({"tag": str(item).strip(), "statement": claim["statement"], "company": self._label(members, claim["subject_ref"]),
-                              "period": claim["period"], "at": claim["created_at"], "ref": claim["ref"]})
-        gaps = [str(g) for g in parsed.get("gaps", [])] if isinstance(parsed.get("gaps"), list) else []
-        confidence = parsed.get("confidence") if parsed.get("confidence") in {"high", "medium", "low"} else None
-        result = {"question": question, "answer": answer, "citations": cited, "gaps": gaps, "confidence": confidence,
-                  "claims_considered": len(selected), "claims_total": len(everything),
-                  # How many copies of a fact the index took out before the
-                  # model saw them. Shown because "we read 400 conclusions"
-                  # and "we read 400 conclusions, 90 of them the same fact
-                  # three times" are different statements about an answer.
-                  "duplicates_dropped": len(everything) - len(claims),
-                  "cost_usd": round(call["cost_micros"] / 1_000_000, 4),
-                  "replayed": call["replayed"], "answered_at": _iso(self.clock())}
+        answer = ask_answer.parse_answer(unwrap_json_object(call["text"]) or {}, context=context)
+        cost_micros = call["cost_micros"]
+        replayed = call["replayed"]
+
+        plan = ask_refresh.plan_refresh(
+            answer, context, mission=mission,
+            policy=policy_state["policy"] if policy_state["state"] == "active" else None,
+            specs=specs, pool=pool,
+            already_refreshed=self._already_refreshed(request_id))
+        outcome: dict[str, Any] | None = None
+        if refresh and plan["available"]:
+            outcome = ask_refresh.run_refresh(
+                plan,
+                start=lambda **params: self._start_discovery(login, **params),
+                status=lambda ticket_ref: self._discovery_status(login, ticket_ref),
+                documents=lambda discovery_ref: self._discovered_by(
+                    mission["mission_ref"], discovery_ref))
+            self.journal.record_event(
+                kind="refresh",
+                title=f"为回答你的问题补搜了一次：{plan['suggestion']['source']}",
+                detail=outcome["status_label"], login=login,
+                refs={"request_id": request_id, "status": outcome["status"],
+                      "ticket_ref": outcome["ticket_ref"], **outcome["operation"]})
+            plan = {**plan, "available": False, "reasons": ["already_refreshed"],
+                    "reason_labels": [ask_refresh.GRANT_LABELS["already_refreshed"]]}
+            if outcome["headers"]:
+                # The second and last call.  A new request id, because it is a
+                # different prompt and the scheduler is content-addressed on
+                # it; the same day ledger, because it is the same mission's
+                # money. Nothing found means nothing new to read, so the first
+                # answer stands and the owner is told the search came back
+                # empty rather than charged for a second identical call.
+                again = ask_refresh.with_headers(context, outcome["headers"])
+                second = model.call(purpose="ask", request_id=f"{request_id}:refresh",
+                                    prompt=ask_answer.build_prompt(again, mission=mission),
+                                    mission=mission)
+                answer = ask_answer.parse_answer(
+                    unwrap_json_object(second["text"]) or {}, context=again)
+                context = again
+                cost_micros += second["cost_micros"]
+                replayed = replayed and second["replayed"]
+
+        shown = [dict(row) for row in context["shown"]]
+        result = {
+            "question": question,
+            "answer": answer["answer"],
+            "sentences": answer["sentences"],
+            # The page's existing citation card reads ``statement``,
+            # ``company``, ``period`` and ``at``; those four keep their names
+            # so that an answer citing a valuation row renders in the card
+            # that already exists. ``block`` and ``block_label`` are what let
+            # it say which kind of thing was cited.
+            "citations": [{
+                "tag": row["tag"], "statement": row["statement"], "ref": row["ref"],
+                "period": row["period"], "company": row.get("company") or "",
+                "at": row.get("at") or "", "block": row["block"],
+                "block_label": ask_context.BLOCK_LABELS[row["block"]],
+            } for row in answer["citations"]],
+            "gaps": answer["gaps"],
+            "unknowns": answer["unknowns"],
+            "confidence": answer["confidence"],
+            "refused": answer["refused"],
+            "refusal_reason": answer["refusal_reason"],
+            "refusal_label": answer["refusal_label"],
+            "refusal_detail": answer["refusal_detail"],
+            "market_vs_us": answer["market_vs_us"],
+            "verification": answer["verification"],
+            "context": {
+                "question_kind": context["question_kind"],
+                "wants_market_vs_us": context["wants_market_vs_us"],
+                "companies": context["companies"],
+                "blocks": [{"block": b["block"], "label": b["label"],
+                            "available": b["available"], "reason": b["reason"],
+                            "rows": len(b["rows"])} for b in context["blocks"]],
+                "missing": context["missing"],
+                "context_hash": context["context_hash"],
+                "budget_chars": context["budget_chars"],
+                "spent_chars": context["spent_chars"],
+            },
+            # Why the answer policy did or did not govern this question, in the
+            # router's own three words. A refresh shut because the policy is
+            # ``stale`` is a different fix from one shut because there is none.
+            "answer_policy": {"state": policy_state["state"],
+                              "reason": policy_state["reason"],
+                              "mandate_ref": policy_state["mandate_ref"]},
+            "refresh": {
+                "available": plan["available"],
+                "reasons": plan["reasons"], "reason_labels": plan["reason_labels"],
+                "suggestion": plan["suggestion"],
+                # True whenever a search actually ran, including the run that
+                # found nothing: "we looked and there was nothing" is not the
+                # same answer as "we did not look".
+                "ran": bool(outcome and outcome["ran"]),
+                "status": None if outcome is None else outcome["status"],
+                "status_label": None if outcome is None else outcome["status_label"],
+                "ticket_ref": None if outcome is None else outcome["ticket_ref"],
+                "discovery_ref": None if outcome is None else outcome["discovery_ref"],
+            },
+            "refreshed_with": [] if outcome is None else outcome["headers"],
+            "refresh_note": None if outcome is None else outcome["note"],
+            "claims_considered": context["claims_considered"],
+            "claims_total": len(everything),
+            # How many copies of a fact the index took out before the
+            # model saw them. Shown because "we read 400 conclusions"
+            # and "we read 400 conclusions, 90 of them the same fact
+            # three times" are different statements about an answer.
+            "duplicates_dropped": len(everything) - len(claims),
+            "cost_usd": round(cost_micros / 1_000_000, 4),
+            "replayed": replayed, "answered_at": _iso(self.clock()),
+        }
         # Q1: the answer is a cockpit artifact with no Core record, so the
         # thing a verdict binds to is a hash of what was said and what it
         # cited. Keyed on the request rather than the job, so feedback on a
         # replayed answer lands on the same answer instead of splitting.
-        from .research_quality_score import artefact_from_ask_answer
+        from .research_quality_rubrics import rubric as get_rubric
+        from .research_quality_score import artefact_from_ask_answer, run_deterministic
 
         artefact = artefact_from_ask_answer(
-            result, shown_claims=[{**claim, "tag": f"C{i + 1}"}
-                                  for i, claim in enumerate(selected)],
-            ref=f"cockpit-ask:{request_id}")
+            result, shown_claims=shown, ref=f"cockpit-ask:{request_id}")
         result["feedback"] = {"target_ref": artefact["ref"], "target_hash": artefact["hash"],
                               "target_kind": "ask_answer", "enabled": journal_enabled}
-        self.journal.record_event(kind="question", title=f"你问了：{question[:120]}", detail=answer[:300], login=login,
-                                  refs={"job_kind": "ask", "request_id": request_id, "work_order_ref": call["work_order_ref"]})
+        # P15a: Q1's deterministic layer runs on every answer, not only on the
+        # ones somebody later thinks to grade, and its result rides with the
+        # answer. It is a cockpit artefact like the answer: nothing is recorded
+        # to the Core, and no score authority is touched from this process.
+        rubric = get_rubric("ask_answer")
+        result["quality"] = {
+            "rubric_ref": rubric.rubric_ref, "rubric": rubric.title,
+            "recorded": False,
+            **run_deterministic(artefact, rubric),
+        }
+        self.journal.record_event(kind="question", title=f"你问了：{question[:120]}",
+                                  detail=answer["answer"][:300], login=login,
+                                  refs={"job_kind": "ask", "request_id": request_id,
+                                        "work_order_ref": call["work_order_ref"]})
         return result
 
-    @staticmethod
-    def _select_claims(question: str, claims: list[dict[str, Any]], members: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-        lowered = question.lower()
-        words = set(re.findall(r"[a-z]+", lowered))
-        mentioned = {ref for ref, m in members.items()
-                     if m["ticker"].lower() in words
-                     or (m["ticker"] in COMPANY_NAMES and COMPANY_NAMES[m["ticker"]].lower() in lowered)}
-        pool = [c for c in claims if c["subject_ref"] in mentioned] if mentioned else list(claims)
-        if mentioned and len(pool) < 20:
-            pool = pool + [c for c in claims if c["subject_ref"] not in mentioned]
-        pool = pool[-MAX_CLAIMS_IN_PROMPT:]
-        budget, chosen = MAX_PROMPT_CHARS, []
-        for claim in reversed(pool):
-            cost = len(claim["statement"]) + 80
-            if budget - cost < 0:
-                break
-            budget -= cost
-            chosen.append(claim)
-        chosen.reverse()
-        return chosen
+    # -- the one bounded look, through the writer -------------------------------------------
 
-    def _ask_prompt(self, question: str, mission: Mapping[str, Any], members: Mapping[str, Mapping[str, Any]],
-                    claims: list[dict[str, Any]], theses: list[Mapping[str, Any]]) -> str:
-        lines = [
-            "You are the research assistant of an equity research system. Answer the owner's question using ONLY the",
-            "formal Claims and Theses listed below. Every Claim carries a tag like C12; cite the tags you rely on.",
-            "If the Claims do not answer the question, say so plainly and list what is missing. Never invent facts,",
-            "numbers or sources. Answer in the same language as the question (Chinese if the question is Chinese).",
-            "Return raw JSON only, no markdown fence, with this exact shape:",
-            '{"answer": "<answer text, may use short paragraphs and - bullets>", "citations": ["C1", "C7"],',
-            ' "confidence": "high|medium|low", "gaps": ["<what the Ledger lacks to answer better>"]}',
-            "",
-            f"Research goal: {mission['title']} — {mission['objective']}",
-            "Standing research questions: " + " | ".join(mission["research_questions"]),
-            "Companies: " + ", ".join(f"{m['ticker']} ({COMPANY_NAMES.get(m['ticker'], '')})" for m in members.values()),
-            "",
-        ]
-        if theses:
-            lines.append("Theses:")
-            for thesis in theses:
-                lines.append(f"- [{thesis.get('confidence')}] {thesis.get('thesis_ref') or thesis.get('id')}: "
-                             f"{thesis.get('summary') or thesis.get('statement') or thesis.get('change_reason')}")
-            lines.append("")
-        lines.append(f"Claims ({len(claims)}), oldest first:")
-        for i, claim in enumerate(claims):
-            who = members.get(claim["subject_ref"], {}).get("ticker") or claim["subject_ref"].split(":", 1)[-1]
-            value = "" if claim["value"] is None else f" value={claim['value']} {claim['unit'] or ''}".rstrip()
-            # P12b: the evidence tier travels with the claim, so a filing and
-            # a news story about the same quarter are not weighed the same.
-            tier = f"; {claim['importance']}" if claim.get("importance") else ""
-            lines.append(f"C{i + 1} [{who}; {claim['period']}; {claim['created_at'][:10]}{tier}]{value} {claim['statement']}")
-        lines += ["", f"Question: {question}"]
-        return "\n".join(lines)
+    def _start_discovery(self, login: str, *, company_ref: str, source_ref: str,
+                         spec_ref: str) -> dict[str, Any]:
+        """Spawn one governed discovery, as the owner themselves.
+
+        The cockpit process holds no Core write handle (ADR-0006) and no
+        connector credential; this is the same governance path every other
+        cockpit write takes, under the owner's own Tailscale-derived principal,
+        and the writer re-derives the mission grant before a byte moves. A
+        human requester is also what lets a ``probe_only`` source be searched,
+        which is how the owner rehearses a connector.
+        """
+
+        actor = _subject_for_login(login)
+        return self._discovery_call(
+            actor, "run_mission_source_discovery",
+            {"company_ref": company_ref, "source_ref": source_ref,
+             "spec_ref": spec_ref, "requested_by": actor})
+
+    def _discovery_status(self, login: str, ticket_ref: str) -> dict[str, Any]:
+        return self._discovery_call(
+            _subject_for_login(login), "mission_source_discovery_status",
+            {"ticket_ref": ticket_ref})
+
+    def _discovery_call(self, actor: str, operation: str,
+                        params: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            result = self.governance_call(
+                self.token_config, self.writer_socket, actor_ref=actor,
+                operation=operation, params=dict(params))
+        except (GovernanceCliError, RemoteError) as exc:
+            raise CockpitConflict(f"这次补搜没有跑成：{_reason(exc)}") from exc
+        return dict(result) if isinstance(result, Mapping) else {}
+
+    def _discovered_by(self, mission_ref: str, discovery_ref: str) -> list[dict[str, Any]]:
+        """Exactly the documents one discovery recorded, newest search first.
+
+        Read from the discovery record's own ``document_refs`` rather than from
+        "this company's documents": the second cannot tell what this search
+        returned from what was already in the ledger, and an answer that showed
+        the difference as "just fetched" would be lying in the most convincing
+        possible way. Scoped by ``mission_ref`` rather than by the active
+        mission version, because publishing a version must not hide the rows
+        the previous one discovered.
+        """
+
+        with self._core() as core:
+            if not _table_exists(core, "coverage_mission_source_discoveries"):
+                return []
+            row = core.execute(
+                "SELECT d.record_json AS record_json FROM "
+                "coverage_mission_source_discoveries d "
+                "JOIN coverage_mission_versions v "
+                "ON v.mission_version_id=d.mission_version_ref "
+                "WHERE d.record_id=? AND v.mission_ref=?",
+                (discovery_ref, mission_ref),
+            ).fetchone()
+            if row is None:
+                return []
+            record = json.loads(row["record_json"])
+            refs = [str(ref) for ref in record.get("document_refs") or ()]
+            fresh = {str(ref) for ref in record.get("new_document_refs") or ()}
+            if not refs:
+                return []
+            marks = ",".join("?" for _ in refs)
+            rows = {}
+            if _table_exists(core, "coverage_mission_discovered_documents"):
+                for item in core.execute(
+                    f"SELECT document_ref, source_ref, host, status, created_at "
+                    f"FROM coverage_mission_discovered_documents "
+                    f"WHERE discovery_ref=? AND document_ref IN ({marks})",
+                    (discovery_ref, *refs),
+                ).fetchall():
+                    rows[item["document_ref"]] = dict(item)
+        titles = self._url_map()
+        out = []
+        for ref in refs:
+            stored = rows.get(ref, {})
+            known = titles.get(ref) or {}
+            out.append({
+                "document_ref": ref,
+                "source_ref": stored.get("source_ref") or record.get("source_ref"),
+                "host": stored.get("host") or known.get("host"),
+                "title": known.get("title"),
+                "status": stored.get("status") or "discovered",
+                "created_at": stored.get("created_at"),
+                "new": ref in fresh,
+            })
+        return out
 
     # -- goal and steering drafts ---------------------------------------------------------------
 

@@ -214,6 +214,96 @@ class PoolTests(ResearchTaskFixture):
         self.assertEqual(entries[1]["reason"], "pool_exhausted")
         self.assertEqual(entries[1]["pool"]["cap_micros"], 1_250_000)
 
+    def _ledger_spend(self, micros: int, *, day: str, pool: str = "adhoc",
+                      settle: int | None = None) -> Path:
+        """One planner call booked into the mission day ledger, as C2b books it."""
+
+        from dalton_core.budget_pools import mission_pool_scope
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        path = self.state_dir / "thesis-impact-budget.sqlite"
+        policy = "thesis-impact-day-budget-policy:p14e-test:1"
+        # Held open for the length of the test, because that is the only state
+        # the reading is defined in: the ledger is WAL, and C2's read-only
+        # helper refuses a database with no sidecars.  In the deployment the
+        # writer holds it open and this lane reads beside it.
+        ledger = getattr(self, "_ledger", None)
+        if ledger is None:
+            ledger = ThesisImpactBudgetStore(path)
+            self.addCleanup(ledger.close)
+            self._ledger = ledger
+        ledger.register_policy(
+            policy_version_id=policy, day_cap_micros=100_000_000)
+        admitted = ledger.admit(
+            policy_version_id=policy, day=day,
+            work_order_ref=f"work:llm-research-planner-{pool}-{micros}",
+            attempt_number=1, phase="assessment",
+            route_decision_ref="route:planner:1", reserved_micros=micros,
+            mission_binding={
+                "mission_ref": self.mission["mission_ref"],
+                "mission_version_ref": self.mission["id"],
+                "mission_version_hash": self.mission["content_hash"],
+                "max_daily_paid_calls": 100,
+                "max_daily_cost_micros": 100_000_000,
+                **mission_pool_scope(
+                    self.mission, pool=pool, lane="llm_planner_execute"),
+            },
+        )
+        if settle is not None:
+            ledger.settle(admitted["admission_id"], actual_micros=settle)
+        return path
+
+    def test_the_pool_is_read_net_of_what_the_planner_already_spent(self) -> None:
+        # P14e left this open: the pool was a reservation and only a
+        # reservation, because the planner's model calls -- the thing the
+        # reservation was for -- never reached the ledger. C2b admits them, so
+        # there is finally a settled number to subtract.
+        day = datetime.now(timezone.utc).date().isoformat()
+        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        plan = self.record_plan([wire])
+        self.admit(plan, self.admissions(plan)[0], wire)
+        budget_db = self._ledger_spend(500_000, day=day, settle=300_000)
+
+        state = rt.pool_state(
+            self.authority, self.mission, day=day, budget_db=budget_db)
+        self.assertEqual(state["cap_micros"], 1_250_000)
+        self.assertEqual(state["reserved_micros"], 1_000_000)
+        # What the call actually cost, not what it reserved.
+        self.assertEqual(state["settled_micros"], 300_000)
+        # Reserved and settled overlap wherever a task admitted today has
+        # already made a call, so subtracting both double counts the overlap.
+        # That is deliberate: of the two available errors, only admitting
+        # against a cap that has already been spent can cross the owner's
+        # boundary. Over-committed reads as nothing left, never as negative.
+        self.assertEqual(state["remaining_micros"], 0)
+
+    def test_a_call_still_open_is_counted_at_what_it_reserved(self) -> None:
+        day = datetime.now(timezone.utc).date().isoformat()
+        budget_db = self._ledger_spend(400_000, day=day)
+        state = rt.pool_state(
+            self.authority, self.mission, day=day, budget_db=budget_db)
+        self.assertEqual(state["settled_micros"], 400_000)
+
+    def test_another_pools_spending_is_not_this_pools_business(self) -> None:
+        day = datetime.now(timezone.utc).date().isoformat()
+        budget_db = self._ledger_spend(
+            900_000, day=day, pool="coverage", settle=900_000)
+        state = rt.pool_state(
+            self.authority, self.mission, day=day, budget_db=budget_db)
+        self.assertEqual(state["settled_micros"], 0)
+        self.assertEqual(state["remaining_micros"], 1_250_000)
+
+    def test_without_a_ledger_the_reading_is_the_one_p14e_shipped(self) -> None:
+        # An installation whose planner is still unbudgeted must not be told it
+        # has spent money nobody can find.
+        day = datetime.now(timezone.utc).date().isoformat()
+        absent = rt.pool_state(
+            self.authority, self.mission, day=day,
+            budget_db=self.state_dir / "not-installed.sqlite")
+        self.assertEqual(absent["settled_micros"], 0)
+        self.assertEqual(
+            absent, rt.pool_state(self.authority, self.mission, day=day))
+
     def test_yesterdays_tasks_do_not_spend_todays_pool(self) -> None:
         wire = inquiry(question="Do ACN's margin definitions reconcile?")
         plan = self.record_plan([wire])

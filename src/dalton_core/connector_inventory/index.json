@@ -1,5 +1,5 @@
 {
-  "content_hash": "72e9c99d08588aebc6f8ac1ab01442dab87c2e289d37ddc285f825706c66b54b",
+  "content_hash": "59a689aa7590c76901062078770b6139abcde3d028e179e40b151713a579fd61",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -14,11 +14,11 @@
     },
     {
       "connector_ref": "connector:sec-edgar",
-      "fixture_manifest_hash": "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
+      "fixture_manifest_hash": "2990cae1c02494c1742fe70e4c4c664280880ba3c4540dc4a885a9ea57cb3456",
       "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
-      "profile_template_hash": "c52642b31ee9625f9cc34ffd6dd3c56236761e6ca274485e30046b0d9fb4b063",
+      "profile_template_hash": "72c49020093cea5dbd900c5731e1feeaf6fb20a9487b37a55040ff96ad68ceaa",
       "profile_template_ref": "connector-profile-template:sec:0.1",
-      "proposal_manifest_hash": "bb89a5225dbaf9a0ed28435cbb2407287d64e232483e206361f345904bc2f05a",
+      "proposal_manifest_hash": "45de0cf3b5dcce6e858bb54cce83d9aab88692955d57371343d876f2a3ffe9fe",
       "proposal_manifest_ref": "connector-proposal-manifest:sec:0.2"
     },
     {
@@ -182,6 +182,15 @@
       "profile_template_ref": "connector-profile-template:prior-research:0.1",
       "proposal_manifest_hash": "22962739e752deb52e4ffe6009a781cc035378b0feb2cf71b4e9460445a1cd41",
       "proposal_manifest_ref": "connector-proposal-manifest:prior-research:0.2"
+    },
+    {
+      "connector_ref": "connector:ir-page-watch",
+      "fixture_manifest_hash": "53361b152eb72f8e40c9dd6ae834a2874ebc23ba5ee111314f7c1f0bc11aa426",
+      "fixture_manifest_ref": "connector-fixture-manifest:ir-page-watch:0.1",
+      "profile_template_hash": "39352c0f29ea9892124b5f955ab10be65d2dc114b31993d02613e7ea93994e7c",
+      "profile_template_ref": "connector-profile-template:ir-page-watch:0.1",
+      "proposal_manifest_hash": "7bf64938105965062772b2ab76aa07adff5c290e41b334933e99b333317b3a1b",
+      "proposal_manifest_ref": "connector-proposal-manifest:ir-page-watch:0.2"
     }
   ],
   "schema_version": "0.1"

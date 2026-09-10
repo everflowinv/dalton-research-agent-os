@@ -181,6 +181,19 @@ owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tra
 - **`TrackingCadenceVersion`**（大脑的调配结果，append-only）：company × source → 频率与理由；基线来自 policy，大脑按覆盖厚度与事件密度提出调整，每版带 `because` 与证据 refs。
 - **事件判断 lane**（判断层）：每个未判定事件一次有界模型调用 → 五词决定之一 + 理由 + 映射到 driver / thesis；决定为 `no_change` 也写事件账本；`note` 出一段带 refs 的短报告（异动归因、新闻 implication）；`research` 调 P14e 入口派专项研究；`revise` 调机制层入口（forecast `revise_assumptions`、dossier / thesis 修订候选）——永远是候选，人裁决。独立 verifier 复用 thesis-impact 的 independence predicate。
 
+### 模型选择与自动登记（owner 2026-09-10 提出）
+
+owner：在 cockpit 上可以为各个调用环节选择用哪个模型；模型列表随 openclaw 对外展示的 provider 自动更新、自动登记为 Dalton 可用。
+
+定案（建在模型路由与目录同步之上）：
+1. **按环节选模型**：cockpit「模型」页列出每个 purpose 的当前档位链与最近实际服务的模型；owner 可选「跟随档位」或指定序列
+   （主选 + 回退）；选择经治理 op 以 owner 身份发布成新的 routing policy 版本（append-only，可回滚）；verifier 环节的独立性
+   约束保留——与 producer 同家族的选择被拒绝并说明。
+2. **自动同步 lane**（maintenance 池，每小时）：读 openclaw `models.providers` 与 broker 插件 `allowedModels` / `config.profiles`；
+   新模型自动登记为可用 profile（无 rate card 的标「未定价、只可作回退」）；消失的退役不删除；openclaw 有但 broker 插件未放行的
+   在 cockpit 显示「可用但未放行」，owner 一键放行 = 带备份写 openclaw.json 的 broker 子树 + 提示重载 gateway。
+3. 不自动改 openclaw 的 provider 配置本身。
+
 ### 既有资料的入职处理（owner 2026-09-10 提问，主 agent 定案）
 
 owner：有些公司我们已有资料（以前的 Initial Screen、memo、维护中的 Excel 模型）。Dalton 入职时它们是重要参考、能省时间，
@@ -215,6 +228,13 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 6. 不改 live 状态目录、不部署、不发 mission 版本；测试里用 `p9a_fixtures.mission_params` 就地放宽 `may_write`。
 7. 提交信息沿用 `P1xx: <小写一句话>` 与正文散文，末尾 `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`。
 8. 交付物 = 分支 + `docs/reports/<slug>-v1.0-<date>.md`（做了什么、没做什么、集成时要接的线、验收结果）。
+9. **加一条 lane 或一个 schema 的四处登记**（从 09-10 起测试强制）：`LANE_MODULES` 一行、`cockpit_plane.REGISTRY_LANE_LABELS` 一条中文名、
+   `bootstrap.py` schema 表一行、`scripts/rehearse_deploy.py` 一条 `MigrationSpec`；新治理记录必须在 `install.sh` 里播种或列入
+   `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
+10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
+11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
+12. **自动化冲突解决只允许用于「两边各追加一行」的字典 / 列表 / 元组条目**，且解决后必须先 `python -c "import <module>"`
+    再提交（09-10 一次「两边都保留」把嵌套字面量的闭合括号吃掉，主线无法解析，被 P13-M3 agent 发现）。
 
 ## 5. 主 agent 的集成流程
 
@@ -253,6 +273,13 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 凌晨 | 合并档案 `variant_view` 修复（附「normaliser 输出必须自校验」通用测试）；修订回路两个 schema 补进演练迁移清单。交付在审：S5（SEC 所有权四 op + IR 监视）、ask v2；P15d review 一 blocker（inf/nan 百分比过风险收益标准）已发回并要求补 ADR-0008 版本化 | 进行中 |
 | 09-10 早 | 合并 C1 事件桥接（日历事件真正入 ResearchEvent 账本，payload 合同两侧共享测试）与 INT3（35 条记录 = 32 播种 ∪ 3 明确不播；`sec-filings-index-v1.json` 从合同推导找回；bootstrap 一次开 55 个 schema；演练 27 条 lane 零逃逸）。main 4,213+ 项通过，已 push | 完成 |
 | 09-10 早 | 合并 P15d ConvictionCall（自动化只提案、人裁决；与市场同向不提案；inf/nan 拒绝；提案版本链与 `supersedes_ref`）。在修：P12d、S5、ask v2；在做：stage-ladder、P12e、consensus、P14f、planner 日账本 | 进行中 |
+| 09-10 早 | 第二次用量上限打断 8 个 agent，全部从上下文恢复。规则：每个新 `*_schema.sql` 须同时登记 `bootstrap.py` 与演练迁移清单（测试强制）。P12d 修完合入（在跑全量）；stage-ladder 完成（阶段状态跨 mission 版本折叠；CTSH 折叠为 v9 `gate_failed`）待合；派出既有资料入职（`prior-research`）与重开账本续篇（reopen 后可再次 `gate_passed`） | 进行中 |
+| 09-10 早 | 合并 P12d（4,486 项通过，已 push）；合入 stage-ladder、S5（SEC 所有权 op：13F 读真正的信息表、联名 Form 4 不丢人）、ask v2（补搜只取本次 discovery 的文档；policy 投影复用 authority；adhoc 路由的旧禁令按 owner 解禁去掉）。P14f 在审 | 进行中 |
+| 09-10 上午 | S5 与 ask v2 合入，main `77ffe45`，4,704 项通过，已 push。consensus review：四 blocker（10-K 后年度期映射死区；新旧目标价取错；lane 喂空券商元数据；lane 序号撞 S5），已发回并定案；P14f 三 blocker 在修；planner 日账本在审 | 进行中 |
+| 09-10 上午 | P14f 业绩季合入（4,810 项通过，已 push）。合并时自动解决吃掉一个闭合括号，主线一度无法解析，未 push，10 分钟修复，写成规则 12。reopen-ledger（重开成为阶段账本记录；修了 authority 授权标志按实例而非按连接的地雷）与 P12e 在审；planner 日账本、consensus 在修；P13-M3、prior-research 在做 | 进行中 |
+| 09-10 中午 | reopen-ledger 合入（4,835 项通过，已 push）。合入 planner 日账本（planner 调用进日账本与四池，四处可观测性修复）与 consensus（财年末从「从不交 10-Q 的季度」推导；页首抽取 15 个目标价；两家独立券商规则）。在审：P12e、P13-M3、prior-research；后续：authority 授权标志统一 | 进行中 |
+| 09-10 中午 | planner 日账本合入（4,876 项通过，已 push）；consensus 合入中。P13-M3 review 一 blocker（bridge 单券商可冒充共识）已发回；P12e、prior-research 在修 | 进行中 |
+| 09-10 下午 | consensus 合入（5,045 项通过，已 push）；合入 authority 授权标志统一（19 个 authority 共享按连接的标志；受保护表自动识别）。在修：P12e、prior-research、P13-M3 | 进行中 |
 
 ---
 

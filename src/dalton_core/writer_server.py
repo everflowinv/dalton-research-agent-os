@@ -23,8 +23,10 @@ import stat
 import sys
 import threading
 import traceback
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -411,6 +413,15 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # the authority refuses anything else and the actor is bound here rather
     # than supplied by the caller.
     "record_analyst_journal_entry",
+    # P12d: the Deep Insight Gate is a human checkpoint, and this is the only
+    # door through which it is decided.  ``record_mission_stage`` already covers
+    # the *ladder* half -- and this operation calls it rather than reimplementing
+    # it -- but the ladder has three statuses and no way to bind a decision to
+    # the exact draft the owner read, which is what makes a gate verdict mean
+    # anything.  ``actor_ref`` is replaced by the authenticated principal here
+    # and the authority refuses a non-``human:`` actor a second time.
+    "decide_deep_insight_gate",
+    "deep_insight_gate_draft", "deep_insight_gate_submissions",
     # P15d: the owner answers one conviction call. Automation may write the
     # proposal and may never write the decision, which is the whole of the
     # separation ADR-0007 draws around a thesis and this slice draws around a
@@ -704,6 +715,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "target_ref", "target_hash", "target_kind", "verdict", "company_ref",
         "note", "score_override", "idempotency_key", "actor_ref",
     }),
+    "decide_deep_insight_gate": frozenset({
+        "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
+    }),
+    "deep_insight_gate_draft": frozenset({"version_ref"}),
+    "deep_insight_gate_submissions": frozenset(),
     # P15d. ``proposal_hash`` is required rather than optional: a decision is
     # about the exact bytes it was shown, and a decision that did not name them
     # could be inherited by something else later.
@@ -780,7 +796,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "publish_forecast_line": frozenset({"line_ref", "subject_ref", "metric_or_aspect", "period", "unit", "currency", "value", "value_kind", "scenario_version_ref", "scenario_version_hash", "actor_ref", "rationale", "version_id", "prior_version_ref", "idempotency_key"}),
     "get_forecast_line": frozenset({"version_ref"}),
     "extend_growth_forecast": frozenset({"base_input_version_ref", "growth_input_version_ref", "periods", "line_ref_prefix", "model_run_ref", "idempotency_key"}),
-    "llm_planner_execute": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
+    # C2b: "pool" is the driver naming which of C2's four capacity pools this
+    # loop's model call spends from. Optional, and checked against the pool the
+    # loop record itself implies -- the driver declares, the Core decides.
+    "llm_planner_execute": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds", "pool"}),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -972,6 +991,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
+    "decide_deep_insight_gate": "actor_ref",
     "decide_conviction_call": "actor_ref",
     "decide_thesis_revision_candidate": "actor_ref",
     "decide_gate_reopen": "actor_ref",
@@ -1008,6 +1028,46 @@ def _require_owner_only(path: Path, label: str) -> None:
         raise WriterServerError(f"{label} is unavailable") from exc
     if mode & 0o077:
         raise WriterServerError(f"{label} must be owner-only")
+
+
+def planner_budget_config(state_dir: str | Path) -> dict[str, str]:
+    """The day-ledger wiring for the planner's model calls, if it is installed.
+
+    C2b.  Every Tier-1 bounded planner loop's model call used to bypass the
+    mission day ledger entirely: ``planner_model_config`` carried routing and
+    broker wiring and no ``budget_db``, so the day cap, the mission cap and
+    C2's four capacity pools all applied to everything the system pays for
+    *except* the calls that decide what it works on next.
+
+    The budget wiring is read from the model configuration file
+    ``research_planner_setup`` already writes into the state directory rather
+    than from a new command-line argument.  That file is where the installer
+    records which budget policy version a lane accounts against, and it is
+    already in the set a day-cap raise repoints (``model_configurations``);
+    a second copy passed as an argument would be a second thing to repoint,
+    and the one that was forgotten would be this one.
+
+    Absent, unreadable, or missing either key: an empty mapping, and the
+    planner keeps today's behaviour with the writer reporting ``unbudgeted``
+    in the op result so the gap is visible rather than assumed closed.
+    """
+
+    from .research_planner_setup import CONFIG_FILE_NAME
+
+    target = Path(state_dir).expanduser().resolve() / CONFIG_FILE_NAME
+    try:
+        installed = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(installed, Mapping):
+        return {}
+    budget_db = installed.get("budget_db")
+    policy_ref = installed.get("budget_policy_ref")
+    if not isinstance(budget_db, str) or not isinstance(policy_ref, str):
+        return {}
+    if not budget_db or not policy_ref or not Path(budget_db).is_absolute():
+        return {}
+    return {"budget_db": budget_db, "budget_policy_ref": policy_ref}
 
 
 def load_principals(
@@ -1310,6 +1370,10 @@ class WriterServer:
         self._bounded_planner: BoundedPlannerAuthority | None = None
         self._llm_planner_coordinator_instance: LLMResearchPlannerCoordinator | None = None
         self._planner_model_config: dict[str, Any] | None = planner_model_config
+        # C2b: held open for the writer's lifetime rather than per op. See
+        # _planner_budget_ledger -- a WAL ledger nobody holds has no sidecars,
+        # and the P14e lane reads it between ops, not during one.
+        self._planner_budget: Any | None = None
         self._bounded_control: BoundedPlannerControlPlane | None = None
         self._intent_writer: IntentWriterAuthority | None = None
         self._answer_routing: AnswerRoutingAuthority | None = None
@@ -1791,6 +1855,9 @@ class WriterServer:
         if self._scheduler is not None:
             self._scheduler.close()
             self._scheduler = None
+        if self._planner_budget is not None:
+            self._planner_budget.close()
+            self._planner_budget = None
         self._research_plan = None
         self._backlog = None
         self._bounded_planner = None
@@ -2486,6 +2553,155 @@ class WriterServer:
             raise WriterServerError("analyst-journal authority is unavailable")
         return self._analyst_journal.add(**dict(p))
 
+    def _deep_insight_gates(self) -> Any:
+        """The gate authority, opened on first use.
+
+        Lazily rather than in ``__init__`` because opening it only creates its
+        two tables, and a writer that never sees a gate decision has no reason
+        to carry the object.  The authority is stateless between calls; its
+        write guard is a per-instance flag around one transaction.
+        """
+
+        from .deep_insight_gate import DeepInsightGateAuthority
+
+        return DeepInsightGateAuthority(self.store)
+
+    def _op_decide_deep_insight_gate(self, p: Mapping[str, Any]) -> Any:
+        """P12d: the owner's one verdict on one exact gate draft.
+
+        Two writes, in this order and for this reason.  The mission stage record
+        goes first, through ``CoverageMission.record_stage`` -- the ladder this
+        repository already has, not a second one -- keyed idempotently on the
+        draft and the decision, so a retry after a crash re-derives the same row
+        rather than a second one.  The decision goes second, naming the stage
+        record it produced.  A crash between them leaves a passed stage with no
+        decision, which the next call heals; the opposite order would leave a
+        decided gate whose company never entered the next stage, and nothing
+        would ever notice.
+
+        ``return_for_more_work`` writes no stage record at all: a returned draft
+        is not a failed gate, it is a gate the owner has asked a better question
+        of, and the lane redrafts it when the evidence moves (ADR-0008).
+        """
+
+        from .deep_insight_gate import (
+            DECISION_STAGE_STATUS, DeepInsightGateNotFound, STAGE_REF, decidability,
+        )
+
+        values = dict(p)
+        gate_version_ref = values["gate_version_ref"]
+        decision = values["decision"]
+        actor_ref = values["actor_ref"]
+        gates = self._deep_insight_gates()
+        try:
+            draft = gates.gate(gate_version_ref)
+        except DeepInsightGateNotFound as exc:
+            raise WriterServerError(str(exc)) from exc
+        company_ref = draft["company_ref"]
+        mission_version_ref = (draft.get("bindings") or {}).get("mission_version_ref")
+        stage_record_ref = None
+        status = DECISION_STAGE_STATUS.get(decision)
+        if status is not None:
+            # Asked before anything is written, and by the same predicate the
+            # approvals page uses to decide whether to show the button at all.
+            # The mission stage ledger is scoped by version and the live mission
+            # rolls constantly, so a draft published under version N can become
+            # undecidable without anybody touching it; the owner should not
+            # learn that from a stack trace after clicking.
+            verdict = decidability(self.store.connection, draft)
+            if not verdict["decidable"]:
+                raise WriterServerError(
+                    f"this gate draft cannot be decided right now: {verdict['reason']}"
+                )
+            mission = self.coverage_mission.mission(mission_version_ref)
+            records = self.coverage_mission.stage_records(mission["id"], company_ref)
+            state = {(record["stage_ref"], record["status"]) for record in records}
+            if (STAGE_REF, "entered") not in state:
+                # The gate stage has to be entered before its gate is decided,
+                # and nothing enters it: the drafting lane holds no stage_record
+                # grant, and giving it one would let automation walk the ladder.
+                # The person deciding enters it, in the same breath, under their
+                # own principal.
+                self.coverage_mission.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                    company_ref=company_ref, stage_ref=STAGE_REF, status="entered",
+                    evidence_refs=[gate_version_ref],
+                    rationale="P12d：深度认知门十二问草稿已提交，进入本阶段并由人裁决。",
+                    actor_ref=actor_ref,
+                    idempotency_key=f"deep-insight-gate:{gate_version_ref}:entered",
+                )
+            if (STAGE_REF, status) in state:
+                # The ladder already carries this decision: a previous call
+                # wrote the stage record and then failed, or the caller is
+                # retrying. Reuse the row that exists rather than leaving the
+                # decision unable to name the stage record it produced -- the
+                # whole reason the stage write goes first is that this retry
+                # heals, and a retry that healed the ladder and lost the link
+                # would have healed nothing worth having.
+                existing = next(
+                    (record for record in records
+                     if record["stage_ref"] == STAGE_REF
+                     and record["status"] == status), None)
+                stage_record_ref = None if existing is None else existing["id"]
+            else:
+                record = self.coverage_mission.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                    company_ref=company_ref, stage_ref=STAGE_REF, status=status,
+                    evidence_refs=[gate_version_ref],
+                    rationale=str(values["reason"])[:2000],
+                    actor_ref=actor_ref,
+                    idempotency_key=f"deep-insight-gate:{gate_version_ref}:{decision}",
+                )
+                stage_record_ref = record["id"]
+        return {
+            **gates.decide(**values, stage_record_ref=stage_record_ref),
+            "company_ref": company_ref,
+            "stage_status": status,
+        }
+
+    def _op_deep_insight_gate_draft(self, p: Mapping[str, Any]) -> Any:
+        """One gate draft in full, so the owner can read what they are deciding."""
+
+        from .deep_insight_gate import DeepInsightGateNotFound
+
+        gates = self._deep_insight_gates()
+        try:
+            draft = gates.gate(dict(p)["version_ref"])
+        except DeepInsightGateNotFound as exc:
+            raise WriterServerError(str(exc)) from exc
+        return {**draft, "decision": gates.decision_for(draft["id"])}
+
+    def _op_deep_insight_gate_submissions(self, p: Mapping[str, Any]) -> Any:
+        """Every gate draft waiting for a person, oldest first.
+
+        Each one says whether the ladder would accept its decision today. A
+        draft whose mission version has rolled is still shown -- it is still
+        what the owner has to deal with -- but it says so, and says why, rather
+        than offering a verdict the writer would refuse.
+        """
+
+        from .deep_insight_gate import decidability
+
+        gates = self._deep_insight_gates()
+        drafts = []
+        for draft in gates.undecided():
+            verdict = decidability(self.store.connection, draft)
+            drafts.append({
+                "version_ref": draft["id"],
+                "content_hash": draft["content_hash"],
+                "company_ref": draft["company_ref"],
+                "version": draft["version"],
+                "created_at": draft["created_at"],
+                "classification": draft["classification"],
+                "answers": draft["answers"],
+                "decidable": verdict["decidable"],
+                "undecidable_reason": verdict["reason"],
+                "undecidable_reason_code": verdict["reason_code"],
+            })
+        return {"projection_kind": "deep_insight_gate_submissions", "drafts": drafts}
+
     def _op_decide_conviction_call(self, p: Mapping[str, Any]) -> Any:
         """P15d: one person's answer to one call, bound to the bytes they read.
 
@@ -2594,24 +2810,123 @@ class WriterServer:
             values["context_pack_ref"], values["work_order"]
         )
 
+    def _active_mission_version(self) -> dict[str, Any] | None:
+        """The one active coverage mission, or None if none is published yet.
+
+        Read by the pointer rather than by a reference the caller supplies:
+        the day ledger's caps belong to the mission version that is live now,
+        and a caller able to name a different one could name a richer one.
+        """
+
+        try:
+            pointers = self.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - no mission table is simply no mission
+            return None
+        if not pointers:
+            return None
+        if len(pointers) > 1:
+            # Two active missions and no way to say which one's caps this call
+            # belongs to. coverage_mission refuses the same ambiguity rather
+            # than taking the first row, and taking the first row here would
+            # quietly bill one mission for another's research.
+            raise WriterServerError(
+                "planner budgeting requires exactly one active mission"
+            )
+        try:
+            return self.coverage_mission.mission(pointers[0]["mission_version_id"])
+        except Exception:  # noqa: BLE001 - an unreadable mission is not a binding
+            return None
+
+    def _planner_budget_ledger(self) -> Any:
+        """The mission day ledger, opened once and held for this writer's life.
+
+        Held rather than opened per op, and the reason is not speed.  The
+        ledger is WAL, and C2's read-only open refuses a database with no
+        sidecars -- which is precisely a ledger no process has open.  Opening
+        it inside the op's ``ExitStack`` meant the sidecars existed only while
+        a planner call was in flight, so P14e's admission lane, which reads
+        *between* calls because that is when it runs, saw no settled spend at
+        all: the branch would have shipped a ``settled_micros`` that was
+        always zero and a cap that was still the pre-C2b one.  What makes
+        settled spend readable is that somebody is holding the ledger open.
+
+        Opened lazily on the store thread, which is the only thread that ever
+        runs an op, so the connection belongs to its one caller.
+        """
+
+        if self._planner_budget is None:
+            from .thesis_impact_budget import ThesisImpactBudgetStore
+
+            self._planner_budget = ThesisImpactBudgetStore(
+                self._planner_model_config["budget_db"])
+        return self._planner_budget
+
+    def _planner_budget_binding(self, pool: str) -> dict[str, Any] | None:
+        """The mission binding one planner call is admitted against, or None.
+
+        None means the call runs unbudgeted, which is what every deployment
+        did before C2b and what an install that has not re-run the planner
+        setup still does.  The op result says so.
+        """
+
+        from .budget_pools import mission_pool_scope
+
+        config = self._planner_model_config or {}
+        if not config.get("budget_db") or not config.get("budget_policy_ref"):
+            return None
+        mission = self._active_mission_version()
+        if mission is None:
+            return None
+        return {
+            "mission_ref": mission["mission_ref"],
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
+            "max_daily_cost_micros": int(
+                Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000
+            ),
+            **mission_pool_scope(mission, pool=pool, lane="llm_planner_execute"),
+        }
+
     def _op_llm_planner_execute(self, p: Mapping[str, Any]) -> Any:
         # Runs inside the writer: the planner model worker writes model
         # accounting into this Core, which the driver process must not open.
         if self._planner_model_config is None:
             raise WriterServerError("planner model execution is not configured")
+        from .budget_pools import POOL_NAMES, pool_for_loop
+
         config = self._planner_model_config
         values = dict(p)
         context_pack_ref = values.pop("context_pack_ref")
+        declared_pool = values.pop("pool", None)
+        if declared_pool is not None and declared_pool not in POOL_NAMES:
+            raise WriterServerError("pool is not one of the mission's capacity pools")
         budget = {key: value for key, value in values.items() if value is not None}
         coordinator = self._llm_planner_coordinator()
         prepared = coordinator.prepare(context_pack_ref, **budget)
         if prepared.get("status") != "model_work_ready":
             return prepared
         work_order = prepared["work_order"]
+        # The loop decides its own pool. The driver may declare one, and a
+        # declaration that disagrees is refused rather than silently
+        # overridden -- the same shape as the doctrine pack hash the driver
+        # passes and this server verifies.
+        loop = self.bounded_planner.loop(prepared["context"]["loop_version_ref"])
+        pool = pool_for_loop(loop)
+        if declared_pool is not None and declared_pool != pool:
+            raise WriterServerError(
+                f"this loop spends from the {pool} pool, not {declared_pool}"
+            )
+        binding = self._planner_budget_binding(pool)
         from .model_router import ModelRouter
         from .openclaw_model_adapter import OpenClawModelAdapter
 
-        with ModelRouter(config["model_router_db"]) as router:
+        with ExitStack() as stack:
+            router = stack.enter_context(ModelRouter(config["model_router_db"]))
+            ledger = None if binding is None else self._planner_budget_ledger()
             adapter = OpenClawModelAdapter(
                 str(config["broker_socket"]),
                 route_resolver=router.get_decision,
@@ -2630,11 +2945,32 @@ class WriterServer:
                 observability=self.observability,
                 routing_policy_ref=config["routing_policy_ref"],
                 credential_slot_refs=config["credential_slot_refs"],
+                budget=ledger,
+                budget_policy_ref=(
+                    None if ledger is None else config["budget_policy_ref"]),
+                mission_binding=binding,
             )
             run = worker.run_once(work_order)
+        # C2b: the default when the worker said nothing is read off the ledger
+        # that was actually passed to it, never assumed to be "unbudgeted".
+        # A budgeted install whose broker is down must not report the one word
+        # that means "this call never reached the day ledger".
+        default_budget = {"status": "unbudgeted" if ledger is None else "budgeted"}
+        if run.get("status") == "rejected":
+            # A spent pool is returned, never raised: this loop has had its
+            # share of the day and the driver holds it until tomorrow.
+            return {**run, "pool": run.get("pool", pool),
+                    "work_order_ref": work_order["id"]}
         if run.get("status") != "succeeded":
-            return {"status": f"model_{run.get('status')}", "work_order_ref": work_order["id"]}
-        return coordinator.advance(context_pack_ref, work_order)
+            return {"status": f"model_{run.get('status')}",
+                    "work_order_ref": work_order["id"],
+                    "pool": pool,
+                    "budget": run.get("budget", default_budget)}
+        advanced = coordinator.advance(context_pack_ref, work_order)
+        if isinstance(advanced, dict):
+            return {**advanced, "pool": pool,
+                    "budget": run.get("budget", default_budget)}
+        return advanced
 
     @property
     def model_forecast(self) -> ModelForecastAuthority:
@@ -3315,10 +3651,17 @@ class WriterServer:
         return self._dispatch_one_coverage_mission_sec_lane()
 
     def _op_bounded_planner_active_loops(self, p: Mapping[str, Any]) -> Any:
+        from .budget_pools import pool_for_loop
+
         return {
             "projection_kind": "bounded_planner_active_loops",
             "loops": [
-                {"loop_version_ref": loop["id"], "loop_ref": loop["loop_ref"]}
+                # C2b: the pool travels with the loop rather than being
+                # guessed by the driver from a reference prefix. P14e's
+                # inquiry loops are the ad-hoc pool the 25% share exists for;
+                # everything else is the coverage work of the mission.
+                {"loop_version_ref": loop["id"], "loop_ref": loop["loop_ref"],
+                 "pool": pool_for_loop(loop)}
                 for loop in self.bounded_planner.active_loops()
             ],
         }
@@ -4013,6 +4356,11 @@ def main(argv: list[str] | None = None) -> int:
                 "broker_auth_key": args.planner_broker_auth_key,
                 "broker_client_id": args.planner_broker_client_id,
                 "expected_agent_id": args.planner_expected_agent_id,
+                # C2b: found beside the Core rather than passed in, because
+                # the installer already writes it there and a cap raise
+                # already repoints it. See planner_budget_config.
+                **planner_budget_config(
+                    Path(args.db).expanduser().resolve().parent),
             }
         sec_filings_launcher = None
         if args.sec_filings_governance is not None and args.sec_filings_discovery_plan is not None:

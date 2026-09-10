@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .coverage_mission import STAGE_REOPENED, fold_stage_status
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -357,6 +358,41 @@ def _retired_claim_refs(connection: sqlite3.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
+def folded_stage_history(
+    connection: sqlite3.Connection, *, company_ref: str, stage_ref: str = STAGE_REF
+) -> list[str]:
+    """One company's ordered stage statuses, reopen markers included.
+
+    ``coverage_mission._folded_rows`` is the authority's own version of this
+    and is what the ladder validates against; this is the read-only twin for
+    the callers that hold a bare connection -- the weekly lane, its CLI, and
+    ``passed_version`` -- so all four answer "is this gate open right now" the
+    same way. A Core without the marker table (an older state directory) reads
+    exactly as it used to.
+    """
+
+    if not _has_table(connection, "coverage_mission_stage_records"):
+        return []
+    rows = [
+        (row["created_at"], row["record_id"], row["status"])
+        for row in connection.execute(
+            "SELECT record_id, created_at, status FROM coverage_mission_stage_records "
+            "WHERE company_ref=? AND stage_ref=?",
+            (company_ref, stage_ref),
+        ).fetchall()
+    ]
+    if _has_table(connection, "coverage_mission_stage_reopens"):
+        rows += [
+            (row["created_at"], row["record_id"], STAGE_REOPENED)
+            for row in connection.execute(
+                "SELECT record_id, created_at FROM coverage_mission_stage_reopens "
+                "WHERE company_ref=? AND stage_ref=?",
+                (company_ref, stage_ref),
+            ).fetchall()
+        ]
+    return [status for _at, _id, status in sorted(rows)]
+
+
 def passed_version(
     connection: sqlite3.Connection, *, company_ref: str, stage_ref: str = STAGE_REF
 ) -> dict[str, Any] | None:
@@ -366,19 +402,31 @@ def passed_version(
     version", because that is the binding the gate was recorded with, and a
     later version (there is one for ACN) would silently move what the diff is
     measured from.
+
+    P14-S: the whole ladder is read, not only the ``gate_passed`` rows, so the
+    fold decides.  A company whose gate was passed and then reopened has no
+    passed version to diff against, and answering with the superseded one
+    would let the weekly lane propose reopening a gate that is already open.
+    Across every mission version, because that is where the pass lives after a
+    publish.  Since the P14d sequel that reopen is usually the marker rather
+    than a bare ``gate_failed``, so the history is read through
+    ``folded_stage_history``.
     """
 
     company_ref = _text(company_ref, "company_ref")
     if not _has_table(connection, "coverage_mission_stage_records"):
         return None
-    rows = connection.execute(
+    if fold_stage_status(
+        folded_stage_history(connection, company_ref=company_ref, stage_ref=stage_ref)
+    ) != "gate_passed":
+        return None
+    ladder = connection.execute(
         "SELECT * FROM coverage_mission_stage_records WHERE company_ref=? AND stage_ref=? "
-        "AND status='gate_passed' ORDER BY created_at DESC",
+        "ORDER BY created_at,record_id",
         (company_ref, stage_ref),
     ).fetchall()
-    if not rows:
-        return None
-    row = rows[0]
+    rows = [row for row in ladder if row["status"] == "gate_passed"]
+    row = rows[-1]
     record = json.loads(row["record_json"])
     for ref in record.get("evidence_refs") or ():
         version = connection.execute(
@@ -414,17 +462,32 @@ def reopen_assessment(
     Returns a status rather than raising when there is nothing to diff: a
     company that never passed is not an error, it is the ordinary case, and a
     weekly lane that raised on it would stop on the first company it met.
+
+    ``not_passed`` covers two different situations and says which: a company
+    that never passed, and one whose gate is open right now because somebody
+    approved re-opening it and the re-issued screen has not been decided yet.
+    They read the same on the ladder -- neither has a current passed version --
+    and they mean opposite things to whoever is reading.
     """
 
     company_ref = _text(company_ref, "company_ref")
     settings = dict(policy or DEFAULT_POLICY)
     passed = passed_version(connection, company_ref=company_ref)
     if passed is None:
+        folded = fold_stage_status(
+            folded_stage_history(connection, company_ref=company_ref)
+        )
+        reopened = folded == STAGE_REOPENED
         return {
             "schema_version": SCHEMA_VERSION,
             "status": "not_passed",
             "company_ref": company_ref,
-            "reason": "这家公司还没有任何一版 Initial Screen 过闸",
+            "stage_status": folded,
+            "reopened": reopened,
+            "reason": (
+                "这道门已经重开了，正在等重出的那一版被裁决" if reopened
+                else "这家公司还没有任何一版 Initial Screen 过闸，没有门可以重开"
+            ),
         }
     section_count = max(1, len(passed["record"].get("sections") or ()))
     baseline = evidence_items(
@@ -503,6 +566,31 @@ def reopen_assessment(
 # ---------------------------------------------------------------------------
 
 
+def _no_proposal_reason(assessment: Mapping[str, Any]) -> str:
+    """Why there is nothing to propose, in the terms the caller can act on.
+
+    Three different situations used to arrive as one sentence about items not
+    flipping, and only one of them was about items.  A gate that is already
+    open is the one that matters: the assessment reports ``not_passed``
+    because ``passed_version`` refuses to hand back a superseded version, and
+    "no item flipped" sent the reader looking at the evidence base for a
+    problem that is a pending decision on their own desk.
+    """
+
+    status = assessment.get("status")
+    if status == "not_passed":
+        reason = str(assessment.get("reason") or "")
+        if assessment.get("reopened"):
+            return (
+                "这道门已经重开了，先把重出的那一版裁决掉，再谈下一次重开"
+                "（gate_reopen 已批准，等 Initial Screen 重出并过闸）"
+            )
+        return reason or "这家公司没有任何一版 Initial Screen 过闸，没有门可以重开"
+    if status == "no_flip":
+        return "a reopen proposal needs at least one item that flipped 缺 → 有"
+    return f"this assessment is {status!r}, which is not something to propose"
+
+
 class GateReopenAuthority:
     """Propose a reopen; record the one person's answer; hand out the permission."""
 
@@ -512,6 +600,40 @@ class GateReopenAuthority:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._missions: Any = None
+
+    def _mission_authority(self) -> Any:
+        """The stage ladder, opened once and only when an approval needs it.
+
+        Lazily, because a decline touches the ladder not at all and most of
+        this class is reading.
+        """
+
+        if self._missions is None:
+            from .coverage_mission import CoverageMissionAuthority
+
+            self._missions = CoverageMissionAuthority(self.store)
+        return self._missions
+
+    def _active_mission(self, proposal: Mapping[str, Any]) -> dict[str, Any]:
+        """The mission version the marker will bind as provenance.
+
+        Not the version the *proposal* was written under: that one may have
+        rolled while the proposal waited for an answer, and a stage record
+        binds the active version by contract. What the proposal's version is
+        for is saying when the assessment was made, and it stays in the
+        proposal.
+        """
+
+        missions = self._mission_authority()
+        proposed_under = missions.mission(proposal["mission_version_ref"])
+        row = self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+            (proposed_under["mission_ref"],),
+        ).fetchone()
+        if row is None:
+            raise DeliverableReopenConflict("this mission has no active version")
+        return missions.mission(row["mission_version_id"])
 
     # -- reading -----------------------------------------------------------
 
@@ -567,9 +689,7 @@ class GateReopenAuthority:
         """One proposal per (company, assessment hash).  Automation may write it."""
 
         if assessment.get("status") != "reopen_proposed":
-            raise DeliverableReopenConflict(
-                "a reopen proposal needs at least one item that flipped 缺 → 有"
-            )
+            raise DeliverableReopenConflict(_no_proposal_reason(assessment))
         actor_ref = _text(actor_ref, "actor_ref")
         if actor_ref.startswith("automation:") and (
             actor_ref != mission["autonomy"]["automation_principal"]
@@ -666,7 +786,13 @@ class GateReopenAuthority:
                 and existing["reason"] == reason
                 and existing["actor_ref"] == actor_ref
             ):
-                return {**existing, "status": "duplicate"}
+                repeated: dict[str, Any] = {**existing, "status": "duplicate"}
+                if verdict == "approve":
+                    # Heal: the marker is written after the decision, so a
+                    # retry of the exact same approval is how a decision that
+                    # landed without one gets its ladder entry.
+                    repeated["stage_reopen"] = self._record_stage_reopen(proposal, existing)
+                return repeated
             raise DeliverableReopenConflict(
                 f"this proposal was already {existing['verdict']}d"
             )
@@ -689,6 +815,13 @@ class GateReopenAuthority:
             "actor_ref": actor_ref,
         }
         record["content_hash"] = content_hash(record)
+        # Refuse before writing anything, not after. An approval whose ladder
+        # entry cannot be written is an approval that means nothing -- the
+        # re-issued screen's gate would be refused as a second decision on a
+        # settled stage, which is exactly the hole this closes -- so the
+        # preconditions are read first and the person is told why.
+        if verdict == "approve":
+            self._assert_reopenable(proposal)
         with self.store._transaction() as cur:
             cur.execute(
                 "INSERT INTO gate_reopen_decisions(decision_id,proposal_ref,proposal_hash,"
@@ -700,7 +833,52 @@ class GateReopenAuthority:
                     actor_ref, record["created_at"],
                 ),
             )
-        return {**record, "status": "fresh"}
+        result: dict[str, Any] = {**record, "status": "fresh"}
+        if verdict == "approve":
+            result["stage_reopen"] = self._record_stage_reopen(proposal, record)
+        return result
+
+    # -- the ladder entry --------------------------------------------------
+
+    def _assert_reopenable(self, proposal: Mapping[str, Any]) -> None:
+        """Is the stage this proposal names actually a passed gate right now?"""
+
+        missions = self._mission_authority()
+        mission = self._active_mission(proposal)
+        state = missions.current_stage_state(mission["mission_ref"], proposal["company_ref"])
+        stage = (state["stages"] or {}).get(proposal["stage_ref"]) or {}
+        if stage.get("status") != "gate_passed":
+            raise DeliverableReopenConflict(
+                f"{proposal['stage_ref']} is {stage.get('status') or 'not reached'} for "
+                f"{proposal['company_ref']}; only a passed gate can be re-opened"
+            )
+
+    def _record_stage_reopen(
+        self, proposal: Mapping[str, Any], decision: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Write the ladder's copy of this approval, idempotently.
+
+        Called after the decision so that the failure a half-written approval
+        leaves behind is the safe one: no marker means the re-issue is refused
+        and a person notices, where an orphan marker would mean a gate
+        un-decided by nobody. Re-running the same approval re-derives the same
+        marker id and heals it.
+        """
+
+        missions = self._mission_authority()
+        mission = self._active_mission(proposal)
+        return missions.record_stage_reopen(
+            mission_version_ref=mission["id"],
+            mission_version_hash=mission["content_hash"],
+            company_ref=proposal["company_ref"],
+            stage_ref=proposal["stage_ref"],
+            reopen_decision_ref=decision["id"],
+            reopen_proposal_ref=proposal["id"],
+            reopened_version_ref=proposal["passed_version_ref"],
+            rationale=f"gate_reopen 已批准：{decision['reason']}"[:2000],
+            actor_ref=decision["actor_ref"],
+            idempotency_key=f"gate-reopen:{decision['id']}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +959,7 @@ __all__ = [
     "approved_reopen",
     "consumed_reopen_refs",
     "evidence_items",
+    "folded_stage_history",
     "load_policy",
     "passed_version",
     "reopen_assessment",

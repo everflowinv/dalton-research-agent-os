@@ -432,8 +432,17 @@ class ImportanceTests(unittest.TestCase):
 
 class GradeTests(unittest.TestCase):
     def test_the_prior_grade_exists_and_is_never_a_figure(self) -> None:
+        from dalton_core.document_figure_grade import ALL_GRADES
+
         self.assertEqual(INTERNAL_PRIOR, "internal-prior-document")
-        self.assertEqual(NON_FIGURE_GRADES, (INTERNAL_PRIOR,))
+        self.assertIn(INTERNAL_PRIOR, ALL_GRADES)
+        self.assertIn(INTERNAL_PRIOR, NON_FIGURE_GRADES)
+        # Derived, so a grade added to ALL_GRADES and forgotten cannot pretend
+        # to be figure-bearing. P11b's broker grade is excluded the same way.
+        self.assertEqual(
+            NON_FIGURE_GRADES,
+            tuple(grade for grade in ALL_GRADES if grade not in GRADES),
+        )
         self.assertNotIn(INTERNAL_PRIOR, GRADES)
         self.assertNotIn(INTERNAL_PRIOR, GRADE_BY_SPEC.values())
         self.assertNotIn(INTERNAL_PRIOR, FIGURE_ADMISSIBLE_GRADES)

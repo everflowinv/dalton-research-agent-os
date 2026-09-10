@@ -148,6 +148,31 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S5: the IR-page watcher. There is no upstream to be
+                    # polite to at all -- changedetection.io is a process on
+                    # this machine and it does the fetching -- so these bound a
+                    # loop rather than a relationship. Declared anyway, because
+                    # admission refuses a route with no governed policy rather
+                    # than inventing an unlimited one. Three calls per diff:
+                    # the watch, and the two snapshots the tool serves apart.
+                    "connector_slug": "ir-page-watch",
+                    "operation": "get_watch_diff",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 3,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "ir-page-watch",
+                    "operation": "list_watches",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     # W3: the fund's own prior work on a company. A local file
                     # read like S1's, and smaller: onboarding reads every
                     # prior document once and then only what the owner adds.
@@ -184,6 +209,60 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "operation": "list_notes",
                     "quota_unit": "search",
                     "daily_unit_limit": 500,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # S5: the four ownership filings, sorted before the filings
+                    # index above. One filing per unit, and the unit is a
+                    # document because that is what one of these reads: a
+                    # single primary document at a path derived from a single
+                    # accession.
+                    #
+                    # The numbers are what the covered universe generates times
+                    # a margin, not round numbers chosen for looking
+                    # reasonable. The five issuers filed 587 Form 3/4/5 in the
+                    # last twelve months -- under two a day -- so twenty is a
+                    # fortnight of them in one tick and a bound on what a bug
+                    # can cost against a free government service that publishes
+                    # a ten-per-second limit. A 13D/G or a 144 is rarer still.
+                    "connector_slug": "sec",
+                    "operation": "beneficial_ownership",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 10,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # Quarterly, in a burst forty-five days after quarter end.
+                    # Three calls per unit because a 13F is three documents:
+                    # the cover page, the filing's own index -- the only thing
+                    # that knows what the holdings document is called -- and
+                    # the information table.
+                    "connector_slug": "sec",
+                    "operation": "form13f_holdings",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 8,
+                    "max_physical_calls_per_unit": 3,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sec",
+                    "operation": "form144_notices",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 10,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sec",
+                    "operation": "form4_transactions",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 20,
                     "max_physical_calls_per_unit": 1,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",

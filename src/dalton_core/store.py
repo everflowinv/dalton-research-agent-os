@@ -110,6 +110,121 @@ def _parse_rfc3339(value: str, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+# ---------------------------------------------------------------------------
+# authorization flags
+# ---------------------------------------------------------------------------
+#
+# Every append-only authority in this package guards its tables with a trigger
+# that calls a SQL function -- ``dalton_authorized()``,
+# ``dalton_coverage_mission_authorized()`` and eighteen more -- and flips a
+# Python flag on for the duration of its own transaction.  The flag used to
+# live on the authority *instance*, and ``create_function`` does not: it
+# replaces the function on the **connection**.  So a second authority of the
+# same kind opened on the same connection silently took the function with it,
+# and the first one's writes began failing their own trigger with "insert
+# requires XAuthority" -- a refusal that reads like a bug in the caller and is
+# not.  Nobody opened two until the gate-reopen authority needed a stage
+# ladder to write to (P14d sequel), and then it happened in production code.
+#
+# So the flags belong to the connection.  They cannot be *attached* to it --
+# ``sqlite3.Connection`` has neither ``__dict__`` nor ``__weakref__``, so
+# neither an attribute nor a ``WeakKeyDictionary`` is available -- so they are
+# keyed through the connection instead: one registry function per connection,
+# returning an opaque token, installed the same way every other function here
+# is.  Asking the connection for its token is asking the connection, which is
+# the property that matters; a store wrapping someone else's connection finds
+# the same registry, which is the case the instance-scoped flag got wrong.
+#
+# The token is a uuid4 and is never reused, so a registry entry can never be
+# picked up by a later connection.  ``DaltonStore.close`` drops its own.
+_AUTHORIZATION_REGISTRIES: dict[str, dict[str, bool]] = {}
+_REGISTRY_FUNCTION = "dalton_authorization_registry"
+
+
+def _authorization_registry(connection: sqlite3.Connection) -> tuple[str, dict[str, bool]]:
+    """This connection's flag registry, created on first use."""
+
+    try:
+        row = connection.execute(f"SELECT {_REGISTRY_FUNCTION}()").fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is not None:
+        token = row[0]
+        registry = _AUTHORIZATION_REGISTRIES.get(token)
+        if registry is not None:
+            return token, registry
+    token = uuid.uuid4().hex
+    registry: dict[str, bool] = {}
+    _AUTHORIZATION_REGISTRIES[token] = registry
+    connection.create_function(_REGISTRY_FUNCTION, 0, lambda: token)
+    return token, registry
+
+
+class AuthorizationFlag:
+    """One authority kind's write permission on one connection.
+
+    A view, not a value: two authorities of the same kind on one connection
+    hold two of these and both read and write the same bit, which is the whole
+    point.
+    """
+
+    __slots__ = ("_registry", "_name", "_token")
+
+    def __init__(self, registry: dict[str, bool], name: str, token: str) -> None:
+        self._registry = registry
+        self._name = name
+        self._token = token
+        registry.setdefault(name, False)
+
+    @property
+    def authorized(self) -> bool:
+        return self._registry.get(self._name, False)
+
+    @authorized.setter
+    def authorized(self, value: Any) -> None:
+        self._registry[self._name] = bool(value)
+
+    def __bool__(self) -> bool:
+        return self.authorized
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging only
+        return f"<AuthorizationFlag {self._name}={self.authorized}>"
+
+
+def authorization_flag(connection: sqlite3.Connection, function_name: str) -> AuthorizationFlag:
+    """Install ``function_name`` on this connection and return its flag.
+
+    Replaces the two lines every authority used to write by hand.  Calling it
+    twice on one connection for one name is the case this exists for: the
+    second call re-registers a function that reads the same bit, so whichever
+    authority is inside its transaction is the one that is authorized, and
+    neither can turn the other off.
+    """
+
+    token, registry = _authorization_registry(connection)
+    flag = AuthorizationFlag(registry, function_name, token)
+    connection.create_function(function_name, 0, lambda: int(flag.authorized))
+    return flag
+
+
+class authorized_flag:
+    """``self._authorized`` as a view on the connection-scoped flag.
+
+    A descriptor rather than a property written out nineteen times.  Reading
+    and assigning ``self._authorized`` behaves exactly as it did; what changed
+    is where the bit lives.  The authority must set
+    ``self._authorization_flag`` before anything touches ``_authorized``.
+    """
+
+    def __get__(self, obj: Any, owner: type | None = None) -> Any:
+        if obj is None:
+            return self
+        return obj._authorization_flag.authorized
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        obj._authorization_flag.authorized = bool(value)
+
+
 class DaltonStore:
     """Owns all writes to the hybrid-temporal SQLite database.
 
@@ -120,9 +235,10 @@ class DaltonStore:
     triggers.
     """
 
+    _authorized = authorized_flag()
+
     def __init__(self, path: str | Path = ":memory:", *, connection: sqlite3.Connection | None = None):
         self.path = str(path)
-        self._authorized = False
         self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
         if connection is None and self.path != ":memory:":
             os.chmod(self.path, 0o600)
@@ -147,7 +263,7 @@ class DaltonStore:
         # in-memory Core has no journal to speak of and is left alone.
         if self.path != ":memory:":
             self._ensure_wal()
-        self.connection.create_function("dalton_authorized", 0, lambda: int(self._authorized))
+        self._authorization_flag = authorization_flag(self.connection, "dalton_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_thesis_authority_columns()
         self._backfill_model_execution_links()
@@ -278,6 +394,17 @@ class DaltonStore:
         return self.connection
 
     def close(self) -> None:
+        """Close the connection and drop this connection's flag registry.
+
+        The registry is keyed by a token the connection hands out, so a stale
+        entry could never be picked up by a later connection; dropping it is
+        housekeeping rather than correctness, and it is what keeps a process
+        that opens thousands of in-memory Cores (the test suite) from carrying
+        thousands of dead flag dictionaries.
+        """
+
+        _AUTHORIZATION_REGISTRIES.pop(
+            getattr(self._authorization_flag, "_token", ""), None)
         self.connection.close()
 
     def __enter__(self) -> "DaltonStore":
