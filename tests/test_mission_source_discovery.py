@@ -44,6 +44,7 @@ from dalton_core.mission_source_discovery import (
     load_discovery_plan,
     validate_discovery_plan,
 )
+from dalton_core.mission_source_discovery import _next_page_binding
 from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.runner_journal import RunnerJournal
@@ -442,7 +443,7 @@ class FakeSearchLauncher:
     def start(self, *, authorization, spec_ref, as_of=None, cursor=None):
         self.starts.append({
             "authorization": dict(authorization), "spec_ref": spec_ref,
-            "cursor": cursor,
+            "cursor": cursor, "as_of": as_of,
         })
         ticket_id = f"alphaengine-discovery:{len(self.starts):024x}"
         params = build_discovery_parameters(
@@ -601,20 +602,32 @@ class CoordinatorTests(unittest.TestCase):
         seed_known_document(self.h)
         self.coordinator.dispatch_once()  # ACN
         self.coordinator.dispatch_once()  # settle ACN, launch CTSH
-        from unittest.mock import patch
-        with patch.object(self.coordinator, "_continuation_cursor", return_value="ae1:next"):
-            tick = self.coordinator.dispatch_once()  # settle CTSH; both are in cadence
-        self.assertEqual(tick["discovery"]["status"], "idle")
-        self.assertTrue(any("shortfall retry" in row["reason"]
-                            for row in tick["discovery"]["skipped"]))
         self.clock.advance(days=2)
-        mission = self.missions.active_mission(self.coordinator.plan["mission_ref"])
-        spec = self.coordinator.plan["specs"][0]
-        with patch.object(self.coordinator, "_continuation_cursor", return_value="ae1:next"):
-            self.assertIsNone(self.coordinator._spec_block(mission, CTSH, spec))
-            tick = self.coordinator.dispatch_once()
+        from unittest.mock import patch
+        continuation = {"cursor": "ae1:next", "as_of": NOW.date().isoformat()}
+        with patch.object(self.coordinator, "_continuation_page", return_value=continuation):
+            tick = self.coordinator.dispatch_once()  # settle CTSH and immediately continue
         self.assertEqual(tick["discovery"]["status"], "launched")
         self.assertEqual(self.search_launcher.starts[-1]["cursor"], "ae1:next")
+        self.assertEqual(self.search_launcher.starts[-1]["as_of"], NOW.date())
+
+    def test_continuation_rejects_plan_change_and_repeated_cursor(self) -> None:
+        discovery = {
+            "discovery_plan_ref": self.plan["id"],
+            "discovery_plan_hash": self.plan["content_hash"],
+            "parameters": {
+                "query": "fixed", "filters": {"date_to": "2026-09-02"},
+                "cursor": "ae1:first",
+            },
+        }
+        self.assertIsNone(_next_page_binding(
+            discovery, {"cursor": "ae1:first"}, self.plan))
+        changed = {**self.plan, "content_hash": "0" * 64}
+        self.assertIsNone(_next_page_binding(
+            discovery, {"cursor": "ae1:second"}, changed))
+        self.assertEqual(_next_page_binding(
+            discovery, {"cursor": "ae1:second"}, self.plan),
+            {"cursor": "ae1:second", "as_of": "2026-09-02"})
 
     def test_acquired_document_enters_human_extraction_review_queue(self) -> None:
         v1 = self.create_mission()
@@ -849,7 +862,10 @@ class SearchChildTests(unittest.TestCase):
             )
         finally:
             core.close()
-        ticket = launcher.start(authorization=authorization, spec_ref="earnings-call-transcripts", as_of=date(2026, 9, 2))
+        ticket = launcher.start(
+            authorization=authorization, spec_ref="earnings-call-transcripts",
+            as_of=date(2026, 9, 2), cursor="ae1:continued-page",
+        )
         self.assertEqual(ticket["status"], "running")
         self.assertEqual(ticket["requested_by"], OWNER)
         code = launcher.wait(timeout=120)
@@ -860,6 +876,7 @@ class SearchChildTests(unittest.TestCase):
         self.assertEqual(summary["new_document_count"], 1)
         self.assertEqual(summary["provider_calls"], 1)
         self.assertEqual(summary["transport"], "fake")
+        self.assertEqual(summary["parameters"]["cursor"], "ae1:continued-page")
         self.assertEqual(summary["formal_authority_writes"], 0)
         core = DaltonStore(str(self.state / "core.sqlite"))
         try:

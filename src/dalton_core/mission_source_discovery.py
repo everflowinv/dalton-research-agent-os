@@ -505,6 +505,24 @@ def discovery_query_hash(plan: Mapping[str, Any], parameters: Mapping[str, Any])
     return search_spec_hash(parameters)
 
 
+def _next_page_binding(discovery: Mapping[str, Any], envelope: Mapping[str, Any],
+                       plan: Mapping[str, Any]) -> dict[str, str] | None:
+    """Project a continuation only from the exact plan and prior request."""
+    if (discovery.get("discovery_plan_ref") != plan.get("id")
+            or discovery.get("discovery_plan_hash") != plan.get("content_hash")):
+        return None
+    prior = discovery.get("parameters")
+    cursor = envelope.get("cursor")
+    if (not isinstance(prior, Mapping) or not isinstance(cursor, str) or not cursor
+            or cursor == prior.get("cursor")):
+        return None
+    filters = prior.get("filters")
+    as_of = filters.get("date_to") if isinstance(filters, Mapping) else None
+    if not isinstance(as_of, str):
+        return None
+    return {"cursor": cursor, "as_of": as_of}
+
+
 # ---------------------------------------------------------------------------
 # launcher
 # ---------------------------------------------------------------------------
@@ -1286,13 +1304,13 @@ class MissionSourceDiscoveryCoordinator:
             satisfied = self._satisfied_block(mission, company_ref, spec_ref)
             if satisfied is not None:
                 return satisfied
-        return self._cadence_block(
-            mission["id"], company_ref, spec,
-            use_retry_interval=(
-                self._checklist_shortfall(mission, company_ref, spec_ref)
-                and self._continuation_cursor(mission["id"], company_ref, spec_ref) is not None
-            ),
-        )
+        continuation = self._continuation_page(mission["id"], company_ref, spec_ref)
+        cadence = self._cadence_block(mission["id"], company_ref, spec)
+        if cadence == "previous discovery still open":
+            return cadence
+        if self._checklist_shortfall(mission, company_ref, spec_ref) and continuation:
+            return None
+        return cadence
 
     def _checklist_shortfall(self, mission: Mapping[str, Any], company_ref: str,
                              spec_ref: str) -> bool:
@@ -1325,9 +1343,9 @@ class MissionSourceDiscoveryCoordinator:
         floor = max(int(held["required"]), required or 0)
         return int(held["have"]) < floor
 
-    def _continuation_cursor(self, mission_version_ref: str, company_ref: str,
-                             spec_ref: str) -> str | None:
-        """Read the provider cursor bound to the latest accepted search page."""
+    def _continuation_page(self, mission_version_ref: str, company_ref: str,
+                           spec_ref: str) -> dict[str, Any] | None:
+        """Return an exact prior search binding with its next opaque cursor."""
         if self.source_ref != ALPHAENGINE_SOURCE_REF:
             return None
         discoveries = self.missions.source_discoveries(
@@ -1353,8 +1371,7 @@ class MissionSourceDiscoveryCoordinator:
             or content_hash(hashed) != stored_hash
         ):
             return None
-        cursor = envelope.get("cursor")
-        return cursor if isinstance(cursor, str) and cursor else None
+        return _next_page_binding(discoveries[0], envelope, self.plan)
 
     def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
                          spec_ref: str) -> str | None:
@@ -1557,15 +1574,21 @@ class MissionSourceDiscoveryCoordinator:
                 budget = self._budget(authorization["max_alphaengine_calls_24h"])
                 if budget["remaining"] < 1:
                     return {"status": "budget_exhausted", "budget": budget, "skipped": skipped}
+                continuation = self._continuation_page(
+                    mission["id"], company_ref, spec["spec_ref"])
+                request_date = (
+                    date.fromisoformat(continuation["as_of"])
+                    if continuation else self.clock().date()
+                )
                 parameters = build_discovery_parameters(
                     self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
-                    as_of=self.clock().date(), cursor=self._continuation_cursor(
-                        mission["id"], company_ref, spec["spec_ref"]),
+                    as_of=request_date,
+                    cursor=None if continuation is None else continuation["cursor"],
                 )
                 try:
                     ticket = self.search_launcher.start(
                         authorization=authorization, spec_ref=spec["spec_ref"],
-                        as_of=self.clock().date(),
+                        as_of=request_date,
                         cursor=parameters.get("cursor"),
                     )
                 except DiscoveryLaunchConflict as exc:

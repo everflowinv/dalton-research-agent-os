@@ -10,7 +10,7 @@ A second recovery defect existed in the bounded planner. `ALPHAENGINE_PROBE_BUDG
 
 ## Change
 
-- A successful discovery with a real checklist shortfall now uses the plan's existing `retry_interval_days`; sufficient coverage retains `rediscovery_interval_days`.
+- A an incomplete successful page with a new authoritative continuation cursor is continued on the next tick under the existing cap and single-flight gate. A new search still uses the plan cadence.
 - Discovery candidates are ordered by least-recent company attempt so the first incomplete company cannot consume every newly opened retry window.
 - A rolling-window probe refusal leaves its admitted round open. A later tick retries the same round and can complete it after capacity returns.
 
@@ -20,7 +20,7 @@ This does not raise any signed or owner cap.
 
 Three focused regressions pass:
 
-- successful searches below the accepted evidence floor retry after the short interval when a real continuation cursor exists, and the cursor reaches the governed request;
+- an incomplete successful page continues immediately with its cursor and original UTC date window;
 - a failed acquisition still follows its existing retry behavior without colliding with a replayed first-page source envelope;
 - a quota-window refusal writes no terminal outcome, then the same round resumes successfully on the next tick.
 
