@@ -318,6 +318,22 @@ class ModelRouterTests(unittest.TestCase):
         )
         self.assertIn("model_family_not_independent", same["rejection_reasons"])
 
+    def test_unclassified_family_cannot_claim_independent_verification(self) -> None:
+        self.router.register_policy(policy(independence=["verify"]))
+        self.router.register_profile(
+            profile("unknown", family="unclassified:openai", cost=0.1)
+        )
+        decision = self.router.route(
+            work_order(work_id="work:model-route-unknown-verifier"),
+            **route_args(
+                capability="verify",
+                producer_family="family-alpha",
+                idempotency_key="route-key:unknown-verifier",
+            ),
+        )["decision"]
+        self.assertEqual(decision["outcome"], "rejected")
+        self.assertIn("model_family_not_independent", decision["rejection_reasons"])
+
     def test_budget_context_auth_and_availability_fail_closed(self) -> None:
         self.router.register_policy(policy())
         self.router.register_profile(

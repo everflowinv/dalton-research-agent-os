@@ -169,12 +169,27 @@ def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             raise OpenClawCatalogError(f"broker profile {profile_id} has an invalid model")
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
+        family = profile.get("family")
+        if family is not None and (
+            not isinstance(family, str) or not _TOKEN_RE.fullmatch(family)
+        ):
+            raise OpenClawCatalogError(f"broker profile {profile_id} has an invalid family")
+        capabilities = profile.get("capabilities")
+        if capabilities is not None:
+            capabilities = list(_sequence(capabilities, f"{profile_id}.capabilities"))
+            if (not capabilities or len(set(capabilities)) != len(capabilities)
+                    or any(not isinstance(item, str) or not _TOKEN_RE.fullmatch(item)
+                           for item in capabilities)):
+                raise OpenClawCatalogError(
+                    f"broker profile {profile_id} has invalid capabilities")
         output[profile_id] = {
             "id": profile_id,
             "provider": provider,
             "model": model,
             "model_ref": model_ref,
             "max_tokens": profile.get("maxTokens"),
+            "family": family,
+            "capabilities": capabilities,
         }
     return output
 
@@ -291,11 +306,16 @@ def openclaw_broker_profiles_from_config(
             )
         static_route = static.get(profile_id)
         if static_route is not None:
-            if static_route["model_ref"] != model_ref:
-                raise OpenClawCatalogError(
-                    f"broker profile {profile_id} changed route; add a new profile id"
-                )
             profile = copy.deepcopy(static_route["profile"])
+            route_changed = static_route["model_ref"] != model_ref
+            profile["provider"] = provider_model["provider"]
+            profile["model"] = provider_model["model"]
+            if route_changed:
+                profile["family"] = f"unclassified:{provider_model['provider']}"
+            if broker["family"] is not None:
+                profile["family"] = broker["family"]
+            if broker["capabilities"] is not None:
+                profile["capabilities"] = broker["capabilities"]
             context_window = provider_model["context_window"]
             max_output = provider_model["max_output_tokens"]
             broker_max = broker["max_tokens"]
@@ -361,10 +381,12 @@ def openclaw_broker_profiles_from_config(
             "prior_version_ref": None,
             "provider": provider_model["provider"],
             "model": provider_model["model"],
-            "family": f"unclassified:{provider_model['provider']}",
+            "family": broker["family"] or f"unclassified:{provider_model['provider']}",
             "adapter_ref": ADAPTER_REF,
             "credential_slot_ref": f"credential-slot:openclaw:{provider_model['provider']}",
-            "capabilities": ["verify"],
+            # An unknown catalog entry is visible and priceable, but it is not
+            # silently certified for hard research or independent verification.
+            "capabilities": broker["capabilities"] or ["research"],
             "modalities": ["text"],
             "context": {
                 "max_context_tokens": context_window,
@@ -500,6 +522,38 @@ def _router_broker_profiles(router: ModelRouter) -> dict[str, dict[str, Any]]:
     }
 
 
+def _profile_semantics(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Public route meaning, excluding version and observation timestamps."""
+
+    return {
+        key: copy.deepcopy(value)
+        for key, value in profile.items()
+        if key not in {
+            "schema_version", "profile_version_ref", "version", "created_at",
+            "prior_version_ref", "availability", "content_hash", "status", "retirement",
+        }
+    }
+
+
+def _changed_version(
+    latest: Mapping[str, Any], desired: Mapping[str, Any], *, checked_at: datetime
+) -> dict[str, Any]:
+    version = int(latest["version"]) + 1
+    digest = canonical_hash(_profile_semantics(desired))[:16]
+    wire = copy.deepcopy(dict(desired))
+    wire.update({
+        "profile_version_ref": (
+            f"model-profile-version:broker-{desired['id'].removeprefix('profile:')}"
+            f"-{digest}:{version}"
+        ),
+        "version": version,
+        "prior_version_ref": latest["profile_version_ref"],
+        "created_at": _wire_time(checked_at),
+    })
+    wire.pop("content_hash", None)
+    return wire
+
+
 def catalog_sync_status(
     router: ModelRouter,
     config: Mapping[str, Any],
@@ -517,6 +571,10 @@ def catalog_sync_status(
 
     brokers = _broker_profiles(config)
     held = _router_broker_profiles(router)
+    desired = {
+        profile["id"]: profile
+        for profile in openclaw_broker_profiles_from_config(config, checked_at=checked_at)
+    }
     live = {
         profile_id
         for profile_id, profile in held.items()
@@ -526,6 +584,11 @@ def catalog_sync_status(
     missing_here = sorted(set(brokers) - set(held))
     retired_but_offered = sorted(set(brokers) & set(retired))
     not_offered = sorted(live - set(brokers))
+    drifted = sorted(
+        profile_id for profile_id in live & set(desired)
+        if canonical_json(_profile_semantics(held[profile_id]))
+        != canonical_json(_profile_semantics(desired[profile_id]))
+    )
     return {
         "schema_version": "0.1",
         "checked_at": _wire_time(checked_at),
@@ -536,7 +599,10 @@ def catalog_sync_status(
         # The two diff sets, by name, that a report or a cockpit panel shows.
         "missing_static_profile_ids": missing_here + retired_but_offered,
         "not_in_broker_profile_ids": not_offered,
-        "catalog_in_sync": not missing_here and not retired_but_offered and not not_offered,
+        "drifted_profile_ids": drifted,
+        "catalog_in_sync": (
+            not missing_here and not retired_but_offered and not not_offered and not drifted
+        ),
     }
 
 
@@ -572,6 +638,7 @@ def sync_openclaw_model_catalog(
     held = _router_broker_profiles(router)
     added: list[str] = []
     revived: list[str] = []
+    updated: list[str] = []
     for profile_id in sorted(desired):
         current = held.get(profile_id)
         if current is None:
@@ -582,6 +649,13 @@ def sync_openclaw_model_catalog(
                 _revived_version(current, desired[profile_id], checked_at=checked_at)
             )
             revived.append(profile_id)
+        elif canonical_json(_profile_semantics(current)) != canonical_json(
+            _profile_semantics(desired[profile_id])
+        ):
+            router.register_profile(
+                _changed_version(current, desired[profile_id], checked_at=checked_at)
+            )
+            updated.append(profile_id)
     retired: list[str] = []
     for profile_id in sorted(held):
         current = held[profile_id]
@@ -597,7 +671,8 @@ def sync_openclaw_model_catalog(
         "added_profile_ids": added,
         "retired_profile_ids_this_run": retired,
         "revived_profile_ids": revived,
-        "changed": bool(added or retired or revived),
+        "updated_profile_ids": updated,
+        "changed": bool(added or retired or revived or updated),
     }
 
 

@@ -70,6 +70,53 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(second["revived_profile_ids"], [])
         self.assertTrue(second["catalog_in_sync"])
 
+    def test_route_price_and_capacity_drift_append_one_version(self) -> None:
+        config = _config()
+        self._install(config)
+        profile_id = "profile:deepseek-v4-flash"
+        before = next(row for row in self.router.latest_profiles() if row["id"] == profile_id)
+        before_bytes = self.router.connection.execute(
+            "SELECT profile_json FROM model_endpoint_profile_versions "
+            "WHERE profile_version_ref=?", (before["profile_version_ref"],),
+        ).fetchone()[0]
+        changed = _config()
+        changed["models"]["providers"]["deepseek"]["models"].append({
+            "id": "deepseek-next", "contextWindow": 200_000, "maxTokens": 12_000,
+            "cost": {"input": 0.7, "output": 2.1},
+        })
+        broker = next(
+            row for row in changed["plugins"]["entries"]
+            ["dalton-openclaw-model-broker"]["config"]["profiles"]
+            if row["id"] == profile_id
+        )
+        broker.update({
+            "model": "deepseek/deepseek-next", "maxTokens": 10_000,
+            "family": "deepseek-next", "capabilities": ["research", "verify"],
+        })
+        rows_before = self.router.connection.execute(
+            "SELECT COUNT(*) FROM model_endpoint_profile_versions").fetchone()[0]
+        status = catalog_sync_status(self.router, changed, checked_at=LATER)
+        self.assertEqual(status["drifted_profile_ids"], [profile_id])
+        self.assertEqual(
+            self.router.connection.execute(
+                "SELECT COUNT(*) FROM model_endpoint_profile_versions").fetchone()[0],
+            rows_before,
+        )
+        report = sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
+        self.assertEqual(report["updated_profile_ids"], [profile_id])
+        current = next(row for row in self.router.latest_profiles() if row["id"] == profile_id)
+        self.assertEqual((current["model"], current["family"]),
+                         ("deepseek-next", "deepseek-next"))
+        self.assertEqual(current["cost"]["input_per_million_usd"], 0.7)
+        self.assertEqual(current["context"]["max_output_tokens"], 10_000)
+        self.assertEqual(current["prior_version_ref"], before["profile_version_ref"])
+        self.assertEqual(self.router.connection.execute(
+            "SELECT profile_json FROM model_endpoint_profile_versions "
+            "WHERE profile_version_ref=?", (before["profile_version_ref"],),
+        ).fetchone()[0], before_bytes)
+        again = sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
+        self.assertFalse(again["changed"])
+
     def test_a_profile_the_broker_dropped_is_retired_not_deleted(self) -> None:
         config = _config()
         self._install(config)

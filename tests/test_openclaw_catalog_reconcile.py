@@ -98,7 +98,7 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         self.assertEqual(report["smoke_required_profile_ids"], ["profile:gemini-new-smoke"])
         catalog = openclaw_broker_profiles_from_config(config, checked_at=NOW)
         dynamic = next(item for item in catalog if item["id"] == "profile:gemini-new-smoke")
-        self.assertEqual(dynamic["capabilities"], ["verify"])
+        self.assertEqual(dynamic["capabilities"], ["research"])
         self.assertEqual(dynamic["family"], "unclassified:google")
         self.assertEqual(dynamic["limits"]["max_output_tokens"], 4_000)
         with tempfile.TemporaryDirectory() as directory:
@@ -117,8 +117,12 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         broker["model"] = "deepseek/deepseek-v4-flash-alt"
         report = reconcile_openclaw_model_catalog(config, checked_at=NOW)
         self.assertEqual(report["changed_broker_profile_ids"], ["profile:deepseek-v4-flash"])
-        with self.assertRaisesRegex(OpenClawCatalogError, "changed route"):
-            openclaw_broker_profiles_from_config(config, checked_at=NOW)
+        changed = next(
+            row for row in openclaw_broker_profiles_from_config(config, checked_at=NOW)
+            if row["id"] == "profile:deepseek-v4-flash"
+        )
+        self.assertEqual(changed["model"], "deepseek-v4-flash-alt")
+        self.assertEqual(changed["family"], "unclassified:deepseek")
 
         orphan = _config()
         del orphan["models"]["providers"]["deepseek"]["models"][0]

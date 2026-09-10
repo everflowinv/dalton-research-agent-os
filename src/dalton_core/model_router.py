@@ -240,6 +240,16 @@ def _money_string(value: Decimal) -> str:
     return format(value, ".6f")
 
 
+def independent_families(candidate_family: str, producer_family: str) -> bool:
+    """Unknown lineage is never evidence of verifier independence."""
+
+    return (
+        not candidate_family.startswith("unclassified:")
+        and not producer_family.startswith("unclassified:")
+        and candidate_family != producer_family
+    )
+
+
 def _retirement_wire(value: Any) -> dict[str, Any]:
     """The evidence a retirement carries, so it can be argued with later."""
 
@@ -1738,7 +1748,9 @@ class ModelRouter:
                     reasons.append("profile_cost_limit_exceeded")
                 if budget and estimate > budget["max_cost_usd"]:
                     reasons.append("work_order_cost_budget_exceeded")
-                if producer_family is not None and profile["family"] == producer_family:
+                if producer_family is not None and not independent_families(
+                    profile["family"], producer_family
+                ):
                     reasons.append("model_family_not_independent")
                 reasons = sorted(set(reasons))
                 item = {

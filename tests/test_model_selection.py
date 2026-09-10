@@ -136,6 +136,7 @@ def _with_unpriced_model(config: dict) -> dict:
     entry = config["plugins"]["entries"]["dalton-openclaw-model-broker"]
     entry["config"]["profiles"].append({
         "id": UNPRICED_PROFILE_ID, "model": UNPRICED_MODEL_REF, "maxTokens": 131_072,
+        "family": "zai-glm-6", "capabilities": ["verify"],
     })
     entry["llm"]["allowedModels"] = sorted(
         set(entry["llm"]["allowedModels"]) | {UNPRICED_MODEL_REF}
