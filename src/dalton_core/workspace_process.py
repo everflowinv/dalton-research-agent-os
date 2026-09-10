@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 import socket
 import subprocess
@@ -12,6 +13,7 @@ from typing import Any, Callable, Sequence
 
 from .macos_launchagent import render
 from .workspace import WorkspaceError, load_workspace_manifest
+from .workspace_release import validate_release
 
 
 def label_namespace(slug: str) -> str:
@@ -25,9 +27,17 @@ def workspace_plan(
     check_port: bool = True,
 ) -> dict[str, Any]:
     workspace = load_workspace_manifest(manifest_path)
+    validate_release(
+        workspace.release_path,
+        workspace.release_ref.removeprefix("release:sha256:"),
+    )
     release_bin = workspace.release_path / "bin"
-    required = ("dalton-writer", "daltond")
-    missing = [name for name in required if not (release_bin / name).is_file()]
+    required = ("python", "dalton-writer", "daltond")
+    missing = [
+        name
+        for name in required
+        if not (release_bin / name).is_file() or not os.access(release_bin / name, os.X_OK)
+    ]
     if missing:
         raise WorkspaceError("release is missing executables: " + ", ".join(missing))
     if check_port:
@@ -80,8 +90,26 @@ def _run_launchctl(
     namespace = label_namespace(workspace.slug)
     directory = Path(launch_agents_dir).expanduser().resolve()
     results = []
-    roles = ("writer", "controller", "control", "thesis-impact")
+    roles = (
+        ("writer", "controller", "control", "thesis-impact")
+        if action == "start"
+        else ("controller", "control", "thesis-impact", "writer")
+    )
     for role in roles:
+        if action == "stop" and role == "writer":
+            drain = run(
+                [
+                    str(workspace.release_path / "bin" / "python"),
+                    "-m", "dalton_core.launch_drain", "--state-dir",
+                    str(workspace.state_dir), "--timeout", "600",
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            if drain.returncode != 0:
+                raise WorkspaceError(
+                    "workspace lane drain failed; writer remains loaded: "
+                    + drain.stderr.strip()[:300]
+                )
         label = f"{namespace}.{role}"
         plist = directory / f"{label}.plist"
         if action == "start" and not plist.is_file():
