@@ -15,6 +15,8 @@ live Core and in no repository -- which is exactly the failure this pins.
 from __future__ import annotations
 
 import importlib
+import json
+import os
 import re
 import tempfile
 import unittest
@@ -22,6 +24,9 @@ from pathlib import Path
 
 from scripts.rehearse_deploy import (
     CORE_MIGRATIONS,
+    Rehearsal,
+    StepResult,
+    foreign_paths,
     INSTALL_SEEDS,
     LANE_SWITCHES,
     REPO_ROOT,
@@ -696,3 +701,375 @@ class LaneSwitchRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfinementTests(unittest.TestCase):
+    """The rehearsal may not run against anything but its own temp root.
+
+    These pin the fix for an incident rather than a hypothesis.  On its first
+    run the second rehearsal was pointed at a read-only copy of the live state
+    under ``/tmp``.  The copy step failed on the first database, the rewrite
+    step failed on a read-only ``service.json`` -- and the run carried on to
+    step eleven, built a ``BoundedPlannerDriver`` from a configuration that had
+    never been rewritten and therefore still named
+    ``~/Library/Application Support/Dalton``, and drove a tick against the live
+    Core.  Every writing lane was refused by the live writer, but the tick
+    ledger is opened by the driver directly and took a row.
+
+    Three separate things now have to fail before that can happen again: a
+    fatal step aborts the rest of the run, the confinement check refuses a
+    configuration naming anything outside the temp root, and the tick runs with
+    ``HOME`` pointed at an empty directory inside it.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name).resolve()
+        self.temp_root = base / "temp"
+        self.live_root = base / "live"
+        (self.temp_root / "config").mkdir(parents=True)
+        self.rehearsal = Rehearsal(
+            self.live_root, self.temp_root,
+            openclaw_config=base / "openclaw.json",
+        )
+
+    def _write_config(self, block: dict[str, object], **rest: object) -> None:
+        payload = {"bounded_planner": {"config": block}}
+        payload.update(rest)
+        (self.temp_root / "config" / "service.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def test_a_path_under_the_root_is_not_foreign(self) -> None:
+        root = Path("/tmp/rehearsal")
+        self.assertEqual(foreign_paths({"a": "/tmp/rehearsal/core.sqlite"}, root), [])
+
+    def test_a_path_outside_the_root_is_reported(self) -> None:
+        root = Path("/tmp/rehearsal")
+        self.assertEqual(
+            foreign_paths({"a": "/Users/x/Library/core.sqlite"}, root),
+            ["/Users/x/Library/core.sqlite"],
+        )
+
+    def test_a_sibling_directory_is_not_mistaken_for_a_child(self) -> None:
+        """``/tmp/rehearsal-2`` starts with ``/tmp/rehearsal`` and is not in it."""
+
+        self.assertEqual(
+            foreign_paths({"a": "/tmp/rehearsal-2/core.sqlite"}, Path("/tmp/rehearsal")),
+            ["/tmp/rehearsal-2/core.sqlite"],
+        )
+
+    def test_the_root_itself_counts_as_inside(self) -> None:
+        self.assertEqual(foreign_paths("/tmp/rehearsal", Path("/tmp/rehearsal")), [])
+
+    def test_nested_and_listed_paths_are_all_examined(self) -> None:
+        value = {"a": {"b": ["/tmp/ok/x", "/elsewhere/y"]}, "c": 3, "d": None}
+        self.assertEqual(foreign_paths(value, Path("/tmp/ok")), ["/elsewhere/y"])
+
+    def test_a_relative_string_is_not_a_path(self) -> None:
+        self.assertEqual(foreign_paths({"tier": "cheap"}, Path("/tmp/ok")), [])
+
+    def test_a_confined_config_passes_and_sets_the_flag(self) -> None:
+        self._write_config({"core_db": str(self.temp_root / "core.sqlite")})
+        detail, findings = self.rehearsal.confine_to_temp_root()
+        self.assertTrue(self.rehearsal.confined)
+        self.assertIn(str(self.temp_root), detail)
+        self.assertEqual(findings, [])
+
+    def test_a_config_naming_the_real_root_is_refused(self) -> None:
+        live = Path.home() / "Library" / "Application Support" / "Dalton"
+        self._write_config({"core_db": str(live / "state" / "dalton-core" / "core.sqlite")})
+        with self.assertRaises(RuntimeError) as caught:
+            self.rehearsal.confine_to_temp_root()
+        self.assertIn("outside", str(caught.exception))
+        self.assertIn(str(live), str(caught.exception))
+        self.assertFalse(self.rehearsal.confined)
+
+    def test_a_config_with_no_planner_block_is_refused(self) -> None:
+        (self.temp_root / "config" / "service.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.rehearsal.confine_to_temp_root()
+        self.assertFalse(self.rehearsal.confined)
+
+    def test_a_host_executable_elsewhere_is_a_finding_not_a_refusal(self) -> None:
+        self._write_config(
+            {"core_db": str(self.temp_root / "core.sqlite")},
+            control={"config": {"tailscale_executable": "/opt/homebrew/bin/tailscale"}},
+        )
+        _, findings = self.rehearsal.confine_to_temp_root()
+        self.assertTrue(self.rehearsal.confined)
+        self.assertEqual(findings, [])
+
+    def test_state_elsewhere_in_an_undriven_block_is_reported(self) -> None:
+        self._write_config(
+            {"core_db": str(self.temp_root / "core.sqlite")},
+            outbox={"config": {"token_config": "/Users/x/Dalton/writer-tokens.json"}},
+        )
+        _, findings = self.rehearsal.confine_to_temp_root()
+        self.assertTrue(self.rehearsal.confined)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("writer-tokens.json", findings[0])
+
+    def test_the_tick_refuses_to_build_a_driver_unconfined(self) -> None:
+        self.assertFalse(self.rehearsal.confined)
+        with self.assertRaises(RuntimeError) as caught:
+            self.rehearsal.run_tick()
+        self.assertIn("confinement", str(caught.exception))
+
+
+class FatalStepTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.rehearsal = Rehearsal(
+            Path(directory.name).resolve() / "live",
+            Path(directory.name).resolve() / "temp",
+            openclaw_config=Path(directory.name).resolve() / "openclaw.json",
+            log=lambda _line: None,
+        )
+
+    def test_a_failed_fatal_step_skips_everything_after_it(self) -> None:
+        def boom() -> tuple[str, list[str]]:
+            raise OSError("read-only")
+
+        ran: list[str] = []
+
+        def later() -> tuple[str, list[str]]:
+            ran.append("later")
+            return "", []
+
+        self.rehearsal.step("copy", boom, fatal=True)
+        result = self.rehearsal.step("tick", later)
+        self.assertEqual(ran, [])
+        self.assertTrue(result.skipped)
+        self.assertFalse(result.ok)
+        self.assertIn("copy", result.detail)
+
+    def test_a_failed_ordinary_step_does_not_stop_the_run(self) -> None:
+        def boom() -> tuple[str, list[str]]:
+            raise OSError("no plist")
+
+        ran: list[str] = []
+
+        def later() -> tuple[str, list[str]]:
+            ran.append("later")
+            return "done", []
+
+        self.rehearsal.step("plists", boom)
+        result = self.rehearsal.step("tick", later)
+        self.assertEqual(ran, ["later"])
+        self.assertTrue(result.ok)
+        self.assertFalse(result.skipped)
+
+    def test_a_skipped_step_is_reported_as_skipped_not_as_a_pass(self) -> None:
+        self.rehearsal.steps.append(StepResult("copy", False, 0.1, "OSError"))
+        self.rehearsal.steps.append(
+            StepResult("tick", False, 0.0, "skipped: copy failed", skipped=True)
+        )
+        report = self.rehearsal.report()
+        self.assertIn("FAIL", report)
+        self.assertIn("skip", report)
+
+    def test_the_run_is_not_ok_when_a_step_was_skipped(self) -> None:
+        self.rehearsal.steps.append(
+            StepResult("tick", False, 0.0, "skipped: copy failed", skipped=True)
+        )
+        self.assertFalse(all(step.ok for step in self.rehearsal.steps))
+
+
+class SourceRootTests(unittest.TestCase):
+    """``--live-root`` may be a copy; the rewrites still key off the original.
+
+    A copied ``service.json`` is a byte copy: it spells the root it was written
+    against, not the path it now lives at.  Keying the replacements off the
+    copy's own path replaces nothing, the rewrite becomes a silent no-op, and
+    the configuration the tick is built from still names the live Core.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = Path(directory.name).resolve()
+        self.original = self.base / "Dalton"
+        self.copy = self.base / "copy-of-Dalton"
+        self.temp = self.base / "temp"
+
+    def test_the_source_root_defaults_to_the_live_root(self) -> None:
+        rehearsal = Rehearsal(
+            self.copy, self.temp, openclaw_config=self.base / "openclaw.json"
+        )
+        self.assertEqual(rehearsal.source_root, self.copy.resolve())
+
+    def test_a_copy_rewrites_the_original_root_onto_the_temp_root(self) -> None:
+        rehearsal = Rehearsal(
+            self.copy, self.temp,
+            openclaw_config=self.base / "openclaw.json",
+            source_root=self.original,
+        )
+        rewritten = rewrite_paths(
+            {"core_db": str(self.original / "state" / "core.sqlite")},
+            rehearsal.replacements,
+        )
+        self.assertEqual(
+            rewritten["core_db"], str(self.temp.resolve() / "state" / "core.sqlite")
+        )
+
+    def test_the_copy_is_still_where_the_files_are_read_from(self) -> None:
+        rehearsal = Rehearsal(
+            self.copy, self.temp,
+            openclaw_config=self.base / "openclaw.json",
+            source_root=self.original,
+        )
+        self.assertEqual(rehearsal.live_root, self.copy.resolve())
+        self.assertNotEqual(rehearsal.live_root, rehearsal.source_root)
+
+    def test_inverting_takes_a_rendered_plist_back_to_the_original_root(self) -> None:
+        rehearsal = Rehearsal(
+            self.copy, self.temp,
+            openclaw_config=self.base / "openclaw.json",
+            source_root=self.original,
+        )
+        back = invert(rehearsal.replacements)
+        self.assertEqual(
+            rewrite_paths(str(self.temp.resolve() / "state"), back),
+            str(self.original.resolve() / "state"),
+        )
+
+
+class TempHomeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = Path(directory.name).resolve()
+        self.rehearsal = Rehearsal(
+            self.base / "live", self.base / "temp",
+            openclaw_config=self.base / "openclaw.json",
+        )
+
+    def test_the_temp_home_lives_inside_the_temp_root(self) -> None:
+        self.assertEqual(
+            self.rehearsal.temp_home.parent, (self.base / "temp").resolve()
+        )
+
+    def test_the_real_home_is_captured_before_anything_reassigns_it(self) -> None:
+        self.assertEqual(self.rehearsal.real_home, Path.home())
+
+    def test_home_is_restored_after_the_block(self) -> None:
+        from scripts.rehearse_deploy import _home_pointed_at
+
+        before = os.environ.get("HOME")
+        with _home_pointed_at(self.rehearsal.temp_home):
+            self.assertEqual(os.environ["HOME"], str(self.rehearsal.temp_home))
+            self.assertEqual(Path.home(), self.rehearsal.temp_home)
+        self.assertEqual(os.environ.get("HOME"), before)
+
+    def test_home_is_restored_when_the_block_raises(self) -> None:
+        from scripts.rehearse_deploy import _home_pointed_at
+
+        before = os.environ.get("HOME")
+        with self.assertRaises(ValueError):
+            with _home_pointed_at(self.rehearsal.temp_home):
+                raise ValueError("boom")
+        self.assertEqual(os.environ.get("HOME"), before)
+
+    def test_the_temp_home_has_no_dalton_root_under_it(self) -> None:
+        from scripts.rehearse_deploy import _home_pointed_at
+
+        with _home_pointed_at(self.rehearsal.temp_home):
+            self.assertFalse(
+                (Path.home() / "Library" / "Application Support" / "Dalton").exists()
+            )
+
+
+class CatalogChangeKeyTests(unittest.TestCase):
+    """The keys the sync actually reports, not the ones the step wished for.
+
+    ``run_catalog_sync`` read ``registered`` / ``retired`` / ``revived`` off a
+    report that has never carried any of the three.  Every lookup returned
+    nothing, so a sync that registered five profiles produced no finding, and
+    the idempotence check -- which compares the same three absent keys on a
+    second run -- passed without comparing anything.  A check that cannot fail
+    is worse than no check, because the report says it ran.
+    """
+
+    def test_the_keys_are_the_ones_the_sync_report_is_built_from(self) -> None:
+        from scripts.rehearse_deploy import CATALOG_CHANGE_KEYS
+
+        source = (
+            REPO_ROOT / "src" / "dalton_core" / "openclaw_catalog_reconcile.py"
+        ).read_text(encoding="utf-8")
+        for key in CATALOG_CHANGE_KEYS:
+            self.assertIn(
+                f'"{key}": ', source,
+                f"{key} is not a key sync_openclaw_model_catalog builds its report from",
+            )
+
+    def test_the_words_the_rehearsal_prints_are_the_three_movements(self) -> None:
+        from scripts.rehearse_deploy import CATALOG_CHANGE_KEYS
+
+        self.assertEqual(
+            sorted(CATALOG_CHANGE_KEYS.values()), ["registered", "retired", "revived"]
+        )
+
+    def test_the_retirement_key_is_the_per_run_one_not_the_cumulative_one(self) -> None:
+        """``retired_profile_ids`` is every retirement the router has ever made.
+
+        Reading that one would report six retirements on every deploy for ever,
+        including the deploys that retired nothing.
+        """
+
+        from scripts.rehearse_deploy import CATALOG_CHANGE_KEYS
+
+        self.assertIn("retired_profile_ids_this_run", CATALOG_CHANGE_KEYS)
+        self.assertNotIn("retired_profile_ids", CATALOG_CHANGE_KEYS)
+
+
+class CheckpointTests(unittest.TestCase):
+    """A scope and a checkpoint are different grants and both are checked.
+
+    Three of the merged lanes refuse on the checkpoint alone -- the reopen
+    lane, the conviction lane and the deep-insight gate all say, in their own
+    words, that a proposal nobody has agreed to decide should not be made.  The
+    rehearsal used to test one hard-coded word, so a mission missing the other
+    two read as ready and the lanes refused on the first live tick instead.
+    """
+
+    def test_a_mission_carrying_every_checkpoint_is_clean(self) -> None:
+        from scripts.rehearse_deploy import REQUIRED_CHECKPOINTS, missing_checkpoints
+
+        self.assertEqual(
+            missing_checkpoints([word for word, _ in REQUIRED_CHECKPOINTS]), []
+        )
+
+    def test_each_missing_checkpoint_is_named_with_its_reason(self) -> None:
+        from scripts.rehearse_deploy import missing_checkpoints
+
+        missing = missing_checkpoints(["deep_insight_gate"])
+        self.assertEqual(
+            [word for word, _ in missing],
+            ["thesis_revision_candidate", "gate_reopen", "conviction_call"],
+        )
+        self.assertTrue(all(why for _, why in missing))
+
+    def test_every_required_checkpoint_is_a_word_the_vocabulary_knows(self) -> None:
+        from dalton_core.coverage_mission import CHECKPOINT_KINDS
+        from scripts.rehearse_deploy import REQUIRED_CHECKPOINTS
+
+        for word, _ in REQUIRED_CHECKPOINTS:
+            self.assertIn(
+                word, CHECKPOINT_KINDS,
+                f"{word} is not in coverage_mission.CHECKPOINT_KINDS, so no "
+                "mission could ever carry it",
+            )
+
+    def test_the_lanes_that_refuse_on_a_checkpoint_are_the_ones_listed(self) -> None:
+        """Each required checkpoint is a constant some lane actually reads."""
+
+        from dalton_core.conviction_call import CHECKPOINT_KIND as CONVICTION
+        from dalton_core.deliverable_reopen import CHECKPOINT_KIND as REOPEN
+        from dalton_core.thesis_revision import CHECKPOINT_KIND as REVISION
+        from scripts.rehearse_deploy import REQUIRED_CHECKPOINTS
+
+        words = {word for word, _ in REQUIRED_CHECKPOINTS}
+        self.assertLessEqual({CONVICTION, REOPEN, REVISION}, words)

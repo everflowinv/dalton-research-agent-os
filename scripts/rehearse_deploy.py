@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,6 +179,60 @@ def invert(replacements: Mapping[str, str]) -> dict[str, str]:
     """The reverse swap, for reading a temp-root artefact as if it were live."""
 
     return {new: old for old, new in replacements.items()}
+
+
+def _flatten_paths(value: Any, prefix: str = "") -> list[tuple[str, str]]:
+    """``(dotted key, value)`` for every absolute-path string in a JSON value."""
+
+    out: list[tuple[str, str]] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            out.extend(_flatten_paths(item, f"{prefix}.{key}" if prefix else str(key)))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            out.extend(_flatten_paths(item, f"{prefix}[{index}]"))
+    elif isinstance(value, str) and value.startswith("/"):
+        out.append((prefix, value))
+    return out
+
+
+def foreign_paths(value: Any, root: Path) -> list[str]:
+    """Every absolute path in a JSON-shaped value that is not under ``root``.
+
+    The rehearsal's whole safety argument is that the configuration it hands
+    the driver names the temp root and nothing else.  :func:`rewrite_paths`
+    makes that true only when ``--live-root`` is the root the configuration was
+    actually written against.  Point it at a copy taken from somewhere else and
+    every replacement misses its prefix, the rewrite is a silent no-op, and the
+    tick runs against the live Core.
+
+    That is not hypothetical.  It is what the second rehearsal did on its first
+    run: the copy step failed, the rewrite step failed, and the run carried on
+    to build a driver from an unrewritten configuration whose paths still named
+    the live root.  The writer refused every lane's token, so nothing was
+    published -- but the tick ledger, which the driver opens directly rather
+    than through the writer, took a row on the live Core.  A rehearsal is
+    allowed to fail.  It is not allowed to fail *onto the thing it is
+    rehearsing against*, so this check is separate from the rewrite that is
+    supposed to make it pass, and the run stops on it.
+    """
+
+    prefix = str(root)
+    found: list[str] = []
+
+    def walk(item: Any) -> None:
+        if isinstance(item, Mapping):
+            for entry in item.values():
+                walk(entry)
+        elif isinstance(item, (list, tuple)):
+            for entry in item:
+                walk(entry)
+        elif isinstance(item, str) and item.startswith("/"):
+            if item != prefix and not item.startswith(prefix + os.sep):
+                found.append(item)
+
+    walk(value)
+    return sorted(set(found))
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +834,36 @@ def missing_write_scopes(
     return [(word, why) for word, why in required if word not in have]
 
 
+#: The ``autonomy.human_checkpoints`` words the merged lanes need.  A scope and
+#: a checkpoint are not interchangeable and three lanes now refuse on the
+#: checkpoint alone: a proposal nobody has agreed to decide is a proposal that
+#: should not be made, so those lanes hold rather than accumulate work in a
+#: queue with no reader.  This was one hard-coded ``if`` naming
+#: ``thesis_revision_candidate``, written when that was the only one; the
+#: reopen lane and the conviction lane have since landed and a rehearsal that
+#: checked only the first would report a mission as ready that two lanes will
+#: refuse on the first tick.
+REQUIRED_CHECKPOINTS: tuple[tuple[str, str], ...] = (
+    ("thesis_revision_candidate",
+     "P14a / ADR-0007: revise_thesis records queued and names the ADR instead of proposing"),
+    ("gate_reopen",
+     "P14d / ADR-0008: mission_reopen answers ungranted and proposes no reopen"),
+    ("conviction_call",
+     "P15d: a call nobody is asked to decide is not made; the lane holds"),
+    ("deep_insight_gate",
+     "P12d: a gate draft nobody is asked to decide is not a submission"),
+)
+
+
+def missing_checkpoints(
+    granted: Iterable[str], required: Sequence[tuple[str, str]] = REQUIRED_CHECKPOINTS
+) -> list[tuple[str, str]]:
+    """The ``human_checkpoints`` words a merged main needs and the mission lacks."""
+
+    have = set(granted)
+    return [(word, why) for word, why in required if word not in have]
+
+
 # ---------------------------------------------------------------------------
 # pure: which authority owns which schema
 # ---------------------------------------------------------------------------
@@ -978,6 +1063,21 @@ class LaneRow:
     held: bool
 
 
+#: The keys ``sync_openclaw_model_catalog.py`` actually reports a change under,
+#: mapped to the word the rehearsal prints.  This was three keys the report has
+#: never carried -- ``registered``, ``retired``, ``revived`` -- so the step
+#: silently found nothing to say however many profiles the sync moved, and the
+#: idempotence check compared two empty lists and passed by construction.  The
+#: first rehearsal's report described five registrations and six retirements
+#: that its own findings list never mentioned, which is how a check that is
+#: doing nothing looks from the outside.
+CATALOG_CHANGE_KEYS: dict[str, str] = {
+    "added_profile_ids": "registered",
+    "retired_profile_ids_this_run": "retired",
+    "revived_profile_ids": "revived",
+}
+
+
 #: A tick key that is not a lane.  ``lane_rows`` reports them too -- a tick
 #: whose own ledger write failed matters as much as a lane that raised -- but
 #: it labels them so the table does not claim the registry has 20 lanes.
@@ -1078,6 +1178,7 @@ class StepResult:
     seconds: float
     detail: str = ""
     findings: list[str] = field(default_factory=list)
+    skipped: bool = False
 
 
 class Rehearsal:
@@ -1087,32 +1188,77 @@ class Rehearsal:
         temp_root: Path,
         *,
         openclaw_config: Path,
+        source_root: Path | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
         self.live_root = live_root.expanduser().resolve()
+        # The root the copy was taken *from*.  When ``--live-root`` already is
+        # the live Dalton root the two are the same and nothing changes.  When
+        # it is a copy under /tmp they differ, and it is the original that has
+        # to drive the string swaps: the copied ``service.json`` is a byte copy
+        # and still spells the original root, so rewriting the copy's own path
+        # replaces nothing.  It is also the original that makes the plist diff
+        # readable -- normalising a rendered plist back to a /tmp copy path
+        # leaves every argument differing from the installed one for a reason
+        # that is not the deploy.
+        self.source_root = (source_root or live_root).expanduser().resolve()
         self.temp_root = temp_root.expanduser().resolve()
         self.openclaw_config = openclaw_config.expanduser()
+        # Resolved once, before anything reassigns ``HOME``.  Three steps have
+        # a legitimate need for the real home -- the OpenClaw catalog, the
+        # installed LaunchAgents to diff against, the seed gates -- and all
+        # three read it before the tick, which is the only step that runs with
+        # ``HOME`` pointed somewhere harmless.
+        self.real_home = Path.home()
         self.log = log
         self.temp_state = self.temp_root / STATE_SUBDIR
         self.temp_config = self.temp_root / CONFIG_SUBDIR / "service.json"
         self.stub_broker_dir = self.temp_root / "broker"
+        # A home directory with no Dalton root under it.  The writer child and
+        # the in-process tick run with ``HOME`` set here, so a path built from
+        # ``~`` by some module the rehearsal has not audited resolves to an
+        # empty directory inside the temp root instead of the live Core.
+        self.temp_home = self.temp_root / "home"
         self.launch_agents_dir = self.temp_root / "LaunchAgents"
         self.log_dir = self.temp_root / "logs"
         self.steps: list[StepResult] = []
+        self.confined = False
         self.replacements = path_replacements(
-            self.live_root,
+            self.source_root,
             self.temp_root,
-            broker_dir=Path.home() / ".openclaw",
+            broker_dir=self.real_home / ".openclaw",
             stub_broker_dir=self.stub_broker_dir,
         )
         self.tick_summary: dict[str, Any] = {}
         self.rows: list[LaneRow] = []
+        self._aborted_by: str | None = None
         self._writer: subprocess.Popen[bytes] | None = None
         self._broker: "StubBroker | None" = None
 
     # -- step plumbing ------------------------------------------------------
 
-    def step(self, name: str, fn: Callable[[], tuple[str, list[str]]]) -> StepResult:
+    def step(
+        self, name: str, fn: Callable[[], tuple[str, list[str]]], *, fatal: bool = False
+    ) -> StepResult:
+        """Run one step, unless an earlier fatal step has stopped the run.
+
+        ``fatal`` marks a step whose success is what makes the *rest* of the
+        rehearsal safe rather than merely informative -- the copy, the rewrite,
+        the confinement check.  A non-fatal step is allowed to fail and let the
+        run carry on gathering findings, which is the point of a rehearsal.  A
+        fatal one is not: everything after it would be reasoning about a temp
+        root that was never established, and the tick would be driven from a
+        configuration still naming the live Core.
+        """
+
+        if self._aborted_by is not None:
+            result = StepResult(
+                name, False, 0.0,
+                f"skipped: {self._aborted_by} failed", skipped=True,
+            )
+            self.steps.append(result)
+            self.log(f"\n== {name}\n   [skipped] {self._aborted_by} failed")
+            return result
         self.log(f"\n== {name}")
         started = time.monotonic()
         try:
@@ -1123,6 +1269,8 @@ class Rehearsal:
                 name, False, time.monotonic() - started,
                 f"{type(exc).__name__}: {exc}",
             )
+            if fatal:
+                self._aborted_by = name
         self.steps.append(result)
         self.log(f"   [{'ok' if result.ok else 'FAILED'}] {result.seconds:.1f}s {result.detail}")
         for finding in result.findings:
@@ -1185,16 +1333,65 @@ class Rehearsal:
             encoding="utf-8",
         )
         os.chmod(self.temp_config, 0o600)
-        remaining = [
+        remaining = sorted({
             line for line in json.dumps(rewritten, sort_keys=True).split('"')
-            if line.startswith(str(self.live_root)) or line.startswith(str(Path.home() / ".openclaw"))
-        ]
-        findings = (
-            [f"service.json still names {len(remaining)} live paths after rewrite: "
-             + ", ".join(sorted(set(remaining))[:4])]
-            if remaining else []
+            if line.startswith(str(self.source_root))
+            or line.startswith(str(self.real_home / ".openclaw"))
+        })
+        if remaining:
+            # Not a finding.  A configuration that still names the live root is
+            # a configuration that would drive the tick against the live Core,
+            # and the run has to stop rather than note it and carry on.
+            raise RuntimeError(
+                f"service.json still names {len(remaining)} live paths after "
+                "the rewrite, so --source-root is not the root this "
+                "configuration was written against: " + ", ".join(remaining[:4])
+            )
+        return f"{self.temp_config} rewritten onto the temp root", []
+
+    # -- 2b. confinement ----------------------------------------------------
+
+    #: Absolute paths a rewritten configuration is allowed to keep naming
+    #: outside the temp root, because they are host executables the rehearsal
+    #: never runs rather than state it could write to.  Anything else is a
+    #: rewrite that missed.
+    ALLOWED_FOREIGN_KEYS: tuple[str, ...] = ("tailscale_executable", "openclaw_executable")
+
+    def confine_to_temp_root(self) -> tuple[str, list[str]]:
+        """Refuse to go further unless the tick's configuration is temp-only.
+
+        Separate from the rewrite on purpose: the rewrite is the thing that is
+        supposed to make this true, so it cannot also be the thing that checks
+        it.  The block examined is ``bounded_planner.config`` -- the exact
+        mapping :meth:`run_tick` builds the driver from -- and the check is a
+        precondition of constructing the driver at all, not a report about one
+        that has already run.
+        """
+
+        raw = json.loads(self.temp_config.read_text(encoding="utf-8"))
+        block = (raw.get("bounded_planner") or {}).get("config") or {}
+        if not block:
+            raise RuntimeError("service.json has no bounded_planner.config to rehearse")
+        stray = foreign_paths(block, self.temp_root)
+        if stray:
+            raise RuntimeError(
+                "the rewritten bounded_planner config still names "
+                f"{len(stray)} path(s) outside {self.temp_root}; a tick built "
+                "from it would run against them: " + ", ".join(stray[:6])
+            )
+        outside = set(foreign_paths(raw, self.temp_root))
+        elsewhere = sorted(
+            f"{key}={value}"
+            for key, value in _flatten_paths(raw)
+            if value in outside and not key.endswith(self.ALLOWED_FOREIGN_KEYS)
         )
-        return f"{self.temp_config} rewritten onto the temp root", findings
+        self.confined = True
+        findings = (
+            [f"service.json names {len(elsewhere)} path(s) outside the temp root "
+             "in blocks the rehearsal does not drive: " + ", ".join(elsewhere[:4])]
+            if elsewhere else []
+        )
+        return f"bounded_planner.config is confined to {self.temp_root}", findings
 
     # -- 3. bootstrap -------------------------------------------------------
 
@@ -1451,10 +1648,10 @@ class Rehearsal:
         report = json.loads(completed.stdout)
         self.catalog_report = report
         findings: list[str] = []
-        for key in ("registered", "retired", "revived"):
+        for key, verb in CATALOG_CHANGE_KEYS.items():
             values = report.get(key) or []
             if values:
-                findings.append(f"catalog {key}: " + ", ".join(str(v) for v in values))
+                findings.append(f"catalog {verb}: " + ", ".join(str(v) for v in values))
         # Idempotence: install.sh runs this on every deploy, so a second run
         # that changes something would mean the deploy never converges.
         again = subprocess.run(
@@ -1462,12 +1659,14 @@ class Rehearsal:
         )
         if again.returncode == 0:
             second = json.loads(again.stdout)
-            for key in ("registered", "retired", "revived"):
+            for key, verb in CATALOG_CHANGE_KEYS.items():
                 if second.get(key):
                     findings.append(
-                        f"catalog sync is not idempotent: a second run still {key} "
+                        f"catalog sync is not idempotent: a second run still {verb} "
                         + ", ".join(str(v) for v in second[key])
                     )
+            if second.get("changed"):
+                findings.append("catalog sync is not idempotent: a second run reports changed=true")
         findings.extend(self._check_verifier_pin(router_db))
         return json.dumps(
             {k: v for k, v in report.items() if k != "profiles"}, sort_keys=True
@@ -1530,19 +1729,20 @@ class Rehearsal:
         granted = list(autonomy.get("may_write") or [])
         checkpoints = list(autonomy.get("human_checkpoints") or [])
         self.mission_granted = granted
+        name = mission.get("mission_version_id") or mission.get("id")
         missing = missing_write_scopes(granted)
+        absent_checkpoints = missing_checkpoints(checkpoints)
         findings = [
-            f"mission {mission.get('mission_version_id') or mission.get('id')} "
-            f"does not grant may_write:{word} -- {why}"
+            f"mission {name} does not grant may_write:{word} -- {why}"
             for word, why in missing
         ]
-        if "thesis_revision_candidate" not in checkpoints:
-            findings.append(
-                "mission human_checkpoints lacks thesis_revision_candidate "
-                "(ADR-0007); revise_thesis records queued instead of proposing"
-            )
+        findings.extend(
+            f"mission {name} human_checkpoints lacks {word} -- {why}"
+            for word, why in absent_checkpoints
+        )
         return (
-            f"may_write grants {len(granted)}, missing {len(missing)}",
+            f"may_write grants {len(granted)}, missing {len(missing)}; "
+            f"checkpoints {len(checkpoints)}, missing {len(absent_checkpoints)}",
             findings,
         )
 
@@ -1593,9 +1793,9 @@ class Rehearsal:
         # would really change.
         back = invert(self.replacements) | {
             str(Path(sys.executable).parent): "<venv>/bin",
-            str(self.log_dir): str(Path.home() / "Library" / "Logs" / "Dalton"),
+            str(self.log_dir): str(self.real_home / "Library" / "Logs" / "Dalton"),
         }
-        live_agents = Path.home() / "Library" / "LaunchAgents"
+        live_agents = self.real_home / "Library" / "LaunchAgents"
         for label in (
             "space.lumos.dalton.writer", "space.lumos.dalton.controller",
             "space.lumos.dalton.control", "space.lumos.dalton.thesis-impact",
@@ -1612,7 +1812,7 @@ class Rehearsal:
                 continue
             old = rewrite_paths(
                 plistlib.loads(old_path.read_bytes()),
-                {str(Path.home() / "Library" / "Application Support" / "Dalton"
+                {str(self.real_home / "Library" / "Application Support" / "Dalton"
                      / "runtime" / "venv" / "bin"): "<venv>/bin"},
             )
             new = normalise_plist(plistlib.loads(new_path.read_bytes()), back)
@@ -1641,7 +1841,12 @@ class Rehearsal:
             argv,
             stdout=self._writer_log,
             stderr=subprocess.STDOUT,
-            env=dict(os.environ, PYTHONPATH=str(REPO_ROOT / "src"), PYTHONUNBUFFERED="1"),
+            env=dict(
+                os.environ,
+                PYTHONPATH=str(REPO_ROOT / "src"),
+                PYTHONUNBUFFERED="1",
+                HOME=str(self.temp_home),
+            ),
             cwd=str(self.temp_state),
         )
         socket_path = self.temp_state / "run" / "writer.sock"
@@ -1682,13 +1887,25 @@ class Rehearsal:
         from dalton_core.lane_registry import tick_lanes
         from dalton_core.service import ServiceConfig
 
+        if not self.confined:
+            raise RuntimeError(
+                "refusing to build a driver: the confinement step did not pass, "
+                "so the configuration is not known to name the temp root only"
+            )
         service = ServiceConfig.from_file(self.temp_config)
         raw = json.loads(self.temp_config.read_text(encoding="utf-8"))
         block = dict(raw["bounded_planner"]["config"])
+        stray = foreign_paths(block, self.temp_root)
+        if stray:
+            raise RuntimeError(
+                "the driver block names paths outside the temp root: "
+                + ", ".join(stray[:6])
+            )
         config = BoundedPlannerDriverConfig.from_mapping(block)
         driver = BoundedPlannerDriver(config, transport=RefusingTransport())
         started = time.monotonic()
-        self.tick_summary = driver.run_once()
+        with _home_pointed_at(self.temp_home):
+            self.tick_summary = driver.run_once()
         elapsed = time.monotonic() - started
         operations = {
             spec.driver_key: spec.operation for spec in tick_lanes()
@@ -1710,9 +1927,20 @@ class Rehearsal:
 
     def run(self) -> int:
         self.temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.temp_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
-            self.step("copy live state (read-only)", self.copy_state)
-            self.step("rewrite service.json onto the temp root", self.rewrite_config)
+            # The first three are fatal: each one is what makes the steps after
+            # it operate on the temp root rather than on the live Core.  A
+            # rehearsal that keeps going past them is not a rehearsal any more.
+            self.step("copy live state (read-only)", self.copy_state, fatal=True)
+            self.step(
+                "rewrite service.json onto the temp root",
+                self.rewrite_config, fatal=True,
+            )
+            self.step(
+                "confine the rehearsal to the temp root",
+                self.confine_to_temp_root, fatal=True,
+            )
             self.step("dalton-bootstrap", self.run_bootstrap)
             self.step("migrations (every *_schema.sql)", self.run_migrations)
             # install.sh's order, and it matters: several lanes' ``argv_fragment``
@@ -1736,8 +1964,9 @@ class Rehearsal:
     def report(self) -> str:
         lines = ["", "=" * 72, "rehearsal summary", "=" * 72]
         for step in self.steps:
+            marker = "skip" if step.skipped else ("ok " if step.ok else "FAIL")
             lines.append(
-                f"{'ok ' if step.ok else 'FAIL'} {step.seconds:6.1f}s  {step.name}"
+                f"{marker} {step.seconds:6.1f}s  {step.name}"
                 + (f" -- {step.detail}" if step.detail else "")
             )
         findings = [
@@ -1901,6 +2130,31 @@ def copy_tree(source: Path, destination: Path) -> int:
     return total
 
 
+@contextmanager
+def _home_pointed_at(home: Path) -> Any:
+    """Run a block with ``HOME`` naming a directory that has no Dalton root.
+
+    Belt to the confinement check's braces.  The check proves the *declared*
+    paths are all under the temp root; this makes an *undeclared* one -- a
+    module reaching for ``Path.home()`` on a path the rehearsal has not read --
+    resolve inside the temp root as well.  ``Path.home()`` reads ``HOME``
+    first on POSIX, so the swap covers ``~`` expansion too.
+    """
+
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    previous = {name: os.environ.get(name) for name in ("HOME", "USERPROFILE")}
+    os.environ["HOME"] = str(home)
+    os.environ["USERPROFILE"] = str(home)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 class RefusingTransport:
     """A probe transport that refuses instead of reaching the network.
 
@@ -2009,6 +2263,15 @@ def main(argv: list[str] | None = None) -> int:
         help="the live Dalton root; opened read-only and never written to",
     )
     parser.add_argument(
+        "--source-root", type=Path, default=None,
+        help=(
+            "the root --live-root was copied from; defaults to --live-root. "
+            "Set it when --live-root is a copy: the copied service.json still "
+            "spells the original root, so it is the original that has to drive "
+            "the path rewrites and the plist diff"
+        ),
+    )
+    parser.add_argument(
         "--temp-root", type=Path, default=None,
         help="where to rehearse; defaults to /tmp/dalton-rehearsal-<utc timestamp>",
     )
@@ -2025,7 +2288,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--temp-root must live under /tmp; this script writes there only")
     if temp_root.resolve() == args.live_root.expanduser().resolve():
         raise SystemExit("--temp-root must not be the live root")
-    rehearsal = Rehearsal(args.live_root, temp_root, openclaw_config=args.openclaw_config)
+    rehearsal = Rehearsal(
+        args.live_root, temp_root,
+        openclaw_config=args.openclaw_config,
+        source_root=args.source_root,
+    )
     code = rehearsal.run()
     summary = rehearsal.report()
     print(summary)
