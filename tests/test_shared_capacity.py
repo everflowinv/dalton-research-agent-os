@@ -33,16 +33,22 @@ NOW = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
 
 def policy(*, calls=10, cost=10_000_000, concurrency=2,
            policy_id="shared-capacity-policy:model-openai-main",
-           provider="openai", slot="credential-slot:openai:dalton"):
+           provider="openai", slot="credential-slot:openai:dalton",
+           account="provider-account:openai:dalton", slots=None,
+           schema_version=POLICY_SCHEMA_VERSION):
     body = {
-        "schema_version": POLICY_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "id": policy_id,
         "status": "approved", "provider": provider,
-        "credential_slot_ref": slot,
         "max_daily_calls": calls, "max_daily_cost_micros": cost,
         "max_concurrency": concurrency, "approved_by": "human:owner",
         "created_at": NOW.isoformat(),
     }
+    if schema_version == "shared-model-capacity-policy-0.1":
+        body["credential_slot_ref"] = slot
+    else:
+        body["account_ref"] = account
+        body["allowed_credential_slot_refs"] = sorted(slots or [slot])
     return {**body, "content_hash": content_hash(body)}
 
 
@@ -79,12 +85,13 @@ class SharedCapacityTests(unittest.TestCase):
             self.db, policy_ref=record["id"], policy_hash=record["content_hash"],
             clock=clock)
 
-    def binding(self, record):
+    def binding(self, record, slot=None):
         normalized = validate_policy(record)
+        credential_slot_ref = slot or normalized["allowed_credential_slot_refs"][0]
         return {"database": str(self.db), "policy_ref": record["id"],
                 "policy_hash": record["content_hash"],
                 "provider": normalized["provider"],
-                "credential_slot_ref": normalized["credential_slot_ref"],
+                "credential_slot_ref": credential_slot_ref,
                 "scope_ref": normalized["scope_ref"],
                 "account_ref": normalized["account_ref"]}
 
@@ -175,6 +182,69 @@ class SharedCapacityTests(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(Exception, "must be positive"):
                     SharedCapacityAuthority.initialize(self.db, policy(**{field: 0}))
+
+    def test_legacy_policy_bytes_keep_slot_derived_account(self):
+        record = policy(schema_version="shared-model-capacity-policy-0.1")
+        original = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        normalized = validate_policy(record)
+        self.assertEqual(
+            normalized["account_ref"], "credential-slot:openai:dalton")
+        self.assertEqual(
+            normalized["allowed_credential_slot_refs"],
+            ["credential-slot:openai:dalton"])
+        self.assertEqual(
+            json.dumps(record, sort_keys=True, separators=(",", ":")), original)
+
+    def test_two_slots_for_one_declared_account_share_the_same_cap(self):
+        slots = ["credential-slot:openai:a", "credential-slot:openai:b"]
+        record = self.init(calls=1, slots=slots)
+        release = self.host / "runtime" / "releases" / ("b" * 64)
+        release.mkdir(parents=True)
+        workspace = create_workspace_manifest(
+            self.host, "analyst-slots", 8790, "release:sha256:" + "b" * 64,
+            release, shared_model_capacity_bindings=[
+                self.binding(record, slots[0]), self.binding(record, slots[1])])
+        self.assertEqual(len(workspace.shared_model_capacity_bindings), 2)
+        with self.open(record) as authority:
+            first = authority.reserve(
+                workspace_id=str(uuid.uuid4()), invocation_ref="invocation:slot-a",
+                provider="openai", credential_slot_ref=slots[0],
+                maximum_cost_micros=100,
+                expires_at=NOW + timedelta(minutes=1))
+            authority.mark_dispatched(first["reservation_ref"])
+            with self.assertRaisesRegex(SharedCapacityExceeded, "daily call"):
+                authority.reserve(
+                    workspace_id=str(uuid.uuid4()), invocation_ref="invocation:slot-b",
+                    provider="openai", credential_slot_ref=slots[1],
+                    maximum_cost_micros=100,
+                    expires_at=NOW + timedelta(minutes=1))
+
+    def test_slot_rotation_preserves_account_usage(self):
+        first = self.init(calls=1, slots=["credential-slot:openai:old"])
+        with self.open(first) as authority:
+            reservation = authority.reserve(
+                workspace_id=str(uuid.uuid4()), invocation_ref="invocation:old-slot",
+                provider="openai", credential_slot_ref="credential-slot:openai:old",
+                maximum_cost_micros=100,
+                expires_at=NOW + timedelta(minutes=1))
+            authority.mark_dispatched(reservation["reservation_ref"])
+        replacement = policy(
+            calls=1, policy_id="shared-capacity-policy:model-openai-rotated",
+            slots=["credential-slot:openai:new"])
+        SharedCapacityAuthority.activate(
+            self.db, replacement, expected_policy_ref=first["id"],
+            expected_policy_hash=first["content_hash"])
+        with self.open(first) as historical:
+            historical.settle(
+                reservation["reservation_ref"], actual_cost_micros=50,
+                outcome="broker_succeeded")
+        with self.open(replacement) as authority:
+            with self.assertRaisesRegex(SharedCapacityExceeded, "daily call"):
+                authority.reserve(
+                    workspace_id=str(uuid.uuid4()), invocation_ref="invocation:new-slot",
+                    provider="openai", credential_slot_ref="credential-slot:openai:new",
+                    maximum_cost_micros=100,
+                    expires_at=NOW + timedelta(minutes=1))
 
     def test_two_provider_accounts_are_governed_by_distinct_bindings(self):
         openai = self.init(calls=2)

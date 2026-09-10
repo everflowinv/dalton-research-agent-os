@@ -14,7 +14,8 @@ from typing import Any, Callable, Mapping
 
 from .store import content_hash
 
-POLICY_SCHEMA_VERSION = "shared-model-capacity-policy-0.1"
+LEGACY_POLICY_SCHEMA_VERSION = "shared-model-capacity-policy-0.1"
+POLICY_SCHEMA_VERSION = "shared-model-capacity-policy-0.2"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _REF = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*:[^\s]+$")
 
@@ -36,24 +37,45 @@ class SharedCapacityConflict(SharedCapacityError):
 
 
 def validate_policy(value: Mapping[str, Any]) -> dict[str, Any]:
-    fields = {"schema_version", "id", "status", "provider", "credential_slot_ref",
+    if not isinstance(value, Mapping):
+        raise SharedCapacityError("shared capacity policy has an invalid closed shape")
+    version = value.get("schema_version")
+    legacy = version == LEGACY_POLICY_SCHEMA_VERSION
+    fields = {"schema_version", "id", "status", "provider",
               "max_daily_calls", "max_daily_cost_micros", "max_concurrency",
               "approved_by", "created_at", "content_hash"}
-    if not isinstance(value, Mapping) or set(value) != fields:
+    fields |= ({"credential_slot_ref"} if legacy else {
+        "account_ref", "allowed_credential_slot_refs"})
+    if version not in {LEGACY_POLICY_SCHEMA_VERSION, POLICY_SCHEMA_VERSION} \
+            or set(value) != fields:
         raise SharedCapacityError("shared capacity policy has an invalid closed shape")
     wire = dict(value)
     asserted = wire.pop("content_hash")
     if asserted != content_hash(wire) or not isinstance(asserted, str) \
             or _SHA.fullmatch(asserted) is None:
         raise SharedCapacityError("shared capacity policy content hash does not match")
-    if wire["schema_version"] != POLICY_SCHEMA_VERSION or wire["status"] != "approved":
+    if wire["status"] != "approved":
         raise SharedCapacityError("shared capacity policy is not an approved supported policy")
-    for key in ("id", "credential_slot_ref", "approved_by"):
+    for key in ("id", "approved_by"):
         if not isinstance(wire[key], str) or _REF.fullmatch(wire[key]) is None:
             raise SharedCapacityError(f"shared capacity policy {key} is invalid")
     if not isinstance(wire["provider"], str) or not wire["provider"] \
             or any(char.isspace() for char in wire["provider"]):
         raise SharedCapacityError("shared capacity policy provider is invalid")
+    if legacy:
+        slots = [wire["credential_slot_ref"]]
+        account_ref = wire["credential_slot_ref"]
+    else:
+        account_ref = wire["account_ref"]
+        if not isinstance(account_ref, str) or _REF.fullmatch(account_ref) is None:
+            raise SharedCapacityError("shared capacity policy account_ref is invalid")
+        slots = wire["allowed_credential_slot_refs"]
+        if (not isinstance(slots, list) or not slots or slots != sorted(slots)
+                or len(slots) != len(set(slots))
+                or any(not isinstance(slot, str) or _REF.fullmatch(slot) is None
+                       for slot in slots)):
+            raise SharedCapacityError(
+                "shared capacity policy allowed credential slots are invalid")
     try:
         created = datetime.fromisoformat(wire["created_at"].replace("Z", "+00:00"))
     except (AttributeError, ValueError) as exc:
@@ -66,17 +88,19 @@ def validate_policy(value: Mapping[str, Any]) -> dict[str, Any]:
     # Version 0.1 used the credential slot as its explicit account identity.
     # Keep those signed bytes valid while deriving one stable aggregation key
     # that does not change when the owner publishes a new policy ref.
-    account_ref = wire["credential_slot_ref"]
     scope_ref = "shared-model-capacity-scope:" + content_hash({
         "provider": wire["provider"], "account_ref": account_ref,
     })[:32]
     return {**wire, "content_hash": asserted,
-            "account_ref": account_ref, "scope_ref": scope_ref}
+            "account_ref": account_ref, "allowed_credential_slot_refs": slots,
+            "scope_ref": scope_ref}
 
 
 def _signed_policy_record(policy: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in policy.items()
-            if key not in {"account_ref", "scope_ref"}}
+    derived = {"scope_ref"}
+    if policy["schema_version"] == LEGACY_POLICY_SCHEMA_VERSION:
+        derived |= {"account_ref", "allowed_credential_slot_refs"}
+    return {key: value for key, value in policy.items() if key not in derived}
 
 
 _SCHEMA = """
@@ -267,7 +291,7 @@ class SharedCapacityAuthority:
         credential_slot_ref: str, maximum_cost_micros: int, expires_at: datetime,
     ) -> dict[str, Any]:
         if provider != self.policy["provider"] \
-                or credential_slot_ref != self.policy["credential_slot_ref"]:
+                or credential_slot_ref not in self.policy["allowed_credential_slot_refs"]:
             raise SharedCapacityUnavailable("selected model is outside shared capacity policy scope")
         if isinstance(maximum_cost_micros, bool) or not isinstance(maximum_cost_micros, int) \
                 or maximum_cost_micros < 1:
