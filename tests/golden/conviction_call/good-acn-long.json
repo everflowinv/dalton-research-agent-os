@@ -1,0 +1,138 @@
+{
+ "artefact": {
+  "artefact_kind": "conviction_call",
+  "cited_tags": [],
+  "confidence": "medium",
+  "expected_sections": [
+   "我们的看法",
+   "市场的看法",
+   "市场错在哪",
+   "靠拢路径",
+   "预期差",
+   "可观察信号",
+   "风险回报",
+   "证伪条件"
+  ],
+  "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prior": null,
+  "question": null,
+  "ref": "conviction-call-proposal:golden-good-acn-long",
+  "sections": [
+   {
+    "body": "订单转收入的时滞是两到四个季度，本季 bookings 的加速要到 FY27 上半年才进收入，所以我们把 FY27 增速建在高个位数而不是中个位数",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "我们的看法"
+   },
+   {
+    "body": "卖方多数把 FY27 收入增速建在 5% 附近，理由是 discretionary 支出还在收缩；DebateMap 记的 market_position 是 bear",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场的看法"
+   },
+   {
+    "body": "分歧不在需求方向，而在时滞：街上把 bookings 与收入建成同期，于是把一个还没到账的加速读成没有发生",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场错在哪"
+   },
+   {
+    "body": "9 月 25 日的业绩会披露本季 bookings 与 book-to-bill；若 book-to-bill 连续两个季度在 1.1 以上，时滞假设就可以被外部验证",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "靠拢路径"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这个 Core 上还没有 consensus authority（P11b 未建），所以我们的预测与街上的差没有办法逐项算出来"
+    ],
+    "numbers": [],
+    "title": "预期差"
+   },
+   {
+    "body": "2026-09-25：业绩会披露的 book-to-bill 高于 1.1\n日期未知：下一份大单公告里 AI 相关 scope 的占比被单独披露",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25",
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "可观察信号"
+   },
+   {
+    "body": "上行：FY27 增速被证实在高个位数，倍数回到近五年中位数，合计约 55% 上行\n下行：时滞假设错、bookings 不转化，增速回到低个位数，倍数继续压缩约 20%\n对照 Playbook 标准：met——55% upside against a 50% standard",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "风险回报"
+   },
+   {
+    "body": "连续两个季度 book-to-bill 低于 1.0；公司恢复单独披露 AI 收入且其增速低于总收入",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "证伪条件"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company:sec-cik:0001467373 long (6_12_months)"
+ },
+ "case_ref": "good-acn-long",
+ "expected": {
+  "deterministic": {},
+  "rationale": "正例：市场看法有具名来源、分歧落在一个可争论的机制（时滞）上、路径挂在确认过的业绩日上、两个情形都有量级并对照了标准、证伪条件可观测。consensus 缺失如实写明，所以 consensus_gap_named 给 3–4 而不是满分——缺口写了，但没有说清缺它导致哪一句话只能定性。",
+  "score_ranges": {
+   "consensus_gap_named": [
+    3,
+    4
+   ],
+   "falsifiers_bound_to_a_thesis": [
+    3,
+    4
+   ],
+   "horizon_matches_the_direction": [
+    3,
+    4
+   ],
+   "not_a_paraphrase_of_the_price": [
+    3,
+    4
+   ],
+   "pathway_is_observable": [
+    3,
+    4
+   ],
+   "risk_reward_against_the_standard": [
+    3,
+    4
+   ],
+   "variant_view_is_variant": [
+    3,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "正例：一份可以直接放到 PM 面前的 call。机械半边（conviction_call.rubric_findings）全过，所以确定性检查为空——这份标准的确定性一半不在 research_quality_score.CHECKS 里。",
+ "rubric": "conviction_call",
+ "source": "手写；用 conviction_call.conviction_call_artefact 从手写的 ConvictionCallProposal 记录渲染，论断取自 live Core 只读副本 2026-09-09 里 ACN 的真实材料（订单时滞、GCC 内部化）"
+}

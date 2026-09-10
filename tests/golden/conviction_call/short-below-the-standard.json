@@ -1,0 +1,138 @@
+{
+ "artefact": {
+  "artefact_kind": "conviction_call",
+  "cited_tags": [],
+  "confidence": "low",
+  "expected_sections": [
+   "我们的看法",
+   "市场的看法",
+   "市场错在哪",
+   "靠拢路径",
+   "预期差",
+   "可观察信号",
+   "风险回报",
+   "证伪条件"
+  ],
+  "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prior": null,
+  "question": null,
+  "ref": "conviction-call-proposal:golden-short-below-the-standard",
+  "sections": [
+   {
+    "body": "GCC 内部化正在侵蚀 ACN 的应用外包份额，FY27 的续约价格会低于街上的假设",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "我们的看法"
+   },
+   {
+    "body": "卖方多数把 FY27 收入增速建在 5% 附近，理由是 discretionary 支出还在收缩；DebateMap 记的 market_position 是 bear",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场的看法"
+   },
+   {
+    "body": "街上把 GCC 当作增量客户，而不是被内部化的存量；分歧在于同一批客户的续约口径",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场错在哪"
+   },
+   {
+    "body": "9 月 25 日的业绩会若披露 managed services 续约价格，这一条可以被证实或证伪",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "靠拢路径"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这个 Core 上还没有 consensus authority（P11b 未建），所以我们的预测与街上的差没有办法逐项算出来"
+    ],
+    "numbers": [],
+    "title": "预期差"
+   },
+   {
+    "body": "2026-09-25：managed services 的续约价格或 renewal rate 被披露\n日期未知：有具名客户把应用维护迁回自建 GCC 的公开案例",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25",
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "可观察信号"
+   },
+   {
+    "body": "上行：内部化被证实，倍数与增速同时下修，约 18% 下行空间\n下行：做空错的话，AI 重构需求把份额补回来，约 18% 逆向\n对照 Playbook 标准：not_met——18% downside against a 30% standard",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "风险回报"
+   },
+   {
+    "body": "managed services 续约价格同比持平或上升",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "证伪条件"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company:sec-cik:0001467373 short (3_6_months)"
+ },
+ "case_ref": "short-below-the-standard",
+ "expected": {
+  "deterministic": {},
+  "rationale": "做空写明了 3–6 个月跨度（满分行为），但 18% 的下行空间没到手册的 30%，standard 判定 not_met 并如实写出。评分标准说得很清楚：如实标不达标比把数字调到刚好达标高分，所以 risk_reward_against_the_standard 给 2–3 而不是 0–1。",
+  "score_ranges": {
+   "consensus_gap_named": [
+    3,
+    4
+   ],
+   "falsifiers_bound_to_a_thesis": [
+    3,
+    4
+   ],
+   "horizon_matches_the_direction": [
+    3,
+    4
+   ],
+   "not_a_paraphrase_of_the_price": [
+    3,
+    4
+   ],
+   "pathway_is_observable": [
+    3,
+    4
+   ],
+   "risk_reward_against_the_standard": [
+    2,
+    3
+   ],
+   "variant_view_is_variant": [
+    3,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "边界例：一份诚实但不达标的做空。它证明 not_met 不是低分——手册的标准是仓位标准，研究观点仍然值得人看一眼。",
+ "rubric": "conviction_call",
+ "source": "手写；用 conviction_call.conviction_call_artefact 从手写的 ConvictionCallProposal 记录渲染，论断取自 live Core 只读副本 2026-09-09 里 ACN 的真实材料（订单时滞、GCC 内部化）"
+}
