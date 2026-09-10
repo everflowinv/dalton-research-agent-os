@@ -1675,9 +1675,10 @@ class ModelRouter:
             if policy_row is None:
                 raise RoutingPolicyNotFound(str(policy_version_ref))
             policy = json.loads(policy_row["policy_json"])
-            if purpose is not None and (
+            purpose_override = purpose is not None and (
                 policy.get("purpose_overrides") or {}
-            ).get(purpose) is not None:
+            ).get(purpose) is not None
+            if purpose_override:
                 # P14-M2. The purpose joins the request identity only when this
                 # policy version actually carries a selection for it, and then
                 # for a reason: the same work under a different selection is a
@@ -1781,6 +1782,8 @@ class ModelRouter:
                 if (
                     filters["allowed_profile_ids"]
                     and profile["id"] not in filters["allowed_profile_ids"]
+                    and not (purpose_override and chain_positions is not None
+                             and profile["id"] in chain_positions)
                 ):
                     reasons.append("profile_not_allowed")
                 if (

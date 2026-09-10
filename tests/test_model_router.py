@@ -334,6 +334,29 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(decision["outcome"], "rejected")
         self.assertIn("model_family_not_independent", decision["rejection_reasons"])
 
+    def test_purpose_override_may_select_outside_legacy_profile_pin(self) -> None:
+        first = profile("legacy", cost=0.1)
+        second = profile("selected", provider="deepseek", family="family-beta", cost=0.2)
+        self.router.register_profile(first)
+        self.router.register_profile(second)
+        wire = policy()
+        wire["filters"]["allowed_profile_ids"] = [first["id"]]
+        wire["purpose_overrides"] = {
+            "dossier_verifier": {"mode": "explicit", "chain": [second["id"]]}
+        }
+        self.router.register_policy(wire)
+        decision = self.router.route(
+            work_order(work_id="work:purpose-override"),
+            **route_args(
+                capability="verify", producer_family="family-alpha",
+                idempotency_key="route-key:purpose-override",
+            ),
+            tier="verifier", purpose="dossier_verifier",
+        )["decision"]
+        self.assertEqual(
+            decision["selected_profile_version_ref"], second["profile_version_ref"]
+        )
+
     def test_budget_context_auth_and_availability_fail_closed(self) -> None:
         self.router.register_policy(policy())
         self.router.register_profile(
