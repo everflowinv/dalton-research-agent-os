@@ -356,6 +356,8 @@ def pool_caps(budget: Mapping[str, Any]) -> dict[str, Any]:
             amount = Decimal(str(value))
         except Exception as exc:  # noqa: BLE001 - Decimal raises several types
             raise BudgetPoolError(f"pool {name} cap must be a number") from exc
+        if not amount.is_finite():
+            raise BudgetPoolError(f"pool {name} cap must be finite")
         if amount < 0:
             raise BudgetPoolError(f"pool {name} cap must not be negative")
         total += amount

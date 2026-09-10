@@ -92,7 +92,18 @@
       "properties": {
         "max_daily_paid_calls": {"type": "integer", "minimum": 0},
         "max_daily_cost_usd": {"type": "number", "minimum": 0},
-        "max_alphaengine_calls_24h": {"type": "integer", "minimum": 0}
+        "max_alphaengine_calls_24h": {"type": "integer", "minimum": 0},
+        "pools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coverage", "event_response", "adhoc", "maintenance"],
+          "properties": {
+            "coverage": {"type": "number", "minimum": 0},
+            "event_response": {"type": "number", "minimum": 0},
+            "adhoc": {"type": "number", "minimum": 0},
+            "maintenance": {"type": "number", "minimum": 0}
+          }
+        }
       }
     },
     "actor_ref": {"type": "string", "pattern": "^human:"},

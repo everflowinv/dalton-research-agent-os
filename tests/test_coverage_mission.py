@@ -63,6 +63,50 @@ class MissionHarness(unittest.TestCase):
 
 
 class CoverageMissionTests(MissionHarness):
+    def test_signed_mission_can_publish_explicit_daily_pool_caps(self) -> None:
+        from dalton_core.budget_pools import pool_caps
+        from dalton_core.event_judgement import pool as event_pool
+
+        params = mission_params(self.state)
+        daily = params["budget"]["max_daily_cost_usd"]
+        params["budget"]["pools"] = {
+            "coverage": daily * 0.5,
+            "event_response": daily * 0.2,
+            "adhoc": daily * 0.2,
+            "maintenance": daily * 0.1,
+        }
+        mission = self.authority.create_mission(
+            params.pop("mission_ref"), **params
+        )
+        caps = pool_caps(mission["budget"])
+        self.assertFalse(caps["defaulted"])
+        self.assertEqual(
+            event_pool(mission)["cap_micros"], caps["caps_micros"]["event_response"]
+        )
+
+    def test_explicit_pool_caps_are_closed_finite_and_within_the_daily_cap(self) -> None:
+        valid = {"coverage": 1, "event_response": 1, "adhoc": 1, "maintenance": 1}
+        cases = [
+            {key: value for key, value in valid.items() if key != "maintenance"},
+            {**valid, "unknown": 0},
+            {**valid, "coverage": float("nan")},
+            {**valid, "coverage": float("inf")},
+            {**valid, "coverage": -1},
+            {**valid, "coverage": "1"},
+            {**valid, "coverage": True},
+            {**valid, "coverage": 1_000_000},
+        ]
+        for pools in cases:
+            with self.subTest(pools=pools):
+                params = mission_params(self.state)
+                params["version_id"] += ":" + str(len(pools))
+                params["idempotency_key"] += ":" + str(len(pools))
+                params["budget"]["pools"] = pools
+                with self.assertRaises(CoverageMissionValidationError):
+                    self.authority.create_mission(
+                        params.pop("mission_ref"), **params
+                    )
+
     def test_manifest_creates_mission_and_replays(self) -> None:
         mission = self.create()
         self.assertEqual(mission["status"], "fresh")
@@ -75,6 +119,7 @@ class CoverageMissionTests(MissionHarness):
         self.assertEqual(self.authority.mission(mission["id"])["id"], mission["id"])
         statuses = {item["status"] for item in mission["source_plan"]}
         self.assertEqual(statuses, {"connected", "probe_only", "not_connected"})
+        self.assertNotIn("pools", mission["budget"])
 
     def test_json_contracts_match_record_shapes(self) -> None:
         mission = self.create()

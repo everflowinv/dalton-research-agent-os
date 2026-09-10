@@ -36,6 +36,7 @@ lane records the pair only after the policy-authorized formal write exists.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
@@ -446,7 +447,8 @@ def _non_negative_int(value: Any, name: str) -> int:
 
 
 def _non_negative_number(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(float(value)) or value < 0):
         raise CoverageMissionValidationError(f"{name} must be a non-negative number")
     return float(value)
 
@@ -537,18 +539,42 @@ def validate_mission_body(value: Mapping[str, Any]) -> dict[str, Any]:
         "human_checkpoints": checkpoints,
     }
 
-    budget = _closed(
-        body["budget"],
-        frozenset({"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}),
-        "budget",
-    )
-    body["budget"] = {
+    required_budget = frozenset({
+        "max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"
+    })
+    if not isinstance(body["budget"], Mapping):
+        raise CoverageMissionValidationError("budget must be an object")
+    budget = dict(body["budget"])
+    if set(budget) not in {required_budget, required_budget | {"pools"}}:
+        raise CoverageMissionValidationError(
+            "budget has an invalid closed shape; expected the three legacy fields "
+            "and optional pools"
+        )
+    validated_budget = {
         "max_daily_paid_calls": _non_negative_int(budget["max_daily_paid_calls"], "budget.max_daily_paid_calls"),
         "max_daily_cost_usd": _non_negative_number(budget["max_daily_cost_usd"], "budget.max_daily_cost_usd"),
         "max_alphaengine_calls_24h": _non_negative_int(
             budget["max_alphaengine_calls_24h"], "budget.max_alphaengine_calls_24h"
         ),
     }
+    if "pools" in budget:
+        from .budget_pools import BudgetPoolError, pool_caps
+
+        raw_pools = budget["pools"]
+        if isinstance(raw_pools, Mapping):
+            for name, amount in raw_pools.items():
+                if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+                    raise CoverageMissionValidationError(
+                        f"budget.pools.{name} must be a number"
+                    )
+        validated_budget["pools"] = (
+            dict(raw_pools) if isinstance(raw_pools, Mapping) else raw_pools
+        )
+        try:
+            pool_caps(validated_budget)
+        except BudgetPoolError as exc:
+            raise CoverageMissionValidationError(f"budget.pools is invalid: {exc}") from exc
+    body["budget"] = validated_budget
     return body
 
 
