@@ -153,15 +153,13 @@ class MissionCatalystLaneCoordinator:
     def _today(self) -> str:
         return self.clock().astimezone(timezone.utc).date().isoformat()
 
-    def _failure_key(self, company_ref: str, governance_hash: str | None = None) -> str:
-        if governance_hash is None:
-            resolver = getattr(self.launcher, "governance_identity", None)
-            if resolver is not None:
-                try:
-                    governance_hash = resolver()
-                except LaneChildRejected:
-                    governance_hash = "invalid-governance"
-        return company_ref if not governance_hash else f"{company_ref}|governance:{governance_hash}"
+    def _permission_key(self, company_ref: str) -> str:
+        resolver = getattr(self.launcher, "governance_identity", None)
+        try:
+            identity = resolver() if resolver is not None else "legacy"
+        except Exception:
+            identity = "invalid"
+        return f"permission|{company_ref}|governance:{identity}"
 
     def due(self, company_ref: str) -> bool:
         """Has nobody asked about this company's diary today?"""
@@ -219,7 +217,7 @@ class MissionCatalystLaneCoordinator:
         status = settled.get("status")
         if status not in ("succeeded", "partial"):
             settled["failure"] = self.budget.record_settled(
-                self._failure_key(company_ref, settled.get("governance_hash")), settled).as_wire()
+                company_ref, settled).as_wire()
             # Not marked as asked: a failed run learned nothing, and holding
             # the company for a day on the strength of it would mean a
             # transient error costs a day of the calendar.
@@ -231,12 +229,12 @@ class MissionCatalystLaneCoordinator:
             # because a vendor that stays broken must not hide behind a
             # calendar that keeps almost working.
             settled["failure"] = self.budget.record(
-                self._failure_key(company_ref, settled.get("governance_hash")),
+                company_ref,
                 reason=settled.get("failure_reason") or "the vendor half failed",
                 status="partial",
             ).as_wire()
         else:
-            resumed = self.budget.clear(self._failure_key(company_ref, settled.get("governance_hash")))
+            resumed = self.budget.clear(company_ref)
             if resumed:
                 settled["resumed"] = resumed
         self._asked[company_ref] = self._today()
@@ -337,14 +335,16 @@ class MissionCatalystLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
-            failure_key = self._failure_key(company_ref)
-            blocked = self.budget.blocked(failure_key)
+            permission_key = self._permission_key(company_ref)
+            permission_blocked = self.budget.blocked(permission_key)
+            business_blocked = self.budget.blocked(company_ref)
+            blocked = permission_blocked or business_blocked
             if blocked is not None:
                 # P17d: three words, not one. ``held`` will change on a deploy,
                 # ``parked`` when the dependency answers, ``terminal`` never.
                 skipped.append({
                     "company_ref": company_ref, "reason": blocked.action,
-                    "detail": self.budget.failure_reason(failure_key),
+                    "detail": self.budget.failure_reason(permission_key if permission_blocked else company_ref),
                     "failure_class": blocked.classification.failure_class,
                     "dependency": blocked.classification.dependency,
                 })
@@ -363,9 +363,10 @@ class MissionCatalystLaneCoordinator:
                         "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                self.budget.record(failure_key, reason=reason)
-                return {"status": "rejected", "company_ref": company_ref,
-                        "settled": settled, "skipped": skipped, "reason": reason}
+                decision = self.budget.record(permission_key, reason=reason)
+                return {"status": "not_permitted" if decision.classification.awaits_permission else "rejected", "company_ref": company_ref,
+                        "settled": settled, "skipped": skipped, "reason": reason,
+                        "failure": decision.as_wire()}
             self._open = ticket["id"]
             self._open_company = company_ref
             return {

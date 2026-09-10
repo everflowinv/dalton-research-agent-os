@@ -156,15 +156,13 @@ class MissionMarketPriceLaneCoordinator:
     def _today(self) -> date:
         return self.clock().astimezone(timezone.utc).date()
 
-    def _failure_key(self, company_ref: str, governance_hash: str | None = None) -> str:
-        if governance_hash is None:
-            resolver = getattr(self.launcher, "governance_identity", None)
-            if resolver is not None:
-                try:
-                    governance_hash = resolver()
-                except LaneChildRejected:
-                    governance_hash = "invalid-governance"
-        return company_ref if not governance_hash else f"{company_ref}|governance:{governance_hash}"
+    def _permission_key(self, company_ref: str) -> str:
+        resolver = getattr(self.launcher, "governance_identity", None)
+        try:
+            identity = resolver() if resolver is not None else "legacy"
+        except Exception:
+            identity = "invalid"
+        return f"permission|{company_ref}|governance:{identity}"
 
     def _floor(self) -> date:
         today = self._today()
@@ -275,13 +273,13 @@ class MissionMarketPriceLaneCoordinator:
             return settled
         if settled.get("status") != "succeeded":
             settled["failure"] = self.budget.record_settled(
-                self._failure_key(company_ref, settled.get("governance_hash")), settled).as_wire()
+                company_ref, settled).as_wire()
             return settled
         # A run that succeeded is a run that reached the source, whatever it
         # found: the retry budget is about companies this lane cannot serve,
         # not about quiet markets. It is also the probe that resumes every
         # company parked on the same source -- P14e's resume, by dependency.
-        resumed = self.budget.clear(self._failure_key(company_ref, settled.get("governance_hash")))
+        resumed = self.budget.clear(company_ref)
         # A price read that worked is a market-data read that worked, whether
         # or not this company was the one parked on it.
         resumed += self.budget.dependency_answered("market_data")
@@ -364,15 +362,17 @@ class MissionMarketPriceLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
-            failure_key = self._failure_key(company_ref)
-            blocked = self.budget.blocked(failure_key)
+            permission_key = self._permission_key(company_ref)
+            permission_blocked = self.budget.blocked(permission_key)
+            business_blocked = self.budget.blocked(company_ref)
+            blocked = permission_blocked or business_blocked
             if blocked is not None:
                 # Three words, not one. ``held`` will change on a deploy,
                 # ``parked`` when the source answers, ``terminal`` never --
                 # and an operator who cannot tell them apart cannot act.
                 skipped.append({
                     "company_ref": company_ref, "reason": blocked.action,
-                    "detail": self.budget.failure_reason(failure_key),
+                    "detail": self.budget.failure_reason(permission_key if permission_blocked else company_ref),
                     "failure_class": blocked.classification.failure_class,
                     "dependency": blocked.classification.dependency,
                 })
@@ -403,8 +403,8 @@ class MissionMarketPriceLaneCoordinator:
                         "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                decision = self.budget.record(failure_key, reason=reason)
-                return {"status": "rejected", "company_ref": company_ref,
+                decision = self.budget.record(permission_key, reason=reason)
+                return {"status": "not_permitted" if decision.classification.awaits_permission else "rejected", "company_ref": company_ref,
                         "settled": settled, "skipped": skipped, "reason": reason,
                         "failure": decision.as_wire()}
             self._open = ticket["id"]

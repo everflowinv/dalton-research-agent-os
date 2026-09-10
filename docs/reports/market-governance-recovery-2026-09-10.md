@@ -4,6 +4,6 @@ The market-price, consensus-estimate, and catalyst-calendar launchers now load a
 
 Ticket identity now includes the exact governance hash. Consensus identity additionally includes both fiscal-year-end and last-reported-period-end, alongside company, ticker, and day. A same-day owner replacement of a proposed record with an approved record therefore creates a different governed request rather than reopening the failed ticket.
 
-The three coordinators key failure state by company and governance hash when the real launcher exposes that identity. Settlement uses the hash captured in the ticket, so an old child's result cannot be attributed to a newly approved record. Legacy/fake launchers retain the prior company key for compatibility; no unrelated source or content failures are cleared.
+The three coordinators use a governance-hash key only for a preflight permission refusal. Real child failures continue to use the stable company business key, so a governance replacement cannot bypass a network, content, quota, or retry hold. Legacy tickets settle against that same stable business key rather than borrowing the current governance hash. A newly approved record has a new permission key and can launch without clearing any unrelated failure.
 
 Validation: 105 focused launcher and coordinator tests passed. The new tests use packaged ConnectorGovernance validation with proposed and approved records and do not invoke the network.

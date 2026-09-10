@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
-from .connector_governance import ConnectorGovernance, YFINANCE_DAILY_PRICES_KIND
+from .connector_governance import ConnectorGovernance
 
 TICKET_PREFIX = "market-price-run"
 
@@ -56,15 +56,16 @@ class MarketPriceLauncher(LaneChildLauncher):
         if not self.configured:
             raise LaneChildRejected("a price run needs an approved yfinance daily-prices record")
         try:
-            governance = ConnectorGovernance.load(self.governance_path)
+            from .market_price_cli import _load_governance
+            governance = _load_governance(self.governance_path)
         except Exception as exc:
             raise LaneChildRejected(f"invalid yfinance daily-prices governance: {exc}") from exc
-        if governance.kind != YFINANCE_DAILY_PRICES_KIND:
-            raise LaneChildRejected("the governance record covers a different capability")
         return governance
 
     def governance_identity(self) -> str:
-        return self.load_governance().content_hash
+        if not self.configured:
+            return "unconfigured"
+        return ConnectorGovernance.load(self.governance_path).content_hash
 
     def _command(
         self, *, ticket_dir: Path, company_ref: str, ticker: str,
@@ -87,8 +88,6 @@ class MarketPriceLauncher(LaneChildLauncher):
         self, *, company_ref: str, ticker: str, start: str, end: str,
     ) -> dict[str, Any]:
         governance = self.load_governance()
-        if not governance.approved:
-            raise LaneChildRejected("the yfinance daily-prices governance record is not approved")
         for name, value in (
             ("company_ref", company_ref), ("ticker", ticker),
             ("start", start), ("end", end),

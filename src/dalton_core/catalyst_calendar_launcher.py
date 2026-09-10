@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
-from .connector_governance import ConnectorGovernance, YFINANCE_CALENDAR_KIND
+from .connector_governance import ConnectorGovernance
 
 TICKET_PREFIX = "catalyst-calendar-run"
 
@@ -51,15 +51,16 @@ class CatalystCalendarLauncher(LaneChildLauncher):
         if not self.configured:
             raise LaneChildRejected("a calendar run needs an approved yfinance-calendar record")
         try:
-            governance = ConnectorGovernance.load(self.governance_path)
+            from .catalyst_calendar_cli import _load_governance
+            governance = _load_governance(self.governance_path)
         except Exception as exc:
             raise LaneChildRejected(f"invalid yfinance-calendar governance: {exc}") from exc
-        if governance.kind != YFINANCE_CALENDAR_KIND:
-            raise LaneChildRejected("the governance record covers a different capability")
         return governance
 
     def governance_identity(self) -> str:
-        return self.load_governance().content_hash
+        if not self.configured:
+            return "unconfigured"
+        return ConnectorGovernance.load(self.governance_path).content_hash
 
     def _command(
         self, *, ticket_dir: Path, company_ref: str, ticker: str,
@@ -85,8 +86,6 @@ class CatalystCalendarLauncher(LaneChildLauncher):
         issuer: str | None = None,
     ) -> dict[str, Any]:
         governance = self.load_governance()
-        if not governance.approved:
-            raise LaneChildRejected("the yfinance-calendar governance record is not approved")
         for name, value in (
             ("company_ref", company_ref), ("ticker", ticker), ("as_of", as_of),
         ):

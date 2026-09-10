@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
-from .connector_governance import ConnectorGovernance, YFINANCE_ANALYST_ESTIMATES_KIND
+from .connector_governance import ConnectorGovernance
 
 TICKET_PREFIX = "consensus-estimate-run"
 
@@ -52,15 +52,16 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
         if not self.configured:
             raise LaneChildRejected("a consensus run needs an approved yfinance analyst-estimates record")
         try:
-            governance = ConnectorGovernance.load(self.governance_path)
+            from .consensus_estimate_cli import _load_governance
+            governance = _load_governance(self.governance_path)
         except Exception as exc:
             raise LaneChildRejected(f"invalid yfinance analyst-estimates governance: {exc}") from exc
-        if governance.kind != YFINANCE_ANALYST_ESTIMATES_KIND:
-            raise LaneChildRejected("the governance record covers a different capability")
         return governance
 
     def governance_identity(self) -> str:
-        return self.load_governance().content_hash
+        if not self.configured:
+            return "unconfigured"
+        return ConnectorGovernance.load(self.governance_path).content_hash
 
     def _command(
         self, *, ticket_dir: Path, company_ref: str, ticker: str,
@@ -84,8 +85,6 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
         last_reported_period_end: str, day: str,
     ) -> dict[str, Any]:
         governance = self.load_governance()
-        if not governance.approved:
-            raise LaneChildRejected("the yfinance analyst-estimates governance record is not approved")
         for name, value in (
             ("company_ref", company_ref), ("ticker", ticker),
             ("fiscal_year_end", fiscal_year_end),
