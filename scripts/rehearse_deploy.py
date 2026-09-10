@@ -1981,6 +1981,8 @@ class Rehearsal:
             for row in bad
         ]
         self.log("\n" + render_table(self.rows))
+        if bad:
+            raise RuntimeError("controller tick escaped: " + "; ".join(findings))
         return (
             f"{len(self.rows)} entries, {len(bad)} escaped, {elapsed:.1f}s "
             f"(service tick_seconds={service.tick_seconds})",

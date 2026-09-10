@@ -31,3 +31,13 @@ connector inventory `--check` 通过，`git diff --check` 通过。此前两次�
 2. F15 待授权失败分类与 F13 港股日缓存在独立后续 worktree 处理；F14 十六条 lane 接账本为后续覆盖扩展，不以旧报告的“已分类”冒充“已接线”。
 3. 主线全量绿后 push；对合并 main 的隔离 live 副本重跑 fail-closed 复演，记录实际 schema/lane 数与下一步。
 4. D1–D9 继续留为明确待裁决，W5 market-proxy 生产者与成本模板不在本轮扩项。
+
+## 第二次集成审查补充
+
+预测与 ZeroBase 首批修复合入后，聚焦 333 项通过（50.030s）。首轮隔离复演针对 main `1ff80e0`，输入为已有 `/tmp/dalton-rehearsal2-20260910T073000Z/live` 快照，显式 `--source-root` 指向原 Dalton 根，输出在 `/tmp/dalton-resume-rehearsal-20260910`：66/66 schemas、35 lanes、38 tick entries、0 escaped，11 个 may_write 与 3 个 checkpoint 缺授权，5/11 lane switches 在盘；没有部署。该结果只验证快照兼容与接线，不能冒充最终版全量或 live 产物验收。
+
+额外发现并修复：ZeroBase 的兄弟候选表虽接入 ThesisRevisionAuthority，但 cockpit 仍只读原表。现两个来源统一展示，同一裁决入口过滤终态，四问 narrative 可见；周反思的 judgement_outcomes 也接 HTML。首次模型发布被拒、公司还没有旧模型时，卡片同样显示拒绝理由。ask 的 route-decision 输出契约同步允许实际返回的 boolean availability。
+
+复演 harness 原本将 escaped lane 仅计入 findings、仍返回通过；现在任何 escaped lane 都使 tick 步骤失败，并加回归测试。这是发现即变成机器检查，不依赖操作者阅读告警。
+
+验证：cockpit/回归 115 项（36.215s）通过；回归/复演 108 项（1.520s）通过；内嵌 JavaScript `node --check` 通过。

@@ -101,7 +101,7 @@
         }
       ]
     },
-    "adhoc_research_route_available": {"const": false},
+    "adhoc_research_route_available": {"type": "boolean"},
     "agenda_recommendation": {"type": ["object", "null"]},
     "write_performed": {"const": false},
     "content_hash": {"$ref": "#/$defs/hash"}

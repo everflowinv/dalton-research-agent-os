@@ -3035,7 +3035,11 @@ class CockpitPlane:
             mission = self._mission(core)
             members = self._members(mission)
             reflections = self._reflections(core)
-            for kind, (table, key, decisions, ref_column) in CHECKPOINT_TABLES.items():
+            checkpoint_tables = list(CHECKPOINT_TABLES.items())
+            checkpoint_tables.append(("thesis_revision_candidate", (
+                "zero_base_revision_candidates", "candidate_id",
+                "thesis_revision_decisions", "candidate_ref")))
+            for kind, (table, key, decisions, ref_column) in checkpoint_tables:
                 if not _table_exists(core, table):
                     continue
                 decidable = _table_exists(core, decisions)
@@ -3051,6 +3055,14 @@ class CockpitPlane:
                     sql += join + "WHERE d.rowid IS NULL "
                 for row in self._rows(core, sql + "ORDER BY t.created_at"):
                     record = json.loads(row["record_json"])
+                    zero_base = None
+                    if table == "zero_base_revision_candidates" and _table_exists(core, "zero_base_review_versions"):
+                        review_row = core.execute(
+                            "SELECT record_json FROM zero_base_review_versions WHERE version_id=?",
+                            (record.get("review_version_ref"),),
+                        ).fetchone()
+                        if review_row is not None:
+                            zero_base = json.loads(review_row["record_json"]).get("narrative")
                     decision = record.get("decision")
                     details = {
                         "大脑的判断": JUDGEMENT_DECISION_LABELS.get(decision, decision),
@@ -3066,7 +3078,10 @@ class CockpitPlane:
                     items.append({
                         "kind": kind, "ref": row[key], "hash": row["content_hash"],
                         "at": row["created_at"],
-                        "title": (CHECKPOINT_TITLES.get(kind) or kind),
+                        "title": ("从零复盘后，提议改我们对这家公司的判断"
+                                  if table == "zero_base_revision_candidates"
+                                  else CHECKPOINT_TITLES.get(kind) or kind),
+                        "zero_base_review": zero_base,
                         "who": self._label(members, record.get("company_ref")),
                         "summary": summary,
                         "details": {name: value for name, value in details.items()

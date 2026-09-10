@@ -128,3 +128,59 @@ class HKPriceIntegrationTests(AuthorityTestCase):
         close = self.authority.latest_close(COMPANY)
         self.assertEqual(close['currency'], 'HKD')
         self.assertEqual(close['version_ref'], published['id'])
+
+
+from tests.test_cockpit_int2 import Int2Case
+
+
+class ZeroBaseCockpitIntegrationTests(Int2Case):
+    def test_zero_base_sibling_candidate_appears_with_its_review_until_decided(self):
+        # Projection fixture deliberately uses only the columns the read path
+        # needs; authority/candidate writes have separate full-schema tests.
+        core = self.store.connection
+        core.executescript('''
+            CREATE TABLE zero_base_review_versions(version_id TEXT PRIMARY KEY, record_json TEXT);
+            CREATE TABLE zero_base_revision_candidates(candidate_id TEXT PRIMARY KEY,
+                content_hash TEXT, created_at TEXT, record_json TEXT);
+            CREATE TABLE thesis_revision_decisions(candidate_ref TEXT, terminal INTEGER);
+        ''')
+        narrative = {'title': '从零复盘', 'sections': [
+            {'heading': '四、下一个验证点与日期', 'body': '2026-10-01：业绩'}]}
+        core.execute('INSERT INTO zero_base_review_versions VALUES (?,?)',
+                     ('zero:1', json.dumps({'narrative': narrative})))
+        core.execute('INSERT INTO zero_base_revision_candidates VALUES (?,?,?,?)', (
+            'candidate:zero:1', 'a' * 64, '2026-09-10T00:00:00+00:00', json.dumps({
+                'review_version_ref': 'zero:1', 'company_ref': ACN,
+                'decision': 'THESIS_WEAKENED', 'because': '重新审视后需要改写'})))
+        core.commit()
+        item = next(row for row in self.plane.approvals()['items'] if row['ref'] == 'candidate:zero:1')
+        self.assertEqual(item['kind'], 'thesis_revision_candidate')
+        self.assertEqual(item['zero_base_review'], narrative)
+        self.assertEqual({a['decision'] for a in item['actions']}, {'accept', 'reject', 'defer'})
+        core.execute('INSERT INTO thesis_revision_decisions VALUES (?,?)', ('candidate:zero:1', 1))
+        core.commit()
+        self.assertNotIn('candidate:zero:1', [r['ref'] for r in self.plane.approvals()['items']])
+
+
+class RehearsalResultTests(unittest.TestCase):
+    def test_an_escaped_lane_makes_the_rehearsal_step_fail(self):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from scripts.rehearse_deploy import Rehearsal
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rehearsal = Rehearsal(root / 'source', root / 'temp',
+                                  openclaw_config=root / 'catalog.json', log=lambda _: None)
+            rehearsal.temp_config.parent.mkdir(parents=True)
+            rehearsal.temp_home.mkdir(parents=True)
+            rehearsal.temp_config.write_text(json.dumps({'bounded_planner': {'config': {}}}))
+            rehearsal.confined = True
+            with patch('dalton_core.service.ServiceConfig.from_file', return_value=SimpleNamespace(tick_seconds=5)), \
+                 patch('dalton_core.bounded_planner_driver.BoundedPlannerDriverConfig.from_mapping'), \
+                 patch('dalton_core.bounded_planner_driver.BoundedPlannerDriver') as driver:
+                driver.return_value.run_once.return_value = {'event_judgement': {'status': 'unavailable:RuntimeError'}}
+                result = rehearsal.step('one controller tick', rehearsal.run_tick)
+            self.assertFalse(result.ok)
+            self.assertIn('event_judgement', result.detail)
+            self.assertIn('escaped', result.detail)
