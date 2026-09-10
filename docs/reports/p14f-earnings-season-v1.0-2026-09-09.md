@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 分支：`w3-earnings-season`（worktree `~/Projects/dalton-w3-earnings-season-worktree`）
-分叉基线：main `eaf48f0`；已 `git merge main` 到 `56f666c`（含 C1 事件桥接、P14b/P14d 重出 lane、P15d）
+分叉基线：main `eaf48f0`；已 `git merge main` 到 `12d759e`（含 C1 事件桥接、P14b/P14d 重出 lane、P15d、P12d、stage ladder、S5、ask v2）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（机制 vs 判断、自我反思）与 Daily tracking 一节、蓝图 §5.2 P14f、ADR-0007、ADR-0008
 消费（按名字，不改）：[C1 事件日历](c1-catalyst-calendar-v1.0-2026-09-09.md)、[P14a 每日跟踪](p14a-daily-tracking-v1.0-2026-09-09.md)、[P13-M2 预测行](p13-m2-forecast-lines-v1.0-2026-09-09.md)、[P12a 公司档案](p12a-company-dossier-v1.0-2026-09-09.md)（guidance profile）、[P12c DebateMap](p12c-debate-map-v1.0-2026-09-09.md)、`forecast_reconciliation`、`mission_deliverable`、`research_playbook`
 全量测试：见第 7 节，原文粘贴
@@ -25,10 +25,10 @@
 | `src/dalton_core/mission_earnings_season_lane.py` | 无队列 lane + `LaneSpec`（order 117，driver_key `earnings_season`） |
 | `src/dalton_core/earnings_season_launcher.py` | `EarningsSeasonLauncher(LaneChildLauncher)` |
 | `src/dalton_core/earnings_season_cli.py` | 子进程：确定性在前、一次调用、效果按外键顺序落地；每个缺的写入权限如实报告 |
-| `tests/test_earnings_season.py`（74 项） | 窗口、指引、consensus、预测读取、preview 的六种拒绝、calibration 的确定性三步与八种拒绝、效果与幂等 |
+| `tests/test_earnings_season.py`（76 项） | 窗口、指引、consensus、预测读取、preview 的六种拒绝、calibration 的确定性三步与八种拒绝、效果与幂等 |
 | `tests/test_mission_earnings_season_lane.py`（17 项） | 选择、协调器、注册（含全新解释器进程）、未装配时的行为 |
-| `tests/test_earnings_season_cli.py`（9 项） | 全链路：preview → 出业绩 → 对账 → 校准 → candidate，人只裁决一次 |
-| 共享增量（每处一行或一词） | `lane_registry.LANE_MODULES`、`budget_pools.LANE_POOLS`、`cockpit_plane.REGISTRY_LANE_LABELS`、`research_event` 的 `calibration` kind、`mission_deliverable` 的两个 kind + 迁移泛化 |
+| `tests/test_earnings_season_cli.py`（13 项） | 全链路：preview → 出业绩 → 对账 → 校准 → candidate，人只裁决一次；以及「到点没报就等」「发布失败不丢工作」「一份被拒不拖垮整轮」 |
+| 共享增量（每处一行或一词） | `lane_registry.LANE_MODULES`、`budget_pools.LANE_POOLS`、`cockpit_plane.REGISTRY_LANE_LABELS`、`research_event` 的 `calibration` kind、`mission_deliverable` 的两个 kind + 迁移泛化、`scripts/rehearse_deploy.py` 的 CHECK 断言改成逐 kind |
 
 **没有新建 schema。** 本片写的东西全部落在既有权威上：两个 deliverable、一条 `ResearchEvent`、P14a 的 `event_judgements` / `thesis_revision_candidates` / `thesis_reflections` / `forecast_revision_proposals`、以及 `actualize` 出的一版 `ForecastModelVersion`。一个自己的表会是第二本账，而这里没有第二本账要记。
 
@@ -195,11 +195,13 @@ lane 需要两份模型配置才装：`earnings-season-model-config.json` 与 `e
 
 `/private/tmp/dalton-ro/core.sqlite` → `/tmp/p14f-smoke.sqlite`，mission `coverage-mission-version:us-it-services:13`，过闸公司四家（ACN / EPAM / IBM / DXC）。
 
-按 2026-10-01 的预期日、2026-09-09 的今天构造 occurrence：
+按 2026-10-01 的预期日、2026-09-09 的今天，用 C1 自己的 `calendar_event_payload` 造一条日历事件（先过 `research_event.validate_payload`，确保这是账本会收的那个形状），再问它会开出什么：
 
 ```
-occurrence: earnings-occurrence:aebf11464c7a6b706e6ecae50b555e31
+occurrence_ref: earnings-occurrence:e124a142b7238aba841d8ab9cc1e20ae
+entry_ref:      catalyst-entry:c5b40036a18f709087cfac16955f3a0e
 window preview　expected_date 2026-10-01　date_confidence estimated　date_caveat 日期未确认
+already_done: False
 period_end: None（live 没有 ACN 的 ForecastModelVersion）
 forecast rows: 0
 consensus: available=false —— this Core holds no consensus authority (P11b), so there is
@@ -231,12 +233,12 @@ prompt: 9,002 字节
 ```
 $ PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
 ...
-Ran 4494 tests in 740.176s
+Ran 4603 tests in 764.644s
 
 OK (skipped=1)
 ```
 
-合并 main（`56f666c`）之后一条不红。本片新增 100 项（`tests/test_earnings_season.py` 74、`tests/test_mission_earnings_season_lane.py` 17、`tests/test_earnings_season_cli.py` 9）。
+合并 main（`12d759e`，含 P12d / stage-ladder / S5 / ask v2）与 review 修订之后一条不红。本片新增 106 项（`tests/test_earnings_season.py` 76、`tests/test_mission_earnings_season_lane.py` 17、`tests/test_earnings_season_cli.py` 13）。
 
 **开发过程中撞到的一个与本片无关但值得记的东西**：`tests/test_openclaw_web_search_broker_client.py` 的 `FUTURE` 是在**模块导入时**算的「五分钟后」，而 `unittest discover` 会先导入全部测试模块再开始跑。全量套件跑到这个模块时早已过了五分钟，于是它的八项全部 `ERROR: web search deadline has already passed`。这不是随机的 flake，是一颗随套件变长必然引爆的定时炸弹：合入前在 main 上量过，`test_[a-n]*.py` 这一段是 4:35（刚好在闸内），本分支加了约 13 秒的测试后是 5:13（刚好在闸外）。已报给主 agent，**main 上已修**，本次全量因此干净。
 
@@ -260,6 +262,11 @@ OK (skipped=1)
 | 没有任何东西自动提交 thesis | 同上 | `test_no_thesis_version_is_written_by_any_of_this` |
 | 未来期不改，发事件给判断层 | `emit_calibration_event` | `test_the_event_tells_the_judgement_lane_the_forward_view_is_unreviewed`、`test_the_calibration_does_not_move_a_forward_quarter` |
 | lane：每 tick 扫过闸公司里未处理的窗口，幂等 | `due_occurrences` / `newest_due` | `test_a_window_already_written_about_is_not_named_again`、`test_a_second_run_over_the_same_occurrence_pays_nothing` |
+| occurrence 身份不含日期，且是账本收得下的那个形状 | `occurrence_ref` / `occurrence_of` | `test_the_occurrence_is_the_same_when_the_date_moves`、`test_the_payload_a_fixture_builds_is_one_the_ledger_accepts`、`test_an_event_that_names_no_entry_names_no_occurrence` |
+| 发布之后失败不丢工作 | `already_done` + 账本先于文档 | `test_a_document_that_fails_to_publish_leaves_the_occurrence_open` |
+| 没授 `market_event` 不花钱、不烧机会 | `_one_window` 前置检查 | `test_an_ungranted_market_event_leaves_the_occurrence_re_runnable` |
+| 到点没报就等，不调用 | `_nothing_to_calibrate` | `test_a_company_due_today_that_has_not_filed_waits_instead_of_paying` |
+| 一份文档被拒不拖垮整轮 | `_publish` | `test_one_refused_document_does_not_abandon_the_other_companies` |
 | lane 注册（全新解释器） | `LaneSpec(order=117)` | `test_importing_this_module_does_not_pull_in_the_writer`、`test_the_lane_is_registered_at_its_own_order` |
 | ACN 全链路自动跑通、人只裁决一次 | CLI | `test_the_print_produces_a_calibration_and_one_thing_to_decide` |
 
