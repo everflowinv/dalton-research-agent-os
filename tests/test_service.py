@@ -153,7 +153,7 @@ class InstallerSeedTests(unittest.TestCase):
     def test_the_calendar_and_tracking_lanes_are_one_file_each(self) -> None:
         text = self.script()
         self.assertIn("yfinance-calendar-v1.json", text)
-        self.assertIn("p14a-tracking-policy-v1.json", text)
+        self.assertIn("p14a-tracking-policy-v2.json", text)
         record = (self.INSTALL.parents[1] / "connector-governance"
                   / "yfinance-calendar-v1.json")
         # Seeded as proposed: the installer never approves anything.
@@ -189,7 +189,7 @@ class InstallerSeedTests(unittest.TestCase):
             "connector-governance/prior-research-get-document-v1.json":
                 repo / "deploy/connector-governance/prior-research-get-document-v1.json",
             "tracking-policy.json":
-                repo / "deploy/phase9/p14a-tracking-policy-v1.json",
+                repo / "deploy/phase9/p14a-tracking-policy-v2.json",
         }
         for lane, (needs, flag) in self.LANE_SEEDS.items():
             with tempfile.TemporaryDirectory() as directory:

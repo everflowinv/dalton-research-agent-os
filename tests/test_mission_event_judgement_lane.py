@@ -14,6 +14,7 @@ from dalton_core.event_judgement_cli import (
     missing_write_scopes,
     run_judgement,
     same_routing_policy,
+    unjudged_event_groups,
     unjudged_events,
 )
 from dalton_core.lane_child_launcher import LaneChildRejected
@@ -212,6 +213,31 @@ class SelectionTests(P14aHarness):
         batch = unjudged_events(self.events, self.judgements, company_ref=ACN, limit=2)
         self.assertEqual(len(batch), 2)
 
+    def test_monthly_buyback_rows_share_one_slot_without_displacing_form_4(self):
+        from tests.test_buyback_disclosure import buyback_event, table_payload
+        from tests.test_insider_context import event as insider_event, insider_payload
+
+        for month in ("March", "April", "May"):
+            candidate = buyback_event(table_payload(period_label=month))
+            record_event(
+                self.events, company_ref=ACN, kind=candidate["kind"],
+                occurred_at=candidate["occurred_at"],
+                source_refs=candidate["source_refs"], payload=candidate["payload"],
+                mission=self.mission, actor_ref=AUTOMATION,
+            )
+        candidate = insider_event(insider_payload())
+        record_event(
+            self.events, company_ref=ACN, kind=candidate["kind"],
+            occurred_at=candidate["occurred_at"],
+            source_refs=candidate["source_refs"], payload=candidate["payload"],
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+        groups = unjudged_event_groups(
+            self.events, self.judgements, company_ref=ACN, limit=2
+        )
+        self.assertEqual([len(group) for group in groups], [3, 1])
+        self.assertEqual(groups[1][0]["kind"], "insider_transaction")
+
 
 class GrantTests(P14aHarness):
     grants = ()
@@ -270,6 +296,41 @@ class ChildTests(P14aHarness):
         again = self.run_child()
         self.assertEqual(again["judgement_status"], "nothing_unjudged")
         self.assertEqual(self.judgements.judged_count(ACN), 1)
+
+    def test_one_buyback_table_and_one_form_4_use_two_calls_and_process_four_rows(self):
+        from tests.test_buyback_disclosure import buyback_event, table_payload
+        from tests.test_insider_context import event as insider_event, insider_payload
+
+        for month in ("March", "April", "May"):
+            candidate = buyback_event(table_payload(period_label=month))
+            record_event(
+                self.events, company_ref=ACN, kind=candidate["kind"],
+                occurred_at=candidate["occurred_at"],
+                source_refs=candidate["source_refs"], payload=candidate["payload"],
+                mission=self.mission, actor_ref=AUTOMATION,
+            )
+        candidate = insider_event(insider_payload())
+        record_event(
+            self.events, company_ref=ACN, kind=candidate["kind"],
+            occurred_at=candidate["occurred_at"],
+            source_refs=candidate["source_refs"], payload=candidate["payload"],
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+        judge_model = FakeModel([decision(), decision()], route=JUDGE_ROUTE)
+        summary = run_judgement(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "judge",
+            policy_path=POLICY_PATH, now=NOW, per_company=2,
+            judge_model=judge_model,
+            verifier_model=FakeModel([PASS, PASS], route=VERIFIER_ROUTE),
+            family_resolver=resolver(),
+        )
+        self.assertEqual(summary["judged"], 2)
+        self.assertEqual(self.judgements.judged_count(ACN), 4)
+        self.assertEqual(len(judge_model.prompts), 2)
+        self.assertIn("Other monthly rows in this filing", judge_model.prompts[0])
+        self.assertEqual(
+            unjudged_events(self.events, self.judgements, company_ref=ACN, limit=5), []
+        )
 
     def test_a_verifier_rejection_leaves_the_event_unjudged_and_the_reason_visible(self):
         self.event()

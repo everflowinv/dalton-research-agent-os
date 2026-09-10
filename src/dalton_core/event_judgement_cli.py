@@ -128,6 +128,51 @@ def unjudged_events(
     return [events.event(row["event_id"]) for row in rows]
 
 
+def unjudged_event_groups(
+    events: ResearchEventAuthority,
+    judgements: EventJudgementAuthority,
+    *,
+    company_ref: str,
+    limit: int,
+) -> list[list[dict[str, Any]]]:
+    """Oldest unjudged events, with one issuer-purchases filing per slot.
+
+    A US 10-Q normally contributes three monthly rows. They remain three
+    immutable events because the month in which purchases stopped is evidence,
+    but the analyst reads their common accession as one table and makes one
+    judgement. Other kinds, including Form 4 insider transactions, retain one
+    slot each.
+    """
+
+    rows = events.connection.execute(
+        "SELECT e.event_id AS event_id FROM research_events e "
+        "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
+        "WHERE e.company_ref = ? AND j.event_ref IS NULL "
+        "ORDER BY e.occurred_at ASC, e.event_id ASC",
+        (company_ref,),
+    ).fetchall()
+    groups: list[list[dict[str, Any]]] = []
+    positions: dict[tuple[str, str], int] = {}
+    for row in rows:
+        event = events.event(row["event_id"])
+        payload = event.get("payload") or {}
+        accession = payload.get("accession")
+        grouped = (
+            event.get("kind") == "buyback_disclosure"
+            and payload.get("disclosure_kind") == "issuer_purchases_table"
+            and isinstance(accession, str) and accession
+        )
+        key = (str(event.get("kind")), accession) if grouped else ("event", event["id"])
+        if key in positions:
+            groups[positions[key]].append(event)
+            continue
+        if len(groups) >= max(1, int(limit)):
+            continue
+        positions[key] = len(groups)
+        groups.append([event])
+    return groups
+
+
 def config_fingerprint(*paths: Path | None) -> str:
     """A short hash of the model configurations this run is using.
 
@@ -305,10 +350,12 @@ def run_judgement(
         state = pool_state(judgements, mission, day=day)
         summary["pool"] = state
 
-        batch: list[dict[str, Any]] = []
+        batch: list[list[dict[str, Any]]] = []
         for ref in tracked:
             batch.extend(
-                unjudged_events(events, judgements, company_ref=ref, limit=per_company)
+                unjudged_event_groups(
+                    events, judgements, company_ref=ref, limit=per_company
+                )
             )
         batch = batch[:max_events]
         summary["candidates"] = len(batch)
@@ -373,7 +420,8 @@ def run_judgement(
         # which is the shape where a decision is recorded without the account
         # of what we may have missed -- exactly the half the owner asked for.
         reservation = int(MAX_COST_USD * 4 * 1_000_000)
-        for event in batch:
+        for event_group in batch:
+            event = event_group[0]
             if state["remaining_micros"] - spent < reservation:
                 summary["judgement_status"] = "skipped:pool_exhausted"
                 break
@@ -387,6 +435,7 @@ def run_judgement(
                 price=prices.get(event["company_ref"]),
                 market_cap=market_caps.get(event["company_ref"]),
             )
+            context["grouped_events"] = event_group
             request_id = f"{fingerprint}{event['id'].split(':', 1)[-1]}"[:32]
             decided = judge(
                 context, model=judge_model, mission=mission, request_id=request_id
@@ -442,6 +491,13 @@ def run_judgement(
                 event=event, judgement=decided, verification=checked,
                 effect=effect, mission=mission, actor_ref=actor,
             )
+            for grouped_event in event_group[1:]:
+                judgements.record(
+                    event=grouped_event, judgement=decided, verification=checked,
+                    effect={"kind": "grouped_judgement", "status": "recorded",
+                            "primary_event_ref": event["id"]},
+                    mission=mission, actor_ref=actor,
+                )
             # The owner's third instruction: when we changed our mind, or when
             # the price kept running against us, write down what we expected
             # and what we may have missed -- including when the decision was to

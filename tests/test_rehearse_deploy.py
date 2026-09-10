@@ -654,7 +654,7 @@ class MissionAndSwitchTests(unittest.TestCase):
              "model-catalog-sync.json"},
         )
         self.assertIn("document_extraction_setup", code)
-        self.assertIn("p14a-tracking-policy-v1.json", code)
+        self.assertIn("p14a-tracking-policy-v2.json", code)
         self.assertIn("p12e-industry-framework-policy-v1.json", code)
         self.assertIn("model-catalog-sync.json", code)
         states = [spec.state for spec in INSTALL_SEEDS]

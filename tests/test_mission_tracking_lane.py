@@ -268,7 +268,7 @@ class ChildTests(P14aHarness):
         summary = json.loads((self.state_dir / "summary" / "summary.json")
                              .read_text(encoding="utf-8"))
         self.assertEqual(summary["schema_version"], "0.1")
-        self.assertEqual(summary["policy_ref"], "tracking-policy:p14a:v1")
+        self.assertEqual(summary["policy_ref"], "tracking-policy:p14a:v2")
 
 
 if __name__ == "__main__":  # pragma: no cover

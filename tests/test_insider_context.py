@@ -363,11 +363,20 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(found["anticipated"], "unknown")
         self.assertIn("no ledger", found["anticipated_reason"])
 
-    def test_a_core_with_claims_and_none_anticipating_answers_false(self):
+    def test_thin_capital_allocation_coverage_is_unknown(self):
         self._claims([("claim-1", "Bookings grew 12% year on year in the third quarter.")])
         found = self.context(connection=self.connection)
+        self.assertEqual(found["anticipated"], "unknown")
+        self.assertIn("coverage_thin", found["anticipated_reason"])
+
+    def test_five_capital_allocation_claims_can_support_false(self):
+        self._claims([
+            (f"claim-{index}", f"Capital allocation observation {index} has no sale plan.")
+            for index in range(5)
+        ])
+        found = self.context(connection=self.connection)
         self.assertEqual(found["anticipated"], "false")
-        self.assertIn("searched 1 Claims", found["anticipated_reason"])
+        self.assertIn("searched 5 Claims", found["anticipated_reason"])
 
     def test_a_claim_that_expects_a_sale_answers_true_with_its_ref(self):
         self._claims([

@@ -514,8 +514,8 @@ fi
 # two model configurations are written further down, after the model catalog
 # sync -- they need registered profiles, which the sync is what guarantees.
 tracking_policy_file="$state_dir/tracking-policy.json"
-if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" ]]; then
-  cp "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" "$tracking_policy_file"
+if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking-policy-v2.json" ]]; then
+  cp "$repo_root/deploy/phase9/p14a-tracking-policy-v2.json" "$tracking_policy_file"
   chmod 600 "$tracking_policy_file"
 fi
 # P12e: the industry-framework policy is that lane's whole switch -- it titles

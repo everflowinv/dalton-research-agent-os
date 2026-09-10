@@ -68,6 +68,7 @@ CLUSTER_DAYS = 7
 #: forty Form 4s a quarter would otherwise push the theses off the end.
 MAX_TRAILING_ROWS = 8
 MAX_ANTICIPATION_ROWS = 3
+MIN_CAPITAL_ALLOCATION_CLAIMS = 5
 
 #: §16 codes that dispose of shares. ``S`` is a sale into the market; ``D`` is
 #: a disposition back to the issuer; ``F`` is shares withheld to pay the tax on
@@ -512,6 +513,7 @@ def anticipation_from_claims(
     import json as _json
 
     matches: list[dict[str, Any]] = []
+    capital_allocation_claims = 0
     for row in rows:
         try:
             claim = _json.loads(row["claim_json"])
@@ -520,6 +522,8 @@ def anticipation_from_claims(
         statement = str(
             claim.get("normalized_statement") or claim.get("statement") or ""
         )
+        if claim.get("aspect") == "management_and_capital_allocation":
+            capital_allocation_claims += 1
         if not _ANTICIPATION_RE.search(statement):
             continue
         matches.append({
@@ -532,6 +536,17 @@ def anticipation_from_claims(
             break
     if matches:
         return {"answer": "true", "reason": None, "matches": matches}
+    if capital_allocation_claims < MIN_CAPITAL_ALLOCATION_CLAIMS:
+        return {
+            "answer": "unknown",
+            "reason": (
+                "coverage_thin: only "
+                f"{capital_allocation_claims} management_and_capital_allocation "
+                f"Claims are held; at least {MIN_CAPITAL_ALLOCATION_CLAIMS} are "
+                "required before absence is evidence that a sale was unanticipated"
+            ),
+            "matches": [],
+        }
     return {
         "answer": "false",
         "reason": (
@@ -752,6 +767,7 @@ __all__ = [
     "CONSIDERATIONS",
     "DISPOSAL_CODES",
     "MAX_ANTICIPATION_ROWS",
+    "MIN_CAPITAL_ALLOCATION_CLAIMS",
     "MAX_TRAILING_ROWS",
     "NO_CONSIDERATION_CODES",
     "SCHEMA_VERSION",

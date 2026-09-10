@@ -56,7 +56,7 @@ from .store import canonical_json, content_hash
 SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("tracking_cadence_schema.sql")
 POLICY_PATH = (
-    Path(__file__).resolve().parents[2] / "deploy/phase9/p14a-tracking-policy-v1.json"
+    Path(__file__).resolve().parents[2] / "deploy/phase9/p14a-tracking-policy-v2.json"
 )
 
 WRITE_SCOPE = "observation"

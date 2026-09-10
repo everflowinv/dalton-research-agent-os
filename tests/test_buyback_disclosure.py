@@ -62,7 +62,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sec-buyback"
 ITEM2 = FIXTURES / "acn-10q-item2-0001467373-26-000032.txt"
 AUTHORISATION = FIXTURES / "8k-authorisation-synthetic.txt"
 ITEM2_ACCESSION = "0001467373-26-000032"
-POLICY = Path(__file__).resolve().parents[1] / "deploy/phase9/p14a-tracking-policy-v1.json"
+POLICY = Path(__file__).resolve().parents[1] / "deploy/phase9/p14a-tracking-policy-v2.json"
 
 
 def item2_text():
@@ -651,6 +651,18 @@ class CapabilityMapTests(unittest.TestCase):
 class CadenceTests(unittest.TestCase):
     def setUp(self):
         self.policy = load_policy(POLICY)
+
+    def test_v1_policy_bytes_remain_frozen(self):
+        import hashlib
+
+        v1 = POLICY.with_name("p14a-tracking-policy-v1.json")
+        self.assertEqual(
+            hashlib.sha256(v1.read_bytes()).hexdigest(),
+            "714e752c96bb5d66eef4249216267c13ee52cf4a81bc31067b0fecfadb89bc10",
+        )
+
+    def test_new_tracking_baselines_have_a_new_policy_identity(self):
+        self.assertEqual(self.policy["policy_ref"], "tracking-policy:p14a:v2")
 
     def test_the_ownership_lane_and_the_filings_index_are_both_resident(self):
         self.assertIn("sec", self.policy["cadences"])

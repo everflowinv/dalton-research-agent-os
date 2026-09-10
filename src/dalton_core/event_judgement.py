@@ -238,6 +238,19 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
         "",
         f"## Company: {context.get('ticker') or context['company_ref']} ({context['company_ref']})",
     ]
+    grouped = context.get("grouped_events") or ()
+    if len(grouped) > 1:
+        lines.extend(["", "## Other monthly rows in this filing (same judgement)"])
+        for row in grouped[1:]:
+            payload = row.get("payload") or {}
+            lines.append(
+                f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
+                f"shares_purchased={payload.get('shares_purchased')}; "
+                f"average_price_paid={payload.get('average_price_paid')}; "
+                f"shares_purchased_under_plans="
+                f"{payload.get('shares_purchased_under_plans')}; "
+                f"remaining_authorisation={payload.get('remaining_authorisation')}"
+            )
     theses = context.get("theses") or ()
     lines.append("")
     lines.append("## Theses in force")
@@ -319,6 +332,13 @@ def allowed_refs(context: Mapping[str, Any]) -> set[str]:
     """Every ref the prompt printed.  A citation outside this set is a refusal."""
 
     refs = {context["event"]["id"], *context["event"]["source_refs"]}
+    for grouped in context.get("grouped_events") or ():
+        refs.add(grouped["id"])
+        refs.update(grouped.get("source_refs") or ())
+        for field in REF_PAYLOAD_FIELDS:
+            value = (grouped.get("payload") or {}).get(field)
+            if isinstance(value, str) and value:
+                refs.add(value)
     for field in REF_PAYLOAD_FIELDS:
         value = context["event"]["payload"].get(field)
         if isinstance(value, str) and value:
