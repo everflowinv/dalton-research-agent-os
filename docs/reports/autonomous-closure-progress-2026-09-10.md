@@ -87,3 +87,14 @@ Next: finish final-deliverable acceptance and publish; then controls repair and 
 - Provider-controls classification and selection admission are integrated but not yet deployed. A reversible operator-only config packet is prepared; it refuses until catalog capability sync. No human research approval is impersonated.
 
 Next: complete scope-stable model/connector capacity and controls validation; full frozen acceptance then deploy and observe genuine research results.
+
+## 19:49 UTC — final integrated review
+
+- XLSX display is now monetary millions without changing raw values/formulas; annual/quarterly calendar and flow proofs remain mandatory. Latest 123-test suite and real LibreOffice render passed.
+- CTSH automatic extraction accepts the configured fallback chain; all-view failures remain failures. Consecutive earnings gate currently reports FY2026-Q2 as 1/4 and names the missing prior three quarters; ordinary Citi conference is excluded.
+- The b61d99e full suite passed 6,463 tests, but real catalog acceptance rejected the wrong providerControls rate-card shape. This candidate was never accepted/deployed. Correct schema now uses broker decimal-string pricing fields, verifiedAt/expiresAt and route/mode compatibility.
+- ENOSPC interrupted an earlier run; only completed agent-owned temporary rehearsal copies were removed. Their reports, failed logs and live backups remain. Acceptance will be rerun on the final immutable commit.
+- Shared connector account-scope recovery passed 77 tests. Final independent review found model reservation dispatch/settle must enforce exact historical policy ownership; this last blocker is being repaired with two-account tests.
+- Private model-selection repair now has a closed hashed candidate, WAL-aware logical database digest, staged backup and rollback; real CLI process detection and copied-state rehearsal are being finalized. No live writes or paid calls during these checks.
+
+Next: freeze final integrated code, full suite + wheel + copied-state rehearsal, deploy under existing owner authorization, then observe genuine scheduled results with mission v14 unchanged.
