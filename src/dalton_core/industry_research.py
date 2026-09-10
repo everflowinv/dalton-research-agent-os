@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .coverage_admission import validate_driver_pack_version
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 
 SCHEMA_VERSION = "0.1"
@@ -311,13 +313,13 @@ def _driver_views(value: Any) -> list[dict[str, Any]]:
 class IndustryResearchAuthority:
     """Publish and verify immutable industry evidence packs and overlays."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore):
         self.store = store
         self.connection = store.connection
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_industry_research_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_industry_research_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager
