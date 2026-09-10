@@ -445,8 +445,8 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
     # notes and the company wiki are separate approvals and separate
     # directories, so one being absent must not take the other with it.
     SeedSpec(
-        "deploy/phase9/p9-us-it-services-feeds-v1.json",
-        "feed-plans/p9-us-it-services-feeds-v1.json", optional=True,
+        "deploy/phase9/p9-us-it-services-feeds-v2.json",
+        "feed-plans/p9-us-it-services-feeds-v2.json", optional=True,
         gate="any-feed",
     ),
     *(

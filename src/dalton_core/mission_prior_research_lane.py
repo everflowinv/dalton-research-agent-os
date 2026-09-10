@@ -42,7 +42,7 @@ GOVERNANCE = (
     "prior-research-list-documents-v1.json",
     "prior-research-get-document-v1.json",
 )
-FEED_PLAN_NAME = "p9-us-it-services-feeds-v1.json"
+FEED_PLAN_NAME = "p9-us-it-services-feeds-v2.json"
 CORPUS_DIRNAME = "prior-research"
 
 #: The two words reading this feed needs. The same pair every discovery source
@@ -119,15 +119,22 @@ def build_launcher(args: Any) -> Any | None:
 def argv_fragment(context: Any) -> list[str]:
     """Every file this lane needs, or none of them.
 
-    All-or-nothing on the code side of INT2's rule. The plan flag is left to
-    whichever feed lane the launchagent renders first: a second copy would be
-    a duplicate argparse value rather than a second plan.
+    All-or-nothing on the code side of INT2's rule, and it keeps
+    ``--feed-discovery-plan``. The company-wiki fragment drops that flag
+    because the sales-note lane at order 120 always renders before it; this
+    lane is at 32 and renders *first*, and a Core whose owner set only
+    ``DALTON_PRIOR_RESEARCH_DIR`` -- no OpenClaw workspace at all -- has no
+    other lane to supply it. Dropping it there would mean the one lane that is
+    installed comes up with no plan and refuses every tick.
+
+    The duplicate the wiki fragment was avoiding is handled where duplicates
+    belong: ``lane_argv`` de-duplicates the flag across fragments.
     """
 
     from .mission_feed_lane import _feed_argv
 
     corpus = context.state / "feeds" / CORPUS_DIRNAME
-    argv = _feed_argv(
+    return _feed_argv(
         context, plan_name=FEED_PLAN_NAME, governance=GOVERNANCE,
         flags=[
             ("--prior-research-corpus-root", corpus),
@@ -137,7 +144,6 @@ def argv_fragment(context: Any) -> list[str]:
              context.state / "connector-governance" / GOVERNANCE[1]),
         ],
     )
-    return argv[2:] if argv else argv
 
 
 LANE = register_lane(LaneSpec(

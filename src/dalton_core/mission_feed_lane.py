@@ -94,6 +94,18 @@ FEED_DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
 
 SALES_NOTE_SPEC_REF = "sales-note"
 WIKI_SPEC_PREFIX = "wiki-"
+# W3: one spec for the whole feed, not one per kind as the wiki has. The spec
+# is what carries the evidence tier, and every kind of prior document is the
+# same tier -- an old screen, a memo and a working note are all "us, earlier".
+# The kind still travels on the wire and decides reading order; it does not
+# decide provenance strength, because there is only one provenance here.
+# ``claim_index_tagging.SPEC_IMPORTANCE`` holds this exact key.
+PRIOR_RESEARCH_SPEC_REF = "prior-research"
+#: What an analyst opens first when a company already has a file.
+PRIOR_READ_ORDER: tuple[str, ...] = (
+    "initial_screen", "memo", "notes", "model_excel", "other",
+)
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9-]*$")
 DISCOVERY_SCOPE = "source_discovery"
 # Both feeds read local files, so a tick can afford a real batch; the bound is
 # here to keep one tick finite, not to ration an upstream.
@@ -462,6 +474,85 @@ def triage_wiki_documents(
     }
 
 
+def prior_research_ticker(document: Mapping[str, Any]) -> str:
+    """The ticker a prior document is filed under, from its company folder.
+
+    The manifest is filed per company, so the attribution is the owner's own
+    filing rather than a regex over the prose -- the same principle the wiki
+    follows, and stronger here because the folder is the only thing the owner
+    had to decide. A folder that is not ticker-shaped (``acn-accenture``)
+    yields nothing rather than a guess.
+    """
+
+    candidate = str(document.get("company") or "").strip()
+    return candidate if _TICKER_RE.fullmatch(candidate) else ""
+
+
+def attribute_prior_documents(
+    documents: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """The company folder, intersected with the mission universe.
+
+    One document belongs to at most one company, unlike a wiki note that can
+    carry five tags: the owner put the file in one folder, and a prior view
+    written about Accenture is not also a prior view about Cognizant.
+    """
+
+    ticker_to_ref = {str(item["ticker"]).strip(): str(item["company_ref"])
+                     for item in universe}
+    by_company: dict[str, list[str]] = {}
+    unattributed: list[str] = []
+    for document in documents:
+        ticker = prior_research_ticker(document)
+        if ticker not in ticker_to_ref:
+            unattributed.append(document["document_id"])
+            continue
+        by_company.setdefault(ticker_to_ref[ticker], []).append(document["document_id"])
+    return {
+        "by_company": {ref: sorted(dict.fromkeys(refs))
+                       for ref, refs in sorted(by_company.items())},
+        "unattributed": sorted(dict.fromkeys(unattributed)),
+    }
+
+
+def triage_prior_documents(
+    documents: Sequence[Mapping[str, Any]],
+    universe: Sequence[Mapping[str, Any]],
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Split an enumeration into "already attributed" and "worth reading".
+
+    Ordered by what the analyst would read first: an earlier Initial Screen
+    before a memo before loose notes, and the newest of each before the older
+    ones. The enumeration already arrives newest-first, so this only has to
+    keep that order within each kind.
+    """
+
+    _universe_terms(universe)
+    ticker_to_ref = {str(item["ticker"]).strip(): str(item["company_ref"])
+                     for item in universe}
+    company: dict[str, list[str]] = {}
+    tagged: list[str] = []
+    rest: dict[str, list[str]] = {kind: [] for kind in PRIOR_READ_ORDER}
+    for document in documents:
+        ticker = prior_research_ticker(document)
+        if ticker in ticker_to_ref:
+            company.setdefault(ticker_to_ref[ticker], []).append(document["document_id"])
+            tagged.append(document["document_id"])
+            continue
+        kind = str(document.get("kind") or "other")
+        rest.setdefault(kind if kind in rest else "other", []).append(
+            document["document_id"]
+        )
+    queue = tagged + [ref for kind in PRIOR_READ_ORDER for ref in rest[kind]]
+    return {
+        "header_company": {ref: sorted(dict.fromkeys(refs))
+                           for ref, refs in sorted(company.items())},
+        "read_queue": queue,
+        "header_industry_count": 0,
+    }
+
+
 def wiki_spec_ref(doc_type_key: str) -> str:
     """One spec per document kind, because the kind is what sets the tier.
 
@@ -637,6 +728,8 @@ class FeedDiscoveryCoordinator:
     ) -> dict[str, Any]:
         if self.source_ref == SALES_NOTES_SOURCE_REF:
             return triage_notes(observation["notes"], universe, self.plan)
+        if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
+            return triage_prior_documents(observation["documents"], universe, self.plan)
         return triage_wiki_documents(observation["documents"], universe, self.plan)
 
     def headers_by_document(self, observation: Mapping[str, Any]) -> dict[str, Any]:
@@ -690,6 +783,8 @@ class FeedDiscoveryCoordinator:
     ) -> dict[str, Any]:
         if self.source_ref == SALES_NOTES_SOURCE_REF:
             return attribute_notes(observation["notes"], universe)
+        if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
+            return attribute_prior_documents(observation["documents"], universe)
         return attribute_wiki_documents(observation["documents"], universe)
 
     def spec_refs(self, observation: Mapping[str, Any]) -> dict[str, str]:
@@ -697,6 +792,11 @@ class FeedDiscoveryCoordinator:
 
         if self.source_ref == SALES_NOTES_SOURCE_REF:
             return {note["note_id"]: SALES_NOTE_SPEC_REF for note in observation["notes"]}
+        if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
+            return {
+                document["document_id"]: PRIOR_RESEARCH_SPEC_REF
+                for document in observation["documents"]
+            }
         return {
             document["document_id"]: wiki_spec_ref(document["doc_type_key"])
             for document in observation["documents"]
@@ -986,6 +1086,8 @@ class FeedDiscoveryCoordinator:
     def document_spec_ref(self, observation: Mapping[str, Any]) -> str:
         if self.source_ref == SALES_NOTES_SOURCE_REF:
             return SALES_NOTE_SPEC_REF
+        if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
+            return PRIOR_RESEARCH_SPEC_REF
         return wiki_spec_ref(observation["document"]["doc_type_key"])
 
     def decide(
@@ -1002,6 +1104,25 @@ class FeedDiscoveryCoordinator:
                 observation["body"], universe, self.plan,
                 header_companies=header_companies,
             )
+        if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
+            # The company folder is the attribution and there is no second
+            # candidate: the owner put this file in one company's folder. A
+            # document under a folder outside the universe is not read for
+            # industry terms either -- prior work about a company we do not
+            # cover is prior work about a company we do not cover.
+            ticker_to_ref = {str(item["ticker"]).strip(): str(item["company_ref"])
+                             for item in universe}
+            ticker = prior_research_ticker(observation["document"])
+            if ticker in ticker_to_ref:
+                return {"outcome": "company", "company_refs": [ticker_to_ref[ticker]],
+                        "industry_terms": [], "reason": None}
+            terms = mentions_any(observation["text"], plan_terms(self.plan))
+            if terms:
+                return {"outcome": "industry", "company_refs": [],
+                        "industry_terms": terms, "reason": None}
+            return {"outcome": "dropped", "company_refs": [], "industry_terms": [],
+                    "reason": "filed under a folder outside the universe and names "
+                              "no industry term"}
         # The wiki's company attribution is the corpus's own filing, not a
         # regex over the prose: a sector note that mentions Accenture twice is
         # still a sector note. Only the industry-or-dropped half is decided
@@ -1384,7 +1505,7 @@ def _feed_argv(context: Any, *, plan_name: str, governance: Sequence[str],
 def sales_notes_argv(context: Any) -> list[str]:
     digests = context.state / "feeds" / "market-digest-output"
     return _feed_argv(
-        context, plan_name="p9-us-it-services-feeds-v1.json",
+        context, plan_name="p9-us-it-services-feeds-v2.json",
         governance=SALES_NOTES_GOVERNANCE,
         flags=[
             ("--sales-notes-digest-dir", digests),
@@ -1399,7 +1520,7 @@ def sales_notes_argv(context: Any) -> list[str]:
 def company_wiki_argv(context: Any) -> list[str]:
     corpus = context.state / "feeds" / "company-wiki"
     argv = _feed_argv(
-        context, plan_name="p9-us-it-services-feeds-v1.json",
+        context, plan_name="p9-us-it-services-feeds-v2.json",
         governance=COMPANY_WIKI_GOVERNANCE,
         flags=[
             ("--company-wiki-index-db", corpus / "wiki-index.sqlite"),
@@ -1410,9 +1531,11 @@ def company_wiki_argv(context: Any) -> list[str]:
              context.state / "connector-governance" / COMPANY_WIKI_GOVERNANCE[1]),
         ],
     )
-    # The plan argument is added by whichever feed lane comes first; a second
-    # copy would be a duplicate argparse value, not a second plan.
-    return argv[2:] if argv else argv
+    # The plan flag is kept. ``lane_registry.lane_argv`` writes an identical
+    # pair once, so this fragment no longer has to assume another feed lane
+    # ran before it -- an assumption that was wrong the moment a lane was
+    # registered ahead of this one.
+    return argv
 
 
 SALES_NOTES_LANE = register_lane(LaneSpec(
@@ -1461,6 +1584,8 @@ __all__ = [
     "SALES_NOTES_GOVERNANCE",
     "SALES_NOTES_LANE",
     "SALES_NOTES_LAUNCHER_KWARG",
+    "PRIOR_READ_ORDER",
+    "PRIOR_RESEARCH_SPEC_REF",
     "SALES_NOTES_SOURCE_REF",
     "SALES_NOTE_SPEC_REF",
     "FeedDiscoveryCoordinator",
@@ -1487,5 +1612,8 @@ __all__ = [
     "triage_notes",
     "triage_wiki_documents",
     "validate_feed_discovery_plan",
+    "attribute_prior_documents",
+    "prior_research_ticker",
+    "triage_prior_documents",
     "wiki_spec_ref",
 ]

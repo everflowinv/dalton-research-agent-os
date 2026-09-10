@@ -311,12 +311,20 @@ feed_plan_dir="$state_dir/feed-plans"
 feeds_dir="$state_dir/feeds"
 digest_source="$openclaw_workspace/skills/market-digest/output"
 wiki_index_source="$openclaw_workspace/wiki-index.sqlite"
+# W3: the plan is versioned rather than re-copied. Seeding is copy-once by
+# design -- the state directory is the owner's, and a script that overwrites
+# what is there is a script that can undo a hand edit -- so a plan whose
+# *contents* changed has to arrive under a new name or it never lands on a
+# Core that already installed the old one. v2 is v1 plus `source:prior-research`;
+# the three feed lanes name v2 by constant, so a Core that has only v1 on disk
+# brings up no feed lane until install.sh is re-run, which is the one step the
+# deploy runbook already has.
 seed_feed_plan() {
   mkdir -p "$feed_plan_dir"
   chmod 700 "$feed_plan_dir"
-  feed_plan_file="$feed_plan_dir/p9-us-it-services-feeds-v1.json"
-  if [[ ! -f "$feed_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" ]]; then
-    cp "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" "$feed_plan_file"
+  feed_plan_file="$feed_plan_dir/p9-us-it-services-feeds-v2.json"
+  if [[ ! -f "$feed_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-feeds-v2.json" ]]; then
+    cp "$repo_root/deploy/phase9/p9-us-it-services-feeds-v2.json" "$feed_plan_file"
     chmod 600 "$feed_plan_file"
   fi
 }

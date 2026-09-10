@@ -94,7 +94,7 @@ import dalton_core.company_wiki_cli as wiki_cli
 import dalton_core.sales_notes_cli as notes_cli
 
 REPO = Path(__file__).resolve().parents[1]
-PLAN_PATH = REPO / "deploy" / "phase9" / "p9-us-it-services-feeds-v1.json"
+PLAN_PATH = REPO / "deploy" / "phase9" / "p9-us-it-services-feeds-v2.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "s1_feeds"
 ACN = "company:sec-cik:0001467373"
 CTSH = "company:sec-cik:0001058290"

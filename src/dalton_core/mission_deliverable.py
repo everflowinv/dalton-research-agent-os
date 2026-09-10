@@ -628,6 +628,16 @@ class MissionDeliverableAuthority:
             # passed and names the refs that occasioned it.
             "revision": validate_revision(revision),
         }
+        if gate is not None and as_version_zero and gate.get("passed"):
+            # A version zero is a document this system did not write, so no
+            # reading of it can be a pass of this system's exit gate. A raise
+            # rather than an assert: assertions vanish under -O, and this is
+            # the one place a caller could quietly turn an imported document
+            # into a passed screen.
+            raise MissionDeliverableValidationError(
+                "an imported version zero cannot carry a passed gate; its "
+                "items are 'imported', not 'passed'"
+            )
         if gate is not None:
             # P10c's exit-gate self-assessment, stored rather than left to
             # live as one line of prose in a stage record's rationale. Out of
@@ -654,11 +664,6 @@ class MissionDeliverableAuthority:
                 "SELECT version_id, version_number, content_hash FROM mission_deliverable_pointer "
                 "WHERE deliverable_ref=?", (deliverable_ref,),
             ).fetchone()
-            if as_version_zero and pointer is not None:
-                raise MissionDeliverableConflict(
-                    "this chain already has a version; a prior document can "
-                    "only be imported into a chain that has not started"
-                )
             if as_version_zero:
                 version, prior = 0, None
             else:
@@ -676,6 +681,34 @@ class MissionDeliverableAuthority:
                 current = json.loads(existing["record_json"])
                 if current.get("body_hash") == record["body_hash"]:
                     return {**current, "status": "duplicate"}
+            if as_version_zero and pointer is not None:
+                # Deliberately *after* the duplicate checks above and the
+                # idempotency check below: re-running the import of a document
+                # that is already the chain's v0 has to be a no-op, because a
+                # lane that reads a corpus every tick will re-offer the same
+                # screen for ever. What this refuses is the other case -- a
+                # *different* prior document arriving at a chain that already
+                # started -- and that one is a conflict, because a chain can
+                # only begin once and the second document is evidence, not an
+                # origin.
+                seen_import = cur.execute(
+                    "SELECT version_id FROM mission_deliverable_versions "
+                    "WHERE deliverable_ref=? AND version_number=0", (deliverable_ref,),
+                ).fetchone()
+                if seen_import is not None and idempotency_key is not None:
+                    existing = cur.execute(
+                        "SELECT record_json FROM mission_deliverable_versions "
+                        "WHERE version_id=? AND json_extract(record_json,'$.idempotency_key')=?",
+                        (seen_import["version_id"],
+                         _text(idempotency_key, "idempotency_key", maximum=512)),
+                    ).fetchone()
+                    if existing is not None:
+                        return {**json.loads(existing["record_json"]),
+                                "status": "duplicate"}
+                raise MissionDeliverableConflict(
+                    "this chain already has a version; a prior document can "
+                    "only be imported into a chain that has not started"
+                )
             if idempotency_key is not None:
                 key = _text(idempotency_key, "idempotency_key", maximum=512)
                 seen = cur.execute(

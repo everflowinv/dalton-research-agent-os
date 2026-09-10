@@ -12,7 +12,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -107,15 +107,21 @@ GenAI bookings 的口径能不能和总 bookings 对上？
 
 
 def build_corpus(root: Path, *, entries: list[dict[str, Any]] | None = None,
-                 company: str = "ACN") -> Path:
-    """A prior-research corpus with one company folder and a manifest."""
+                 company: str = "ACN", as_of: str = "2024-03-28") -> Path:
+    """A prior-research corpus with one company folder and a manifest.
+
+    ``as_of`` is a parameter because the coordinator tests have to put the
+    document inside one enumeration window: the tick walks the lookback
+    fourteen days at a time and spawns a governed child per window, so a
+    fixture dated in 2024 would cost a hundred subprocesses to reach.
+    """
 
     folder = root / company
     (folder / "2024").mkdir(parents=True, exist_ok=True)
     (folder / "2024" / "screen.md").write_text(SCREEN_TEXT, encoding="utf-8")
     (folder / "2024" / "undated.md").write_text("没有日期的备忘。\n", encoding="utf-8")
     documents = entries if entries is not None else [
-        {"path": "2024/screen.md", "kind": "initial_screen", "as_of": "2024-03-28",
+        {"path": "2024/screen.md", "kind": "initial_screen", "as_of": as_of,
          "author": "human:pm", "source_note": "FY24 Q2 电话会之前写的"},
         {"path": "2024/undated.md", "kind": "memo", "author": "human:pm"},
     ]
@@ -649,6 +655,41 @@ class DeliverableV0Tests(unittest.TestCase):
                 text="# 另一个\n别的东西。\n", actor_ref=OWNER,
             )
 
+    def test_re_importing_the_same_document_is_a_duplicate(self) -> None:
+        # The lane re-offers the same screen every tick for as long as the
+        # file is on disk, so the second import has to be a no-op rather than
+        # a conflict that reads like a fault.
+        first = self.import_screen()
+        again = self.import_screen()
+        self.assertEqual(again["status"], "duplicate")
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual(again["version"], 0)
+
+        # And it stays a duplicate once Dalton's own v1 is the chain head,
+        # which is the case the pointer-based duplicate check cannot see.
+        self.authority.publish(
+            kind="initial_screen", subject_ref=self.company, mission=self.mission,
+            playbook=self.playbook, template_ref="t",
+            sections=[{"title": "结论", "body": "本版重新判断了 bookings 的口径。"}],
+            summary="Dalton 自己写的第一版", actor_ref=OWNER,
+        )
+        third = self.import_screen()
+        self.assertEqual(third["status"], "duplicate")
+        self.assertEqual(third["version"], 0)
+
+    def test_a_version_zero_may_not_claim_it_passed(self) -> None:
+        with self.assertRaises(MissionDeliverableValidationError) as caught:
+            self.authority.publish(
+                kind="initial_screen", subject_ref=self.company,
+                mission=self.mission, playbook=self.playbook,
+                template_ref="t", sections=[{"title": "T", "body": "b"}],
+                summary="s", actor_ref=OWNER, as_version_zero=True,
+                revision={"change_reason": IMPORT_CHANGE_REASON,
+                          "evidence_refs": ["d:1"]},
+                gate={"passed": True, "answers": []},
+            )
+        self.assertIn("cannot carry a passed gate", str(caught.exception))
+
     def test_the_v0_gate_marks_every_item_imported(self) -> None:
         v0 = self.import_screen()
         gate = v0["gate"]
@@ -894,6 +935,186 @@ class PriorViewTests(unittest.TestCase):
         }
 
 
+class CoordinatorTests(unittest.TestCase):
+    """The tick, against the real mission authority and a real runner.
+
+    ``coverage_mission.DISCOVERY_SOURCES`` does not carry this feed's row yet
+    -- the branch that added the feed may not touch that file -- so the row is
+    patched in exactly as S1 and S2 do, which also pins what the integrator
+    will install.
+    """
+
+    def setUp(self) -> None:
+        from dalton_core.connector import ConnectorStore
+        from dalton_core.connector_governance import ConnectorGovernance
+        from dalton_core.mission_feed_lane import FEED_DISCOVERY_SOURCES
+        from dalton_core.observability import ObservabilityStore
+        from dalton_core.prior_research_launcher import PriorResearchFeedLauncher
+        from dalton_core.raw_spool import RawSpool
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        # Inside one fourteen-day enumeration window: every window is a
+        # governed child process, so a fixture dated two years back would make
+        # this test a hundred subprocesses long.
+        self.as_of = (date.today() - timedelta(days=3)).isoformat()
+        self.since = (date.today() - timedelta(days=6)).isoformat()
+        self.corpus = build_corpus(self.root / "corpus", as_of=self.as_of)
+        repo = Path(__file__).resolve().parents[1]
+        patch_path = mock.patch.dict("os.environ", {"PYTHONPATH": str(repo / "src")})
+        patch_path.start()
+        self.addCleanup(patch_path.stop)
+
+        self.core = DaltonStore(str(self.root / "core.sqlite"))
+        self.addCleanup(self.core.close)
+        self.connectors = ConnectorStore(self.core)
+        self.observability = ObservabilityStore(self.core)
+        self.spool = RawSpool(str(self.root / "spool"), max_total_bytes=1_000_000_000)
+        self.bootstrap = bootstrap_method_authorities(self.core)
+        self.missions = CoverageMissionAuthority(self.core)
+        patch = mock.patch.object(
+            coverage_mission_module, "DISCOVERY_SOURCES",
+            MappingProxyType({
+                **dict(coverage_mission_module.DISCOVERY_SOURCES),
+                **dict(FEED_DISCOVERY_SOURCES),
+            }),
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.mission = self.publish_mission()
+        self.governance = {
+            operation: self.write_governance(kind)
+            for operation, kind in (("list_documents", PRIOR_RESEARCH_LIST_KIND),
+                                    ("get_document", PRIOR_RESEARCH_GET_KIND))
+        }
+        self.launcher = PriorResearchFeedLauncher(
+            corpus_root=self.corpus, state_dir=self.state,
+            governance_paths=self.governance, spool_dir=self.root / "spool",
+        )
+        self.addCleanup(self.launcher.close)
+        self.ConnectorGovernance = ConnectorGovernance
+
+    def write_governance(self, kind: str) -> Path:
+        record = build_governance_record(kind, approved_by=OWNER, status="approved")
+        path = self.root / f"{kind}-approved.json"
+        path.write_text(canonical_json(record) + "\n", encoding="utf-8")
+        return path
+
+    def publish_mission(self) -> dict[str, Any]:
+        params = mission_params(self.bootstrap)
+        params["source_plan"] = list(params["source_plan"]) + [{
+            "source_ref": PRIOR_RESEARCH,
+            "role": "this fund's own earlier work on these companies",
+            "status": "connected",
+        }]
+        params["autonomy"]["may_write"] = sorted(
+            set(params["autonomy"]["may_write"]) | {"source_discovery", "observation"}
+        )
+        ref = params.pop("mission_ref")
+        return self.missions.create_mission(ref, **params)
+
+    def coordinator(self) -> Any:
+        from dalton_core.mission_feed_lane import (
+            FeedDiscoveryCoordinator,
+            build_feed_runner,
+            load_feed_discovery_plan,
+        )
+
+        runners = {
+            name: build_feed_runner(
+                launcher=self.launcher, operation=operation,
+                governance=self.ConnectorGovernance.load(self.governance[operation]),
+                store=self.core, connectors=self.connectors,
+                observability=self.observability, spool=self.spool,
+                source_ref=PRIOR_RESEARCH,
+            )
+            for name, operation in (("enumerator", "list_documents"),
+                                    ("runner", "get_document"))
+        }
+        repo = Path(__file__).resolve().parents[1]
+        return FeedDiscoveryCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            source_ref=PRIOR_RESEARCH,
+            plan=load_feed_discovery_plan(
+                repo / "deploy/phase9/p9-us-it-services-feeds-v2.json"
+            ),
+            **runners,
+        )
+
+    def test_a_tick_reads_a_prior_document_into_an_internal_prior_discovery(self) -> None:
+        result = self.coordinator().dispatch_once(
+            universe=[{"company_ref": ACN, "ticker": "ACN"}], since=self.since
+        )
+        self.assertEqual(result["status"], "dispatched", result)
+        read = result["read"]
+        self.assertEqual(read["read"], 1)
+        self.assertEqual(read["company"], 1)
+        outcome = read["outcomes"][0]
+        self.assertEqual(outcome["outcome"], "company")
+        self.assertEqual(outcome["document_ref"],
+                         document_ref("ACN", "2024/screen.md"))
+
+        queued = self.missions.discovered_documents(self.mission["id"], limit=50)
+        self.assertEqual({row["document_ref"] for row in queued},
+                         {document_ref("ACN", "2024/screen.md")})
+        self.assertEqual({row["status"] for row in queued}, {"acquired"})
+
+        specs = {
+            row["spec_ref"] for row in self.core.connection.execute(
+                "SELECT spec_ref FROM coverage_mission_source_discoveries"
+            ).fetchall()
+        }
+        self.assertEqual(specs, {"prior-research"})
+        # The whole point of the spec: it is the key the claim index reads the
+        # tier off, and it has to be a key that table actually holds.
+        self.assertEqual(SPEC_IMPORTANCE["prior-research"], "internal_prior")
+
+        # Second tick: the same document is held, not discovered again.
+        again = self.coordinator().dispatch_once(
+            universe=[{"company_ref": ACN, "ticker": "ACN"}], since=self.since
+        )
+        self.assertEqual(again["read"]["read"], 0)
+        self.assertEqual(again["read"]["already_held"], 1)
+
+    def test_a_folder_outside_the_universe_is_dropped_not_attributed(self) -> None:
+        build_corpus(self.corpus, company="ZZZZ", as_of=self.as_of)
+        result = self.coordinator().dispatch_once(
+            universe=[{"company_ref": ACN, "ticker": "ACN"}], since=self.since
+        )
+        outcomes = {item["document_ref"]: item for item in result["read"]["outcomes"]}
+        stray = outcomes[document_ref("ZZZZ", "2024/screen.md")]
+        self.assertEqual(stray["outcome"], "dropped")
+        self.assertEqual(stray["records"], [])
+
+    def test_the_triage_reads_a_screen_before_a_memo(self) -> None:
+        from dalton_core.mission_feed_lane import (
+            attribute_prior_documents,
+            triage_prior_documents,
+        )
+
+        documents = [
+            {"document_id": "d:notes", "company": "ZZZZ", "kind": "notes"},
+            {"document_id": "d:screen", "company": "ZZZZ", "kind": "initial_screen"},
+            {"document_id": "d:memo", "company": "ZZZZ", "kind": "memo"},
+            {"document_id": "d:acn", "company": "ACN", "kind": "memo"},
+        ]
+        triaged = triage_prior_documents(documents, [{"company_ref": ACN, "ticker": "ACN"}],
+                                         {"industry_keywords": [], "peer_names": [],
+                                          "companies": {}})
+        self.assertEqual(triaged["read_queue"],
+                         ["d:acn", "d:screen", "d:memo", "d:notes"])
+        self.assertEqual(triaged["header_company"], {ACN: ["d:acn"]})
+        attributed = attribute_prior_documents(
+            documents, [{"company_ref": ACN, "ticker": "ACN"}]
+        )
+        self.assertEqual(attributed["by_company"], {ACN: ["d:acn"]})
+        self.assertEqual(attributed["unattributed"],
+                         ["d:memo", "d:notes", "d:screen"])
+
+
 class LaneTests(unittest.TestCase):
     def test_the_lane_is_registered_at_order_thirty_two(self) -> None:
         from dalton_core.lane_registry import LANE_MODULES, registered_lanes
@@ -977,7 +1198,7 @@ class LaneTests(unittest.TestCase):
 
         repo = Path(__file__).resolve().parents[1]
         plan = load_feed_discovery_plan(
-            repo / "deploy/phase9/p9-us-it-services-feeds-v1.json"
+            repo / "deploy/phase9/p9-us-it-services-feeds-v2.json"
         )
         self.assertIn(PRIOR_RESEARCH, plan["source_refs"])
 

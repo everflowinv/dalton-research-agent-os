@@ -126,7 +126,12 @@ def imported_gate(
         }
         for index, check in enumerate(GATE_QUESTION_CHECKS)
     ]
-    assert all(item["status"] in GATE_ITEM_STATUSES for item in answers)
+    stray = sorted({item["status"] for item in answers} - set(GATE_ITEM_STATUSES))
+    if stray:
+        # A raise rather than an assert: assertions vanish under ``-O`` and
+        # this one guards the vocabulary a reader uses to tell an imported
+        # item from a checked one.
+        raise ValueError(f"imported gate produced a status outside the vocabulary: {stray}")
     return {
         "schema_version": SCHEMA_VERSION,
         # A v0 is never a passed gate. The word is a state of a version

@@ -122,13 +122,13 @@ class InstallerSeedTests(unittest.TestCase):
             "--guidepoint-discovery-plan",
         ),
         "sales_notes": (
-            ["feed-plans/p9-us-it-services-feeds-v1.json",
+            ["feed-plans/p9-us-it-services-feeds-v2.json",
              "connector-governance/sales-notes-list-notes-v1.json",
              "connector-governance/sales-notes-get-note-v1.json"],
             "--sales-notes-digest-dir",
         ),
         "company_wiki": (
-            ["feed-plans/p9-us-it-services-feeds-v1.json",
+            ["feed-plans/p9-us-it-services-feeds-v2.json",
              "connector-governance/company-wiki-list-documents-v1.json",
              "connector-governance/company-wiki-get-document-v1.json"],
             "--company-wiki-corpus-root",
@@ -137,7 +137,7 @@ class InstallerSeedTests(unittest.TestCase):
         # declares. Same three files as the two S1 feeds; the corpus link is
         # made in the same block and is what the fragment checks for.
         "prior_research": (
-            ["feed-plans/p9-us-it-services-feeds-v1.json",
+            ["feed-plans/p9-us-it-services-feeds-v2.json",
              "connector-governance/prior-research-list-documents-v1.json",
              "connector-governance/prior-research-get-document-v1.json"],
             "--prior-research-corpus-root",
@@ -174,8 +174,8 @@ class InstallerSeedTests(unittest.TestCase):
                 repo / "deploy/connector-governance/guidepoint-search-library-v1.json",
             "discovery-plans/us-it-services-guidepoint-v1.json":
                 repo / "deploy/phase9/p9-us-it-services-guidepoint-v1.json",
-            "feed-plans/p9-us-it-services-feeds-v1.json":
-                repo / "deploy/phase9/p9-us-it-services-feeds-v1.json",
+            "feed-plans/p9-us-it-services-feeds-v2.json":
+                repo / "deploy/phase9/p9-us-it-services-feeds-v2.json",
             "connector-governance/sales-notes-list-notes-v1.json":
                 repo / "deploy/connector-governance/sales-notes-list-notes-v1.json",
             "connector-governance/sales-notes-get-note-v1.json":
