@@ -1,7 +1,7 @@
 # P13-M3 敏感性与 consensus bridge v1.0
 
 日期：2026-09-09
-分支：`w3-sensitivity`（worktree `dalton-w3-sensitivity-worktree`），基线 main `62b54fd`（≥ `bb5f93b`）
+分支：`w3-sensitivity`（worktree `dalton-w3-sensitivity-worktree`），基线 main `62b54fd`，已并入 main `427f684`（stage-ladder / S5 / ask v2 / P14f 之后）
 作者：Wave 3 Agent「sensitivity」（Opus 5）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节、[能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.2 Phase 13 P13-M3、[P13-M2 预测行 v1.0](p13-m2-forecast-lines-v1.0-2026-09-09.md)（尤其 §9 开放问题 5）、[P15d 高 conviction call v1.0](p15d-conviction-call-v1.0-2026-09-09.md)、playbook `model_discipline`
 
@@ -29,6 +29,7 @@ driver 模型（P13-M2）把每条假设摆得一样重，但真实公司里一�
 | `scripts/rehearse_deploy.CORE_MIGRATIONS` | 改（一行） | 同上的 `MigrationSpec` |
 | `pyproject.toml` `[project.scripts]` | 改（一行） | `dalton-forecast-sensitivity` |
 | `tests/test_forecast_sensitivity.py`、`tests/test_consensus_bridge.py`、`tests/test_mission_sensitivity_lane.py` | 新增 | 95 项（43 / 28 / 24） |
+| `src/dalton_core/research_event.py` | 改（**不是本片的文件**，见 §9） | 补回 main `427f684` 合并时丢掉的一个 `}),` |
 
 **没有碰**：`writer_server.py`、`coverage_mission.py`（及其 schema）、`bounded_planner_driver.py`、`macos_launchagent.py`、`install.sh`、`cockpit_control.html`、`PROJECT_STATUS.md`、`tests/test_service.py`、`tests/test_lane_registry.py` 的字面量、`model_forecast_driver.py`（一个字没改——`compute_results` / `chain_base` 就是接缝）、其他 agent 的模块。
 
@@ -171,12 +172,12 @@ DXC 的净利润在 M2 上就 `unavailable`（营业利润变号，税率没有�
 ## 6. 测试
 
 ```
-Ran 2XXX tests in XXX.XXXs
+Ran 4905 tests in 681.099s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，本分支。基线 main `62b54fd` 是 X,XXX，本片 +95：`test_forecast_sensitivity` 43、`test_consensus_bridge` 28、`test_mission_sensitivity_lane` 24。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `427f684` 之后的本分支。并入前、基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`，其中本片 +95：`test_forecast_sensitivity` 43、`test_consensus_bridge` 28、`test_mission_sensitivity_lane` 24。）
 
 fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，成本份额按 80% / 82% / 78% 循环，**SG&A 恰好是收入的十分之一、税恰好是营业利润的四分之一**——后两条是故意的：两条历史带宽度为零的 driver，逼排序去破平局，而且必须在每台机器上以同样方式破（按 driver ref）。带的期望值都是手算出来写全的。
 
@@ -216,3 +217,11 @@ fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，�
 6. **历史窗口就是输入表的全部季度，没有单独的 horizon 参数。** 规格的 `horizon.historical_quarters` 已经决定了输入表有多长，再在这里截一次窗只会让带和模型说的不是同一段历史。如果 owner 想要「只看最近 8 个季度的带」，那是规格的事。
 7. **`report_consensus` 的返回形状是我定的**（`[{broker, value, refs}]`），因为 P11b 还没并。`w2-consensus` 落地时如果形状不同，改 `consensus_bridge.report_consensus` 的解析一处；`read_consensus` 已经对两种签名都做了尝试。**建议 w2-consensus 的 agent 看一眼这两个函数的期望**，比事后对齐便宜。
 8. **DXC 的 swing 超过 100% 是真的，不是 bug。** 一家营业利润率薄的公司，任何一条费用线的历史幅度都能把营业利润吃穿（峰上是 -3.334 亿）。表照实印。要不要在视图里给「swing > 100%」加一句提示，是个显示决定，我没加——加了就等于替读者判断这件事是不是异常。
+
+## 9. 两处不是本片的修复
+
+跑全量时撞上两处 main 上已有的红，都不是这一片的文件，都按「一行、说明是谁的」处理，并即时报给了主 agent：
+
+1. **`bootstrap.SCHEMA_DATABASES` 缺 `conviction_call_schema.sql`**（P15d 合并时只登记了 `rehearse_deploy` 的 `MigrationSpec`）。基线 `62b54fd` 上 6 项测试因此失败——`test_service` 的 INT3 守卫加 5 个 `bootstrap(...)` 调用者。这条守卫存在的全部理由就是「没被应用的 schema 不会让安装失败，它会在几分钟后让某一条 lane 在没人看的心跳里报 OperationalError」，所以让守卫红着就等于把守卫关掉。**主 agent 确认 main 当时已自行修复**，并入时我丢掉了自己那一行。
+
+2. **main `427f684` 不能解析**。`research_event.PAYLOAD_FIELDS` 里 S5 的 `"ir_page_change": frozenset({…` 丢了收尾的 `}),`，于是 P14f 的 `"calibration"` 落进它里面、整个 `MappingProxyType({` 再也没闭合。两个 merge 父节点各自都能解析，括号是在解决冲突时丢的。补之前先验过「丢的真的只是一个分隔符」：修好后 `PAYLOAD_FIELDS` 17 个 kind，`EVENT_KINDS` 与它互为满射，两个父节点都没有贡献被合并丢掉的 kind——两边确实都留住了，只是少了个界符。主 agent 已在 main 上落同一行修复；本分支这一条并回去应是 no-op。
