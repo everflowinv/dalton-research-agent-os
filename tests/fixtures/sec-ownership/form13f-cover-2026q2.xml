@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <headerData>
+    <submissionType>13F-HR</submissionType>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>2026-06-30</reportCalendarOrQuarter>
+      <filingManager>
+        <name>SYNTHETIC ASSET MANAGEMENT LLC</name>
+      </filingManager>
+    </coverPage>
+    <summaryPage>
+      <otherIncludedManagersCount>0</otherIncludedManagersCount>
+      <tableEntryTotal>3</tableEntryTotal>
+      <tableValueTotal>1615000000</tableValueTotal>
+    </summaryPage>
+  </formData>
+</edgarSubmission>

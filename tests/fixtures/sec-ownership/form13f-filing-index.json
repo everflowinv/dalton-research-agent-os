@@ -1,0 +1,13 @@
+{
+  "directory": {
+    "name": "/Archives/edgar/data/1900002/000190000226000090",
+    "parent-dir": "/Archives/edgar/data/1900002/",
+    "item": [
+      {"name": "0001900002-26-000090-index.htm", "type": "text.gif", "size": "8000"},
+      {"name": "primary_doc.xml", "type": "13F-HR", "size": "2000"},
+      {"name": "xslForm13F_X02/primary_doc.xml", "type": "13F-HR", "size": "9000"},
+      {"name": "infotable.xml", "type": "INFORMATION TABLE", "size": "40000"},
+      {"name": "xslForm13F_X02/infotable.xml", "type": "INFORMATION TABLE", "size": "90000"}
+    ]
+  }
+}

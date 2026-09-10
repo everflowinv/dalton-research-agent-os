@@ -1,0 +1,88 @@
+{
+  "schema_version": "0.1",
+  "id": "ir-page-map:us-it-services:v1",
+  "industry_ref": "industry:us-it-services",
+  "note": "Which investor-relations pages Dalton may read a change out of, per covered company. This file is the whole of the connector's scope: changedetection.io runs on this machine for whoever else uses it, and a watch whose URL is not listed here is reported to the operator and never read. Nothing is derivable -- a company's IR host, the path its press releases live under and the page that lists its events are three separate facts, and a wrong entry here fills one company's file with another company's news. The URLs below are the ones an operator must confirm before the two governance records are approved; they are written as the declaration a human signs, not as something a scan produced.",
+  "companies": [
+    {
+      "company_ref": "company:sec-cik:0001467373",
+      "ticker": "ACN",
+      "pages": [
+        {
+          "url": "https://investor.accenture.com/news-and-events/news-releases",
+          "page_kind": "press_releases",
+          "label": "Accenture news releases"
+        },
+        {
+          "url": "https://investor.accenture.com/news-and-events/events-and-presentations",
+          "page_kind": "events",
+          "label": "Accenture events and presentations"
+        }
+      ]
+    },
+    {
+      "company_ref": "company:sec-cik:0001058290",
+      "ticker": "CTSH",
+      "pages": [
+        {
+          "url": "https://news.cognizant.com/press-releases",
+          "page_kind": "press_releases",
+          "label": "Cognizant press releases"
+        },
+        {
+          "url": "https://investors.cognizant.com/events-and-presentations",
+          "page_kind": "events",
+          "label": "Cognizant events and presentations"
+        }
+      ]
+    },
+    {
+      "company_ref": "company:sec-cik:0001352010",
+      "ticker": "EPAM",
+      "pages": [
+        {
+          "url": "https://investors.epam.com/news-releases",
+          "page_kind": "press_releases",
+          "label": "EPAM news releases"
+        },
+        {
+          "url": "https://investors.epam.com/events-and-presentations",
+          "page_kind": "events",
+          "label": "EPAM events and presentations"
+        }
+      ]
+    },
+    {
+      "company_ref": "company:sec-cik:0000051143",
+      "ticker": "IBM",
+      "pages": [
+        {
+          "url": "https://newsroom.ibm.com/announcements",
+          "page_kind": "press_releases",
+          "label": "IBM announcements"
+        },
+        {
+          "url": "https://www.ibm.com/investor/events",
+          "page_kind": "events",
+          "label": "IBM investor events"
+        }
+      ]
+    },
+    {
+      "company_ref": "company:sec-cik:001688568",
+      "ticker": "DXC",
+      "pages": [
+        {
+          "url": "https://dxc.com/us/en/about-us/newsroom/press-releases",
+          "page_kind": "press_releases",
+          "label": "DXC press releases"
+        },
+        {
+          "url": "https://investors.dxc.com/events-and-presentations",
+          "page_kind": "events",
+          "label": "DXC events and presentations"
+        }
+      ]
+    }
+  ]
+}

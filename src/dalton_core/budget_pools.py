@@ -148,6 +148,10 @@ LANE_POOLS: dict[str, str] = {
     "dispatch_mission_tracking": "event_response",
     "dispatch_mission_catalyst_calendar": "event_response",
     "dispatch_event_judgement": "event_response",
+    # P14f: the earnings season. The same pool for the same reason -- a
+    # preview and a calibration are responses to a dated event, and the day
+    # a company reports is the day this pool is meant to be spent.
+    "dispatch_earnings_season": "event_response",
     # P14e.
     "dispatch_research_task": "adhoc",
     # P12c: drafting the debate map is coverage work, like the dossier.

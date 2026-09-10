@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .coverage_mission import fold_stage_status
 from .lane_registry import LaneSpec, register_lane
 
 SCHEMA_VERSION = "0.1"
@@ -62,16 +63,26 @@ def passed_companies(connection: Any, mission: Mapping[str, Any]) -> list[str]:
 
     In the mission's own priority order, so a week that is cut short by
     anything reads the same companies first that everything else does.
+
+    P14-S: folded, so a company whose gate was already reopened -- a
+    ``gate_failed`` after its ``gate_passed`` -- is not offered for reopening a
+    second time.  ``DISTINCT ... status='gate_passed'`` could not see that: a
+    superseded pass is still a row.
     """
 
     members = [member["company_ref"] for member in mission.get("universe") or ()]
     if not members:
         return []
-    rows = connection.execute(
-        "SELECT DISTINCT company_ref FROM coverage_mission_stage_records "
-        "WHERE stage_ref='initial_screen' AND status='gate_passed'"
-    ).fetchall()
-    passed = {row["company_ref"] for row in rows}
+    ladder: dict[str, list[str]] = {}
+    for row in connection.execute(
+        "SELECT company_ref, status FROM coverage_mission_stage_records "
+        "WHERE stage_ref='initial_screen' ORDER BY created_at,record_id"
+    ).fetchall():
+        ladder.setdefault(row["company_ref"], []).append(row["status"])
+    passed = {
+        company for company, statuses in ladder.items()
+        if fold_stage_status(statuses) == "gate_passed"
+    }
     return [member for member in members if member in passed]
 
 
@@ -253,12 +264,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.company:
             companies = list(args.company)
         else:
-            rows = connection.execute(
-                "SELECT DISTINCT company_ref FROM coverage_mission_stage_records "
-                "WHERE stage_ref='initial_screen' AND status='gate_passed' "
-                "ORDER BY company_ref"
-            ).fetchall()
-            companies = [row["company_ref"] for row in rows]
+            # P14-S: folded, for the same reason ``passed_companies`` is --
+            # a pass that a reopen superseded is not a pass.
+            ladder: dict[str, list[str]] = {}
+            for row in connection.execute(
+                "SELECT company_ref, status FROM coverage_mission_stage_records "
+                "WHERE stage_ref='initial_screen' ORDER BY created_at,record_id"
+            ).fetchall():
+                ladder.setdefault(row["company_ref"], []).append(row["status"])
+            companies = sorted(
+                company for company, statuses in ladder.items()
+                if fold_stage_status(statuses) == "gate_passed"
+            )
         assessments = [
             reopen_assessment(connection, company_ref=company_ref, policy=policy)
             for company_ref in companies
