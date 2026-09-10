@@ -467,12 +467,7 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
    已发布的 ad-hoc 模板是 0，这条车道在两个 owner 动作上都还是停的。
    它是**授权打开的那一天**才会咬人，咬五家里的一家——值得在开闸前修，不是正在冒烟。
 
-   **这三条不是 P14e review 的全部。** 上面列的是与本报告有交叉引用的那几条；
-   code-review 那一轮总共 7 条（还有 `bounded_planner_driver.py:465` 的裸 `except` 把瞬时
-   写入失败变成永久 `source_unavailable`、`agenda_control.py:290` 的 `research_task_grant`
-   从未被 `serve()` 接线所以开关恒为 False，以及两条模板绑不上的低危项）。
-   那四条**只存在于本次会话的 transcript 里**——`ReportFindings` 当时不可用，
-   而写不写成文件是 owner 的决定，不是本片能替它做的。开 ad-hoc 闸之前应当先把它们捞出来。
+   **这三条不是 P14e review 的全部**，其余四条见第九节。
    诊断见第四节，均由 code-review 复核确认，修在 P14e / C2 的切片里。
 
    **注意不要把第 1 条和第 5 条连起来读。** DXC 那 17 份卡在 `discovered` 的研报是
@@ -488,3 +483,67 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
   cockpit 可直接读 `unreadable_reviews` 来回答「队列深度为什么下不去」；六类永久失败里现在也含
   「渲染出来是空的」（`source offset must be a valid bounded window`）。
 - P12c 的 `document_attribution()` 与本片的 `document_attribution_rows()` 一行合并（见 5.2）。
+
+## 九、P14e findings for the integrator（code-review 那一轮剩下的四条）
+
+`ReportFindings` 当轮不可用，这四条原本只存在于会话 transcript 里；coordinator 要求落到本报告。
+**每一条我都对着代码复核过**——本报告刚在第四节因为「照抄一条没核的结论」翻过一次车（`POOL_SHARE`），
+所以这里只写我自己看到的东西。**行号与 review 口头给的有出入的，以下面这份为准，并已标出。**
+
+DXC 的 CIK 补零（`research_task.py:553`）不在此列：coordinator 说集成时自己修。
+供其参考的精确行为：`_CIK_RE = re.compile(r"^company:sec-cik:(\d+)$")`（`:89`）原样捕获数字段，
+`:553` 直接拼成 `f"company-facts/CIK{matched.group(1)}"`。实测
+`company:sec-cik:001688568` → `CIK001688568`（九位，SEC 要十位），
+`company:sec-cik:0001467373` → `CIK0001467373`（十位，正常）。
+最小修法是 `matched.group(1).zfill(10)`。
+
+| # | 位置 | 严重度 | 问题 | 最小修法 |
+| --- | --- | --- | --- | --- |
+| 1 | `bounded_planner_driver.py:485`（review 说 465） | medium | 瞬时写入失败被当成探针拒绝 | 只 catch `BoundedProbeExecutionError` |
+| 2 | `agenda_control.py:1117`（review 说 `serve()` `:1090`） | medium | ad-hoc 开关恒为 `False` | 构造时把 grant resolver 传进去 |
+| 3 | `research_task.py:541` | low | 三个已发布模板里两个永远绑不上 | 补 `_parameters_for` 的分支，或把模板撤下 |
+| 4 | `research_task.py:546`–`550` | low | 行业级 inquiry 被误报 `no_bindable_template` | 换一个说实话的拒绝理由 |
+
+**1. `bounded_planner_driver.py:485` —— 裸 `except Exception` 把瞬时故障变成永久结论。**
+`try` 在 `:472`，同时罩住两条分支：`alphaengine_get_document` 走
+`self.client.call("bounded_alphaengine_probe", ...)`（一次 **writer RPC**），其余走
+`execute_probe_work_order`（本进程内跑）。`:485` 的 `except Exception` 把两者一视同仁地转成
+`_refused_probe_envelope(work, exc)`，再 `scheduler.complete(...)` 成终态。
+问题在第一条分支：writer 忙、socket 超时、writer 正在重启——这些都是**下一分钟就会好**的故障，
+却被记成「探针拒绝」，coverage item 从此永久 `source_unavailable`，不会再试。
+第二条分支不需要这层网：`bounded_probe_executor` 自己对真正的失败抛
+`BoundedProbeExecutionError`（`bounded_probe_executor.py:130`/`:134`/`:140`/`:143`），
+网络错误也已经由它自己转成 failed envelope。
+**最小修法**：把 `except Exception` 收窄成 `except BoundedProbeExecutionError`，
+让传输层异常照常上抛、由外层的重试与租约机制处理。
+
+**2. `agenda_control.py:1117` —— 开关是算出来的，但没人喂它。**
+`AgendaControlPlane.__init__` 接 `research_task_grant`，默认 `None`（`:228`/`:238`）；
+`adhoc_research_enabled()` 第一句就是 `if self.research_task_grant is None: return False`（`:296`）。
+全仓 `grep research_task_grant` 只有这三处加上 `research_cycle_reflection.py:498` 的同名字段，
+**没有任何调用点传它**；唯一的生产构造是 `:1117` 的 `plane = AgendaControlPlane(config)`。
+所以 P14e 把一个写死的 `False` 换成了一个**恒为 `False` 的表达式**——
+`:232` 的注释说得很清楚（「cockpit 进程没有 Core 句柄，所以 resolver 是注入的」），
+注入这一步没做完。**最小修法**：在 `:1117` 传入 resolver。
+注意这条与 CIK 那条叠加决定了「ad-hoc 车道今天是停的」这个事实的两个半边：
+mission 的 `may_write` 没给 `research_task` 是一半，这个开关是另一半。
+
+**3. `research_task.py:541` —— 三个模板，一个能绑。**
+`_parameters_for` 只有一个分支 `if operation == "get_company_facts"`，其余一律 `return None`（`:561`），
+而 `:529` 拿到 `None` 就 `continue`。已发布的模板有三个：
+`adhoc-sec-company-facts`（能绑）、`adhoc-alphaengine-search-library:v1`（`:126`，
+operation `alphaengine_search_library`）、`adhoc-web-search:v1`（`:147` 附近）。
+后两个**永远拿不到参数**，所以永远不会出现在任何 binding 里。
+它们带着 `status: ACTIVE_STATUS` 与 `cost` 发布，读起来像是可用的能力。
+**最小修法**：要么给 `_parameters_for` 补上这两条分支，要么把它们从已发布集合里撤下——
+不要让目录宣称一个执行不了的能力。
+
+**4. `research_task.py:546`–`550` —— 行业级问题被拒得不诚实。**
+planner schema 明确允许 `company_ref: null` 的行业级 inquiry。到了 `_parameters_for`，
+唯一能绑的分支要求 CIK，匹配不上就 `return None`——那里的注释是自觉的
+（「行业级 inquiry 没有 CIK……Absent, not faked」，这个判断本身没问题）。
+但**外层给出的理由是 `no_bindable_template`**，读起来像「没有这类模板」，
+实际是「有模板，但它按公司取数，而这个问题不属于任何一家公司」。
+本报告第一节刚花了很大篇幅讲同一件事：行业是一个独立主体，它的证据不属于任何一家公司。
+**最小修法**：这一条不必立刻实现行业级探针，把拒绝理由换成能说清楚的那句就够了；
+真要支持，需要一个不按 CIK 取数的探针。
