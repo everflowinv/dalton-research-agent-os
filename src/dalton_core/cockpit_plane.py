@@ -3403,6 +3403,17 @@ class CockpitPlane:
                           for ref in members],
         }
 
+    def research_library(self, company_ref: str) -> dict[str, Any]:
+        from .cockpit_research_library import research_library
+
+        ref = _text(company_ref, "company_ref", maximum=512)
+        with self._core() as core:
+            try:
+                result = research_library(core, self._mission(core), ref)
+            except ValueError as exc:
+                raise CockpitError(str(exc)) from exc
+        return {"as_of": _iso(self.clock()), **result}
+
     def company_model(self, company_ref: str) -> dict[str, Any]:
         """One company's forecast model, printed so a person can argue with it.
 
