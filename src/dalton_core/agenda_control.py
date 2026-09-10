@@ -809,6 +809,8 @@ class AgendaControlApplication:
             return plane.select_model(login, value)
         if action == "model_allow":
             return plane.allow_model(login, value)
+        if action == "model_metadata":
+            return plane.declare_model_metadata(login, value)
         if action == "model_notice_ack":
             return plane.acknowledge_model_notice(login, value)
         raise CockpitError("unknown cockpit action")

@@ -1265,10 +1265,11 @@ class ReviewFindingTests(StateDirectoryCase):
 
 
 class GovernanceOperationTests(unittest.TestCase):
-    def test_the_three_model_operations_are_human_only_and_actor_bound(self) -> None:
+    def test_the_model_operations_are_human_only_and_actor_bound(self) -> None:
         from dalton_core import writer_server
 
         for operation in ("set_model_selection", "allow_openclaw_model",
+                          "declare_model_profile_metadata",
                           "acknowledge_model_fallback_notice"):
             with self.subTest(operation=operation):
                 self.assertIn(operation, writer_server.OPERATION_FIELDS)
@@ -1289,6 +1290,50 @@ class GovernanceOperationTests(unittest.TestCase):
             writer_server.OPERATION_FIELDS["allow_openclaw_model"],
             frozenset({"model_ref", "actor_ref"}),
         )
+        self.assertEqual(
+            writer_server.OPERATION_FIELDS["declare_model_profile_metadata"],
+            frozenset({"profile_id", "family", "capabilities", "actor_ref"}),
+        )
+
+    def test_writer_binds_metadata_to_the_current_profile_route_and_actor(self) -> None:
+        from dalton_core import writer_server
+        from dalton_core.writer_server import WriterServer
+        from dalton_core.model_deployment import openclaw_broker_profiles
+
+        with tempfile.TemporaryDirectory() as directory:
+            router_path = Path(directory) / "router.sqlite"
+            with ModelRouter(router_path) as router:
+                profile = openclaw_broker_profiles(checked_at=NOW)[0]
+                router.register_profile(profile)
+            server = object.__new__(WriterServer)
+            server._model_router_db = lambda: str(router_path)
+            result = server._op_declare_model_profile_metadata({
+                "profile_id": profile["id"], "family": "declared-family",
+                "capabilities": ["research", "verify"], "actor_ref": OWNER,
+            })
+            declaration = result["declaration"]
+            self.assertEqual(
+                (declaration["provider"], declaration["model"]),
+                (profile["provider"], profile["model"]),
+            )
+            self.assertEqual(declaration["actor_ref"], OWNER)
+            self.assertNotIn("provider", writer_server.OPERATION_FIELDS[
+                "declare_model_profile_metadata"])
+
+    def test_writer_refuses_metadata_for_a_profile_that_is_not_live(self) -> None:
+        from dalton_core.writer_server import WriterServer, WriterServerError
+
+        with tempfile.TemporaryDirectory() as directory:
+            router_path = Path(directory) / "router.sqlite"
+            with ModelRouter(router_path):
+                pass
+            server = object.__new__(WriterServer)
+            server._model_router_db = lambda: str(router_path)
+            with self.assertRaisesRegex(WriterServerError, "not live"):
+                server._op_declare_model_profile_metadata({
+                    "profile_id": "profile:missing", "family": "family",
+                    "capabilities": ["research"], "actor_ref": OWNER,
+                })
 
 
 class CockpitModelPageTests(unittest.TestCase):
@@ -1398,12 +1443,17 @@ class CockpitModelPageTests(unittest.TestCase):
             "chain": ["profile:claude-fable-5-1"],
         })
         plane.allow_model("owner@example.com", {"model_ref": "openai/gpt-6-astra"})
+        plane.declare_model_metadata("owner@example.com", {
+            "profile_id": "profile:gpt-6-astra", "family": "openai-gpt",
+            "capabilities": ["research", "verify"],
+        })
         plane.acknowledge_model_notice(
             "owner@example.com", {"ref": "model-fallback-notice:abc"}
         )
         self.assertEqual(
             [name for name, _ in self.calls],
             ["set_model_selection", "allow_openclaw_model",
+             "declare_model_profile_metadata",
              "acknowledge_model_fallback_notice"],
         )
         self.assertEqual(self.calls[1][1], {"model_ref": "openai/gpt-6-astra"})
@@ -1420,6 +1470,17 @@ class CockpitModelPageTests(unittest.TestCase):
         with self.assertRaises(CockpitError):
             plane.select_model("owner@example.com", {
                 "purpose": BRAIN_PURPOSE, "mode": "explicit", "chain": [],
+            })
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_metadata_never_reaches_the_writer(self) -> None:
+        from dalton_core.cockpit_plane import CockpitError
+
+        plane = self.plane(with_model_config=True)
+        with self.assertRaisesRegex(CockpitError, "能力"):
+            plane.declare_model_metadata("owner@example.com", {
+                "profile_id": "profile:deepseek-v4-flash",
+                "family": "deepseek", "capabilities": [],
             })
         self.assertEqual(self.calls, [])
 

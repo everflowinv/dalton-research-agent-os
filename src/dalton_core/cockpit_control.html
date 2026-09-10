@@ -661,7 +661,14 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     d.append(c);stages.append(d)});
   sheet.append(stages);
   const avail=node("section");avail.append(node("h3","可以选的模型"));
-  avail.append(node("div",r.choices.map(c=>`${c.model} · 家族 ${c.family||"未声明"} · 能力 ${(c.capabilities||[]).join("/")||"未声明"}${c.note?"（"+c.note+"）":""}`).join("、")||"没有","raw"));
+  r.choices.forEach(choice=>{const line=node("div",null,"raw");
+    line.append(node("span",`${choice.model} · 家族 ${choice.family||"未声明"} · 能力 ${(choice.capabilities||[]).join("/")||"未声明"}${choice.note?"（"+choice.note+"）":""}`));
+    const declare=node("button","声明元数据","ghost");declare.onclick=async()=>{
+      const family=window.prompt("模型家族（用于独立核验；请填写已确认的公开家族名）",choice.family&& !choice.family.startsWith("unclassified:")?choice.family:"");
+      if(family===null)return;const raw=window.prompt("能力，用逗号分隔",(choice.capabilities||[]).join(","));if(raw===null)return;
+      const capabilities=raw.split(",").map(x=>x.trim()).filter(Boolean);declare.disabled=true;
+      try{await postJson("/v1/cockpit/model_metadata",{profile_id:choice.model,family:family.trim(),capabilities});toast("元数据已发布；目录同步后生效");openModels()}
+      catch(e){declare.disabled=false;toast(e.message)}};line.append(declare);avail.append(line)});
   sheet.append(avail);
   const cat=r.catalog,box=node("section");box.append(node("h3","网关上有什么"));
   if(!cat.available){box.append(node("div",cat.reason,"empty"));sheet.append(box);return}

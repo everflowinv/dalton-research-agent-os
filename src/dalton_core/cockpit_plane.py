@@ -3867,6 +3867,39 @@ class CockpitPlane:
                   "backup_path": result.get("backup_path") or ""})
         return result
 
+    def declare_model_metadata(
+        self, login: str, value: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Record owner-declared family/capabilities inside Dalton."""
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("模型元数据必须是一个对象")
+        profile_id = _text(value.get("profile_id"), "profile_id", maximum=256)
+        family = _text(value.get("family"), "family", maximum=128)
+        capabilities = value.get("capabilities")
+        if not isinstance(capabilities, list) or not capabilities or any(
+            not isinstance(item, str) or not item.strip() for item in capabilities
+        ):
+            raise CockpitError("能力必须是至少一个名称")
+        capabilities = [
+            _text(item.strip(), "capabilities[]", maximum=64)
+            for item in capabilities
+        ]
+        result = self._governance(
+            login, "declare_model_profile_metadata",
+            {"profile_id": profile_id, "family": family,
+             "capabilities": capabilities},
+            failure="模型元数据没有发布",
+        )
+        declaration = result.get("declaration") or {}
+        self.journal.record_event(
+            kind="model_metadata", title=f"你声明了 {profile_id} 的模型元数据",
+            detail=f"家族 {family}；能力 {'、'.join(capabilities)}", login=login,
+            refs={"profile_id": profile_id,
+                  "declaration_ref": declaration.get("declaration_ref") or ""},
+        )
+        return result
+
     def acknowledge_model_notice(
         self, login: str, value: Mapping[str, Any]
     ) -> dict[str, Any]:

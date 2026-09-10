@@ -416,6 +416,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # refused before either operation runs.
     "set_model_selection",
     "allow_openclaw_model",
+    "declare_model_profile_metadata",
     # And the third: reading a notice that a model a stage was using has gone.
     # Acknowledging is a person saying "I have seen this and I am leaving it as
     # it fell", which is a decision, so automation may not make it -- otherwise
@@ -739,6 +740,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     # ``--model-catalog-config``, not by the caller: an operation that took the
     # path to write would be an operation that writes anywhere.
     "allow_openclaw_model": frozenset({"model_ref", "actor_ref"}),
+    "declare_model_profile_metadata": frozenset({
+        "profile_id", "family", "capabilities", "actor_ref"}),
     "acknowledge_model_fallback_notice": frozenset({"notice_id", "actor_ref"}),
     "decide_deep_insight_gate": frozenset({
         "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
@@ -1018,6 +1021,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_analyst_journal_entry": "actor_ref",
     "set_model_selection": "actor_ref",
     "allow_openclaw_model": "actor_ref",
+    "declare_model_profile_metadata": "actor_ref",
     "acknowledge_model_fallback_notice": "actor_ref",
     "decide_deep_insight_gate": "actor_ref",
     "decide_conviction_call": "actor_ref",
@@ -2712,6 +2716,44 @@ class WriterServer:
             )
         return {**result, "decision_ref": record["decision"]["id"],
                 "decision_status": record["status"]}
+
+    def _op_declare_model_profile_metadata(self, p: Mapping[str, Any]) -> Any:
+        """Publish Dalton-owned metadata for the profile's exact live route."""
+
+        from .model_router import ModelRouter, ModelRouterError
+
+        values = dict(p)
+        capabilities = values.get("capabilities")
+        if not isinstance(capabilities, list) or any(
+            not isinstance(item, str) for item in capabilities
+        ):
+            raise WriterServerError("capabilities must be a list of names")
+        try:
+            with ModelRouter(self._model_router_db()) as router:
+                profile_id = str(values["profile_id"])
+                profile = next(
+                    (item for item in router.latest_profiles()
+                     if item["id"] == profile_id), None)
+                if profile is None or profile.get("status") == "retired":
+                    raise WriterServerError("the profile is not live in this Core")
+                prior = router.latest_profile_metadata(profile_id)
+                version = 1 if prior is None else int(prior["version"]) + 1
+                slug = profile_id.removeprefix("profile:")
+                result = router.declare_profile_metadata(
+                    declaration_ref=(
+                        f"model-profile-metadata-declaration:{slug}:{version}"),
+                    profile_id=profile_id, version=version,
+                    prior_declaration_ref=(None if prior is None
+                                           else prior["declaration_ref"]),
+                    provider=profile["provider"], model=profile["model"],
+                    family=str(values["family"]), capabilities=capabilities,
+                    actor_ref=str(values["actor_ref"]),
+                    created_at=datetime.now(timezone.utc).isoformat(
+                        timespec="microseconds"),
+                )
+        except (ModelRouterError, KeyError, ValueError) as exc:
+            raise WriterServerError(str(exc)) from exc
+        return result
 
     def _deep_insight_gates(self) -> Any:
         """The gate authority, opened on first use.
