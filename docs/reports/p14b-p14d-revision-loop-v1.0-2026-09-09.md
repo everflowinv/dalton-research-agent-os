@@ -366,10 +366,10 @@ OK (skipped=1)
 
 ## 附录 A：重开的阶梯表示（P14d 续集，2026-09-10）
 
-分支 `w3-reopen-ledger`（= main `e4b452c` + 合入 `w3-stage-ladder`）。全量：
+分支 `w3-reopen-ledger`（起于 main `e4b452c` + `w3-stage-ladder`；交付前已 `git merge` 到 main `0d8e21e`，那时 `w3-stage-ladder` 已在 main 上）。全量：
 
 ```
-Ran 4522 tests in 774.322s
+Ran 4729 tests in 456.540s
 
 OK (skipped=1)
 ```
