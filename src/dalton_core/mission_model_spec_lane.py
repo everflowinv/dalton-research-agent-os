@@ -108,6 +108,7 @@ class MissionModelSpecLaneCoordinator:
         self._open = None
         failed = settled.get("status") != "succeeded" or settled.get("spec_status") in (
             "refused", "model_unavailable", "busy", "failed", "gated",
+            "stale_input",
         )
         company_ref = settled.get("company_ref")
         state_hash = settled.get("state_hash")

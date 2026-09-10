@@ -173,6 +173,8 @@ def run_model_spec(
     summary_dir: Path,
     scheduler_db: Path | None,
     company_ref: str | None = None,
+    expected_state_hash: str | None = None,
+    expected_task_hash: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state_dir = state_dir.expanduser().resolve()
@@ -228,6 +230,16 @@ def run_model_spec(
             "generic": bool(template["generic"]),
             "registry_hash": TEMPLATE_REGISTRY_HASH,
         }
+        if ((expected_state_hash is not None
+             and expected_state_hash != state["state_hash"])
+                or (expected_task_hash is not None
+                    and expected_task_hash != TASK_HASH)):
+            summary.update({
+                "status": "succeeded", "spec_status": "stale_input",
+                "failure_reason": (
+                    "the model specification input changed after its ticket was created"),
+            })
+            return summary
         if dry_run or model_config_path is None:
             summary.update({
                 "status": "succeeded", "spec_status": "gated",
@@ -311,6 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument("--scheduler-db", type=Path)
     parser.add_argument("--company-ref", help="decide about this company rather than the next")
+    parser.add_argument("--expected-state-hash")
+    parser.add_argument("--expected-task-hash")
     parser.add_argument("--dry-run", action="store_true",
                         help="assemble the state and stop; no model call, no writes")
     parser.add_argument("--quiet", action="store_true")
@@ -323,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=args.state_dir, model_config_path=args.model_config,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         scheduler_db=args.scheduler_db, company_ref=args.company_ref,
+        expected_state_hash=args.expected_state_hash,
+        expected_task_hash=args.expected_task_hash,
         dry_run=args.dry_run,
     )
     if not args.quiet:

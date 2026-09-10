@@ -52,11 +52,14 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
         return self.model_config_path is not None
 
-    def _command(self, *, ticket_dir: Path, company_ref: str) -> list[str]:
+    def _command(self, *, ticket_dir: Path, company_ref: str,
+                 expected_state_hash: str, expected_task_hash: str) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--company-ref", company_ref,
+            "--expected-state-hash", expected_state_hash,
+            "--expected-task-hash", expected_task_hash,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
         if self.model_config_path is not None:
@@ -72,11 +75,13 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         if not isinstance(state_hash, str) or len(state_hash) != 64:
             raise LaneChildRejected("state_hash must be a sha256 digest")
         company_ref = company_ref.strip()
+        if task_hash is None:
+            from .company_model_spec import TASK_HASH
+            task_hash = TASK_HASH
         identity = f"{self.TICKET_PREFIX}|{company_ref}|{state_hash}"
-        if task_hash is not None:
-            if not isinstance(task_hash, str) or len(task_hash) != 64:
-                raise LaneChildRejected("task_hash must be a sha256 digest")
-            identity += f"|{task_hash}"
+        if not isinstance(task_hash, str) or len(task_hash) != 64:
+            raise LaneChildRejected("task_hash must be a sha256 digest")
+        identity += f"|{task_hash}"
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         return self.spawn(
             digest=digest,
@@ -85,7 +90,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
                 "task_hash": task_hash,
                 "model_configured": self.configured,
             },
-            company_ref=company_ref,
+            company_ref=company_ref, expected_state_hash=state_hash,
+            expected_task_hash=task_hash,
         )
 
 

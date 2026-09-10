@@ -166,6 +166,33 @@ class ChooseCompanyTests(unittest.TestCase):
             (self.state_dir / "summary" / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(written["state_hash"], state["state_hash"])
 
+    def test_ticket_input_drift_is_typed_and_stops_before_a_model_call(self):
+        _, state = choose_company(self.missions, self.mission)
+        config = self.state_dir / "model.json"
+        config.write_text("{}", encoding="utf-8")
+        summary = run_model_spec(
+            state_dir=self.state_dir, model_config_path=config,
+            summary_dir=self.state_dir / "stale-summary", scheduler_db=None,
+            company_ref=ACN, expected_state_hash="f" * 64,
+            expected_task_hash="e" * 64,
+        )
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["spec_status"], "stale_input")
+        self.assertEqual(summary["state_hash"], state["state_hash"])
+        self.assertEqual(summary["cost_micros"], 0)
+        self.assertEqual(summary["formal_authority_writes"], 0)
+
+    def test_exact_ticket_input_reaches_the_normal_dry_run_path(self):
+        _, state = choose_company(self.missions, self.mission)
+        from dalton_core.company_model_spec import TASK_HASH
+        summary = run_model_spec(
+            state_dir=self.state_dir, model_config_path=None,
+            summary_dir=self.state_dir / "exact-summary", scheduler_db=None,
+            company_ref=ACN, expected_state_hash=state["state_hash"],
+            expected_task_hash=TASK_HASH, dry_run=True,
+        )
+        self.assertEqual(summary["spec_status"], "gated")
+
     def test_a_run_with_nothing_to_decide_says_so_rather_than_paying(self):
         _, state = choose_company(self.missions, self.mission)
         self.missions.record_company_model_spec(

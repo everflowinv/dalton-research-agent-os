@@ -35,18 +35,24 @@ class CompanyModelSpecLauncherTests(unittest.TestCase):
         config.write_text("{}", encoding="utf-8")
         launcher = self.launcher(model_config_path=config,
                                  scheduler_db=self.state / "scheduler.sqlite")
-        command = launcher._command(ticket_dir=self.state, company_ref=ACN)
+        command = launcher._command(
+            ticket_dir=self.state, company_ref=ACN,
+            expected_state_hash=HASH, expected_task_hash="b" * 64)
         self.assertIn("dalton_core.company_model_cli", command)
         self.assertIn(ACN, command)
         self.assertIn("--model-config", command)
         self.assertIn("--scheduler-db", command)
+        self.assertEqual(command[command.index("--expected-state-hash") + 1], HASH)
+        self.assertEqual(command[command.index("--expected-task-hash") + 1], "b" * 64)
         self.assertTrue(launcher.configured)
 
     def test_without_a_model_the_lane_says_so_rather_than_pretending(self):
         launcher = self.launcher()
         self.assertFalse(launcher.configured)
         self.assertNotIn("--model-config",
-                         launcher._command(ticket_dir=self.state, company_ref=ACN))
+                         launcher._command(
+                             ticket_dir=self.state, company_ref=ACN,
+                             expected_state_hash=HASH, expected_task_hash="b" * 64))
 
     def test_the_same_company_and_disclosure_is_the_same_ticket(self):
         launcher = self.launcher()
