@@ -215,24 +215,61 @@ step 3 already put `--market-price-governance` into the writer plist. Approving
 in place is enough; you do **not** need to re-run `install.sh`. You do need the
 writer restart in step 11.
 
-`yfinance-calendar-v1.json` is C1's whole switch and step 3 now seeds it, so
-the writer plist already carries `--catalyst-calendar-governance` and the lane
-launches a child every window. **Until you approve it that child fails** with
-`yfinance calendar governance record is not approved` — a refusal before any
-network call, not a fetch. Approving is what makes the lane do work.
+**Corrected 2026-09-10 (INT2 and INT3 landed on main).** An earlier draft of
+this step said the catalyst calendar, the China records, the crowd sources and
+the S1 feeds were not seeded by `install.sh`. They are. What is left is a set
+of approvals, a set of environment gates, and three records nobody is going to
+seed on purpose.
 
-The six `cn-hk-findata-*` records are also seeded now and are yours to read and
-approve or leave proposed; no lane in this wave reads them either way.
+**Approvals.** The loop above covers both. `yfinance-calendar-v1.json` is the
+whole switch for the C1 catalyst-calendar lane, and the lane needs no new
+mission version — the live mission already grants `observation`. Until you
+approve it the lane still *runs* every tick and its child fails closed with
+`yfinance calendar governance record is not approved`, which the rehearsal
+observed on a copy with no network call made. So the lane reads `launched` in
+the tick summary rather than `unconfigured`; the refusal is one layer down, in
+the next tick's `settled`. `launched` means a child started, not that it did
+anything.
 
-Three committed records are deliberately **not** seeded, and `install.sh` says
-so in a `DELIBERATELY_UNSEEDED` array with the reason beside each:
-`roic-list-transcripts-v1.json` and `roic-get-transcript-v1.json` (roic.ai
-answers 403 site-wide since 2026-08-29; nothing in the writer loads either
-record) and `guidepoint-get-transcript-narrowing-v1.json` (a note, not an
-approval — it goes to `governance-decisions/` where no lane looks).
+The two Guidepoint records behave the same way — `install.sh` seeds their
+discovery plan too, so the lane is installed and reports
+`idle / all_grants_refused` until you approve them.
 
-The S1 feed records and the S3 crowd records are seeded only on a host that has
-the OpenClaw workspace and the three host tools; see the notes step 3 prints.
+`sec-filings-index-v1.json` needs no approval: it is committed and seeded
+**already `approved`**, because the approval is yours, given on 2026-08-26,
+and it predates the repository carrying the record. It re-derives from the
+packaged SEC contract hash for hash, and seeding is copy-once, so this machine's
+copy is untouched and a rebuilt Core gets the same bytes. Two committed records
+already carry an approval for the same reason
+(`alphaengine-get-document-v1.json`, `sec-company-facts-v1.json`).
+
+**Gated on this machine's environment, not on an approval.** `install.sh` skips
+these silently and so does the rehearsal:
+
+| group | installs when |
+| --- | --- |
+| sales notes | `$DALTON_OPENCLAW_WORKSPACE/skills/market-digest/output` is a directory |
+| company wiki | `$DALTON_OPENCLAW_WORKSPACE/wiki-index.sqlite` exists |
+| crowd sources (7 records + the map) | `DALTON_AGENT_REACH_TOOL`, `DALTON_XUEQIU_HOT_RANK_TOOL` and `DALTON_XREACH_TOOL` all name executables |
+
+On the deploy machine as it stands, sales notes is open and the other two are
+shut. Set the variables before step 3 if you want those lanes; setting them
+afterwards means re-running `install.sh`.
+
+The six `cn-hk-findata-*` records are seeded ungated and have no lane in this
+wave — the mission universe is US-listed. Seeding them turns nothing on. They
+are on disk so you can approve six schema hashes separately, whenever S4 grows
+a lane.
+
+**Deliberately not seeded** (INT3). Three committed records, named in a
+`DELIBERATELY_UNSEEDED` array in `install.sh` with the reason beside each, and
+held there by a test that asserts every committed record is either seeded or
+listed:
+
+| record | why |
+| --- | --- |
+| `roic-list-transcripts-v1.json`, `roic-get-transcript-v1.json` | roic.ai answers 403 on every page, site-wide, since 2026-08-29. Nothing in the writer loads either record, so seeding them would be two approvals to make about a source that answers nothing. |
+| `guidepoint-get-transcript-narrowing-v1.json` | Seeded to `$STATE/governance-decisions/`, not `connector-governance/`. Nothing loads it; it is the note to read before deciding what to do about an approval for an operation the upstream does not have. Do not move it — a permanently-`proposed` record under `connector-governance/` is a lane the cockpit shows as waiting for an approval about nothing. |
 
 ## 7. Publish the mission version
 
@@ -402,12 +439,24 @@ Expected: **no lane whose status begins `unavailable:`**. Every lane should
 read one of `idle`, `launched`, `ungranted`, `unconfigured`, `held` or
 `deferred`, and `tick_ledger` should read `recorded`. The rehearsal's table for
 this exact code against a copy of this exact state is in
-`docs/reports/int3-seeds-v1.0-2026-09-09.md`; the lanes that should *change*
-after steps 6 and 7 are `mission_market_prices` (`ungranted` -> `launched`),
-`mission_catalyst_calendar` (its child stops failing on the approval) and
-`mission_tracking` (its child stops reporting `ungranted` once `market_event`
-is granted). `claim_index` and `event_judgement` read `unconfigured` unless you
-named their models at step 3.
+`docs/reports/int3-seeds-v1.0-2026-09-09.md`, which is the same script run
+against merged main (`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md` §6
+has the run before INT3's seeds). The lanes that should *change* after the
+later steps:
+
+| lane | before | after |
+| --- | --- | --- |
+| `mission_market_prices` | `ungranted` | `launched` once step 7 grants `market_price` |
+| `mission_catalyst_calendar` | `launched`, child refuses | `launched`, child succeeds once step 6 approves the calendar record |
+| `mission_tracking` | `launched`, child reports `ungranted` | `launched`, child records events once step 7 grants `market_event` |
+| `guidepoint_discovery` | `idle / all_grants_refused` | `idle`/`launched` once step 6 approves the two Guidepoint records |
+| `claim_index`, `event_judgement` | `unconfigured` | installed only if you named their models at step 3 |
+
+`launched` means a child was started, not that it did anything: the outcome
+arrives in the next tick's `settled`. A lane reading `launched` whose record is
+still `proposed` is a child that failed closed, which is the correct answer and
+looks identical in the tick summary. Check `settled` before concluding a lane
+is working.
 
 Then confirm the tick ledger is being written, which is new in this deploy:
 

@@ -1,7 +1,9 @@
 # INT3 — seeds, switches and the schema set — v1.0 — 2026-09-09
 
 Branch `int3-seeds`, worktree `~/Projects/dalton-int3-seeds-worktree`, base main
-`0fdbfab` (4,097 tests). Nothing under `~/Library/Application Support/Dalton/`
+`0fdbfab`, merged with main `9813b44` before this was written — the rehearsal
+author's own fix (`3f21dbe`) and W3's revision loop landed first, and §1.1 and
+§7 say what that changed. Nothing under `~/Library/Application Support/Dalton/`
 was written: the one file recovered from there was read, and the rehearsal
 opens the live root through `sqlite3.connect("...?mode=ro")` and `read_bytes`
 only. No launchd agent was started or stopped, no live broker socket opened, no
@@ -39,9 +41,9 @@ in the script fails the suite instead of becoming a lane nobody switched on.
 
 ### 1.1 Reading the seeds out of the script rather than transcribing them
 
-The check needs to know what `install.sh` seeds. The rehearsal's previous
-answer — match the connector's name against the script's non-comment text —
-is wrong in a way that matters: six blocks are written as
+The check needs to know what `install.sh` seeds. The old answer — match the
+connector's name against the script's non-comment text — is wrong in a way that
+matters: six blocks are written as
 
 ```sh
 for cn_hk_kind in financial-statements shareholders buybacks ... ; do
@@ -49,11 +51,22 @@ for cn_hk_kind in financial-statements shareholders buybacks ... ; do
 ```
 
 so the literal file name appears nowhere in the file. All six `cn-hk-findata-*`
-records read as *unseeded* while the script was seeding them. `rehearse_deploy`
-now unrolls the `for` loops, resolves the `cp` source and destination through
-their variables, and counts a record as seeded only when it lands in
-`$governance_dir` — which is what makes the Guidepoint narrowing note, copied
-into `governance-decisions/`, correctly read as not seeded.
+records read as *unseeded* while the script was seeding them.
+
+**The rehearsal author found this independently and landed it first** (main
+`3f21dbe`), as `_expanded_loops` in `tests/test_rehearse_deploy.py`. This
+branch had the same expansion in `scripts/rehearse_deploy.py`, one layer
+further on: it resolves the `cp` *pair* — source and destination, both through
+their shell variables — so a record counts as seeded only when it lands in
+`$governance_dir`. That is what makes the Guidepoint narrowing note, copied
+into `governance-decisions/`, correctly read as *not* seeded, and it is what
+lets `INSTALL_SEEDS` be compared to the script as an exact set rather than
+name by name.
+
+Merged to **one** implementation: `expand_for_loops` and `install_script_code`
+live in `rehearse_deploy`, and the test module's `_install_script_code` calls
+them. Two expanders that could disagree would be precisely the drift this is
+about.
 
 ### 1.2 The three deliberate absences
 
@@ -137,7 +150,7 @@ a lane whose configuration is not yet on disk gets no argument.
 
 ## 4. Bootstrap applies every schema
 
-`dalton-bootstrap` opened five authorities. The other forty-eight schemas ran
+`dalton-bootstrap` opened five authorities. The other fifty schemas ran
 the first time the writer or a lane constructed their authority — on a live
 Core, several minutes *after* `install.sh` had exited zero. A deploy that broke
 a schema did not fail the install; it failed one lane on one tick, as
@@ -167,33 +180,52 @@ Two details worth naming:
 
 ```
 $ dalton-bootstrap ... (fresh root)
-"schemas_applied": "53", "schemas_applied_to_scratch": "11"
+"schemas_applied": "55", "schemas_applied_to_scratch": "11"
 second run: identical
 ```
 
-`extraction_backlog_schema.sql` (W2) had no `MigrationSpec` in the rehearsal at
-all and no owner in the schema table; both now name
-`DocumentProvenanceStore`, which takes the Core *connection* rather than the
-store.
+Three schemas had no owner anywhere when this started. `extraction_backlog_
+schema.sql` (W2) is the rehearsal author's fix, kept as merged —
+`_CONNECTION_AUTHORITIES` names `DocumentProvenanceStore` rather than sniffing
+the signature, so a class that later grows a store argument fails loudly. W3's
+`thesis_revision_schema.sql` and `deliverable_reopen_schema.sql` arrived with
+main `9813b44` and are added here, to both the rehearsal's migration list and
+the bootstrap table — the second of which is the point: the table *raises* on
+an unmapped schema, so those two could not have reached a deploy unapplied
+once this change is in.
 
 ## 5. The rehearsal, on a fresh copy of the live Core
 
+Re-run after the merge, against merged main.
+
 ```
-scripts/rehearse_deploy.py --temp-root /tmp/dalton-int3-rehearsal-2
+scripts/rehearse_deploy.py --temp-root /tmp/dalton-int3-rehearsal-3
 ```
 
 ```
-ok     9.9s  copy live state (read-only) -- 23 copied, 0 absent, 809 MB
+ok     1.8s  copy live state (read-only) -- 23 copied, 0 absent, 810 MB
 ok     0.0s  rewrite service.json onto the temp root
-ok     1.5s  dalton-bootstrap -- core=core.sqlite tokens=writer-tokens.json
-ok    14.8s  migrations (every *_schema.sql) -- 53/53 schemas applied
-ok     0.0s  governance seeds -- 13 seeded, 15 already present, 0 absent from repo, 13 gated on the host
+ok     1.2s  dalton-bootstrap -- core=core.sqlite tokens=writer-tokens.json
+ok     6.8s  migrations (every *_schema.sql) -- 55/55 schemas applied
+ok     0.0s  governance seeds -- 16 seeded, 15 already present, 10 gated out, 0 absent from repo
 ok     0.2s  model catalog sync (copy of model-router.sqlite)
 ok     0.0s  render LaunchAgent plists and diff -- 3 plists rendered
 ok     0.0s  mission grants (autonomy.may_write) -- may_write grants 11, missing 11
 ok     0.0s  lane switches on disk -- 4/7 lane switches on disk
-ok     0.5s  start writer against the temp Core -- writer pid 62436, socket bound
-ok    11.1s  one controller tick -- 26 entries, 0 escaped, 11.1s (service tick_seconds=5.0)
+ok     0.3s  start writer against the temp Core -- writer pid 69534, socket bound
+ok     4.6s  one controller tick -- 27 entries, 0 escaped, 4.6s (service tick_seconds=5.0)
+```
+
+The two shut gates are named rather than skipped in silence:
+
+```
+gate shut, 2 seed(s) not installed -- company-wiki: no wiki index at
+  ~/.openclaw/workspace/wiki-index.sqlite
+gate shut, 8 seed(s) not installed -- crowd-tools: not set to an executable:
+  DALTON_AGENT_REACH_TOOL, DALTON_XUEQIU_HOT_RANK_TOOL, DALTON_XREACH_TOOL
+deliberately not seeded, with a reason in install.sh:
+  guidepoint-get-transcript-narrowing-v1.json, roic-get-transcript-v1.json,
+  roic-list-transcripts-v1.json
 ```
 
 ### 5.1 The tick table, verbatim
@@ -217,6 +249,7 @@ research_plan              launched
 claim_index                unconfigured  no claim index lane on this writer
 initial_screen             launched
 event_judgement            unconfigured  no judgement lane on this writer
+mission_reopen             ungranted     任务 coverage-mission-version:us-it-services:13 的 autonomy.human_checkpoints 里没有
 sales_notes_feed           unconfigured  no source:sales-notes lane on this writer
 company_wiki_feed          unconfigured  no source:company-wiki lane on this writer
 debate_map                 launched
@@ -226,18 +259,20 @@ research_task              unconfigured  no research task lane on this writer
 mission_reflection         launched
 mission_sec_dispatch       idle          settled=0
 forecast_reconciliation    idle
-tick_ledger                recorded      lane_count=23
+tick_ledger                recorded      lane_count=24
 ```
 
 ```
-ok    11.1s  one controller tick -- 26 entries, 0 escaped, 11.1s (service tick_seconds=5.0)
+ok     4.6s  one controller tick -- 27 entries, 0 escaped, 4.6s (service tick_seconds=5.0)
 ```
 
-**Zero lanes escaped.** Three lanes moved against the rehearsal that produced
-the runbook, and all three are this branch:
+**Zero lanes escaped.** Twenty-seven entries rather than twenty-six: W3's
+`mission_reopen` arrived with the merge and reports `ungranted` for a reason an
+operator can act on.
 
-- `guidepoint_discovery`: `unconfigured` -> `idle all_grants_refused`. INT2's
-  plan seed; the lane exists and refuses for a reason an operator can read.
+Two lanes moved because of this branch, and both are worth reading carefully,
+because `launched` means a child *started*:
+
 - `mission_tracking`: `unconfigured` -> `launched`. The child ran and reported
   `tracking_status: ungranted, the mission does not grant market_event,
   cost_micros 0` — the correct answer until runbook step 7.
@@ -246,15 +281,15 @@ the runbook, and all three are this branch:
   `CatalystCalendarRunError: yfinance calendar governance record is not
   approved`. That is the seed doing exactly what it should: the record is
   seeded `proposed`, the file's presence installs the lane, and the approval —
-  not the file — is what makes it fetch. Runbook step 6 now approves it.
+  not the file — is what makes it fetch. Runbook step 6 approves it.
 
 Neither child made a network call, a model call, or spent anything. The four
 fetching lanes (`mission_source_discovery`, `mission_sec_quarters`,
 `mission_statements`, `mission_sec_dispatch`) were all `idle`, as before.
 
-`4/7 lane switches on disk` rather than `3/7`: the tracking policy is now
-seeded. The three absent ones are the model configurations, and the rehearsal
-names the environment variable that would write each.
+`4/7 lane switches on disk` rather than `3/7`: the tracking policy is seeded.
+The three absent ones are the model configurations, and the rehearsal names the
+environment variable that would write each.
 
 ### 5.2 What did not change
 
@@ -285,10 +320,9 @@ file is already on disk, so those arguments appearing *is* the evidence that
 
 ```
 $ PYTHONPATH=$PWD/src .venv/bin/python -m unittest tests.test_rehearse_deploy tests.test_service
-.............................................................................................legacy agenda plane retired (ADR-0009)
 ......
 ----------------------------------------------------------------------
-Ran 99 tests in 3.132s
+Ran 111 tests in 3.804s
 
 OK
 ```
@@ -297,33 +331,44 @@ Full suite:
 
 ```
 $ PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
-Ran 4121 tests in 607.269s
+Ran 4220 tests in 641.648s
 
 OK (skipped=1)
 ```
 
-(main `0fdbfab` is 4,097; +24. The suite was **red on main**: 14 tests in
-`tests/test_rehearse_deploy.py` failed because `INSTALL_SEEDS` and the schema
-owner list had not been updated for INT1/INT2's seed blocks or for W2's
-`extraction_backlog_schema.sql`. Both are fixed here.)
+(main `9813b44` is 4,195; +25 — eight in `test_rehearse_deploy`, seventeen in
+`test_service`. The broker-client `FUTURE` flake is fixed on main and did not
+recur.)
+
+Two tests were *replaced* rather than added, and both were asserting something
+that is no longer true:
+
+- `test_a_live_record_with_no_committed_source_is_named` used
+  `sec-filings-index-v1.json` as its example orphan. It is committed now, so
+  the example is a name no repository carries, and a second test asserts the
+  filings record is no longer an orphan *and* is seeded — either alone is worth
+  nothing.
+- `test_every_governance_record_the_script_seeds_is_in_the_list` matched names;
+  it now compares the two sets exactly, resolved through the `cp` pair.
 
 The ones that earn their keep:
 
-- `DeliberatelyUnseededTests` — committed == seeded ∪ deliberately-unseeded,
-  disjoint, every named record exists, and every entry in the array has a
-  reason above it.
-- `InstallSeedTests.test_a_loop_written_seed_is_read_as_a_seed` — the six
-  `cn-hk-findata-*` records, which the old matcher reported as unseeded while
-  the script seeded them.
+- `DeliberatelyUnseededTests` (in `test_service.py`) and
+  `test_the_two_sets_cover_the_repo_exactly_and_do_not_overlap` — committed ==
+  seeded ∪ deliberately-unseeded, disjoint, every named record exists, and
+  every entry in the array has a reason above it.
+- `test_a_loop_written_seed_is_read_as_a_seed` and
+  `test_a_comment_naming_a_record_is_not_a_seed` — the two ways this reading of
+  `install.sh` could go quietly wrong: a name that is only in a loop template,
+  and a name that is only in a comment.
 - `FilingsIndexRecoveryTests.test_it_re_derives_from_the_packaged_contract` —
   the record is the packaged contract's, not one machine's.
 - `BootstrapSchemaTests.test_a_broken_schema_fails_here` and
   `test_a_schema_with_no_declared_database_is_refused` — the two ways a schema
-  can reach a deploy without being applied.
+  can reach a deploy without being applied. The second is not hypothetical: W3
+  landed two schemas with no owner while this branch was open.
 - `BootstrapSchemaTests.test_it_creates_no_database_the_deploy_would_not` — the
   scratch-database property, which is what keeps this additive.
-
----
 
 ## 8. Open
 
@@ -331,8 +376,10 @@ The ones that earn their keep:
    `LaneSpec.argv_fragment` decides whether the lane turns on, and
    `INSTALL_SEEDS` carries a third list. This branch made the *governance
    record* half of that checkable by reading the shell script; the plan and
-   policy files are still transcribed. Wave 0's open question 3 — a
-   `governance_seed` field on `LaneSpec` — would collapse the rest.
+   policy files are still transcribed, and both `tracking-policy.json` and the
+   probe-template manifest were missing from `INSTALL_SEEDS` until this merge
+   noticed. Wave 0's open question 3 — a `governance_seed` field on `LaneSpec`
+   — would collapse the rest.
 2. **`DELIBERATELY_UNSEEDED` is not read at runtime.** It is a shell array
    nothing sources, kept honest by a test. That is the cheapest thing that
    works and it is not the same as the installer refusing to run with an

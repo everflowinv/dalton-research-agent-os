@@ -408,3 +408,163 @@ OK (skipped=1)
 4. **`install.sh` still cannot be pointed anywhere.** Four lines and one
    `${DALTON_ROOT:-...}` would make the real script testable, and this script
    mostly unnecessary. That is a change to `install.sh` and was out of remit.
+
+---
+
+## 6. Addendum — re-run against merged main, 2026-09-10
+
+Branch `ops-rehearsal-fix`. Main moved under this report: INT2 landed a second
+batch of install seeds, and the extraction-throughput, dossier, debate-map and
+ADR-0009 slices landed with them. Two of this report's tests failed on the new
+main. Both failures were correct — the report had gone stale — and both are
+fixed here. The rehearsal was re-run end to end on a fresh copy of live.
+
+**Still zero escaped.** 53/53 schemas applied, 26 tick entries, no
+`unavailable:` and no `unrecorded:`.
+
+```
+lane                       status        reason
+-------------------------  ------------  ------------------------------------------------------------------------------
+mission_source_discovery   idle          acquisitions_launched=0
+guidepoint_discovery       idle          all_grants_refused
+document_extraction        launched      awaiting=14 max_discovery_windows=10 max_numeric_windows=10 max_windows=30
+mission_stage              idle
+claim_review               idle          deferred=1470 documents_read=40 scanned=2285 unreadable=815
+mission_sec_quarters       idle
+mission_statements         idle
+mission_market_prices      ungranted     this mission does not grant market_price in autonomy.may_write; publishing a p
+mission_tracking           unconfigured  no tracking lane on this writer
+mission_catalyst_calendar  launched
+company_model_spec         idle          every company has a current specification
+company_model_forecast     launched
+research_plan              launched
+claim_index                unconfigured  no claim index lane on this writer
+initial_screen             launched
+event_judgement            unconfigured  no judgement lane on this writer
+sales_notes_feed           unconfigured  no source:sales-notes lane on this writer
+company_wiki_feed          unconfigured  no source:company-wiki lane on this writer
+debate_map                 launched
+company_dossier            unconfigured  no company-dossier lane on this writer
+mission_crowd_sources      unconfigured  no crowd-source lane on this writer
+research_task              unconfigured  no research task lane on this writer
+mission_reflection         launched
+mission_sec_dispatch       idle          settled=0
+forecast_reconciliation    idle
+tick_ledger                recorded      lane_count=23
+```
+
+```
+ok    15.3s  migrations (every *_schema.sql) -- 53/53 schemas applied
+ok     0.0s  governance seeds -- 14 seeded, 16 already present, 10 gated out, 0 absent from repo
+ok     4.3s  one controller tick -- 26 entries, 0 escaped, 4.3s (service tick_seconds=5.0)
+```
+
+### 6.1 §3.3(b) is closed: INT2 seeded all nineteen
+
+This report said nineteen committed governance records had no seed path.
+`install.sh` now seeds every one, and `unseeded_governance_records()` returns
+empty. The test that asserted `sales-notes-get-note-v1.json` was unseeded was
+asserting a bug, and now asserts the invariant instead: *no committed record
+may be seeded by nothing*. **§3.3(b) above is superseded; §3.3(a) is not** —
+`sec-filings-index-v1.json` is still on the live Core and in no repository.
+
+### 6.2 The seed test had an invisible hole, and it is why (b) drifted
+
+The reverse check matched each committed record's name against `install.sh`'s
+text. INT2's blocks are written as
+`cn-hk-findata-${cn_hk_kind}-v1.json` over a `for` loop, so the literal
+filename appears nowhere in the script and the check silently **skipped** those
+six rather than failing on them. Six records install.sh genuinely seeds sat
+outside `INSTALL_SEEDS` with the suite green.
+
+The fix expands each `for X in a b; do ... done` body once per word with `$X`
+substituted, so both directions now resolve loop-built filenames. A test whose
+gap is invisible is worse than no test, and this one had been passing for a day
+while wrong.
+
+### 6.3 Two errors in the appended seed list
+
+Both found by reading `install.sh` rather than by a failing test:
+
+- **`guidepoint-get-transcript-narrowing-v1.json` had the wrong destination.**
+  The appended entry sent it to `connector-governance/`. `install.sh` puts it
+  in `governance-decisions/` and says why: nothing loads it, so a
+  permanently-`proposed` copy under `connector-governance/` would show the
+  owner a lane waiting for an approval about nothing. Corrected, and pinned by
+  a test.
+- **Nine seeds were missing entirely** — the six China records, the Guidepoint
+  discovery plan, the feed plan and the crowd-source map. The six China records
+  are the ones §6.2 explains.
+
+### 6.4 `optional` now means gated, and the gate is evaluated
+
+`optional` used to mean install.sh's `[[ -f "$repo_record" ]]` guard, which is
+on every block and so said nothing. It now means *gated*: install.sh only
+reaches the copy when a condition outside the repository holds. `gate` names
+which, as a key into `GATES`, and the rehearsal **evaluates** it.
+
+That last part is not cosmetic. Seeding through a shut gate would have copied
+the seven crowd-source records without any of the three host tools they need —
+a lane switched on with no tool, which is exactly the half-installed state
+install.sh's all-or-nothing rule exists to prevent, and the rehearsal would
+have produced a tick table this machine will never produce. On this machine the
+market-digest gate is open and the company-wiki and crowd-tools gates are shut:
+10 seeds gated out.
+
+The repo-existence guard is now asserted for *every* seed, gated or not: a gate
+decides whether the owner's machine wants a lane, and does not excuse a seed
+pointing at a file nobody committed.
+
+### 6.5 `extraction_backlog_schema.sql` — the one genuinely missing owner
+
+Of the sixteen schemas named as suspect, fifteen already had a `MigrationSpec`.
+Only P10x's `extraction_backlog_schema.sql` was new. It is the first Core
+authority constructed on `store.connection` rather than on `store`, so it
+needed a construction branch as well as a spec; `_CONNECTION_AUTHORITIES` names
+it rather than sniffing the signature, so a class that later grows a store
+argument fails loudly instead of being handed the wrong object.
+
+### 6.6 New plist arguments, and what `launched` does not mean
+
+The catalyst-calendar and Guidepoint lanes are now installed by the seeds, so
+the writer plist gains six more arguments beyond the three in §3.5:
+`--guidepoint-search-governance`, `--guidepoint-discovery-plan`,
+`--guidepoint-mcp-endpoint`, `--catalyst-calendar-governance` and the
+market-price pair.
+
+`mission_catalyst_calendar` therefore reads **`launched`** rather than
+`unconfigured` — and its child failed closed:
+
+```
+"failure_reason": "CatalystCalendarRunError: yfinance calendar governance record is not approved"
+"status": "failed"
+```
+
+No network call was made; a scan of every `*-runs` summary in the temp root
+found no recorded fetch. This is the right behaviour and it is worth stating
+plainly, because the tick summary cannot distinguish it: **`launched` means a
+child started, not that it did anything.** A lane whose record is still
+`proposed` looks identical to one that worked until you read the next tick's
+`settled`. The runbook's step 11 now says so.
+
+### 6.7 Tests
+
+`tests/test_rehearse_deploy.py` grew from 47 to 58: the gate predicates, the
+narrowing record's destination, the "every committed record has a seed path"
+invariant, and the every-seed-source-exists check.
+
+```
+$ PYTHONPATH=$PWD/src .venv/bin/python -m unittest tests.test_rehearse_deploy
+..........................................................
+----------------------------------------------------------------------
+Ran 58 tests in 0.098s
+
+OK
+```
+
+```
+$ PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
+Ran 4108 tests in 600.583s
+
+OK (skipped=1)
+```

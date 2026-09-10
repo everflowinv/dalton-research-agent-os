@@ -229,7 +229,10 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 深夜 | 派出：planner 日账本（C2 发现 BoundedPlannerLoop 模型调用绕过日账本）、P12d Deep Insight Gate 12 问、P12e 行业框架、P15a ask v2、P15d ConvictionCall | 进行中 |
 | 09-10 凌晨 | 合并 INT2（事件 / 判断 / 反思 / 催化剂 / 频率 / 专项研究面板、来源能力地图与模型路由视图、预算池面板、第二批 install 种子、owner 部署后步骤清单）+ 两处跟进修复。main `1fc7c5f`，3,983 项通过 | 完成 |
 | 09-10 凌晨 | 派出：S5 SEC 内幕交易 / 13F op + IR 页监视、D3 perception 显式退役（ADR-0009）、部署演练（临时副本上跑迁移 / 种子 / 目录同步 / 一个 tick，产出 owner runbook） | 进行中 |
-| 09-10 凌晨 | 交付待合：P14b + P14d 修订回路（与 INT2 审批列表调和中）、抽取吞吐（三 blocker 已修；DXC CIK 补零待集成修） | 进行中 |
+| 09-10 凌晨 | 合并抽取吞吐（诊断：lane 在饿而非堵；多主体归属、行业 Claim 路径、券商持久化、按证据价值排队）、ADR-0009 perception 显式退役、部署演练（52 个迁移在 live 副本全过，tick 零逃逸；runbook 12 步）；DXC CIK 补零已修。全量测试在跑 | 进行中 |
+| 09-10 凌晨 | 派出：P14e 四条发现修复、INT3（install.sh 种子补齐 15 条记录 + 4 个开关文件、找回 `sec-filings-index-v1.json`、bootstrap 打开全部 schema） | 进行中 |
+| 09-10 凌晨 | 合并 P14e 四条发现修复（probe 轮次可恢复不再永久失败；grant 解析器注入；两个绑不上的模板退役；行业 inquiry 拒绝理由）。P12d Deep Insight Gate、P15d ConvictionCall 交付在审；P12d 发现档案 `variant_view` 丢 `gaps` 的 blocker，档案作者在修 | 进行中 |
+| 09-10 凌晨 | 三个 agent 在用量上限时静默死亡、无产出（consensus、P14f 业绩季、planner 日账本），已重新派出并要求早提交 | 进行中 |
 
 ---
 
