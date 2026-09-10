@@ -234,6 +234,8 @@ def unjudged_event_groups(
     company_ref: str,
     limit: int,
     now: datetime | None = None,
+    mission_version_refs: tuple[str, ...] | None = None,
+    newest_first: bool = False,
 ) -> list[list[dict[str, Any]]]:
     """Oldest eligible events, grouped by one filing or closed HK ISO week.
 
@@ -245,12 +247,21 @@ def unjudged_event_groups(
     Form 4 insider transactions, retain one slot each.
     """
 
+    mission_sql = ""
+    parameters: list[Any] = [company_ref]
+    if mission_version_refs is not None:
+        if not mission_version_refs:
+            return []
+        mission_sql = " AND e.mission_version_ref IN (" + ",".join(
+            "?" for _ in mission_version_refs) + ")"
+        parameters.extend(mission_version_refs)
     rows = events.connection.execute(
         "SELECT e.event_id AS event_id FROM research_events e "
         "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
-        "WHERE e.company_ref = ? AND j.event_ref IS NULL "
-        "ORDER BY e.occurred_at ASC, e.event_id ASC",
-        (company_ref,),
+        "WHERE e.company_ref = ? AND j.event_ref IS NULL " + mission_sql +
+        "ORDER BY e.occurred_at " + ("DESC" if newest_first else "ASC")
+        + ", e.event_id " + ("DESC" if newest_first else "ASC"),
+        parameters,
     ).fetchall()
     groups: list[list[dict[str, Any]]] = []
     positions: dict[tuple[str, ...], int] = {}
@@ -412,7 +423,8 @@ def run_judgement(
     policy_path: Path | None = None,
     scheduler_db: Path | None = None,
     company_ref: str | None = None,
-    event_ref: str | None = None,
+    event_refs: tuple[str, ...] | None = None,
+    event_group_hash: str | None = None,
     max_events: int | None = None,
     per_company: int | None = None,
     dry_run: bool = False,
@@ -485,18 +497,47 @@ def run_judgement(
             else int(run_budget["max_events_per_company"])
         )
 
+        allowed_versions = tuple(
+            row["mission_version_id"] for row in store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_versions "
+                "WHERE mission_ref=?", (mission["mission_ref"],)
+            ).fetchall())
         batch: list[list[dict[str, Any]]] = []
-        for ref in tracked:
-            batch.extend(
-                unjudged_event_groups(
-                    events, judgements, company_ref=ref,
-                    limit=(1000000 if event_ref is not None else effective_per_company),
-                    now=moment,
-                )
+        if event_refs is not None:
+            current = unjudged_event_groups(
+                events, judgements, company_ref=company_ref or "", limit=1,
+                mission_version_refs=allowed_versions, newest_first=True, now=moment,
             )
-        if event_ref is not None:
-            batch = [group for group in batch
-                     if any(item["id"] == event_ref for item in group)]
+            target = current[0] if current else []
+            if target:
+                key = buyback_group_key(target[0]) or ("event", target[0]["id"])
+                judged_refs = {
+                    row["event_ref"] for row in events.connection.execute(
+                        "SELECT event_ref FROM event_judgements"
+                    ).fetchall()
+                }
+                valid = (
+                    len({item["id"] for item in target}) == len(target)
+                    and {item["id"] for item in target} == set(event_refs)
+                    and company_ref in tracked
+                    and all(item["company_ref"] == company_ref for item in target)
+                    and all(item.get("mission_version_ref") in allowed_versions
+                            for item in target)
+                    and all((buyback_group_key(item) or ("event", item["id"])) == key
+                            for item in target)
+                    and _closed_hk_week(buyback_group_key(target[0]), moment)
+                    and incremental_group_hash(target) == event_group_hash
+                    and all(item["id"] not in judged_refs for item in target)
+                )
+                if valid:
+                    batch = [target]
+        else:
+            for ref in tracked:
+                batch.extend(unjudged_event_groups(
+                    events, judgements, company_ref=ref,
+                    limit=effective_per_company,
+                    mission_version_refs=allowed_versions, now=moment,
+                ))
         batch = batch[:effective_max_events]
         summary["candidates"] = len(batch)
         if not batch:
@@ -838,7 +879,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-policy", type=Path)
     parser.add_argument("--scheduler", type=Path)
     parser.add_argument("--company-ref")
-    parser.add_argument("--event-ref")
+    parser.add_argument("--event-ref", action="append", dest="event_refs")
+    parser.add_argument("--event-group-hash")
     parser.add_argument("--max-events", type=int)
     parser.add_argument("--per-company", type=int)
     parser.add_argument("--dry-run", action="store_true", help="count and stop; no calls")
@@ -856,7 +898,8 @@ def main(argv: list[str] | None = None) -> int:
         policy_path=args.tracking_policy,
         scheduler_db=args.scheduler,
         company_ref=args.company_ref,
-        event_ref=args.event_ref,
+        event_refs=None if args.event_refs is None else tuple(args.event_refs),
+        event_group_hash=args.event_group_hash,
         max_events=args.max_events,
         per_company=args.per_company,
         dry_run=args.dry_run,

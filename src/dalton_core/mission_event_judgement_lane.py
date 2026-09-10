@@ -123,6 +123,7 @@ class MissionEventJudgementLaneCoordinator:
                     "reason": "every event this company has produced has been judged"}
         if isinstance(candidates, str):
             candidates = [{"company_ref": "legacy", "event_ref": candidates,
+                           "event_refs": (candidates,), "group_hash": "legacy",
                            "group_key": f"{mission['id']}|{candidates}"}]
         if self._open is not None:
             return {"status": "busy", "settled": settled,
@@ -131,6 +132,8 @@ class MissionEventJudgementLaneCoordinator:
         chosen = None
         for candidate in candidates:
             candidate = dict(candidate)
+            candidate.setdefault("event_refs", (candidate["event_ref"],))
+            candidate.setdefault("group_hash", candidate["group_key"])
             candidate["failure_key"] = candidate["group_key"]
             if configuration is not None:
                 candidate["failure_key"] += f"|configuration:{configuration}"
@@ -146,7 +149,9 @@ class MissionEventJudgementLaneCoordinator:
         try:
             ticket = self.launcher.start(
                 batch_ref=batch, company_ref=chosen["company_ref"],
-                event_ref=chosen["event_ref"], group_key=chosen["failure_key"])
+                event_refs=tuple(chosen["event_refs"]),
+                event_group_hash=chosen["group_hash"],
+                group_key=chosen["failure_key"])
         except LaneChildConflict as exc:
             return {"status": "busy", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -209,15 +214,17 @@ def pending_event_groups(store: Any, missions: Any,
     candidates = []
     for company_ref in screen_passed_companies(missions, mission):
         for group in unjudged_event_groups(
-                events, judgements, company_ref=company_ref, limit=1000000):
-            if any(item.get("mission_version_ref") not in allowed_versions
-                   for item in group):
-                continue
+                events, judgements, company_ref=company_ref, limit=1,
+                mission_version_refs=tuple(sorted(allowed_versions)),
+                newest_first=True):
             group_type = buyback_group_key(group[0]) or ("event", group[0]["id"])
+            group_hash = incremental_group_hash(group)
             identity = "|".join((mission["id"], company_ref, *group_type,
-                                  incremental_group_hash(group)))
+                                  group_hash))
             candidates.append({
                 "company_ref": company_ref, "event_ref": group[0]["id"],
+                "event_refs": tuple(sorted(item["id"] for item in group)),
+                "group_hash": group_hash,
                 "group_key": identity, "occurred_at": max(
                     str(item["occurred_at"]) for item in group),
             })

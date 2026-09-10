@@ -12,6 +12,7 @@ from dalton_core.event_judgement_cli import (
     MAX_COST_USD,
     config_fingerprint,
     group_evidence_events,
+    incremental_group_hash,
     missing_write_scopes,
     run_judgement,
     same_routing_policy,
@@ -54,12 +55,14 @@ class FakeLauncher:
         self.started: list[str] = []
         self.tickets: dict[str, dict] = {}
 
-    def start(self, *, batch_ref, company_ref=None, event_ref=None, group_key=None):
+    def start(self, *, batch_ref, company_ref=None, event_refs=(),
+              event_group_hash=None, group_key=None):
         if not self.configured:
             raise LaneChildRejected("needs a judge and a verifier configuration")
         ticket = {"id": f"event-judgement-run:{len(self.started):024d}",
                   "batch_ref": batch_ref, "company_ref": company_ref,
-                  "event_ref": event_ref, "group_key": group_key,
+                  "event_refs": list(event_refs), "event_group_hash": event_group_hash,
+                  "group_key": group_key,
                   "status": "running"}
         self.started.append(batch_ref)
         self.tickets[ticket["id"]] = ticket
@@ -138,7 +141,8 @@ class RegistrationTests(unittest.TestCase):
             )
             self.addCleanup(launcher.close)
             command = launcher._command(
-                ticket_dir=state, company_ref=ACN, event_ref="research-event:chosen")
+                ticket_dir=state, company_ref=ACN,
+                event_refs=("research-event:chosen",), event_group_hash="a" * 64)
             self.assertEqual(command[command.index("--company-ref") + 1], ACN)
             self.assertEqual(command[command.index("--event-ref") + 1],
                              "research-event:chosen")
@@ -156,7 +160,8 @@ class RegistrationTests(unittest.TestCase):
             )
             first = first_launcher.start(
                 batch_ref="group|configuration:x", company_ref=ACN,
-                event_ref="research-event:chosen", group_key="group")
+                event_refs=("research-event:chosen",), event_group_hash="a" * 64,
+                group_key="group")
             first_launcher.wait(timeout=30)
             settled = first_launcher.status(first["id"])
             first_launcher.close()
@@ -170,7 +175,8 @@ class RegistrationTests(unittest.TestCase):
             self.addCleanup(restarted.close)
             adopted = restarted.start(
                 batch_ref="group|configuration:x", company_ref=ACN,
-                event_ref="research-event:chosen", group_key="group")
+                event_refs=("research-event:chosen",), event_group_hash="a" * 64,
+                group_key="group")
             self.assertEqual(adopted["id"], first["id"])
             self.assertNotEqual(adopted["status"], "running")
             self.assertEqual(log.read_bytes(), before)
@@ -366,14 +372,38 @@ class SelectionTests(P14aHarness):
         self.pass_screen(ACN)
         first = self.event(document="alphaengine-doc:first",
                            occurred="2026-09-09T10:00:00+00:00")
-        self.event(document="alphaengine-doc:second",
-                   occurred="2026-09-09T11:00:00+00:00")
+        second = self.event(document="alphaengine-doc:second",
+                            occurred="2026-09-09T11:00:00+00:00")
         summary = run_judgement(
             state_dir=self.state_dir, summary_dir=self.state_dir / "target-summary",
-            company_ref=ACN, event_ref=first["id"], dry_run=True, now=NOW,
+            company_ref=ACN, event_refs=(second["id"],),
+            event_group_hash=incremental_group_hash([second]),
+            dry_run=True, now=NOW,
         )
         self.assertEqual(summary["judgement_status"], "dry_run")
         self.assertEqual(summary["candidates"], 1)
+
+    def test_child_refuses_changed_group_membership_before_model_calls(self):
+        self.pass_screen(ACN)
+        from tests.test_buyback_disclosure import buyback_event, table_payload
+        first_wire = buyback_event(table_payload(period_label="March"))
+        first = record_event(
+            self.events, company_ref=ACN, kind=first_wire["kind"],
+            occurred_at=first_wire["occurred_at"], source_refs=first_wire["source_refs"],
+            payload=first_wire["payload"], mission=self.mission, actor_ref=AUTOMATION)
+        selected_hash = incremental_group_hash([first])
+        second_wire = buyback_event(table_payload(period_label="April"))
+        record_event(
+            self.events, company_ref=ACN, kind=second_wire["kind"],
+            occurred_at=second_wire["occurred_at"], source_refs=second_wire["source_refs"],
+            payload=second_wire["payload"], mission=self.mission, actor_ref=AUTOMATION)
+        summary = run_judgement(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "drift-summary",
+            company_ref=ACN, event_refs=(first["id"],),
+            event_group_hash=selected_hash, dry_run=True, now=NOW,
+        )
+        self.assertEqual(summary["judgement_status"], "nothing_unjudged")
+        self.assertEqual(summary["cost_micros"], 0)
 
     def test_monthly_buyback_rows_share_one_slot_without_displacing_form_4(self):
         from tests.test_buyback_disclosure import buyback_event, table_payload
@@ -399,6 +429,36 @@ class SelectionTests(P14aHarness):
         )
         self.assertEqual([len(group) for group in groups], [3, 1])
         self.assertEqual(groups[1][0]["kind"], "insider_transaction")
+
+    def test_foreign_mission_member_is_filtered_before_buyback_grouping(self):
+        from tests.test_buyback_disclosure import buyback_event, table_payload
+        current = []
+        for month in ("March", "May"):
+            wire = buyback_event(table_payload(period_label=month))
+            current.append(record_event(
+                self.events, company_ref=ACN, kind=wire["kind"],
+                occurred_at=wire["occurred_at"], source_refs=wire["source_refs"],
+                payload=wire["payload"], mission=self.mission, actor_ref=AUTOMATION))
+        other_params = dict(self.params)
+        other_params.update(idempotency_key="mission-foreign-group",
+                            version_id="coverage-mission-version:foreign-group:1")
+        other_params["autonomy"] = {
+            **other_params["autonomy"],
+            "may_write": [*other_params["autonomy"]["may_write"], "market_event"],
+        }
+        other = self.missions.create_mission("coverage-mission:foreign-group",
+                                             **other_params)
+        foreign_wire = buyback_event(table_payload(period_label="April"))
+        record_event(
+            self.events, company_ref=ACN, kind=foreign_wire["kind"],
+            occurred_at=foreign_wire["occurred_at"],
+            source_refs=foreign_wire["source_refs"], payload=foreign_wire["payload"],
+            mission=other, actor_ref=AUTOMATION)
+        groups = unjudged_event_groups(
+            self.events, self.judgements, company_ref=ACN, limit=1,
+            mission_version_refs=(self.mission["id"],))
+        self.assertEqual({item["id"] for item in groups[0]},
+                         {item["id"] for item in current})
 
 
 class GrantTests(P14aHarness):

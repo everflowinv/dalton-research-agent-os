@@ -39,6 +39,7 @@ class EventJudgementLauncher(LaneChildLauncher):
         self.verifier_model_config = Path(verifier_model_config).expanduser().resolve()
         self.policy_path = None if policy_path is None else Path(policy_path).expanduser().resolve()
         self.scheduler_db = None if scheduler_db is None else Path(scheduler_db)
+        self._adopted_finished: set[str] = set()
 
     @property
     def configured(self) -> bool:
@@ -69,15 +70,18 @@ class EventJudgementLauncher(LaneChildLauncher):
         return digest.hexdigest()
 
     def _command(self, *, ticket_dir: Path, company_ref: str,
-                 event_ref: str) -> list[str]:
+                 event_refs: tuple[str, ...], event_group_hash: str) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--judge-model-config", str(self.judge_model_config),
             "--verifier-model-config", str(self.verifier_model_config),
-            "--company-ref", company_ref, "--event-ref", event_ref,
+            "--company-ref", company_ref,
+            "--event-group-hash", event_group_hash,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
+        for event_ref in event_refs:
+            command += ["--event-ref", event_ref]
         if self.policy_path is not None:
             command += ["--tracking-policy", str(self.policy_path)]
         if self.scheduler_db is not None:
@@ -85,16 +89,22 @@ class EventJudgementLauncher(LaneChildLauncher):
         return command
 
     def start(self, *, batch_ref: str, company_ref: str,
-              event_ref: str, group_key: str) -> dict[str, Any]:
+              event_refs: tuple[str, ...], event_group_hash: str,
+              group_key: str) -> dict[str, Any]:
         if not isinstance(batch_ref, str) or not batch_ref.strip():
             raise LaneChildRejected("a judgement run needs a batch ref")
         if not self.configured:
             raise LaneChildRejected(
                 "the judgement lane needs a judge and a verifier configuration"
             )
-        if not all(isinstance(value, str) and value.strip()
-                   for value in (company_ref, event_ref, group_key)):
+        if (not all(isinstance(value, str) and value.strip()
+                    for value in (company_ref, event_group_hash, group_key))
+                or not event_refs
+                or any(not isinstance(ref, str) or not ref for ref in event_refs)):
             raise LaneChildRejected("a judgement run needs a company and event group")
+        if (len(event_group_hash) != 64
+                or any(char not in "0123456789abcdef" for char in event_group_hash)):
+            raise LaneChildRejected("event_group_hash must be a sha256 digest")
         digest = hashlib.sha256(
             f"{self.TICKET_PREFIX}|{batch_ref.strip()}".encode("utf-8")
         ).hexdigest()[:24]
@@ -102,13 +112,19 @@ class EventJudgementLauncher(LaneChildLauncher):
         # A writer may restart after the child finished but before the next
         # tick settled it into the durable failure ledger. Adopt that exact
         # ticket instead of truncating its log and paying for the group again.
-        if self._ticket_path(ticket_id).is_file():
-            return self.status(ticket_id)
+        if (self._current is None and ticket_id not in self._adopted_finished
+                and self._ticket_path(ticket_id).is_file()):
+            adopted = self.status(ticket_id)
+            if adopted.get("status") != "running":
+                self._adopted_finished.add(ticket_id)
+            return adopted
         return self.spawn(
             digest=digest,
             record={"batch_ref": batch_ref.strip(), "company_ref": company_ref,
-                    "event_ref": event_ref, "group_key": group_key},
-            company_ref=company_ref, event_ref=event_ref,
+                    "event_refs": list(event_refs), "event_group_hash": event_group_hash,
+                    "group_key": group_key},
+            company_ref=company_ref, event_refs=event_refs,
+            event_group_hash=event_group_hash,
         )
 
 
