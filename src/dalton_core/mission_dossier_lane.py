@@ -153,6 +153,8 @@ class MissionDossierLaneCoordinator:
             "signature": ticket.get("signature"),
             "company_ref": summary.get("company_ref") or ticket.get("company_ref"),
             "dossier_status": summary.get("dossier_status"),
+            "verification_status": (summary.get("verification") or {}).get("status"),
+            "verification_verdict": (summary.get("verification") or {}).get("verdict"),
             "version_ref": summary.get("version_ref"),
             "units_drafted": summary.get("units_drafted"),
             "new_refs": summary.get("new_refs"),
@@ -181,7 +183,13 @@ class MissionDossierLaneCoordinator:
         # (notably verification_failed when the verifier transport never ran)
         # must still reach the shared classifier instead of being mistaken for
         # a content verdict.
-        elif status == "rubric_refused" and signature:
+        elif (
+            status == "rubric_refused"
+            or (
+                status == "verification_failed"
+                and settled.get("verification_status") in {"refused", "verified"}
+            )
+        ) and signature:
             self.budget.record(str(signature), status=f"content_refused:{status}",
                                reason=settled.get("failure_reason") or status)
         elif settled.get("status") != "succeeded" and settled.get("status") != "orphaned":

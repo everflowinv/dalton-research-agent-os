@@ -1015,6 +1015,18 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(coordinator.dispatch_once()["status"], "launched")
         self.assertEqual(len(launcher.started), 2)
 
+    def test_an_executed_verifier_rejection_is_terminal_content(self):
+        launcher = self.Launcher(
+            ticket_status="failed",
+            summary={"dossier_status": "verification_failed",
+                     "failure_reason": "verifier rejected unsupported_sentence",
+                     "verification": {"status": "verified", "verdict": "reject"}})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(coordinator.dispatch_once()["status"], "terminal")
+        self.assertEqual(len(launcher.started), 1)
+
     def test_a_draft_contract_change_moves_the_lane_signature_once(self):
         before = ledger_signature(self.connection)
         with patch("dalton_core.company_dossier_draft.draft_contract_fingerprint",
