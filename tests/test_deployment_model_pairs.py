@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dalton_core.mission_dossier_lane import argv_fragment as dossier_argv
 from dalton_core.mission_earnings_season_lane import argv_fragment as earnings_argv
+from dalton_core.mission_deep_insight_lane import argv_fragment as deep_insight_argv
 from dalton_core.model_router import ModelRouter
 from dalton_core.research_planner_setup import install
 from tests.test_document_extraction_setup import _service
@@ -46,6 +47,13 @@ class DeploymentModelPairTests(unittest.TestCase):
             str(self.state / "dossier-model-config.json"),
             "--company-dossier-policy", str(policy),
             "--company-dossier-verifier-model-config",
+            str(self.state / "company-dossier-verifier-model-config.json"),
+        ])
+        self.assertEqual(deep_insight_argv(self.context), [
+            "--deep-insight-gate-model-config",
+            str(self.state / "dossier-model-config.json"),
+            "--deep-insight-gate-policy", str(policy),
+            "--deep-insight-gate-verifier-model-config",
             str(self.state / "company-dossier-verifier-model-config.json"),
         ])
 
@@ -95,6 +103,7 @@ class DeploymentModelPairTests(unittest.TestCase):
         self.assertLess(script.index('validate_model_pair "DALTON_EVENT"'),
                         script.index('mkdir -p "$config_dir"'))
         self.assertIn("unknown model tier", script)
+        self.assertIn("must set a profile or tier per role, not both", script)
 
     def test_legacy_dossier_paths_remain_a_fallback(self) -> None:
         (self.state / "initial-screen-model-config.json").write_text("{}")

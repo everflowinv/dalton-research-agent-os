@@ -287,8 +287,10 @@ def build_launcher(args: Any) -> Any | None:
 # same route, same broker, same day ledger), the policy that carries the
 # Constitution's output-rubric bindings, and the verifier's own configuration,
 # without which nothing can be submitted.
-GATE_MODEL_CONFIG = "initial-screen-model-config.json"
-GATE_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
+GATE_MODEL_CONFIG = "dossier-model-config.json"
+GATE_VERIFIER_MODEL_CONFIG = "company-dossier-verifier-model-config.json"
+LEGACY_GATE_MODEL_CONFIG = "initial-screen-model-config.json"
+LEGACY_GATE_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
 GATE_POLICY = "p12a-dossier-policy-v1.json"
 
 
@@ -301,8 +303,12 @@ def argv_fragment(context: Any) -> list[str]:
     # policy path is passed through because its default only resolves inside a
     # source checkout.
     config = context.state / GATE_MODEL_CONFIG
+    if not config.is_file():
+        config = context.state / LEGACY_GATE_MODEL_CONFIG
     policy = context.state / GATE_POLICY
     verifier = context.state / GATE_VERIFIER_MODEL_CONFIG
+    if not verifier.is_file():
+        verifier = context.state / LEGACY_GATE_VERIFIER_MODEL_CONFIG
     if not (config.is_file() and policy.is_file() and verifier.is_file()):
         return []
     return ["--deep-insight-gate-model-config", str(config),
@@ -330,6 +336,8 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "GATE_MODEL_CONFIG",
+    "LEGACY_GATE_MODEL_CONFIG",
+    "LEGACY_GATE_VERIFIER_MODEL_CONFIG",
     "GATE_POLICY",
     "GATE_VERIFIER_MODEL_CONFIG",
     "LANE",

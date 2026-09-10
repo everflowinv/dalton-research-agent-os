@@ -19,7 +19,12 @@ domain="gui/$(id -u)"
 validate_model_pair() {
   # $1 name, $2 producer profile, $3 producer tier, $4 verifier profile,
   # $5 verifier tier.
-  local name="$1" producer="${2}${3}" verifier="${4}${5}"
+  local name="$1"
+  if [[ -n "$2" && -n "$3" || -n "$4" && -n "$5" ]]; then
+    print -u2 "error: $name must set a profile or tier per role, not both"
+    exit 2
+  fi
+  local producer="${2:-$3}" verifier="${4:-$5}"
   if [[ -n "$producer" || -n "$verifier" ]]; then
     if [[ -z "$producer" || -z "$verifier" ]]; then
       print -u2 "error: set both $name producer and verifier model variables or neither"
