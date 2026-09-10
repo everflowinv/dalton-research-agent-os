@@ -111,7 +111,7 @@ class ModelStageReadinessTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("active_mission_model_sensitivity_binding", result["reasons"])
 
-    def test_complete_bound_playbook_evidence_passes(self):
+    def test_baseline_cadence_is_not_completed_calendar_proof(self):
         source = {"ref": "claim:1", "period": "2026-09-10"}
         block = {"status": "drafted", "sources": [source]}
         framework = {
@@ -131,7 +131,8 @@ class ModelStageReadinessTests(unittest.TestCase):
         }
         result = industry_model_readiness(
             framework, mission=mission(), cadence_source_keys=frozenset({"market_price"}))
-        self.assertTrue(result["passed"], result)
+        self.assertFalse(result["passed"])
+        self.assertIn("high_frequency_update_calendar_bound", result["reasons"])
 
     def test_waiting_company_does_not_starve_later_ready_company(self):
         stages = {
@@ -152,6 +153,45 @@ class ModelStageReadinessTests(unittest.TestCase):
             result = advance_once(authority, object(), value)
         self.assertEqual(result["status"], "advanced")
         self.assertEqual(result["company_ref"], "company:b")
+
+    def test_accessions_do_not_prove_wrong_history_reconciles(self):
+        model = {"id": "model:v1", "content_hash": "b" * 64,
+                 "company_ref": "company:a", "mission_version_ref": "mission:v14",
+                 "history_periods": [{}] * 8, "forecast_periods": [{}],
+                 "drivers": [{"ref": f"driver:{n}", "history": [
+                     {"value": "999999", "accessions": ["0001"]}],
+                     "role": "revenue", "status": "forecastable"} for n in range(3)],
+                 "assumptions": [{"driver_ref": "driver:0", "because": "filed",
+                                  "refs": [{"ref": "claim:1"}]}],
+                 "results": [{"ref": "result:revenue", "status": "computed"}]}
+        sensitivity = {"id": "s:v1", "company_ref": "company:a",
+                       "mission_version_ref": "mission:v14", "model_version_ref": "model:v1",
+                       "model_version_hash": "b" * 64, "selection": {"status": "selected"},
+                       "drivers": [], "consensus_bridge": {"status": "available", "metrics": [{}]}}
+        result = company_model_readiness(
+            model, sensitivity, mission=mission(), company_ref="company:a")
+        self.assertIn("two_year_filings_reconciled_zero_error", result["reasons"])
+
+    def test_unrelated_peer_table_is_not_peer_sensitivity(self):
+        model = {"id": "model:v1", "content_hash": "b" * 64,
+                 "company_ref": "company:a", "mission_version_ref": "mission:v14",
+                 "history_periods": [{}] * 8, "forecast_periods": [{}],
+                 "drivers": [{"ref": f"driver:{n}", "history": [{}], "role": "revenue",
+                              "status": "forecastable"} for n in range(3)],
+                 "assumptions": [{"driver_ref": "driver:0", "because": "filed",
+                                  "refs": [{"ref": "claim:1"}]}],
+                 "results": [{"ref": "result:revenue", "status": "computed"}]}
+        sensitivity = {"id": "s:v1", "company_ref": "company:a",
+                       "mission_version_ref": "mission:v14", "model_version_ref": "model:v1",
+                       "model_version_hash": "b" * 64, "selection": {"status": "selected"},
+                       "drivers": [], "consensus_bridge": {"status": "available", "metrics": [{}]}}
+        peers = {"status": "computed", "companies": [{"company_ref": "company:b"},
+                                                       {"company_ref": "company:c"}],
+                 "cells": [{"company_ref": "company:b", "status": "computed"}]}
+        result = company_model_readiness(
+            model, sensitivity, mission=mission(), company_ref="company:a",
+            peer_comparison=peers)
+        self.assertIn("peer_relative_sensitivity_quantified", result["reasons"])
 
     def test_waiting_readiness_recovers_without_terminal_gate_failure(self):
         stages = {"company:a": {"current_stage": "deep_insight_gate",

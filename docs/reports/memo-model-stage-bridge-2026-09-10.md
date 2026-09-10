@@ -65,16 +65,16 @@ and sensitivity versions could be combined despite a stale model binding.
 The bridge now reads records through each authority's checked public reader
 and requires the current mission, company, model ref, and model hash to agree.
 It reports each unmet playbook criterion and remains `entered`/`waiting`.
-The final correction derives proof from existing records. Framework source
-`period` values supply input as-of dates, and a connected high-frequency source
-must also appear in the governed tracking-cadence policy. Comparison notes
-carry the stated peer-gap basis. Company history requires eight quarters and
-filed accessions on every history cell; the published model's existing
-economic-invariant gate supplies the arithmetic refusal boundary. Peer proof
-requires the same company in a multi-company computed framework comparison and
-three or more selected sensitivity drivers with complete historical bands.
-Missing data stays a named waiting reason. A complete positive fixture now
-passes every industry-stage criterion without an attestation-only field.
+The final review found that three tempting derivations are still invalid.
+Baseline cadence is policy, not proof that a high-frequency input entered an
+installed update calendar. An accession proves provenance, not that the stored
+historical value reconciles to the filing. A company band beside an unrelated
+peer table is not peer-relative sensitivity. Those three criteria therefore
+remain named waiting reasons. The current authorities lack enough information
+for an honest end-to-end positive gate: the needed next contract must persist
+or deterministically reconstruct the exact calendar binding, statement-row
+reconciliation report, and peer-relative sensitivity calculation. The bridge
+must not ship as a stage closer until that producer work exists.
 
 Cross-review validation:
 
@@ -83,7 +83,8 @@ PYTHONPATH=src python3 -m unittest \
   tests.test_model_stage_bridge tests.test_lane_registry tests.test_service
 ```
 
-Result: 75 tests passed. Regressions cover the formerly accepted framework
+Regressions cover the formerly accepted framework
 without as-of/calendar proof and a sensitivity projection bound to an older
-forecast model. They also cover a complete evidence path and show that a
-waiting first company does not starve a later ready company.
+forecast model, as well as baseline-only cadence, unrelated peer data, and
+wrong history values carrying accessions. They also show that a waiting first
+company does not starve a later ready company.

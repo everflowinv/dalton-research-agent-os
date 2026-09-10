@@ -52,13 +52,10 @@ def industry_model_readiness(
         all(source.get("period") for source in block.get("sources") or [])
         for block in blocks if block.get("status") == "drafted"
     )
-    high_frequency_sources = {
-        str(source.get("slug"))
-        for gap in gaps if gap.get("gap_ref") == "gap:high-frequency-demand"
-        for source in gap.get("candidate_sources") or []
-        if source.get("connection_status") == "connected"
-    }
-    update_calendar_bound = bool(high_frequency_sources & cadence_source_keys)
+    # A baseline cadence only says how often a source would run. Neither it nor
+    # a connector candidate proves that this high-frequency input was bound to
+    # an installed calendar for this framework.
+    update_calendar_bound = False
     comparison_explained = bool(comparison.get("comparability_notes"))
     checks.extend([
         {"criterion": "active_mission_binding", "passed": mission_bound},
@@ -122,33 +119,12 @@ def company_model_readiness(
     # reconciliation result nor peer-relative sensitivity bands. Publication
     # validates arithmetic, but it is not an attestation of these playbook
     # readings and outputs.
-    historical_reconciliation_proved = (
-        ready["history_quarters"] >= 8
-        and not ready["drivers_without_history"]
-        and not ready["results_partial"]
-        and not ready["results_unavailable"]
-        and all(
-            cell.get("accessions")
-            for driver in model.get("drivers") or []
-            for cell in driver.get("history") or []
-        )
-    )
-    peer_companies = {
-        str(row.get("company_ref"))
-        for row in (peer_comparison or {}).get("companies") or []
-    }
-    peer_sensitivity_proved = bool(
-        sensitivity
-        and projection.get("drivers_selected", 0) >= 3
-        and projection.get("drivers_without_bands") == []
-        and (peer_comparison or {}).get("status") == "computed"
-        and expected_company in peer_companies
-        and len(peer_companies) >= 2
-        and any(
-            row.get("status") == "computed" and row.get("company_ref") == expected_company
-            for row in (peer_comparison or {}).get("cells") or []
-        )
-    )
+    # Accessions prove provenance, not that the values reconcile to the filing.
+    # Likewise a company band beside an unrelated peer table is not a
+    # peer-relative sensitivity. These remain closed until typed derived proof
+    # is persisted or can be recomputed from the exact source rows.
+    historical_reconciliation_proved = False
+    peer_sensitivity_proved = False
     checks = [
         {"criterion": "active_mission_model_sensitivity_binding", "passed": authority_binding},
         {"criterion": "three_to_five_key_drivers", "passed": driver_count_ready},
