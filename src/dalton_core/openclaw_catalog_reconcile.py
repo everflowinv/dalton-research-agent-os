@@ -169,12 +169,24 @@ def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             raise OpenClawCatalogError(f"broker profile {profile_id} has an invalid model")
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
+        provider_controls = profile.get("providerControls")
+        controls_declared = (
+            isinstance(provider_controls, Mapping)
+            and provider_controls.get("mode") in {
+                "openai-responses-input-count-v1",
+                "google-generative-ai-count-tokens-v1",
+            }
+            and isinstance(provider_controls.get("rateCard"), Mapping)
+        )
         output[profile_id] = {
             "id": profile_id,
             "provider": provider,
             "model": model,
             "model_ref": model_ref,
             "max_tokens": profile.get("maxTokens"),
+            # Public broker-side admission. The broker still verifies the host
+            # runtime's matching advertised transport before provider use.
+            "provider_controls": controls_declared,
         }
     return output
 
@@ -311,6 +323,15 @@ def openclaw_broker_profiles_from_config(
             if declaration is not None:
                 profile["family"] = declaration["family"]
                 profile["capabilities"] = list(declaration["capabilities"])
+            if broker["provider_controls"]:
+                profile["capabilities"] = list(dict.fromkeys(
+                    [*profile["capabilities"], "provider-controlled-verify"]
+                ))
+            else:
+                profile["capabilities"] = [
+                    item for item in profile["capabilities"]
+                    if item != "provider-controlled-verify"
+                ]
             context_window = provider_model["context_window"]
             max_output = provider_model["max_output_tokens"]
             broker_max = broker["max_tokens"]
@@ -415,6 +436,10 @@ def openclaw_broker_profiles_from_config(
                 "max_cost_usd": 250.0,
             },
         }
+        if broker["provider_controls"]:
+            dynamic["capabilities"] = list(dict.fromkeys(
+                [*dynamic["capabilities"], "provider-controlled-verify"]
+            ))
         if provider_model["unpriced"]:
             dynamic["unpriced"] = True
         output.append(dynamic)
@@ -427,14 +452,16 @@ def broker_catalog_hash(config: Mapping[str, Any]) -> str:
     A retirement is an assertion about the world -- "the broker stopped
     offering this" -- and an assertion that carries no evidence cannot be
     argued with a year later.  So the retired version records the hash of the
-    broker catalog that proved it: profile ids and their model references,
-    sorted, and no configuration, credential or control near them.
+    broker catalog that proved it: profile ids, model references, and whether
+    each profile publicly declares the controls required by verifier calls.
+    Secrets and rate-card values remain outside this digest.
     """
 
     brokers = _broker_profiles(config)
     return canonical_hash(
         [
-            {"id": profile_id, "model": brokers[profile_id]["model_ref"]}
+            {"id": profile_id, "model": brokers[profile_id]["model_ref"],
+             "provider_controls": brokers[profile_id]["provider_controls"]}
             for profile_id in sorted(brokers)
         ]
     )

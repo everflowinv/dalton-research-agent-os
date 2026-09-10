@@ -318,15 +318,26 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
     if verifier_provider_contract is not None:
         identity["verifier_provider_contract"] = verifier_provider_contract
         identity["verifier_provider_schema_hash"] = verifier_provider_schema_hash
+        # Provider-control eligibility became a route-time requirement after
+        # older verifier work had already been persisted with plain
+        # ``research`` capability. Give the corrected admission contract a new
+        # identity so it cannot conflict with or replay that old work.
+        identity["provider_control_capability"] = "provider-controlled-verify"
     if mission_version_hash is not None:
         identity["mission_version_hash"] = mission_version_hash
     if producer_route_decision_refs:
         identity["producer_route_decision_refs"] = list(producer_route_decision_refs)
     digest = content_hash(identity)
     at = created_at or _now()
+    capability = (
+        "provider-controlled-verify"
+        if verifier_provider_contract is not None
+        else "research"
+    )
     return WorkOrder(
         schema_version=SCHEMA_VERSION, id=f"work:cockpit-{purpose}-{digest[:32]}",
-        created_at=at, updated_at=at, question=prompt, requested_capabilities=("research",),
+        created_at=at, updated_at=at, question=prompt,
+        requested_capabilities=(capability,),
         runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
         budget={"max_input_tokens": max_input_tokens, "max_output_tokens": max_output_tokens,
                 "max_total_tokens": max_input_tokens + max_output_tokens,
@@ -561,7 +572,8 @@ class CockpitModel:
                         formal = scheduler.formal_result(work.id)
                         return self._answer(formal, work, replayed, cost_micros, cost_status)
                     route = router.route(
-                        work, attempt_number=attempt, capability="research",
+                        work, attempt_number=attempt,
+                        capability=work.requested_capabilities[0],
                         policy_version_ref=self.config["routing_policy_ref"],
                         credential_slot_refs=self.config["credential_slot_refs"], required_modalities=("text",),
                         required_context_tokens=prompt_bytes + effective["max_output_tokens"],
@@ -778,7 +790,8 @@ class CockpitModel:
         served_micros, served_status = 0, "failed"
         try:
             outcome = execute_chain(
-                router, work, purpose=purpose, tier=tier, capability="research",
+                router, work, purpose=purpose, tier=tier,
+                capability=work.requested_capabilities[0],
                 attempt_number=attempt,
                 policy_version_ref=self.config["routing_policy_ref"],
                 credential_slot_refs=self.config["credential_slot_refs"],
@@ -828,7 +841,10 @@ class CockpitModel:
         detail_text = "; ".join(
             f"{item['profile_id']} [{item['code']}]: {item['message']}"
             for item in details)
-        failure = f"every model in the {tier} chain failed: {skipped}"
+        if outcome["status"] == "halted":
+            failure = f"the {tier} chain halted on {outcome.get('reason')}: {skipped}"
+        else:
+            failure = f"every model in the {tier} chain failed: {skipped}"
         if detail_text:
             failure += f"; broker details: {detail_text}"
         return {"result": _failure(

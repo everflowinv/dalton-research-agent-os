@@ -101,8 +101,21 @@ class CockpitChainTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.router_db = self.root / "router.sqlite"
+        config = _config()
+        broker_profiles = config["plugins"]["entries"][
+            "dalton-openclaw-model-broker"
+        ]["config"]["profiles"]
+        verifier_ids = set(tier_chain("verifier"))
+        for profile in broker_profiles:
+            if profile["id"] in verifier_ids:
+                profile["providerControls"] = {
+                    "mode": "google-generative-ai-count-tokens-v1",
+                    "rateCard": {"inputPerMillionUsd": 1,
+                                 "outputPerMillionUsd": 2,
+                                 "validUntil": "2026-09-10T09:00:00.000000+00:00"},
+                }
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, _config(), checked_at=NOW)
+            sync_openclaw_model_catalog(router, config, checked_at=NOW)
             self.chain_policy = ensure_planner_policy(
                 router, tier="brain", now=NOW,
                 policy_id="model-routing-policy:p14m-cockpit-brain",
@@ -283,6 +296,10 @@ class CockpitChainTests(unittest.TestCase):
         with Scheduler(self.root / "scheduler.sqlite") as scheduler:
             stored = scheduler.work_order_authority(verifier["work_order_ref"])
         metadata = stored["work_order"]["metadata"]
+        self.assertEqual(
+            stored["work_order"]["requested_capabilities"],
+            ["provider-controlled-verify"],
+        )
         self.assertEqual(metadata["verifier_output_schema_version"], "0.1")
         self.assertEqual(metadata["verifier_provider_contract"],
                          "event-judgement-verifier-provider-output-0.1")
@@ -295,6 +312,33 @@ class CockpitChainTests(unittest.TestCase):
             created_at=self.mission["created_at"],
         )
         self.assertNotEqual(verifier["work_order_ref"], legacy.id)
+
+    def test_required_controls_failure_halts_without_trying_another_provider(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="event_judgement", request_id="controls-producer",
+               prompt="draft", mission=self.mission)
+        adapter = ChainAdapter({
+            "profile:claude-fable-5-1": {
+                "code": "REQUIRED_CONTROLS_UNAVAILABLE",
+                "message": "profile lacks providerControls; mode missing not advertised",
+            }
+        })
+        with self.assertRaisesRegex(
+            CockpitModelError,
+            "contract_violation.*REQUIRED_CONTROLS_UNAVAILABLE.*lacks providerControls",
+        ):
+            self._model(
+                adapter, policy_version_ref=self.verifier_policy,
+                slots=self.verifier_slots,
+            ).call(
+                purpose="event_judgement_verifier",
+                request_id="controls-halt",
+                prompt='{"verdict":"pass","findings":[]}',
+                mission=self.mission,
+                producer_route_decision_refs=[producer["route_decision_ref"]],
+            )
+        self.assertEqual(adapter.served, ["profile:claude-fable-5-1"])
 
     def test_memo_writer_reads_real_scheduler_work_and_router_route(self) -> None:
         from dalton_core.writer_server import WriterServer

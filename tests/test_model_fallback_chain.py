@@ -160,6 +160,7 @@ class TierMapTests(unittest.TestCase):
             (BrokerIdempotencyConflict("already bound"), "contract_violation"),
             (ModelAdmissionError("bad route"), "contract_violation"),
             ({"code": "MODEL_UNAVAILABLE"}, "model_unavailable"),
+            ({"code": "REQUIRED_CONTROLS_UNAVAILABLE"}, "contract_violation"),
             ({"code": "PROVIDER_OVERLOADED"}, "model_unavailable"),
             ({"code": "RATE_LIMITED"}, "provider_failure"),
             ({"code": "UPSTREAM_TIMEOUT"}, "transport_failure"),

@@ -105,6 +105,27 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
             with ModelRouter(Path(directory) / "router.sqlite") as router:
                 self.assertEqual(router.register_profile(dynamic)["status"], "fresh")
 
+    def test_only_broker_profiles_with_provider_controls_are_verifier_eligible(self):
+        config = _config()
+        profiles = config["plugins"]["entries"]["dalton-openclaw-model-broker"][
+            "config"
+        ]["profiles"]
+        controlled = profiles[0]
+        controlled["providerControls"] = {
+            "mode": "openai-responses-input-count-v1",
+            "rateCard": {"inputPerMillionUsd": 1, "outputPerMillionUsd": 2,
+                         "validUntil": "2026-09-10T09:00:00.000000+00:00"},
+        }
+        catalog = {
+            item["id"]: item
+            for item in openclaw_broker_profiles_from_config(config, checked_at=NOW)
+        }
+        self.assertIn("provider-controlled-verify",
+                      catalog[controlled["id"]]["capabilities"])
+        uncontrolled = next(item for item in profiles if item["id"] != controlled["id"])
+        self.assertNotIn("provider-controlled-verify",
+                         catalog[uncontrolled["id"]]["capabilities"])
+
     def test_changed_static_route_and_orphan_fail_closed(self):
         config = _config()
         config["models"]["providers"]["deepseek"]["models"].append({

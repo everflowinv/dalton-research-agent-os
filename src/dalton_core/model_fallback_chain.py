@@ -194,6 +194,10 @@ def safe_failure_detail(profile_id: str, outcome: Mapping[str, Any]) -> dict[str
 # provider-agnostic uppercase tokens; the substrings below are matched against
 # the whole code so a provider-specific suffix still lands in the right class.
 _FAILURE_CODES: tuple[tuple[tuple[str, ...], str], ...] = (
+    # This is a broker admission/host-capability failure, not an outage.  The
+    # word ``UNAVAILABLE`` in the specific code must never make the chain try
+    # another profile that lacks the same mandatory controls.
+    (("REQUIRED_CONTROLS_UNAVAILABLE",), "contract_violation"),
     (("TIMEOUT", "TIMED_OUT", "DEADLINE"), "transport_failure"),
     (("CONNECTION", "NETWORK", "SOCKET", "TRANSPORT", "BROKEN_PIPE", "EOF"),
      "transport_failure"),
