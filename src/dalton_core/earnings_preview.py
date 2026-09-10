@@ -37,11 +37,13 @@ from .earnings_season import (
     PREVIEW_KIND,
     PREVIEW_PURPOSE,
     EarningsSeasonValidationError,
+    bounded_text,
     citable_refs,
     consensus_block,
     forecast_rows,
     guidance_vs_actual,
     idempotency_key_for,
+    ref_list,
     render_rows,
     reported_period,
     watch_list,
@@ -73,26 +75,11 @@ VERIFIER_FINDING_CODES: tuple[str, ...] = (
 
 
 def _text(value: Any, name: str, *, maximum: int) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise EarningsSeasonValidationError(f"{name} must be non-empty text")
-    if len(value.strip()) > maximum:
-        raise EarningsSeasonValidationError(
-            f"{name} must be at most {maximum} characters"
-        )
-    return value.strip()
+    return bounded_text(value, name, maximum=maximum)
 
 
 def _ref_list(value: Any, name: str, *, limit: int = MAX_CITATIONS) -> list[str]:
-    if not isinstance(value, list) or len(value) > limit:
-        raise EarningsSeasonValidationError(
-            f"{name} must be a list of at most {limit} refs"
-        )
-    refs = []
-    for item in value:
-        if not isinstance(item, str) or not item.strip():
-            raise EarningsSeasonValidationError(f"{name} entries must be refs")
-        refs.append(item.strip())
-    return list(dict.fromkeys(refs))
+    return ref_list(value, name, limit=limit)
 
 
 # ---------------------------------------------------------------------------

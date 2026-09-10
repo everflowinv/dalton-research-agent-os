@@ -117,6 +117,32 @@ def _text(value: Any, name: str, *, maximum: int = 512) -> str:
     return value.strip()[:maximum]
 
 
+def bounded_text(value: Any, name: str, *, maximum: int) -> str:
+    """Text with a ceiling.  Shared by both windows so the two cannot disagree
+    about what "too long" means."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise EarningsSeasonValidationError(f"{name} must be non-empty text")
+    if len(value.strip()) > maximum:
+        raise EarningsSeasonValidationError(f"{name} must be at most {maximum} characters")
+    return value.strip()
+
+
+def ref_list(value: Any, name: str, *, limit: int = 16) -> list[str]:
+    """A bounded list of refs, de-duplicated in the order given."""
+
+    if not isinstance(value, list) or len(value) > limit:
+        raise EarningsSeasonValidationError(
+            f"{name} must be a list of at most {limit} refs"
+        )
+    refs = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise EarningsSeasonValidationError(f"{name} entries must be refs")
+        refs.append(item.strip())
+    return list(dict.fromkeys(refs))
+
+
 # ---------------------------------------------------------------------------
 # reading a calendar event
 # ---------------------------------------------------------------------------
@@ -718,6 +744,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "WINDOWS",
     "already_written",
+    "bounded_text",
     "citable_refs",
     "consensus_block",
     "date_confidence_of",
@@ -729,6 +756,7 @@ __all__ = [
     "occurrence_ref",
     "occurrences_from_calendar",
     "open_occurrences",
+    "ref_list",
     "render_rows",
     "reported_period",
     "watch_list",
