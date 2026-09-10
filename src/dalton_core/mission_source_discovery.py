@@ -1281,7 +1281,42 @@ class MissionSourceDiscoveryCoordinator:
             satisfied = self._satisfied_block(mission, company_ref, spec_ref)
             if satisfied is not None:
                 return satisfied
-        return self._cadence_block(mission["id"], company_ref, spec)
+        return self._cadence_block(
+            mission["id"], company_ref, spec,
+            use_retry_interval=self._checklist_shortfall(mission, company_ref,
+                                                         spec_ref),
+        )
+
+    def _checklist_shortfall(self, mission: Mapping[str, Any], company_ref: str,
+                             spec_ref: str) -> bool:
+        """Whether this spec's actual accepted material is below its floor."""
+        from .mission_stage import INDUSTRY_BASE_ITEMS, SOURCE_BASE_ITEMS
+
+        item = next((row for row in (*SOURCE_BASE_ITEMS, *INDUSTRY_BASE_ITEMS)
+                     if spec_ref in row["spec_refs"]), None)
+        if item is None:
+            return False
+        try:
+            from .mission_stage import evaluate_industry, evaluate_mission
+
+            if item in INDUSTRY_BASE_ITEMS:
+                items = evaluate_industry(self.store.connection, mission)["items"]
+            else:
+                company = next((row for row in evaluate_mission(
+                    self.store.connection, mission)
+                    if row["company_ref"] == company_ref), None)
+                items = [] if company is None else company["items"]
+        except Exception:
+            return False
+        held = next((row for row in items if row["item_ref"] == item["item_ref"]), None)
+        if held is None:
+            return True
+        verdict, required = self._sufficiency(
+            mission, company_ref, item["item_ref"])
+        if verdict == "insufficient":
+            return True
+        floor = max(int(held["required"]), required or 0)
+        return int(held["have"]) < floor
 
     def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
                          spec_ref: str) -> str | None:
@@ -1363,7 +1398,9 @@ class MissionSourceDiscoveryCoordinator:
                 else None)
         return None, None
 
-    def _cadence_block(self, mission_version_ref: str, company_ref: str, spec: Mapping[str, Any]) -> str | None:
+    def _cadence_block(self, mission_version_ref: str, company_ref: str,
+                       spec: Mapping[str, Any], *,
+                       use_retry_interval: bool = False) -> str | None:
         latest = self.missions.discovery_dispatches(
             mission_version_ref, company_ref=company_ref, spec_ref=spec["spec_ref"], limit=1
         )
@@ -1374,8 +1411,11 @@ class MissionSourceDiscoveryCoordinator:
         if row["status"] == "launched":
             return "previous discovery still open"
         if row["status"] == "succeeded":
-            if age < timedelta(days=spec["rediscovery_interval_days"]):
-                return f"rediscovered {age.days}d ago; interval {spec['rediscovery_interval_days']}d"
+            interval = (spec["retry_interval_days"] if use_retry_interval
+                        else spec["rediscovery_interval_days"])
+            if age < timedelta(days=interval):
+                kind = "rediscovered (shortfall retry)" if use_retry_interval else "rediscovered"
+                return f"{kind} {age.days}d ago; interval {interval}d"
             return None
         if age < timedelta(days=spec["retry_interval_days"]):
             return f"last attempt {row['status']} {age.days}d ago; retry interval {spec['retry_interval_days']}d"
@@ -1446,7 +1486,24 @@ class MissionSourceDiscoveryCoordinator:
         if self.search_launcher.running():
             return {"status": "busy", "reason": "a discovery child is still running"}
         skipped: list[dict[str, Any]] = []
-        for member in mission["universe"]:
+
+        def last_dispatch_time(member: Mapping[str, Any]) -> tuple[int, str, str]:
+            latest_times = []
+            for candidate_spec in self.plan["specs"]:
+                rows = self.missions.discovery_dispatches(
+                    mission["id"], company_ref=member["company_ref"],
+                    spec_ref=candidate_spec["spec_ref"], limit=1,
+                )
+                if rows:
+                    latest_times.append(str(rows[0]["created_at"]))
+            if not latest_times:
+                return (0, "", "")
+            return (1, max(latest_times), str(member["company_ref"]))
+
+        # Rotate companies by their last attempted discovery so an incomplete
+        # first company cannot monopolize every newly-opened retry window.
+        members = sorted(mission["universe"], key=last_dispatch_time)
+        for member in members:
             company_ref = member["company_ref"]
             if company_ref not in self.plan["companies"]:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})

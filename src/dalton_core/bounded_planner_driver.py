@@ -436,6 +436,19 @@ class BoundedPlannerDriver:
                         "kind": "hold",
                         "reason": f"probe_transport_unavailable:{type(exc).__name__}",
                     }
+                error = envelope.get("error") if isinstance(envelope, Mapping) else None
+                if (
+                    envelope.get("status") == "failed"
+                    and isinstance(error, Mapping)
+                    and error.get("code") == "ALPHAENGINE_PROBE_BUDGET_EXCEEDED"
+                ):
+                    # A rolling-window refusal expires without changing the
+                    # admitted work.  Keep the round open so a later tick can
+                    # retry it instead of recording a permanent source miss.
+                    return {
+                        "kind": "hold",
+                        "reason": "alphaengine_quota_window_exhausted",
+                    }
                 lease = scheduler.claim(WORKER_REF, work_order_id=work_id)
                 if lease is None:
                     raise BoundedPlannerDriverError(

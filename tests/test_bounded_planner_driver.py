@@ -460,6 +460,30 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.assertEqual(entry["outcome_kind"], "observed")
         self.assertEqual(len(authority.outcomes(self.loop["id"])), 1)
 
+    def test_a_rolling_quota_refusal_holds_then_resumes_same_round(self) -> None:
+        from unittest.mock import patch
+
+        from dalton_core.writer_server import write_token_config
+        write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
+        driver = self._driver(FakeTransport(FakeResponse(200, company_facts_body())))
+        quota = {
+            "status": "failed",
+            "error": {"code": "ALPHAENGINE_PROBE_BUDGET_EXCEEDED", "message": "window full"},
+        }
+        with patch(
+            "dalton_core.bounded_planner_driver.execute_probe_work_order",
+            return_value=quota,
+        ):
+            first = driver.run_once()
+        self.assertEqual(first["probes_executed"], 0)
+        held = first["skipped"][0]
+        self.assertEqual(held["reason"], "alphaengine_quota_window_exhausted")
+
+        second = driver.run_once()
+        self.assertEqual(second["probes_executed"], 1)
+        self.assertEqual(second["executed"][0]["round_ref"], held["round_ref"])
+        self.assertTrue(second["executed"][0]["resumed"])
+
     def test_driver_runs_loop_to_terminal_one_probe_per_tick(self) -> None:
         from dalton_core.writer_server import write_token_config
         write_token_config(self.root / "tokens.json", list(self.server.principals.values()))

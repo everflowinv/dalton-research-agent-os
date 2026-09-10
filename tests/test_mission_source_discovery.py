@@ -591,6 +591,24 @@ class CoordinatorTests(unittest.TestCase):
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["company_ref"], ACN)
 
+    def test_successful_search_below_floor_retries_after_short_interval(self) -> None:
+        v1 = self.create_mission()
+        self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.coordinator.dispatch_once()  # ACN
+        self.coordinator.dispatch_once()  # settle ACN, launch CTSH
+        tick = self.coordinator.dispatch_once()  # settle CTSH; both are in cadence
+        self.assertEqual(tick["discovery"]["status"], "idle")
+        self.assertTrue(any("shortfall retry" in row["reason"]
+                            for row in tick["discovery"]["skipped"]))
+        self.clock.advance(days=2)
+        launched = []
+        for _ in range(2):
+            tick = self.coordinator.dispatch_once()
+            if tick["discovery"]["status"] == "launched":
+                launched.append(tick["discovery"]["company_ref"])
+        self.assertIn(CTSH, launched)
+
     def test_acquired_document_enters_human_extraction_review_queue(self) -> None:
         v1 = self.create_mission()
         self.mission_v2(v1)
