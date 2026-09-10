@@ -96,6 +96,18 @@
       "max_output_tokens": 3000,
       "timeout_seconds": 180
     },
+    "investment_memo": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 6000,
+      "timeout_seconds": 300
+    },
+    "investment_memo_verifier": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 6000,
+      "timeout_seconds": 300
+    },
     "model_spec": {
       "max_cost_usd": 2.5,
       "max_input_tokens": 120000,

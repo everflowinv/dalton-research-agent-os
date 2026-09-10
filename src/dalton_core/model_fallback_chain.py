@@ -138,6 +138,8 @@ _PURPOSE_TIERS: dict[str, str] = {
     "deep_insight_gate_verifier": TIER_VERIFIER,
     "industry_framework": TIER_BRAIN,
     "industry_framework_verifier": TIER_VERIFIER,
+    "investment_memo": TIER_BRAIN,
+    "investment_memo_verifier": TIER_VERIFIER,
     "earnings_preview": TIER_BRAIN,
     "earnings_preview_verifier": TIER_VERIFIER,
     "earnings_calibration": TIER_BRAIN,

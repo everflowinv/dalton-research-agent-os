@@ -19,6 +19,10 @@
     "research_task": {
       "max_admissions_per_tick": 1,
       "max_rounds": 4
+    },
+    "investment_memo": {
+      "max_cost_usd": 5.0,
+      "max_units": 4
     }
   },
   "schema_version": "0.1"
