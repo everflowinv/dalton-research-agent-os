@@ -8,9 +8,13 @@ real `ModelRouter.route` decisions against that copy. No broker transport or
 model was called. No live file or database was changed, and no credential value
 was read or printed.
 
-The WorkOrder used the proposed event contract exactly: 5,000 maximum input
-bytes (conservatively presented to the router as 5,000 input tokens), 700 output
-tokens, 180 seconds, and a $0.10 per-call ceiling. It used the routing policies
+The original check used the then-proposed 5,000-byte / 700-token / $0.10
+contract. That contract is historical: the owner subsequently authorized a
+$1 per-call ceiling so the event lane can retain its full evidence context.
+
+The current check used the replacement contract exactly: 60,000 maximum input
+bytes (conservatively presented to the router as 60,000 input tokens), 1,500
+output tokens, 180 seconds, and the authorized $1 per-call ceiling. It used the routing policies
 actually referenced by the installed `event-judgement-model-config.json` and
 `event-verifier-model-config.json`.
 
@@ -18,24 +22,24 @@ actually referenced by the installed `event-judgement-model-config.json` and
 
 The installed producer policy selected `openai/gpt-6-astra`, family
 `openai-gpt-6`. Its current public rate card is $10/M input and $50/M output,
-giving a worst-case reservation of **$0.085000**. The other configured brain
+giving a worst-case reservation of **$0.675000**. The other configured brain
 fallback, `claude-cli-gateway/claude-fable-5-1`, has the same public rates and
-the same **$0.085000** reservation. Both are below the unchanged $0.10 cap.
+the same **$0.675000** reservation. Both are below the authorized $1 cap.
 
 The installed verifier policy has three live, priced links:
 
 | Profile | Family | Maximum reservation | Result |
 | --- | --- | ---: | --- |
-| `profile:claude-fable-5-1` | `anthropic-claude-5` | $0.085000 | admitted unless producer is Anthropic |
-| `profile:zai-glm-5-3` | `zhipu-glm-5.3` | $0.010080 | admitted unless producer is Zhipu |
-| `profile:gemini-3-5-flash-lite` | `google-gemini-3` | $0.003250 | admitted unless producer is Google |
+| `profile:claude-fable-5-1` | `anthropic-claude-5` | $0.675000 | admitted unless producer is Anthropic |
+| `profile:zai-glm-5-3` | `zhipu-glm-5.3` | $0.090600 | admitted unless producer is Zhipu |
+| `profile:gemini-3-5-flash-lite` | `google-gemini-3` | $0.021750 | admitted unless producer is Google |
 
 Real routing on the temporary copy produced these decisions:
 
-- OpenAI producer → Claude verifier at $0.085000.
-- Anthropic producer → Claude was excluded and ZAI was selected at $0.010080.
-- Zhipu producer → ZAI was excluded and Claude was selected at $0.085000.
-- Google producer → Gemini was excluded and Claude was selected at $0.085000.
+- OpenAI producer → Claude verifier at $0.675000.
+- Anthropic producer → Claude was excluded and ZAI was selected at $0.090600.
+- Zhipu producer → ZAI was excluded and Claude was selected at $0.675000.
+- Google producer → Gemini was excluded and Claude was selected at $0.675000.
 - An unclassified producer family → routing was rejected before selection.
 
 Thus every family that can currently produce through the installed brain policy
