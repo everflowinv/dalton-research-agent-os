@@ -564,9 +564,12 @@ def _parameters_for(
             # An industry-wide inquiry has no CIK, so the filings index has
             # nothing to look up.  Absent, not faked.
             return None
+        # A company ref carries the CIK as it was written; the EDGAR locator
+        # wants exactly ten digits.  DXC is the live universe's nine-digit
+        # ref, and an unpadded locator is a 404 the day the grant opens.
         return {
             "source_ref": "source:sec-edgar",
-            "locator": f"company-facts/CIK{matched.group(1)}",
+            "locator": f"company-facts/CIK{matched.group(1).zfill(10)}",
             # The executor reads concept candidates and the form out of these.
             "query_terms": [
                 "Revenues",

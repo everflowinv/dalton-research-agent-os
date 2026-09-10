@@ -654,3 +654,15 @@ class UngrantedChildTests(ResearchTaskFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CikPaddingTests(unittest.TestCase):
+    def test_a_nine_digit_cik_is_padded_to_the_ten_edgar_wants(self) -> None:
+        from dalton_core.research_task import _parameters_for
+
+        template = {"operation": "get_company_facts", "id": "probe-template:sec:1"}
+        params = _parameters_for(template, "company:sec-cik:000167...".replace("...", "8925"))
+        self.assertIsNotNone(params)
+        self.assertEqual(params["locator"], "company-facts/CIK0001678925")
+        ten = _parameters_for(template, "company:sec-cik:0001467373")
+        self.assertEqual(ten["locator"], "company-facts/CIK0001467373")
