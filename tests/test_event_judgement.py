@@ -436,7 +436,7 @@ class VerifierTests(JudgementHarness):
     def test_a_model_failure_preserves_its_exact_scheduler_trace(self):
         context = self.context()
         trace = {"schema_version": "0.1", "purpose": PURPOSE,
-                 "base_request_id": "r1", "work_order_ref": "work:cockpit-event_judgement-" + "c" * 32,
+                 "base_request_id": "r1", "work_request_id": "r1", "work_order_ref": "work:cockpit-event_judgement-" + "c" * 32,
                  "work_order_hash": "a" * 64,
                  "formal_result_envelope_hash": "b" * 64}
         model = FakeModel([CockpitModelError("host failed", failure_trace=trace)])

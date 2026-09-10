@@ -37,8 +37,8 @@ from .openclaw_model_adapter import (
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
 )
-from .scheduler import Scheduler
-from .store import content_hash
+from .scheduler import Scheduler, SchedulerConflict
+from .store import canonical_json, content_hash
 from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .thesis_impact_budget import ThesisImpactBudgetError, ThesisImpactBudgetStore
 
@@ -151,7 +151,7 @@ def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
     trace = getattr(exc, "failure_trace", None)
     if not isinstance(trace, Mapping) or set(trace) != {
         "schema_version", "purpose", "base_request_id", "work_order_ref",
-        "work_order_hash", "formal_result_envelope_hash",
+        "work_request_id", "work_order_hash", "formal_result_envelope_hash",
     }:
         return None
     copied = dict(trace)
@@ -160,6 +160,8 @@ def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
         or copied["purpose"] not in _PURPOSES
         or not isinstance(copied["base_request_id"], str)
         or not 1 <= len(copied["base_request_id"]) <= 512
+        or not isinstance(copied["work_request_id"], str)
+        or not 1 <= len(copied["work_request_id"]) <= 600
         or re.fullmatch(
             r"work:cockpit-[a-z0-9_]+-[0-9a-f]{32}",
             str(copied["work_order_ref"]),
@@ -177,17 +179,58 @@ def _failed_work_trace(scheduler: Any, work: WorkOrder, *, purpose: str,
                        request_id: str) -> dict[str, Any] | None:
     """Bind a surfaced failure to Scheduler's immutable WorkOrder and result."""
 
-    formal = scheduler.formal_result(work.id)
-    if formal is None or formal.get("terminal_state") != "failed":
+    row = scheduler.connection.execute(
+        "SELECT * FROM scheduler_formal_results WHERE work_order_id=?", (work.id,)
+    ).fetchone()
+    if row is None:
         return None
-    authority = scheduler.work_order_authority(work.id)
-    envelope_hash = formal.get("result_envelope_hash")
-    if authority is None or not isinstance(envelope_hash, str):
+    try:
+        formal = dict(row)
+        envelope_wire = json.loads(formal["result_envelope_json"])
+        envelope_hash = content_hash(envelope_wire)
+        formal_wire = {
+            "id": formal["result_record_id"],
+            "work_order_id": formal["work_order_id"],
+            "attempt_number": formal["attempt_number"],
+            "result_envelope_id": formal["result_envelope_id"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+            "terminal_state": formal["terminal_state"],
+            "created_at": formal["created_at"],
+        }
+        authority = scheduler.work_order_authority(work.id)
+    except (KeyError, TypeError, ValueError, SchedulerConflict):
+        return None
+    if (
+        authority is None
+        or formal["terminal_state"] != "failed"
+        or formal["work_order_id"] != work.id
+        or envelope_wire.get("work_order_ref") != work.id
+        or envelope_wire.get("id") != formal["result_envelope_id"]
+        or envelope_wire.get("status") != "failed"
+        or canonical_json(envelope_wire) != formal["result_envelope_json"]
+        or envelope_hash != formal["result_envelope_hash"]
+        or content_hash(formal_wire) != formal["content_hash"]
+    ):
+        return None
+    metadata = authority["work_order"].get("metadata") or {}
+    work_request_id = metadata.get("request_id")
+    if (
+        metadata.get("control_plane") != "cockpit"
+        or metadata.get("purpose") != purpose
+        or not isinstance(work_request_id, str)
+        or not (
+            work_request_id == request_id
+            or re.fullmatch(
+                re.escape(request_id) + r":producer:[0-9a-f]{16}", work_request_id
+            ) is not None
+        )
+    ):
         return None
     return {
         "schema_version": "0.1",
         "purpose": purpose,
         "base_request_id": request_id,
+        "work_request_id": work_request_id,
         "work_order_ref": work.id,
         "work_order_hash": authority["work_order_hash"],
         "formal_result_envelope_hash": envelope_hash,

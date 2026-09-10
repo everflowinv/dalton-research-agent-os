@@ -18,11 +18,12 @@ import dalton_core.event_judgement  # noqa: F401
 from dalton_core.cockpit_model import (
     CockpitModel,
     CockpitModelError,
+    _failed_work_trace,
     build_work,
     independent_model_call,
     register_purpose,
 )
-from dalton_core.contracts import ModelInvocation, ResultEnvelope
+from dalton_core.contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from dalton_core.model_fallback_chain import register_purpose_tier, tier_chain
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
@@ -150,6 +151,7 @@ class CockpitChainTests(unittest.TestCase):
         trace = raised.exception.failure_trace
         self.assertEqual(trace["purpose"], "plan")
         self.assertEqual(trace["base_request_id"], "pinned-busy")
+        self.assertEqual(trace["work_request_id"], "pinned-busy")
         self.assertRegex(trace["work_order_ref"], r"^work:cockpit-plan-")
         self.assertRegex(trace["work_order_hash"], r"^[0-9a-f]{64}$")
         self.assertRegex(trace["formal_result_envelope_hash"], r"^[0-9a-f]{64}$")
@@ -159,6 +161,57 @@ class CockpitChainTests(unittest.TestCase):
                 "SELECT actual_micros FROM thesis_impact_day_settlements"
             ).fetchone()
         self.assertEqual(settlement[0], 0)
+
+    def test_failure_trace_rejects_corrupt_formal_authority(self) -> None:
+        adapter = BusyThenAvailableAdapter({})
+        with self.assertRaises(CockpitModelError) as raised:
+            self._model(adapter, policy_version_ref=self.pinned_policy).call(
+                purpose="plan", request_id="trace-authority", prompt="draft",
+                mission=self.mission,
+            )
+        work_ref = raised.exception.failure_trace["work_order_ref"]
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            authority = scheduler.work_order_authority(work_ref)
+            work = WorkOrder.from_dict(authority["work_order"])
+            original = dict(scheduler.connection.execute(
+                "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+                (work_ref,),
+            ).fetchone())
+            # Fault injection: production schema makes these rows immutable.
+            scheduler.connection.execute("DROP TRIGGER scheduler_result_no_update")
+            mutations = [
+                ("result_envelope_hash", "0" * 64),
+                ("terminal_state", "succeeded"),
+                ("content_hash", "0" * 64),
+            ]
+            envelope = json.loads(original["result_envelope_json"])
+            envelope["work_order_ref"] = "work:cockpit-plan-" + "f" * 32
+            mutations.append(("result_envelope_json", json.dumps(
+                envelope, sort_keys=True, separators=(",", ":"))))
+            for column, value in mutations:
+                scheduler.connection.execute(
+                    f"UPDATE scheduler_formal_results SET {column}=? WHERE work_order_id=?",
+                    (value, work_ref),
+                )
+                self.assertIsNone(_failed_work_trace(
+                    scheduler, work, purpose="plan", request_id="trace-authority"))
+                scheduler.connection.execute(
+                    "UPDATE scheduler_formal_results SET "
+                    "result_record_id=?,attempt_number=?,result_envelope_id=?,"
+                    "result_envelope_hash=?,result_envelope_json=?,terminal_state=?,"
+                    "content_hash=?,created_at=? WHERE work_order_id=?",
+                    (original["result_record_id"], original["attempt_number"],
+                     original["result_envelope_id"], original["result_envelope_hash"],
+                     original["result_envelope_json"], original["terminal_state"],
+                     original["content_hash"], original["created_at"], work_ref),
+                )
+            scheduler.connection.execute("DROP TRIGGER scheduler_work_no_update")
+            scheduler.connection.execute(
+                "UPDATE scheduler_work_orders SET work_order_hash=? WHERE work_order_id=?",
+                ("0" * 64, work_ref),
+            )
+            self.assertIsNone(_failed_work_trace(
+                scheduler, work, purpose="plan", request_id="trace-authority"))
 
     def test_post_send_timeout_halts_and_keeps_the_full_reservation(self) -> None:
         adapter = ChainAdapter({"profile:gpt-6-astra": BrokerTimeout("recv timed out")})
