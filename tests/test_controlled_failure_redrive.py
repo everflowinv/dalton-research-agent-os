@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
+import sqlite3
 import tempfile
+import shutil
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,11 +32,20 @@ class ControlledFailureRedriveTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         self.openclaw_root = root / "openclaw"
-        (self.openclaw_root / "dist").mkdir(parents=True)
-        (self.openclaw_root / "package.json").write_text(
-            '{"version":"2026.9.3"}', encoding="utf-8")
-        (self.openclaw_root / "dist" / "simple-completion-execution-test.mjs").write_text(
-            PATCHED + "\n" + PATCHED_BIND, encoding="utf-8")
+        installed = Path(
+            "/Users/everflow/.openclaw/tools/node/lib/node_modules/openclaw")
+        if not installed.exists():
+            self.skipTest("reviewed OpenClaw fixture source is unavailable")
+        for relative in (
+            "package.json", "dist/simple-completion-execution-3EZC6KFA.mjs",
+            "dist/runtime-llm.runtime-DdpXXHBe.mjs",
+            "node_modules/@openclaw/ai/dist/google-shared-BedY23XS.mjs",
+        ):
+            target = self.openclaw_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(installed / relative, target)
+        from integrations.openclaw_host_patches.patch_controlled_completion_transport import apply as apply_host_patch
+        apply_host_patch(self.openclaw_root, check=False)
         self.scheduler_db = root / "scheduler.sqlite"
         self.budget_db = root / "budget.sqlite"
         self.scheduler = Scheduler(self.scheduler_db, clock=lambda: NOW)
@@ -139,6 +152,105 @@ class ControlledFailureRedriveTests(unittest.TestCase):
         with self.assertRaises(ControlledFailureRedriveError):
             prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
                     old_work_order_ref="work:missing", openclaw_root=self.openclaw_root)
+
+    def test_missing_work_mission_binding_is_ineligible(self):
+        authority = self.scheduler.work_order_authority(self.work.id)
+        wire = authority["work_order"]
+        wire["metadata"] = {}
+        encoded = json.dumps(wire, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        self.scheduler.connection.execute("DROP TRIGGER scheduler_work_no_update")
+        self.scheduler.connection.execute(
+            "UPDATE scheduler_work_orders SET work_order_json=?,work_order_hash=? WHERE work_order_id=?",
+            (encoded, content_hash(wire), self.work.id),
+        )
+        self.scheduler.connection.commit()
+        with self.assertRaisesRegex(ControlledFailureRedriveError, "mission bindings disagree"):
+            prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                    old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+
+    def test_apply_is_convergent_across_two_connections(self):
+        candidate = prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+        barrier = threading.Barrier(2)
+        outcomes = []
+        errors = []
+
+        def run():
+            try:
+                barrier.wait()
+                outcomes.append(apply(
+                    scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                    candidate=candidate, expected_candidate_hash=candidate["candidate_hash"],
+                )["status"])
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertCountEqual(outcomes, ["fresh", "duplicate"])
+
+    def test_approved_request_fails_closed_on_host_or_correction_drift(self):
+        candidate = prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+        apply(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+              candidate=candidate, expected_candidate_hash=candidate["candidate_hash"])
+        formal = self.scheduler.formal_result(self.work.id)
+        bundle = Path(candidate["repair"]["bundle_path"])
+        original = bundle.read_bytes()
+        bundle.write_bytes(original + b"\n")
+        self.assertIsNone(approved_request(
+            self.scheduler_db, self.budget_db, old_work_order_ref=self.work.id,
+            formal=formal, mission=self.mission,
+        ))
+        bundle.write_bytes(original)
+        self.budget.connection.execute(
+            "DROP TRIGGER thesis_impact_settlement_corrections_no_delete"
+        )
+        self.budget.connection.execute("DELETE FROM thesis_impact_settlement_corrections")
+        self.budget.connection.commit()
+        self.assertIsNone(approved_request(
+            self.scheduler_db, self.budget_db, old_work_order_ref=self.work.id,
+            formal=formal, mission=self.mission,
+        ))
+
+    def test_original_and_patched_host_blocks_are_rejected(self):
+        candidate = prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+        bundle = Path(candidate["repair"]["bundle_path"])
+        bundle.write_text(bundle.read_text("utf-8") + "\n" +
+                          "\tif (runtime) completionModel = bindModelLlmRuntime(completionModel, runtime);\n",
+                          "utf-8")
+        with self.assertRaisesRegex(ControlledFailureRedriveError, "not installed"):
+            prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                    old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+
+    def test_read_only_open_refuses_unprovisioned_wal_without_side_effects(self):
+        copied = self.scheduler_db.parent / "wal-header.sqlite"
+        copied.write_bytes(self.scheduler_db.read_bytes())
+        payload = bytearray(copied.read_bytes())
+        payload[18:20] = b"\x02\x02"
+        copied.write_bytes(payload)
+        before = sorted(path.name for path in copied.parent.iterdir())
+        with self.assertRaises(sqlite3.OperationalError):
+            prepare(scheduler_db=copied, budget_db=self.budget_db,
+                    old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+        self.assertEqual(sorted(path.name for path in copied.parent.iterdir()), before)
+
+    def test_approved_request_fails_closed_when_correction_schema_is_absent(self):
+        candidate = prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+        apply(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+              candidate=candidate, expected_candidate_hash=candidate["candidate_hash"])
+        old_budget = self.scheduler_db.parent / "old-budget.sqlite"
+        sqlite3.connect(old_budget).close()
+        self.assertIsNone(approved_request(
+            self.scheduler_db, old_budget, old_work_order_ref=self.work.id,
+            formal=self.scheduler.formal_result(self.work.id), mission=self.mission,
+        ))
 
 
 if __name__ == "__main__":

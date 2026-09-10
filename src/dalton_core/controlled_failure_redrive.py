@@ -10,10 +10,32 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .store import canonical_json, content_hash
+from .readonly_sqlite import connect_read_only
 from .thesis_impact_budget import ThesisImpactBudgetStore
 
 ACTOR = "automation:operator-recovery"
 ELIGIBLE_CODES = frozenset({"HOST_COMPLETION_FAILED", "HOST_CONTROL_PROOF_MISSING"})
+_REVIEWED_HOST_HASHES = {
+    "completion_bundle": "49dda99ac8a3c036b2cafdd9c9b28e849868fa706efcc4cd015882c331596ed8",
+    "runtime_proof": "26918355da740418539934495ab4612fe8e37aceb7ba8d26c27583709b5e1c68",
+    "native_google_controls": "afa619910da140d3c2c95ae24076bbb20eb3a44a48da0d65b95517c0545c9859",
+}
+
+_ORIGINAL_TRANSPORT = """\tlet completionModel = getModelCompletionTransport(params.model) ?? prepareModelForSimpleCompletion({
+\t\tapiRegistry: runtime?.registry ?? defaultApiRegistry,
+\t\tmodel: params.model,
+\t\tcfg: params.cfg
+\t});"""
+_PATCHED_TRANSPORT = """\tconst controlledTransport = params.options?.providerControls !== void 0;
+\tconst boundCompletionTransport = getModelCompletionTransport(params.model);
+\tlet completionModel = controlledTransport ? { ...params.model } : boundCompletionTransport ?? prepareModelForSimpleCompletion({
+\t\tapiRegistry: runtime?.registry ?? defaultApiRegistry,
+\t\tmodel: params.model,
+\t\tcfg: params.cfg
+\t});
+\tif (controlledTransport && getModelLlmRuntime(completionModel)) throw new Error("Controlled completion retained a host-bound transport");"""
+_ORIGINAL_BIND = "\tif (runtime) completionModel = bindModelLlmRuntime(completionModel, runtime);"
+_PATCHED_BIND = "\tif (runtime && !controlledTransport) completionModel = bindModelLlmRuntime(completionModel, runtime);"
 
 
 class ControlledFailureRedriveError(RuntimeError):
@@ -32,14 +54,20 @@ def installed_repair(openclaw_root: str | Path) -> dict[str, str]:
             raise ValueError("managed completion bundle is ambiguous")
         bundle = matches[0]
         source = bundle.read_text("utf-8")
-        anchors = (
-            "const controlledTransport = params.options?.providerControls !== void 0;",
-            "controlledTransport ? { ...params.model } : boundCompletionTransport",
-            "if (runtime && !controlledTransport) completionModel = bindModelLlmRuntime",
-            'throw new Error("Controlled completion retained a host-bound transport")',
-        )
-        if any(source.count(anchor) != 1 for anchor in anchors):
-            raise ValueError("controlled transport patch anchors are absent or duplicated")
+        runtime = root / "dist" / "runtime-llm.runtime-DdpXXHBe.mjs"
+        google = root / "node_modules" / "@openclaw" / "ai" / "dist" / "google-shared-BedY23XS.mjs"
+        if (source.count(_PATCHED_TRANSPORT) != 1
+                or source.count(_PATCHED_BIND) != 1
+                or source.count(_ORIGINAL_TRANSPORT) != 0
+                or source.count(_ORIGINAL_BIND) != 0):
+            raise ValueError("controlled transport patch is absent, partial, or duplicated")
+        observed = {
+            "completion_bundle": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+            "runtime_proof": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            "native_google_controls": hashlib.sha256(google.read_bytes()).hexdigest(),
+        }
+        if observed != _REVIEWED_HOST_HASHES:
+            raise ValueError("managed host bytes differ from the reviewed repair set")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise ControlledFailureRedriveError(
             "managed OpenClaw controlled transport repair is not installed"
@@ -49,6 +77,10 @@ def installed_repair(openclaw_root: str | Path) -> dict[str, str]:
         "openclaw_version": "2026.9.3",
         "bundle_path": str(bundle),
         "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+        "runtime_proof_path": str(runtime),
+        "runtime_proof_sha256": observed["runtime_proof"],
+        "native_google_controls_path": str(google),
+        "native_google_controls_sha256": observed["native_google_controls"],
         "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
     }
 
@@ -65,8 +97,7 @@ def _eligible_code(envelope: Mapping[str, Any]) -> str | None:
 
 def prepare(*, scheduler_db: str | Path, budget_db: str | Path,
             old_work_order_ref: str, openclaw_root: str | Path) -> dict[str, Any]:
-    uri = f"file:{Path(scheduler_db).resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as connection:
+    with connect_read_only(scheduler_db) as connection:
         connection.row_factory = sqlite3.Row
         formal = connection.execute(
             "SELECT attempt_number,result_envelope_id,result_envelope_hash,"
@@ -91,8 +122,7 @@ def prepare(*, scheduler_db: str | Path, budget_db: str | Path,
     if (canonical_json(work_wire) != work["work_order_json"]
             or content_hash(work_wire) != work["work_order_hash"]):
         raise ControlledFailureRedriveError("old WorkOrder authority is invalid")
-    budget_uri = f"file:{Path(budget_db).resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(budget_uri, uri=True) as budget_connection:
+    with connect_read_only(budget_db) as budget_connection:
         budget_connection.row_factory = sqlite3.Row
         rows = budget_connection.execute(
             "SELECT a.admission_id,a.content_hash AS admission_hash,a.reserved_micros,"
@@ -111,6 +141,13 @@ def prepare(*, scheduler_db: str | Path, budget_db: str | Path,
     mission_hash = binding.get("mission_version_hash")
     if not isinstance(mission_ref, str) or not isinstance(mission_hash, str):
         raise ControlledFailureRedriveError("cost authority has no exact mission binding")
+    metadata = work_wire.get("metadata") or {}
+    if (metadata.get("mission_version_ref") != mission_ref
+            or (metadata.get("mission_version_hash") is not None
+                and metadata.get("mission_version_hash") != mission_hash)):
+        raise ControlledFailureRedriveError(
+            "WorkOrder and cost authority mission bindings disagree"
+        )
     if row["actual_micros"] >= row["reserved_micros"]:
         raise ControlledFailureRedriveError("old work has no conservatively correctable cost authority")
     candidate = {
@@ -191,10 +228,12 @@ def apply(*, scheduler_db: str | Path, budget_db: str | Path,
 
 def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_work_order_ref: str,
                      formal: Mapping[str, Any], mission: Mapping[str, Any]) -> str | None:
-    connection = sqlite3.connect(f"file:{Path(scheduler_db).resolve().as_posix()}?mode=ro", uri=True)
+    connection = connect_read_only(scheduler_db)
     try:
         row = connection.execute(
-            "SELECT record_json,content_hash FROM controlled_failure_redrives WHERE old_work_order_ref=?",
+            "SELECT r.record_json,r.content_hash,w.work_order_hash "
+            "FROM controlled_failure_redrives r JOIN scheduler_work_orders w "
+            "ON w.work_order_id=r.old_work_order_ref WHERE r.old_work_order_ref=?",
             (old_work_order_ref,),
         ).fetchone()
     except sqlite3.OperationalError:
@@ -206,6 +245,7 @@ def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_wor
     record = json.loads(row[0])
     if (canonical_json(record) != row[0]
             or record.get("content_hash") != row[1]
+            or record.get("old_work_order_hash") != row[2]
             or content_hash({key: value for key, value in record.items()
                              if key != "content_hash"}) != row[1]):
         return None
@@ -219,6 +259,7 @@ def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_wor
     except (ControlledFailureRedriveError, KeyError, TypeError):
         return None
     if (formal.get("terminal_state") != "failed"
+            or content_hash(envelope) != formal.get("result_envelope_hash")
             or record.get("failure_code") != _eligible_code(envelope)
             or record.get("formal_result_envelope_hash") != formal.get("result_envelope_hash")
             or record.get("mission_version_ref") != mission.get("id")
@@ -226,13 +267,15 @@ def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_wor
             or record.get("old_work_order_ref") != old_work_order_ref
             or not repair_current):
         return None
-    budget_uri = f"file:{Path(budget_db).resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(budget_uri, uri=True) as budget_connection:
-        budget_connection.row_factory = sqlite3.Row
-        correction = budget_connection.execute(
-            "SELECT record_json,content_hash FROM thesis_impact_settlement_corrections "
-            "WHERE correction_id=?", (record["cost_correction_ref"],),
-        ).fetchone()
+    try:
+        with connect_read_only(budget_db) as budget_connection:
+            budget_connection.row_factory = sqlite3.Row
+            correction = budget_connection.execute(
+                "SELECT record_json,content_hash FROM thesis_impact_settlement_corrections "
+                "WHERE correction_id=?", (record["cost_correction_ref"],),
+            ).fetchone()
+    except (sqlite3.Error, OSError, ValueError):
+        return None
     if correction is None:
         return None
     correction_wire = json.loads(correction["record_json"])
