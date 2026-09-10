@@ -138,13 +138,15 @@ def _chart(
     numbers: Sequence[Mapping[str, Any]],
     claims: Mapping[str, Mapping[str, Any]],
     chart_id: str,
+    *,
+    subject_ref: str,
 ) -> str:
     series = []
     for item in numbers:
         if not isinstance(item, Mapping):
             continue
         claim = claims.get(item.get("claim_version_ref"))
-        if claim is None:
+        if claim is None or claim.get("subject_ref") != subject_ref:
             continue
         try:
             value = float(claim["value"])
@@ -180,20 +182,18 @@ def _chart(
         key = (
             claim.get("subject_ref"),
             claim.get("metric_or_aspect"),
-            basis,
             claim.get("unit"),
             claim.get("scale"),
             claim.get("currency"),
             grain,
-            estimate_kind,
         )
         if (
-            not all(isinstance(part, str) and part for part in key[:4])
+            not all(isinstance(part, str) and part for part in key[:3])
             or grain is None
             or estimate_kind is None
         ):
             continue
-        series.append((item, claim, value, key))
+        series.append((item, claim, value, key, estimate_kind))
     if (
         len(series) < 2
         or len({row[3] for row in series}) != 1
@@ -206,14 +206,14 @@ def _chart(
     span = high - low or 1.0
     axis = 170 + ((0.0 - low) / span * 390)
     rows = []
-    for index, (item, claim, value, _) in enumerate(series):
+    for index, (item, claim, value, _, estimate_kind) in enumerate(series):
         y = 20 + index * 58
         point = 170 + ((value - low) / span * 390)
         x, width = min(axis, point), abs(point - axis)
         rows.append(
-            f'<text x="0" y="{y + 14}" class="sl">{_esc(claim.get("period") or item.get("period") or "unknown")}</text>'
+            f'<text x="0" y="{y + 14}" class="sl">{_esc(claim.get("period") or item.get("period") or "unknown")} · {_esc(estimate_kind)}</text>'
             f'<line x1="{axis:.2f}" x2="{axis:.2f}" y1="{y-2}" y2="{y+24}" class="axis"/>'
-            f'<rect x="{x:.2f}" y="{y}" width="{width:.2f}" height="20"/>'
+            f'<rect class="{_esc(estimate_kind)}" x="{x:.2f}" y="{y}" width="{width:.2f}" height="20"/>'
             f'<text x="570" y="{y+15}" class="sv">{_esc(claim["value"])} {_esc(claim.get("currency") or "")} {_esc(claim["unit"])} {_esc(claim.get("scale") or "base")}</text>'
         )
     height = 58 * len(series) + 35
@@ -221,7 +221,7 @@ def _chart(
         f'<figure><svg role="img" aria-labelledby="{_esc(chart_id)}-title" '
         f'viewBox="0 0 700 {height}"><title id="{_esc(chart_id)}-title">'
         f'Typed Claim series: {_esc(series[0][3][1])}</title>{"".join(rows)}</svg>'
-        "<figcaption>Values come from hash-verified quantitative Claim versions with identical metric, unit, scale, and currency.</figcaption></figure>"
+        "<figcaption>Reported and estimate values are labelled separately; all values come from hash-verified quantitative Claim versions with the exact product subject and identical metric, unit, scale, and currency.</figcaption></figure>"
     )
 
 
@@ -313,6 +313,8 @@ def _assets(asset_manifest: Mapping[str, Any] | None) -> list[dict[str, str]]:
                 "caption": str(item["caption"]),
                 "refs": ", ".join(refs),
                 "sha256": digest,
+                "media_type": media,
+                "source_refs": list(refs),
             }
         )
     return out
@@ -366,7 +368,7 @@ def render_research_html(
                 if isinstance(n, Mapping)
             )
             chunks.append(
-                f'<article><h3>{_esc(section.get("title") or "Untitled")}</h3><p class="prose">{_esc(section.get("body") or "Unknown / unavailable")}</p>{_chart(nums, claims, f"chart-{pi}-{si}") if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>Period</th><th>Value in authority text</th><th>Authority ref</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<p class="refs">Sources: {_esc(", ".join(_source_text(ref) for ref in refs) if refs else "unknown / unavailable")}</p><p class="gaps">Gaps: {_esc("; ".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "none recorded")}</p></article>'
+                f'<article><h3>{_esc(section.get("title") or "Untitled")}</h3><p class="prose">{_esc(section.get("body") or "Unknown / unavailable")}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>Period</th><th>Value in authority text</th><th>Authority ref</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<p class="refs">Sources: {_esc(", ".join(_source_text(ref) for ref in refs) if refs else "unknown / unavailable")}</p><p class="gaps">Gaps: {_esc("; ".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "none recorded")}</p></article>'
             )
         if not chunks:
             chunks = [
@@ -377,7 +379,7 @@ def render_research_html(
         f'<figure><img src="{a["data"]}" alt="{_esc(a["caption"])}"><figcaption>{_esc(a["caption"])} · {_esc(a["refs"])} · user-supplied local figure · sha256 {_esc(a["sha256"])}</figcaption></figure>'
         for a in assets
     )
-    css = """body{margin:0;background:#f5f5f7;color:#1d1d1f;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:980px;margin:auto;padding:48px 24px}h1{font-size:42px}h2{border-top:1px solid #ccc;padding-top:32px}article{background:white;border-radius:18px;padding:24px;margin:18px 0;box-shadow:0 2px 18px #0001}.meta,.refs,figcaption{color:#666;font-size:13px;overflow-wrap:anywhere}.approval{font-weight:700}.prose{white-space:pre-wrap}.unavailable,.gaps{background:#fff4ce;padding:10px;border-radius:8px}.tablewrap{overflow:auto}table{border-collapse:collapse;min-width:620px;width:100%}th,td{text-align:left;padding:8px;border-bottom:1px solid #ddd}svg{width:100%;height:auto}rect{fill:#147ce5}.sl,.sv{font-size:12px;fill:#333}img{max-width:100%;height:auto}@media(max-width:520px){main{padding:24px 14px}h1{font-size:32px}article{padding:16px}}@media print{body{background:#fff}article{box-shadow:none;border:1px solid #ddd;break-inside:avoid}nav{break-after:page}}"""
+    css = """body{margin:0;background:#f5f5f7;color:#1d1d1f;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:980px;margin:auto;padding:48px 24px}h1{font-size:42px}h2{border-top:1px solid #ccc;padding-top:32px}article{background:white;border-radius:18px;padding:24px;margin:18px 0;box-shadow:0 2px 18px #0001}.meta,.refs,figcaption{color:#666;font-size:13px;overflow-wrap:anywhere}.approval{font-weight:700}.prose{white-space:pre-wrap}.unavailable,.gaps{background:#fff4ce;padding:10px;border-radius:8px}.tablewrap{overflow:auto}table{border-collapse:collapse;min-width:620px;width:100%}th,td{text-align:left;padding:8px;border-bottom:1px solid #ddd}svg{width:100%;height:auto}rect.actual{fill:#147ce5}rect.estimate{fill:#8e8e93}.sl,.sv{font-size:12px;fill:#333}img{max-width:100%;height:auto}@media(max-width:520px){main{padding:24px 14px}h1{font-size:32px}article{padding:16px}}@media print{body{background:#fff}article{box-shadow:none;border:1px solid #ddd;break-inside:avoid}nav{break-after:page}}"""
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
         + _esc(company)
@@ -402,6 +404,27 @@ def render_research_html(
         )
         + "</main></body></html>\n"
     )
+
+
+def _manifest_claims(
+    library: Mapping[str, Any], claims: Mapping[str, Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    """List only claim versions eligible for the exact product that cites them."""
+    refs: dict[str, str] = {}
+    for product in library.get("products") or []:
+        subject_ref = product.get("subject_ref")
+        for section in product.get("sections") or []:
+            for number in section.get("numbers") or []:
+                if not isinstance(number, Mapping):
+                    continue
+                ref = number.get("claim_version_ref")
+                claim = claims.get(ref)
+                if claim is not None and claim.get("subject_ref") == subject_ref:
+                    refs[ref] = claim["content_hash"]
+    return [
+        {"version_ref": ref, "content_hash": refs[ref]}
+        for ref in sorted(refs)
+    ]
 
 
 def export_research_html(
@@ -449,17 +472,25 @@ def export_research_html(
         }
         if target in asset_paths or manifest_target in asset_paths:
             raise ResearchHtmlExportError("output paths collide with an input or each other")
-    page = render_research_html(
-        library, mission=mission, claims=claims, assets=_assets(manifest)
-    )
+    assets = _assets(manifest)
+    page = render_research_html(library, mission=mission, claims=claims, assets=assets)
     raw = page.encode()
     result = {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
         "company_ref": company_ref,
         "mission_version_ref": mission["id"],
         "mission_version_hash": mission["content_hash"],
         "html_file": target.name,
         "html_sha256": hashlib.sha256(raw).hexdigest(),
+        "source_claims": _manifest_claims(library, claims),
+        "assets": [
+            {
+                "sha256": asset["sha256"],
+                "media_type": asset["media_type"],
+                "source_refs": asset["source_refs"],
+            }
+            for asset in assets
+        ],
         "product_versions": [
             {
                 "kind": p["kind"],

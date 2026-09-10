@@ -6,6 +6,7 @@ from dalton_core.research_html_export import (
     export_research_html,
     ResearchHtmlExportError,
     _typed_claims,
+    _manifest_claims,
 )
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.cockpit_research_library import research_library
@@ -27,6 +28,7 @@ class HtmlRenderTests(unittest.TestCase):
             "products": [
                 {
                     "kind": "investment_memo",
+                    "subject_ref": "company:acn",
                     "label": "Investment Memo",
                     "status": "available",
                     "mission_binding": "current",
@@ -192,12 +194,23 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         }
         claims = _typed_claims(fixture.store.connection, library)
         self.assertEqual(set(claims), set(refs))
+        self.assertEqual(
+            _manifest_claims(
+                {"products": [{"subject_ref": "company:sec-cik:0001467373",
+                                "sections": [{"numbers": [
+                                    {"claim_version_ref": ref} for ref in refs]}]}]},
+                claims,
+            ),
+            [{"version_ref": ref, "content_hash": claims[ref]["content_hash"]}
+             for ref in sorted(refs)],
+        )
         page = render_research_html(
             {
                 "company_ref": "company:sec-cik:0001467373",
                 "products": [
                     {
                         "kind": "memo",
+                        "subject_ref": "company:sec-cik:0001467373",
                         "label": "Memo",
                         "status": "available",
                         "sections": [
@@ -217,6 +230,52 @@ class RealReadonlyExportTests(ResearchTaskFixture):
             claims=claims,
         )
         self.assertIn("Typed Claim series: revenue", page)
+
+    def test_wrong_subject_claims_cannot_render_as_company_chart(self):
+        fixture = LedgerFixture()
+        self.addCleanup(fixture.close)
+        refs = [
+            fixture.add_claim(
+                f"claim:html:wrong-subject:{period}",
+                subject_ref="company:sec-cik:0000789019",
+                value=value,
+                unit="usd",
+                metric="revenue",
+                period=period,
+            )["claim_version_id"]
+            for value, period in ((10, "2025"), (12, "2026"))
+        ]
+        library = {
+            "company_ref": "company:sec-cik:0001467373",
+            "products": [{
+                "kind": "memo", "label": "Memo", "status": "available",
+                "subject_ref": "company:sec-cik:0001467373",
+                "sections": [{"title": "Revenue", "body": "Series",
+                              "numbers": [{"claim_version_ref": ref} for ref in refs]}],
+            }],
+        }
+        claims = _typed_claims(fixture.store.connection, library)
+        page = render_research_html(library, mission=self.mission, claims=claims)
+        self.assertIn("Chart unavailable", page)
+        self.assertNotIn("<svg", page)
+
+    def test_reported_and_estimate_values_share_chart_with_explicit_labels(self):
+        mission, library = HtmlRenderTests().fixture()
+        claims = {
+            "claim:1": {"id": "claim:1", "subject_ref": "company:acn",
+                        "value": "10", "unit": "usd", "scale": "billion",
+                        "currency": "USD", "metric_or_aspect": "revenue",
+                        "period": "FY2025", "basis": "reported"},
+            "claim:2": {"id": "claim:2", "subject_ref": "company:acn",
+                        "value": "12", "unit": "usd", "scale": "billion",
+                        "currency": "USD", "metric_or_aspect": "revenue",
+                        "period": "FY2026", "basis": "forecast"},
+        }
+        page = render_research_html(library, mission=mission, claims=claims)
+        self.assertIn('<rect class="actual"', page)
+        self.assertIn('<rect class="estimate"', page)
+        self.assertIn("FY2025 · actual", page)
+        self.assertIn("FY2026 · estimate", page)
 
 
 class PublishedAuthorityExportTests(unittest.TestCase):
@@ -351,6 +410,14 @@ class PublishedAuthorityExportTests(unittest.TestCase):
                 "manifest_output": self.chain.root / "same.html",
             },
         )
+        exported = export_research_html(
+            database, self.company, self.chain.root / "assets-ok.html",
+            mission_ref=self.mission["mission_ref"], asset_manifest=manifest,
+        )
+        self.assertEqual(exported["assets"], [{
+            "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+            "media_type": "image/png", "source_refs": ["claim:fixture"],
+        }])
         for overrides in cases:
             with self.subTest(overrides=overrides), self.assertRaisesRegex(
                 ResearchHtmlExportError, "collide"
