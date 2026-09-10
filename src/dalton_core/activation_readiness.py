@@ -266,7 +266,14 @@ def audit(*, core_db: Path, state_dir: Path, mission_ref: str | None = None) -> 
                                        "producer input fingerprint; current-input freshness is not provable")}
                     elif product == "debate_map":
                         current = _digest(claims)
-                        item["mission_binding"] = {"fresh": None, "reason": "DebateMapVersion has no mission binding field"}
+                        if "mission_version_ref" in record or "mission_version_hash" in record:
+                            item["mission_binding"] = {
+                                "ref": record.get("mission_version_ref"),
+                                "hash": record.get("mission_version_hash"),
+                                "fresh": (record.get("mission_version_ref") == mission.get("id")
+                                          and record.get("mission_version_hash") == mission.get("content_hash"))}
+                        else:
+                            item["mission_binding"] = {"fresh": None, "reason": "Legacy DebateMapVersion has no mission binding field"}
                         item["input_binding"] = {"method": "evidence_fingerprint",
                                                  "stored": record.get("evidence_fingerprint"),
                                                  "current": current,

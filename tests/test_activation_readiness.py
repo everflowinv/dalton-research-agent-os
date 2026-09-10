@@ -213,5 +213,21 @@ class ActivationReadinessTests(unittest.TestCase):
         refs = ["claim:中文版本", "claim:ascii", "claim:中文版本"]
         self.assertEqual(_digest(refs), evidence_fingerprint(refs))
 
+    def test_new_debate_map_requires_both_current_mission_ref_and_hash(self):
+        self.c.commit()
+        mission = json.loads(self.c.execute("SELECT record_json FROM coverage_mission_versions").fetchone()[0])
+        debate = {"id": "debate:bound", "version": 1, "subject_ref": self.company,
+                  "mission_version_ref": mission["id"], "mission_version_hash": mission["content_hash"],
+                  "evidence_fingerprint": "irrelevant-for-mission-check"}
+        for expected, digest in ((True, mission["content_hash"]), (False, "0" * 64)):
+            debate["mission_version_hash"] = digest
+            debate["content_hash"] = content_hash({k: v for k, v in debate.items() if k != "content_hash"})
+            self.c.execute("DELETE FROM debate_map_versions")
+            self.c.execute("INSERT INTO debate_map_versions VALUES(?,?,?,?,?,?)", (
+                debate["id"], self.company, "company", 1, json.dumps(debate), debate["content_hash"]))
+            self.c.commit()
+            item = audit(core_db=self.db, state_dir=self.state)["companies"][0]["products"]["debate_map"]
+            self.assertEqual(item["mission_binding"]["fresh"], expected)
+
 
 if __name__ == "__main__": unittest.main()
