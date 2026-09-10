@@ -126,10 +126,9 @@ def due_occurrences(
 ) -> list[dict[str, Any]]:
     """Every screened company's open, unwritten window.
 
-    Reads the event ledger first, because that is where a calendar window is
-    supposed to arrive.  Falls back to C1's calendar directly when the ledger
-    holds no calendar event for the company: today that is *every* company,
-    because the catalyst lane looks for a writer method that does not exist.
+    Reads the event ledger, and reads C1's calendar as well.  Both, every
+    time: the ledger is where a calendar window is supposed to arrive, and the
+    calendar is what answers on a Core where the catalyst lane has not run yet.
     The fallback is a pure read -- C1's own emitter with a collector in place
     of the writer -- so nothing is written to find out what is due.
     """
@@ -145,19 +144,27 @@ def due_occurrences(
     found = open_occurrences(
         store.connection, events, company_refs=companies, now=now, limit=limit,
     )
-    covered = {row["company_ref"] for row in found}
-    remaining = [ref for ref in companies if ref not in covered]
-    if remaining:
-        try:
-            from .catalyst_calendar import CatalystCalendarAuthority
+    # Every company goes through the fallback too, not only the ones the
+    # ledger said nothing about.  Skipping a company because the ledger already
+    # named *a* window for it would let a month-old preview hide the
+    # calibration of a call that happened yesterday -- the two-day window would
+    # close while the lane reported itself busy with the preview.  What
+    # de-duplicates is the occurrence and the window, which is the thing the
+    # two readers actually agree on.
+    seen = {(row["occurrence_ref"], row["window"]) for row in found}
+    try:
+        from .catalyst_calendar import CatalystCalendarAuthority
 
-            calendar = CatalystCalendarAuthority(store)
-        except Exception:  # noqa: BLE001 - no calendar on this Core
-            return found[:limit]
-        found += occurrences_from_calendar(
-            store.connection, calendar, company_refs=remaining, now=now,
-            limit=limit - len(found),
-        )
+        calendar = CatalystCalendarAuthority(store)
+    except Exception:  # noqa: BLE001 - no calendar on this Core
+        return found[:limit]
+    for row in occurrences_from_calendar(
+        store.connection, calendar, company_refs=companies, now=now, limit=limit,
+    ):
+        if (row["occurrence_ref"], row["window"]) in seen:
+            continue
+        seen.add((row["occurrence_ref"], row["window"]))
+        found.append(row)
     return found[:limit]
 
 

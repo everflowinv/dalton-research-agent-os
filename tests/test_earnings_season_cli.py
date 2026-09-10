@@ -15,13 +15,17 @@ import unittest
 from unittest import mock
 
 from dalton_core import earnings_season as season
+from dalton_core import mission_earnings_season_lane as lane
+from dalton_core.earnings_preview import publish_preview
 from dalton_core.earnings_season_cli import run_earnings_season
+from dalton_core.mission_deliverable import MissionDeliverableConflict
 from dalton_core.event_judgement import EventJudgementAuthority
 from dalton_core.mission_deliverable import MissionDeliverableAuthority
 from dalton_core.model_forecast_driver import ForecastModelAuthority
 from dalton_core.research_event import ResearchEventAuthority, record_event
-from tests.p14a_fixtures import ACN, AUTOMATION, P14aHarness
-from tests.test_earnings_season import TODAY
+from tests.p14a_fixtures import ACN, AUTOMATION, EPAM, P14aHarness
+from dalton_core.catalyst_calendar import calendar_event_payload
+from tests.test_earnings_season import TODAY, calendar_entry
 from dalton_core.company_model_inputs import build_model_inputs
 from tests.test_model_forecast_driver import (
     cells_all,
@@ -95,15 +99,45 @@ class EndToEndTests(P14aHarness):
         }
         self.table = build_model_inputs(filed_quarter(ledger()), spec())
 
-    def calendar(self, *, expected, confirmed):
+    def regrant(self, *scopes):
+        """Publish a mission version granting exactly these scopes.
+
+        The harness's own ``grant`` only ever adds, and half of what is being
+        tested here is what happens when a word is *not* granted.
+        """
+
+        params = dict(self.params)
+        autonomy = dict(params["autonomy"])
+        autonomy["may_write"] = list(scopes)
+        autonomy["human_checkpoints"] = list(
+            dict.fromkeys(list(autonomy["human_checkpoints"])
+                          + ["thesis_revision_candidate", "forecast_overturn"]))
+        params["autonomy"] = autonomy
+        self._version += 1
+        params.update({
+            "version_id": f"coverage-mission-version:us-it-services:{self._version}",
+            "prior_version_ref": self.mission["id"],
+            "idempotency_key": f"coverage-mission:us-it-services:{self._version}",
+        })
+        self.mission = self.missions.create_mission(self.mission_ref, **params)
+        return self.mission
+
+    def calendar(self, *, expected, confirmed, window=None, anchor=None,
+                 company_ref=ACN):
+        """A calendar event on the ledger, built the way C1 builds one."""
+
+        entry = calendar_entry(
+            company_ref=company_ref, expected=expected, anchor=anchor or expected,
+            confidence="confirmed" if confirmed else "estimated")
         return record_event(
-            self.events, company_ref=ACN, kind="calendar",
+            self.events, company_ref=company_ref, kind="calendar",
             occurred_at=f"{TODAY}T00:00:00+00:00",
             source_refs=["catalyst-calendar-version:1"],
-            payload={"event_kind": "earnings", "expected_date": expected,
-                     "confirmed": confirmed,
-                     "calendar_version_ref": "catalyst-calendar-version:1",
-                     "source_ref": "connector-invocation:yfinance:1"},
+            payload=calendar_event_payload(
+                entry,
+                window=window or ("calibration" if confirmed and
+                                  expected <= TODAY else "preview"),
+                version_ref="catalyst-calendar-version:1"),
             mission=self.mission, actor_ref=AUTOMATION,
         )
 
@@ -307,6 +341,102 @@ class EndToEndTests(P14aHarness):
             writer_answers={"earnings_calibration": self.calibration_answer})
         self.assertEqual(again["season_status"], "nothing_due")
         self.assertEqual(writer.calls, [])
+
+    def test_a_company_due_today_that_has_not_filed_waits_instead_of_paying(self):
+        # The window opens on the day the company is due, and the filing does
+        # not land at midnight. A calibration written first would grade a print
+        # nobody has read -- and would spend the occurrence doing it.
+        self.calendar(expected="2026-09-08", confirmed=True)
+        self.table = build_model_inputs(ledger(), spec())  # nothing filed yet
+        waiting, writer, verifier = self.execute(
+            writer_answers={"earnings_calibration": self.calibration_answer})
+        self.assertEqual(waiting["season_status"], "waiting")
+        self.assertEqual(waiting["windows"][0]["status"], "waiting")
+        self.assertEqual(writer.calls, [])
+        self.assertEqual(verifier.calls, [])
+
+        # The filing lands. The same occurrence is still open, and now it is
+        # written.
+        self.table = build_model_inputs(filed_quarter(ledger()), spec())
+        written, writer, _verifier = self.execute(
+            writer_answers={"earnings_calibration": self.calibration_answer})
+        self.assertEqual(written["calibrations"], 1)
+        self.assertEqual(len(writer.calls), 1)
+
+    def test_an_ungranted_market_event_leaves_the_occurrence_re_runnable(self):
+        self.calendar(expected="2026-09-08", confirmed=True)
+        self.regrant("deliverable", "forecast_line", "observation", "stage_record")
+        blocked, writer, _verifier = self.execute(
+            writer_answers={"earnings_calibration": self.calibration_answer})
+        self.assertEqual(blocked["season_status"], "blocked")
+        self.assertEqual(blocked["windows"][0]["status"], "ungranted")
+        # Nothing was paid for, nothing was published, and nothing was burnt.
+        self.assertEqual(writer.calls, [])
+        self.assertIsNone(self.deliverables.latest(
+            "mission-deliverable:earnings_calibration:0001467373"))
+        self.regrant("deliverable", "forecast_line", "observation", "stage_record",
+                     "market_event", "thesis_revision_candidate")
+        written, writer, _verifier = self.execute(
+            writer_answers={"earnings_calibration": self.calibration_answer})
+        self.assertEqual(written["calibrations"], 1)
+        self.assertEqual(len(self.judgements.thesis_candidates(ACN)), 1)
+
+    def test_a_document_that_fails_to_publish_leaves_the_occurrence_open(self):
+        # The half most easily lost is the half that reaches a person, so the
+        # ledger writes go first; a document that then fails is a refusal of
+        # this occurrence, and the next tick redoes the half that is missing.
+        self.calendar(expected="2026-09-08", confirmed=True)
+        broken = mock.patch(
+            "dalton_core.earnings_season_cli.publish_calibration",
+            side_effect=MissionDeliverableConflict("a figure cites a retired Claim"))
+        with broken:
+            refused, _writer, _verifier = self.execute(
+                writer_answers={"earnings_calibration": self.calibration_answer})
+        self.assertEqual(refused["season_status"], "refused")
+        self.assertEqual(refused["windows"][0]["status"], "refused")
+        self.assertIn("retired Claim", refused["windows"][0]["reason"])
+        # The judgement and the candidate survived, and the occurrence is not
+        # reported as done, because its document is missing.
+        self.assertEqual(len(self.judgements.thesis_candidates(ACN)), 1)
+        occurrence = lane.due_occurrences(
+            self.store, self.missions, self.mission,
+            now=datetime.fromisoformat(f"{TODAY}T12:00:00+00:00"))
+        self.assertEqual([row["window"] for row in occurrence], ["calibration"])
+
+        # The next tick publishes it, and the judgement it already has is not
+        # written twice.
+        written, _writer, _verifier = self.execute(
+            writer_answers={"earnings_calibration": self.calibration_answer})
+        self.assertEqual(written["calibrations"], 1)
+        self.assertEqual(len(self.judgements.thesis_candidates(ACN)), 1)
+
+    def test_one_refused_document_does_not_abandon_the_other_companies(self):
+        self.pass_screen(EPAM)
+        self.calendar(expected="2026-10-01", confirmed=False)
+        self.calendar(company_ref=EPAM, expected="2026-10-01", confirmed=False)
+        calls = {"n": 0}
+        real = publish_preview
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise MissionDeliverableConflict("a figure cites a retired Claim")
+            return real(*args, **kwargs)
+
+        def answer(_prompt):
+            # Cites only the thesis, so the same answer is valid for either
+            # company: what is being tested is the run, not the drafting.
+            body = self.preview_answer(_prompt)
+            body["what_to_watch"][0]["refs"] = [self.thesis_ref]
+            body["citations"] = [self.thesis_ref]
+            return body
+
+        with mock.patch("dalton_core.earnings_season_cli.publish_preview", flaky):
+            summary, _writer, _verifier = self.execute(
+                writer_answers={"earnings_preview": answer})
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["refused"], 1)
+        self.assertEqual(summary["previews"], 1)
 
     def test_a_mission_that_grants_no_deliverable_pays_for_nothing(self):
         self.calendar(expected="2026-10-01", confirmed=False)

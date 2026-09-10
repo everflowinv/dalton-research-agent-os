@@ -56,31 +56,39 @@ C1 日历（或它发的 calendar 事件）
                                      → ForecastRevisionProposal（≥3% 档触发，人闸 forecast_overturn）
 ```
 
-**三条硬规则**，都在代码里被强制，不靠调用方自觉：
+**代码里强制的规则**，不靠调用方自觉：
 
 1. **estimated 开 preview，只有 confirmed 开 calibration。** C1 定的，这里再判一次——从账本读事件的 lane 不能假设写事件的就是它以为的那个 emitter。`build_calibration_context` 对未确认的日期直接 `CalibrationRefused`。
 2. **`date_confidence` 与 caveat 随 preview 走到底。** 从事件上带下来而不是各处自己推导；模型自己那段 `summary` 里没有这句话，整条回答被拒绝（检查的是模型的散文而不是拼装好的正文——正文是我们自己补的 caveat，检查它等于什么都没检查）。
-3. **一次业绩一份工作，不是一个事件一份工作。** 公司把 estimated 确认成 confirmed 时 C1 会再发一条 preview 事件；那是给判断层重排期用的消息，不是再买一份 preview 的理由。幂等键是 occurrence，`occurrence_ref = sha256({company, entry_ref, anchor_date})[:32]`，**不含日期**——日期动了还是同一次业绩。
+3. **一次业绩一份工作，不是一个事件一份工作。** 公司把 estimated 确认成 confirmed 时 C1 会再发一条 preview 事件；那是给判断层重排期用的消息，不是再买一份 preview 的理由。幂等键是 occurrence，而 occurrence 就是 C1 的 `entry_ref`（见 3.1）——日期动了还是同一次业绩。
+4. **「做过了」要两半都在。** preview 只产出一份文档，文档在就是做过了。校准产出的是文档**和**一条事件加一串判断记录，所以只有两半都在才算做过：只看文档，发布之后判决失败的那一次会被永远跳过，这一季再也到不了判断层；只看判决，文档被拒的那一次会丢掉散文。两半都看，缺哪半下一 tick 补哪半，已经在的那半回 `duplicate`。
+5. **先写账本，后发文档。** 最容易丢的是「这一季到了判断层、候选到了人手里」，所以它先落；文档在写的时候，那一半已经是安全的。
+6. **公司到点了但还没报，就等。** 窗口在应报日当天就开，而 filing 不在午夜落地。这时候既没有 actual 格也没有对账行，一次调用只能去给没人读过的业绩打分——而且会把这次机会花掉。所以**不调用**，返回 `waiting`；窗口活 `CALIBRATION_DEADLINE_DAYS` 天，明天再问。判据读的是模型自己的格子（该期有没有 `actual` 单元），不是本次运行 actualize 的结果——昨天已经对齐过的那一版，今天再问会说「没什么可对齐的」，读运行结果就会让它永远等在自己已经结清的那一季后面。
+7. **mission 没授 `market_event` 就一分钱不花。** 记不下判决的校准是半个校准，丢掉的正是人要读的那一半；这在调用之前就查，占用的机会留给之后授权了的那一 tick。
 
 ---
 
 ## 3. 形状
 
-### 3.1 occurrence（不落库，是两个账本的联合读）
+### 3.1 occurrence（不落库，是几个账本的联合读）
 
 ```json
 {
-  "occurrence_ref": "earnings-occurrence:aebf11464c7a6b706e6ecae50b555e31",
+  "occurrence_ref": "earnings-occurrence:{sha256({entry_ref})[:32]}",
   "company_ref": "company:sec-cik:0001467373",
-  "entry_ref": "calendar-entry:acn:earnings:2026-10-01",
+  "entry_ref": "catalyst-entry:…",
   "event_ref": "research-event:…", "event_hash": "…",
   "window": "preview", "event_kind": "earnings",
-  "anchor_date": "2026-10-01", "expected_date": "2026-10-01",
+  "anchor_date": null, "expected_date": "2026-10-01",
   "date_confidence": "estimated", "date_unconfirmed": true,
   "date_caveat": "日期未确认",
   "source_refs": ["catalyst-calendar-version:…"], "as_of": "2026-09-09"
 }
 ```
+
+**身份就是 C1 的 `entry_ref`，别的什么都不掺。** `catalyst-entry:{sha256({company, event_kind, anchor_date})}` 本来就是「一次业绩」的身份：它钉在任何人给出的第一个日期上，之后 `expected_date` 怎么动它都不动。所以这里只是换个名字，不是第二套身份。
+
+初版还把 anchor date 一起哈希进去，那是错的两次：anchor 已经在 `entry_ref` 里面了；而且它**根本不随事件走**——`research_event` 冻结的 `calendar` payload 只有九个字段，`anchor_date` 不在其中（它可导出，账本的职责是当那本薄的）。从 `expected_date` 把它凑出来就等于把工作键在日期上，而那正是绝对不能做的事：改期会买第二份付费 preview。事件上没有 `entry_ref`（值为 `null`）时，本片**不产生 occurrence 也不做任何工作**——叫不出名字的一次业绩没法保证只写一次。
 
 ### 3.2 `earnings_preview` deliverable
 
@@ -159,7 +167,9 @@ C1 日历（或它发的 calendar 事件）
 - 我们的数字写在文档的 `summary` 行里，**每个数字后面跟着它的 cell ref 与模型版本 ref**；
 - 该期没有预测行时，`summary` 行里写 `缺来源` 而不是 `None`。
 
-要让预测数字进正文，需要 `validate_section` 能接受 Claim 之外的 ref 种类（`forecast-model-version:…#cell:…`）。这是 `mission_deliverable` 所有者的一次改动，不在本片权限内，列为 to-do。
+一句更准确的说法：`summary` 字段本身**不被数字检查扫**，所以把数字写在那里是可行的，但它不是「带 ref 的正文」的等价物——它是一行摘要，没有分节、没有 `claim_refs`、也不进 `unsourced_numbers` 的核验。所以这是一个**权衡**，不是一个等价替代：读者拿得到我们的数字和它的 cell ref，但那一行不受权威的数字纪律保护。
+
+要让预测数字进正文并同样受检，需要 `validate_section` 能接受 Claim 之外的 ref 种类（比如 `forecast-model-version:…` 加 cell ref），照今天检查 Claim 的方式检查它存在且未被取代。这是 `mission_deliverable` 所有者的一次改动，不在本片权限内，列为 to-do。
 
 ### 5.3 live 现在缺什么（第 6 节冒烟测出来的）
 

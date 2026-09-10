@@ -21,7 +21,7 @@ from dalton_core.lane_registry import LANE_MODULES, load_lanes, registered_lanes
 from dalton_core.mission_deliverable import MissionDeliverableAuthority
 from dalton_core.research_event import ResearchEventAuthority, record_event
 from tests.p14a_fixtures import ACN, AUTOMATION, CTSH, P14aHarness
-from tests.test_earnings_season import TODAY, calendar_event
+from tests.test_earnings_season import TODAY, calendar_entry
 
 
 class FakeLauncher:
@@ -104,15 +104,21 @@ class SelectionTests(P14aHarness):
         self.events = ResearchEventAuthority(self.store)
         self.deliverables = MissionDeliverableAuthority(self.store)
 
-    def record(self, *, company_ref=ACN, expected="2026-10-01", confirmed=False):
+    def record(self, *, company_ref=ACN, expected="2026-10-01", confirmed=False,
+               window="preview", anchor=None):
+        """A calendar event on the ledger, built the way C1 builds one."""
+
+        from dalton_core.catalyst_calendar import calendar_event_payload
+
+        entry = calendar_entry(
+            company_ref=company_ref, expected=expected, anchor=anchor or expected,
+            confidence="confirmed" if confirmed else "estimated")
         return record_event(
             self.events, company_ref=company_ref, kind="calendar",
             occurred_at=f"{TODAY}T00:00:00+00:00",
             source_refs=["catalyst-calendar-version:1"],
-            payload={"event_kind": "earnings", "expected_date": expected,
-                     "confirmed": confirmed,
-                     "calendar_version_ref": "catalyst-calendar-version:1",
-                     "source_ref": "connector-invocation:yfinance:1"},
+            payload=calendar_event_payload(
+                entry, window=window, version_ref="catalyst-calendar-version:1"),
             mission=self.mission, actor_ref=AUTOMATION,
         )
 
@@ -147,7 +153,8 @@ class SelectionTests(P14aHarness):
         self.pass_screen(ACN)
         self.pass_screen(CTSH)
         self.record()
-        self.record(company_ref=CTSH, expected="2026-09-08", confirmed=True)
+        self.record(company_ref=CTSH, expected="2026-09-08", confirmed=True,
+                    window="calibration")
         named = lane.newest_due(self.store, self.missions, self.mission)
         self.assertTrue(named.endswith(":calibration"))
 

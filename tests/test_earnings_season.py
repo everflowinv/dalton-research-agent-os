@@ -38,6 +38,12 @@ from dalton_core.research_event import (
     PAYLOAD_FIELDS,
     ResearchEventAuthority,
     record_event,
+    validate_payload,
+)
+from dalton_core.catalyst_calendar import (
+    calendar_event_payload,
+    entry_ref_for,
+    occurrence_label,
 )
 from dalton_core.store import DaltonStore, content_hash
 from tests.p14a_fixtures import ACN, AUTOMATION, P14aHarness
@@ -55,28 +61,47 @@ TODAY = "2026-09-09"
 REPORT_DATE = "2026-10-01"
 
 
-def calendar_event(
-    *, company_ref=ACN, window="preview", expected=REPORT_DATE,
-    confidence="estimated", anchor=REPORT_DATE, entry="calendar-entry:acn:q4",
-    payload=None, event_ref="research-event:preview-1",
+def calendar_entry(
+    *, company_ref=ACN, event_kind="earnings", expected=REPORT_DATE,
+    confidence="estimated", anchor=REPORT_DATE, disagreement=False,
 ):
-    """A calendar event in C1's rich shape, unless one is supplied."""
+    """One calendar entry in the shape C1's authority hands to its emitter."""
 
-    body = payload if payload is not None else {
-        "event_key": "calendar-event:1",
-        "window": window,
-        "entry_ref": entry,
-        "event_kind": "earnings",
-        "subject": "FY26 Q4",
+    return {
+        "entry_ref": entry_ref_for(company_ref, event_kind, anchor),
+        "event_kind": event_kind,
+        "subject": occurrence_label(anchor),
         "anchor_date": anchor,
         "expected_date": expected,
-        "date_confidence": confidence,
-        "date_unconfirmed": confidence != "confirmed",
-        "date_caveat": "" if confidence == "confirmed" else "日期未确认",
-        "disagreement": False,
-        "days_until": (date.fromisoformat(expected) - date.fromisoformat(TODAY)).days,
-        "as_of": TODAY,
+        "confidence": confidence,
+        "disagreement": disagreement,
+        "disagreeing_dates": [],
+        "sources": [{"ref": "catalyst-calendar-version:1",
+                     "source_ref": "connector-invocation:yfinance:1"}],
     }
+
+
+def calendar_event(
+    *, company_ref=ACN, window="preview", expected=REPORT_DATE,
+    confidence="estimated", anchor=REPORT_DATE, entry=None, payload=None,
+    event_ref="research-event:preview-1",
+):
+    """A calendar event, built the way C1 builds one.
+
+    The payload comes from ``catalyst_calendar.calendar_event_payload`` and is
+    put through ``research_event.validate_payload`` before it is used, so a
+    fixture cannot invent a field the ledger would refuse -- which is how the
+    occurrence identity came to be keyed on an ``anchor_date`` that never
+    travels on a real event.
+    """
+
+    if payload is None:
+        entry = entry or calendar_entry(
+            company_ref=company_ref, expected=expected, confidence=confidence,
+            anchor=anchor)
+        payload = calendar_event_payload(
+            entry, window=window, version_ref="catalyst-calendar-version:1")
+    body = validate_payload("calendar", payload)
     return {
         "id": event_ref,
         "company_ref": company_ref,
@@ -107,29 +132,54 @@ class WindowTests(unittest.TestCase):
             window="calibration", expected="2026-09-08", confidence="confirmed")
         self.assertEqual(season.window_of(event, now=TODAY), "calibration")
 
-    def test_the_ledgers_narrower_payload_is_read_too(self):
-        # The event ledger declares five fields for a calendar event and C1
-        # writes eleven; this slice must work whichever wrote the row.
-        event = calendar_event(payload={
-            "event_kind": "earnings", "expected_date": REPORT_DATE,
-            "confirmed": False, "calendar_version_ref": "catalyst-calendar-version:1",
-            "source_ref": "connector-invocation:yfinance:1",
-        })
+    def test_a_payload_with_no_window_word_is_derived_from_the_date(self):
+        # C1 writes the window; a row that predates that, or any other emitter
+        # of a dated fact, is read from the date and the confirmation flag.
+        entry = calendar_entry()
+        payload = calendar_event_payload(
+            entry, window="preview", version_ref="catalyst-calendar-version:1")
+        payload["window"] = None
+        event = calendar_event(payload=payload)
         self.assertEqual(season.window_of(event, now=TODAY), "preview")
         occurrence = season.occurrence_of(event, now=TODAY)
         self.assertEqual(occurrence["date_confidence"], "estimated")
         self.assertEqual(occurrence["date_caveat"], "日期未确认")
+        self.assertEqual(occurrence["entry_ref"], entry["entry_ref"])
+
+    def test_an_event_that_names_no_entry_names_no_occurrence(self):
+        # Without C1's entry ref there is no anchor-stable identity, and an
+        # occurrence that cannot be named cannot be written about once.
+        payload = calendar_event_payload(
+            calendar_entry(), window="preview",
+            version_ref="catalyst-calendar-version:1")
+        payload["entry_ref"] = None
+        self.assertIsNone(season.occurrence_of(calendar_event(payload=payload),
+                                               now=TODAY))
+
+    def test_the_payload_a_fixture_builds_is_one_the_ledger_accepts(self):
+        # The whole reason the fixture goes through C1's builder: a fixture
+        # that invents fields would let this slice key its work on something
+        # no real event carries.
+        payload = calendar_event_payload(
+            calendar_entry(), window="preview",
+            version_ref="catalyst-calendar-version:1")
+        self.assertEqual(set(payload), set(PAYLOAD_FIELDS["calendar"]))
+        self.assertEqual(validate_payload("calendar", payload), payload)
+        self.assertNotIn("anchor_date", payload)
+        self.assertNotIn("event_key", payload)
 
     def test_a_date_change_is_not_a_window_this_lane_opens(self):
         event = calendar_event(window="date_change")
         self.assertIsNone(season.window_of(event, now=TODAY))
 
     def test_a_report_a_year_out_opens_nothing(self):
-        event = calendar_event(payload={
-            "event_kind": "earnings", "expected_date": "2027-10-01",
-            "confirmed": True, "calendar_version_ref": None, "source_ref": None,
-        })
-        self.assertIsNone(season.window_of(event, now=TODAY))
+        payload = calendar_event_payload(
+            calendar_entry(expected="2027-10-01", anchor="2027-10-01",
+                           confidence="confirmed"),
+            window="preview", version_ref=None)
+        payload["window"] = None
+        self.assertIsNone(season.window_of(calendar_event(payload=payload),
+                                           now=TODAY))
 
     def test_the_caveat_travels_on_the_occurrence(self):
         occurrence = season.occurrence_of(calendar_event(), now=TODAY)
@@ -450,16 +500,15 @@ class PreviewPublishTests(PreviewHarness):
             now=TODAY,
         )
         self.assertIsNotNone(
-            season.already_written(self.store.connection, "preview", confirmed))
+            season.published_document(self.store.connection, "preview", confirmed))
 
     def test_an_unwritten_occurrence_is_not_reported_as_written(self):
         other = season.occurrence_of(
-            calendar_event(anchor="2027-01-05", expected="2027-01-05",
-                           entry="calendar-entry:acn:q1"),
+            calendar_event(anchor="2027-01-05", expected="2027-01-05"),
             now="2026-12-20",
         )
         self.assertIsNone(
-            season.already_written(self.store.connection, "preview", other))
+            season.published_document(self.store.connection, "preview", other))
 
 
 # ---------------------------------------------------------------------------

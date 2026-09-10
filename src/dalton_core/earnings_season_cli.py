@@ -56,9 +56,11 @@ from .earnings_preview import (
     verify_preview,
 )
 from .earnings_season import (
+    CALIBRATION_DEADLINE_DAYS,
     CALIBRATION_KIND,
     PREVIEW_KIND,
     EarningsSeasonError,
+    forecast_rows as season_forecast_rows,
     reported_period,
 )
 from .event_judgement import (
@@ -312,6 +314,8 @@ def run_earnings_season(
         "previews": 0,
         "calibrations": 0,
         "refused": 0,
+        "waiting": 0,
+        "blocked": 0,
         "decisions": {},
         "candidates": 0,
         "forecast_proposals": 0,
@@ -436,6 +440,13 @@ def run_earnings_season(
                 )
                 summary["reflections"] += 1 if outcome.get("reflection_ref") else 0
                 summary["events"] += 1 if outcome.get("event_ref") else 0
+            elif outcome["status"] == "waiting":
+                # Not a refusal and not work: the company is due but has not
+                # filed. Counted separately so an operator can tell "we could
+                # not" from "there was nothing yet".
+                summary["waiting"] += 1
+            elif outcome["status"] in ("ungranted", "queued"):
+                summary["blocked"] += 1
             else:
                 summary["refused"] += 1
         summary["cost_micros"] = spent
@@ -444,6 +455,8 @@ def run_earnings_season(
         if summary["season_status"] is None:
             summary["season_status"] = (
                 "written" if summary["previews"] or summary["calibrations"]
+                else "waiting" if summary["waiting"]
+                else "blocked" if summary["blocked"]
                 else "refused"
             )
         return summary
@@ -533,16 +546,36 @@ def _one_window(
             )
             result["findings"] = checked.get("findings")
             return result
-        published = publish_preview(
-            deliverables, context=context, draft=drafted, mission=mission,
-            playbook=playbook, actor_ref=actor,
+        published = _publish(
+            result,
+            lambda: publish_preview(
+                deliverables, context=context, draft=drafted, mission=mission,
+                playbook=playbook, actor_ref=actor,
+            ),
+            context,
         )
+        if published is None:
+            return result
         result.update({"status": "published", "deliverable_ref": published["id"],
                        "publish_status": published.get("status"),
                        "gaps": context["gaps"]})
         return result
 
     # -- the calibration ----------------------------------------------------
+    #
+    # Before anything is paid for: a calibration that cannot record its
+    # judgement is half a calibration, and the half it would lose is the half
+    # a person reads.  Checked here rather than after the call so an ungranted
+    # mission costs nothing and leaves the occurrence for a later tick.
+    if "market_event" not in granted:
+        result.update({
+            "status": "ungranted",
+            "reason": "the mission does not grant market_event writes, so the "
+                      "judgement lane could not be told this quarter settled and "
+                      "no candidate could be attached to it; the occurrence is "
+                      "left for a tick under a mission that grants it",
+        })
+        return result
     actualisation = {"status": "skipped",
                      "reason": "the mission does not grant forecast_line writes"}
     if "forecast_line" in granted:
@@ -561,6 +594,24 @@ def _one_window(
         reconciliations, company_ref=company_ref,
         period_end=None if period is None else str(period.get("end")),
     ) if reconciliations else []
+    # The window opens on the day the company is due to report, and the filing
+    # does not land at midnight.  A calibration written before it does has
+    # nothing to calibrate: no quarter has been actualised and no
+    # reconciliation row exists, so the model would be asked to grade a print
+    # nobody has read -- and, worse, the occurrence would be spent on the
+    # answer.  Wait instead.  The window is open for
+    # CALIBRATION_DEADLINE_DAYS, so tomorrow's tick asks again, and the day the
+    # filing lands the calibration is written against it.
+    if _nothing_to_calibrate(model_version, period, rows):
+        result.update({
+            "status": "waiting",
+            "reason": "the company is due to report but nothing has been filed "
+                      "yet: no quarter has been actualised and there is no "
+                      "reconciliation row, so there is nothing to calibrate",
+            "actualisation": actualisation.get("status"),
+            "waits_until_days": CALIBRATION_DEADLINE_DAYS,
+        })
+        return result
     try:
         context = build_calibration_context(
             occurrence=occurrence, mission=mission, model_version=model_version,
@@ -593,22 +644,13 @@ def _one_window(
         )
         result["findings"] = checked.get("findings")
         return result
-    published = publish_calibration(
-        deliverables, context=context, output=drafted, mission=mission,
-        playbook=playbook, actor_ref=actor,
-    )
-    result.update({"status": "published", "deliverable_ref": published["id"],
-                   "publish_status": published.get("status"),
-                   "gaps": context["gaps"]})
-    # The event first: the judgement records hang off it, and it is also the
-    # thing that tells the judgement lane the forward view is unreviewed.
-    if "market_event" not in granted:
-        result["event_ref"] = None
-        result["effects"] = {"status": "queued",
-                             "reason": "the mission does not grant market_event "
-                                       "writes, so the judgement lane is not told "
-                                       "this quarter settled"}
-        return result
+    # The event and the effects before the document, and the reason is what
+    # happens when the second thing fails.  ``already_done`` treats a
+    # calibration as finished only when both halves are there, so whichever
+    # half is missing is the one the next tick redoes; putting the ledger
+    # writes first means the half most easily lost -- the quarter reaching the
+    # judgement lane, the candidate reaching a person -- is the half that is
+    # already safe when the document is being written.
     event = emit_calibration_event(
         context=context, output=drafted,
         record_event=lambda **kwargs: record_event(events, **kwargs),
@@ -618,12 +660,12 @@ def _one_window(
     if "thesis_revision_candidate" not in granted and any(
         row["action"] == "revise_thesis" for row in drafted["theses"]
     ):
-        result["effects"] = {
+        result.update({
             "status": "queued",
             "reason": "the mission does not grant thesis_revision_candidate writes; "
                       "ADR-0007 says automation proposes and a person decides, and "
                       "this Core has not been given the word for the proposal",
-        }
+        })
         return result
     effects = apply_calibration_effects(
         judgements, event=event, context=context, output=drafted,
@@ -635,7 +677,71 @@ def _one_window(
     result["forecast_proposals"] = effects.get("forecast_proposals") or []
     result["reflection_ref"] = effects.get("reflection_ref")
     result["judgement_ref"] = effects.get("judgement_ref")
+    published = _publish(
+        result,
+        lambda: publish_calibration(
+            deliverables, context=context, output=drafted, mission=mission,
+            playbook=playbook, actor_ref=actor,
+        ),
+        context,
+    )
+    if published is None:
+        return result
+    result.update({"status": "published", "deliverable_ref": published["id"],
+                   "publish_status": published.get("status"),
+                   "gaps": context["gaps"]})
     return result
+
+
+def _nothing_to_calibrate(
+    model_version: Any, period: Any, rows: Any,
+) -> bool:
+    """Whether the company is due but nothing has actually been filed yet.
+
+    Asked of the model's own cells rather than of this run's actualisation.
+    A run that actualised yesterday and a run that finds the quarter already
+    actualised are the same state of the world -- the filing has landed -- and
+    reading the run's outcome would have made the second one wait for ever
+    behind a quarter it had already settled.
+
+    A company with no model at all is not waiting for anything: nothing here
+    will ever actualise or reconcile for it, and a calibration built on the
+    guidance table and the Claims is thinner but not wrong.
+    """
+
+    if rows:
+        return False
+    if not model_version or period is None:
+        return False
+    return not any(
+        row.get("kind") == "actual"
+        for row in season_forecast_rows(model_version, str(period.get("end")))
+    )
+
+
+def _publish(result: dict[str, Any], publish: Any, context: Any) -> Any:
+    """Publish, or record a refusal for this occurrence and let the run go on.
+
+    The deliverable authority refuses a document whose figures cite a Claim it
+    does not hold, and it does so by raising.  Uncaught, that ends the whole
+    child -- so one company whose Claim was retired between the context being
+    built and the document being written would take the other two companies'
+    windows down with it.  It is a refusal of one occurrence, and it is
+    recorded as one.
+    """
+
+    from .mission_deliverable import MissionDeliverableError
+
+    try:
+        return publish()
+    except MissionDeliverableError as exc:
+        result.update({
+            "status": "refused",
+            "reason": f"the deliverable authority refused the document: "
+                      f"{type(exc).__name__}: {exc}",
+            "gaps": list((context or {}).get("gaps") or ()),
+        })
+        return None
 
 
 def _book(

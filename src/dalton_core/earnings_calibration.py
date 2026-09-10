@@ -892,6 +892,26 @@ def build_calibration_verifier_prompt(
     ]
     for row in context.get("numbers") or ():
         lines.append(f"- [{row['claim_version_ref']}] {row['text']}")
+    # The reflection's own citations and its two follow-up lists.  They are
+    # part of what was produced and part of what a person will read beside the
+    # candidate, so a verifier that never saw them could only ever verify half
+    # the answer.
+    reflection = draft.get("reflection") or {}
+    lines += ["", "反思引用：" + "、".join(reflection.get("citations") or ["（无）"])]
+    market = reflection.get("market_view_vs_ours") or {}
+    lines.append(
+        f"我们 vs 市场：available={str(market.get('available')).lower()}"
+        f"　{market.get('summary') or ''}"
+        f"　refs={'、'.join(market.get('refs') or []) or '（无）'}"
+    )
+    lines.append("市场靠拢路径：" + str(reflection.get("convergence_pathway") or ""))
+    for row in reflection.get("missed_debates") or ():
+        lines.append(f"可能漏掉的 debate：{row['question']}　refs={'、'.join(row['refs'])}")
+    for row in reflection.get("followup_tracking") or ():
+        lines.append(
+            f"建议调频：{row['source_key']} → {row['interval_seconds']}s　{row['because']}")
+    for row in reflection.get("followup_research") or ():
+        lines.append(f"建议专项研究：{row['question']}　要什么：{row['wants']}")
     return "\n".join(lines)[:MAX_PROMPT_CHARS]
 
 
@@ -1144,7 +1164,13 @@ def apply_calibration_effects(
         proposals.append(judgements.record_forecast_proposal(
             judgement_ref=judgement_ref,
             company_ref=context["company_ref"],
-            model_version_ref=context.get("model_version_ref"),
+            # The version the actual was written into, not the one that held
+            # the estimate: a person opening the proposal wants the model as it
+            # stands now, with the filed figure beside the miss.
+            model_version_ref=(
+                (context.get("actualisation") or {}).get("version_ref")
+                or context.get("model_version_ref")
+            ),
             change={
                 "driver_ref": str(row.get("metric_ref")),
                 "period_end": str(row.get("period_end") or context.get("period_end") or ""),

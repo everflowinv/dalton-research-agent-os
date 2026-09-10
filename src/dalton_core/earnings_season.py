@@ -206,18 +206,26 @@ def window_of(
     return window
 
 
-def occurrence_ref(company_ref: str, entry_ref: str, anchor_date: str) -> str:
-    """One name for one company reporting once.
+def occurrence_ref(entry_ref: str) -> str:
+    """One name for one company reporting once: C1's entry ref, and only that.
 
-    Not a function of the expected date: a date that moves is the same
-    occurrence, and keying the work on the date would buy a second preview
-    every time Yahoo changed its mind.
+    ``catalyst-entry:{sha256({company, event_kind, anchor_date})}`` is already
+    the identity of an occurrence, fixed at the first date anybody gave for it
+    and never moved again while ``expected_date`` moves underneath it.  So this
+    is a rename and not a second identity.
+
+    It used to fold in the anchor date as well.  That was wrong twice over: the
+    anchor is *inside* the entry ref already, and it does not travel on the
+    event -- ``research_event``'s frozen ``calendar`` payload has nine fields
+    and ``anchor_date`` is not one of them, because it is derivable and the
+    ledger's job is to be the thin index.  Reconstructing it from
+    ``expected_date`` would have keyed the work on the date, which is exactly
+    the thing this must not do: a rescheduled call would have bought a second
+    paid preview.
     """
 
     return "earnings-occurrence:" + content_hash({
-        "company_ref": _text(company_ref, "company_ref"),
         "entry_ref": _text(entry_ref, "entry_ref"),
-        "anchor_date": _text(anchor_date, "anchor_date"),
     })[:32]
 
 
@@ -233,19 +241,26 @@ def occurrence_of(
     company_ref = _text(event["company_ref"], "company_ref")
     expected = _text(payload.get("expected_date"), "expected_date")
     event_kind = str(payload.get("event_kind") or "earnings")
-    anchor = str(payload.get("anchor_date") or expected)
-    entry = str(payload.get("entry_ref") or f"{company_ref}:{event_kind}:{anchor}")
+    entry = payload.get("entry_ref")
+    if not isinstance(entry, str) or not entry.strip():
+        # No identity, no work.  An occurrence that cannot be named cannot be
+        # written about once, and paying for a preview that might be the third
+        # copy of itself is worse than skipping a window.
+        return None
+    entry = entry.strip()
     confidence = date_confidence_of(payload)
     unconfirmed = confidence != CONFIRMED
     return {
-        "occurrence_ref": occurrence_ref(company_ref, entry, anchor),
+        "occurrence_ref": occurrence_ref(entry),
         "company_ref": company_ref,
         "entry_ref": entry,
         "event_ref": event["id"],
         "event_hash": event.get("content_hash"),
         "event_kind": event_kind,
         "window": window,
-        "anchor_date": anchor,
+        # Carried when the caller happens to have it (the calendar's own
+        # entries do); never part of the identity, and absent on an event.
+        "anchor_date": payload.get("anchor_date"),
         "expected_date": expected,
         "date_confidence": confidence,
         "date_unconfirmed": unconfirmed,
@@ -277,7 +292,7 @@ def idempotency_key_for(window: str, occurrence: Mapping[str, Any]) -> str:
     return f"{deliverable_kind_for(window)}:{occurrence['occurrence_ref']}"
 
 
-def already_written(
+def published_document(
     connection: sqlite3.Connection, window: str, occurrence: Mapping[str, Any]
 ) -> dict[str, Any] | None:
     """The deliverable this occurrence already produced for this window, if any.
@@ -308,6 +323,60 @@ def already_written(
         return {"id": row["version_id"]}
 
 
+def landed_judgement(
+    connection: sqlite3.Connection, occurrence: Mapping[str, Any]
+) -> str | None:
+    """The judgement recorded against this occurrence's calibration event.
+
+    A calibration's document is only half of what it produces.  The other half
+    -- the event that tells the judgement lane the quarter settled, the
+    judgement, the reflection, the candidate a person rules on -- is written
+    through four ledgers, and anything that fails part way through has to be
+    something the next tick picks up rather than something the next tick
+    believes is done.
+    """
+
+    try:
+        row = connection.execute(
+            "SELECT j.judgement_id AS judgement_id FROM research_events e "
+            "JOIN event_judgements j ON j.event_ref = e.event_id "
+            "WHERE e.company_ref=? AND e.kind=? "
+            "AND json_extract(e.record_json,'$.payload.occurrence_ref')=? "
+            "ORDER BY e.occurred_at DESC LIMIT 1",
+            (occurrence["company_ref"], CALIBRATION_EVENT_KIND,
+             occurrence["occurrence_ref"]),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return None
+    return None if row is None else str(row["judgement_id"])
+
+
+def already_done(
+    connection: sqlite3.Connection, window: str, occurrence: Mapping[str, Any]
+) -> bool:
+    """Whether this occurrence's window needs doing at all.
+
+    A preview is done when its document exists: it produces nothing else.
+
+    A calibration is done when its document exists **and** its judgement
+    landed.  Both, because either alone is a way to lose work silently.  Keyed
+    on the document alone, a run that published and then failed to record the
+    judgement would be skipped for ever and the quarter would never reach the
+    judgement lane.  Keyed on the judgement alone, a run that recorded the
+    judgement and then had its document refused would lose the prose.  Keyed on
+    both, whichever half is missing is the half the next tick redoes -- and the
+    halves that are already there answer ``duplicate`` rather than doubling.
+    """
+
+    if published_document(connection, window, occurrence) is None:
+        return False
+    if window != "calibration":
+        return True
+    return landed_judgement(connection, occurrence) is not None
+
+
 def open_occurrences(
     connection: sqlite3.Connection,
     events: Any,
@@ -336,7 +405,7 @@ def open_occurrences(
             if key in seen:
                 continue
             seen.add(key)
-            if already_written(connection, occurrence["window"], occurrence):
+            if already_done(connection, occurrence["window"], occurrence):
                 continue
             out.append(occurrence)
             if len(out) >= limit:
@@ -354,13 +423,12 @@ def occurrences_from_calendar(
 ) -> list[dict[str, Any]]:
     """The same list, derived from C1's calendar instead of the event ledger.
 
-    Two reasons this exists beside :func:`open_occurrences`.  The first is that
-    the wiring between C1 and the event ledger is not finished: the lane looks
-    for a ``record_research_event`` the writer does not have, and C1's payload
-    is wider than the ledger's declared ``calendar`` contract, so today no
-    calendar event reaches the ledger at all.  The second is that it is the
-    honest read for a *read-only* smoke: it answers "what would fire today"
-    without writing an event to find out.
+    Two reasons this exists beside :func:`open_occurrences`.  The first is a
+    Core where the calendar lane has not run yet -- live today has neither a
+    calendar version nor a ``research_events`` table -- so there is no event to
+    read and the calendar itself is the only thing that can answer.  The second
+    is that it is the honest read for a *read-only* smoke: it says which window
+    would fire without writing an event to find out.
 
     It calls C1's own emitter with a collector in place of the writer, so the
     window rules are C1's and not a second copy of them here.  Nothing is
@@ -402,7 +470,7 @@ def occurrences_from_calendar(
             if occurrence is None:
                 continue
             occurrence["derived_from"] = "catalyst_calendar"
-            if already_written(connection, occurrence["window"], occurrence):
+            if already_done(connection, occurrence["window"], occurrence):
                 continue
             out.append(occurrence)
             if len(out) >= limit:
@@ -746,7 +814,7 @@ __all__ = [
     "PREVIEW_PURPOSE",
     "SCHEMA_VERSION",
     "WINDOWS",
-    "already_written",
+    "already_done",
     "bounded_text",
     "citable_refs",
     "consensus_block",
@@ -756,9 +824,11 @@ __all__ = [
     "guidance_vs_actual",
     "idempotency_key_for",
     "occurrence_of",
+    "landed_judgement",
     "occurrence_ref",
     "occurrences_from_calendar",
     "open_occurrences",
+    "published_document",
     "ref_list",
     "render_rows",
     "reported_period",
