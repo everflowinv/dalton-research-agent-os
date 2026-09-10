@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 分支：`c1-catalyst-calendar`（worktree `~/Projects/dalton-c1-catalyst-calendar-worktree`）
-分叉基线：main `2fa5934`；已 `git merge main` 到 `7708d43`（含 Wave 1.5 的 S1 / S2 / P14e / P14-M / P12b）
+分叉基线：main `2fa5934`（v1.0 主体）；事件桥修复在分支 `c1-event-bridge`，基线 main `3f21dbe`
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 C1 与「Daily tracking」一节、[vision 回顾](vision-review-against-plan-v1.0-2026-09-09.md) C1、蓝图 §5.2 P14f、ADR-0008、[P11a 市场层](p11a-market-layer-v1.0-2026-09-09.md)
 全量测试：见第 7 节，原文粘贴
 
@@ -191,48 +191,57 @@ core.sqlite: connector_call_specs(operation='list_filings')
 
 ## 5. 集成时要接的线
 
-### 5.1 `record_event`（P14a）
+### 5.1 `record_event`（P14a）——已接上
 
-lane **不 import** `research_event`。`MissionCatalystLaneCoordinator(record_event=...)` 收一个可调用对象；`dispatch()` 现在从 `getattr(server, "record_research_event", None)` 取。集成时把它绑上：
-
-```python
-# writer_server 侧（或 mission_catalyst_lane.dispatch 里那一行）
-coordinator = MissionCatalystLaneCoordinator(
-    authority=CatalystCalendarAuthority(server.store),
-    launcher=launcher,
-    mission=mission,
-    record_event=server.research_events.record_event,   # P14a 的入口
-)
-```
-
-期望签名（按计划第 3 节的合同）：
+lane 仍然**不 import** `research_event` 到模块层：`MissionCatalystLaneCoordinator(record_event=...)` 收一个可调用对象，测试传 fake。真正的绑定在 `dispatch()` 里，和它建 `CatalystCalendarAuthority` 是同一个写法：
 
 ```python
-record_event(company_ref=..., kind="calendar", occurred_at=..., source_refs=[...], payload={...})
+from .research_event import ResearchEventAuthority, record_event
+
+events = ResearchEventAuthority(server.store)
+
+def record(**event):
+    current = mission()
+    return record_event(events, mission=current,
+                        actor_ref=current["autonomy"]["automation_principal"],
+                        **event)
 ```
 
-`payload` 里有 `event_key`（确定性的：`hash(company_ref, entry_ref, window, expected_date, confidence)`）、`window ∈ {preview, calibration, date_change}`、`entry_ref`、`event_kind`、`subject`、`expected_date`、**`date_confidence`**、**`date_unconfirmed`**、**`date_caveat`**、`disagreement`、`disagreeing_dates`、`days_until`、`as_of`。`source_refs` 是该条目所有来源的 ref 加上日历版本 ref。
+**这里原来是错的，而且错得不显眼。** 原来写的是 `getattr(server, "record_research_event", None)`——writer 上从来没有过这个属性，所以它永远是 `None`，lane 一辈子每个 tick 都报 `events_unwired`。那是一个长得跟接线一模一样的兜底。现在按注册表里别的 lane 的写法建权威，这种写法不可能「不小心缺席」。
 
-字段叫 `date_confidence` 而不是 `confidence`：事件账本很快会装下别的 confidence，一个光秃秃的 `confidence` 摆在日期旁边，正是渲染器会挂到错误东西上的那种字段。
+**payload 的字段集由 P14a 的模块说了算，不由本片说了算。** `research_event.validate_payload` 拒绝未声明的字段，也拒绝任何嵌套值（它只收 text / int / bool / null）。对照之后：
+
+| 原来发的 | 处置 |
+| --- | --- |
+| `event_kind`、`expected_date`、`calendar_version_ref`、`source_ref` | 本来就在声明里 ✓ |
+| `window`、`entry_ref`、`date_confidence`、`disagreement` | **加进 `PAYLOAD_FIELDS["calendar"]`**（见下） |
+| `confirmed` | 声明里本来就有，本片开始产出它——cockpit 早就在渲染它了 |
+| `disagreeing_dates` | 是个 list，`validate_payload` 不收嵌套。**去掉**；布尔留着，要看日期就顺着 `calendar_version_ref` 去读完整版本 |
+| `days_until`、`as_of` | 派生量，而且每天都变。**去掉**（理由见去重） |
+| `event_key`、`subject`、`anchor_date`、`date_unconfirmed`、`date_caveat` | **去掉**：分别与账本自己的身份、`entry_ref`、`confirmed` 重复 |
+
+最终 payload（`catalyst_calendar.calendar_event_payload`）九个字段，与 `PAYLOAD_FIELDS["calendar"]` 完全相等，有一条两边都 import 的测试钉住（`EventContractTests`）。**这两个模块之前正是因为各自只对着对方的 fake 测试，才能一边发九个字段、一边只声明五个，而没有一条红测试。**
+
+**加宽是安全的，前提核验过了**：加宽一个 payload 契约只在「旧契约下还没写过任何东西」时安全，否则旧行会在新字段集下通过校验、读起来像是它对新字段「什么都没说」。核验方式：把 `/private/tmp/dalton-ro/core.sqlite` 复制到 `/tmp` 后查询——**live Core 上根本没有 `research_events` 这张表**，任何 kind 的事件都一条没写过，更不用说 calendar。
+
+`confirmed` 与 `date_confidence` 是同一件事的两种写法：前者是 P14a 的词、cockpit 已经在用它印「日期未确认」，后者是计划要求事件携带的、也是将来出现第三种取值时需要的。两者在 `calendar_event_payload` 里由同一个值派生，不可能对不上，有测试。另有一条测试把本模块的 `UNCONFIRMED_DATE_CAVEAT` 钉死等于 cockpit 源码里印出来的那串字，免得一句注意语裂成两句。
 
 ### 5.1.1 窗口规则（2026-09-09 下午，主 agent 按分析师实践裁定）
 
 | 窗口 | estimated | confirmed |
 | --- | --- | --- |
-| `preview`（T−30，`0 < days_until ≤ 30`） | **开**，带 `date_caveat` | 开 |
+| `preview`（T−30，`0 < days_until ≤ 30`） | **开**，`confirmed: false` + `date_confidence: estimated` | 开 |
 | `calibration`（T+0..T+2） | **不开** | 开 |
 | `date_change` | 开 | 开 |
 
 - **preview 不等确认**，因为分析师就是这么工作的：等公司确认，要准备的那个月已经过掉大半了。代价是偶尔照一个后来会挪的日期备了稿，而对策是把日期是哪一种说出来，不是不干活。
-- **确认本身是第二个事件。** 公司的 filing 把估计变成确认时，版本链记 `evidence_thicker`，同时再发一次 `preview`，判断层据此重新排期——它之前排的工作现在可以放心投入了。这条能成立，是因为 `confidence` 进了 `event_key`。
+- **确认本身是第二个事件**，而且现在是**账本**让它成为第二个事件的：确认改变了 payload（`confirmed` 与 `date_confidence` 都变），所以第二次写回 `fresh` 而不是 `duplicate`。有端到端测试（真 store，两行）。
 - **calibration 永远只认 confirmed。** 它是对着一次发布写的；estimated 的日期只说明「大概率会报」，不说明「报过了」。对一场没人开过的电话会做校准不是薄，是错。
 - 判据集中在 `emit_calendar_events` 里的 `UNCONFIRMED_DATE_WINDOWS`（`{preview, date_change}`）一个常量上。
 
-**没接上时不会静默丢**：tick summary 里 `settled.events.status == "events_unwired"`，并把本该发出的事件列出来。谁都不用几个月后才发现窗口一直开进了虚空。没写出去就什么都不记，所以窗口会一直出现在 tick summary 里，直到有人把 writer 接上——这个状态就该被这样念叨。
+**去重是账本的，不是本片的。** 事件身份是 `(company_ref, kind, payload_hash)`，而 payload 里不带任何随天变化的字段，所以一个开着的窗口每天早上算出同一个 payload，账本回 `duplicate` 且什么都不写。原来这里有一个进程内的 `set` 兼一个 `event_key`——那是对一个已经有答案的问题给的第二个答案，而且是更差的那个：重启就忘光，部署后第一个 tick 会把所有开着的窗口重记一遍。两者都删掉了。`days_until` / `as_of` 仍然在 `emit_calendar_events` 的返回行上（tick summary 要看），只是不在 payload 里。
 
-**写一条记一条。** `record_event` 接受了哪一条，就在那一刻记进 `_emitted`，不是整批发完再记。一家公司同时开着 preview 和 date_change 时，如果第二条写失败，整批记录法会让第一条「写出去了但没记住」，第二天再写一次。有测试（一个第二次调用就抛的 writer）。
-
-**去重**：`emit_calendar_events(is_emitted=...)` 收一个谓词。现在由 coordinator 的进程内 `set` 提供，所以 preview 窗口开着的三十天里只发一次；`event_key` 带日期，所以日期真动了窗口会重开。**集成时建议把 `is_emitted` 换成对事件账本的持久查询**（按 `payload.event_key`），否则 writer 重启会重发一次。这是目前唯一一个「进程内状态承担了本该持久的职责」的地方，故意留成一个参数。
+**两个 grant，不是同一个。** 发布日历要 `observation`；把日历开出来的窗口记进账本是写 P14a 的账本，要的是**它的** scope `market_event`（由账本自己校验）。**live mission 现在只有前者**（`may_write` 里有 `observation`、没有 `market_event`），所以在 owner 发新版 mission 之前，日历照常维护、事件一条都不会写，tick 报 `events_ungranted` 并把原因带上——这是缺一个授权，不是 lane 坏了，因此**不消耗这家公司的重试预算**。有测试。
 
 ### 5.2 `install.sh` 种子
 
@@ -317,27 +326,27 @@ ACN 的 10/1 与蓝图里「ACN 10/1 业绩实战」对上了。
 
 只有 ACN 落在 T−30 里；其余四家在 T−42 到 T−57，还没到。ACN 的日期是 Yahoo 给的估计，所以 preview 照开，事件带着 `date_confidence: estimated` 与「日期未确认」。等 ACN 发出那份 Item 2.02 的 8-K，日历出新版本带 `evidence_thicker`，同一个 preview 窗口以 `confirmed` 再发一次，判断层可以据此把「照估计日期备的稿」升级为「照确认日期投入」。T+0..T+2 的 calibration 要等那份 8-K，这是设计。
 
-同一天再问一次什么都不发——`event_key` 是确定性的，进程内那个集合（集成后换成对事件账本的持久查询，见 5.1）挡住了重复。
+同一天再问一次不会多写一行——payload 里没有随天变化的字段，账本按 `(company_ref, kind, payload_hash)` 认出它并回 `duplicate`。
 
 **10 月之后那一段，有测试端到端钉住**（`OccurrenceTests::test_the_whole_accenture_autumn_end_to_end`）：10/1 的已确认发布入库之后，Yahoo 给出 12/17 的估计 → 两条条目而不是一条，`next_catalyst` 在 11 月中返回 12/17（`estimated`，T−32），preview 在 11/17 也就是 T−30 那天开火。这正是原来那个 occurrence key 会静默吞掉的一整次财报。
 
 ## 7. 验收
 
 ```
-Ran 2973 tests in 283.279s
+Ran 4126 tests in 595.982s
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，合并 main `7708d43` 之后。本片自己的五个测试文件共 130 项；其余增量来自并入的 S1 / S2 / P14e / P14-M / P12b。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，在 `c1-event-bridge` 分支、main `3f21dbe` 之上。本片自己的五个测试文件共 141 项。）
 
 各文件：
 
 ```
-tests/test_catalyst_calendar.py          Ran 45 tests   OK
+tests/test_catalyst_calendar.py          Ran 52 tests   OK
 tests/test_yfinance_calendar_adapter.py  Ran 19 tests   OK
 tests/test_sec_earnings_release.py       Ran 16 tests   OK
 tests/test_catalyst_calendar_cli.py      Ran 19 tests   OK
-tests/test_mission_catalyst_lane.py      Ran 31 tests   OK
+tests/test_mission_catalyst_lane.py      Ran 36 tests   OK
 ```
 
 覆盖到的行为，按交付要求逐条：
@@ -357,6 +366,8 @@ tests/test_mission_catalyst_lane.py      Ran 31 tests   OK
 | **Yahoo 的两日窗口** | `EntryTests::test_a_window_is_one_entry_dated_at_its_earlier_end`、`test_a_windowed_run_publishes_rather_than_failing`（CTSH 形状，跑到发布） |
 | **两半独立失败** | `PublishingTests` 四条：畸形 vendor 响应不丢 filing 那一半（`status: partial`）、治理未批也一样、两半都空才是 `failed`、同一天的两半落在同一次事件上 |
 | **写一条记一条** | `EventTests::test_a_writer_that_fails_halfway_does_not_lose_what_it_wrote`；`partial` 两条（照发事件并记「今天问过」、连三天挂起且理由是 vendor 的） |
+| **事件契约（两边都 import）** | `EventContractTests` 七条：产出的字段集 == `PAYLOAD_FIELDS["calendar"]`、三个窗口 × 两种 confidence × 两种 disagreement 都过 `validate_payload`、payload 不含嵌套、不含随天变化的字段、`confirmed` 与 `date_confidence` 不会对不上、`calendar` 是账本认识的 kind、注意语与 cockpit 印的那串字相等 |
+| **端到端接线（真 store、真账本）** | `WiringTests` 四条：走 `dispatch()` → `research_events` 里真有一行 `calendar`（`evidence_tier: derived`、`actor_ref` 是 mission 的 automation principal、`date_confidence: estimated`）、第二天不写第二行、确认之后写第二行、calibration 那行是 confirmed；`UngrantedEventScopeTests` 一条：只给 `observation` 不给 `market_event` 时报 `events_ungranted` 且不消耗重试预算 |
 | **产物哈希与时区** | `SpoolTests` 两条（`tampered` / `unreadable` 各自成词）、`WireTests` 两条（带时区先归一化、不带时区按印出来的那天取） |
 | lane 注册（新解释器） | `RegistrationTests::test_importing_this_module_does_not_pull_in_the_writer`（subprocess 实跑），另加 order / driver key / argv / unconfigured 四条 |
 | yfinance 适配器（stub） | `FetchTests`（`sys.modules["yfinance"]` 换成 stub；`date` 对象要能过 canonical JSON；来源拒绝是「有理由的缺席」不是崩溃） |
@@ -370,7 +381,6 @@ tests/test_mission_catalyst_lane.py      Ran 31 tests   OK
 - **没有读 8-K 正文**，因此没有公司确认的未来日期；preview 照估计日期开并标注，calibration 要等它。第 3.3 与 6.2 节。
 - **没有 guidance / investor_day / filing_due 的产出方。** 三个 `event_kind` 在词表里、能被写入、能开窗口，但目前没有来源填它们。`filing_due` 尤其可惜——10-Q 的法定截止日是可以从 filing 期末加规则算出来的，但那是**推算**，本片不做推算，要做得是另一个显式的、有自己规则冻结的东西。
 - **没有 cockpit 接线**（越界；读者接口已就位）。
-- **没有把 `is_emitted` 做成持久查询**（要等 P14a 的事件账本，见 5.1）。
 - **没有用财季判定同一次事件**（见开放问题 2）。
 - **没有 `filings.files` 的翻页**：`filings.recent` 是大约一年 / 一千条的窗口，更老的 8-K 在 `filings.files` 里，而这套系统对那个没有抓取权限。对一个 120 天保留期的日历来说够用。
 
@@ -378,8 +388,9 @@ tests/test_mission_catalyst_lane.py      Ran 31 tests   OK
 
 ## 9. 开放问题
 
-1. **`date_caveat` 的字面。** 现在是硬写的 `"日期未确认"`（`UNCONFIRMED_DATE_CAVEAT`），与 `dashboard_projector` 里「结果待确认」同一路数。如果 cockpit 之后要走一套统一的文案表，这个常量是唯一要改的地方。
-2. **占位判据是「45 天以内」，不是财季。** 现在两条陈述算不算同一次事件，靠的是日期距离；真正的判据是财季（10-Q 的 `fiscal_period`，或 8-K 正文里的「fourth-quarter」）。45 天在这五家公司的实际节奏上有很宽的余量（改期几天 vs 两季 77 天以上），但一家一年报十次的公司会把这个余量吃掉。等 dossier 那一层拿得到财季，`_match()` 应该先用财季、退化时才用距离——那是一个函数的改动，因为身份的判定已经收在权威里的一处了。
-3. **8-K 行不在 `source_record_refs` 里**这件事。本片的立场是「引用一个日期」和「取一份文档」是两件事，前者靠 accession + `items` + artifact hash 就够，后者必须走 URL authority 而那条路正确地拒绝了。如果集成时认为连引用日期也该要求该行在 envelope 里，那就得在 discovery plan 里加 `form: 8-K` 的 spec——同 6.1 的路径 1，两件事会一起解决。
-4. **`acceptanceDateTime` 没有时区**。SEC 的字段是东部时间不带偏移；本片只在它自带 `Z` 时用它，否则用 `filingDate` 的午夜 UTC。这个值只用于给同一来源的两条陈述排序，`filingDate` 排得对，但如果以后有人拿它当墙上时钟用，这里要先改。
-5. **DXC 的 `company_ref` 是九位**（`company:sec-cik:001688568`），别处已经记过这个疤。本片的 `issuer_for()` 原样返回、`submissions_artifacts()` 用 `lstrip("0")` 比对，两条都有测试；但这个疤该由谁来收，仍然没人认领。
+1. **live mission 还没有 `market_event`。** 在 owner 发一版把它加进 `autonomy.may_write` 之前，这条 lane 会维护日历、报 `events_ungranted`、一条事件都不写。这不是缺陷，是缺一个授权；但它是「接上之后还差最后一步」的那一步，需要 owner。
+2. **`date_caveat` 的字面。** 现在是硬写的 `"日期未确认"`（`UNCONFIRMED_DATE_CAVEAT`），与 `dashboard_projector` 里「结果待确认」同一路数。如果 cockpit 之后要走一套统一的文案表，这个常量是唯一要改的地方。
+3. **占位判据是「45 天以内」，不是财季。** 现在两条陈述算不算同一次事件，靠的是日期距离；真正的判据是财季（10-Q 的 `fiscal_period`，或 8-K 正文里的「fourth-quarter」）。45 天在这五家公司的实际节奏上有很宽的余量（改期几天 vs 两季 77 天以上），但一家一年报十次的公司会把这个余量吃掉。等 dossier 那一层拿得到财季，`_match()` 应该先用财季、退化时才用距离——那是一个函数的改动，因为身份的判定已经收在权威里的一处了。
+4. **8-K 行不在 `source_record_refs` 里**这件事。本片的立场是「引用一个日期」和「取一份文档」是两件事，前者靠 accession + `items` + artifact hash 就够，后者必须走 URL authority 而那条路正确地拒绝了。如果集成时认为连引用日期也该要求该行在 envelope 里，那就得在 discovery plan 里加 `form: 8-K` 的 spec——同 6.1 的路径 1，两件事会一起解决。
+5. **`acceptanceDateTime` 没有时区**。SEC 的字段是东部时间不带偏移；本片只在它自带 `Z` 时用它，否则用 `filingDate` 的午夜 UTC。这个值只用于给同一来源的两条陈述排序，`filingDate` 排得对，但如果以后有人拿它当墙上时钟用，这里要先改。
+6. **DXC 的 `company_ref` 是九位**（`company:sec-cik:001688568`），别处已经记过这个疤。本片的 `issuer_for()` 原样返回、`submissions_artifacts()` 用 `lstrip("0")` 比对，两条都有测试；但这个疤该由谁来收，仍然没人认领。
