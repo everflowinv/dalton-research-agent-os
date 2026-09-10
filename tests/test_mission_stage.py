@@ -172,6 +172,34 @@ class SourceBaseTests(StageHarness):
         self.assertIn("还没有接入", calls["note"])
         self.assertIn("earnings_calls", next(c for c in companies if c["company_ref"] == ACN)["blocked_on"])
 
+    def test_unavailable_sources_do_not_make_an_empty_company_ready(self):
+        from dalton_core.mission_stage import evaluate_industry
+        mission = {**self.mission, "source_plan": [
+            {**source, "status": "not_connected"} for source in self.mission["source_plan"]
+        ]}
+        companies = evaluate_mission(self.store.connection, mission)
+        company = next(item for item in companies if item["company_ref"] == ACN)
+        self.assertEqual(company["gaps"], [])
+        self.assertTrue(company["blocked_on"])
+        self.assertFalse(company["source_base_ready"])
+        industry = evaluate_industry(self.store.connection, mission)
+        self.assertEqual(industry["gaps"], [])
+        self.assertTrue(industry["blocked_on"])
+        self.assertFalse(industry["source_base_ready"])
+
+    def test_unplanned_industry_stays_unready_until_required_documents_exist(self):
+        from dalton_core.mission_stage import evaluate_industry, INDUSTRY_BASE_ITEMS
+        empty = evaluate_industry(self.store.connection, self.mission)
+        self.assertTrue(empty["blocked_on"])
+        self.assertEqual(empty["gaps"], [])
+        self.assertFalse(empty["source_base_ready"])
+        for item in INDUSTRY_BASE_ITEMS:
+            for _ in range(item["required"]):
+                self.document(ACN, item["spec_refs"][0], "acquired")
+        ready = evaluate_industry(self.store.connection, self.mission)
+        self.assertEqual(ready["blocked_on"], [])
+        self.assertTrue(ready["source_base_ready"])
+
     def test_quarterly_financials_count_distinct_periods_of_quantitative_claims(self) -> None:
         self.assertEqual(self.item(self.evaluate(), ACN, "quarterly_financials")["have"], 0)
         rows = [

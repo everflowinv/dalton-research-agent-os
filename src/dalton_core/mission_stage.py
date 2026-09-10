@@ -439,7 +439,7 @@ def evaluate_mission(
             "stage": stage, "stage_label": STAGE_LABELS.get(stage or "", "还没开始"),
             "stage_status": status, "stage_status_label": STAGE_STATUS_LABELS.get(status or "", "还没开始"),
             "items": items,
-            "source_base_ready": not blocking,
+            "source_base_ready": all(item["status"] == "complete" for item in items),
             "gaps": [i["item_ref"] for i in blocking],
             "blocked_on": [i["item_ref"] for i in items if i["status"] in {"not_planned", "source_unavailable"}],
         })
@@ -499,7 +499,7 @@ def evaluate_industry(
         "gaps": [i["item_ref"] for i in blocking],
         "blocked_on": [i["item_ref"] for i in items
                        if i["status"] in {"not_planned", "source_unavailable"}],
-        "source_base_ready": not blocking,
+        "source_base_ready": all(item["status"] == "complete" for item in items),
     }
 
 
