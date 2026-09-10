@@ -141,7 +141,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_a_batch_is_dispatched_once(self):
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
-        self.assertEqual(self.coordinator.dispatch_once()["status"], "idle")
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "busy")
         self.assertEqual(len(self.launcher.started), 1)
 
     def test_a_new_event_is_a_new_batch(self):

@@ -102,12 +102,12 @@ class MissionEventJudgementLaneCoordinator:
         batch = f"{mission['id']}:{newest}"
         if configuration is not None:
             batch += f":configuration:{configuration}"
-        if batch == self._last_batch:
-            return {"status": "idle", "settled": settled, "batch_ref": batch,
-                    "reason": "this batch has already been dispatched"}
         if self._open is not None:
             return {"status": "busy", "settled": settled,
                     "reason": "the previous judgement batch is still running"}
+        if batch == self._last_batch:
+            return {"status": "idle", "settled": settled, "batch_ref": batch,
+                    "reason": "this batch has already been dispatched"}
         try:
             ticket = self.launcher.start(batch_ref=batch)
         except LaneChildConflict as exc:

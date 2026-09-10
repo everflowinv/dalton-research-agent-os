@@ -25,6 +25,7 @@ class ConfigurationRetryTests(unittest.TestCase):
                 pending=lambda mission: "event:unchanged",
             )
             first = coordinator.dispatch_once()
+            self.assertEqual(coordinator.dispatch_once()["status"], "busy")
             verifier.write_text('{"routing_policy_ref":"verifier:2"}')
             self.assertEqual(coordinator.dispatch_once()["status"], "busy")
             self.assertEqual(len(launcher.started), 1)
@@ -41,10 +42,16 @@ class ConfigurationRetryTests(unittest.TestCase):
         launcher = FakeLauncher()
         def unreadable():
             raise OSError("configuration unavailable")
-        launcher.configuration_signature = unreadable
+        launcher.configuration_signature = lambda: "initial"
         coordinator = MissionEventJudgementLaneCoordinator(
             launcher=launcher, mission=lambda: {"id": "mission:14"},
             pending=lambda mission: "event:1",
         )
+        first = coordinator.dispatch_once()
+        launcher.configuration_signature = unreadable
         self.assertEqual(coordinator.dispatch_once()["status"], "unavailable")
-        self.assertEqual(launcher.started, [])
+        self.assertEqual(coordinator._open, first["ticket_ref"])
+        self.assertEqual(len(launcher.started), 1)
+        launcher.configuration_signature = lambda: "restored"
+        self.assertEqual(coordinator.dispatch_once()["status"], "busy")
+        self.assertEqual(len(launcher.started), 1)
