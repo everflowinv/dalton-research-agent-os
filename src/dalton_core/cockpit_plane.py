@@ -195,6 +195,7 @@ REGISTRY_LANE_LABELS = {
     "company_dossier": "写公司档案",
     "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",
     "mission_ownership": "看谁在买卖这家公司",
+    "mission_hkex_filings": "看港股公司每天回购了多少、董事有没有增减持",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
     "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
@@ -215,6 +216,10 @@ EVENT_KIND_LABELS = {
     "reconciliation": "预测与实际对账", "claim": "新结论",
     "sales_note": "卖方 sales note", "crowd_post": "散户与市场议论",
     "expert_excerpt": "专家访谈摘录",
+    "insider_transaction": "董事与高管的买卖",
+    "ownership_change": "大股东持股变化",
+    "holdings_change": "机构持仓变化",
+    "buyback_disclosure": "公司回购自己的股票",
 }
 # Ordered best first, the same order the Playbook reads them in.
 EVIDENCE_TIER_LABELS = {

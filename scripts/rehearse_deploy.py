@@ -440,6 +440,22 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
             "margin-balance", "northbound-flow", "ah-premium",
         )
     ),
+    # W4: the four Hong Kong disclosure records, all-or-nothing by the INT1
+    # rule -- the lane's plist argument is the governance *directory* and the
+    # launcher asks that directory which of the four it may run. Seeding them
+    # does turn the lane on, and that is safe: the live mission's universe
+    # holds only company:sec-cik: names, so the lane reports ``idle`` with the
+    # reason and starts nothing until the owner admits a Hong Kong name.
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/hkex-filings-{kind}-v1.json",
+            f"connector-governance/hkex-filings-{kind}-v1.json",
+        )
+        for kind in (
+            "next-day-disclosure-returns", "monthly-returns",
+            "disclosure-of-interests", "announcements-index",
+        )
+    ),
     # S2 / INT2: the Guidepoint lane's discovery plan.  The two records were
     # already seeded further up; the plan is the other half of the switch and
     # its argv fragment requires both, so they are seeded together.
