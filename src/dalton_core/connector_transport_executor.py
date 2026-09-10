@@ -28,6 +28,7 @@ from .raw_spool import (
 from .runner_journal import RunnerJournal, RunnerJournalConflict, RunnerJournalNotFound
 from .store import content_hash
 from .workspace_runtime import ENVIRONMENT_KEY
+from pathlib import Path
 
 
 class ConnectorTransportError(Exception):
@@ -208,7 +209,7 @@ class _SharedConnectorReservation:
         actual = usage.get("cost_micros") if isinstance(usage, Mapping) else None
         if isinstance(actual, bool) or not isinstance(actual, int) or actual < 0:
             actual = None
-        unknown = outcome in {"timeout", "indeterminate"}
+        unknown = outcome in {"timeout", "indeterminate"} or observation is None
         with self._authority() as authority:
             authority.settle(
                 self.ref, actual_cost_micros=None if unknown else actual,
@@ -225,23 +226,40 @@ def _shared_recovery(reservation_ref: str | None, *, clock: Callable[[], datetim
     if not manifest:
         raise ConnectorTransportError("shared connector reservation lost its workspace binding")
     workspace = load_workspace_manifest(manifest)
-    found = 0
+    targets: dict[tuple[str, str], tuple[str, str]] = {}
+    databases: set[str] = set()
     for binding in workspace.shared_connector_capacity:
+        database = str(Path(binding["database"]).resolve())
         with SharedConnectorCapacityAuthority(
                 binding["database"], policy_ref=binding["policy_ref"],
                 policy_hash=binding["policy_hash"], clock=clock) as authority:
             row = authority.connection.execute(
-                "SELECT 1 FROM shared_connector_capacity_reservations WHERE reservation_ref=?",
+                "SELECT workspace_id,policy_ref,policy_hash FROM shared_connector_capacity_reservations WHERE reservation_ref=?",
                 (reservation_ref,)).fetchone()
-            if row:
-                found += 1
-                if dispatched:
-                    authority.settle(reservation_ref, actual_cost_micros=None,
-                                     outcome="transport_or_protocol_unknown")
-                else:
-                    authority.release_undispatched(reservation_ref)
-    if found != 1:
+            if row is None:
+                continue
+            databases.add(database)
+            if row["workspace_id"] != workspace.workspace_id:
+                raise ConnectorTransportError("shared connector recovery belongs to another workspace")
+            # A database can contain several account policies. Inspect all
+            # declarations before mutating, and open the exact historical
+            # policy that authorized this physical attempt.
+            with SharedConnectorCapacityAuthority(
+                    database, policy_ref=row["policy_ref"],
+                    policy_hash=row["policy_hash"], clock=clock) as historical:
+                if (historical.policy["quota_scope_ref"] == authority.policy["quota_scope_ref"]
+                        and historical.policy["provider_account_ref"] == authority.policy["provider_account_ref"]):
+                    targets[(database, reservation_ref)] = (row["policy_ref"], row["policy_hash"])
+    if len(targets) != 1 or len(databases) != 1:
         raise ConnectorTransportError("shared connector recovery binding is unavailable")
+    (database, _), (policy_ref, policy_hash) = next(iter(targets.items()))
+    with SharedConnectorCapacityAuthority(
+            database, policy_ref=policy_ref, policy_hash=policy_hash, clock=clock) as authority:
+        if dispatched:
+            authority.settle(reservation_ref, actual_cost_micros=None,
+                             outcome="transport_or_protocol_unknown")
+        else:
+            authority.release_undispatched(reservation_ref)
 
 
 class ConnectorTransportExecutor:

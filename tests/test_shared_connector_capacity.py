@@ -11,6 +11,8 @@ from unittest.mock import patch
 from dalton_core.shared_connector_capacity import (
     SharedConnectorCapacityAuthority,
     SharedConnectorCapacityExceeded,
+    SharedConnectorCapacityUnavailable,
+    SharedConnectorCapacityConflict,
     policy_record,
 )
 from dalton_core.workspace import create_workspace_manifest
@@ -49,9 +51,12 @@ class SharedConnectorCapacityTests(unittest.TestCase):
         self.now = probe.base.clock.value
         self.database = self.host / "fleet-capacity" / "connectors.sqlite"
 
-    def policy(self, *, calls=2, concurrency=2, policy_id="connector-capacity:fixture"):
+    def policy(self, *, calls=2, concurrency=2, policy_id="connector-capacity:fixture",
+               version=1, prior=None, scopes=None):
         return policy_record(
-            id=policy_id, status="approved", **self.scope,
+            id=policy_id, status="approved", scopes=scopes or [self.scope],
+            quota_scope_ref="quota-scope:fixture-account", version=version,
+            prior_policy_ref=prior,
             provider_account_ref="provider-account:fixture-owner",
             rolling_window_seconds=86400, max_calls=calls,
             max_cost_micros=2000, max_cost_micros_per_call=1000,
@@ -91,6 +96,35 @@ class SharedConnectorCapacityTests(unittest.TestCase):
         con=SharedConnectorCapacityAuthority(self.database,policy_ref=policy["id"],policy_hash=policy["content_hash"]); self.addCleanup(con.close)
         row=con.connection.execute("SELECT status,outcome,charged_micros FROM shared_connector_capacity_reservations").fetchone()
         self.assertEqual(tuple(row),("dispatched","transport_or_protocol_unknown",1000))
+
+    def test_recovery_with_two_account_policies_in_one_database_is_exact(self):
+        from dalton_core.store import content_hash
+        policy = self.policy(concurrency=1)
+        other = {**policy, "id": "connector-capacity:other-account",
+                 "provider_account_ref": "provider-account:other",
+                 "quota_scope_ref": "quota-scope:other",
+                 "scopes": [{**self.scope, "capability_ref": "capability:unrelated"}]}
+        other.pop("content_hash")
+        other["content_hash"] = content_hash(other)
+        SharedConnectorCapacityAuthority.initialize(self.database, policy)
+        SharedConnectorCapacityAuthority.initialize(self.database, other)
+        workspace = create_workspace_manifest(
+            self.host, "analyst-a", 8787, "release:sha256:" + "e" * 64, self.release,
+            shared_connector_capacity=[
+                {"database": str(self.database), "policy_ref": p["id"], "policy_hash": p["content_hash"]}
+                for p in (other, policy)])
+        first = TransportHarness("success", fault_at="after_transport_started")
+        self.addCleanup(first.close)
+        with patch.dict("os.environ", {ENVIRONMENT_KEY: str(workspace.manifest_path)}, clear=True):
+            with self.assertRaises(BaseException):
+                first.execute()
+            recovered = first.recovery_executor().recover(first.request()["id"])
+        self.assertEqual(recovered["state"], "indeterminate_recovered")
+        with SharedConnectorCapacityAuthority(
+                self.database, policy_ref=other["id"], policy_hash=other["content_hash"]) as wrong:
+            ref = wrong.connection.execute("SELECT reservation_ref FROM shared_connector_capacity_reservations").fetchone()[0]
+            with self.assertRaisesRegex(SharedConnectorCapacityConflict, "another capacity policy"):
+                wrong.settle(ref, actual_cost_micros=0, outcome="succeeded")
 
     def test_alphaengine_style_policy_uses_rolling_24_hours(self):
         policy=self.policy(calls=1); SharedConnectorCapacityAuthority.initialize(self.database,policy)
@@ -136,14 +170,49 @@ class SharedConnectorCapacityTests(unittest.TestCase):
 
     def test_policy_version_does_not_reset_stable_account_scope(self):
         first=self.policy(calls=1,policy_id="connector-capacity:fixture:v1")
-        second=self.policy(calls=1,policy_id="connector-capacity:fixture:v2")
+        second=self.policy(calls=1,policy_id="connector-capacity:fixture:v2",
+                           version=2,prior=first["id"])
         SharedConnectorCapacityAuthority.initialize(self.database,first)
-        SharedConnectorCapacityAuthority.initialize(self.database,second)
         with SharedConnectorCapacityAuthority(self.database,policy_ref=first["id"],policy_hash=first["content_hash"],clock=lambda:self.now) as authority:
-            authority.reserve(workspace_id="one",invocation_ref="connector-invocation:one",attempt_number=1,maximum_cost_micros=1000,expires_at=self.now+timedelta(hours=1))
+            row = authority.reserve(workspace_id="one",invocation_ref="connector-invocation:one",attempt_number=1,maximum_cost_micros=1000,expires_at=self.now+timedelta(hours=1))
+            authority.mark_dispatched(row["reservation_ref"])
+            SharedConnectorCapacityAuthority.initialize(self.database,second)
+            with self.assertRaisesRegex(SharedConnectorCapacityUnavailable, "superseded"):
+                authority.reserve(workspace_id="one",invocation_ref="connector-invocation:old-policy",attempt_number=1,maximum_cost_micros=1000,expires_at=self.now+timedelta(hours=1))
+            # A superseded policy can still settle its exact already-dispatched call.
+            authority.settle(row["reservation_ref"], actual_cost_micros=10, outcome="succeeded")
         with SharedConnectorCapacityAuthority(self.database,policy_ref=second["id"],policy_hash=second["content_hash"],clock=lambda:self.now) as authority:
             with self.assertRaises(SharedConnectorCapacityExceeded):
                 authority.reserve(workspace_id="two",invocation_ref="connector-invocation:two",attempt_number=1,maximum_cost_micros=1000,expires_at=self.now+timedelta(hours=1))
+
+    def test_two_operations_share_one_account_window_and_expired_dispatch_refuses(self):
+        other = {**self.scope, "capability_ref": "capability:second-operation"}
+        policy = self.policy(calls=1, scopes=[self.scope, other])
+        SharedConnectorCapacityAuthority.initialize(self.database, policy)
+        current = [self.now]
+        with SharedConnectorCapacityAuthority(
+                self.database, policy_ref=policy["id"], policy_hash=policy["content_hash"],
+                clock=lambda: current[0]) as authority:
+            self.assertTrue(authority.matches(**self.scope))
+            self.assertTrue(authority.matches(**other))
+            row = authority.reserve(workspace_id="one", invocation_ref="connector-invocation:search",
+                                    attempt_number=1, maximum_cost_micros=1000,
+                                    expires_at=self.now + timedelta(seconds=1))
+            with self.assertRaises(SharedConnectorCapacityExceeded):
+                authority.reserve(workspace_id="two", invocation_ref="connector-invocation:document",
+                                  attempt_number=1, maximum_cost_micros=1000,
+                                  expires_at=self.now + timedelta(seconds=1))
+            current[0] += timedelta(seconds=2)
+            with self.assertRaisesRegex(SharedConnectorCapacityConflict, "expired"):
+                authority.mark_dispatched(row["reservation_ref"])
+            # Merely installing another named quota cannot reset this account.
+            from dalton_core.store import content_hash
+            duplicate = {**policy, "id": "connector-capacity:duplicate-account",
+                         "quota_scope_ref": "quota-scope:renamed"}
+            duplicate.pop("content_hash")
+            duplicate["content_hash"] = content_hash(duplicate)
+            with self.assertRaisesRegex(SharedConnectorCapacityConflict, "already owns"):
+                SharedConnectorCapacityAuthority.initialize(self.database, duplicate)
 
 
 if __name__ == "__main__": unittest.main()

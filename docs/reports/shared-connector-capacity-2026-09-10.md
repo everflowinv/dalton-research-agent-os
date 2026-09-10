@@ -44,3 +44,11 @@ credential-slot set because the current ConnectorProfile has no separate
 provider-account authority field. Public credential-free profiles bind an
 explicit empty slot set. Connector-wide activation still requires owner-created
 policies and manifest bindings; this change creates or approves none.
+
+## Account and recovery review correction
+
+The unactivated connector policy is now schema 0.2: one explicit `quota_scope_ref` and `provider_account_ref` owns a list of exact connector/capability/credential scopes. Search and document retrieval spend the same account window; operation names cannot create separate copies of its cap. Policy versions extend an explicit active head while all reservations retain their original policy hash. Stale policies cannot reserve or dispatch new work; their existing dispatched attempts can still settle.
+
+Reservations validate future expiry and positive physical attempt/cost, enforce the per-call cap, and refuse expired/released attempts with an explicit fresh-attempt requirement. Missing observations retain uncertain completion/concurrency. Recovery scans all bindings before mutation, resolves one workspace-bound reservation and exact historical policy, and does not count the same shared database twice when multiple account policies live there. Wrong-policy mutation is refused.
+
+Root verification: 28 connector recovery/Cockpit/fleet tests passed. Direct-transport bypass and the expired pre-journal retry convergence remain under independent review; no live capacity authority was created.

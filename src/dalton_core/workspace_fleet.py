@@ -32,8 +32,9 @@ def fleet_overview(host_root: str | Path) -> dict[str, Any]:
                 "release_ref": workspace.release_ref,
                 "state": "awaiting_bootstrap", "local_cockpit_url": None,
                 "runtime_health": "not_checked",
-                "model_capacity": "configured" if workspace.shared_capacity else "unknown",
-                "connector_capacity": "unknown",
+                "model_capacity": ("configured" if workspace.shared_capacity
+                                   or workspace.shared_model_capacity_bindings else "unknown"),
+                "connector_capacity": ("configured_scopes" if workspace.shared_connector_capacity else "unknown"),
             }
             if workspace.config_path.is_file():
                 config = ServiceConfig.from_file(workspace.config_path)

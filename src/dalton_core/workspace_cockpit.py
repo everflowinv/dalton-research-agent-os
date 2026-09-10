@@ -43,6 +43,8 @@ def cockpit_workspace_context(
         "manifest_hash": workspace.content_hash,
         "release_ref": workspace.release_ref,
         "aggregate_capacity": ("configured_model_authority"
-                               if workspace.shared_capacity else "unknown"),
-        "connector_aggregate_capacity": "unknown",
+                               if workspace.shared_capacity or workspace.shared_model_capacity_bindings
+                               else "unknown"),
+        "connector_aggregate_capacity": ("configured_scoped_authorities"
+                                         if workspace.shared_connector_capacity else "unknown"),
     }
