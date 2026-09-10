@@ -106,6 +106,18 @@ ASPECT_LABELS = {
     "catalyst_calendar": "日程与催化", "history_of_price_drivers": "股价的历史驱动",
     "industry": "行业", "other": "其他",
 }
+# P15d: the owner's language for a conviction call's three closed fields.
+CALL_DIRECTION_LABELS = {"long": "做多", "short": "做空", "avoid": "回避"}
+CALL_HORIZON_LABELS = {
+    "3_6_months": "3–6 个月", "6_12_months": "6–12 个月",
+    "1_3_years": "1–3 年", "3_5_years": "3–5 年",
+}
+CALL_STANDARD_LABELS = {
+    "met": "达到手册的风险回报标准",
+    "not_met": "没达到手册的风险回报标准",
+    "unavailable": "没给出可对照的数字",
+    "not_applicable": "手册对这类 call 没有回报标准",
+}
 # P11c asked for this one specifically: a percentile computed while the
 # fundamentals never moved is the price's percentile wearing a multiple's
 # clothes, and a reader who is not told cannot know.
@@ -175,6 +187,7 @@ REGISTRY_LANE_LABELS = {
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
+    "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
 }
 # Already shown by name above the registry rows, with their budgets.
@@ -2302,6 +2315,43 @@ class CockpitPlane:
                                 "依据": record["rationale"]},
                     "actions": [{"decision": "retired", "label": "退役这条结论"},
                                 {"decision": "kept", "label": "保留"}],
+                    "needs_rationale": False,
+                })
+            # P15d: a conviction call the machine proposed and nobody has
+            # answered yet. Listed with no buttons on purpose: the decision op
+            # exists on the writer, but the cockpit's own decide path and the
+            # three buttons are integration work, and INT1's rule is that a
+            # button which errors when pressed is worse than no button. What
+            # the owner needs from this card today is to know the call is
+            # waiting and what it says.
+            for row in self._rows(core,
+                "SELECT p.* FROM conviction_call_proposals p "
+                "LEFT JOIN conviction_call_decisions d ON d.proposal_ref=p.proposal_id "
+                "WHERE d.decision_id IS NULL ORDER BY p.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                variant = record.get("variant_view") or {}
+                items.append({
+                    "kind": "conviction_call", "ref": row["proposal_id"],
+                    "hash": row["content_hash"], "at": row["created_at"],
+                    "title": "是否采纳这条投资 call："
+                             + CALL_DIRECTION_LABELS.get(row["direction"], row["direction"]),
+                    "who": self._label(members, row["company_ref"]),
+                    "summary": (variant.get("where_market_is_wrong") or {}).get("statement") or "",
+                    "details": {
+                        "我们的看法": (variant.get("our_view") or {}).get("statement"),
+                        "市场的看法": (variant.get("market_view") or {}).get("statement")
+                                      or (variant.get("market_view") or {}).get("reason"),
+                        "时间跨度": CALL_HORIZON_LABELS.get(
+                            row["time_horizon"], row["time_horizon"]),
+                        "信心": row["confidence"],
+                        "风险回报是否达标": CALL_STANDARD_LABELS.get(
+                            row["risk_reward_status"], row["risk_reward_status"]),
+                        "可观察信号": [step.get("signal") for step
+                                       in record.get("event_pathway") or []],
+                        "怎么裁决": "写者操作 decide_conviction_call（accept / reject / defer，要写理由）",
+                    },
+                    "actions": [],
                     "needs_rationale": False,
                 })
         # INT2 / ADR-0007: the checkpoints the revision loop raises. Rendered
