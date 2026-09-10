@@ -16,6 +16,7 @@ from dalton_core.bounded_planner_driver import (
     BoundedPlannerDriverError,
 )
 from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+from dalton_core.budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
 from dalton_core.bounded_probe_executor import (
     BoundedProbeExecutionError,
     execute_probe_work_order,
@@ -815,6 +816,121 @@ class StalledLoopTests(unittest.TestCase):
         self.assertEqual(
             float(default_planner_cost_usd()), DEFAULT_PLANNER_MAX_COST_USD)
 
+
+
+class PlannerPoolHoldTests(unittest.TestCase):
+    """C2b: a spent capacity pool holds the loop; it does not spend a round.
+
+    The writer refuses before it leases anything, so the honest thing for the
+    driver to do is nothing at all.  What it must *not* do is fall through to
+    the free deterministic planner: that would consume the round the pool just
+    said no to, and the loop would arrive at tomorrow with one fewer round and
+    nothing to show for it.
+    """
+
+    class _Client:
+        def __init__(self, *, pool: str | None = "adhoc",
+                     rejected: bool = True) -> None:
+            self.pool = pool
+            self.rejected = rejected
+            self.calls: list[str] = []
+            self.planner_params: dict | None = None
+
+        def call(self, operation, params=None):
+            self.calls.append(operation)
+            if operation == "bounded_planner_active_loops":
+                loop = {
+                    "loop_version_ref": "bounded-planner-loop-version:1",
+                    "loop_ref": "bounded-loop:1",
+                }
+                if self.pool is not None:
+                    loop["pool"] = self.pool
+                return {"loops": [loop]}
+            if operation == "materialize_bounded_planner_context":
+                return {
+                    "id": "planner-context-pack-version:1",
+                    "remaining_budget": {
+                        "rounds_remaining": 2, "cost_units_remaining": 4,
+                        "seconds_remaining": 600,
+                    },
+                }
+            if operation == "llm_planner_execute":
+                self.planner_params = dict(params or {})
+                if self.rejected:
+                    return {
+                        "status": "rejected", "reason": POOL_EXHAUSTED_REASON,
+                        "lane_status": POOL_EXHAUSTED_STATUS,
+                        "pool": "adhoc", "day": "2026-09-09",
+                        "spent": 2_500_000, "cap": 2_500_000,
+                    }
+                return {"status": "model_failed"}
+            if operation in {
+                "bounded_planner_propose_next",
+                "bounded_planner_propose_next_with_context",
+            }:
+                return {"status": "pending_round"}
+            return {"status": "idle"}
+
+    def _run(self, client) -> dict:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            config = BoundedPlannerDriverConfig(
+                writer_socket=root / "writer.sock",
+                token_config=root / "tokens.json",
+                scheduler_db=root / "scheduler.sqlite", user_agent="Dalton Test",
+                max_response_bytes=1_000_000, timeout_seconds=10.0,
+                max_probes_per_tick=1, filed_window_days=400,
+                observation_mandate_version_ref=None,
+                doctrine_pack_version_ref="doctrine-pack-version:1",
+                doctrine_pack_version_hash="d" * 64,
+                planner_routing_policy_ref=None,
+                planner_credential_slot_refs=None,
+                planner_model_router_db=None, planner_broker_socket=None,
+                planner_broker_auth_key=None,
+                planner_broker_client_id="client:dalton-core",
+                planner_expected_agent_id="chem", planner_max_cost_usd=0.5,
+            )
+            return BoundedPlannerDriver(
+                config, client=client, transport=object(), clock=lambda: NOW,
+            ).run_once()
+
+    def test_a_spent_pool_holds_the_loop_without_consuming_its_round(self) -> None:
+        client = self._Client()
+        result = self._run(client)
+
+        held = result["skipped"][0]
+        self.assertEqual(held["reason"], POOL_EXHAUSTED_REASON)
+        self.assertEqual(held["pool"], "adhoc")
+        self.assertEqual(held["lane_status"], POOL_EXHAUSTED_STATUS)
+        self.assertEqual(held["loop_version_ref"],
+                         "bounded-planner-loop-version:1")
+        # The deterministic fallback is for a planner that failed, not for a
+        # pool that refused: reaching it here would spend the round.
+        self.assertNotIn("bounded_planner_propose_next_with_context",
+                         client.calls)
+        self.assertNotIn("bounded_planner_propose_next", client.calls)
+
+    def test_the_pool_the_projection_named_travels_with_the_call(self) -> None:
+        client = self._Client(pool="adhoc")
+        self._run(client)
+        self.assertEqual(client.planner_params["pool"], "adhoc")
+
+    def test_a_projection_without_a_pool_sends_no_pool_at_all(self) -> None:
+        # An older writer's projection has no "pool" key. The driver must not
+        # invent one: the loop record is what decides, and a guess that
+        # disagreed with it would be refused.
+        client = self._Client(pool=None, rejected=False)
+        self._run(client)
+        self.assertNotIn("pool", client.planner_params)
+
+    def test_a_model_failure_still_falls_through_to_the_free_planner(self) -> None:
+        # The hold is narrow: only "rejected/pool_exhausted" holds. Every
+        # other planner outcome keeps P14e's behaviour.
+        client = self._Client(pool="coverage", rejected=False)
+        result = self._run(client)
+        self.assertIn("bounded_planner_propose_next_with_context", client.calls)
+        self.assertNotEqual(result["skipped"][0]["reason"],
+                            POOL_EXHAUSTED_REASON)
 
 if __name__ == "__main__":
     unittest.main()
