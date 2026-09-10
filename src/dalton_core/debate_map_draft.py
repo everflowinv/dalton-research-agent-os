@@ -100,7 +100,7 @@ _RESOLUTION_KEYS = frozenset({"reason", "refs"})
 # Versioned separately from the DebateMap authority.  This is the exact model
 # output boundary; changing it must release a persisted lane hold and create a
 # new WorkOrder identity without pretending the underlying evidence changed.
-DRAFT_CONTRACT_VERSION = "debate-map-draft-output-0.2"
+DRAFT_CONTRACT_VERSION = "debate-map-draft-output-0.3"
 DRAFT_CONTRACT_HASH = content_hash({
     "version": DRAFT_CONTRACT_VERSION,
     "top_level": ["debates"],
@@ -109,6 +109,11 @@ DRAFT_CONTRACT_HASH = content_hash({
     "market": sorted(_MARKET_KEYS),
     "ours": sorted(_OURS_KEYS),
     "resolution": sorted(_RESOLUTION_KEYS),
+    "limits": {
+        "debates": MAX_DEBATES,
+        "question_chars": MAX_QUESTION_CHARS,
+        "statement_chars": MAX_STATEMENT_OUT_CHARS,
+    },
 })
 
 TASK_HASH = content_hash({
@@ -314,7 +319,12 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "* Return one raw JSON object and nothing else. No prose, no code "
         "fence. The only top-level key is debates. Do not return "
         "template_coverage, evidence_limits, commentary, or any other sibling "
-        "key; those fields make the entire answer unusable.\n\n"
+        "key; those fields make the entire answer unusable.\n"
+        f"* Return at most {MAX_DEBATES} debates. Every question is at most "
+        f"{MAX_QUESTION_CHARS} characters. Every bull.statement, "
+        "bear.statement, market.statement, ours.statement, and "
+        f"resolution.reason is at most {MAX_STATEMENT_OUT_CHARS} characters. "
+        "These character limits include spaces.\n\n"
         "{\"debates\": [{\"debate_ref\": \"new-1\", \"question\": \"...\",\n"
         "  \"driver_refs\": [\"<driver_ref>\"], \"question_admission_index\": 0,\n"
         "  \"causal_chain_index\": 0,\n"

@@ -13,6 +13,8 @@ from dalton_core.debate_map_draft import (
     MAX_CLAIM_ROWS,
     MAX_DEBATES,
     MAX_PROMPT_BYTES,
+    MAX_QUESTION_CHARS,
+    MAX_STATEMENT_OUT_CHARS,
     PURPOSE,
     DebateDraftRefused,
     assemble_debates,
@@ -153,6 +155,12 @@ class InputTableTests(unittest.TestCase):
         # from one house never look like two sources to the drafter either
         self.assertIn("C1\tdemand_drivers\tsell_side\ttd\t", prompt)
         self.assertIn("C2\tdemand_drivers\tsell_side\twolfe\t", prompt)
+        self.assertIn(
+            f"Every question is at most {MAX_QUESTION_CHARS} characters", prompt)
+        self.assertIn(
+            f"resolution.reason is at most {MAX_STATEMENT_OUT_CHARS} characters",
+            prompt,
+        )
 
     def test_the_prompt_shows_the_numbered_constitution_lists(self) -> None:
         prompt = build_prompt(table())
@@ -196,6 +204,12 @@ class ParseDraftTests(unittest.TestCase):
         reply = json.loads(draft_reply())
         reply["debates"][0]["confidence"] = "high"
         with self.assertRaises(DebateDraftRefused):
+            parse_draft(json.dumps(reply), self.table)
+
+    def test_an_oversized_question_is_still_refused(self) -> None:
+        reply = json.loads(draft_reply())
+        reply["debates"][0]["question"] = "Q" * (MAX_QUESTION_CHARS + 1)
+        with self.assertRaisesRegex(DebateDraftRefused, "longer than 300"):
             parse_draft(json.dumps(reply), self.table)
 
     def test_live_style_top_level_commentary_is_refused_and_contract_is_explicit(self) -> None:
