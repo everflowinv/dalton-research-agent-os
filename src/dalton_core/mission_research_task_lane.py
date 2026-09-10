@@ -134,6 +134,8 @@ class ResearchTaskCoordinator:
 
         return {
             "plan_ref": plan_ref,
+            "configuration": (self.launcher.configuration_signature()
+                              if hasattr(self.launcher, "configuration_signature") else None),
             "tasks": count(
                 "SELECT COUNT(*) FROM bounded_planner_loop_versions "
                 "WHERE json_extract(record_json,'$.admission.source')='inquiry'"),
@@ -174,7 +176,9 @@ class ResearchTaskCoordinator:
         if mission is None:
             return {"status": "idle", "reason": "no active mission"}
         authority = BoundedPlannerAuthority(self.store)
-        retired = getattr(self.launcher, "retired_templates", ())
+        configuration = (self.launcher.configuration()
+                         if hasattr(self.launcher, "configuration") else {})
+        retired = configuration.get("retired_templates", getattr(self.launcher, "retired_templates", ()))
         decision = grant(mission, bindable_templates(authority, retired=retired))
         settled = self.settle()
         top_permission = permission_key(
@@ -276,7 +280,7 @@ class ResearchTaskCoordinator:
                     "reason": "计划和已派发的专项研究都没有变化"}
         try:
             ticket = self.launcher.start(
-                plan_ref=plan["plan_id"], signature=str(signature["tasks"]),
+                plan_ref=plan["plan_id"], signature=canonical_json(signature),
             )
         except LaneChildConflict as exc:
             return {**result, "status": "busy", "reason": str(exc)}
@@ -335,23 +339,31 @@ def lane_configuration(path: Path) -> dict[str, Any]:
     who wants an admitted template to stop being bound tonight names it here.
     """
 
+    from .call_budget import default_run_budget
+    from .research_task import ResearchTaskError, validate_task_budget
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         value = {}
-    if not isinstance(value, dict):
-        value = {}
-    requested = value.get("max_admissions_per_tick", 1)
+    except (OSError, ValueError) as exc:
+        raise ResearchTaskError("research task configuration cannot be read") from exc
+    if not isinstance(value, dict) or set(value) - {
+        "max_admissions_per_tick", "retired_templates", "task_budget",
+    }:
+        raise ResearchTaskError("research task configuration has an invalid shape")
+    requested = value.get("max_admissions_per_tick",
+                          default_run_budget("research_task")["max_admissions_per_tick"])
     if isinstance(requested, bool) or not isinstance(requested, int) or requested < 1:
-        requested = 1
-    retired = value.get("retired_templates") or []
-    if not isinstance(retired, list):
-        retired = []
+        raise ResearchTaskError("max_admissions_per_tick must be a positive integer")
+    retired = value.get("retired_templates", [])
+    if not isinstance(retired, list) or any(
+        not isinstance(item, str) or not item.strip() for item in retired
+    ):
+        raise ResearchTaskError("retired_templates must be a list of nonempty refs")
     return {
-        "max_admissions_per_tick": min(requested, 3),
-        "retired_templates": tuple(
-            item for item in retired if isinstance(item, str) and item
-        ),
+        "max_admissions_per_tick": requested,
+        "retired_templates": tuple(retired),
+        "task_budget": validate_task_budget(value.get("task_budget", {})),
     }
 
 
@@ -365,6 +377,8 @@ def build_launcher(args: Any) -> Any | None:
         state_dir=Path(args.db).expanduser().resolve().parent,
         max_admissions_per_tick=configuration["max_admissions_per_tick"],
         retired_templates=configuration["retired_templates"],
+        task_budget=configuration["task_budget"],
+        config_path=args.research_task_lane,
     )
 
 

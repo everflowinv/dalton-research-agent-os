@@ -12,7 +12,8 @@ from typing import Any
 
 FIELDS = ("max_input_tokens", "max_output_tokens", "max_cost_usd", "timeout_seconds")
 RUN_FIELDS = ("max_cost_usd", "max_units", "max_events",
-              "max_events_per_company", "max_calls")
+              "max_events_per_company", "max_calls", "max_rounds",
+              "max_cost_units", "max_seconds", "max_admissions_per_tick")
 _PURPOSE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
 

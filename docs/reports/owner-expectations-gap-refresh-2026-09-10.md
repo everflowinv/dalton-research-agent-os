@@ -7,6 +7,15 @@
 报告及 `docs/PROJECT_STATUS.md`。本报告只核对代码、配置与已有验收记录；没有读取或修改 live，
 也不把 rehearsal、stub launch 或 authority 存在本身算作产品成功。
 
+## 17:32 UTC 运行复核（覆盖下面较早分类）
+
+- `38721e4` 已完成全量 6,323 项验收、状态副本演练及部署；真实产品仍需逐项验收。事件独立 verifier 被错误输出 schema 契约拦在 broker 前的原因已定位，修复正在集成。
+- **CTSH 当前不能再描述为限额耗尽。** 17:32:13 UTC 只读调用账本显示最近 24 小时 54/130 次，最新调用 17:31:06。discovery 已恢复获取；但 CTSH earnings-call 搜索被 `rediscovered 0d ago; interval 7d` 跳过，仍需检查缺资料时的补搜规则。8 条错误公司资料不会恢复为有效证据。
+- ResearchTask 是部分闭环：live 未发布任何 ad-hoc ProbeTemplate，只有 SEC `get_company_facts` 可执行，AlphaEngine search 与 web search 模板明确 retired 且没有对应执行器。当前 probe 参数固定查收入，不能把它当成回答任意 inquiry 的能力。当前已绑定 mandate 只覆盖行业与 ACN，其余四家公司询问另有范围限制；模板发布与扩大 mandate 均需具体人类治理，尚未执行。
+- 公司模型与行业框架阶段缺少实证：历史数字与原始 filing 的逐行证明、framework 高频项的实际日历登记绑定、peer-relative sensitivity 的计算与来源绑定。模型/政策存在本身不算这些门已过。filing proof 正在独立开发审查；宽松代理判定已拦截，未部署。
+- “所有预算可配置”仍需补 ResearchTask 的隐藏 batch/round 上限及其实际 planner 预留，修复和真实消费测试正在集成；旧表“代码已实现”不再代表没有剩余缺口。
+- 最终 Cockpit 视觉与页面逻辑完整重构放在功能闭环之后，按 owner 的浅色、精致华丽和创造性工作流展示方向实施，暂不合入零碎 CSS 修补。
+
 ## 结论
 
 09-09 蓝图列出的主体架构缺口已经大幅收敛。市场/估值、ClaimIndex、CompanyDossier、DebateMap、

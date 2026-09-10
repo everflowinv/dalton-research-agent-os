@@ -75,16 +75,30 @@ POOL_SHARE = DEFAULT_SHARES[POOL_NAME]
 # reserved against this estimate at admission, because a pool that only counted
 # settled spend would admit a day's worth of tasks before the first one had
 # billed anything.
-def default_planner_cost_usd() -> Decimal:
+def default_planner_cost_usd(state_dir: str | Path | None = None) -> Decimal:
     """The per-round reservation, as the driver is configured to spend it."""
 
-    from .bounded_planner_driver import DEFAULT_PLANNER_MAX_COST_USD
-
+    from .bounded_planner_driver import (
+        BoundedPlannerDriverConfig, BoundedPlannerDriverError, DEFAULT_PLANNER_MAX_COST_USD,
+    )
+    if state_dir is not None:
+        import json
+        directory = Path(state_dir).expanduser().resolve()
+        config_path = directory.parents[1] / "config" / "service.json"
+        if config_path.exists():
+            try:
+                raw = json.loads(config_path.read_text())
+                config = BoundedPlannerDriverConfig.from_mapping(
+                    raw["bounded_planner"]["config"])
+            except (OSError, ValueError, KeyError, TypeError, BoundedPlannerDriverError) as exc:
+                raise ResearchTaskError("cannot read the configured planner budget") from exc
+            return Decimal(str(config.planner_call_budget["max_cost_usd"]))
     return Decimal(str(DEFAULT_PLANNER_MAX_COST_USD))
 
 # A task is a question, not a project.  Four rounds is three probes and one
 # retry; past that the honest terminal is "not answerable within budget".
-MAX_ROUNDS_PER_TASK = 4
+from .call_budget import default_run_budget
+MAX_ROUNDS_PER_TASK = default_run_budget("research_task")["max_rounds"]
 
 ACTIVE_STATUS = "active"
 RETIRED_STATUS = "retired"
@@ -594,6 +608,8 @@ def day_reserved_micros(
 
     if not _DAY_RE.fullmatch(day or ""):
         raise ResearchTaskError("day must be YYYY-MM-DD")
+    if planner_cost_usd is None:
+        planner_cost_usd = default_planner_cost_usd(Path(authority.store.path).parent)
     total = 0
     for loop in authority.admitted_loops(INQUIRY_ADMISSION_SOURCE):
         if loop["created_at"][:10] != day:
@@ -768,9 +784,18 @@ def _parameters_for(
     return None
 
 
+def validate_task_budget(value: Mapping[str, Any]) -> dict[str, int]:
+    from .call_budget import validate_run_budget_overrides
+    checked = validate_run_budget_overrides(value)
+    if set(checked) - {"max_rounds", "max_cost_units", "max_seconds"}:
+        raise ResearchTaskError("task_budget accepts max_rounds, max_cost_units and max_seconds")
+    return checked
+
+
 def task_budget(
     bindings: Sequence[Mapping[str, Any]],
     templates: Mapping[str, Mapping[str, Any]],
+    *, overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, int]:
     """Rounds, cost units and seconds, derived from the probes actually bound.
 
@@ -784,13 +809,14 @@ def task_budget(
     units = [by_version[b["template_version_ref"]]["cost"] for b in bindings]
     if not units:
         raise ResearchTaskError("a task needs at least one bound probe")
-    rounds = min(len(bindings) + 1, MAX_ROUNDS_PER_TASK)
+    configured = validate_task_budget({} if overrides is None else overrides)
+    rounds = configured.get("max_rounds", min(len(bindings) + 1, MAX_ROUNDS_PER_TASK))
     spare_cost = max(cost["cost_units"] for cost in units)
     spare_seconds = max(cost["max_seconds"] for cost in units)
     return {
         "max_rounds": rounds,
-        "max_cost_units": sum(cost["cost_units"] for cost in units) + spare_cost,
-        "max_seconds": sum(cost["max_seconds"] for cost in units) + spare_seconds,
+        "max_cost_units": configured.get("max_cost_units", rounds * spare_cost),
+        "max_seconds": configured.get("max_seconds", rounds * spare_seconds),
     }
 
 
@@ -804,6 +830,7 @@ def plan_admissions(
     planner_cost_usd: Decimal | None = None,
     scope: frozenset[str] | None = None,
     limit: int | None = None,
+    budget_overrides: Mapping[str, Any] | None = None,
     retired: Sequence[str] = (),
     budget_db: str | Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -820,6 +847,8 @@ def plan_admissions(
     difference between "come back next tick" and "come back next day".
     """
 
+    if planner_cost_usd is None:
+        planner_cost_usd = default_planner_cost_usd(Path(authority.store.path).parent)
     if templates is None:
         templates = bindable_templates(authority, retired=retired)
     day = day or datetime.now(timezone.utc).date().isoformat()
@@ -876,7 +905,7 @@ def plan_admissions(
                 ),
             })
             continue
-        budget = task_budget(bindings, templates)
+        budget = task_budget(bindings, templates, overrides=budget_overrides)
         estimate = task_estimate_micros(budget, planner_cost_usd=planner_cost_usd)
         if limit is not None and admissible_so_far >= limit:
             results.append({
@@ -1006,6 +1035,7 @@ def research_task_view(
             mission = CoverageMissionAuthority(store).mission(
                 pointer["mission_version_id"]
             )
+    planner_cost = default_planner_cost_usd(Path(store.path).parent)
     by_company: dict[str, list[dict[str, Any]]] = {}
     for loop in authority.admitted_loops(INQUIRY_ADMISSION_SOURCE):
         question, subject = _question_of(store, loop["question_version_ref"])
@@ -1036,7 +1066,7 @@ def research_task_view(
             ),
             "rounds_used": len(rounds),
             "rounds_budget": loop["budget"]["max_rounds"],
-            "estimated_micros": task_estimate_micros(loop["budget"]),
+            "estimated_micros": task_estimate_micros(loop["budget"], planner_cost_usd=planner_cost),
             "citations": sorted(set(citations)),
             "gap": (
                 None if citations

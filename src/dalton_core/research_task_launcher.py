@@ -39,6 +39,8 @@ class ResearchTaskLauncher(LaneChildLauncher):
         *,
         max_admissions_per_tick: int = 1,
         retired_templates: Sequence[str] = (),
+        task_budget: dict[str, int] | None = None,
+        config_path: str | Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -50,17 +52,35 @@ class ResearchTaskLauncher(LaneChildLauncher):
         ):
             raise LaneChildRejected("max_admissions_per_tick must be a positive integer")
         self.max_admissions_per_tick = max_admissions_per_tick
+        from .research_task import validate_task_budget
+        self.task_budget = validate_task_budget({} if task_budget is None else task_budget)
+        self.config_path = None if config_path is None else Path(config_path)
+
+    def configuration(self) -> dict[str, Any]:
+        from .mission_research_task_lane import lane_configuration
+        from .research_task import default_planner_cost_usd
+        settings = (lane_configuration(self.config_path) if self.config_path is not None else {
+            "max_admissions_per_tick": self.max_admissions_per_tick,
+            "retired_templates": self.retired_templates,
+            "task_budget": self.task_budget,
+        })
+        return {**settings, "planner_cost_usd": str(default_planner_cost_usd(self.state_dir))}
+
+    def configuration_signature(self) -> str:
+        return hashlib.sha256(canonical_json(self.configuration()).encode()).hexdigest()
 
     def _command(self, *, ticket_dir: Path, **kwargs: Any) -> list[str]:
+        settings = kwargs.get("configuration") or self.configuration()
         return [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--summary-dir", str(ticket_dir),
-            "--max-admissions", str(self.max_admissions_per_tick),
+            "--max-admissions", str(settings["max_admissions_per_tick"]),
+            "--task-budget", canonical_json(settings["task_budget"]),
             "--quiet",
         ] + [
             argument
-            for template_ref in self.retired_templates
+            for template_ref in settings["retired_templates"]
             for argument in ("--retired-template", template_ref)
         ]
 
@@ -72,15 +92,17 @@ class ResearchTaskLauncher(LaneChildLauncher):
         five minutes.
         """
 
+        configuration = self.configuration()
         digest = hashlib.sha256(
             canonical_json({
                 "plan_ref": plan_ref, "signature": signature,
-                "retired": list(self.retired_templates),
+                "configuration": configuration,
             }).encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,
-            record={"plan_ref": plan_ref, "signature": signature},
+            record={"plan_ref": plan_ref, "signature": signature, "configuration": configuration},
+            configuration=configuration,
         )
 
 

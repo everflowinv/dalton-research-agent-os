@@ -52,3 +52,7 @@ The frozen recovery release is now deployed and runtime/package acceptance passe
 - ResearchTask is installed as an opt-in lane but absent from the current writer arguments, despite the mission write grant. This is an activation/wiring gap, not missing authorization vocabulary.
 
 The next-stage audit also found that industry/company model gate closure needs real evidence producers for update-calendar binding, filing reconciliation proof, and peer-relative sensitivity. A proposed bridge based only on presence/count proxies was rejected in review and remains unmerged. Work is now split around those actual missing proof paths rather than declaring model stages passed.
+
+## 17:32 UTC CTSH quota correction
+
+Owner questioned why CTSH remained described as quota-blocked after a day. A fresh read-only Core query found **54/130 trailing-24h invocations**, 40 successful physical attempts, 13 failed, and one invocation without a physical attempt. The newest invocation was 17:31:06 UTC. The last discovery heartbeat had already resumed acquisitions (five launches), so the earlier exhausted-window explanation is stale. CTSH earnings-call search is currently skipped by the seven-day rediscovery cadence despite its evidence shortage. A Sol agent is reviewing whether unmet coverage needs are incorrectly gated by ordinary rediscovery cadence; no quota was raised and no manual paid call was made.

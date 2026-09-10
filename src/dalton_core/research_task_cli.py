@@ -42,11 +42,14 @@ from .research_task import (
     grant,
     plan_admissions,
     pool_state,
+    validate_task_budget,
+    default_planner_cost_usd,
 )
 from .store import DaltonStore, canonical_json
 
 SUMMARY_SCHEMA_VERSION = "0.1"
-DEFAULT_MAX_ADMISSIONS = 1
+from .call_budget import default_run_budget
+DEFAULT_MAX_ADMISSIONS = default_run_budget("research_task")["max_admissions_per_tick"]
 
 
 def _write_owner_only(path: Path, value: Any) -> None:
@@ -63,8 +66,13 @@ def run_admissions(
     max_admissions: int = DEFAULT_MAX_ADMISSIONS,
     retired_templates: tuple[str, ...] = (),
     dry_run: bool = False,
+    task_budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    if isinstance(max_admissions, bool) or not isinstance(max_admissions, int) or max_admissions < 1:
+        raise ResearchTaskError("max_admissions must be a positive integer")
+    task_budget = validate_task_budget({} if task_budget is None else task_budget)
     state_dir = state_dir.expanduser().resolve()
+    planner_cost = default_planner_cost_usd(state_dir)
     summary_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     summary: dict[str, Any] = {
@@ -80,6 +88,8 @@ def run_admissions(
         "tasks": [],
         "pool": None,
         "failure_reason": None,
+        "planner_cost_usd": str(planner_cost),
+        "task_budget": task_budget,
         "formal_authority_writes": 0,
     }
     # C2b: the same day ledger the planner's model calls are now admitted
@@ -122,6 +132,7 @@ def run_admissions(
             authority, mission=mission, plan=plan, templates=templates, day=day,
             # Only what this pass will actually create spends the day's pool.
             limit=max_admissions, budget_db=budget_db,
+            budget_overrides=task_budget, planner_cost_usd=planner_cost,
         )
         summary["considered"] = len(entries)
         summary["refused"] = [
@@ -200,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--retired-template", action="append", default=[], dest="retired_templates",
         help="An ad-hoc ProbeTemplate this deployment has withdrawn. Repeatable.",
     )
+    parser.add_argument("--task-budget", type=json.loads, default={})
     parser.add_argument("--dry-run", action="store_true",
                         help="decide and stop; no authority writes")
     parser.add_argument("--quiet", action="store_true")
@@ -211,7 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     summary = run_admissions(
         state_dir=args.state_dir,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
-        max_admissions=max(int(args.max_admissions), 1),
+        max_admissions=args.max_admissions,
+        task_budget=args.task_budget,
         retired_templates=tuple(args.retired_templates or ()),
         dry_run=args.dry_run,
     )
