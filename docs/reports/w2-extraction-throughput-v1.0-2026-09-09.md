@@ -266,7 +266,7 @@ OK (skipped=1)
 （`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，merge main `7011104` 之后。
 本片新增 58 项 + 3 项端到端准入用例。）
 
-**那一条失败不是本片的，是 main 上一条会在 UTC 午夜翻车的时间依赖测试。**
+**那一条失败不是本片的。它看起来像「测试依赖时钟」，但 review 复核后确认是一个生产缺陷。**
 `tests.test_mission_research_task_lane.LaneTests.test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`
 报 `'launched' != 'skipped:pool_exhausted'`。在 main 检出（`7011104`）上单独跑同样失败。查清了：
 
@@ -277,9 +277,26 @@ OK (skipped=1)
 - 于是 `pool_state(day='2026-09-09')` 数到 `reserved_micros: 0`、`remaining_micros: 5000000`，
   池子永远不满，`dispatch_once()` 返回 `launched`。
 
-也就是说这条测试在 UTC 09-09 当天通过、过了午夜就失败。修法是把 fixture 的时钟注进
-loop 的 `created_at`（或让 `day_reserved_micros` 收一个显式的 day 而不是从 `created_at` 推）。
+也就是说这条测试在 UTC 09-09 当天通过、过了午夜就失败。
+
+**但冻结时钟只是它最先暴露的形状。** code-review 复核 P14e diff 后确认了更根本的一层：
+`create_loop` 的 `created_at` 来自 `bounded_planner_loop._now()`（`bounded_planner_loop.py:595` → `:82`），
+**没有时钟接缝**；而它被分到哪一天，用的是调用方的时钟
+（`mission_research_task_lane.py:157` 的 `ResearchTaskCoordinator.clock`、
+`research_task_cli.py:96` 的 `run_admissions` 自带 `now`）。于是在生产上：
+**一轮准入在 UTC 午夜前开始、午夜后落库，它查的是今天的池子，reservation 却记进明天的桶——
+这个任务从此不被计入任何它据以准入的池子。** 这不是测试的毛病。
+
+修法两条都对；review 认为更耐用的是**在 admission 记录里写下显式的准入日**，因为它经得起重放。
 **属于 P14e / C2 的切片，本片没有改动它。**上面的失败数就是这一条。
+
+review 另外在同一片池子算术上标了两条本片同样没碰的：
+`bounded_planner_loop.py:375` 的 `admitted_loops` 返回的是每个 loop 的**所有版本**而非 head
+（`active_loops` 就在它下面，行为相反），而 `day_reserved_micros` / `settle` / `research_task_view`
+都按「一个任务一行」遍历它，所以一旦有人真的走了 `create_loop:504` 有意支持的修订路径，
+同一个任务的预算会被记进池子两次；以及 `research_task.py:64` 的 `POOL_SHARE 0.25`
+对上 $1.00 的单任务最低成本，意味着在仓库里所有 mission fixture 用的 0.5 预算下
+**没有任何 inquiry 可以准入**，车道会永远报 `pool_exhausted` 而一分钱没花。
 
 新用例覆盖：
 
@@ -433,10 +450,12 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
    建议 DebateMap 自己声明一条按 `broker_key` 去重的需求，而不是把清单下限调大。
 4. **`document_extraction.max_windows_per_tick` 现在配的 30/10/10 超出 mission 的 9,000 次调用上限**
    （满负荷 14,400）。本片给了推导函数，但没有改 `service.json`——那是部署动作。
-5. **main `7011104` 上有一条与本片无关的时间依赖失败测试**（ad-hoc 研究池
-   `test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`）：
-   `day_reserved_micros` 按 loop 的墙上时间 `created_at` 分日，测试用冻结时钟，
-   过了 UTC 午夜就对不上。诊断见第四节，修在 P14e / C2 的切片里。
+5. **main `7011104` 上有一个 ad-hoc 研究池的生产缺陷**（本片只是撞上了它的测试形态）：
+   loop 的 `created_at` 没有时钟接缝，分日却用调用方的时钟，所以跨 UTC 午夜的一轮准入
+   会把 reservation 记进明天的桶，任务不被计入任何它据以准入的池子。
+   同一片算术上还有两条（`admitted_loops` 返回所有版本导致预算重复计入；
+   `POOL_SHARE 0.25` × $1.00 最低成本使仓库里所有 fixture 预算下无任何 inquiry 可准入）。
+   诊断见第四节，均由 code-review 复核确认，修在 P14e / C2 的切片里。
 
 ## 八、接线需求（集成时统一做，本片没碰）
 
