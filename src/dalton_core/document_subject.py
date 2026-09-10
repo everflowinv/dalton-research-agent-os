@@ -144,7 +144,11 @@ def earnings_call_names_issuer(title: Any, subject: Any) -> dict[str, Any]:
     if not names or not isinstance(title, str):
         return {"checked": bool(names), "names_issuer": False, "matched": []}
     folded = _fold(title)
-    quarter = re.search(r"(?:q[1-4]\s+20\d{2}|20\d{2}\s+q[1-4]|[1-4]q\s+20\d{2})", folded)
+    quarter = re.search(
+        r"(?:q[1-4]\s+(?:fy\s*)?20\d{2}|(?:fy\s*)?20\d{2}\s*q[1-4]|"
+        r"[1-4]q\s+(?:fy\s*)?20\d{2})",
+        folded,
+    )
     if quarter is None:
         return {"checked": True, "names_issuer": False, "matched": []}
     call = re.search(

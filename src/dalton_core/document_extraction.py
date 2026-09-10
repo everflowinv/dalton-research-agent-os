@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1220,13 +1221,18 @@ class DocumentExtractionService:
                     document_names_subject as names_subject,
                     earnings_call_names_issuer,
                 )
-                row = self.writer.store.connection.execute(
-                    "SELECT title,named_companies_json,metadata_seen "
-                    "FROM document_provenance_records WHERE document_ref=?",
-                    (context["document_ref"],),
-                ).fetchone()
+                try:
+                    row = self.writer.store.connection.execute(
+                        "SELECT title,named_companies_json,metadata_seen "
+                        "FROM document_provenance_records WHERE document_ref=?",
+                        (context["document_ref"],),
+                    ).fetchone()
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc):
+                        raise
+                    row = None
                 if row is None or not row["metadata_seen"]:
-                    cached[key] = {"checked": False, "names_subject": False,
+                    cached[key] = {"checked": True, "names_subject": False,
                                    "matched": [], "basis": "issuer_metadata_missing"}
                     return cached[key]
                 try:
@@ -1240,7 +1246,10 @@ class DocumentExtractionService:
                     context.get("company_ticker"),
                 )
                 cached[key] = {
-                    "checked": issuer.get("checked", False),
+                    # This earnings-specific proof was attempted. A missing
+                    # subject alias is a configuration failure, not permission
+                    # to fall back to the looser body-mention rule.
+                    "checked": True,
                     "names_subject": bool(issuer.get("names_issuer"))
                     and bool(listed.get("names_subject")),
                     "matched": list(issuer.get("matched") or ()),

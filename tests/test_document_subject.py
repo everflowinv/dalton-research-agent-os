@@ -58,6 +58,9 @@ class DocumentTests(unittest.TestCase):
         self.assertTrue(earnings_call_names_issuer(
             "Q2 2026 Cognizant Earnings Conference Call — EPAM comparison", "CTSH"
         )["names_issuer"])
+        self.assertTrue(earnings_call_names_issuer(
+            "Cognizant FY2026Q2 Earnings Call", "CTSH"
+        )["names_issuer"])
 
     def test_the_transcripts_that_caused_this_are_refused(self):
         self.assertFalse(document_names_subject(HAIER, "EPAM")["names_subject"])

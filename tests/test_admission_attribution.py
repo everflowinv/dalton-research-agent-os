@@ -64,6 +64,28 @@ class AdmissionAttributionTests(unittest.TestCase):
         self.assertEqual(result["admitted"], [])
         self.assertIn("never names this company", result["reason"])
 
+    def test_missing_earnings_issuer_metadata_refuses_before_qualitative_model(self):
+        calls = []
+        with patch.object(type(self.h.service), "_suggestions",
+                          side_effect=lambda *a, **k: calls.append(a)):
+            result = self.admit()
+        self.assertEqual(result["status"], "not_attributed")
+        self.assertEqual(calls, [])
+
+    def test_missing_earnings_issuer_metadata_refuses_before_numeric_model(self):
+        context = self.h.service.context(
+            self.review["review_id"], content_hash(self.review), 0, self.actor,
+            require_open=False)
+        calls = []
+        with patch.object(type(self.h.service), "numeric_slots",
+                          side_effect=lambda *a, **k: calls.append(a)):
+            result = self.h.service.generate_numeric(
+                review_id=self.review["review_id"],
+                expected_review_hash=content_hash(self.review), offset=0,
+                expected_context_hash=context["content_hash"], actor_ref=self.actor)
+        self.assertEqual(result["status"], "not_attributed")
+        self.assertEqual(calls, [])
+
     def test_a_document_that_names_the_company_is_not_blocked_here(self):
         # The harness transcript says "Accenture"; admission proceeds to its
         # own gates rather than being refused for attribution.
@@ -170,6 +192,14 @@ class MetricDiscoveryAttributionTests(unittest.TestCase):
             self.discover()
         self.assertEqual(calls, [])
 
+    def test_missing_earnings_issuer_metadata_refuses_before_metric_model(self):
+        calls = []
+        with patch.object(type(self.h.service), "_run_secondary",
+                          side_effect=lambda *a, **k: calls.append(a) or (None, False)):
+            result = self.discover()
+        self.assertEqual(result["status"], "not_attributed")
+        self.assertEqual(calls, [])
+
     def test_a_document_that_names_the_company_is_not_blocked_here(self):
         with patch.object(type(self.h.service), "document_names_subject",
                           return_value={"checked": True, "names_subject": True,
@@ -250,6 +280,16 @@ class MultiSubjectAdmissionTests(unittest.TestCase):
                                 expected_context_hash=self.h.context()["content_hash"])
         self._policy_with_document_rule()
         self.store = DocumentProvenanceStore(self.h.h.core.connection)
+        self.store.record({
+            "document_ref": self.review["document_ref"],
+            "source_ref": "source:alphaengine",
+            "spec_ref": "earnings-call-transcripts",
+            "provenance_tier": "management",
+            "title": "Accenture Q2 2026 Earnings Conference Call",
+            "named_companies": ["Accenture"],
+            "metadata_seen": True,
+        })
+        self.h.service._subject_cache = {}
         self.members = [m["company_ref"] for m in self.v2["universe"]]
 
     def _policy_with_document_rule(self):
