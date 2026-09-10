@@ -359,7 +359,13 @@ class VerifierIndependenceTests(RouterCase):
     def test_unknown_lineage_cannot_be_selected_for_verification(self) -> None:
         config = _config()
         broker = config["plugins"]["entries"]["dalton-openclaw-model-broker"]["config"]["profiles"][0]
-        broker["family"] = "unclassified:fixture"
+        provider, model = broker["model"].split("/", 1)
+        self.router.declare_profile_metadata(
+            declaration_ref="metadata:unknown-fixture:1", profile_id=broker["id"],
+            version=1, prior_declaration_ref=None, provider=provider, model=model,
+            family="unclassified:fixture", capabilities=["research", "verify"],
+            actor_ref=OWNER, created_at=NOW.isoformat(),
+        )
         sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
         with self.assertRaisesRegex(FallbackChainError, "no declared family"):
             validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
