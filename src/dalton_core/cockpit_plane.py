@@ -2619,6 +2619,13 @@ class CockpitPlane:
         status = ticket.get("status")
         state = "running" if status == "running" else "failed" if status in {"failed", "crashed"} or (
             ticket.get("exit_code") not in (None, 0)) else "done"
+        # Exit zero proves only that the child wrote its summary.  Product
+        # refusal/failure remains a failure on the activity page.
+        if state == "done" and any(value in {
+            "failed", "refused", "unverified", "verifier_rejected",
+            "model_unavailable", "not_independent", "rejected",
+        } for value in (summary.get("status"), summary.get("map_status"))):
+            state = "failed"
         auth = summary.get("authorization") or {}
         company_ref = ticket.get("company_ref") or summary.get("company_ref") or auth.get("company_ref")
         who = self._label(members, company_ref)

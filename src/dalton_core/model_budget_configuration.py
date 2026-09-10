@@ -19,6 +19,19 @@ class BudgetConfigurationConflict(ModelSelectionError):
     pass
 
 
+def _consumer_call_defaults(purpose: str) -> dict[str, Any] | None:
+    """The legacy baseline used by callers absent from the shared catalogue."""
+    if purpose == "document_extraction":
+        from .document_extraction import LEGACY_CALL_BUDGET
+    elif purpose == "document_numeric_extraction":
+        from .document_numeric_extraction import LEGACY_CALL_BUDGET
+    elif purpose == "metric_discovery_extraction":
+        from .metric_discovery_extraction import LEGACY_CALL_BUDGET
+    else:
+        return None
+    return dict(LEGACY_CALL_BUDGET)
+
+
 def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, Any], kind: str):
     if kind != "call":
         return {"editable": False, "reason": "此服务的周期预算由治理政策配置"}
@@ -85,9 +98,13 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
     if kind == "run" and not has_defaults:
         return {"editable": False, "source": source, "reason": "此环节没有独立的每轮预算配置"}
     validate = validate_budget_overrides if kind == "call" else validate_run_budget_overrides
-    effective = ((resolve_call_budget(config, purpose, defaults=default_call_budget(purpose))
+    consumer_defaults = _consumer_call_defaults(purpose)
+    effective = ((resolve_call_budget(
+                      config, purpose,
+                      defaults=(consumer_defaults or default_call_budget(purpose)))
                   if kind == "call" else resolve_run_budget(config, purpose, defaults=defaults_wire["purposes"][purpose]))
-                 if has_defaults else None)
+                 if has_defaults or (kind == "call" and consumer_defaults is not None)
+                 else None)
     overrides = validate((config.get(f"purpose_{kind}_budgets") or {}).get(purpose, {}))
     general = validate(config.get(f"{kind}_budget", {}))
     return {"editable": True, "source": str(path), "effective": effective,
@@ -148,7 +165,10 @@ def _set_model_call_budget_locked(state_dir: str | Path, *, purpose: str,
         from .bounded_planner_driver import BoundedPlannerDriverConfig
         BoundedPlannerDriverConfig.from_mapping(updated["bounded_planner"]["config"])
     else:
-        resolve_call_budget(updated, purpose, defaults=default_call_budget(purpose))
+        resolve_call_budget(
+            updated, purpose,
+            defaults=(_consumer_call_defaults(purpose)
+                      or default_call_budget(purpose)))
     if kind == "run":
         resolve_run_budget(updated, purpose, defaults=view["effective"])
     current = path.read_bytes() if path.exists() else b""

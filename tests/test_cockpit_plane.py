@@ -156,6 +156,18 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertEqual(log["cursor"], log["events"][0]["at"])
         self.assertEqual(self.c.plane.log(since=log["cursor"])["events"], [])
 
+    def test_exit_zero_child_with_failed_product_summary_is_not_shown_done(self) -> None:
+        event = self.c.plane._ticket_event({
+            "lane": "acquisitions", "dir": "x",
+            "ticket": {"status": "succeeded", "exit_code": 0,
+                       "company_ref": self.c.h.mission["universe"][0]["company_ref"],
+                       "completed_at": "2026-09-10T00:00:00+00:00"},
+            "summary": {"status": "succeeded", "map_status": "refused"},
+            "ticket_mtime": "2026-09-10T00:00:00+00:00",
+        }, self.c.plane._members(self.c.h.mission), {})
+        self.assertEqual(event["state"], "failed")
+        self.assertIn("获取失败", event["title"])
+
     def test_ask_answers_from_claims_with_citations_and_spends_under_the_mission(self) -> None:
         job = self.c.plane.ask(self.login, {"question": "What did management say about client decisions?", "request_id": "q1"})
         self.assertEqual(job["status"], "running")

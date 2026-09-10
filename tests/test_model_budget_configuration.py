@@ -133,7 +133,11 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
                 before = json.loads(path.read_text())
                 view = call_budget_view(state, purpose)
                 self.assertTrue(view["editable"], view)
-                self.assertIsNone(view["effective"])
+                if purpose == "document_extraction":
+                    from dalton_core.document_extraction import LEGACY_CALL_BUDGET
+                    self.assertEqual(view["effective"], LEGACY_CALL_BUDGET)
+                else:
+                    self.assertIsNone(view["effective"])
                 result = set_model_call_budget(
                     state, purpose=purpose, budget={"max_cost_usd": 0.42},
                     expected_config_hash=view["config_hash"], actor_ref=OWNER,
@@ -144,6 +148,18 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
                                  before["routing_policy_ref"])
                 consumer = CockpitModel(stored, scheduler_db=base / "scheduler.sqlite")
                 self.assertEqual(consumer.budget_for(purpose)["max_cost_usd"], 0.42)
+
+        from dalton_core.call_budget import resolve_call_budget
+        from dalton_core.document_extraction import LEGACY_CALL_BUDGET
+        configured = json.loads(extraction.read_text())
+        effective = resolve_call_budget(
+            configured, "document_extraction", defaults=LEGACY_CALL_BUDGET)
+        self.assertEqual(effective["max_input_tokens"],
+                         LEGACY_CALL_BUDGET["max_input_tokens"])
+        self.assertEqual(effective["max_output_tokens"],
+                         LEGACY_CALL_BUDGET["max_output_tokens"])
+        self.assertEqual(effective["timeout_seconds"],
+                         LEGACY_CALL_BUDGET["timeout_seconds"])
 
 
 class BudgetGovernanceTests(unittest.TestCase):
