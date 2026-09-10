@@ -365,6 +365,21 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(
             legacy["selected_profile_version_ref"], first["profile_version_ref"]
         )
+        missing_credential = self.router.route(
+            work_order(work_id="work:purpose-override-no-slot"),
+            **route_args(
+                capability="verify", producer_family="family-alpha",
+                credential_slot_refs=["credential-slot:openai:dalton"],
+                idempotency_key="route-key:purpose-override-no-slot",
+            ),
+            purpose="dossier_verifier",
+        )["decision"]
+        self.assertEqual(missing_credential["outcome"], "rejected")
+        selected_row = next(
+            row for row in missing_credential["candidate_snapshot"]
+            if row["profile_version_ref"] == second["profile_version_ref"]
+        )
+        self.assertIn("credential_slot_unavailable", selected_row["rejection_reasons"])
 
     def test_budget_context_auth_and_availability_fail_closed(self) -> None:
         self.router.register_policy(policy())

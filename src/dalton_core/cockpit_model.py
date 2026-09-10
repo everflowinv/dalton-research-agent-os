@@ -543,7 +543,9 @@ class CockpitModel:
         declared = (policy.get("fallback_chains") or {}).get("tiers", {})
         tier = purpose_tiers().get(purpose)
         override = (policy.get("purpose_overrides") or {}).get(purpose)
-        if not declared and override is None:
+        if not declared and (
+            override is None or override.get("mode") != "explicit"
+        ):
             return None
         if tier is None:
             # The policy offers chains and this purpose has not said which one

@@ -18,6 +18,10 @@ A private proposed packet was generated at `/Users/everflow/Projects/dalton-owne
 
 On a temporary SQLite backup of the live router, the current catalog first appended an unclassified alias version. Applying the proposed declaration and syncing appended one recovery version. A real router-only route selected DeepSeek as producer and a known OpenAI family as verifier. No adapter, budget ledger, broker call, host-config write, or live database write occurred.
 
+Final cross-review of owner selection and reservation found one legacy regression: a `mode=tier` purpose override on a single-pin policy with no fallback chains entered the chain runner even though no tier chain existed. It now retains the old single-profile route. An explicit purpose chain still supersedes only `allowed_profile_ids` for that purpose; credential slots, provider/family/adapter filters, capabilities, context, availability, per-profile price bounds, and work-order budget checks remain active. Tests prove a selected profile outside the legacy pin still needs its credential, while the same policy without the purpose continues selecting the old pin. Reservation uses the resolved explicit chain, including its most expensive reachable fallback.
+
+All review calls used fake adapters and temporary router/scheduler/budget databases. No broker, network, paid model, host budget ledger, host configuration, or live authority call was made.
+
 `catalog_sync_status` builds the same desired public profiles as the writer path and compares semantic content, so check-only detects route, price, capacity, capability, and family drift without writing. Sync handles add, update, retire, and revive as append-only transitions. A second sync with unchanged public catalog data writes no rows.
 
 Focused verification covers a populated real ModelRouter, a stable profile whose route, price, capacity, family, and capabilities all change, preservation of the prior row bytes, read-only drift detection, idempotent second sync, secret-free reporting, retirement/revival, and unclassified-family verifier refusal.

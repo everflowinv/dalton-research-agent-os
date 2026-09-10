@@ -357,6 +357,25 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(len(admissions), 1)
         self.assertGreaterEqual(admissions[0]["reserved_micros"], answer["cost_micros"])
 
+    def test_tier_choice_on_legacy_pin_keeps_the_single_profile(self) -> None:
+        from dalton_core.model_selection import publish_selection
+
+        with ModelRouter(self.router_db) as router:
+            selected = publish_selection(
+                router, policy_version_ref=self.pinned_policy,
+                purpose="plan", mode="tier", chain=(), now=NOW,
+            )["policy_version_ref"]
+        adapter = ChainAdapter({})
+        answer = self._model(
+            adapter, policy_version_ref=selected,
+            slots=["credential-slot:openclaw:openai"],
+        ).call(
+            purpose="plan", request_id="legacy-tier-choice",
+            prompt="tag these", mission=self.mission,
+        )
+        self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+
     def test_a_content_refusal_does_not_buy_a_second_opinion(self) -> None:
         adapter = ChainAdapter({
             "profile:gpt-6-astra": {"code": "CONTENT_REFUSAL", "message": "declined"}
