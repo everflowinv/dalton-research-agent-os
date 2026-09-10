@@ -15,12 +15,12 @@ from dalton_core.catalyst_calendar import (
     CatalystCalendarAuthority,
     CatalystCalendarConflict,
     CatalystCalendarValidationError,
-    calendar_event_key,
+    calendar_event_payload,
     emit_calendar_events,
     entry_ref_for,
     required_change_reason,
 )
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, canonical_json
 
 COMPANY = "company:sec-cik:0001467373"
 YAHOO = "connector-invocation:yfinance:aaaa"
@@ -467,12 +467,145 @@ class ReaderTests(AuthorityTestCase):
         )
 
 
+class EventContractTests(unittest.TestCase):
+    """The producer's payload and the ledger's contract, pinned together.
+
+    Both sides are imported here so that neither can move without this file
+    saying so. They drifted apart once and the failure mode was the worst
+    available: the producer built nine fields, the ledger declared five and
+    refuses unknown ones, so every live write would have been rejected whole --
+    and nothing in either module's own tests could see it, because each was
+    exercised against a fake of the other.
+    """
+
+    def entry(self, *, confidence="estimated", disagreement=False):
+        return {
+            "entry_ref": "catalyst-entry:one", "event_kind": "earnings",
+            "subject": "2026q4", "anchor_date": "2026-10-01",
+            "expected_date": "2026-10-01", "confidence": confidence,
+            "disagreement": disagreement,
+            "disagreeing_dates": ["2026-10-01", "2026-10-02"] if disagreement else [],
+            "sources": [filed_source("2026-10-01") if confidence == "confirmed"
+                        else vendor_source("2026-10-01")],
+            "notes": "",
+        }
+
+    def test_the_producer_builds_exactly_the_declared_field_set(self):
+        from dalton_core.research_event import PAYLOAD_FIELDS
+
+        payload = calendar_event_payload(
+            self.entry(), window="preview",
+            version_ref="catalyst-calendar-version:one")
+        self.assertEqual(set(payload), set(PAYLOAD_FIELDS["calendar"]))
+
+    def test_the_ledger_accepts_what_the_producer_builds(self):
+        from dalton_core.research_event import validate_payload
+
+        from dalton_core.catalyst_calendar import EVENT_WINDOWS
+
+        for window in EVENT_WINDOWS:
+            for confidence in ("estimated", "confirmed"):
+                for disagreement in (False, True):
+                    with self.subTest(window=window, confidence=confidence,
+                                      disagreement=disagreement):
+                        payload = calendar_event_payload(
+                            self.entry(confidence=confidence,
+                                       disagreement=disagreement),
+                            window=window,
+                            version_ref="catalyst-calendar-version:one")
+                        stored = validate_payload("calendar", payload)
+                        self.assertEqual(stored["window"], window)
+                        self.assertEqual(stored["date_confidence"], confidence)
+                        self.assertIs(stored["confirmed"],
+                                      confidence == "confirmed")
+
+    def test_the_payload_carries_nothing_nested(self):
+        # The ledger takes text, integers, booleans and nulls, on the ground
+        # that a payload able to hold a document holds a document's worth of
+        # unverified prose. `disagreeing_dates` is a list and does not travel;
+        # the boolean does, and the version ref is how a reader gets the rest.
+        payload = calendar_event_payload(
+            self.entry(disagreement=True), window="preview",
+            version_ref="catalyst-calendar-version:one")
+        for field, value in payload.items():
+            with self.subTest(field=field):
+                self.assertIsInstance(value, (str, bool, int, type(None)))
+        self.assertNotIn("disagreeing_dates", payload)
+        self.assertIs(payload["disagreement"], True)
+        self.assertEqual(payload["calendar_version_ref"],
+                         "catalyst-calendar-version:one")
+
+    def test_the_payload_carries_nothing_that_changes_with_the_day(self):
+        # This is what makes the ledger's own identity sufficient. A field that
+        # moved daily would make every morning's unchanged window a new event.
+        payload = calendar_event_payload(
+            self.entry(), window="preview",
+            version_ref="catalyst-calendar-version:one")
+        self.assertNotIn("days_until", payload)
+        self.assertNotIn("as_of", payload)
+        self.assertNotIn("event_key", payload)
+
+    def test_confirmed_and_date_confidence_cannot_come_apart(self):
+        # The Cockpit renders `confirmed`; the plan asks for `date_confidence`.
+        # One value, spelled two ways, derived in one place.
+        for confidence, confirmed in (("confirmed", True), ("estimated", False)):
+            payload = calendar_event_payload(
+                self.entry(confidence=confidence), window="preview",
+                version_ref=None)
+            self.assertEqual(payload["date_confidence"], confidence)
+            self.assertIs(payload["confirmed"], confirmed)
+
+    def test_the_caveat_this_module_carries_is_the_one_the_cockpit_prints(self):
+        # The Cockpit derives its own words from `confirmed`; the readers here
+        # carry `date_caveat` for consumers that have no payload to derive
+        # from. Two spellings of one caveat is one edit away from two
+        # different caveats, so they are pinned to each other.
+        import re
+        from pathlib import Path as _Path
+
+        import dalton_core
+
+        source = (_Path(dalton_core.__file__).parent / "cockpit_plane.py").read_text(
+            encoding="utf-8")
+        printed = re.search(
+            r'confirmed = "[^"]+" if payload\.get\("confirmed"\) else "([^"]+)"',
+            source)
+        self.assertIsNotNone(printed, "the Cockpit no longer renders a calendar caveat")
+        self.assertEqual(printed.group(1), UNCONFIRMED_DATE_CAVEAT)
+
+    def test_calendar_is_a_kind_the_ledger_knows(self):
+        from dalton_core.research_event import (
+            DEFAULT_TIER_BY_KIND, EVENT_KINDS, PAYLOAD_FIELDS,
+        )
+
+        from dalton_core.catalyst_calendar import RESEARCH_EVENT_KIND
+
+        self.assertIn(RESEARCH_EVENT_KIND, EVENT_KINDS)
+        self.assertIn(RESEARCH_EVENT_KIND, PAYLOAD_FIELDS)
+        self.assertIn(RESEARCH_EVENT_KIND, DEFAULT_TIER_BY_KIND)
+
+
 class EventWindowTests(unittest.TestCase):
-    """Which windows open, and what stops them opening thirty times."""
+    """Which windows open, and what the ledger is told about them.
+
+    The fake writer answers the way the real one does -- ``fresh`` the first
+    time it sees a payload for a company, ``duplicate`` afterwards -- because
+    that is the whole de-duplication story now: identity is the ledger's, and
+    a window that stays open produces the same payload every morning.
+    """
 
     def setUp(self):
         self.written = []
-        self.record = lambda **event: self.written.append(event)
+        self.ledger: dict[tuple[str, str], int] = {}
+
+        def record(**event):
+            key = (event["company_ref"], canonical_json(event["payload"]))
+            self.written.append(event)
+            status = "duplicate" if key in self.ledger else "fresh"
+            self.ledger[key] = 1
+            return {"status": status, "id": f"research-event:{len(self.ledger)}"}
+
+        self.record = record
 
     def resolved(self, day, *, confidence="confirmed", kind="earnings",
                  subject="2026q4", entry_ref="catalyst-entry:one"):
@@ -497,8 +630,8 @@ class EventWindowTests(unittest.TestCase):
         self.assertEqual([item["window"] for item in emitted], ["preview"])
         self.assertEqual(emitted[0]["days_until"], 22)
         self.assertEqual(emitted[0]["date_confidence"], "confirmed")
-        self.assertFalse(emitted[0]["date_unconfirmed"])
-        self.assertEqual(emitted[0]["date_caveat"], "")
+        self.assertIs(emitted[0]["confirmed"], True)
+        self.assertEqual(emitted[0]["status"], "fresh")
         self.assertEqual(self.written[0]["kind"], "calendar")
         self.assertEqual(self.written[0]["company_ref"], COMPANY)
         self.assertIn("catalyst-calendar-version:one", self.written[0]["source_refs"])
@@ -529,8 +662,7 @@ class EventWindowTests(unittest.TestCase):
             [self.resolved("2026-10-01", confidence="estimated")], "2026-09-09")
         self.assertEqual([item["window"] for item in emitted], ["preview"])
         self.assertEqual(emitted[0]["date_confidence"], "estimated")
-        self.assertTrue(emitted[0]["date_unconfirmed"])
-        self.assertEqual(emitted[0]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
+        self.assertIs(emitted[0]["confirmed"], False)
 
     def test_an_estimated_date_never_opens_a_calibration(self):
         # A calibration is written about a release. An estimated date says a
@@ -550,19 +682,17 @@ class EventWindowTests(unittest.TestCase):
         # The judgement layer planned work against an estimate; when the
         # company confirms the same day, it needs to be told that the work is
         # now safe to commit to. That is a second event, not a suppressed one.
-        seen: set[str] = set()
         first = self.emit(
-            [self.resolved("2026-10-01", confidence="estimated")], "2026-09-09",
-            is_emitted=seen.__contains__)
-        seen.update(item["event_key"] for item in first)
+            [self.resolved("2026-10-01", confidence="estimated")], "2026-09-09")
         second = self.emit(
-            [self.resolved("2026-10-01", confidence="confirmed")], "2026-09-10",
-            is_emitted=seen.__contains__)
+            [self.resolved("2026-10-01", confidence="confirmed")], "2026-09-10")
         self.assertEqual([item["date_confidence"] for item in first], ["estimated"])
         self.assertEqual([item["date_confidence"] for item in second], ["confirmed"])
         self.assertEqual([item["window"] for item in second], ["preview"])
-        self.assertEqual(second[0]["date_caveat"], "")
-        self.assertEqual(len(self.written), 2)
+        # A different payload, so the ledger calls it new rather than
+        # swallowing it as a repeat of the estimated one.
+        self.assertEqual([item["status"] for item in first], ["fresh"])
+        self.assertEqual([item["status"] for item in second], ["fresh"])
 
     def test_a_moved_date_is_emitted_whatever_its_confidence(self):
         emitted = self.emit(
@@ -571,7 +701,7 @@ class EventWindowTests(unittest.TestCase):
         )
         self.assertEqual([item["window"] for item in emitted], ["date_change"])
         self.assertEqual(emitted[0]["date_confidence"], "estimated")
-        self.assertEqual(emitted[0]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
+        self.assertIs(emitted[0]["confirmed"], False)
 
     def test_an_ex_dividend_never_opens_a_preview(self):
         self.assertEqual(
@@ -580,24 +710,23 @@ class EventWindowTests(unittest.TestCase):
             [],
         )
 
-    def test_a_window_that_stays_open_is_recorded_once(self):
+    def test_a_window_that_stays_open_is_written_once(self):
+        # Asked for every morning, stored once. The payload carries nothing
+        # that changes with the day, so the ledger recognises it -- which is
+        # why days_until and as_of are on the returned row and not in it.
         entries = [self.resolved("2026-10-01")]
-        seen: set[str] = set()
-        first = self.emit(entries, "2026-09-09", is_emitted=seen.__contains__)
-        seen.update(item["event_key"] for item in first)
-        second = self.emit(entries, "2026-09-10", is_emitted=seen.__contains__)
-        self.assertEqual(len(first), 1)
-        self.assertEqual(second, [])
-        self.assertEqual(len(self.written), 1)
+        first = self.emit(entries, "2026-09-09")
+        second = self.emit(entries, "2026-09-10")
+        self.assertEqual([item["status"] for item in first], ["fresh"])
+        self.assertEqual([item["status"] for item in second], ["duplicate"])
+        self.assertEqual(len(self.ledger), 1)
+        self.assertNotEqual(first[0]["days_until"], second[0]["days_until"])
 
     def test_a_date_that_moves_reopens_the_window_it_had_closed(self):
-        seen = {calendar_event_key(
-            COMPANY, "catalyst-entry:one", "preview", "2026-10-01", "confirmed")}
-        emitted = self.emit(
-            [self.resolved("2026-10-02")], "2026-09-09",
-            is_emitted=seen.__contains__,
-        )
-        self.assertEqual([item["window"] for item in emitted], ["preview"])
+        self.emit([self.resolved("2026-10-01")], "2026-09-09")
+        moved = self.emit([self.resolved("2026-10-02")], "2026-09-09")
+        self.assertEqual([item["window"] for item in moved], ["preview"])
+        self.assertEqual([item["status"] for item in moved], ["fresh"])
 
     def test_an_entry_ref_is_where_an_occurrence_was_first_seen(self):
         self.assertEqual(
