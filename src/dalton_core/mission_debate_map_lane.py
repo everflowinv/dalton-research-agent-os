@@ -31,8 +31,11 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_failure_class import Classification, CONTENT_REFUSED
 
 MAX_FAILURE_DETAIL_CHARS = 500
+DRIVER_KEY = "mission_debate_map"
 # Outcomes that say something about this moment rather than about this
 # evidence, so the subject is not held back for them: the scheduler had the
 # request in flight, or there was no route just then. The very next tick can
@@ -56,6 +59,7 @@ class MissionDebateMapLaneCoordinator:
         store: Any,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
@@ -65,7 +69,7 @@ class MissionDebateMapLaneCoordinator:
         # subject does not consume the slot every five minutes.  Held for this
         # process only: a restart is nearly always a deploy, which is the most
         # likely thing to have fixed whatever it was.
-        self._failed: dict[str, str] = {}
+        self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
 
     # -- settling ---------------------------------------------------------
 
@@ -124,14 +128,20 @@ class MissionDebateMapLaneCoordinator:
         # question is worth asking again. It is process-local as well, so a
         # deploy -- the most likely thing to have fixed a ``gated`` or a
         # ``not_authorized`` -- clears it too.
-        hold = not published and map_status not in TRANSIENT_STATUSES
+        hold = not published
         subject_ref = settled.get("subject_ref")
         fingerprint = settled.get("evidence_fingerprint")
         if hold and subject_ref and fingerprint:
-            self._failed[f"{subject_ref}|{fingerprint}"] = (
-                settled.get("failure_reason")
-                or f"last run: {map_status or settled.get('status')}"
-            )
+            key = f"{subject_ref}|{fingerprint}"
+            reason = settled.get("failure_reason") or f"last run: {map_status or settled.get('status')}"
+            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
+                                              status=str(map_status))
+                              if map_status in ("refused", "duplicate") else None)
+            settled["failure"] = self.budget.record(
+                key, reason=reason, status=map_status or settled.get("status"),
+                classification=classification).as_wire()
+        elif subject_ref and fingerprint:
+            settled["resumed"] = self.budget.clear(f"{subject_ref}|{fingerprint}")
         return settled
 
     # -- the tick ---------------------------------------------------------
@@ -177,9 +187,10 @@ class MissionDebateMapLaneCoordinator:
             current = authority.current(subject_ref)
             if current is not None and current["evidence_fingerprint"] == fingerprint:
                 continue
-            held = self._failed.get(f"{subject_ref}|{fingerprint}")
-            if held is not None:
-                blocked = blocked or (subject_ref, fingerprint, held)
+            decision = self.budget.blocked(f"{subject_ref}|{fingerprint}")
+            if decision is not None:
+                blocked = blocked or (subject_ref, fingerprint,
+                                      decision.classification.reason)
                 continue
             return subject_ref, fingerprint, None
         if blocked is not None:
@@ -242,6 +253,7 @@ def dispatch(server: Any, params: Any) -> dict[str, Any]:
 
         coordinator = MissionDebateMapLaneCoordinator(
             store=server.store, launcher=launcher, mission=mission,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

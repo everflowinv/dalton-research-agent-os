@@ -567,7 +567,11 @@ class LaneCoordinatorTests(ConvictionHarness):
         self.eligible_company()
         launched = self.coordinator.dispatch_once()
         self.launcher.settle(launched["ticket_ref"], {"call_status": "model_unavailable"})
-        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+        probe = self.coordinator.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.assertEqual(probe["evidence_fingerprint"], launched["evidence_fingerprint"])
+        self.assertEqual(probe["settled"]["failure"]["failure_class"],
+                         "dependency_unavailable")
 
     def test_a_weeks_call_stops_the_next_one_even_across_a_restart(self):
         from tests.test_conviction_call import proposal_kwargs

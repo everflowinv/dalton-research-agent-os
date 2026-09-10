@@ -157,12 +157,13 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertEqual(self.lane.dispatch_once()["status"], "held")
         self.assertEqual(len(self.launcher.started), 1)
 
-    def test_a_child_that_died_without_a_summary_is_still_attributed(self):
+    def test_a_child_that_died_without_a_summary_spends_one_transient_retry(self):
         launched = self.lane.dispatch_once()
         self.launcher.finish(launched["ticket_ref"], status="failed", summary=None)
-        held = self.lane.dispatch_once()
-        self.assertEqual(held["status"], "held")
-        self.assertIn("failed", held["reason"])
+        retried = self.lane.dispatch_once()
+        self.assertEqual(retried["status"], "launched")
+        self.assertEqual(retried["settled"]["failure"]["failure_class"], "transient")
+        self.assertEqual(retried["settled"]["failure"]["failures"], 1)
 
     def test_a_running_child_is_left_alone(self):
         self.lane.dispatch_once()
@@ -170,6 +171,16 @@ class ModelSpecLaneTests(unittest.TestCase):
         busy = self.lane.dispatch_once()
         self.assertEqual(busy["status"], "busy")
         self.assertEqual(busy["settled"]["status"], "running")
+
+    def test_dependency_failure_retries_same_state_as_probe(self):
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "spec_status": "model_unavailable", "failure_reason": "model_unavailable"})
+        probe = self.lane.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.assertEqual(probe["state_hash"], first["state_hash"])
+        self.assertEqual(probe["settled"]["failure"]["failure_class"],
+                         "dependency_unavailable")
 
     def test_no_mission_is_reported_not_crashed(self):
         lane = MissionModelSpecLaneCoordinator(

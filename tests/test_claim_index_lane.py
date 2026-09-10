@@ -359,6 +359,16 @@ class LaneCoordinatorTests(unittest.TestCase):
         again = self.coordinator.dispatch_once()
         self.assertEqual(again["status"], "launched")
 
+    def test_dependency_failure_retries_the_same_batch_as_a_probe(self):
+        self.harness.fixture.add_claim("acn-dependency", subject_ref=ACN)
+        first = self.coordinator.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], index_status="model_unavailable")
+        probe = self.coordinator.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.assertEqual(probe["batch_digest"], first["batch_digest"])
+        self.assertEqual(probe["settled"]["failure"]["failure_class"],
+                         "dependency_unavailable")
+
     def test_a_mission_that_is_not_there_yet_is_unconfigured_not_a_crash(self):
         coordinator = MissionClaimIndexLaneCoordinator(
             store=self.harness.store, launcher=self.launcher, mission=lambda: None)

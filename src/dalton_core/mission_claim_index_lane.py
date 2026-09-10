@@ -29,6 +29,8 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_failure_class import Classification, CONTENT_REFUSED
 
 MAX_FAILURE_DETAIL_CHARS = 500
 # One tick looks at this many pending claims per company before deciding.  The
@@ -38,6 +40,7 @@ MAX_PENDING_SCANNED = 200
 # Outcomes that say something about this moment rather than about this batch,
 # so the batch is not held back for them.
 TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
+DRIVER_KEY = "mission_claim_index"
 
 
 class MissionClaimIndexLaneCoordinator:
@@ -49,6 +52,7 @@ class MissionClaimIndexLaneCoordinator:
         store: Any,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
@@ -61,7 +65,7 @@ class MissionClaimIndexLaneCoordinator:
         # doomed batch does not consume the slot every five minutes.  Held for
         # this process only: a restart is nearly always a deploy, which is the
         # most likely thing to have fixed whatever it was.
-        self._failed: dict[str, str] = {}
+        self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
 
     # -- settling ---------------------------------------------------------
 
@@ -111,18 +115,22 @@ class MissionClaimIndexLaneCoordinator:
         # moment, not of a batch, and holding a batch back for them would park
         # work that the very next tick could do.
         index_status = settled.get("index_status")
-        failed = (
-            index_status not in TRANSIENT_STATUSES
-            and (settled.get("status") != "succeeded"
-                 or index_status in ("refused", "failed", "not_authorized"))
-        )
+        failed = (settled.get("status") != "succeeded"
+                  or index_status in ("refused", "failed", "not_authorized",
+                                      "busy", "model_unavailable"))
         company_ref = settled.get("company_ref")
         digest = settled.get("batch_digest")
         if failed and company_ref and digest:
-            self._failed[f"{company_ref}|{digest}"] = (
-                settled.get("failure_reason")
-                or f"last run: {settled.get('index_status') or settled.get('status')}"
-            )
+            key = f"{company_ref}|{digest}"
+            reason = settled.get("failure_reason") or f"last run: {index_status or settled.get('status')}"
+            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
+                                              status=str(index_status))
+                              if index_status == "refused" else None)
+            settled["failure"] = self.budget.record(
+                key, reason=reason, status=index_status or settled.get("status"),
+                classification=classification).as_wire()
+        elif company_ref and digest:
+            settled["resumed"] = self.budget.clear(f"{company_ref}|{digest}")
         return settled
 
     # -- the tick ---------------------------------------------------------
@@ -160,10 +168,11 @@ class MissionClaimIndexLaneCoordinator:
         from .claim_index_launcher import batch_digest
 
         digest = batch_digest(company_ref, refs)
-        held = self._failed.get(f"{company_ref}|{digest}")
+        held = self.budget.blocked(f"{company_ref}|{digest}")
         if held is not None:
             return {"status": "held", "company_ref": company_ref,
-                    "settled": settled, "reason": held}
+                    "settled": settled, "reason": held.classification.reason,
+                    "failure": held.as_wire()}
         try:
             ticket = self.launcher.start(
                 company_ref=company_ref, claim_version_refs=refs
@@ -234,6 +243,7 @@ def dispatch(server: Any, params: Any) -> dict[str, Any]:
             store=server.store,
             launcher=launcher,
             mission=mission,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

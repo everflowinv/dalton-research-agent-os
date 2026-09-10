@@ -32,8 +32,11 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_failure_class import Classification, CONTENT_REFUSED
 
 MAX_FAILURE_DETAIL_CHARS = 500
+DRIVER_KEY = "mission_sensitivity"
 LAUNCHER_KWARG = "forecast_sensitivity_launcher"
 
 
@@ -49,6 +52,7 @@ class MissionSensitivityLaneCoordinator:
         projections: Any,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.store = store
         self.missions = missions
@@ -61,7 +65,7 @@ class MissionSensitivityLaneCoordinator:
         # table cannot be computed does not consume the slot every tick. Held
         # for this process only: a restart is nearly always a deploy, which is
         # the most likely thing to have fixed it.
-        self._failed: dict[str, str] = {}
+        self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -108,10 +112,16 @@ class MissionSensitivityLaneCoordinator:
         company_ref = settled.get("company_ref")
         digest = settled.get("projection_digest")
         if failed and company_ref and digest:
-            self._failed[f"{company_ref}|{digest}"] = (
-                settled.get("failure_reason")
-                or f"last run: {status or settled.get('status')}"
-            )
+            key = f"{company_ref}|{digest}"
+            reason = settled.get("failure_reason") or f"last run: {status or settled.get('status')}"
+            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
+                                              status=status)
+                              if status.startswith(("refused:", "unavailable:")) else None)
+            settled["failure"] = self.budget.record(
+                key, reason=reason, status=status or settled.get("status"),
+                classification=classification).as_wire()
+        elif company_ref and digest:
+            settled["resumed"] = self.budget.clear(f"{company_ref}|{digest}")
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -136,9 +146,9 @@ class MissionSensitivityLaneCoordinator:
         held: dict[str, str] = {}
         company_ref = digest = None
         for candidate, _record, _consensus, candidate_digest in pending:
-            reason = self._failed.get(f"{candidate}|{candidate_digest}")
-            if reason is not None:
-                held[candidate] = reason
+            decision = self.budget.blocked(f"{candidate}|{candidate_digest}")
+            if decision is not None:
+                held[candidate] = decision.classification.reason
                 continue
             company_ref, digest = candidate, candidate_digest
             break
@@ -197,6 +207,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             projections=SensitivityProjectionAuthority(server.store),
             launcher=launcher,
             mission=mission,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

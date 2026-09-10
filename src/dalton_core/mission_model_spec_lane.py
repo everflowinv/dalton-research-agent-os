@@ -23,6 +23,8 @@ from typing import Any, Callable, Mapping
 
 from .company_model_cli import choose_company
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_failure_class import Classification, CONTENT_REFUSED
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -30,6 +32,7 @@ from .lane_child_launcher import (
 )
 
 MAX_FAILURE_DETAIL_CHARS = 500
+DRIVER_KEY = "mission_model_spec"
 
 
 class MissionModelSpecLaneCoordinator:
@@ -41,6 +44,7 @@ class MissionModelSpecLaneCoordinator:
         missions: Any,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.missions = missions
         self.launcher = launcher
@@ -53,7 +57,7 @@ class MissionModelSpecLaneCoordinator:
         # doomed company does not consume the slot every five minutes. Held for
         # this process only: a restart is nearly always a deploy, which is the
         # most likely thing to have fixed whatever it was.
-        self._failed: dict[str, str] = {}
+        self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -104,10 +108,17 @@ class MissionModelSpecLaneCoordinator:
         company_ref = settled.get("company_ref")
         state_hash = settled.get("state_hash")
         if failed and company_ref and state_hash:
-            self._failed[f"{company_ref}|{state_hash}"] = (
-                settled.get("failure_reason")
-                or f"last run: {settled.get('spec_status') or settled.get('status')}"
-            )
+            key = f"{company_ref}|{state_hash}"
+            spec_status = settled.get("spec_status")
+            reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
+            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
+                                              status=str(spec_status))
+                              if spec_status == "refused" else None)
+            settled["failure"] = self.budget.record(
+                key, reason=reason, status=spec_status or settled.get("status"),
+                classification=classification).as_wire()
+        elif company_ref and state_hash:
+            settled["resumed"] = self.budget.clear(f"{company_ref}|{state_hash}")
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -130,10 +141,11 @@ class MissionModelSpecLaneCoordinator:
         # about the hash is how this lane first got stuck relaunching one
         # company while the other four waited behind it.
         state_hash = state["state_hash"]
-        held = self._failed.get(f"{company_ref}|{state_hash}")
+        held = self.budget.blocked(f"{company_ref}|{state_hash}")
         if held is not None:
             return {"status": "held", "company_ref": company_ref,
-                    "settled": settled, "reason": held}
+                    "settled": settled, "reason": held.classification.reason,
+                    "failure": held.as_wire()}
         try:
             ticket = self.launcher.start(company_ref=company_ref, state_hash=state_hash)
         except LaneChildConflict as exc:
@@ -186,6 +198,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             missions=server.coverage_mission,
             launcher=launcher,
             mission=mission,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

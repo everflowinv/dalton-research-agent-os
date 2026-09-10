@@ -456,6 +456,17 @@ class LaneCoordinatorTests(unittest.TestCase):
         self.coordinator.launcher = FakeLauncher(reject=True)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "rejected")
 
+    def test_dependency_failure_retries_the_same_evidence_as_a_probe(self):
+        self.harness.add_claims()
+        first = self.coordinator.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], {
+            "map_status": "model_unavailable", "failure_reason": "model_unavailable"})
+        probe = self.coordinator.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.assertEqual(probe["evidence_fingerprint"], first["evidence_fingerprint"])
+        self.assertEqual(probe["settled"]["failure"]["failure_class"],
+                         "dependency_unavailable")
+
     def test_no_mission_is_unconfigured(self):
         coordinator = MissionDebateMapLaneCoordinator(
             store=self.harness.store, launcher=self.launcher, mission=lambda: None)

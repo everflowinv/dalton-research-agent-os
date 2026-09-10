@@ -164,12 +164,23 @@ class LaneTests(unittest.TestCase):
         self.assertIn("model_run", held["reason"])
         self.assertEqual(len(self.launcher.started), 1)
 
-    def test_a_failed_child_with_no_summary_is_still_attributable(self):
+    def test_a_failed_child_with_no_summary_spends_one_transient_retry(self):
         first = self.lane.dispatch_once()
         self.launcher.finish(first["ticket_ref"], status="orphaned")
-        held = self.lane.dispatch_once()
-        self.assertEqual(held["status"], "held")
-        self.assertIn("orphaned", held["reason"])
+        retried = self.lane.dispatch_once()
+        self.assertEqual(retried["status"], "launched")
+        self.assertEqual(retried["settled"]["failure"]["failure_class"], "transient")
+        self.assertEqual(retried["settled"]["failure"]["failures"], 1)
+
+    def test_dependency_failure_retries_same_projection_as_probe(self):
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], status="failed", summary={
+            "failure_reason": "model_unavailable"})
+        probe = self.lane.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.assertEqual(probe["projection_digest"], first["projection_digest"])
+        self.assertEqual(probe["settled"]["failure"]["failure_class"],
+                         "dependency_unavailable")
 
     def test_a_busy_launcher_is_not_a_failed_tick(self):
         self.launcher.raise_on_start = LaneChildConflict("already running")

@@ -37,6 +37,8 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_failure_class import Classification, CONTENT_REFUSED
 
 MAX_FAILURE_DETAIL_CHARS = 500
 LAUNCHER_KWARG = "conviction_call_launcher"
@@ -46,6 +48,7 @@ CONVICTION_MODEL_CONFIG = "initial-screen-model-config.json"
 # the request in flight, or there was no route just then.  The next tick can do
 # the work, so the company is not held back.
 TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
+DRIVER_KEY = "mission_conviction"
 # The one outcome that changes what the next tick sees: a proposal now exists
 # under this fingerprint, so the selector skips the company on its own.
 PUBLISHED_STATUS = "fresh"
@@ -60,6 +63,7 @@ class MissionConvictionLaneCoordinator:
         store: Any,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
@@ -70,7 +74,7 @@ class MissionConvictionLaneCoordinator:
         # minutes while the others never get a turn.  Process-local: a restart
         # is nearly always a deploy, which is the likeliest thing to have fixed
         # whatever it was.
-        self._failed: dict[str, str] = {}
+        self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
 
     # -- settling ---------------------------------------------------------
 
@@ -116,14 +120,20 @@ class MissionConvictionLaneCoordinator:
         published = (
             settled.get("status") == "succeeded" and call_status == PUBLISHED_STATUS
         )
-        hold = not published and call_status not in TRANSIENT_STATUSES
+        hold = not published
         company_ref = settled.get("company_ref")
         fingerprint = settled.get("evidence_fingerprint")
         if hold and company_ref and fingerprint:
-            self._failed[f"{company_ref}|{fingerprint}"] = (
-                settled.get("failure_reason")
-                or f"last run: {call_status or settled.get('status')}"
-            )
+            key = f"{company_ref}|{fingerprint}"
+            reason = settled.get("failure_reason") or f"last run: {call_status or settled.get('status')}"
+            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
+                                              status=str(call_status))
+                              if call_status == "refused" else None)
+            settled["failure"] = self.budget.record(
+                key, reason=reason, status=call_status or settled.get("status"),
+                classification=classification).as_wire()
+        elif company_ref and fingerprint:
+            settled["resumed"] = self.budget.clear(f"{company_ref}|{fingerprint}")
         return settled
 
     # -- the tick ---------------------------------------------------------
@@ -190,9 +200,10 @@ class MissionConvictionLaneCoordinator:
                         company_ref, fingerprint,
                         f"{company_ref} already has a call in {week_key(now)}")
                     continue
-            held = self._failed.get(f"{company_ref}|{fingerprint}")
-            if held is not None:
-                blocked = blocked or (company_ref, fingerprint, held)
+            decision = self.budget.blocked(f"{company_ref}|{fingerprint}")
+            if decision is not None:
+                blocked = blocked or (company_ref, fingerprint,
+                                      decision.classification.reason)
                 continue
             return company_ref, fingerprint, None
         if blocked is not None:
@@ -256,6 +267,7 @@ def dispatch(server: Any, params: Any) -> dict[str, Any]:
 
         coordinator = MissionConvictionLaneCoordinator(
             store=server.store, launcher=launcher, mission=mission,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
