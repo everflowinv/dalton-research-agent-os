@@ -105,10 +105,19 @@
           "spec_ref",
           "inquiry_hash",
           "company_ref",
+          "as_of",
+          "company_scope_refs",
           "discovery_plan_ref",
           "discovery_plan_hash"
         ],
         "constants": {
+          "company_scope_refs": [
+            "company:sec-cik:0000051143",
+            "company:sec-cik:0001058290",
+            "company:sec-cik:0001352010",
+            "company:sec-cik:0001467373",
+            "company:sec-cik:001688568"
+          ],
           "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92",
           "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1",
           "source_ref": "source:alphaengine"
@@ -118,6 +127,8 @@
           "spec_ref",
           "inquiry_hash",
           "company_ref",
+          "as_of",
+          "company_scope_refs",
           "discovery_plan_ref",
           "discovery_plan_hash"
         ]

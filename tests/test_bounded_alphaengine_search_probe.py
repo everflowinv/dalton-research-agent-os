@@ -21,7 +21,8 @@ def work(parameters=None):
                 "source_ref": "source:alphaengine",
                 "spec_ref": "earnings-call-transcripts",
                 "inquiry_hash": "b" * 64,
-                "company_ref": "company:sec-cik:0001467373",
+                "company_ref": "company:sec-cik:0001467373", "as_of": "2026-09-10",
+                "company_scope_refs": ["company:sec-cik:0001467373"],
                 "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1",
                 "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92",
             },
@@ -37,7 +38,7 @@ class Client:
     def call(self, operation, params):
         if operation == "start_bounded_source_discovery":
             self.starts += 1
-            return {"id": "alphaengine-search-ticket:" + "1" * 24, "status": "running"}
+            return {"id": "alphaengine-search-ticket:" + "1" * 24, "status": "running", "query_hash": "c" * 64}
         assert operation == "mission_source_discovery_status"
         return self.statuses.pop(0)
 

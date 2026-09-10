@@ -9,6 +9,8 @@ from dalton_core.mission_source_discovery import load_discovery_plan
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
 from dalton_core.writer_server import WriterServer, WriterServerError
+from dalton_core.bounded_alphaengine_search_probe import (
+    BoundedAlphaEngineSearchProbePending, execute_alphaengine_search_probe)
 from tests.test_research_task import ResearchTaskFixture, inquiry
 from dalton_core import research_task as rt
 
@@ -105,6 +107,39 @@ class InquiryDiscoveryWriterTests(ResearchTaskFixture):
         for name, forged in cases.items():
             with self.subTest(name=name), self.assertRaises(WriterServerError):
                 self.call(forged)
+        self.assertEqual(self.launcher.starts, 0)
+
+    def test_executor_timeout_then_next_tick_reuses_child_and_returns_result(self):
+        outer = self
+        class Client:
+            def call(self, operation, params):
+                if operation == "start_bounded_source_discovery":
+                    return outer.call(params["work_order"])
+                return outer.launcher.status(params["ticket_ref"])
+        client = Client()
+        with self.assertRaises(BoundedAlphaEngineSearchProbePending):
+            execute_alphaengine_search_probe(
+                self.work, client=client, timeout_seconds=0, poll_seconds=0)
+        ticket = next(iter(self.launcher.records))
+        query_hash = self.missions.discovery_dispatches(self.mission["id"])[0]["query_hash"]
+        self.launcher.records[ticket] = {"id": ticket, "status": "succeeded",
+            "summary": {"status": "succeeded", "query_hash": query_hash, "provider_calls": 1,
+                "search": {"outcome": "succeeded", "document_refs": ["document:a"],
+                    "connector_invocation_ref": "connector-invocation:a",
+                    "connector_invocation_hash": "d" * 64,
+                    "source_envelope_ref": "source-envelope:a",
+                    "source_envelope_hash": "e" * 64}}}
+        result = execute_alphaengine_search_probe(
+            self.work, client=client, timeout_seconds=0, poll_seconds=0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(self.launcher.starts, 1)
+
+    def test_scheduler_registered_shape_without_an_admitted_round_is_refused(self):
+        forged = {**self.work, "id": self.work["id"] + ":orphan",
+                  "idempotency_key": self.work["idempotency_key"] + ":orphan"}
+        self.assertEqual(self.scheduler.enqueue(forged)["status"], "fresh")
+        with self.assertRaisesRegex(WriterServerError, "not an admitted loop round"):
+            self.call(forged)
         self.assertEqual(self.launcher.starts, 0)
 
     def test_unadmitted_but_well_shaped_work_cannot_bypass_template_gate(self):

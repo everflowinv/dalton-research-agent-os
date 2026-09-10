@@ -184,9 +184,9 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
         "operation": "alphaengine_discovery_refresh",
         "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
         "parameter_contract": {
-            "allowed_fields": ["source_ref", "spec_ref", "inquiry_hash", "company_ref", "discovery_plan_ref", "discovery_plan_hash"],
-            "required_fields": ["source_ref", "spec_ref", "inquiry_hash", "company_ref", "discovery_plan_ref", "discovery_plan_hash"],
-            "constants": {"source_ref": "source:alphaengine", "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1", "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92"},
+            "allowed_fields": ["source_ref", "spec_ref", "inquiry_hash", "company_ref", "as_of", "company_scope_refs", "discovery_plan_ref", "discovery_plan_hash"],
+            "required_fields": ["source_ref", "spec_ref", "inquiry_hash", "company_ref", "as_of", "company_scope_refs", "discovery_plan_ref", "discovery_plan_hash"],
+            "constants": {"source_ref": "source:alphaengine", "company_scope_refs": ["company:sec-cik:0000051143", "company:sec-cik:0001058290", "company:sec-cik:0001352010", "company:sec-cik:0001467373", "company:sec-cik:001688568"], "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1", "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92"},
         },
         "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
         "verifier_ref": "verifier:source-level-coverage:0.1",
@@ -768,6 +768,7 @@ def _bindings_for(
     company_ref: str,
     templates: Mapping[str, Mapping[str, Any]],
     inquiry: Mapping[str, Any],
+    as_of: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """The probes this inquiry may run, parameterised deterministically."""
 
@@ -778,7 +779,7 @@ def _bindings_for(
         if template is None:
             continue
         parameters = _parameters_for(template, company_ref, inquiry=inquiry,
-                                     inquiry_hash=inquiry_hash)
+                                     inquiry_hash=inquiry_hash, as_of=as_of)
         if parameters is None:
             continue
         refs.append(template_ref)
@@ -792,7 +793,7 @@ def _bindings_for(
 
 def _parameters_for(
     template: Mapping[str, Any], company_ref: str, *, inquiry: Mapping[str, Any],
-    inquiry_hash: str,
+    inquiry_hash: str, as_of: str,
 ) -> dict[str, Any] | None:
     operation = template["operation"]
     if operation == "get_company_facts":
@@ -829,10 +830,11 @@ def _parameters_for(
             spec_ref = "sell-side-reports"
         else:
             return None
-        if company_ref != "company:sec-cik:0001467373":
+        allowed = template["parameter_contract"]["constants"]["company_scope_refs"]
+        if company_ref not in allowed:
             return None
         return {"source_ref": "source:alphaengine", "spec_ref": spec_ref,
-                "inquiry_hash": inquiry_hash, "company_ref": company_ref,
+                "inquiry_hash": inquiry_hash, "company_ref": company_ref, "as_of": as_of, "company_scope_refs": allowed,
                 "discovery_plan_ref": template["parameter_contract"]["constants"]["discovery_plan_ref"],
                 "discovery_plan_hash": template["parameter_contract"]["constants"]["discovery_plan_hash"]}
     # Every other operation in the catalogue is retired for exactly this
@@ -946,7 +948,7 @@ def plan_admissions(
             results.append({**entry, "admissible": False, "reason": refusal})
             continue
         entry["subject_ref"] = company_ref
-        bindings, template_refs = _bindings_for(digest, company_ref, templates, inquiry)
+        bindings, template_refs = _bindings_for(digest, company_ref, templates, inquiry, day)
         if not bindings:
             # Two different facts, and reporting them as one sent the reader
             # looking for a missing template that is not missing.  An

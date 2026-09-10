@@ -866,10 +866,10 @@ class CikPaddingTests(unittest.TestCase):
         from dalton_core.research_task import _parameters_for
 
         template = {"operation": "get_company_facts", "id": "probe-template:sec:1"}
-        params = _parameters_for(template, "company:sec-cik:000167...".replace("...", "8925"), inquiry=inquiry(question="Revenue?"), inquiry_hash="a" * 64)
+        params = _parameters_for(template, "company:sec-cik:000167...".replace("...", "8925"), inquiry=inquiry(question="Revenue?"), inquiry_hash="a" * 64, as_of="2026-09-10")
         self.assertIsNotNone(params)
         self.assertEqual(params["locator"], "company-facts/CIK0001678925")
-        ten = _parameters_for(template, "company:sec-cik:0001467373", inquiry=inquiry(question="Revenue?"), inquiry_hash="b" * 64)
+        ten = _parameters_for(template, "company:sec-cik:0001467373", inquiry=inquiry(question="Revenue?"), inquiry_hash="b" * 64, as_of="2026-09-10")
         self.assertEqual(ten["locator"], "company-facts/CIK0001467373")
 
 class InquiryDirectedDiscoveryTests(ResearchTaskFixture):

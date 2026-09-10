@@ -3987,6 +3987,10 @@ class WriterServer:
         loop = self.bounded_planner.loop(metadata.get("bounded_loop_version_ref"))
         if loop["content_hash"] != metadata.get("bounded_loop_version_hash"):
             raise WriterServerError("bounded discovery loop binding drifted")
+        admitted_round = next((row for row in self.bounded_planner.rounds(loop["id"])
+                               if row["work_order_ref"] == work["id"]), None)
+        if admitted_round is None:
+            raise WriterServerError("bounded discovery work is not an admitted loop round")
         binding = next((row for row in loop["template_bindings"]
                         if row["coverage_item_ref"] == metadata.get("coverage_item_ref")), None)
         if binding is None or binding["template_version_ref"] != metadata.get("probe_template_version_ref") \
@@ -4017,7 +4021,7 @@ class WriterServer:
             mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"])
         compiled = build_discovery_parameters(
             coordinator.plan, spec_ref=parameters["spec_ref"], company_ref=parameters["company_ref"],
-            as_of=datetime.now(timezone.utc).date())
+            as_of=date.fromisoformat(parameters["as_of"]))
         query_hash = discovery_query_hash(coordinator.plan, compiled)
         # The writer request may time out while the governed child continues.
         # Reuse the exact mission/company/spec/query dispatch so retrying the
@@ -4030,14 +4034,14 @@ class WriterServer:
             and row["discovery_plan_hash"] == coordinator.plan["content_hash"]), None)
         if prior is not None:
             ticket = launcher.status(prior["ticket_ref"])
-            return {**ticket, "dispatch_ref": prior["dispatch_id"], "parameters": compiled,
+            return {**ticket, "dispatch_ref": prior["dispatch_id"], "parameters": compiled, "query_hash": query_hash,
                     "status": "duplicate" if ticket.get("status") == "running" else ticket.get("status")}
         ticket = launcher.start(authorization=authorization, spec_ref=parameters["spec_ref"])
         dispatch = self.coverage_mission.record_discovery_dispatch(
             authorization=authorization, discovery_plan_ref=coordinator.plan["id"],
             discovery_plan_hash=coordinator.plan["content_hash"], spec_ref=parameters["spec_ref"],
             query_hash=query_hash, ticket_ref=ticket["id"])
-        return {**ticket, "dispatch_ref": dispatch["dispatch_id"], "parameters": compiled}
+        return {**ticket, "dispatch_ref": dispatch["dispatch_id"], "parameters": compiled, "query_hash": query_hash}
 
     def _op_bounded_planner_propose_next_with_context(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.propose_next_with_context(
