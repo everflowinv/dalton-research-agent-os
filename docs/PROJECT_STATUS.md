@@ -1,48 +1,19 @@
 # Dalton 项目进度
 
-更新日期：2026-09-10
+更新日期：2026-09-11
 
-## 下一步（按顺序）
+## 下一步（按顺序，2026-09-11 凌晨重写）
 
-1. **把建模规格接到序列上（建模第四段）。** 规格说"这家公司靠什么驱动"，序列说"这条科目的历史是什么"，
-   中间的 join 还没写：规格每一行的 `basis_concept` 就是 join key，而它本来就是**逐公司**的——
-   Accenture 报 `us-gaap:Revenues`，EPAM 报 `us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax`，
-   规格里各自写对了。做完这一步，一家公司的"模型输入表"就是真的了：每行一个科目、每列一个季度、
-   每格标明是报出来的还是推出来的、以及来自哪份 filing。
-2. **预测行，然后才是 Excel。** 顺序是 owner 定的也是对的：建模阶段不进 Excel，模型是结构与推理；
-   要交付时再连公式导出（`xlsx` skill）。所以先有预测行的存储形状（驱动因子 → 假设 → 结果），
-   再谈导出。**导出时的关键约束**：导出的是**公式**不是数值，否则收到的人无法追问"这个数是怎么来的"。
-3. **`gate_passed` 是终态，所以四家公司的 Initial Screen 永远不会重写。** ACN / EPAM / IBM / DXC 已过闸，
-   selection 第一条规则就把它们跳过，无论后来多了多少证据、换了多强的模型。CTSH 不受此限（它没过闸），
-   它在等 earnings_calls 补齐。**要决定的是**：一份在较弱模型、较薄证据下过了闸的 screen，
-   值不值得在证据变厚之后重出一版？现在四家都有了季报和建模规格，这个问题比之前更实在了。
-4. **roic 接不通，两条治理记录悬着（等 owner 判断）。** 见下方 2026-09-09 的 roic 条目：整站 403。
-   要么撤回这两条批准，要么改走抓取服务（那是换 transport，得发新版本重新批准）。
-5. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。它们的失败是
-   plan 执行层的（带 result envelope），归因不到那三次基础设施故障，所以当时没有撤回。
-   要单独查 result envelope 说了什么，再决定是不是也该豁免。
-6. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选。
-   这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。在那之前数字停在
-   `coverage_mission_document_figures`，驾驶舱直接读这张表。
-   **注意**：季报的数字走的是另一条路（`coverage_mission_statement_lines`），它有 accession 与原始产物哈希，
-   provenance 比 figures 强；这两条路要不要合并，是和第 1、2 步同一个设计问题。
-7. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的
-   静态 profile，broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——
-   删旧 profile 会改动历史版本链，值得单独做。
-8. **修 discovery 的公司归属（检索侧）。** 抽取侧三条 pass 都堵住了，但检索仍会把别家公司的文档放进队列，
-   白花获取预算。owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；
-   所以这是"怎么让检索更准"的开放问题，不是"加个过滤器"。
-9. **contested 指标要能在驾驶舱上看见。** `metric_discovery.contested()` 能说出谁在哪个单位上分歧
-   （live 5 条，都是 percent/ratio），页面还没读它。
-10. **Guidepoint lane 仍未建。** host-bridge 的命名冲突已在 P13ae 解决（按 (source_ref, operation) 解析），
-    身份与两条治理记录也已 owner 批准；还缺 child CLI、discovery plan、launcher、writer/installer 接线，
-    以及 owner 发新 mission 版本把 `source:guidepoint` 置为 connected。
-11. **三个连接器身份模块长得几乎一样**（guidepoint / sec-financials / roic），到第三个就该抽公共描述符了。
-    当时没做是因为其中两个已经在 owner 批准的哈希后面，重构必须把那些哈希钉成测试——值得单独一轮。
+详细账在 `docs/reports/parallel-development-plan-v1.0-2026-09-09.md` 第 6 节（6b 切片、6c 待派修复 F1–F19 与待裁决 D1–D9）。
 
-**owner 已定的**：AlphaEngine 先维持 130/24h（owner cap 也已改回 130，配置与实际一致）。
-这仍是 CTSH 缺电话会的直接约束，但不再是待办。
-
+1. **按 6c 派修，先 F1 / F11 / F5 系列。** F1：大脑带外的预测修订传不进 `outside_band` 理由会在发布时被拒；F11：两条线各自定义了 `buyback_disclosure`，契约要统一；F5：五条分支在判断层、cockpit、bootstrap、演练脚本上同文件，合并顺序已写明。
+2. **合并六条 W4 分支与复演 2 分支**（顺序：hkex → insider-buyback → framework → failure-classes → zero-base → rehearsal-2），每次调和后 import 检查，全量绿再 push。
+3. **用 `--source-root` 对合并后的 main 重跑复演**，然后部署；owner 步骤见 `owner-steps-after-deploy-v2.0-2026-09-10.md`（mission 版本、policy 重签、gateway reload 由 owner 签）。
+4. **owner 裁决 D1–D9**（8-K discovery spec、港股覆盖名单与数字准入、AlphaEngine 配额与抽取节奏、探测分层、复盘进 deliverable 等）。
+5. **部署后一周只做一件事：让五家公司各出第一版档案与 DebateMap，判断层真正跑一轮。** 这是 Chem 复盘的第一条教训（`chem-retrospective-implications-v1.0-2026-09-10.md` §3.1）。
+6. **W5 候选**（不阻塞）：market-proxy claims + 成本侧模板（F10 / D3）、10-Q Item 5 交易安排（D2）、F14 十六条 lane 接失败账本。
+7. **沿用的旧待办**：roic 整站 403 的两条治理记录（撤回或换 transport）；ACN 两份卡在 3 次上限的 filing 要看 result envelope；discovery 的公司归属仍是检索准度问题；contested 指标要上 cockpit；三个连接器身份模块的公共描述符。
+8. **owner 搁置到最后**：周报投递（P15c/P15e）、Excel 导出（P13-M5，导出公式而非数值，每个硬编码格一行来源）。
 
 ## 当前状态速览（2026-09-09 收盘）
 
@@ -72,6 +43,13 @@ research plan、initial screen。
 
 **并行开发**：分析师蓝图按 [并行开发计划 v1.0](reports/parallel-development-plan-v1.0-2026-09-09.md) 推进：
 主 agent 定计划与集成，Opus 5 subagent 各自 worktree 写代码。进度账在该文档第 6 节。
+
+## 2026-09-11 凌晨：七条交付到齐，按 owner 指示只记录不动手
+
+owner 因限额指示：agent 返回后只记录修法，不动手、不派。七条交付（作者侧全量各自绿）：经济不变量层（已合入本地 main，
+未 push，主线全量未跑）、美股 insider / buyback tracking、港股 hkex-filings 连接器、按分类的 driver 模板 + `market_proxy`、
+失败分类 + cockpit 四格、ZeroBaseReview + 判断事后验证、部署复演 2（fail-closed 通过，对 `8717de0`）。审读产出 19 条待派修复与
+9 条待裁决，全部在计划文档 6c。本地 main 领先远端 10 个提交（经济不变量合并 + 记录文档），按「全量绿才 push」规则未推。
 
 ## 2026-09-10（并行开发第二天）：认知层、演化层、对话层大部分上主线，部署演练通过
 
