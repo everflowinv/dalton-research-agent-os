@@ -841,6 +841,11 @@ class AgendaControlApplication:
         if path == "/v1/cockpit/sources":
             return {**plane.sources(), "enabled": True}
         # INT2 / Q2: 每周回头看 -- the latest week's "我们把时间花在哪".
+        if path == "/v1/cockpit/ops":
+            # P17d 运维待办: what is parked on which dependency. Read-only and
+            # derived from the append-only lane failure ledger; no authority,
+            # no new grant, nothing to press.
+            return {**plane.ops_backlog(), "enabled": True}
         if path == "/v1/cockpit/reflection":
             return {**plane.cycle_reflection(), "enabled": True}
         if path == "/v1/cockpit/history":

@@ -905,6 +905,9 @@ SIDECAR_MIGRATIONS: tuple[MigrationSpec, ...] = (
     # be applied after them.
     MigrationSpec("research_review_schema.sql", "dalton_core.research_review", "HumanReviewAuthority", "sidecar", "research-review/candidate-staging.sqlite"),
     MigrationSpec("tick_ledger_schema.sql", "dalton_core.tick_ledger", "TickLedger", "sidecar", "tick-ledger.sqlite"),
+    # P17d: the parked-item ledger.  Same sidecar shape as the tick ledger --
+    # append-only, opened read-only by the cockpit, retention is a reader window.
+    MigrationSpec("lane_failure_ledger_schema.sql", "dalton_core.lane_failure_ledger", "LaneFailureLedger", "sidecar", "lane-failure-ledger.sqlite"),
     # C2: budget_pools_schema.sql is applied by ``apply_pool_migration``, which
     # ThesisImpactBudgetStore calls -- it is not a constructor of its own.
     MigrationSpec("thesis_impact_budget_schema.sql", "dalton_core.thesis_impact_budget", "ThesisImpactBudgetStore", "sidecar", "thesis-impact-budget.sqlite"),

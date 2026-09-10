@@ -108,6 +108,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("candidate_staging_schema.sql", "research-review/candidate-staging.sqlite"),
     ("research_review_schema.sql", "research-review/candidate-staging.sqlite"),
     ("tick_ledger_schema.sql", "tick-ledger.sqlite"),
+    ("lane_failure_ledger_schema.sql", "lane-failure-ledger.sqlite"),
     ("thesis_impact_budget_schema.sql", "thesis-impact-budget.sqlite"),
     ("budget_pools_schema.sql", "thesis-impact-budget.sqlite"),
 )

@@ -76,6 +76,11 @@ header.top p{margin:4px 0 0;color:var(--muted)}
 .stat .n{font-size:30px;font-weight:800;letter-spacing:-.5px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .stat .l{color:var(--muted);font-size:13px}
 .stat .s{color:var(--dim);font-size:12px;margin-top:2px}
+/* P17d 四格: the same tile, made a link to the page it counts. */
+.stat.link{cursor:pointer;transition:border-color .15s,background .15s}
+.stat.link:hover{border-color:rgba(255,255,255,.28);background:rgba(0,0,0,.32)}
+.stat .go{color:var(--muted);font-size:12px;margin-top:8px}
+.stat.alarm .n{background:none;-webkit-text-fill-color:#ffb3c3;color:#ffb3c3}
 .qlist{margin:0;padding:0;list-style:none;counter-reset:q}
 .qlist li{position:relative;padding:10px 14px 10px 44px;border-radius:12px;background:rgba(0,0,0,.18);margin-bottom:8px}
 .qlist li:before{counter-increment:q;content:counter(q);position:absolute;left:12px;top:9px;width:22px;height:22px;border-radius:7px;background:var(--grad);color:#08101f;font-weight:800;font-size:12px;display:grid;place-items:center}
@@ -264,6 +269,15 @@ pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;
       <details><summary>目标的修改记录</summary><div class="hist" id="goal-history"></div></details>
     </div>
 
+    <!-- P17d 四格. Chem 的健康页说一切正常，同时行业框架有缺口没填、一个任务
+         因为 AlphaEngine 桌面页读不到已经永久挂起了一周——因为这四件事分在四
+         个页面。放在一行里，每格点开到它自己那页。 -->
+    <div class="card">
+      <h2>一眼看全</h2>
+      <p class="sub" id="ops-sub">运行状态、来源缺口、挂起的失败、上周产物验收。点任意一格看明细。</p>
+      <div class="grid c4" id="ops-panels"></div>
+    </div>
+
     <div class="card">
       <h2>进展</h2>
       <p class="sub" id="totals-sub"></p>
@@ -412,6 +426,7 @@ function renderOverview(o){
   }
   $("goal-sources").replaceChildren(...g.sources.map(s=>node("span",`${s.connected?"● ":"○ "}${s.label}`,`tag ${s.connected?"on":"off"}`)));
   $("goal-history").replaceChildren(...g.history.map(h=>{const d=node("div",null,"h");d.append(node("b",`第 ${h.version} 版 · ${fmtDate(h.created_at)}`),node("div",h.title),node("div",`${h.research_questions.length} 个问题 · ${h.universe.join("、")}`));return d}));
+  renderOpsPanels(o.ops);
   const t=o.totals,b=o.budgets;
   $("totals").replaceChildren(stat(t.found,"找到的资料","网页、研报、电话会"),stat(t.read,"已读完的资料",`还有 ${t.waiting} 份排队`),stat(t.claims,"入库的结论",t.claims_today?`今天新增 ${t.claims_today} 条`:"今天还没有新增"),
     stat(b.model_calls?`${b.model_calls.used}/${b.model_calls.cap}`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}，上限 $${b.model_calls.cost_cap_usd}`:"未接入"));
@@ -558,7 +573,11 @@ function cadenceBlock(rows){const d=node("details");const s=node("summary","我�
     if(r.because)li.append(node("span",` ${r.because}`,"hint"));ul.append(li)});
   d.append(ul);return d}
 /* INT2: the source capability map and the model routing, in the reader. */
-$("open-sources").onclick=async()=>{$("reader").classList.add("show");const sheet=$("reader-sheet");
+/* P17d: named, because the 四格 tile opens the same sheet as the button. Two
+   ways in, one renderer -- a tile whose number and page could disagree is the
+   thing the row exists to prevent. */
+$("open-sources").onclick=openSources;
+async function openSources(){$("reader").classList.add("show");const sheet=$("reader-sheet");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderSources(sheet,await getJson("/v1/cockpit/sources"))}
   catch(e){sheet.replaceChildren(readerClose(),node("div",e.message,"empty"))}};
@@ -595,7 +614,8 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
   sheet.append(box)}
 /* Q2: 每周回头看. Prose and table both derived from counted things; no model
    wrote either, which is why they are shown verbatim. */
-$("open-reflection").onclick=async()=>{$("reader").classList.add("show");const sheet=$("reader-sheet");
+$("open-reflection").onclick=openReflection;
+async function openReflection(){$("reader").classList.add("show");const sheet=$("reader-sheet");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderReflection(sheet,await getJson("/v1/cockpit/reflection"))}
   catch(e){sheet.replaceChildren(readerClose(),node("div",e.message,"empty"))}};
@@ -681,6 +701,41 @@ doc.sections.forEach(s=>{const sec=node("section");sec.append(node("h3",s.title)
 const CHECK={complete:["✓","ok"],partial:["◐","part"],missing:["○","no"],not_planned:["⊘","na"],source_unavailable:["⊘","na"]};
 function checklist(items){const ul=node("ul",null,"checks");items.forEach(it=>{const[icon,cls]=CHECK[it.status]||["·","na"];const li=node("li",null,cls);li.append(node("span",icon,"ic"),node("span",it.label),node("span",`${it.have}/${it.required}`,"cnt"));if(it.status!=="complete")li.append(node("span",it.note,"nt"));ul.append(li)});return ul}
 function stat(n,l,s){const d=node("div",null,"stat");d.append(node("div",String(n),"n"),node("div",l,"l"),node("div",s,"s"));return d}
+/* P17d: a tile that is also the way to the page it counts. ``alarm`` is used
+   only where a non-zero number means somebody has to do something. */
+function panel(n,l,s,go,onclick,alarm){const d=stat(n,l,s);d.className="stat link"+(alarm?" alarm":"");
+  d.append(node("div",go,"go"));d.onclick=onclick;return d}
+function renderOpsPanels(ops){const box=$("ops-panels");if(!ops){box.replaceChildren();return}
+  const L=ops.lanes,G=ops.gaps,F=ops.failures,A=ops.acceptance;
+  box.replaceChildren(
+    panel(`${L.counts.running}/${L.total}`,"流水线在跑",L.note,"往下看每条流水线 ↓",
+      ()=>$("lanes").scrollIntoView({behavior:"smooth",block:"center"}),L.waiting_on_you>0),
+    panel(G.headline,"还没填上的来源缺口",G.note,"看每个来源能取什么 →",openSources,false),
+    panel(F.headline,"挂起 / 不再重试的工作",F.note,"看运维待办 →",openOps,F.parked_items>0),
+    panel(A.available?A.published:"—","上周产物验收",A.note||"",
+      `${A.week||"上周"} · 每周回头看 →`,openReflection,false));}
+/* P17d 运维待办: 哪些工作在等哪个依赖、从什么时候开始等。只读，纯粹是
+   append-only 失败台账的折叠结果。 */
+function openOps(){$("reader").classList.add("show");const sheet=$("reader-sheet");
+  sheet.replaceChildren(node("div","正在读取…","empty"));
+  getJson("/v1/cockpit/ops").then(r=>renderOps(sheet,r))
+    .catch(e=>sheet.replaceChildren(readerClose(),node("div",e.message,"empty")))}
+function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运维待办"));
+  if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
+  sheet.append(node("div",r.note,"meta"));
+  if(!r.dependencies.length)sheet.append(node("div","没有任何工作在等外部依赖。","empty"));
+  r.dependencies.forEach(dep=>{const s=node("section");
+    s.append(node("h3",`${dep.dependency_label} · ${dep.item_count} 件`));
+    s.append(node("div",`最早 ${fmtDate(dep.first_seen)} 开始等，最近一次 ${fmtDate(dep.last_seen)}；共试了 ${dep.attempts} 次`,"hint"));
+    const ul=node("ul",null,"latest");
+    dep.items.forEach(it=>ul.append(node("li",`${it.lane_label}：${it.item_key} — ${it.reason}`)));
+    s.append(ul);sheet.append(s)});
+  if(r.terminal_count){const s=node("section");
+    s.append(node("h3",`读到了但用不了 · ${r.terminal_count} 件`),
+             node("div","这些不会再重试；内容本身读不出来，再试一次读到的还是同样的字节。","hint"));
+    const ul=node("ul",null,"latest");
+    r.terminal_items.forEach(it=>ul.append(node("li",`${it.lane_label}：${it.item_key} — ${it.reason}`)));
+    s.append(ul);sheet.append(s)}}
 function laneStatus(s){return{launched:"运行中",busy:"运行中",running:"运行中",idle:"待命",ready:"就绪",held:"暂停等待",failed:"出错",budget_exhausted:"今日额度用完",paused:"已暂停",ungranted:"缺授权，一次也没跑",unconfigured:"还没装上",unapproved:"等你批准数据源",unstarted:"这台机器上还没跑过",rejected:"被拒绝",unavailable:"暂时读不到",current:"已经是最新"}[s]||s||"待命"}
 function svc(state,tick){const d=$("svc-dot"),t=$("svc-text");const stale=tick&&(Date.now()-new Date(tick).getTime())>10*60*1000;if(state==="running"&&!stale){d.className="dot";t.textContent=`系统运行中 · 最近活动 ${ago(tick)}`}else if(state){d.className="dot warn";t.textContent=`系统${stale?"可能停了":state} · 最近活动 ${ago(tick)}`}else{d.className="dot off";t.textContent="读不到系统状态"}}
 async function loadOverview(){try{renderOverview(await getJson("/v1/cockpit/overview"))}catch(e){$("goal-title").textContent="读取失败";$("goal-objective").textContent=e.message;$("svc-dot").className="dot off";$("svc-text").textContent="连接失败"}}

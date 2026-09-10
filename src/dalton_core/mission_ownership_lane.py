@@ -49,6 +49,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .lane_failure_ledger import lane_budget
 from .lane_registry import LaneSpec, register_lane
 
 # Both are required. The first authorises learning a dated fact about a covered
@@ -58,6 +59,8 @@ WRITE_SCOPES: tuple[str, ...] = ("observation", "market_event")
 COMPANY_REF_CIK_PREFIX = "company:sec-cik:"
 MAX_FAILURE_DETAIL_CHARS = 500
 MAX_FAILURES_PER_COMPANY = 3
+# The tick-summary key, and therefore the name this lane is parked under.
+DRIVER_KEY = "mission_ownership"
 # How far back a first run reaches. A quarter: enough that a Core turned on
 # today sees the current quarter's insider activity, short enough that it does
 # not spend a week reading three years of Form 4s nobody asked about.
@@ -135,6 +138,7 @@ class MissionOwnershipLaneCoordinator:
         *,
         connection: Any,
         state_dir: Any,
+        failure_ledger_dir: Any | None = None,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
         record_event: Callable[..., Any] | None = None,
@@ -159,8 +163,13 @@ class MissionOwnershipLaneCoordinator:
         self.lookback_days = int(lookback_days)
         self._open: str | None = None
         self._read: dict[str, None] = {}
-        self._failures: dict[str, int] = {}
-        self._failure_reason: dict[str, str] = {}
+        # P17d: the counted budget, the parked set and the terminal set, in the
+        # lane common layer. Only ``transient`` failures spend the count; a
+        # source that is down parks the company instead and releases it when a
+        # read of that source works.
+        self.budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir, clock=self.clock,
+            max_transient_failures=MAX_FAILURES_PER_COMPANY)
         self._emitted: set[str] = set()
         self._ir_watched_on: str | None = None
 
@@ -262,15 +271,14 @@ class MissionOwnershipLaneCoordinator:
         if not company_ref:
             return settled
         if settled.get("status") != "succeeded":
-            self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-            self._failure_reason[company_ref] = (
-                settled.get("failure_reason") or f"last run: {settled.get('status')}"
-            )
+            settled["failure"] = self.budget.record_settled(
+                company_ref, settled).as_wire()
             # Not marked as read: a failed run learned nothing, and marking the
             # accession would lose the filing permanently on a transient error.
             return settled
-        self._failures.pop(company_ref, None)
-        self._failure_reason.pop(company_ref, None)
+        resumed = self.budget.clear(company_ref)
+        if resumed:
+            settled["resumed"] = resumed
         if settled.get("accession"):
             self._remember(settled["accession"])
         settled["emission"] = self._emit(company_ref, settled["events"])
@@ -427,10 +435,15 @@ class MissionOwnershipLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
-            if self._failures.get(company_ref, 0) >= MAX_FAILURES_PER_COMPANY:
+            blocked = self.budget.blocked(company_ref)
+            if blocked is not None:
+                # P17d: three words, not one. ``held`` will change on a deploy,
+                # ``parked`` when the dependency answers, ``terminal`` never.
                 skipped.append({
-                    "company_ref": company_ref, "reason": "held",
-                    "detail": self._failure_reason.get(company_ref, "repeated failures"),
+                    "company_ref": company_ref, "reason": blocked.action,
+                    "detail": self.budget.failure_reason(company_ref),
+                    "failure_class": blocked.classification.failure_class,
+                    "dependency": blocked.classification.dependency,
                 })
                 continue
             found = self.candidates(company)
@@ -473,8 +486,7 @@ class MissionOwnershipLaneCoordinator:
                         "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-                self._failure_reason[company_ref] = reason
+                self.budget.record(company_ref, reason=reason)
                 return {"status": "rejected", "company_ref": company_ref,
                         "settled": settled, "skipped": skipped,
                         "ir_pages": ir_pages, "reason": reason}
@@ -525,6 +537,10 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         coordinator = MissionOwnershipLaneCoordinator(
             connection=server.store.connection,
             state_dir=launcher.state_dir,
+            # Separate from ``state_dir``: that one is where this lane's child
+            # writes its tickets, and it is a launcher's directory. The
+            # failure ledger is a Core sidecar the cockpit opens read-only.
+            failure_ledger_dir=getattr(server, "state_dir", None),
             launcher=launcher,
             mission=mission,
             record_event=getattr(server, "record_research_event", None),
