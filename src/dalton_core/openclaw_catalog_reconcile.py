@@ -559,6 +559,15 @@ def _changed_version(
     return wire
 
 
+def _availability_expired(profile: Mapping[str, Any], checked_at: datetime) -> bool:
+    # Profiles come through ModelRouter validation, including timezone-aware
+    # availability bounds. Keep the prior observation immutable when renewing.
+    valid_until = datetime.fromisoformat(
+        profile["availability"]["valid_until"].replace("Z", "+00:00")
+    )
+    return valid_until <= checked_at
+
+
 def catalog_sync_status(
     router: ModelRouter,
     config: Mapping[str, Any],
@@ -605,6 +614,10 @@ def catalog_sync_status(
         "missing_static_profile_ids": missing_here + retired_but_offered,
         "not_in_broker_profile_ids": not_offered,
         "drifted_profile_ids": drifted,
+        "expired_availability_profile_ids": sorted(
+            profile_id for profile_id in live & set(desired)
+            if _availability_expired(held[profile_id], checked_at)
+        ),
         "catalog_in_sync": (
             not missing_here and not retired_but_offered and not not_offered and not drifted
         ),
@@ -644,6 +657,7 @@ def sync_openclaw_model_catalog(
     added: list[str] = []
     revived: list[str] = []
     updated: list[str] = []
+    refreshed: list[str] = []
     for profile_id in sorted(desired):
         current = held.get(profile_id)
         if current is None:
@@ -661,6 +675,11 @@ def sync_openclaw_model_catalog(
                 _changed_version(current, desired[profile_id], checked_at=checked_at)
             )
             updated.append(profile_id)
+        elif _availability_expired(current, checked_at):
+            router.register_profile(
+                _changed_version(current, desired[profile_id], checked_at=checked_at)
+            )
+            refreshed.append(profile_id)
     retired: list[str] = []
     for profile_id in sorted(held):
         current = held[profile_id]
@@ -677,7 +696,8 @@ def sync_openclaw_model_catalog(
         "retired_profile_ids_this_run": retired,
         "revived_profile_ids": revived,
         "updated_profile_ids": updated,
-        "changed": bool(added or retired or revived or updated),
+        "refreshed_profile_ids": refreshed,
+        "changed": bool(added or retired or revived or updated or refreshed),
     }
 
 

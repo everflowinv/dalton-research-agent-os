@@ -120,6 +120,37 @@ class CatalogSyncTests(unittest.TestCase):
         again = sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
         self.assertFalse(again["changed"])
 
+    def test_expired_catalog_observation_renews_without_rewriting_history(self) -> None:
+        config = _config()
+        self._install(config)
+        old = self.router.latest_profiles()
+        old_bytes = {
+            row[0]: row[1] for row in self.router.connection.execute(
+                "SELECT profile_version_ref, profile_json FROM model_endpoint_profile_versions"
+            )
+        }
+        expired_at = NOW + timedelta(days=7)
+        status = catalog_sync_status(self.router, config, checked_at=expired_at)
+        self.assertEqual(status["expired_availability_profile_ids"],
+                         sorted(profile["id"] for profile in old))
+        self.assertEqual(self.router.connection.execute(
+            "SELECT COUNT(*) FROM model_endpoint_profile_versions").fetchone()[0], len(old))
+        refreshed = sync_openclaw_model_catalog(self.router, config, checked_at=expired_at)
+        self.assertEqual(refreshed["refreshed_profile_ids"],
+                         status["expired_availability_profile_ids"])
+        self.assertEqual(refreshed["expired_availability_profile_ids"], [])
+        self.assertEqual(refreshed["updated_profile_ids"], [])
+        for profile in self.router.latest_profiles():
+            self.assertIn(profile["prior_version_ref"], old_bytes)
+            self.assertGreater(datetime.fromisoformat(profile["availability"]["valid_until"]),
+                               expired_at)
+        for ref, raw in old_bytes.items():
+            self.assertEqual(self.router.connection.execute(
+                "SELECT profile_json FROM model_endpoint_profile_versions WHERE profile_version_ref=?",
+                (ref,)).fetchone()[0], raw)
+        self.assertFalse(sync_openclaw_model_catalog(
+            self.router, config, checked_at=expired_at + timedelta(hours=1))["changed"])
+
     def test_curated_profile_without_catalog_price_becomes_unpriced(self) -> None:
         config = _config()
         self._install(config)
