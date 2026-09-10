@@ -181,6 +181,19 @@ owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tra
 - **`TrackingCadenceVersion`**（大脑的调配结果，append-only）：company × source → 频率与理由；基线来自 policy，大脑按覆盖厚度与事件密度提出调整，每版带 `because` 与证据 refs。
 - **事件判断 lane**（判断层）：每个未判定事件一次有界模型调用 → 五词决定之一 + 理由 + 映射到 driver / thesis；决定为 `no_change` 也写事件账本；`note` 出一段带 refs 的短报告（异动归因、新闻 implication）；`research` 调 P14e 入口派专项研究；`revise` 调机制层入口（forecast `revise_assumptions`、dossier / thesis 修订候选）——永远是候选，人裁决。独立 verifier 复用 thesis-impact 的 independence predicate。
 
+### 模型选择与自动登记（owner 2026-09-10 提出）
+
+owner：在 cockpit 上可以为各个调用环节选择用哪个模型；模型列表随 openclaw 对外展示的 provider 自动更新、自动登记为 Dalton 可用。
+
+定案（建在模型路由与目录同步之上）：
+1. **按环节选模型**：cockpit「模型」页列出每个 purpose 的当前档位链与最近实际服务的模型；owner 可选「跟随档位」或指定序列
+   （主选 + 回退）；选择经治理 op 以 owner 身份发布成新的 routing policy 版本（append-only，可回滚）；verifier 环节的独立性
+   约束保留——与 producer 同家族的选择被拒绝并说明。
+2. **自动同步 lane**（maintenance 池，每小时）：读 openclaw `models.providers` 与 broker 插件 `allowedModels` / `config.profiles`；
+   新模型自动登记为可用 profile（无 rate card 的标「未定价、只可作回退」）；消失的退役不删除；openclaw 有但 broker 插件未放行的
+   在 cockpit 显示「可用但未放行」，owner 一键放行 = 带备份写 openclaw.json 的 broker 子树 + 提示重载 gateway。
+3. 不自动改 openclaw 的 provider 配置本身。
+
 ### 既有资料的入职处理（owner 2026-09-10 提问，主 agent 定案）
 
 owner：有些公司我们已有资料（以前的 Initial Screen、memo、维护中的 Excel 模型）。Dalton 入职时它们是重要参考、能省时间，
