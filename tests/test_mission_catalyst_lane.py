@@ -391,7 +391,7 @@ class EventTests(LaneTestCase):
         self.assertEqual(settled["events"]["status"], "recorded")
         self.assertEqual(len(written), 1)
         self.assertFalse(coordinator.due(ACN))
-        self.assertEqual(coordinator._failures[ACN], 1)
+        self.assertEqual(coordinator.budget.attempts(ACN), 1)
 
     def test_three_partial_days_hold_the_company_with_the_vendor_s_reason(self):
         coordinator = self.coordinator(
@@ -719,6 +719,7 @@ class UngrantedEventScopeTests(P14aHarness, _CalendarWiring):
         self.assertIn("market_event", settled["events"]["reason"])
         self.assertEqual(self.rows(), [])
         coordinator = self.server.lane_state["catalyst_calendar_launcher"]
-        self.assertEqual(coordinator._failures, {})
+        self.assertEqual(coordinator.budget.attempts(ACN), 0)
+        self.assertIsNone(coordinator.budget.blocked(ACN))
         # And the calendar itself is unaffected: the company was asked today.
         self.assertFalse(coordinator.due(ACN))

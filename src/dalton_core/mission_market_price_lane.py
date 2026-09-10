@@ -29,6 +29,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .lane_failure_ledger import lane_budget
 from .lane_registry import LaneSpec, register_lane
 from .market_price import provisional_bar_date
 
@@ -54,7 +55,15 @@ MAX_FAILURE_DETAIL_CHARS = 500
 # A company whose runs keep failing stops consuming the single slot. Held in
 # this process only: a restart is nearly always a deploy, which is the most
 # likely thing to have fixed whatever it was.
+#
+# P17d: this is now the *transient* budget only. A company whose runs fail
+# because Yahoo is not answering is parked against ``market_data`` rather than
+# counted down to a permanent hold, and it comes back when a read of that
+# source works. Three strikes was never a statement about the company when the
+# source was the thing that was down.
 MAX_FAILURES_PER_COMPANY = 3
+# The tick-summary key, and therefore the name this lane is parked under.
+DRIVER_KEY = "mission_market_prices"
 
 
 def _universe(mission: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -109,6 +118,7 @@ class MissionMarketPriceLaneCoordinator:
         mission: Callable[[], dict[str, Any] | None],
         clock: Callable[[], datetime] | None = None,
         backfill_years: int = BACKFILL_YEARS,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.authority = authority
         self.launcher = launcher
@@ -119,10 +129,14 @@ class MissionMarketPriceLaneCoordinator:
         # cannot be asked "what did you last run" -- it holds one process, not
         # a history -- and the ticket ref is the only handle on the summary.
         self._open: str | None = None
-        # Companies whose runs failed, and how many times. Held in this process
-        # only, on purpose: see the module note.
-        self._failures: dict[str, int] = {}
-        self._failure_reason: dict[str, str] = {}
+        # Companies whose runs failed, classified. The counted part is held in
+        # this process only, on purpose (see the module note); the parked part
+        # is appended to the lane failure ledger and replayed on construction,
+        # because "Yahoo has been down since Tuesday" is not a fact a deploy
+        # should erase.
+        self.budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir, clock=self.clock,
+            max_transient_failures=MAX_FAILURES_PER_COMPANY)
         # Companies that were up to date last time they were asked, and when.
         self._satisfied: dict[str, datetime] = {}
         # Companies whose earlier history has been asked for once and found to
@@ -244,17 +258,19 @@ class MissionMarketPriceLaneCoordinator:
         if not company_ref:
             return settled
         if settled.get("status") != "succeeded":
-            self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-            self._failure_reason[company_ref] = (
-                settled.get("failure_reason")
-                or f"last run: {settled.get('status')}"
-            )
+            settled["failure"] = self.budget.record_settled(
+                company_ref, settled).as_wire()
             return settled
         # A run that succeeded is a run that reached the source, whatever it
         # found: the retry budget is about companies this lane cannot serve,
-        # not about quiet markets.
-        self._failures.pop(company_ref, None)
-        self._failure_reason.pop(company_ref, None)
+        # not about quiet markets. It is also the probe that resumes every
+        # company parked on the same source -- P14e's resume, by dependency.
+        resumed = self.budget.clear(company_ref)
+        # A price read that worked is a market-data read that worked, whether
+        # or not this company was the one parked on it.
+        resumed += self.budget.dependency_answered("market_data")
+        if resumed:
+            settled["resumed"] = sorted(set(resumed))
         if kind == "backfill_gap" and not settled.get("added_bar_count"):
             # There is nothing behind this company's first trading day. Asked
             # and answered; asking again every six hours would never learn it.
@@ -301,10 +317,16 @@ class MissionMarketPriceLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
-            if self._failures.get(company_ref, 0) >= MAX_FAILURES_PER_COMPANY:
+            blocked = self.budget.blocked(company_ref)
+            if blocked is not None:
+                # Three words, not one. ``held`` will change on a deploy,
+                # ``parked`` when the source answers, ``terminal`` never --
+                # and an operator who cannot tell them apart cannot act.
                 skipped.append({
-                    "company_ref": company_ref, "reason": "held",
-                    "detail": self._failure_reason.get(company_ref, "repeated failures"),
+                    "company_ref": company_ref, "reason": blocked.action,
+                    "detail": self.budget.failure_reason(company_ref),
+                    "failure_class": blocked.classification.failure_class,
+                    "dependency": blocked.classification.dependency,
                 })
                 continue
             if self._held_recently(company_ref):
@@ -333,10 +355,10 @@ class MissionMarketPriceLaneCoordinator:
                         "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-                self._failure_reason[company_ref] = reason
+                decision = self.budget.record(company_ref, reason=reason)
                 return {"status": "rejected", "company_ref": company_ref,
-                        "settled": settled, "skipped": skipped, "reason": reason}
+                        "settled": settled, "skipped": skipped, "reason": reason,
+                        "failure": decision.as_wire()}
             self._open = ticket["id"]
             self._open_kind = kind
             return {
@@ -348,6 +370,7 @@ class MissionMarketPriceLaneCoordinator:
             }
         return {
             "status": "idle", "settled": settled, "skipped": skipped,
+            "failures": self.budget.summary(),
             "reason": "every covered company's price history is current",
         }
 
@@ -401,6 +424,10 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             authority=MarketPriceSeriesAuthority(server.store),
             launcher=launcher,
             mission=mission,
+            # ``getattr``: a lane exercised against a stub writer has no
+            # state directory, and a lane that refuses to run without a
+            # ledger would be a lane that fails closed on its bookkeeping.
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

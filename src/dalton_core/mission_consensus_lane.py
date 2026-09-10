@@ -41,6 +41,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .lane_failure_ledger import lane_budget
 from .lane_registry import LaneSpec, register_lane
 
 WRITE_SCOPE = "consensus_estimate"
@@ -53,6 +54,8 @@ MAX_FAILURE_DETAIL_CHARS = 500
 # this process only: a restart is nearly always a deploy, which is the most
 # likely thing to have fixed whatever it was.
 MAX_FAILURES_PER_COMPANY = 3
+# The tick-summary key, and therefore the name this lane is parked under.
+DRIVER_KEY = "mission_consensus"
 # How many documents one tick reads. One: the writer thread is doing this
 # in-process, and a lane that reads twenty notes in a tick is a lane that
 # occasionally stops answering.
@@ -113,6 +116,7 @@ class MissionConsensusLaneCoordinator:
         fiscal_calendar_for: Callable[[str], Mapping[str, str] | None],
         next_context: Callable[[str, set[str]], Mapping[str, Any] | None],
         clock: Callable[[], datetime] | None = None,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.authority = authority
         self.street_store = street_store
@@ -123,8 +127,13 @@ class MissionConsensusLaneCoordinator:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # The fetch in flight, so the next tick can settle it.
         self._open: str | None = None
-        self._failures: dict[str, int] = {}
-        self._failure_reason: dict[str, str] = {}
+        # P17d: the counted budget, the parked set and the terminal set, in the
+        # lane common layer. Only ``transient`` failures spend the count; a
+        # source that is down parks the company instead and releases it when a
+        # read of that source works.
+        self.budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir, clock=self.clock,
+            max_transient_failures=MAX_FAILURES_PER_COMPANY)
         # Companies whose vendor observation was refreshed, and when.
         self._refreshed: dict[str, datetime] = {}
         # Companies whose notes have all been read, so the scan stops asking.
@@ -202,16 +211,15 @@ class MissionConsensusLaneCoordinator:
         if not company_ref:
             return settled
         if settled.get("status") != "succeeded":
-            self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-            self._failure_reason[company_ref] = (
-                settled.get("failure_reason") or f"last run: {settled.get('status')}"
-            )
+            settled["failure"] = self.budget.record_settled(
+                company_ref, settled).as_wire()
             return settled
         # A run that succeeded is a run that reached the source, whatever it
         # found. ``duplicate`` is the common and correct answer: the street
         # said today what it said yesterday.
-        self._failures.pop(company_ref, None)
-        self._failure_reason.pop(company_ref, None)
+        resumed = self.budget.clear(company_ref)
+        if resumed:
+            settled["resumed"] = resumed
         self._refreshed[company_ref] = self.clock()
         return settled
 
@@ -241,10 +249,15 @@ class MissionConsensusLaneCoordinator:
                         "units against yfinance/analyst_estimates today")}
         for company in universe:
             company_ref = company["company_ref"]
-            if self._failures.get(company_ref, 0) >= MAX_FAILURES_PER_COMPANY:
+            blocked = self.budget.blocked(company_ref)
+            if blocked is not None:
+                # P17d: three words, not one. ``held`` will change on a deploy,
+                # ``parked`` when the dependency answers, ``terminal`` never.
                 skipped.append({
-                    "company_ref": company_ref, "reason": "held",
-                    "detail": self._failure_reason.get(company_ref, "repeated failures"),
+                    "company_ref": company_ref, "reason": blocked.action,
+                    "detail": self.budget.failure_reason(company_ref),
+                    "failure_class": blocked.classification.failure_class,
+                    "dependency": blocked.classification.dependency,
                 })
                 continue
             if self._fresh(company_ref):
@@ -281,8 +294,7 @@ class MissionConsensusLaneCoordinator:
                         "skipped": skipped, "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-                self._failure_reason[company_ref] = reason
+                self.budget.record(company_ref, reason=reason)
                 return {"status": "rejected", "company_ref": company_ref,
                         "skipped": skipped, "reason": reason}
             self._open = ticket["id"]
@@ -650,6 +662,10 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             mission=mission,
             fiscal_calendar_for=_fiscal_calendar_reader(server),
             next_context=_context_reader(server),
+            # ``getattr``: a lane exercised against a stub writer has no
+            # state directory, and a lane that refuses to run without a
+            # ledger would be a lane that fails closed on its bookkeeping.
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

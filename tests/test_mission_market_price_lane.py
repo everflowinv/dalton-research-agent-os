@@ -395,7 +395,8 @@ class SettleTests(LaneTestCase):
         self.launcher.finish(second["ticket_ref"], summary={
             "series_status": "fresh", "added_bar_count": 1})
         lane._settle_open()
-        self.assertEqual(lane._failures, {})
+        self.assertEqual(lane.budget.attempts(ACN), 0)
+        self.assertIsNone(lane.budget.blocked(ACN))
 
     def test_an_orphaned_ticket_is_settled_rather_than_left_open(self):
         lane = self.coordinator()

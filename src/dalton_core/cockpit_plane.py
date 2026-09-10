@@ -203,6 +203,51 @@ REGISTRY_LANE_LABELS = {
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
+
+# P17d 四格: the six words the lane panel counts by, in the owner's language.
+# The panel is a count of the rows already on the page, not a second reading of
+# the heartbeat: the number in the tile and the rows below it cannot disagree.
+LANE_STATUS_BUCKETS: dict[str, str] = {
+    "ungranted": "还没授权", "unconfigured": "没装", "unapproved": "等你批准",
+    "idle": "闲着", "running": "在跑", "held": "卡住了",
+}
+# Which lane status word falls in which bucket.  A word this table has never
+# seen is counted under ``other`` rather than silently dropped -- an
+# uncountable lane is the thing the panel exists to end.
+LANE_STATUS_BUCKET_OF: dict[str, str] = {
+    "ungranted": "ungranted",
+    "unconfigured": "unconfigured", "unstarted": "unconfigured",
+    "unapproved": "unapproved",
+    "idle": "idle", "current": "idle",
+    "launched": "running", "busy": "running",
+    "held": "held", "failed": "held", "unavailable": "held",
+    "rejected": "held",
+}
+
+# P17d: what a parked work item is waiting on, in the owner's language.  The
+# ops backlog is the one page whose whole job is to be actionable, so a
+# dependency shown as ``alphaengine_desktop`` would be a page that needs a
+# programmer to read it.
+DEPENDENCY_LABELS: dict[str, str] = {
+    "alphaengine_desktop": "AlphaEngine 桌面端会话（要重新登录）",
+    "alphaengine": "AlphaEngine",
+    "guidepoint": "Guidepoint",
+    "sec": "SEC EDGAR",
+    "market_data": "行情源（yfinance）",
+    "openclaw": "OpenClaw 网关",
+    "model": "模型服务",
+    "model_budget": "今天的模型额度",
+    "quota": "数据源配额",
+    "transport": "网络 / 连接器",
+    "writer_rpc": "写入服务（重启中或忙）",
+    "source": "外部数据源",
+    "unknown": "说不出名字的依赖（原文见明细）",
+}
+FAILURE_CLASS_LABELS: dict[str, str] = {
+    "dependency_unavailable": "依赖不可用：等它回来，不算重试次数",
+    "content_refused": "内容不可用：读到了但用不了，不再重试",
+    "transient": "临时失败：有限次重试",
+}
 # -- INT2: P14a / C1 / P14e / P14-M / Q2, in the owner's language --------------
 #
 # The same rule as the Wave 1 block above: every reader below answers empty on
@@ -1780,6 +1825,18 @@ class CockpitPlane:
         }
         running = [self._ticket_event(t, members, self._url_map()) for t in self.tickets.tickets()
                    if _ticket_still_running(t["ticket"])]
+        lane_rows = self._lane_states(
+            heartbeat, extraction, discovery, mission["budget"], planner)
+        # P17d 四格. Computed here, inside the one connection the page already
+        # holds, so the landing page stays a single fetch and the tiles read
+        # the same rows the sections below them read.
+        with self._core() as ops_core:
+            ops = {
+                "lanes": self._panel_lanes(lane_rows),
+                "gaps": self._panel_gaps(ops_core, members),
+                "failures": self._panel_failures(),
+                "acceptance": self._panel_acceptance(ops_core),
+            }
         return {
             "schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()),
             "goal": {
@@ -1812,7 +1869,7 @@ class CockpitPlane:
                         "summary": t.get("summary") or t.get("statement") or t.get("change_reason")} for t in theses],
             "activity": {
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
-                "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"], planner),
+                "lanes": lane_rows,
                 "running": running,
                 # C2: how many heartbeats had nothing to do, and which lane
                 # could not work. Q2 found this unanswerable because the
@@ -1824,6 +1881,11 @@ class CockpitPlane:
             # level, beside the goal it serves -- it is not an activity note.
             "plan": plan,
             "budgets": budgets,
+            # P17d 四格: 运行状态 / 来源缺口 / 悬置失败 / 上周产物验收, side by
+            # side. Chem's health page said OK while research gaps sat unfilled
+            # and a task had been permanently suspended for a week, because
+            # those four facts lived on four pages. They are one row now.
+            "ops": ops,
             # Q1: whether this Core can take the feedback buttons at all. A
             # Core with no journal table shows no buttons rather than buttons
             # that fail when pressed.
@@ -2092,6 +2154,282 @@ class CockpitPlane:
             "idle_note": (f"{idle.get('idle_ticks')}/{idle.get('ticks')} "
                           "次心跳里没有任何流水线有事可做"),
             "stalled_lanes": stalled[:6],
+        }
+
+    # -- P17d: the four panels, and the ops backlog behind one of them ------
+    #
+    # Chem's §8.8, which the retrospective's 3.5 asks for: run state, source
+    # gaps, pending failures and output acceptance shown *together*.  They
+    # existed here already and were four pages apart, which is how a "health
+    # OK" page came to sit beside a research gap nobody had filled.  Each tile
+    # counts what its own detail page shows and links to it; none of them is a
+    # second, independent reading that could disagree with the page it links to.
+
+    def _failure_ledger_events(self) -> list[dict[str, Any]] | None:
+        """Every park/resume event, or ``None`` when there is no ledger yet."""
+
+        from .lane_failure_ledger import (
+            LaneFailureLedger, LaneFailureLedgerError, default_path,
+        )
+
+        path = default_path(self.config.state_dir)
+        if not path.is_file():
+            return None
+        try:
+            with LaneFailureLedger(path, read_only=True) as ledger:
+                return ledger.events()
+        except (LaneFailureLedgerError, sqlite3.Error, OSError, ValueError):
+            return None
+
+    def ops_backlog(self) -> dict[str, Any]:
+        """P17d 运维待办: what is parked, on which dependency, since when.
+
+        Read-only and derived: the rows are a fold over the append-only lane
+        failure ledger, so this page and a replay of the ledger cannot give
+        different answers.  A Core whose lanes have never parked anything has
+        no ledger file, and that is reported as "nothing has been parked"
+        rather than as an error -- and, importantly, not as an empty table that
+        looks like a working page with nothing in it.
+        """
+
+        from .lane_failure_ledger import summarise_events
+
+        rows = self._failure_ledger_events()
+        if rows is None:
+            return {
+                "available": False,
+                "reason": "这台机器还没有任何流水线因为依赖不可用而挂起过工作",
+                "dependencies": [], "parked_items": 0,
+                "terminal_items": [], "terminal_count": 0,
+            }
+        backlog = summarise_events(rows)
+        dependencies = []
+        for bucket in backlog["dependencies"]:
+            dependencies.append({
+                **bucket,
+                "dependency_label": DEPENDENCY_LABELS.get(
+                    bucket["dependency"], bucket["dependency"]),
+                "lane_labels": [REGISTRY_LANE_LABELS.get(lane, lane)
+                                for lane in bucket["lanes"]],
+                "items": [
+                    {**item,
+                     "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"])}
+                    for item in bucket["items"]
+                ],
+            })
+        terminal = [
+            {**row, "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"])}
+            for row in backlog["terminal_items"]
+        ]
+        return {
+            "available": True, "as_of": _iso(self.clock()),
+            "window": backlog["window"], "events": backlog["events"],
+            "dependencies": dependencies,
+            "parked_items": backlog["parked_items"],
+            "terminal_items": terminal,
+            "terminal_count": backlog["terminal_count"],
+            "class_labels": dict(FAILURE_CLASS_LABELS),
+            "note": ("挂起 = 依赖不可用，等依赖回来自动重试，不消耗重试预算；"
+                     "终态 = 内容读到了但用不了，不会再试"),
+        }
+
+    def _panel_lanes(self, lanes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Panel 1: the lane rows on this very page, counted by status."""
+
+        counts = {key: 0 for key in LANE_STATUS_BUCKETS}
+        other = 0
+        for row in lanes:
+            bucket = LANE_STATUS_BUCKET_OF.get(str(row.get("status") or ""))
+            if bucket is None:
+                other += 1
+            else:
+                counts[bucket] += 1
+        stuck = counts["ungranted"] + counts["unapproved"] + counts["held"]
+        return {
+            "counts": counts, "labels": dict(LANE_STATUS_BUCKETS),
+            "other": other, "total": len(lanes),
+            "waiting_on_you": counts["ungranted"] + counts["unapproved"],
+            "headline": stuck,
+            "note": (f"{counts['running']} 条在跑，{counts['idle']} 条闲着，"
+                     f"{stuck} 条动不了"),
+            "link": "lanes",
+        }
+
+    def _panel_gaps(self, core: sqlite3.Connection,
+                    members: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        """Panel 2: the source gaps -- framework questions plus unread documents."""
+
+        framework_gaps = self._open_framework_gaps(core)
+        backlog = self._extraction_backlog_total(core, members)
+        parts = []
+        if framework_gaps["available"]:
+            parts.append(f"行业框架还缺 {framework_gaps['open']} 项")
+        if backlog["available"]:
+            parts.append(f"{backlog['queued_documents']} 份资料还没读")
+        headline = (
+            (framework_gaps.get("open") or 0) + (backlog.get("queued_documents") or 0)
+        )
+        return {
+            "framework_gaps": framework_gaps, "extraction_backlog": backlog,
+            "headline": headline,
+            "note": "；".join(parts) or "这个 Core 还没有可数的缺口",
+            "link": "sources",
+        }
+
+    def _open_framework_gaps(self, core: sqlite3.Connection) -> dict[str, Any]:
+        """Open gaps on the newest framework version of each industry.
+
+        Read straight off ``industry_framework_versions`` rather than through
+        ``IndustryFrameworkAuthority``: that class takes a store and applies its
+        schema, and this connection is ``mode=ro``.
+        """
+
+        if not _table_exists(core, "industry_framework_versions"):
+            return {"available": False,
+                    "reason": "industry_framework_versions 不在这个 Core 里"}
+        newest: dict[str, tuple[int, str]] = {}
+        for row in self._rows(core, (
+            "SELECT industry_ref, version_number, record_json "
+            "FROM industry_framework_versions"
+        )):
+            industry = str(row["industry_ref"])
+            version = int(row["version_number"] or 0)
+            if industry not in newest or version > newest[industry][0]:
+                newest[industry] = (version, row["record_json"])
+        by_industry: list[dict[str, Any]] = []
+        total = 0
+        for industry, (version, record_json) in sorted(newest.items()):
+            try:
+                gaps = json.loads(record_json).get("gaps") or []
+            except (TypeError, ValueError):
+                continue
+            open_gaps = [gap for gap in gaps
+                         if isinstance(gap, Mapping) and gap.get("status") != "covered"]
+            total += len(open_gaps)
+            by_industry.append({
+                "industry_ref": industry, "version": version,
+                "open": len(open_gaps), "gaps": len(gaps),
+                "labels": [str(gap.get("label") or gap.get("gap_ref"))
+                           for gap in open_gaps[:4]],
+            })
+        return {"available": True, "open": total, "industries": by_industry}
+
+    def _extraction_backlog_total(
+        self, core: sqlite3.Connection, members: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """W2's per-company backlog reader, summed over the covered companies.
+
+        The reader is reused rather than re-queried: its three queue kinds
+        (open here, acquired under an older mission version, discovered but
+        never fetched) are the distinction the W2 report exists to make, and a
+        fresh ``COUNT(*)`` here would quietly lose it.
+        """
+
+        if not _table_exists(core, "coverage_mission_discovered_documents"):
+            return {"available": False,
+                    "reason": "这个 Core 还没有资料发现表"}
+        from .extraction_backlog import ExtractionBacklogError, extraction_backlog
+
+        queued = awaiting = unqueued = discovered = 0
+        counted = 0
+        for company_ref in sorted(members):
+            try:
+                backlog = extraction_backlog(core, company_ref)
+            except (ExtractionBacklogError, sqlite3.Error, ValueError):
+                continue
+            counted += 1
+            queued += int(backlog["totals"]["queued_documents"])
+            for tier in backlog["tiers"]:
+                awaiting += int(tier["awaiting_extraction"])
+                unqueued += int(tier["acquired_unqueued"])
+                discovered += int(tier["discovered"])
+        if counted == 0:
+            return {"available": False,
+                    "reason": "研究目标里没有可数的公司"}
+        return {
+            "available": True, "companies": counted,
+            "queued_documents": queued,
+            "awaiting_extraction": awaiting,
+            "acquired_unqueued": unqueued,
+            "discovered": discovered,
+        }
+
+    def _panel_failures(self) -> dict[str, Any]:
+        """Panel 3: parked and terminal work items, from the P17d ledger."""
+
+        backlog = self.ops_backlog()
+        if not backlog["available"]:
+            return {
+                "available": False, "headline": 0,
+                "note": backlog["reason"], "link": "ops",
+                "parked_items": 0, "terminal_count": 0, "dependencies": [],
+            }
+        top = [
+            {"dependency": bucket["dependency"],
+             "dependency_label": bucket["dependency_label"],
+             "item_count": bucket["item_count"],
+             "first_seen": bucket["first_seen"],
+             "last_seen": bucket["last_seen"]}
+            for bucket in backlog["dependencies"][:3]
+        ]
+        if top:
+            note = "，".join(
+                f"{row['dependency_label']} 挂着 {row['item_count']} 件" for row in top)
+        elif backlog["terminal_count"]:
+            note = f"没有挂起的；{backlog['terminal_count']} 件读到了但用不了"
+        else:
+            note = "没有等依赖的工作"
+        return {
+            "available": True,
+            "headline": backlog["parked_items"] + backlog["terminal_count"],
+            "parked_items": backlog["parked_items"],
+            "terminal_count": backlog["terminal_count"],
+            "dependencies": top, "note": note, "link": "ops",
+        }
+
+    def _panel_acceptance(self, core: sqlite3.Connection) -> dict[str, Any]:
+        """Panel 4: last week's output acceptance -- Q1's scores, Q2's window.
+
+        The window is Q2's own ``closed_week``, not "the last seven days": the
+        weekly reflection reports on the week that ended, and a tile computing
+        a different week would put two numbers about "last week" on one page.
+        """
+
+        from .research_cycle_reflection import (
+            closed_week, journal_feedback, quality_scores_published,
+        )
+
+        window = closed_week(self.clock())
+        scores = quality_scores_published(core, window)
+        feedback = journal_feedback(core, window)
+        if not scores.get("available"):
+            return {
+                "available": False, "headline": 0, "week": window["iso_week"],
+                "note": scores.get("reason"), "link": "reflection",
+            }
+        published = int(scores.get("published") or 0)
+        judged = int(scores.get("judged") or 0)
+        deterministic = int(scores.get("deterministic_only") or 0)
+        entries = int(feedback.get("entries") or 0) if feedback.get("available") else 0
+        if published == 0:
+            note = "上周没有产出被打过分"
+        else:
+            note = (f"上周 {published} 份打分，覆盖 "
+                    f"{scores.get('distinct_targets')} 份产出")
+            if entries:
+                note += f"；你留下 {entries} 条反馈"
+            elif feedback.get("available"):
+                note += "；你还没留反馈"
+        return {
+            "available": True, "headline": published, "week": window["iso_week"],
+            "window": {"start": window["start"], "end": window["end"]},
+            "published": published, "judged": judged,
+            "deterministic_only": deterministic,
+            "distinct_targets": scores.get("distinct_targets"),
+            "by_rubric": scores.get("by_rubric"),
+            "feedback": (feedback if feedback.get("available")
+                         else {"available": False, "reason": feedback.get("reason")}),
+            "note": note, "link": "reflection",
         }
 
     def _lane_states(self, heartbeat: Mapping[str, Any], extraction: Mapping[str, Any],
