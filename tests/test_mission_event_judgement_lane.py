@@ -317,17 +317,28 @@ class ChildTests(P14aHarness):
             mission=self.mission, actor_ref=AUTOMATION,
         )
         judge_model = FakeModel([decision(), decision()], route=JUDGE_ROUTE)
+        verifier_model = FakeModel([PASS, PASS], route=VERIFIER_ROUTE)
         summary = run_judgement(
             state_dir=self.state_dir, summary_dir=self.state_dir / "judge",
             policy_path=POLICY_PATH, now=NOW, per_company=2,
             judge_model=judge_model,
-            verifier_model=FakeModel([PASS, PASS], route=VERIFIER_ROUTE),
+            verifier_model=verifier_model,
             family_resolver=resolver(),
         )
         self.assertEqual(summary["judged"], 2)
         self.assertEqual(self.judgements.judged_count(ACN), 4)
         self.assertEqual(len(judge_model.prompts), 2)
         self.assertIn("Other monthly rows in this filing", judge_model.prompts[0])
+        self.assertIn("Other monthly rows in this filing", verifier_model.prompts[0])
+        ledger_cost = self.store.connection.execute(
+            "SELECT SUM(cost_micros) AS cost FROM event_judgements"
+        ).fetchone()["cost"]
+        self.assertEqual(ledger_cost, 80_000)
+        alias_costs = self.store.connection.execute(
+            "SELECT cost_micros FROM event_judgements "
+            "WHERE json_extract(record_json,'$.effect.kind')='grouped_judgement'"
+        ).fetchall()
+        self.assertEqual([row["cost_micros"] for row in alias_costs], [0, 0])
         self.assertEqual(
             unjudged_events(self.events, self.judgements, company_ref=ACN, limit=5), []
         )

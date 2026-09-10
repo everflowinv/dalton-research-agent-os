@@ -935,6 +935,21 @@ def build_verifier_prompt(context: Mapping[str, Any], judgement: Mapping[str, An
         "",
         f"Event ({event['kind']}, evidence tier {event['evidence_tier']}, ref {event['id']}):",
         *_payload_lines(event),
+    ]
+    grouped = context.get("grouped_events") or ()
+    if len(grouped) > 1:
+        lines.extend(["", "Other monthly rows in this filing (same judgement):"])
+        for row in grouped[1:]:
+            payload = row.get("payload") or {}
+            lines.append(
+                f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
+                f"shares_purchased={payload.get('shares_purchased')}; "
+                f"average_price_paid={payload.get('average_price_paid')}; "
+                f"shares_purchased_under_plans="
+                f"{payload.get('shares_purchased_under_plans')}; "
+                f"remaining_authorisation={payload.get('remaining_authorisation')}"
+            )
+    lines.extend([
         "",
         f"Decision: {judgement['decision']} / {judgement['action']}",
         f"Because: {judgement['because']}",
@@ -946,7 +961,7 @@ def build_verifier_prompt(context: Mapping[str, Any], judgement: Mapping[str, An
         '{"verdict": "pass|reject", "findings": [{"code": "'
         + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict must have no findings; a reject verdict must have at least one.",
-    ]
+    ])
     return "\n".join(lines)[:MAX_PROMPT_CHARS]
 
 

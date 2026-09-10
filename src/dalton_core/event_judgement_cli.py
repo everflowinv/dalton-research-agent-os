@@ -492,8 +492,19 @@ def run_judgement(
                 effect=effect, mission=mission, actor_ref=actor,
             )
             for grouped_event in event_group[1:]:
+                alias_judgement = dict(decided)
+                alias_judgement["model"] = {
+                    **(decided.get("model") or {}), "cost_micros": 0,
+                    "grouped_under_event_ref": event["id"],
+                }
+                alias_verification = dict(checked)
+                alias_verification["model"] = {
+                    **(checked.get("model") or {}), "cost_micros": 0,
+                    "grouped_under_event_ref": event["id"],
+                }
                 judgements.record(
-                    event=grouped_event, judgement=decided, verification=checked,
+                    event=grouped_event, judgement=alias_judgement,
+                    verification=alias_verification,
                     effect={"kind": "grouped_judgement", "status": "recorded",
                             "primary_event_ref": event["id"]},
                     mission=mission, actor_ref=actor,
