@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import argparse, base64, hashlib, html, json, re, sqlite3
+import argparse, base64, hashlib, html, json, os, re, sqlite3, tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -15,6 +15,25 @@ _IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpeg"}
 
 class ResearchHtmlExportError(RuntimeError):
     pass
+
+
+def _atomic_owner_write(path: Path, data: bytes) -> None:
+    path = path.expanduser().resolve()
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _esc(value: Any) -> str:
@@ -395,6 +414,20 @@ def export_research_html(
     manifest_output: str | Path | None = None,
 ) -> dict[str, Any]:
     db = Path(core_db).expanduser().resolve()
+    target = Path(output).expanduser().resolve()
+    manifest_target = (
+        Path(manifest_output).expanduser().resolve()
+        if manifest_output is not None
+        else target.with_suffix(target.suffix + ".manifest.json")
+    )
+    manifest_path = (
+        None if asset_manifest is None else Path(asset_manifest).expanduser().resolve()
+    )
+    protected = {db}
+    if manifest_path is not None:
+        protected.add(manifest_path)
+    if target == manifest_target or target in protected or manifest_target in protected:
+        raise ResearchHtmlExportError("output paths collide with an input or each other")
     uri = db.as_uri() + "?mode=ro"
     c = sqlite3.connect(uri, uri=True)
     c.row_factory = sqlite3.Row
@@ -407,15 +440,19 @@ def export_research_html(
         c.rollback()
     finally:
         c.close()
-    manifest = (
-        None if asset_manifest is None else json.loads(Path(asset_manifest).read_text())
-    )
+    manifest = None if manifest_path is None else json.loads(manifest_path.read_text())
+    if manifest is not None:
+        asset_paths = {
+            Path(item["path"]).expanduser().resolve()
+            for item in manifest.get("assets", [])
+            if isinstance(item, Mapping) and isinstance(item.get("path"), str)
+        }
+        if target in asset_paths or manifest_target in asset_paths:
+            raise ResearchHtmlExportError("output paths collide with an input or each other")
     page = render_research_html(
         library, mission=mission, claims=claims, assets=_assets(manifest)
     )
     raw = page.encode()
-    target = Path(output)
-    target.write_bytes(raw)
     result = {
         "schema_version": "0.1",
         "company_ref": company_ref,
@@ -435,15 +472,11 @@ def export_research_html(
             for p in library["products"]
         ],
     }
-    manifest_target = (
-        Path(manifest_output)
-        if manifest_output is not None
-        else target.with_suffix(target.suffix + ".manifest.json")
-    )
-    manifest_target.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    manifest_bytes = (
+        json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    _atomic_owner_write(target, raw)
+    _atomic_owner_write(manifest_target, manifest_bytes)
     return result
 
 

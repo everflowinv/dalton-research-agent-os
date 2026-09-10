@@ -321,6 +321,48 @@ class PublishedAuthorityExportTests(unittest.TestCase):
                 asset_manifest=manifest,
             )
 
+    def test_outputs_cannot_overwrite_database_manifest_or_asset(self):
+        database = self._file_copy("collision-core.sqlite")
+        manifest = self.chain.root / "collision-assets.json"
+        asset = self.chain.root / "collision.png"
+        asset.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": "0.1",
+                    "assets": [
+                        {
+                            "path": str(asset),
+                            "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+                            "media_type": "image/png",
+                            "caption": "fixture",
+                            "source_refs": ["claim:fixture"],
+                        }
+                    ],
+                }
+            )
+        )
+        cases = (
+            {"output": database},
+            {"output": manifest, "asset_manifest": manifest},
+            {"output": asset, "asset_manifest": manifest},
+            {
+                "output": self.chain.root / "same.html",
+                "manifest_output": self.chain.root / "same.html",
+            },
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                ResearchHtmlExportError, "collide"
+            ):
+                export_research_html(
+                    database,
+                    self.company,
+                    overrides.pop("output"),
+                    mission_ref=self.mission["mission_ref"],
+                    **overrides,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
