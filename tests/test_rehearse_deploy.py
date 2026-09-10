@@ -51,8 +51,14 @@ from scripts.rehearse_deploy import (
     reason_of,
     render_table,
     rewrite_paths,
+    committed_governance_records,
+    deliberately_unseeded_records,
+    expand_for_loops,
+    install_script_code,
+    install_seeded_records,
     seeded_repo_records,
     status_of,
+    strip_shell_comments,
     unseeded_governance_records,
 )
 
@@ -76,37 +82,13 @@ def _install_script_code() -> str:
     those records rather than failing on them, and six records that install.sh
     genuinely seeds sat outside ``INSTALL_SEEDS`` with the suite green.  A test
     whose gap is invisible is worse than no test.
+
+    Both live in ``rehearse_deploy`` rather than here, because the rehearsal
+    itself now reads its seed set out of the script and two expanders that
+    disagree would be exactly the drift this is about.
     """
 
-    code = "\n".join(
-        line for line in INSTALL_SH.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("#")
-    )
-    code = re.sub(r"\\\n\s*", " ", code)          # join continued lines
-    return code + "\n" + "\n".join(_expanded_loops(code))
-
-
-def _expanded_loops(code: str) -> list[str]:
-    """Each ``for X in a b; do ... done`` body, once per word, ``$X`` substituted.
-
-    Listing the loop *words* is not enough: the China records are written as
-    ``cn-hk-findata-${cn_hk_kind}-v1.json`` over the words ``ah-premium``,
-    ``buybacks`` and so on, so neither the template nor the word is the
-    filename and only the substitution is.  These loops are never nested, so a
-    non-greedy match to the first ``done`` is exact rather than merely
-    convenient.
-    """
-
-    expanded: list[str] = []
-    pattern = re.compile(r"^\s*for\s+(\w+)\s+in\s+(.+?);\s*do\s*$(.*?)^\s*done\s*$",
-                         re.M | re.S)
-    for match in pattern.finditer(code):
-        variable, words, body = match.group(1), match.group(2).split(), match.group(3)
-        for word in words:
-            expanded.append(
-                body.replace("${" + variable + "}", word).replace("$" + variable, word)
-            )
-    return expanded
+    return install_script_code(INSTALL_SH)
 
 
 def _mentions(code: str, token: str) -> bool:
@@ -238,17 +220,19 @@ class InstallSeedTests(unittest.TestCase):
                 )
 
     def test_every_governance_record_the_script_seeds_is_in_the_list(self) -> None:
-        directory = REPO_ROOT / "deploy" / "connector-governance"
-        seeded = seeded_repo_records()
-        for path in sorted(directory.glob("*.json")):
-            stem = re.sub(r"-v\d+\.json$", "", path.name)
-            if not _mentions(self.code, stem):
-                continue
-            with self.subTest(record=path.name):
-                self.assertIn(
-                    path.name, seeded,
-                    f"install.sh seeds {path.name} and INSTALL_SEEDS does not",
-                )
+        # Exact, in both directions, and resolved through the ``cp`` pair
+        # rather than by matching a name: a record copied to
+        # ``governance-decisions/`` is not a record seeded into the runtime
+        # governance directory, and the two must not read the same.
+        self.assertEqual(
+            install_seeded_records(INSTALL_SH),
+            frozenset(
+                Path(spec.repo).name for spec in INSTALL_SEEDS
+                if spec.state.startswith("connector-governance/")
+            ),
+            "INSTALL_SEEDS and install.sh disagree about which records are "
+            "seeded into the runtime governance directory",
+        )
 
     def test_every_seed_source_is_actually_in_the_repo(self) -> None:
         """Gated or not. A gate decides whether the owner's machine wants the
@@ -304,9 +288,62 @@ class InstallSeedTests(unittest.TestCase):
 
         self.assertEqual(
             unseeded_governance_records(REPO_ROOT), (),
-            "a committed governance record that install.sh never seeds",
+            "seed it in its lane's all-or-nothing block, or name it in "
+            "DELIBERATELY_UNSEEDED in install.sh with the reason",
         )
         self.assertNotIn("web-fetch-v1.json", unseeded_governance_records(REPO_ROOT))
+
+    def test_the_two_sets_cover_the_repo_exactly_and_do_not_overlap(self) -> None:
+        # INT3: the invariant above is only worth anything if "deliberately
+        # not seeded" is a set the script declares rather than a comment
+        # somebody wrote. A record cannot be in both, and the array cannot
+        # name a record the repository does not carry.
+        committed = committed_governance_records(REPO_ROOT)
+        seeded = install_seeded_records(INSTALL_SH)
+        named = deliberately_unseeded_records(INSTALL_SH)
+        self.assertEqual(seeded | named, committed)
+        self.assertEqual(seeded & named, frozenset())
+        self.assertEqual(named - committed, frozenset())
+
+    def test_the_deliberate_absences_are_the_ones_that_were_decided(self) -> None:
+        named = deliberately_unseeded_records(INSTALL_SH)
+        # roic.ai answers 403 site-wide since 2026-08-29 and nothing in the
+        # writer loads either record, so seeding them would be two approvals
+        # to make about a source that answers nothing.
+        self.assertIn("roic-list-transcripts-v1.json", named)
+        self.assertIn("roic-get-transcript-v1.json", named)
+        # The narrowing note is seeded, but into governance-decisions/, so it
+        # is not an approval put in front of the owner.
+        self.assertIn("guidepoint-get-transcript-narrowing-v1.json", named)
+
+    def test_the_calendar_record_is_seeded(self) -> None:
+        # The one that mattered: C1's lane was a single block away and the
+        # record had been committed for a day.
+        self.assertIn("yfinance-calendar-v1.json", install_seeded_records(INSTALL_SH))
+
+    def test_a_loop_written_seed_is_read_as_a_seed(self) -> None:
+        seeded = install_seeded_records(INSTALL_SH)
+        for kind in ("financial-statements", "shareholders", "buybacks",
+                     "margin-balance", "northbound-flow", "ah-premium"):
+            self.assertIn(f"cn-hk-findata-{kind}-v1.json", seeded)
+
+    def test_the_loop_expander_handles_a_continued_word_list(self) -> None:
+        code = ('for k in a b \\\n        c; do\n'
+                '  f="$governance_dir/${k}-v1.json"\n'
+                '  cp "$repo_root/deploy/connector-governance/${k}-v1.json" "$f"\n'
+                'done\n')
+        expanded = expand_for_loops(code)
+        for word in ("a", "b", "c"):
+            self.assertIn(f"{word}-v1.json", expanded)
+        self.assertNotIn("${k}", expanded)
+
+    def test_a_comment_naming_a_record_is_not_a_seed(self) -> None:
+        raw = INSTALL_SH.read_text(encoding="utf-8")
+        self.assertIn("roic-list-transcripts-v1.json", raw)
+        self.assertNotIn(
+            "roic-list-transcripts-v1.json",
+            strip_shell_comments(raw).split("DELIBERATELY_UNSEEDED", 1)[0],
+        )
 
     def test_the_six_china_records_are_seeded_even_though_no_lane_reads_them(self) -> None:
         """They are ungated on purpose: with no lane there is nothing to
@@ -325,10 +362,23 @@ class InstallSeedTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         governance = Path(directory.name)
         (governance / "web-fetch-v1.json").write_text("{}", encoding="utf-8")
-        (governance / "sec-filings-index-v1.json").write_text("{}", encoding="utf-8")
+        (governance / "not-in-any-repository-v1.json").write_text("{}", encoding="utf-8")
         self.assertEqual(
-            orphan_live_records(governance, REPO_ROOT), ("sec-filings-index-v1.json",)
+            orphan_live_records(governance, REPO_ROOT),
+            ("not-in-any-repository-v1.json",),
         )
+
+    def test_the_filings_index_record_is_no_longer_an_orphan(self) -> None:
+        # INT3: it existed only on the live Core while the writer's plist named
+        # it unconditionally, so a rebuilt Core got a dead path. It is now
+        # committed *and* seeded -- either alone is worth nothing.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        governance = Path(directory.name)
+        (governance / "sec-filings-index-v1.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(orphan_live_records(governance, REPO_ROOT), ())
+        self.assertIn(
+            "sec-filings-index-v1.json", install_seeded_records(INSTALL_SH))
 
     def test_an_absent_governance_directory_is_not_an_error(self) -> None:
         self.assertEqual(orphan_live_records(Path("/nonexistent"), REPO_ROOT), ())
@@ -584,12 +634,38 @@ class MissionAndSwitchTests(unittest.TestCase):
                 self.assertTrue((REPO_ROOT / switch.repo_source).is_file())
 
     def test_the_switch_install_sh_does_write_is_the_one_it_names(self) -> None:
-        seeded = [switch for switch in LANE_SWITCHES if switch.seeded_by_install]
+        # Two now: extraction's model config, and P14a's tracking policy,
+        # which INT2 gave a seed block. Each has to be traceable to the line
+        # in install.sh that writes it.
+        seeded = {switch.state_file for switch in LANE_SWITCHES
+                  if switch.seeded_by_install}
         code = _install_script_code()
-        for switch in seeded:
-            with self.subTest(lane=switch.lane):
-                self.assertIn("document_extraction_setup", code)
-                self.assertEqual(switch.state_file, "document-extraction-model-config.json")
+        self.assertEqual(
+            seeded,
+            {"document-extraction-model-config.json", "tracking-policy.json"},
+        )
+        self.assertIn("document_extraction_setup", code)
+        self.assertIn("p14a-tracking-policy-v1.json", code)
+        self.assertIn("tracking-policy.json", [spec.state for spec in INSTALL_SEEDS])
+
+    def test_the_three_model_config_switches_are_written_when_named(self) -> None:
+        # INT3: the judgement pair and the claim index were switches nothing
+        # wrote. They are env-gated setup calls now, on the same rule as the
+        # planner and the deliverable: named, or the lane stays absent.
+        code = _install_script_code()
+        for name, variable in (
+            ("event-judgement-model-config.json", "DALTON_EVENT_JUDGEMENT_MODEL_TIER"),
+            ("event-verifier-model-config.json", "DALTON_EVENT_VERIFIER_MODEL_TIER"),
+            ("claim-index-model-config.json", "DALTON_CLAIM_INDEX_MODEL_TIER"),
+        ):
+            with self.subTest(switch=name):
+                self.assertIn(name, code)
+                self.assertIn(variable, code)
+                switch = next(s for s in LANE_SWITCHES if s.state_file == name)
+                self.assertFalse(
+                    switch.seeded_by_install,
+                    "unset, install.sh writes nothing and the lane is absent",
+                )
 
 
 class EntryPointTests(unittest.TestCase):
