@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -12,6 +13,7 @@ from .budget_pools import (
     POOL_EXHAUSTED_REASON,
     POOL_EXHAUSTED_STATUS,
     pool_decision,
+    record_pool_rejection,
 )
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .llm_research_planner import (
@@ -320,7 +322,32 @@ class LLMResearchPlannerModelWorker:
         )
         if decision["status"] != "rejected":
             return None
+        self._record_refusal(decision)
         return self._pool_refusal(work, decision, gate="pre_lease")
+
+    def _record_refusal(self, rejection: Mapping[str, Any]) -> None:
+        """Leave the refusal where every other pool refusal already lives.
+
+        ``ThesisImpactBudgetStore.admit`` records its own rejections inside the
+        write transaction that made them, but this gate deliberately refuses
+        *before* admitting, so without this the whole pre-lease path would be
+        invisible: ``pool_status()["adhoc"]["exhausted"]`` would read false on
+        a day the ad-hoc pool refused every planner call there was, and the
+        lane that ran out would not appear in ``exhausted_lanes``.  The most
+        common refusal in the system would have been the one nobody could see.
+
+        ``INSERT OR IGNORE`` on a content-addressed id, so the same loop
+        refused on the same day for the same attempt is one row however many
+        ticks ask.  A failure to record is swallowed: observability turning a
+        budget decision into a fault is the exact inversion this branch exists
+        to prevent.
+        """
+
+        try:
+            with self.budget.connection as connection:
+                record_pool_rejection(connection.cursor(), rejection)
+        except sqlite3.Error:
+            pass
 
     @staticmethod
     def _pool_refusal(
@@ -459,7 +486,13 @@ class LLMResearchPlannerModelWorker:
                 result,
                 idempotency_key=f"llm-planner-complete:{work.id}:{attempt_number}",
             )
-            return {"status": "failed", "route": route, "completion": completion}
+            # C2b: a failing call still says what the ledger did, which here is
+            # nothing -- the reservation happens after the route is chosen.
+            # Reporting the budget only on success would have made a budgeted
+            # install with a dead broker indistinguishable from an unbudgeted
+            # one, and the dead-broker case is exactly when somebody asks.
+            return {"status": "failed", "route": route, "completion": completion,
+                    "budget": self._budget_report(None, 0, "not_admitted")}
         profile = self.router.get_profile(route["selected_profile_version_ref"])
         # C2b: the reservation, against the same day ledger and the same four
         # pools as every cockpit-shaped call.  It happens here -- after the
@@ -559,6 +592,7 @@ class LLMResearchPlannerModelWorker:
                 "route": route,
                 "completion": completion,
                 "error_type": type(exc).__name__,
+                "budget": self._budget_report(admission, 0, "failed"),
             }
         # Settled with the rate card of the link that actually served, exactly
         # as a cockpit call is; a non-succeeded envelope means the broker
@@ -593,7 +627,10 @@ class LLMResearchPlannerModelWorker:
                 result,
                 idempotency_key=f"llm-planner-complete:{work.id}:{attempt_number}",
             )
-            return {"status": "failed", "route": route, "completion": completion}
+            return {
+                "status": "failed", "route": route, "completion": completion,
+                "budget": self._budget_report(admission, cost_micros, cost_status),
+            }
 
         saved = self._saved_invocation(invocation.id)
         if saved is None:

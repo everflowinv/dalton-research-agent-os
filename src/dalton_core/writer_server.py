@@ -1355,6 +1355,10 @@ class WriterServer:
         self._bounded_planner: BoundedPlannerAuthority | None = None
         self._llm_planner_coordinator_instance: LLMResearchPlannerCoordinator | None = None
         self._planner_model_config: dict[str, Any] | None = planner_model_config
+        # C2b: held open for the writer's lifetime rather than per op. See
+        # _planner_budget_ledger -- a WAL ledger nobody holds has no sidecars,
+        # and the P14e lane reads it between ops, not during one.
+        self._planner_budget: Any | None = None
         self._bounded_control: BoundedPlannerControlPlane | None = None
         self._intent_writer: IntentWriterAuthority | None = None
         self._answer_routing: AnswerRoutingAuthority | None = None
@@ -1836,6 +1840,9 @@ class WriterServer:
         if self._scheduler is not None:
             self._scheduler.close()
             self._scheduler = None
+        if self._planner_budget is not None:
+            self._planner_budget.close()
+            self._planner_budget = None
         self._research_plan = None
         self._backlog = None
         self._bounded_planner = None
@@ -2661,6 +2668,30 @@ class WriterServer:
         except Exception:  # noqa: BLE001 - an unreadable mission is not a binding
             return None
 
+    def _planner_budget_ledger(self) -> Any:
+        """The mission day ledger, opened once and held for this writer's life.
+
+        Held rather than opened per op, and the reason is not speed.  The
+        ledger is WAL, and C2's read-only open refuses a database with no
+        sidecars -- which is precisely a ledger no process has open.  Opening
+        it inside the op's ``ExitStack`` meant the sidecars existed only while
+        a planner call was in flight, so P14e's admission lane, which reads
+        *between* calls because that is when it runs, saw no settled spend at
+        all: the branch would have shipped a ``settled_micros`` that was
+        always zero and a cap that was still the pre-C2b one.  What makes
+        settled spend readable is that somebody is holding the ledger open.
+
+        Opened lazily on the store thread, which is the only thread that ever
+        runs an op, so the connection belongs to its one caller.
+        """
+
+        if self._planner_budget is None:
+            from .thesis_impact_budget import ThesisImpactBudgetStore
+
+            self._planner_budget = ThesisImpactBudgetStore(
+                self._planner_model_config["budget_db"])
+        return self._planner_budget
+
     def _planner_budget_binding(self, pool: str) -> dict[str, Any] | None:
         """The mission binding one planner call is admitted against, or None.
 
@@ -2720,15 +2751,10 @@ class WriterServer:
         binding = self._planner_budget_binding(pool)
         from .model_router import ModelRouter
         from .openclaw_model_adapter import OpenClawModelAdapter
-        from .thesis_impact_budget import ThesisImpactBudgetStore
 
         with ExitStack() as stack:
             router = stack.enter_context(ModelRouter(config["model_router_db"]))
-            ledger = (
-                None if binding is None
-                else stack.enter_context(
-                    ThesisImpactBudgetStore(config["budget_db"]))
-            )
+            ledger = None if binding is None else self._planner_budget_ledger()
             adapter = OpenClawModelAdapter(
                 str(config["broker_socket"]),
                 route_resolver=router.get_decision,
@@ -2753,6 +2779,11 @@ class WriterServer:
                 mission_binding=binding,
             )
             run = worker.run_once(work_order)
+        # C2b: the default when the worker said nothing is read off the ledger
+        # that was actually passed to it, never assumed to be "unbudgeted".
+        # A budgeted install whose broker is down must not report the one word
+        # that means "this call never reached the day ledger".
+        default_budget = {"status": "unbudgeted" if ledger is None else "budgeted"}
         if run.get("status") == "rejected":
             # A spent pool is returned, never raised: this loop has had its
             # share of the day and the driver holds it until tomorrow.
@@ -2762,11 +2793,11 @@ class WriterServer:
             return {"status": f"model_{run.get('status')}",
                     "work_order_ref": work_order["id"],
                     "pool": pool,
-                    "budget": run.get("budget", {"status": "unbudgeted"})}
+                    "budget": run.get("budget", default_budget)}
         advanced = coordinator.advance(context_pack_ref, work_order)
         if isinstance(advanced, dict):
             return {**advanced, "pool": pool,
-                    "budget": run.get("budget", {"status": "unbudgeted"})}
+                    "budget": run.get("budget", default_budget)}
         return advanced
 
     @property

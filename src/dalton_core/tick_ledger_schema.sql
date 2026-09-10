@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS tick_ledger_ticks (
     idle                INTEGER NOT NULL,
     pool_spend_json     TEXT NOT NULL,
     pool_cumulative_json TEXT NOT NULL,
+    -- C2b: what the mission day ledger did with this tick's Tier-1 planner
+    -- calls -- how many loops its pools held, and whether those calls reached
+    -- the ledger at all.  Nullable: every row written before C2b has no
+    -- answer, and a zero would be a claim rather than a gap.
+    planner_budget_json TEXT,
     content_hash        TEXT NOT NULL,
     created_at          TEXT NOT NULL
 );

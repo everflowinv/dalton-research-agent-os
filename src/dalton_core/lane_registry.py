@@ -190,6 +190,10 @@ RESERVED_DRIVER_KEYS: frozenset[str] = frozenset({
     # summary rather than only in a log because a tick whose own bookkeeping
     # failed must not be indistinguishable from a tick that had nothing to do.
     "tick_ledger",
+    # C2b: what the mission day ledger did with this tick's Tier-1 planner
+    # calls.  Not a lane -- the bounded planner is the driver's own work --
+    # so it must not be counted as one in the idle ratio.
+    "planner_budget",
 })
 
 _LANES: dict[str, LaneSpec] = {}
