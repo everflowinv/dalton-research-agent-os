@@ -259,11 +259,23 @@ def run_company_forecast(
             mission_version_ref=mission_version_ref)
     else:
         body = actualize_model(prior, table, actor_ref=actor_ref)
-    statement_rows = [
-        line
-        for filing in missions.statement_filings(company_ref)
-        for line in missions.statement_lines(filing["ingest_id"])
-    ]
+    # A comparative quarter can occur in several filings.  Segment arithmetic
+    # must use one coherent filing's consolidated row and breakdown members;
+    # flattening every filing would add repeated members while the normalizer
+    # retained only one consolidated value.  Prefer the newest filing for each
+    # concept and economic period, matching the series/restatement rule.
+    chosen: dict[tuple[str, Any, Any], tuple[str, list[Mapping[str, Any]]]] = {}
+    for filing in missions.statement_filings(company_ref):
+        by_period: dict[tuple[str, Any, Any], list[Mapping[str, Any]]] = {}
+        for line in missions.statement_lines(filing["ingest_id"]):
+            key = (str(line.get("concept")), line.get("period_start"),
+                   line.get("period_end"))
+            by_period.setdefault(key, []).append(line)
+        filed = str(filing.get("filed") or "")
+        for key, rows in by_period.items():
+            if key not in chosen or filed > chosen[key][0]:
+                chosen[key] = (filed, rows)
+    statement_rows = [line for _filed, rows in chosen.values() for line in rows]
     stored = models.publish(body, statement_rows=statement_rows)
     published: list[dict[str, Any]] = []
     refused: str | None = None

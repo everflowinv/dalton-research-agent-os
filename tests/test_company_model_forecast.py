@@ -302,6 +302,32 @@ class LaneStateTests(unittest.TestCase):
                                  models=ForecastModelAuthority(self.store))
         self.assertEqual(ForecastModelAuthority(self.store).versions(ACN), [])
 
+    def test_repeated_comparative_segments_use_one_coherent_filing(self):
+        filings = self.missions.statement_filings(ACN)
+        filing = filings[0]
+        original_rows = self.missions.statement_lines(filing["ingest_id"])
+        total = original_rows[0]
+        half = str(Decimal(total["value"]) / 2)
+        coherent = original_rows + [
+            {**total, "label": label, "is_breakdown": True,
+             "dimension_axis": "srt:ProductOrServiceAxis",
+             "dimension_member": member, "value": half}
+            for label, member in (("Consulting", "acn:ConsultingMember"),
+                                  ("Managed Services", "acn:ManagedServicesMember"))
+        ]
+        older = {**filing, "ingest_id": "older-comparative", "filed": "2025-01-01"}
+        self.missions.statement_filings = lambda company_ref=None: [older, filing]
+        original = self.missions.statement_lines
+        self.missions.statement_lines = lambda ingest_id, **kwargs: (
+            [row for row in coherent if not kwargs.get("statement") or
+             row["statement"] == kwargs["statement"]]
+            if ingest_id in {filing["ingest_id"], older["ingest_id"]}
+            else original(ingest_id, **kwargs))
+        outcome = run_company_forecast(
+            self.missions, self.missions.latest_company_model_spec(ACN),
+            models=ForecastModelAuthority(self.store))
+        self.assertEqual(outcome["status"], "fresh")
+
     def test_a_second_run_with_nothing_new_does_nothing(self):
         self.child()
         summary = self.child()

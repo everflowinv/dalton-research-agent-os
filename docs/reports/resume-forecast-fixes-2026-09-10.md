@@ -7,13 +7,15 @@ Baseline: `694471c`
 ## Result
 
 - F1: event judgement accepts an optional `outside_band_reason`, validates it as a substantive reason, and converts it to the forecast assumption's `outside_band.reason`. The prompt tells the judging model when the field is required. Earnings calibration only actualizes filed values, so it has no outside-band judgement to carry. Thesis revision candidates preserve the already validated `forecast_change` object and need no additional conversion.
-- F2: `run_company_forecast` now supplies all stored normalized statement rows, including dimension-derived breakdown rows, to `ForecastModelAuthority.publish`. A segment sum mismatch therefore refuses the forecast before either the model version or forecast lines are published.
+- F2: `run_company_forecast` now supplies normalized statement rows, including dimension-derived breakdown rows, to `ForecastModelAuthority.publish`. For a repeated comparative period it selects the newest filing per concept and period as one coherent consolidated-plus-segments group, preventing restatement duplicates from being added across filings. A real segment mismatch still refuses the forecast before either the model version or forecast lines are published.
 - F3: the cockpit renders valuation refusals beside the valuation position, forecast and sensitivity refusals in the model card, and all model-page refusals above the missing model table values. Each block includes the output label and complete reasons/findings supplied by the wire.
 
 ## Verification
 
 - Focused: `PYTHONPATH=$PWD/src python3 -m unittest tests.test_economic_invariants tests.test_event_judgement tests.test_company_model_forecast tests.test_cockpit_wave1`
 - Result: 222 tests passed in 18.504 seconds. Python emitted one existing unclosed SQLite `ResourceWarning`; it did not fail the run.
+- Review regression: `PYTHONPATH=$PWD/src python3 -m unittest tests.test_company_model_forecast.LaneStateTests tests.test_economic_invariants`
+- Result: 81 tests passed in 11.098 seconds, including two individually balanced filings carrying the same comparative period.
 - Full: `PYTHONPATH=$PWD/src python3 -m unittest discover -s tests -t .`
 - Result: running at the time of the implementation commit; complete output is retained in `full-test-resume-forecast.log` and this report will be updated when it finishes.
 
