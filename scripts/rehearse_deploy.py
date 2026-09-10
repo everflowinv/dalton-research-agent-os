@@ -1293,7 +1293,18 @@ class Rehearsal:
         return findings
 
     def _check_deliverable_check(self) -> list[str]:
-        """P14a: the ``mission_deliverable`` CHECK now has to admit event_note."""
+        """The ``mission_deliverable`` CHECK has to admit *every* declared kind.
+
+        This checked one literal, ``event_note``, because that was the only
+        kind P14a added.  Three slices have added kinds since, and a rehearsal
+        that only ever looks for the first one would pass a Core migrated as
+        far as P14a and no further -- which is exactly the failure the
+        migration exists to prevent, arriving as an ``IntegrityError`` from a
+        constraint the first time somebody publishes the newest kind.  The
+        vocabulary is the list, so the vocabulary is what is checked.
+        """
+
+        from dalton_core.mission_deliverable import DELIVERABLE_KINDS
 
         path = self.temp_state / "core.sqlite"
         with sqlite3.connect(path) as connection:
@@ -1303,8 +1314,13 @@ class Rehearsal:
             ).fetchone()
         if row is None:
             return ["mission_deliverable_versions does not exist after the migration"]
-        if "'event_note'" not in (row[0] or ""):
-            return ["mission_deliverable_versions CHECK still refuses 'event_note'"]
+        sql = row[0] or ""
+        missing = [kind for kind in DELIVERABLE_KINDS if f"'{kind}'" not in sql]
+        if missing:
+            return [
+                "mission_deliverable_versions CHECK still refuses "
+                + ", ".join(repr(kind) for kind in missing)
+            ]
         return []
 
     # -- 5. seeds -----------------------------------------------------------

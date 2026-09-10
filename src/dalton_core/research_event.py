@@ -98,6 +98,13 @@ EVENT_KINDS: tuple[str, ...] = (
     # it carries a diff hash instead of an accession, and the tier says
     # ``management_direct`` rather than ``primary_filing``.
     "ir_page_change",
+    # P14f: one occurrence has been calibrated.  Distinct from
+    # ``reconciliation``, which is one row per metric and says how a single
+    # number graded; this is the quarter's whole account, and the one thing
+    # the judgement lane needs from it is that the *forward* periods were left
+    # alone.  Whether the print moves next year is a decision, and P14f does
+    # not make decisions.
+    "calibration",
 )
 
 # How much a reader should believe one event before reading it.  Ordered best
@@ -201,6 +208,10 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "current_snapshot_hash", "changed_at", "added_line_count",
         "removed_line_count", "title", "excerpt", "artifact_hash",
         "invocation_ref", "event_key",
+    "calibration": frozenset({
+        "occurrence_ref", "period_end", "model_version_ref", "reconciliation_count",
+        "overturn_candidates", "notable", "within_tolerance", "decision",
+        "forward_estimates_revised",
     }),
 })
 
@@ -229,6 +240,9 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     "holdings_change": "primary_filing",
     # The company speaking in its own voice on its own site.
     "ir_page_change": "management_direct",
+    # Computed from what was filed and what we had held: derived, like the
+    # reconciliation rows it summarises.
+    "calibration": "derived",
 })
 
 MAX_PAYLOAD_TEXT = 600
