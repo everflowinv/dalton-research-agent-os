@@ -706,7 +706,8 @@ class ThesisImpactBudgetStore:
             "idempotency_key": _text(idempotency_key, "idempotency_key"),
         }
         corrected_micros = _micros(corrected_micros, "corrected_micros")
-        if corrected_micros == 0 or not isinstance(evidence_hash, str) or len(evidence_hash) != 64:
+        if (corrected_micros == 0 or not isinstance(evidence_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", evidence_hash) is None):
             raise ThesisImpactBudgetConflict("correction evidence or amount is invalid")
         identity = {**values, "evidence_hash": evidence_hash}
         wire = {
