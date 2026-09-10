@@ -1,6 +1,6 @@
 # Dalton 项目进度
 
-更新日期：2026-09-09
+更新日期：2026-09-10
 
 ## 下一步（按顺序）
 
@@ -72,6 +72,25 @@ research plan、initial screen。
 
 **并行开发**：分析师蓝图按 [并行开发计划 v1.0](reports/parallel-development-plan-v1.0-2026-09-09.md) 推进：
 主 agent 定计划与集成，Opus 5 subagent 各自 worktree 写代码。进度账在该文档第 6 节。
+
+## 2026-09-10（并行开发第二天）：认知层、演化层、对话层大部分上主线，部署演练通过
+
+**main 已合入并 push（4,486+ 项测试通过）**：Wave 0、A/B/C/D、S1–S5、P14e、P14a daily tracking、C1 事件日历 + 事件桥接、
+模型路由、C2 预算池 + tick 账本、P12a 档案 + P12f guidance、P12c DebateMap、P12d Deep Insight Gate、P14b + P14d 修订回路、
+P15d ConvictionCall、Q2 周报 rubric + Reflection、抽取吞吐、ADR-0009 perception 退役、部署演练与 runbook、INT1/2/3 接线与种子、
+stage-ladder（阶段状态跨 mission 版本折叠）、ask v2。
+
+**部署演练结论**：55 个 schema 在 live 数据副本上全部通过，一个 tick 27 条 lane 零逃逸异常；owner 部署步骤见
+`docs/reports/deploy-runbook-v1.0-2026-09-09.md` 与 `owner-steps-after-deploy-v1.0-2026-09-09.md`。**live 仍跑旧版。**
+
+**owner 新增方向（09-10）**：既有资料（旧 Initial Screen、memo、Excel 模型）作为受治理的 `internal_prior` 来源，旧 screen 导入为
+版本链 v0，Dalton 仍独立写 v1 并逐条判断旧关注点是否还成立；旧模型只提供假设区间，永不当 actual。
+
+**在飞**：P14f 业绩季（修 review）、P13-M3 敏感性、P12e 行业框架、consensus P11b（在审）、planner 日账本（在审）、
+prior-research、reopen-ledger 续篇。
+
+**方法上的两次事故**：用量上限两次打断十余个 agent，全部从上下文恢复；一次误判「静默 = 死亡」造成同一 worktree 双写，
+已裁决归属并写成规则。
 
 ## 2026-09-09（并行开发第一天，晚）：五条线合进 main，未部署
 

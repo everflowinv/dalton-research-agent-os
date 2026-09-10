@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": false,
+    "risk_class": "low",
+    "side_effects": [
+      "read:host-tool-loopback"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:ir-page-watch-list-watches:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:ir-page-watch-list-watches:v1",
+  "capability_id": "capability:dalton:connector:ir-page-watch-list-watches",
+  "content_hash": "315aaa767b2922b2f18d1d86f62780f3d84b465987f6bd3b6f8a0701a5faa452",
+  "decision_ref": "capability-decision:connector-governance:ir-page-watch-list-watches:v1",
+  "effective_from": "2026-08-26T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "d05bb2acd59ed322219c8a4194ed9db8eb852baf0ef9d265ee265bf20851e61e",
+  "expected_source_hash": "9e226991acc0ec84cd3f4c00f066ae55b2c79de5436f32288e231b216b89c438",
+  "id": "connector-governance:ir-page-watch-list-watches:v1",
+  "max_lease_seconds": 120,
+  "policy_ref": "policy:dalton:connector-governance:ir-page-watch-list-watches:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:ir-page-watch-list-watches@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

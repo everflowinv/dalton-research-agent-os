@@ -1,0 +1,69 @@
+{
+ "case_ref": "industry-view-with-no-market-side",
+ "expected": {
+  "cited_tags": [
+   "D1"
+  ],
+  "confidence": "medium",
+  "quality": {
+   "cites_only_shown_claims": "pass",
+   "confidence_stated": "pass",
+   "numbers_without_refs": "pass"
+  },
+  "question_kind": "view",
+  "rationale": "答案本身不假、也有引用，但它没有回答被问的那件事：差在哪。市场那一侧缺席时要说明是没有材料。",
+  "refused": false,
+  "verification": {
+   "cites_only_shown_rows": "pass",
+   "confidence_in_vocabulary": "pass",
+   "market_vs_us_present": "fail",
+   "numeric_sentences_cite": "pass",
+   "refresh_names_a_capable_source": "skipped",
+   "refusal_states_why": "pass",
+   "unknowns_typed": "pass"
+  },
+  "wants_market_vs_us": true
+ },
+ "note": "反例：看法类问题只回答了我们自己怎么想，没有市场那一侧、没有错在哪、没有收敛路径。这正是 owner 说的「和市场同向且无 pathway 」在问答层的样子。",
+ "question": "我们和市场在这个行业上的看法差在哪？",
+ "reply": {
+  "confidence": "medium",
+  "market_vs_us": null,
+  "refresh_suggested": null,
+  "refusal_detail": null,
+  "refusal_reason": null,
+  "refused": false,
+  "sentences": [
+   {
+    "refs": [
+     "D1"
+    ],
+    "text": "我们认为 AI 会先压低可标准化交付的价格，再抬高咨询端的溢价。"
+   }
+  ],
+  "unknowns": [
+   {
+    "content_kind": "sell_side_comment",
+    "source": "alphaengine",
+    "what": "缺市场对这一分化的定价证据"
+   }
+  ]
+ },
+ "shown": [
+  {
+   "block": "dossier",
+   "period": null,
+   "ref": "company-dossier-version:acn:2",
+   "statement": "客户预算在恢复，但审批链条比 2024 年长；管理层在两次电话会上都提到这一点。",
+   "tag": "D1"
+  },
+  {
+   "block": "claims",
+   "period": "fiscal 2025",
+   "ref": "claim-version:ec52d36d94",
+   "statement": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
+   "tag": "C2"
+  }
+ ],
+ "source": "问题是 PM 的原话；答案是「只说了我们的看法」的典型形状。"
+}

@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .coverage_mission import fold_stage_status
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -366,19 +367,27 @@ def passed_version(
     version", because that is the binding the gate was recorded with, and a
     later version (there is one for ACN) would silently move what the diff is
     measured from.
+
+    P14-S: the whole ladder is read, not only the ``gate_passed`` rows, so the
+    fold decides.  A company whose gate was passed and then reopened -- a
+    later ``gate_failed`` -- has no passed version to diff against, and
+    answering with the superseded one would let the weekly lane propose
+    reopening a gate that is already open.  Across every mission version,
+    because that is where the pass lives after a publish.
     """
 
     company_ref = _text(company_ref, "company_ref")
     if not _has_table(connection, "coverage_mission_stage_records"):
         return None
-    rows = connection.execute(
+    ladder = connection.execute(
         "SELECT * FROM coverage_mission_stage_records WHERE company_ref=? AND stage_ref=? "
-        "AND status='gate_passed' ORDER BY created_at DESC",
+        "ORDER BY created_at,record_id",
         (company_ref, stage_ref),
     ).fetchall()
-    if not rows:
+    if fold_stage_status([row["status"] for row in ladder]) != "gate_passed":
         return None
-    row = rows[0]
+    rows = [row for row in ladder if row["status"] == "gate_passed"]
+    row = rows[-1]
     record = json.loads(row["record_json"])
     for ref in record.get("evidence_refs") or ():
         version = connection.execute(

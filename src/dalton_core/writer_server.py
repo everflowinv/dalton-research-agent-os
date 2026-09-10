@@ -413,6 +413,15 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # the authority refuses anything else and the actor is bound here rather
     # than supplied by the caller.
     "record_analyst_journal_entry",
+    # P12d: the Deep Insight Gate is a human checkpoint, and this is the only
+    # door through which it is decided.  ``record_mission_stage`` already covers
+    # the *ladder* half -- and this operation calls it rather than reimplementing
+    # it -- but the ladder has three statuses and no way to bind a decision to
+    # the exact draft the owner read, which is what makes a gate verdict mean
+    # anything.  ``actor_ref`` is replaced by the authenticated principal here
+    # and the authority refuses a non-``human:`` actor a second time.
+    "decide_deep_insight_gate",
+    "deep_insight_gate_draft", "deep_insight_gate_submissions",
     # P15d: the owner answers one conviction call. Automation may write the
     # proposal and may never write the decision, which is the whole of the
     # separation ADR-0007 draws around a thesis and this slice draws around a
@@ -706,6 +715,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "target_ref", "target_hash", "target_kind", "verdict", "company_ref",
         "note", "score_override", "idempotency_key", "actor_ref",
     }),
+    "decide_deep_insight_gate": frozenset({
+        "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
+    }),
+    "deep_insight_gate_draft": frozenset({"version_ref"}),
+    "deep_insight_gate_submissions": frozenset(),
     # P15d. ``proposal_hash`` is required rather than optional: a decision is
     # about the exact bytes it was shown, and a decision that did not name them
     # could be inherited by something else later.
@@ -977,6 +991,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
+    "decide_deep_insight_gate": "actor_ref",
     "decide_conviction_call": "actor_ref",
     "decide_thesis_revision_candidate": "actor_ref",
     "decide_gate_reopen": "actor_ref",
@@ -2537,6 +2552,155 @@ class WriterServer:
         if self._analyst_journal is None:
             raise WriterServerError("analyst-journal authority is unavailable")
         return self._analyst_journal.add(**dict(p))
+
+    def _deep_insight_gates(self) -> Any:
+        """The gate authority, opened on first use.
+
+        Lazily rather than in ``__init__`` because opening it only creates its
+        two tables, and a writer that never sees a gate decision has no reason
+        to carry the object.  The authority is stateless between calls; its
+        write guard is a per-instance flag around one transaction.
+        """
+
+        from .deep_insight_gate import DeepInsightGateAuthority
+
+        return DeepInsightGateAuthority(self.store)
+
+    def _op_decide_deep_insight_gate(self, p: Mapping[str, Any]) -> Any:
+        """P12d: the owner's one verdict on one exact gate draft.
+
+        Two writes, in this order and for this reason.  The mission stage record
+        goes first, through ``CoverageMission.record_stage`` -- the ladder this
+        repository already has, not a second one -- keyed idempotently on the
+        draft and the decision, so a retry after a crash re-derives the same row
+        rather than a second one.  The decision goes second, naming the stage
+        record it produced.  A crash between them leaves a passed stage with no
+        decision, which the next call heals; the opposite order would leave a
+        decided gate whose company never entered the next stage, and nothing
+        would ever notice.
+
+        ``return_for_more_work`` writes no stage record at all: a returned draft
+        is not a failed gate, it is a gate the owner has asked a better question
+        of, and the lane redrafts it when the evidence moves (ADR-0008).
+        """
+
+        from .deep_insight_gate import (
+            DECISION_STAGE_STATUS, DeepInsightGateNotFound, STAGE_REF, decidability,
+        )
+
+        values = dict(p)
+        gate_version_ref = values["gate_version_ref"]
+        decision = values["decision"]
+        actor_ref = values["actor_ref"]
+        gates = self._deep_insight_gates()
+        try:
+            draft = gates.gate(gate_version_ref)
+        except DeepInsightGateNotFound as exc:
+            raise WriterServerError(str(exc)) from exc
+        company_ref = draft["company_ref"]
+        mission_version_ref = (draft.get("bindings") or {}).get("mission_version_ref")
+        stage_record_ref = None
+        status = DECISION_STAGE_STATUS.get(decision)
+        if status is not None:
+            # Asked before anything is written, and by the same predicate the
+            # approvals page uses to decide whether to show the button at all.
+            # The mission stage ledger is scoped by version and the live mission
+            # rolls constantly, so a draft published under version N can become
+            # undecidable without anybody touching it; the owner should not
+            # learn that from a stack trace after clicking.
+            verdict = decidability(self.store.connection, draft)
+            if not verdict["decidable"]:
+                raise WriterServerError(
+                    f"this gate draft cannot be decided right now: {verdict['reason']}"
+                )
+            mission = self.coverage_mission.mission(mission_version_ref)
+            records = self.coverage_mission.stage_records(mission["id"], company_ref)
+            state = {(record["stage_ref"], record["status"]) for record in records}
+            if (STAGE_REF, "entered") not in state:
+                # The gate stage has to be entered before its gate is decided,
+                # and nothing enters it: the drafting lane holds no stage_record
+                # grant, and giving it one would let automation walk the ladder.
+                # The person deciding enters it, in the same breath, under their
+                # own principal.
+                self.coverage_mission.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                    company_ref=company_ref, stage_ref=STAGE_REF, status="entered",
+                    evidence_refs=[gate_version_ref],
+                    rationale="P12d：深度认知门十二问草稿已提交，进入本阶段并由人裁决。",
+                    actor_ref=actor_ref,
+                    idempotency_key=f"deep-insight-gate:{gate_version_ref}:entered",
+                )
+            if (STAGE_REF, status) in state:
+                # The ladder already carries this decision: a previous call
+                # wrote the stage record and then failed, or the caller is
+                # retrying. Reuse the row that exists rather than leaving the
+                # decision unable to name the stage record it produced -- the
+                # whole reason the stage write goes first is that this retry
+                # heals, and a retry that healed the ladder and lost the link
+                # would have healed nothing worth having.
+                existing = next(
+                    (record for record in records
+                     if record["stage_ref"] == STAGE_REF
+                     and record["status"] == status), None)
+                stage_record_ref = None if existing is None else existing["id"]
+            else:
+                record = self.coverage_mission.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                    company_ref=company_ref, stage_ref=STAGE_REF, status=status,
+                    evidence_refs=[gate_version_ref],
+                    rationale=str(values["reason"])[:2000],
+                    actor_ref=actor_ref,
+                    idempotency_key=f"deep-insight-gate:{gate_version_ref}:{decision}",
+                )
+                stage_record_ref = record["id"]
+        return {
+            **gates.decide(**values, stage_record_ref=stage_record_ref),
+            "company_ref": company_ref,
+            "stage_status": status,
+        }
+
+    def _op_deep_insight_gate_draft(self, p: Mapping[str, Any]) -> Any:
+        """One gate draft in full, so the owner can read what they are deciding."""
+
+        from .deep_insight_gate import DeepInsightGateNotFound
+
+        gates = self._deep_insight_gates()
+        try:
+            draft = gates.gate(dict(p)["version_ref"])
+        except DeepInsightGateNotFound as exc:
+            raise WriterServerError(str(exc)) from exc
+        return {**draft, "decision": gates.decision_for(draft["id"])}
+
+    def _op_deep_insight_gate_submissions(self, p: Mapping[str, Any]) -> Any:
+        """Every gate draft waiting for a person, oldest first.
+
+        Each one says whether the ladder would accept its decision today. A
+        draft whose mission version has rolled is still shown -- it is still
+        what the owner has to deal with -- but it says so, and says why, rather
+        than offering a verdict the writer would refuse.
+        """
+
+        from .deep_insight_gate import decidability
+
+        gates = self._deep_insight_gates()
+        drafts = []
+        for draft in gates.undecided():
+            verdict = decidability(self.store.connection, draft)
+            drafts.append({
+                "version_ref": draft["id"],
+                "content_hash": draft["content_hash"],
+                "company_ref": draft["company_ref"],
+                "version": draft["version"],
+                "created_at": draft["created_at"],
+                "classification": draft["classification"],
+                "answers": draft["answers"],
+                "decidable": verdict["decidable"],
+                "undecidable_reason": verdict["reason"],
+                "undecidable_reason_code": verdict["reason_code"],
+            })
+        return {"projection_kind": "deep_insight_gate_submissions", "drafts": drafts}
 
     def _op_decide_conviction_call(self, p: Mapping[str, Any]) -> Any:
         """P15d: one person's answer to one call, bound to the bytes they read.
