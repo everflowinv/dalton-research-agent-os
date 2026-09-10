@@ -289,6 +289,51 @@ class SegmentSumTests(unittest.TestCase):
         results = check({"segments": ei.segment_groups(self.ROWS[1:])})
         self.assertEqual(result_of(results, SEGMENT_SUM).status, NOT_APPLICABLE)
 
+    def test_non_additive_xbrl_axes_are_not_called_segments(self):
+        for axis in (
+            "srt:ConsolidationItemsAxis",
+            "us-gaap:StatementEquityComponentsAxis",
+            "us-gaap:StatementClassOfStockAxis",
+            "us-gaap:FairValueByMeasurementBasisAxis",
+        ):
+            with self.subTest(axis=axis):
+                rows = [dict(self.ROWS[0])] + [
+                    {**dict(self.ROWS[1]), "dimension_axis": axis, "value": "1000"},
+                    {**dict(self.ROWS[2]), "dimension_axis": axis, "value": "1000"},
+                ]
+                groups = ei.segment_groups(rows)
+                self.assertEqual(groups, [])
+                self.assertEqual(
+                    result_of(check({"segments": groups}), SEGMENT_SUM).status,
+                    NOT_APPLICABLE,
+                )
+
+    def test_a_collapsed_multi_dimension_series_is_not_summed(self):
+        rows = list(self.ROWS) + [
+            {**dict(self.ROWS[1]), "value": "600", "level": 3},
+        ]
+        groups = ei.segment_groups(rows)
+        self.assertEqual(groups, [])
+        self.assertEqual(
+            result_of(check({"segments": groups}), SEGMENT_SUM).status,
+            NOT_APPLICABLE,
+        )
+
+    def test_a_geographic_instant_is_not_assumed_to_be_a_complete_partition(self):
+        rows = [
+            {**dict(self.ROWS[0]), "period_start": None},
+            {**dict(self.ROWS[1]), "period_start": None, "value": "40",
+             "dimension_axis": "srt:StatementGeographicalAxis"},
+            {**dict(self.ROWS[2]), "period_start": None, "value": "10",
+             "dimension_axis": "srt:StatementGeographicalAxis"},
+        ]
+        groups = ei.segment_groups(rows)
+        self.assertEqual(groups, [])
+        self.assertEqual(
+            result_of(check({"segments": groups}), SEGMENT_SUM).status,
+            NOT_APPLICABLE,
+        )
+
 
 class PeriodBasisTests(unittest.TestCase):
     def test_four_quarters_in_one_line_pass(self):

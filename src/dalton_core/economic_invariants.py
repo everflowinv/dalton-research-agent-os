@@ -93,6 +93,23 @@ DIRECTION = "direction_consistency"
 BAND = "assumption_band"
 DOMAIN = "rate_domain"
 SEGMENT_SUM = "segment_sum"
+
+# These are the dimensional axes whose members describe mutually exclusive
+# operating/geographic parts of a reported total.  Other XBRL axes commonly
+# found beside statement facts are not additive: consolidation axes distinguish
+# parent/non-controlling views, equity-component axes describe a roll-forward,
+# and class-of-stock or measurement-basis axes describe attributes.  Treating
+# those members as segments rejects sound statements and, worse, gives their
+# sum an economic meaning the filing never asserted.
+ADDITIVE_SEGMENT_AXES = frozenset({
+    "srt:SegmentAxis",
+    "srt:StatementBusinessSegmentsAxis",
+    "us-gaap:StatementBusinessSegmentsAxis",
+    "srt:StatementGeographicalAxis",
+    "us-gaap:StatementGeographicalAxis",
+    "srt:ProductOrServiceAxis",
+    "us-gaap:ProductOrServiceAxis",
+})
 PERIOD_BASIS = "period_basis"
 SOLVER_BOUNDS = "solver_bounds"
 # The order they run in and the order they are reported in. Frozen, because a
@@ -776,7 +793,7 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         key = (concept, start, end)
         if not axis and not row.get("is_breakdown"):
             consolidated[key] = row.get("value")
-        elif axis:
+        elif start and axis and str(axis) in ADDITIVE_SEGMENT_AXES:
             parts.setdefault((*key, str(axis)), []).append({
                 "member": str(row.get("dimension_member") or ""),
                 "value": row.get("value"),
@@ -784,6 +801,15 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for (concept, start, end, axis), members in sorted(parts.items()):
         if (concept, start, end) not in consolidated:
+            continue
+        # The normalized statement shape carries one axis/member pair.  A raw
+        # context can carry more dimensions, so the same member may survive
+        # more than once after that projection.  Such rows are not a complete
+        # one-dimensional partition and cannot honestly be summed.  Refuse to
+        # manufacture a finding from the lossy projection; a unique-member
+        # business/geography/product series remains fully checked below.
+        member_names = [str(item.get("member") or "") for item in members]
+        if not all(member_names) or len(set(member_names)) != len(member_names):
             continue
         out.append({
             "line": concept,
