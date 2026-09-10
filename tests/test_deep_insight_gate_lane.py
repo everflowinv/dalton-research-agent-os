@@ -43,7 +43,7 @@ from dalton_core.deep_insight_gate_cli import (
 from dalton_core.deep_insight_gate_launcher import DeepInsightGateLauncher, run_digest
 from dalton_core.lane_registry import lane_for_operation, registered_lanes
 from dalton_core.mission_deep_insight_lane import (
-    LANE, MissionDeepInsightLaneCoordinator, build_launcher, dispatch,
+    LANE, MissionDeepInsightLaneCoordinator, build_launcher, company_ledger_signature, dispatch,
     ledger_signature,
 )
 from dalton_core.store import DaltonStore, content_hash
@@ -1128,6 +1128,54 @@ class LaneTests(unittest.TestCase):
                 coordinator.dispatch_once()
                 self.assertEqual(coordinator.dispatch_once()["status"], "terminal")
                 self.assertEqual(launcher.started, 1)
+
+    def test_one_company_content_refusal_does_not_starve_the_next(self):
+        other = "company:sec-cik:0000000002"
+
+        class Launcher:
+            def __init__(self):
+                self.started = []
+
+            def start(self, *, signature, company_ref=None):
+                self.started.append((signature, company_ref))
+                return {"id": f"ticket-{len(self.started)}", "signature": signature,
+                        "company_ref": company_ref}
+
+            def status(self, ticket_ref):
+                signature, company_ref = self.started[int(ticket_ref.rsplit("-", 1)[1]) - 1]
+                return {"status": "succeeded", "signature": signature,
+                        "company_ref": company_ref,
+                        "summary": {"company_ref": company_ref,
+                                    "gate_status": "rubric_refused"}}
+
+        harness = Harness()
+        self.addCleanup(harness.close)
+        launcher = Launcher()
+        coordinator = MissionDeepInsightLaneCoordinator(
+            connection=harness.store.connection, launcher=launcher,
+            companies=lambda: [ACN, other])
+        self.assertEqual(coordinator.dispatch_once()["company_ref"], ACN)
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["company_ref"], other)
+        self.assertIn(ACN, second["held"])
+        coordinator.dispatch_once()  # settle the second refusal
+        held = coordinator.dispatch_once()
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_company_input_fingerprint_is_scoped_and_moves_with_its_file(self):
+        harness = Harness()
+        self.addCleanup(harness.close)
+        other = "company:sec-cik:0000000002"
+        before = company_ledger_signature(harness.store.connection, ACN)
+        other_before = company_ledger_signature(harness.store.connection, other)
+        fresh = harness.fixture.add_claim(
+            "signature-guidance", kind="qualitative", value=None, unit=None,
+            statement="新的指引风格证据。"
+        )["claim_version_id"]
+        harness.publish_dossier(extra={"guidance_style": fresh})
+        self.assertNotEqual(company_ledger_signature(harness.store.connection, ACN), before)
+        self.assertEqual(company_ledger_signature(harness.store.connection, other), other_before)
 
     def test_a_submission_is_the_one_reason_to_look_again(self):
         from dalton_core.mission_deep_insight_lane import RELAUNCH_STATUSES

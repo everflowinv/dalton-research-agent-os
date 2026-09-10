@@ -88,7 +88,7 @@ from .deep_insight_gate_draft import (
     summarise_answers,
     verify,
 )
-from .store import DaltonStore, canonical_json
+from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 # The groups whose questions are about numbers.  The other two are about how a
@@ -168,6 +168,43 @@ def valuation_rows(store: DaltonStore, company_ref: str) -> list[dict[str, Any]]
             "importance": "derived_deterministic",
         })
     return rows
+
+
+def deep_insight_company_source_fingerprint(connection: Any, company_ref: str) -> str:
+    """Hash the bounded authority inputs the selected company's gate can read."""
+
+    class ReadView:
+        def __init__(self, supplied: Any) -> None:
+            self.connection = supplied
+
+    view = ReadView(connection)
+
+    def latest(table: str, company_column: str) -> dict[str, Any] | None:
+        if not table_exists(connection, table):
+            return None
+        row = connection.execute(
+            f"SELECT record_json FROM {table} WHERE {company_column}=? "
+            "ORDER BY version_number DESC LIMIT 1", (company_ref,),
+        ).fetchone()
+        return None if row is None else json.loads(row["record_json"])
+
+    dossier = latest("company_dossier_versions", "company_ref")
+    debate = latest("debate_map_versions", "subject_ref")
+    gate = latest("deep_insight_gate_versions", "company_ref")
+    decision = None
+    if gate is not None and table_exists(connection, "deep_insight_gate_decisions"):
+        row = connection.execute(
+            "SELECT record_json FROM deep_insight_gate_decisions "
+            "WHERE gate_version_ref=?", (gate["id"],),
+        ).fetchone()
+        decision = None if row is None else json.loads(row["record_json"])
+    return content_hash({
+        "schema_version": "0.1", "company_ref": company_ref,
+        "dossier": dossier, "debate_map": debate, "prior_gate": gate,
+        "prior_decision": decision,
+        "numbers": number_material(view, company_ref, limit=MAX_NUMBER_ROWS),
+        "valuation": valuation_rows(view, company_ref),
+    })
 
 
 def debate_map_version(store: DaltonStore, company_ref: str) -> dict[str, Any] | None:

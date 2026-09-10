@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .lane_child_launcher import (
     LaneChildConflict,
@@ -85,10 +85,26 @@ def permission_key(connection: Any, launcher: Any, signature: str) -> str:
     return f"{signature}|permission:{hashlib.sha256('|'.join(parts).encode()).hexdigest()[:16]}"
 
 
-def clear_obsolete_permissions(budget: Any, current: str, signature: str) -> None:
+def clear_obsolete_permissions(
+    budget: Any, current: str, company_ref: str | None = None,
+) -> None:
     for row in budget.permission_items():
-        if row["item_key"] != current:
+        same_company = company_ref is None or str(row["item_key"]).startswith(
+            f"{company_ref}|")
+        if same_company and row["item_key"] != current:
             budget.retire(row["item_key"])
+
+
+def company_ledger_signature(connection: Any, company_ref: str) -> str:
+    from .cockpit_model import verifier_provider_contract_fingerprint
+    from .deep_insight_gate_cli import deep_insight_company_source_fingerprint
+
+    value = "|".join((
+        company_ref,
+        deep_insight_company_source_fingerprint(connection, company_ref),
+        verifier_provider_contract_fingerprint("deep_insight_gate_verifier"),
+    ))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
 def ledger_signature(connection: Any) -> str:
@@ -127,16 +143,18 @@ class MissionDeepInsightLaneCoordinator:
     """Launch and settle the Deep Insight Gate lane."""
 
     def __init__(self, *, connection: Any, launcher: Any,
+                 companies: Callable[[], list[str]] | None = None,
                  failure_ledger_dir: Any | None = None,
                  failure_clock: Any | None = None) -> None:
         self.connection = connection
         self.launcher = launcher
+        self.companies = companies
         self._open: str | None = None
         # The signature under which the last run found nothing, and the
         # signatures whose runs failed.  Held for this process only: a restart
         # is nearly always a deploy, which is the likeliest thing to have fixed
         # it.
-        self._quiet_signature: str | None = None
+        self._quiet_signatures: set[str] = set()
         self.budget = lane_budget("deep_insight_gate", state_dir=failure_ledger_dir,
                                   clock=failure_clock)
 
@@ -177,7 +195,7 @@ class MissionDeepInsightLaneCoordinator:
         status = str(settled.get("gate_status") or "")
         if status in {"not_authorized", "no_checkpoint", "no_policy"} and signature:
             self.budget.record(
-                permission_key(self.connection, self.launcher, str(signature)),
+                str(signature),
                 status="gated:not permitted", reason=f"gated:not permitted: {status}")
         elif settled.get("status") not in ("succeeded", "orphaned"):
             if signature:
@@ -185,14 +203,14 @@ class MissionDeepInsightLaneCoordinator:
                 if decision.action == "not_permitted":
                     self.budget.clear(str(signature))
                     self.budget.record(
-                        permission_key(self.connection, self.launcher, str(signature)),
+                        str(signature),
                         classification=decision.classification)
         elif status in CONTENT_TERMINAL_STATUSES and signature:
             self.budget.record(str(signature), status=f"content_refused:{status}",
                                reason=settled.get("failure_reason") or status)
         elif status not in RELAUNCH_STATUSES and signature:
             settled["resumed"] = self.budget.clear(str(signature))
-            self._quiet_signature = str(signature)
+            self._quiet_signatures.add(str(signature))
         elif signature:
             self.budget.clear(str(signature))
         return settled
@@ -202,32 +220,62 @@ class MissionDeepInsightLaneCoordinator:
         if self._open is not None:
             return {"status": "running", "ticket_ref": self._open, "settled": settled}
         try:
-            signature = ledger_signature(self.connection)
+            companies = self.companies() if self.companies is not None else [None]
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
-        if signature == self._quiet_signature:
-            return {"status": "idle", "settled": settled, "signature": signature,
-                    "reason": "nothing has moved since the last run found nothing"}
-        permission = permission_key(self.connection, self.launcher, signature)
-        clear_obsolete_permissions(self.budget, permission, signature)
-        held = (self.budget.blocked(permission)
-                or self.budget.blocked(signature))
-        if held is not None:
-            return {"status": held.action, "settled": settled, "signature": signature,
-                    "reason": held.classification.reason,
+        held_companies = {}
+        held_decisions = {}
+        quiet_companies = []
+        for company_ref in companies:
+            evidence = (ledger_signature(self.connection) if company_ref is None else
+                        f"{company_ref}|{company_ledger_signature(self.connection, company_ref)}")
+            signature = permission_key(self.connection, self.launcher, evidence)
+            clear_obsolete_permissions(self.budget, signature, company_ref)
+            if signature in self._quiet_signatures:
+                quiet_companies.append(company_ref)
+                continue
+            held = self.budget.blocked(signature) or self.budget.blocked(evidence)
+            if held is not None:
+                label = str(company_ref or "-")
+                held_companies[label] = held.classification.reason
+                held_decisions[label] = held
+                continue
+            try:
+                ticket = self.launcher.start(signature=signature, company_ref=company_ref)
+            except LaneChildConflict as exc:
+                return {"status": "busy", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            except LaneChildRejected as exc:
+                return {"status": "rejected", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            self._open = ticket["id"]
+            return {"status": "launched", "ticket_ref": ticket["id"],
+                    "company_ref": company_ref, "signature": signature,
+                    "settled": settled, "held": held_companies}
+        if held_companies:
+            if len(companies) == 1 and len(held_decisions) == 1:
+                decision = next(iter(held_decisions.values()))
+                return {"status": decision.action, "settled": settled,
+                        "reason": decision.classification.reason,
+                        "held": held_companies,
+                        "failure_budget": self.budget.summary()}
+            return {"status": "held", "settled": settled, "held": held_companies,
+                    "reason": "; ".join(f"{key}: {value}" for key, value in held_companies.items()),
                     "failure_budget": self.budget.summary()}
-        try:
-            ticket = self.launcher.start(signature=signature)
-        except LaneChildConflict as exc:
-            return {"status": "busy", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        except LaneChildRejected as exc:
-            return {"status": "rejected", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        self._open = ticket["id"]
-        return {"status": "launched", "ticket_ref": ticket["id"],
-                "signature": signature, "settled": settled}
+        return {"status": "idle", "settled": settled, "companies": quiet_companies,
+                "reason": "nothing has moved since each company's last quiet run"}
+
+
+def _screened_companies(server: Any) -> list[str]:
+    from .deep_insight_gate_cli import screened_companies
+    pointer = server.store.connection.execute(
+        "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref LIMIT 1"
+    ).fetchone()
+    if pointer is None:
+        return []
+    mission = server.coverage_mission.mission(pointer["mission_version_id"])
+    return screened_companies(server.coverage_mission, mission)
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -241,6 +289,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     if coordinator is None:
         coordinator = MissionDeepInsightLaneCoordinator(
             connection=server.store.connection, launcher=launcher,
+            companies=lambda: _screened_companies(server),
             failure_ledger_dir=getattr(launcher, "state_dir", None))
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
