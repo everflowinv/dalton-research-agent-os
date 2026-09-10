@@ -1096,9 +1096,6 @@ def _decode(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
     }
     keys = set(row.keys())
     for column, expected in columns.items():
-        if (column == "change_reason" and expected == "mission_rebind"
-                and row[column] == "evidence_thicker"):
-            continue
         if column in keys and row[column] != expected:
             raise DebateMapConflict(f"{name} column {column} drifted")
     return version
@@ -1132,6 +1129,67 @@ class DebateMapAuthority:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._admit_mission_rebind_reason()
+
+    def _admit_mission_rebind_reason(self) -> None:
+        """Widen an existing table's CHECK without changing any stored bytes."""
+
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
+        ).fetchone()
+        if row is None or MISSION_REBIND_REASON in (row["sql"] or ""):
+            return
+        if self.connection.in_transaction:
+            raise DebateMapConflict(
+                "the debate-map change-reason migration requires no open transaction")
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript("""
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS debate_map_version_insert_guard;
+                DROP TRIGGER IF EXISTS debate_map_version_no_update;
+                DROP TRIGGER IF EXISTS debate_map_version_no_delete;
+                CREATE TABLE debate_map_versions_v2 (
+                    version_id TEXT PRIMARY KEY,
+                    map_ref TEXT NOT NULL,
+                    version_number INTEGER NOT NULL CHECK(version_number >= 1),
+                    prior_version_id TEXT REFERENCES debate_map_versions_v2(version_id),
+                    subject_ref TEXT NOT NULL,
+                    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('company', 'industry')),
+                    change_reason TEXT NOT NULL CHECK(change_reason IN (
+                        'filing_actual','driver_event','assumption_review',
+                        'evidence_thicker','human_revision','mission_rebind')),
+                    evidence_fingerprint TEXT NOT NULL,
+                    debate_count INTEGER NOT NULL CHECK(debate_count >= 0),
+                    live_count INTEGER NOT NULL CHECK(live_count >= 0),
+                    rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
+                    record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    actor_ref TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(map_ref, version_number));
+                INSERT INTO debate_map_versions_v2 SELECT * FROM debate_map_versions;
+                DROP TABLE debate_map_versions;
+                ALTER TABLE debate_map_versions_v2 RENAME TO debate_map_versions;
+                CREATE INDEX debate_map_versions_by_map
+                    ON debate_map_versions(map_ref, version_number);
+                CREATE INDEX debate_map_versions_by_subject
+                    ON debate_map_versions(subject_ref, version_number);
+                CREATE TRIGGER debate_map_version_insert_guard
+                BEFORE INSERT ON debate_map_versions WHEN dalton_authorized() = 0 BEGIN
+                    SELECT RAISE(ABORT, 'debate map version insert requires DaltonStore'); END;
+                CREATE TRIGGER debate_map_version_no_update
+                BEFORE UPDATE ON debate_map_versions BEGIN
+                    SELECT RAISE(ABORT, 'debate map versions are immutable'); END;
+                CREATE TRIGGER debate_map_version_no_delete
+                BEFORE DELETE ON debate_map_versions BEGIN
+                    SELECT RAISE(ABORT, 'debate map versions are immutable'); END;
+                COMMIT;
+            """)
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise DebateMapConflict("the debate-map migration broke foreign keys")
 
     # -- reads ------------------------------------------------------------
 
@@ -1306,16 +1364,12 @@ class DebateMapAuthority:
         """
 
         subject_ref = _text(subject_ref, "subject_ref")
-        mission = self._authorized_mission(
-            subject_ref=subject_ref, actor_ref=actor_ref,
-            mission_version_ref=mission_version_ref,
-            mission_version_hash=mission_version_hash,
-        )
+        subject_kind = _one_of(subject_kind, SUBJECT_KINDS, "subject_kind")
         map_ref = map_ref_for(subject_ref)
-        body = {
+        body_without_mission = {
             "map_ref": map_ref,
             "subject_ref": subject_ref,
-            "subject_kind": _one_of(subject_kind, SUBJECT_KINDS, "subject_kind"),
+            "subject_kind": subject_kind,
             "change_reason": _one_of(
                 change_reason, _VERSION_CHANGE_REASONS, "change_reason"),
             "change_evidence_refs": _refs(
@@ -1326,8 +1380,6 @@ class DebateMapAuthority:
             "policy_ref": _text(policy_ref, "policy_ref"),
             "policy_hash": _hash(policy_hash, "policy_hash"),
             "evidence_fingerprint": _text(evidence_fingerprint, "evidence_fingerprint"),
-            "mission_version_ref": mission["id"],
-            "mission_version_hash": mission["content_hash"],
             "debates": [dict(item) for item in debates],
             "rejected_by_constitution": [dict(item) for item in rejected_by_constitution],
             "drafted_by": None if drafted_by is None else dict(drafted_by),
@@ -1335,33 +1387,27 @@ class DebateMapAuthority:
             "actor_ref": _text(actor_ref, "actor_ref"),
         }
         created_at = _text(created_at, "created_at")
-
-        latest_row = self._latest_row(map_ref)
-        latest = None if latest_row is None else _decode(
-            latest_row, f"DebateMapVersion for {subject_ref}"
-        )
-        candidate_wire = self._compose(
-            body,
-            version=1 if latest is None else latest["version"] + 1,
-            prior_version_ref=None if latest is None else latest["id"],
-            created_at=created_at,
-        )
-        decision = novelty(latest, candidate_wire)
-        if not decision["new"]:
-            return {"status": "duplicate", "reason": decision["reason"], **latest}
-
+        from .coverage_mission import CoverageMissionAuthority
+        missions = CoverageMissionAuthority(self.store)
         with self.store._transaction() as cur:
-            table_sql = cur.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
-            ).fetchone()[0]
-            stored_change_reason = candidate_wire["change_reason"]
-            if (stored_change_reason == "mission_rebind"
-                    and "mission_rebind" not in table_sql):
-                # Existing Cores retain their immutable v0.1 table bytes and
-                # closed CHECK. The canonical record carries the truthful new
-                # reason; this indexed compatibility projection uses the old
-                # closest admitted value until a normal schema rebuild.
-                stored_change_reason = "evidence_thicker"
+            mission = self._authorized_mission(
+                subject_ref=subject_ref, subject_kind=subject_kind, actor_ref=actor_ref,
+                mission_version_ref=mission_version_ref,
+                mission_version_hash=mission_version_hash, missions=missions,
+            )
+            body = {**body_without_mission,
+                    "mission_version_ref": mission["id"],
+                    "mission_version_hash": mission["content_hash"]}
+            latest_row = self._latest_row(map_ref, cur)
+            latest = None if latest_row is None else _decode(
+                latest_row, f"DebateMapVersion for {subject_ref}")
+            candidate_wire = self._compose(
+                body, version=1 if latest is None else latest["version"] + 1,
+                prior_version_ref=None if latest is None else latest["id"],
+                created_at=created_at)
+            decision = novelty(latest, candidate_wire)
+            if not decision["new"]:
+                return {"status": "duplicate", "reason": decision["reason"], **latest}
             cur.execute(
                 f"INSERT INTO {TABLE}(version_id,map_ref,version_number,prior_version_id,"
                 "subject_ref,subject_kind,change_reason,evidence_fingerprint,debate_count,"
@@ -1371,7 +1417,7 @@ class DebateMapAuthority:
                     candidate_wire["id"], candidate_wire["map_ref"],
                     candidate_wire["version"], candidate_wire["prior_version_ref"],
                     candidate_wire["subject_ref"], candidate_wire["subject_kind"],
-                    stored_change_reason, candidate_wire["evidence_fingerprint"],
+                    candidate_wire["change_reason"], candidate_wire["evidence_fingerprint"],
                     len(candidate_wire["debates"]),
                     sum(1 for item in candidate_wire["debates"]
                         if item["status"] in LIVE_STATUSES),
@@ -1386,14 +1432,14 @@ class DebateMapAuthority:
         return {"status": "fresh", "reason": decision["reason"], **stored}
 
     def _authorized_mission(
-        self, *, subject_ref: str, actor_ref: str,
-        mission_version_ref: str, mission_version_hash: str,
+        self, *, subject_ref: str, subject_kind: str, actor_ref: str,
+        mission_version_ref: str, mission_version_hash: str, missions: Any | None = None,
     ) -> dict[str, Any]:
         """Resolve the active Core authority; never trust caller bindings."""
 
         from .coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
 
-        missions = CoverageMissionAuthority(self.store)
+        missions = missions or CoverageMissionAuthority(self.store)
         claimed_ref = _text(mission_version_ref, "mission_version_ref")
         claimed_hash = _hash(mission_version_hash, "mission_version_hash")
         mission = missions.mission(claimed_ref)
@@ -1407,6 +1453,10 @@ class DebateMapAuthority:
         members = {row["company_ref"] for row in mission["universe"]}
         if subject_ref not in members and subject_ref != mission["industry_ref"]:
             raise CoverageMissionConflict("debate map subject is outside the mission")
+        expected_kind = "industry" if subject_ref == mission["industry_ref"] else "company"
+        if subject_kind != expected_kind:
+            raise CoverageMissionConflict(
+                f"debate map subject_kind must be {expected_kind} for this mission subject")
         return mission
 
     def _compose(
@@ -1437,8 +1487,21 @@ def novelty(
 
     if prior is None:
         return {"new": True, "reason": "first_version"}
-    if prior.get("mission_version_ref") != candidate.get("mission_version_ref"):
-        return {"new": True, "reason": "mission_changed"}
+    mission_changed = (
+        prior.get("mission_version_ref") != candidate.get("mission_version_ref"))
+    if candidate.get("change_reason") == MISSION_REBIND_REASON:
+        stable_fields = (
+            "map_ref", "subject_ref", "subject_kind", "constitution_ref",
+            "constitution_hash", "policy_ref", "policy_hash",
+            "evidence_fingerprint", "debates", "rejected_by_constitution",
+            "drafted_by", "verified_by", "change_evidence_refs",
+        )
+        if mission_changed and all(prior.get(key) == candidate.get(key)
+                                   for key in stable_fields):
+            return {"new": True, "reason": "mission_changed"}
+        return {"new": False, "reason": (
+            "mission_rebind requires a new mission and otherwise identical map, "
+            "policy, constitution and evidence")}
     prior_refs = {item["debate_ref"] for item in prior["debates"]}
     fresh_debates = sorted(
         {item["debate_ref"] for item in candidate["debates"]} - prior_refs

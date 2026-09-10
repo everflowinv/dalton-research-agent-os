@@ -543,6 +543,25 @@ class DebateMapAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(published["subject_ref"], self.mission["industry_ref"])
 
+    def test_subject_kind_must_match_mission_membership(self) -> None:
+        with self.assertRaisesRegex(Exception, "subject_kind must be company"):
+            self.publish([valid_debate()], refs=["cv-a"], subject_kind="industry")
+        with self.assertRaisesRegex(Exception, "subject_kind must be industry"):
+            self.publish([valid_debate()], refs=["cv-a"],
+                         subject_ref=self.mission["industry_ref"], subject_kind="company")
+
+    def test_mission_rebind_cannot_hide_a_policy_or_content_change(self) -> None:
+        prior = self.publish([valid_debate()], refs=["cv-a"])
+        candidate = copy.deepcopy(prior)
+        candidate["mission_version_ref"] = "mission:new"
+        candidate["mission_version_hash"] = "f" * 64
+        candidate["change_reason"] = "mission_rebind"
+        candidate["policy_hash"] = "e" * 64
+        self.assertFalse(novelty(prior, candidate)["new"])
+        candidate["policy_hash"] = prior["policy_hash"]
+        candidate["debates"][0]["question"] = "Changed under a rebind"
+        self.assertFalse(novelty(prior, candidate)["new"])
+
     def test_a_subject_outside_the_mission_is_refused(self) -> None:
         with self.assertRaisesRegex(Exception, "outside the mission"):
             self.publish(
@@ -568,6 +587,68 @@ class DebateMapAuthorityTests(unittest.TestCase):
         read = self.authority.version(legacy["id"])
         self.assertEqual(read, legacy)
         self.assertNotIn("mission_version_ref", read)
+
+    def test_old_change_reason_check_is_losslessly_rebuilt(self) -> None:
+        published = self.publish([valid_debate()], refs=["cv-a"])
+        before = self.store.connection.execute(
+            "SELECT record_json,content_hash FROM debate_map_versions WHERE version_id=?",
+            (published["id"],)).fetchone()
+        connection = self.store.connection
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.executescript("""
+            BEGIN IMMEDIATE;
+            DROP TRIGGER debate_map_version_insert_guard;
+            DROP TRIGGER debate_map_version_no_update;
+            DROP TRIGGER debate_map_version_no_delete;
+            ALTER TABLE debate_map_versions RENAME TO debate_map_versions_new;
+            CREATE TABLE debate_map_versions (
+                version_id TEXT PRIMARY KEY, map_ref TEXT NOT NULL,
+                version_number INTEGER NOT NULL CHECK(version_number >= 1),
+                prior_version_id TEXT REFERENCES debate_map_versions(version_id),
+                subject_ref TEXT NOT NULL,
+                subject_kind TEXT NOT NULL CHECK(subject_kind IN ('company','industry')),
+                change_reason TEXT NOT NULL CHECK(change_reason IN (
+                    'filing_actual','driver_event','assumption_review',
+                    'evidence_thicker','human_revision')),
+                evidence_fingerprint TEXT NOT NULL, debate_count INTEGER NOT NULL,
+                live_count INTEGER NOT NULL, rejected_count INTEGER NOT NULL,
+                record_json TEXT NOT NULL, content_hash TEXT NOT NULL,
+                actor_ref TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(map_ref,version_number));
+            INSERT INTO debate_map_versions SELECT * FROM debate_map_versions_new;
+            DROP TABLE debate_map_versions_new;
+            COMMIT;
+        """)
+        connection.execute("PRAGMA foreign_keys=ON")
+        migrated = DebateMapAuthority(self.store)
+        after = connection.execute(
+            "SELECT record_json,content_hash,change_reason FROM debate_map_versions "
+            "WHERE version_id=?", (published["id"],)).fetchone()
+        self.assertEqual(tuple(after)[:2], tuple(before))
+        self.assertEqual(after["change_reason"], "evidence_thicker")
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='debate_map_versions'").fetchone()[0]
+        self.assertIn("mission_rebind", table_sql)
+        self.assertEqual(migrated.version(published["id"])["content_hash"],
+                         published["content_hash"])
+        params = copy.deepcopy(self.params)
+        params.update({
+            "version_id": self.mission["id"].rsplit(":", 1)[0] + ":2",
+            "prior_version_ref": self.mission["id"],
+            "idempotency_key": "mission:migrated-debate-map:2",
+        })
+        mission = CoverageMissionAuthority(self.store).create_mission(
+            params.pop("mission_ref"), **params)
+        rebound = self.publish(
+            [valid_debate()], refs=["cv-a"], change_reason="mission_rebind",
+            mission_version_ref=mission["id"],
+            mission_version_hash=mission["content_hash"],
+            created_at="2026-09-10T00:00:00+00:00")
+        indexed = connection.execute(
+            "SELECT change_reason FROM debate_map_versions WHERE version_id=?",
+            (rebound["id"],)).fetchone()[0]
+        self.assertEqual(indexed, "mission_rebind")
 
     def test_a_new_reference_is_a_new_version(self) -> None:
         self.publish([valid_debate()], refs=["cv-a"])
