@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -95,8 +94,7 @@ def _claims(c: sqlite3.Connection, company_ref: str) -> list[str]:
 
 
 def _digest(refs: list[str]) -> str:
-    wire = json.dumps({"claim_version_refs": sorted(set(refs))}, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(wire.encode()).hexdigest()
+    return content_hash({"claim_version_refs": sorted(set(refs))})
 
 
 def _latest(c: sqlite3.Connection, table: str, company_ref: str) -> tuple[dict[str, Any] | None, str | None, list[str]]:

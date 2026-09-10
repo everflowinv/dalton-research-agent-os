@@ -207,5 +207,11 @@ class ActivationReadinessTests(unittest.TestCase):
         refs.append({"kind": "figure", "ref": "statement-line:missing"})
         self.assertFalse(_dossier_evidence(self.c, {"evidence_refs": refs})["bound_refs_valid"])
 
+    def test_fingerprint_matches_producer_unicode_canonicalization(self):
+        from dalton_core.activation_readiness import _digest
+        from dalton_core.debate_map import evidence_fingerprint
+        refs = ["claim:中文版本", "claim:ascii", "claim:中文版本"]
+        self.assertEqual(_digest(refs), evidence_fingerprint(refs))
+
 
 if __name__ == "__main__": unittest.main()
