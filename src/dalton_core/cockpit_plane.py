@@ -282,6 +282,13 @@ RESEARCH_TASK_TERMINAL_LABELS = {
     "human_deprioritized": "人已降级",
 }
 # The two model tiers a purpose can sit in, and what each is for.
+# P14-M2: "跟随档位" or "自己点名"; the third is what a stage does when every
+# model the owner named has been retired.
+MODEL_SELECTION_MODE_LABELS = {
+    "tier": "跟随档位",
+    "explicit": "自己点名",
+    "tier_after_retirement": "你选的都退役了，暂时按档位走",
+}
 MODEL_TIER_LABELS = {
     "brain": "要动脑的（写判断、做规划）",
     "cheap": "量大而便宜的（逐窗口阅读、打标签）",
@@ -2494,8 +2501,65 @@ class CockpitPlane:
                 "actions": [{"decision": "publish", "label": "确认发布"}, {"decision": "discard", "label": "放弃"}],
                 "needs_rationale": False,
             })
+        # P14-M2: a model a calling stage was using has gone from OpenClaw and
+        # the stage fell to its next link on its own. Nothing is broken, which
+        # is exactly why it belongs here: the work carries on under a model the
+        # owner did not choose, and the only thing that would ever surface that
+        # is a notice that stays until somebody reads it.
+        items.extend(self._model_fallback_items())
         items.sort(key=lambda i: i["at"])
         return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()), "items": items, "count": len(items)}
+
+    def _model_router_db(self) -> str | None:
+        """The model catalog this Core reads, named by its model configuration."""
+
+        if self.config.model_config_path is None:
+            return None
+        config = _load_json(self.config.model_config_path)
+        path = config.get("model_router_db") if isinstance(config, dict) else None
+        if not isinstance(path, str) or not Path(path).is_file():
+            return None
+        return path
+
+    def _model_fallback_items(self) -> list[dict[str, Any]]:
+        """Open "the model you were using has gone" notices, as approval rows.
+
+        Read-only and best effort: a Core with no model catalog has no notices,
+        and an unreadable one must not be able to empty the approvals page.
+        """
+
+        path = self._model_router_db()
+        if path is None:
+            return []
+        from .model_router import ModelRouter
+
+        try:
+            with closing(ModelRouter(path, read_only=True)) as router:
+                notices = router.fallback_notices(open_only=True)
+        except (sqlite3.Error, OSError, ValueError):
+            return []
+        items: list[dict[str, Any]] = []
+        for notice in notices:
+            replacement = notice["replacement_profile_id"]
+            items.append({
+                "kind": "model_fallback", "ref": notice["id"],
+                "hash": notice["content_hash"], "at": notice["created_at"],
+                "title": "有个环节换模型了：原来用的那个在 OpenClaw 上没有了",
+                "who": "模型",
+                "summary": notice["message"],
+                "details": {
+                    "消失的模型": notice["profile_id"],
+                    "环节": notice["purpose"],
+                    "现在用": replacement or "没有可用的模型",
+                    "档位": MODEL_TIER_LABELS.get(notice["tier"], notice["tier"]),
+                },
+                # 「知道了」 changes no routing -- the fall already happened -- so
+                # it needs no reason. Re-selecting is the other way to clear it,
+                # and that is a different page and a different decision.
+                "actions": [{"decision": "acknowledge", "label": "知道了"}],
+                "needs_rationale": False,
+            })
+        return items
 
     def _revision_checkpoints(self) -> list[dict[str, Any]]:
         """ADR-0007 / P14d: revision candidates, gate reopens, forecast overturns.
@@ -2608,6 +2672,14 @@ class CockpitPlane:
         actor = _subject_for_login(login)
         if kind.startswith("draft:"):
             return self._decide_draft(login, kind.split(":", 1)[1], ref, digest, decision, request_id)
+        # P14-M2: 「知道了」 on a model that vanished from the gateway. It is on
+        # this page because it is a thing waiting for the owner, and it takes
+        # this path rather than its own because the page has one shape for
+        # "something is waiting" and adding a second would be a second page.
+        if kind == "model_fallback":
+            if decision != "acknowledge":
+                raise CockpitError("这条提示只能「知道了」")
+            return self.acknowledge_model_notice(login, {"ref": ref})
         if kind == "thesis":
             if decision not in {"admit", "reject"}:
                 raise CockpitError("decision must be admit or reject")
@@ -2892,6 +2964,157 @@ class CockpitPlane:
             "routing": self._routing(),
         }
 
+    # -- P14-M2: the 「模型」 page ------------------------------------------------
+
+    def models(self) -> dict[str, Any]:
+        """Per calling stage: the tier, the chain it will really use, and a choice.
+
+        Everything on this page is read out of two files this process already
+        has permission to read -- the model configuration and, when the Core is
+        installed beside a gateway, ``openclaw.json`` -- and out of the router
+        database, read-only.  The cockpit holds no write handle: every button
+        here goes back out through the writer as the owner's own principal
+        (ADR-0006).
+        """
+
+        from .model_selection import PURPOSE_LABELS, SELECTION_MODES
+
+        path = self._model_router_db()
+        if path is None:
+            return {"available": False,
+                    "reason": "这台机器上还没有模型路由库，所以没有可选的模型"}
+        policy_ref = None
+        config = (_load_json(self.config.model_config_path)
+                  if self.config.model_config_path is not None else None)
+        if isinstance(config, dict):
+            policy_ref = config.get("routing_policy_ref")
+        broker = (None if self.config.openclaw_config_path is None
+                  else _load_json(self.config.openclaw_config_path))
+        broker = broker if isinstance(broker, Mapping) else None
+        from .model_fallback_chain import FallbackChainError, routing_overview
+        from .model_router import ModelRouter
+        from .openclaw_model_discovery import discover_models
+
+        try:
+            with closing(ModelRouter(path, read_only=True)) as router:
+                overview = routing_overview(
+                    router, openclaw_config=broker, checked_at=self.clock(),
+                    policy_version_ref=policy_ref,
+                )
+                discovery = (
+                    {} if broker is None
+                    else discover_models(broker, router=router,
+                                         checked_at=self.clock())
+                )
+                notices = router.fallback_notices()
+                catalogue = {
+                    profile["id"]: profile for profile in router.latest_profiles()
+                }
+        except (FallbackChainError, sqlite3.Error, OSError, ValueError) as exc:
+            return {"available": False, "reason": f"模型目录读不出来：{_reason(exc)}"}
+        purposes = []
+        for row in overview["purposes"]:
+            chain = [{
+                "position": link["position"], "model": link["profile_id"],
+                "family": link["family"], "unpriced": link["unpriced"],
+                "retired": link["status"] == "retired",
+                "note": (
+                    "这台机器上没有这个模型的档案" if not link["registered"]
+                    else "已退役：网关不再提供" if link["status"] == "retired"
+                    else "未定价：只能当最后的回退" if link["unpriced"]
+                    else None
+                ),
+            } for link in row["chain"]]
+            served = row["last_served"]
+            purposes.append({
+                "purpose": row["purpose"],
+                "label": PURPOSE_LABELS.get(row["purpose"], row["purpose"]),
+                "tier": row["tier"],
+                "tier_label": MODEL_TIER_LABELS.get(row["tier"], row["tier"]),
+                "mode": row["mode"],
+                "mode_label": MODEL_SELECTION_MODE_LABELS.get(
+                    row["mode"], row["mode"]
+                ),
+                "chain": chain,
+                "superseded_chain": row["superseded_chain"],
+                "superseded_note": (
+                    None if not row["superseded_chain"] else
+                    "你选的模型都已退役，这个环节暂时按档位的默认链走："
+                    + "、".join(row["superseded_chain"])
+                ),
+                "last_served": None if served is None else {
+                    "model": served["profile_id"],
+                    "position": served["chain_position"],
+                    "at": served["created_at"],
+                    "cost_usd": served["estimated_cost_usd"],
+                },
+                "last_served_note": (
+                    "还没有用过这个环节" if served is None else
+                    (f"上一次是链上第 {served['chain_position']} 个模型服务的"
+                     + (f"，估算 {served['estimated_cost_usd']} 美元"
+                        if served["estimated_cost_usd"] else ""))
+                ),
+            })
+        # Everything live, in one list, because a selector that only offered
+        # what is already in some chain could never be used to choose a model
+        # the catalog lane has just registered -- which is the whole point.
+        choices = sorted(
+            (
+                {
+                    "model": profile_id,
+                    "family": profile.get("family"),
+                    "unpriced": bool(profile.get("unpriced")),
+                    "note": ("未定价：只能放在链的最后一位"
+                             if profile.get("unpriced") else None),
+                }
+                for profile_id, profile in catalogue.items()
+                if profile.get("status") != "retired"
+            ),
+            key=lambda item: item["model"],
+        )
+        return {
+            "available": True,
+            "as_of": _iso(self.clock()),
+            "schema_version": SCHEMA_VERSION,
+            "policy_version_ref": policy_ref,
+            "purposes": purposes,
+            "modes": [{"value": mode,
+                       "label": MODEL_SELECTION_MODE_LABELS.get(mode, mode)}
+                      for mode in SELECTION_MODES],
+            "choices": choices,
+            "catalog": self._model_catalog(discovery, broker is not None),
+            "notices": [{
+                "ref": notice["id"], "at": notice["created_at"],
+                "message": notice["message"],
+                "purpose": notice["purpose"],
+                "acknowledged": notice["acknowledged_by"] is not None,
+            } for notice in notices],
+            "tiers": overview["tiers"],
+        }
+
+    @staticmethod
+    def _model_catalog(discovery: Mapping[str, Any], configured: bool) -> dict[str, Any]:
+        """The three diff sets, named in the owner's words."""
+
+        if not configured or not discovery:
+            return {"available": False,
+                    "reason": "这台机器没有配 openclaw.json 的位置，所以看不到网关有什么"}
+        return {
+            "available": True,
+            "in_sync": bool(discovery.get("in_sync")),
+            "in_openclaw_not_allowed": list(discovery["in_openclaw_not_allowed"]),
+            "in_openclaw_not_allowed_note":
+                "网关上有、但还没放行给 Dalton；点「放行」写进 broker 的白名单",
+            "allowed_not_in_dalton": list(discovery["allowed_not_in_dalton"]),
+            "allowed_not_in_dalton_note":
+                "已放行、但这台机器还没登记档案；同步流水线下一个整点会自动登记",
+            "dalton_not_in_openclaw": list(discovery["dalton_not_in_openclaw"]),
+            "dalton_not_in_openclaw_note":
+                "这台机器还留着档案、网关上已经没有了；同步流水线会把它退役（不删除）",
+            "allowed_without_broker_profile":
+                list(discovery.get("allowed_without_broker_profile") or []),
+        }
+
     def _routing(self) -> dict[str, Any]:
         """P14-M: which model serves each purpose, and what it falls back to."""
 
@@ -3089,6 +3312,89 @@ class CockpitPlane:
         return {"status": status or "recorded", "verdict": verdict,
                 "verdict_label": label, "target_ref": target_ref,
                 "duplicate": status == "duplicate"}
+
+    # -- P14-M2: the three model decisions, all through the writer ---------------
+
+    def _governance(self, login: str, operation: str, params: dict[str, Any],
+                    *, failure: str) -> dict[str, Any]:
+        """One writer call as the owner's own principal (ADR-0006).
+
+        Same shape as the feedback button's: a refusal by contract reads as 400
+        so the page can say what to change, and a conflict reads as 409 so it
+        can offer a retry that might work.
+        """
+
+        actor = _subject_for_login(login)
+        try:
+            result = self.governance_call(
+                self.token_config, self.writer_socket, actor_ref=actor,
+                operation=operation, params=params)
+        except RemoteError as exc:
+            if getattr(exc, "code", None) in {"rejected", "protocol_error", "forbidden"}:
+                raise CockpitError(f"{failure}：{_reason(exc)}") from exc
+            raise CockpitConflict(f"{failure}：{_reason(exc)}") from exc
+        except GovernanceCliError as exc:
+            raise CockpitConflict(f"{failure}：{_reason(exc)}") from exc
+        return result if isinstance(result, dict) else {"status": "done"}
+
+    def select_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        """P14-M2: the owner points one calling stage at a model, or at its tier."""
+
+        from .model_selection import PURPOSE_LABELS, SELECTION_MODES
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("选择必须是一个对象")
+        purpose = _text(value.get("purpose"), "purpose", maximum=64)
+        mode = _text(value.get("mode"), "mode", maximum=32)
+        if mode not in SELECTION_MODES:
+            raise CockpitError("要么跟随档位，要么自己点名，没有第三种")
+        chain = value.get("chain") or []
+        if not isinstance(chain, list) or any(
+            not isinstance(item, str) for item in chain
+        ):
+            raise CockpitError("点名的模型必须是一串模型 id")
+        if mode == "explicit" and not chain:
+            raise CockpitError("自己点名就要至少点一个模型，第一选择排在最前")
+        params: dict[str, Any] = {"purpose": purpose, "mode": mode}
+        if mode == "explicit":
+            params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
+        result = self._governance(
+            login, "set_model_selection", params, failure="这个选择没有生效")
+        label = PURPOSE_LABELS.get(purpose, purpose)
+        self.journal.record_event(
+            kind="model_selection", title=f"你给「{label}」选了模型",
+            detail=("跟随档位" if mode == "tier" else " → ".join(chain)),
+            login=login, refs={"purpose": purpose, "mode": mode})
+        return {**result, "purpose": purpose, "label": label}
+
+    def allow_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        """P14-M2: 「放行」 -- let one of the gateway's models through to Dalton."""
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("放行请求必须是一个对象")
+        model_ref = _text(value.get("model_ref"), "model_ref", maximum=256)
+        result = self._governance(
+            login, "allow_openclaw_model", {"model_ref": model_ref},
+            failure="这个模型没有被放行")
+        self.journal.record_event(
+            kind="model_allow", title=f"你放行了模型 {model_ref}",
+            detail=result.get("reload_instruction"), login=login,
+            refs={"model_ref": model_ref,
+                  "backup_path": result.get("backup_path") or ""})
+        return result
+
+    def acknowledge_model_notice(
+        self, login: str, value: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """P14-M2: 「知道了」 on one "the model you were using has gone"."""
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("请求必须是一个对象")
+        notice_ref = _text(value.get("ref"), "ref", maximum=256)
+        result = self._governance(
+            login, "acknowledge_model_fallback_notice", {"notice_id": notice_ref},
+            failure="这条提示没有被记下")
+        return {**result, "ref": notice_ref}
 
     # -- jobs (model work off the request thread) -----------------------------------------
 
