@@ -1,0 +1,137 @@
+{
+ "artefact": {
+  "artefact_kind": "conviction_call",
+  "cited_tags": [],
+  "confidence": "medium",
+  "expected_sections": [
+   "我们的看法",
+   "市场的看法",
+   "市场错在哪",
+   "靠拢路径",
+   "预期差",
+   "可观察信号",
+   "风险回报",
+   "证伪条件"
+  ],
+  "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prior": null,
+  "question": null,
+  "ref": "conviction-call-proposal:golden-market-view-is-our-view",
+  "sections": [
+   {
+    "body": "我们看好 ACN，AI 相关重构需求真实且在成熟，增速会回到高个位数",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "我们的看法"
+   },
+   {
+    "body": "市场也认为 AI 重构需求真实，卖方普遍给增持评级，认为增速会回升",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场的看法"
+   },
+   {
+    "body": "市场还不够乐观，对 AI 的定价太保守",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场错在哪"
+   },
+   {
+    "body": "随着几个季度的业绩落地，市场会逐步认识到需求的强度",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "靠拢路径"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这个 Core 上还没有 consensus authority（P11b 未建），所以我们的预测与街上的差没有办法逐项算出来"
+    ],
+    "numbers": [],
+    "title": "预期差"
+   },
+   {
+    "body": "2026-09-25：业绩会再次确认 AI 相关订单在增长",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "可观察信号"
+   },
+   {
+    "body": "上行：增速回升带动倍数扩张，约 55% 上行\n下行：增速不回升，约 20% 下行\n对照 Playbook 标准：met——55% upside against a 50% standard",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "风险回报"
+   },
+   {
+    "body": "AI 相关订单增速低于总收入增速",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "证伪条件"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company:sec-cik:0001467373 long (6_12_months)"
+ },
+ "case_ref": "market-view-is-our-view",
+ "expected": {
+  "deterministic": {},
+  "rationale": "反例：方向与理由都与市场一致，「市场错在哪」只是「还不够乐观」——这是情绪判断不是分歧点。not_a_paraphrase_of_the_price 与 variant_view_is_variant 都低；其余字段是齐的，所以不给 0：字段齐但没有判断，正是 2 的锚点。",
+  "score_ranges": {
+   "consensus_gap_named": [
+    2,
+    3
+   ],
+   "falsifiers_bound_to_a_thesis": [
+    2,
+    3
+   ],
+   "horizon_matches_the_direction": [
+    3,
+    4
+   ],
+   "not_a_paraphrase_of_the_price": [
+    0,
+    1
+   ],
+   "pathway_is_observable": [
+    1,
+    2
+   ],
+   "risk_reward_against_the_standard": [
+    2,
+    3
+   ],
+   "variant_view_is_variant": [
+    0,
+    1
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "反例，也是这份标准存在的理由：与市场同向、同理由，只是措辞更强。机械检查抓不到它——市场看法有来源、路径有日期、证伪挂对了 thesis——所以它必须由判官抓。",
+ "rubric": "conviction_call",
+ "source": "手写；用 conviction_call.conviction_call_artefact 从手写的 ConvictionCallProposal 记录渲染，论断取自 live Core 只读副本 2026-09-09 里 ACN 的真实材料（订单时滞、GCC 内部化）"
+}

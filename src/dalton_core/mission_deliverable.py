@@ -173,6 +173,58 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
     ]
 
 
+# ADR-0008's closed vocabulary.  Imported rather than restated so a sixth
+# reason has one place to be added, and so the cockpit's label map, which
+# already renders these five, cannot drift away from the authority that
+# accepts them.
+REVISION_FIELDS: frozenset[str] = frozenset({
+    "change_reason", "evidence_refs", "reopen_ref",
+})
+
+
+def validate_revision(value: Any) -> dict[str, Any] | None:
+    """Why a version exists, or ``None`` when nobody claimed a reason.
+
+    ADR-0008: a version carries a ``change_reason`` from a closed vocabulary
+    and the exact evidence refs that occasioned it, and "a version that cannot
+    name what it learned is a rewrite".  So a reason with no refs is refused
+    here rather than stored and disbelieved later.
+    """
+
+    if value is None:
+        return None
+    from .model_forecast_driver import CHANGE_REASONS
+
+    if not isinstance(value, Mapping):
+        raise MissionDeliverableValidationError("revision must be an object")
+    unknown = sorted(set(value) - REVISION_FIELDS)
+    if unknown:
+        raise MissionDeliverableValidationError(
+            f"revision has unknown fields: {', '.join(unknown)}"
+        )
+    reason = value.get("change_reason")
+    if reason not in CHANGE_REASONS:
+        raise MissionDeliverableValidationError(
+            f"change_reason must be one of {list(CHANGE_REASONS)}"
+        )
+    refs = value.get("evidence_refs") or ()
+    if isinstance(refs, (str, bytes)) or not isinstance(refs, Sequence):
+        raise MissionDeliverableValidationError("revision evidence_refs must be a list")
+    cleaned = [_text(ref, "revision.evidence_refs[]", maximum=512) for ref in refs]
+    if not cleaned:
+        raise MissionDeliverableValidationError(
+            "a revision must name the evidence that occasioned it (ADR-0008)"
+        )
+    reopen_ref = value.get("reopen_ref")
+    if reopen_ref is not None:
+        reopen_ref = _text(reopen_ref, "revision.reopen_ref", maximum=512)
+    return {
+        "change_reason": reason,
+        "evidence_refs": list(dict.fromkeys(cleaned))[:40],
+        "reopen_ref": reopen_ref,
+    }
+
+
 def validate_section(
     section: Mapping[str, Any], *, live_claim_refs: set[str] | None = None
 ) -> dict[str, Any]:
@@ -430,6 +482,7 @@ class MissionDeliverableAuthority:
         model_invocation_refs: Sequence[str] = (),
         actor_ref: str,
         idempotency_key: str | None = None,
+        revision: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if kind not in DELIVERABLE_KINDS:
             raise MissionDeliverableValidationError(f"kind must be one of {list(DELIVERABLE_KINDS)}")
@@ -473,9 +526,20 @@ class MissionDeliverableAuthority:
             "model_invocation_refs": [str(ref)[:512] for ref in model_invocation_refs][:40],
             "actor_ref": actor_ref,
             "created_at": self.clock(),
+            # P14d / ADR-0008: why this version exists, when it exists because
+            # somebody decided it should.  ``None`` on a first draft and on the
+            # ordinary "there are new Claims" redraft, which needs no reason
+            # beyond the Claims; a value here means a human checkpoint was
+            # passed and names the refs that occasioned it.
+            "revision": validate_revision(revision),
         }
         # What the document says, without its version number or timestamp: an
         # unchanged body is a duplicate, not a new version.
+        #
+        # ``revision`` is deliberately not in the body hash.  A re-issue that
+        # produces the identical document is still a duplicate, however good
+        # the reason was: ADR-0008 refuses "a rewrite of an unchanged world",
+        # and a change_reason is not a change.
         record["body_hash"] = content_hash({
             key: record[key] for key in (
                 "kind", "subject_ref", "mission_version_ref", "mission_version_hash",
@@ -549,8 +613,10 @@ __all__ = [
     "MissionDeliverableError",
     "MissionDeliverableNotFound",
     "MissionDeliverableValidationError",
+    "REVISION_FIELDS",
     "WRITE_SCOPE",
     "unsourced_numbers",
+    "validate_revision",
     "validate_section",
     "value_tokens",
 ]

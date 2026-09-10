@@ -1,7 +1,7 @@
 # P14e 专项研究派发：inquiry 变成有预算的 BoundedPlannerLoop
 
-日期：2026-09-09（v1.2：2026-09-10 修池的日期口径、对接 C2 预算池；基线 main `7011104`）
-分支：`p14e-pool-test`（前身 `p14e-adhoc-research`）
+日期：2026-09-09（v1.3：2026-09-10 修 W2 报告第九节的四条 finding；基线 main `0fdbfab`）
+分支：`p14e-findings`（前身 `p14e-adhoc-research` → `p14e-pool-test`）
 状态：代码完成，全量测试通过；**live 未启用**，需要 owner 三步（见 §4）
 
 ---
@@ -96,9 +96,9 @@ live 特有的前置条件：
 1. **发一版 mission**，`autonomy.may_write` 加 `research_task`
    （Wave 0 已把这个词加进 `AUTOMATION_WRITE_SCOPES`，live 第 13 版没有授予）。
    缺它 → `mission_does_not_grant_research_task`。
-2. **发布 ProbeTemplate**：按 `deploy/phase8/p14e-adhoc-probe-templates-v1.json`，用
-   `publish_probe_template` 逐个发布，`actor_ref` 必须是 `human:`（本切片从不代签，测试用
-   fixture 自己发）。缺它 → `no_executable_adhoc_template_published`。
+2. **发布 ProbeTemplate**：按 `deploy/phase8/p14e-adhoc-probe-templates-v1.json`，
+   **只发 `status: active` 的那一个**（SEC filings index），`actor_ref` 必须是 `human:`
+   （本切片从不代签，测试用 fixture 自己发）。缺它 → `no_executable_adhoc_template_published`。
 3. **发一版 mandate**，`scope_refs` 覆盖 universe 五家。live 第 7 版只有
    `industry:us-it-services` 与 ACN，而最新计划的三条 inquiry 全是 EPAM / IBM / CTSH，
    现在一条都进不来（§7）。缺它 → 每条 `out_of_mandate_scope`。
@@ -126,15 +126,26 @@ owner 三条都需要——(a) 用一个执行器不接受的 `(operation, permi
 列出模板 ref，今晚就能生效、不用发版。三条任意一条命中，该模板即不可绑；全部模板都不可绑
 时授权自动回到 `no_executable_adhoc_template_published`。
 
-## 5. 三个 ProbeTemplate
+## 5. ProbeTemplate 目录：一个 active，两个 retired
 
-| template_ref | operation | permission_scope | allowed_hosts | cost（units/attempts/seconds） | 今天可绑 |
-| --- | --- | --- | --- | --- | --- |
-| `probe-template:adhoc-sec-filings-index:v1` | `get_company_facts` | `public_sec_read` | `data.sec.gov` | 1 / 2 / 120 | ✅ |
-| `probe-template:adhoc-alphaengine-search-library:v1` | `alphaengine_search_library` | `alphaengine_read` | `127.0.0.1` | 2 / 1 / 120 | ❌ 等执行器 |
-| `probe-template:adhoc-web-search:v1` | `public_web_search` | `public_web_read` | `*` | 1 / 2 / 60 | ❌ 等执行器 |
+| template_ref | operation | permission_scope | cost（units/attempts/seconds） | status |
+| --- | --- | --- | --- | --- |
+| `probe-template:adhoc-sec-filings-index:v1` | `get_company_facts` | `public_sec_read` | 1 / 2 / 120 | **active** |
+| `probe-template:adhoc-alphaengine-search-library:v1` | `alphaengine_search_library` | `alphaengine_read` | 2 / 1 / 120 | **retired** |
+| `probe-template:adhoc-web-search:v1` | `public_web_search` | `public_web_read` | 1 / 2 / 60 | **retired** |
 
-每个模板另带 `status`（`active` / `retired`）。
+**v1.3 改（finding 3）**：后两个原本挂着 `status: active` 发布，读起来像可用的能力，
+但 `_parameters_for` 只有 `get_company_facts` 一条分支，它们**永远拿不到参数、永远不会出现在
+任何 binding 里**。复核 main 上的执行器后确认：`bounded_probe_executor` 仍只跑
+`get_company_facts`，`bounded_alphaengine_probe` 仍只跑 `alphaengine_get_document`
+（`search_library` 没有对应物）。所以**不是补分支，而是把它们标成 `retired` 并写明理由**
+（`retired_reason`：`no executor: ...`）——补一条拿不到执行器的分支只会把失败推后。
+`_parameters_for` 的 `return None` 处也写下了这一条：没有执行器就没有参数可造。
+
+同时 **cockpit 投影只宣传 `bindable_templates`**：`research_task_view` 新增
+`templates` 字段，值就是可绑集合（今天只有 SEC 那一个），`grant.template_refs` 与它一致。
+目录里有、执行器跑不了的东西，不会再作为「能力」出现在 owner 面前——那正是让人以为
+「web search 已经跑过了」的路径。冒烟脚本也不再模拟发布 retired 的模板。
 
 `allowed_hosts` 与 `cost_estimate_usd` 只在清单里（Core 的模板记录是闭合形状，host 白名单由
 执行探针的 transport 强制），清单与 `research_task.ADHOC_PROBE_TEMPLATES` 由测试钉死不许漂。
@@ -142,10 +153,24 @@ owner 三条都需要——(a) 用一个执行器不接受的 `(operation, permi
 ## 6. 测试
 
 ```
-Ran 3932 tests in 391.494s
+Ran 4104 tests in 603.295s
 
-OK (skipped=1)
+FAILED (failures=14, skipped=1)
 ```
+
+**这 14 项全部在 `tests/test_rehearse_deploy.py`，且在基线 main `0fdbfab` 上原样失败**
+（`git stash` 后单跑该模块：`Ran 47 tests ... FAILED (failures=14)`）——
+`test_every_governance_record_the_script_seeds_is_in_the_list`（13 条 connector 治理记录）
+与 `test_every_shipped_schema_has_a_named_owner`，都与 P14e 无关（本切片不新增 schema、
+不新增治理记录）。除它们之外全部通过。P14e 相关模块单跑：
+
+```
+Ran 119 tests in 5.651s
+OK
+```
+
+（`tests.test_research_task` / `tests.test_mission_research_task_lane` /
+`tests.test_bounded_planner_driver` / `tests.test_agenda_control` / `tests.test_budget_pools`）
 
 `tests/test_mission_research_task_lane.py` 单跑（连跑三次）：
 
@@ -154,7 +179,7 @@ Ran 13 tests in 0.573s
 OK
 ```
 
-（合 main `7011104` 之后全量 **3,932 通过、1 跳过**；本切片 48 项。命令：
+（合 main `0fdbfab` 之后；本切片 55 项。命令：
 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）
 
 合并时 `tests/test_lane_registry.py` 取 main 那一侧：那四处字面量在 main 上已改成**包含**
@@ -213,6 +238,46 @@ mission 级绑定上，不是 `adhoc` 池；池今天是准入闸门，不是结
 tick 都要计费」这个具体故障已经关掉了：pending 的 loop 不再被问付费问题，而且它根本不会再
 卡住。
 
+## 8b. W2 报告第九节的四条 finding（v1.3 修）
+
+| # | 位置 | 改法 |
+| --- | --- | --- |
+| 1 | `bounded_planner_driver` 探针执行 | 裸 `except Exception` 收窄成 `except BoundedProbeExecutionError`；传输层异常改为**暂挂并在下一 tick 续跑** |
+| 2 | `agenda_control.serve` | 在唯一的生产构造点注入 grant resolver；resolver 从 `config.cockpit.core_db` **只读**打开 Core |
+| 3 | `research_task.ADHOC_PROBE_TEMPLATES` | 两个跑不了的模板标 `retired` + 理由；cockpit 投影只宣传可绑集合 |
+| 4 | `plan_admissions` 的拒绝理由 | 行业级 inquiry 改报 `industry_inquiry_has_no_company_probe` |
+
+**1 的关键不是收窄，是「暂挂」得是真的暂挂。** AlphaEngine 那条分支是一次 **writer RPC**，
+writer 忙 / 重启会抛普通异常；原来它和执行器的拒绝一样被写成 failed envelope，coverage item
+从此永久 `source_unavailable`。但只是「不写终态就 continue」会退回 B2 修掉的那个坑：
+round 已经准入、没有 outcome，loop 永远 pending，而 `run_once` 只为**本 tick 新准入的**
+proposal 跑探针，没人会回来收拾它。所以这次把执行那段抽成 `_advance_round(loop, round)`，
+并让 `run_once` 在 `propose_next` 返回 `pending_round` 时**拿回那个 round 继续跑**
+（`propose_next` 对 pending 的 loop 是只读的，不写任何东西；doctrine 分支 materialize 报
+「round is pending」时也落到同一条路上）。`_advance_round` 还会先看 work order 是否已有
+formal result——有就不重跑，只补记 outcome，顺带修掉「完成了但记 outcome 前崩了」那一格。
+执行器自己的拒绝（scope / operation / locator 不对）仍然是终态：那是对这枚探针的判断，
+重试不会变。两条都有测试：拒绝 → 一轮 `source_unavailable`；瞬时故障 → 本 tick
+`probe_transport_unavailable:RuntimeError` 且 `outcomes == []`，下一 tick `resumed: true`
+且同一个 `round_ref` 拿到 `observed`。
+
+**2 的两半。** `AgendaControlPlane` 一直接 `research_task_grant`，但**没有任何调用点传它**，
+所以 P14e 把写死的 `False` 换成了恒为 `False` 的表达式——注释里写着「cockpit 进程没有 Core
+句柄，所以 resolver 是注入的」，注入没做完。现在 `serve()` 唯一的生产构造点传入
+`_research_task_grant(config)`：cockpit 段没配就仍是 `None`（答案还是「否」，但理由变成
+「不知道 Core 在哪」而不是「线没接完」）；配了就用 `research_task.cockpit_grant_resolver`
+从 `core_db` **只读**读答案。为什么不能复用 `read_grant`：那条路要构造两个 authority，
+两个都会在构造时跑自己的 schema 脚本，对只读连接是不可能的。所以另写了
+`readonly_grant`，直接查两张表并用行上的 `content_hash` 校验记录；读不到、哈希对不上、
+表不存在，一律**不授权并说明原因**，绝不默认放行。每次调用现读，因为授权的两个 owner 动作
+是在 cockpit 运行期间发生的。
+
+**4 为什么只改一句话。** planner schema 明确允许 `company_ref: null`；到了绑定这一步，
+目录里唯一能绑的探针按 CIK 取数，而行业不是公司。原来报 `no_bindable_template`，读起来像
+「缺模板」，实际是「模板在，但它按公司取数」。真要支持得有一个不按 CIK 取数的行业探针，
+那是独立的一块活（行业是独立主体、证据不属于任何一家公司——见 W2 报告第一节），不在本切片；
+这里先把理由说清楚。
+
 ## 9. 池的日期与那条「顺序相关」的测试（2026-09-10 修）
 
 `test_an_exhausted_pool_is_a_skip_...` 在全量里一度失败（`'launched' != 'skipped:pool_exhausted'`）。
@@ -249,13 +314,17 @@ tick 都要计费」这个具体故障已经关掉了：pending 的 loop 不再�
    P14e 这边只做了最小对接：cap 读 C2，`POOL_SHARE` 读 C2，lane 归池交给 `LANE_POOLS`。
    还没做的是让 `pool_state` 把 C2 已结算的 adhoc 花费也减掉（需要把日账本的连接递到
    lane / CLI 里）；今天两边量的是预留与结算两件事，各自都对，合并读数留给集成。
-3. **另外两个模板的执行器还没有。** web-search 与 AlphaEngine `search_library` 已入目录但不可绑。
-   要让它们可用，需在 `bounded_probe_executor` 按 `metadata.operation` 分派，或在 writer 侧
-   新增两个 `bounded_*_probe` 操作（`writer_server.py` 本切片仍禁止触碰）。B2 之后这是
-   「功能缺」而不再是「掀 tick 的安全隐患」。
+3. **另外两个模板的执行器还没有，模板已按 finding 3 撤下。** 要让 web-search /
+   AlphaEngine `search_library` 可用，需在 `bounded_probe_executor` 按 `metadata.operation`
+   分派，或在 writer 侧新增两个 `bounded_*_probe` 操作，然后把目录里的 `status` 改回
+   `active` 并给 `_parameters_for` 补分支。三件事要一起做，少一件目录就又在宣传空能力。
+5. **行业级探针**（finding 4 的下半截）：需要一个不按 CIK 取数的探针，行业级 inquiry 才有
+   下游。今天它们被诚实地拒绝，理由是 `industry_inquiry_has_no_company_probe`。
+6. **DXC 的 CIK 补零**：`company:sec-cik:001688568` → `CIK001688568`（九位，SEC 要十位）。
+   coordinator 说集成时自己修（`matched.group(1).zfill(10)`），本切片按嘱未动。
 4. **一条任务的模型开销记在哪。** C2 的 `PURPOSE_POOLS` 已经把 `research_task` /
    `adhoc_research` 指到 `adhoc` 池，`llm_planner_execute` 也按池显式携带；P14e 这边的
    `pool_state` 仍只报预留。把两个数字合成一行给 cockpit 看，是集成时的小活。
-5. **cockpit 接线。** `AgendaControlPlane(research_task_grant=...)` 的解析器需要一个能读 Core
-   的入口；`writer_server.py` 与 cockpit 两个文件本切片禁止触碰，建议集成时加一个只读操作
-   （返回 `research_task.read_grant(store)` 的 `granted` 与 `reasons`）并注入。缺省仍是「否」。
+7. ~~**cockpit 接线。**~~ **已按 finding 2 接上**：`serve()` 注入
+   `cockpit_grant_resolver(config.cockpit.core_db)`，不需要新的 writer 操作。
+   仍然要注意：cockpit 段没配 `core_db` 的部署，开关还是「否」。

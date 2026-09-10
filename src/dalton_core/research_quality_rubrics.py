@@ -750,9 +750,137 @@ WEEKLY_BRIEF = Rubric(
 )
 
 
+# P15d: the one artefact that says *do something about it*.
+#
+# Every other rubric here grades a description of the world.  This one grades a
+# recommendation, so its standards are not about completeness -- they are about
+# whether the thing is a call at all.  The owner's rule is the first criterion
+# and the reason the rest exist: 市场看涨你也看涨、市场看跌你也看跌，没有价值.
+#
+# Its mechanical half deliberately does not live in
+# ``research_quality_score.CHECKS``.  Those checks read the generic artefact --
+# sections, numbers, claim refs -- and every question worth asking about a call
+# is about the *record*: whether the market view is sourced, whether a pathway
+# step has a date, whether a falsifier belongs to a thesis the call cites.  So
+# the deterministic half is ``conviction_call.rubric_findings``, which runs over
+# the record before a proposal is written and returns the criterion ids it
+# fails; a call that fails any of them is never put in front of a person.  The
+# criteria below say ``layer="both"`` and name no shared check, which is what
+# that arrangement looks like from here.
+CONVICTION_CALL = Rubric(
+    rubric_ref="rubric:conviction-call",
+    version=1,
+    title="高 conviction call 评分标准",
+    applies_to="ConvictionCallProposal（P15d）",
+    intent=(
+        "一份 call 值不值得让人花时间裁决：它有没有说清我们与市场的差在哪、"
+        "什么可观察的事件会把市场拉过来、赌错了亏多少，以及这些是不是都由"
+        "已展示的材料承载。它不评这笔投资对不对——那是人的决定。"
+    ),
+    criteria=(
+        Criterion(
+            criterion_id="variant_view_is_variant",
+            question="这份 call 有没有分别写出我们的看法与市场的看法，并指名差在哪一点？",
+            evidence_required=(
+                "market_view 的 available 与 sources（consensus / 卖方评级 / DebateMap 的 "
+                "market_position / sales note / 大众叙事之一）、它引用的行，以及 "
+                "where_market_is_wrong 指向的那个事实、时点、传导或倍数"
+            ),
+            anchors=_anchors(
+                "只写了我们的看法，或者把市场的看法当作背景一笔带过；差异靠形容词而不是靠指认",
+                "两边都写了，但「市场错在哪」是情绪判断（太悲观 / 太乐观），没有落到一个可争论的点上",
+                "市场的看法有具名来源并引用到行；分歧落在一个具体的事实、时点、传导或倍数上，"
+                "读者可以据此判断谁对",
+            ),
+            layer="both",
+        ),
+        Criterion(
+            criterion_id="pathway_is_observable",
+            question="靠拢路径是不是由可观察的事件组成，能查到日期的都挂上了日历行？",
+            evidence_required="event_pathway 每一步的 signal、它引用的行，以及日期来自哪一条 catalyst 日历记录",
+            anchors=_anchors(
+                "路径是「随着时间推移市场会认识到」这类不可观察的说法，或者某一步没有引用",
+                "每一步都可观察，但全部没有日期，也没有说为什么日历上没有它",
+                "每一步都是一个人能看见的读数或事件；能定日的挂在日历行上并带上「日期是否由公司确认」，"
+                "定不了日的说明为什么",
+            ),
+            layer="both",
+        ),
+        Criterion(
+            criterion_id="consensus_gap_named",
+            question="预期差一节要么给出我们与街上的逐项对比，要么说明为什么这个 Core 上没有 consensus。",
+            evidence_required="consensus_gap 的 status；available 时每条 metric 的期间、双方数值与 refs；unavailable 时的 reason",
+            anchors=_anchors(
+                "既没有对比也没有说明，读起来像是我们与街上恰好一致",
+                "说了没有 consensus，但没有说缺它导致哪一句话没有量化支撑",
+                "有对比时逐项可回指；没有时明写缺口，并说明这让这份 call 的哪一部分只能定性",
+            ),
+            layer="both",
+        ),
+        Criterion(
+            criterion_id="risk_reward_against_the_standard",
+            question="上行与下行两个情形是否都写了、都有引用，并对照了 Playbook 的 risk_reward_standards？",
+            evidence_required="upside / downside 的陈述与百分比、各自的 refs，以及 standard 块里冻结策略算出的判定",
+            anchors=_anchors(
+                "只写了对了赚多少，没写错了亏多少；或者两个数字都没有材料承载",
+                "两边都写了，但没有对照标准，或者对照结果与时间跨度对不上",
+                "两边都有引用与量级；对照标准的判定是由冻结策略算出来的，不满足时如实标 not_met "
+                "并说明为什么仍然值得人看一眼",
+            ),
+            layer="both",
+        ),
+        Criterion(
+            criterion_id="falsifiers_bound_to_a_thesis",
+            question="证伪条件是否每一条都挂在这份 call 引用的某一条 thesis 上？",
+            evidence_required="falsifiers 每条的 thesis_version_ref 是否在 thesis_refs 里，以及它是否真的能推翻那条 thesis",
+            anchors=_anchors(
+                "没有证伪条件，或者证伪条件挂在一条这份 call 没有引用的 thesis 上",
+                "挂对了 thesis，但条件不可观测（「基本面恶化」），无法据以退出",
+                "每条都指名它会推翻哪条 thesis，且本身是一个可观测的读数或事件",
+            ),
+            layer="both",
+        ),
+        Criterion(
+            criterion_id="horizon_matches_the_direction",
+            question="时间跨度写明了吗？做空是否落在手册要求的 3–6 个月上？",
+            evidence_required="direction 与 time_horizon 的组合，以及它命中的那条标准",
+            anchors=_anchors(
+                "没有时间跨度，或者做空没有按手册写明交易时间跨度",
+                "写了跨度，但与所选标准不是同一件事（例如按长期复利标准评一笔催化型交易）",
+                "跨度明确，且与它被对照的那条标准是同一个口径",
+            ),
+            layer="both",
+        ),
+        Criterion(
+            criterion_id="not_a_paraphrase_of_the_price",
+            question="把这份 call 的结论换成中性语气之后，它还剩下什么是市场没有在做的？",
+            evidence_required="call 的方向与 market_view 的 lean、以及它引用的争议行是否真的处在对立面",
+            anchors=_anchors(
+                "结论与市场的看法方向一致、理由也一致，只是措辞更强",
+                "方向不同，但理由是市场已经在讨论的同一套论据，没有新的东西被指出来",
+                "方向与理由至少有一样是市场没有在计价的，并说明为什么它现在还没有被计价",
+            ),
+            layer="judge",
+        ),
+    ),
+    grading_notes=(
+        "这份标准的确定性一半在 `conviction_call.rubric_findings`，不在 `research_quality_score.CHECKS`："
+        "它问的每个问题都是关于记录本身（市场看法有没有来源、路径每一步有没有引用、证伪挂没挂上 thesis、做空的跨度对不对），"
+        "而不是关于渲染出来的正文。起草时先跑它，失败的 call 不会被提案，所以你在这里看到的 call "
+        "都已经过了那一关；你评的是论证质量，不是字段齐不齐。",
+        "risk_reward 判定为 not_met 不等于低分。手册的标准是仓位标准，不是研究标准；"
+        "如实标出不达标并说明为什么仍值得看，比把数字调到刚好达标要高分得多。",
+        "consensus 缺失是这个 Core 当前的真实状态。诚实地写「没有 consensus authority」是满分行为，"
+        "编一个市场预期不是。",
+        "自动化只能提案。不要因为「这个决定应该由模型来做」而扣分，也不要因为 call 没有给出仓位大小而扣分。",
+    ),
+)
+
+
 RUBRICS: Mapping[str, Rubric] = MappingProxyType({
     rubric.rubric_ref: rubric
-    for rubric in (INITIAL_SCREEN, ASK_ANSWER, COMPANY_DOSSIER, WEEKLY_BRIEF)
+    for rubric in (INITIAL_SCREEN, ASK_ANSWER, COMPANY_DOSSIER, WEEKLY_BRIEF,
+                   CONVICTION_CALL)
 })
 # The short names the CLI and the golden set use, so nobody has to type
 # "rubric:initial-screen" twice.
@@ -761,6 +889,7 @@ RUBRIC_ALIASES: Mapping[str, str] = MappingProxyType({
     "ask_answer": ASK_ANSWER.rubric_ref,
     "company_dossier": COMPANY_DOSSIER.rubric_ref,
     "weekly_brief": WEEKLY_BRIEF.rubric_ref,
+    "conviction_call": CONVICTION_CALL.rubric_ref,
 })
 # Spellings that resolve but are not the name.  The refs are hyphenated and the
 # short names are not, so the hyphenated form of this one is the mistake a
@@ -800,6 +929,7 @@ __all__ = [
     "CAPABILITY_DEBATE_MAP",
     "CAPABILITY_MARKET_PRICE",
     "COMPANY_DOSSIER",
+    "CONVICTION_CALL",
     "Criterion",
     "DOSSIER_SECTIONS",
     "INITIAL_SCREEN",

@@ -459,6 +459,85 @@ class AuthorityTests(unittest.TestCase):
                          ["unavailable", "unavailable"])
 
 
+class VariantViewPublishTests(unittest.TestCase):
+    """The test that should have caught it.
+
+    ``validate_variant_view``'s drafted branch dropped ``gaps`` from what it
+    returned while its own closed-shape check required it. Nothing noticed,
+    because every other test either published a dossier whose variant view was
+    ``unavailable`` (that branch kept the field) or ran the validator without
+    publishing. Between those two shapes lay the only path a real dossier
+    takes: draft the variant view, then publish it -- and it could not, ever,
+    for any company, with a message about hashes that named no field.
+
+    So the assertions here are on the *shape being preserved*, not on the
+    symptom: a validator that normalises a record is only safe if what it
+    returns validates to itself.
+    """
+
+    def setUp(self):
+        self.fixture = LedgerFixture()
+        self.addCleanup(self.fixture.close)
+        self.authority = CompanyDossierAuthority(self.fixture.store)
+
+    def test_a_dossier_with_a_drafted_variant_view_publishes(self):
+        block = variant("claim-version:v")
+        block["gaps"] = ["缺共识区间：没有卖方模型可以对照"]
+        published = self.authority.publish(body(
+            drafted_sections={"business_model": drafted("business_model", "claim-version:a")},
+            variant_block=block))
+        self.assertEqual(published["status"], "fresh")
+        stored = self.authority.dossier(published["id"])
+        self.assertEqual(stored["variant_view"]["status"], "drafted")
+        self.assertEqual(stored["variant_view"]["gaps"], block["gaps"])
+        self.assertEqual([slot["slot_id"] for slot in stored["variant_view"]["slots"]],
+                         [slot for slot in VARIANT_SLOTS if slot != "market_view"])
+
+    def test_a_variant_view_with_a_market_view_publishes_too(self):
+        published = self.authority.publish(body(
+            drafted_sections={"business_model": drafted("business_model", "claim-version:a")},
+            variant_block=variant("claim-version:v", available=True)))
+        self.assertEqual(published["status"], "fresh")
+        stored = self.authority.dossier(published["id"])
+        self.assertIn("market_view",
+                      [slot["slot_id"] for slot in stored["variant_view"]["slots"]])
+
+    def test_a_drafted_classification_publishes(self):
+        published = self.authority.publish(body(
+            drafted_sections={"business_model": drafted("business_model", "claim-version:a")},
+            classification_block=classification("claim-version:c")))
+        self.assertEqual(published["status"], "fresh")
+        stored = self.authority.dossier(published["id"])
+        self.assertEqual(stored["industry_classification"]["classification"],
+                         "contract_compounder")
+
+    def test_every_validator_returns_something_that_validates_to_itself(self):
+        # The general form of the defect. A validator normalises a record and
+        # the authority hashes what it returned; if the two disagree about the
+        # field set, the hash of the body and the body's own hash differ, and
+        # the error names a hash rather than the field that went missing.
+        from dalton_core.company_dossier import (
+            validate_classification, validate_section, validate_variant_view,
+        )
+
+        def section_of(value):
+            return validate_section(value, "sections[0]")
+
+        cases = [
+            (section_of, drafted("business_model", "claim-version:a")),
+            (section_of, unavailable("kpi_dictionary")),
+            (validate_classification, classification("claim-version:c")),
+            (validate_classification, classification()),
+            (validate_variant_view, variant("claim-version:v")),
+            (validate_variant_view, variant("claim-version:v", available=True)),
+            (validate_variant_view, variant()),
+        ]
+        for validator, value in cases:
+            once = validator(value)
+            self.assertEqual(validator(once), once,
+                             getattr(validator, "__name__", str(validator)))
+
+
 class OutputRubricTests(unittest.TestCase):
     def test_a_criterion_the_policy_never_mentions_is_a_finding(self):
         record = body(drafted_sections={

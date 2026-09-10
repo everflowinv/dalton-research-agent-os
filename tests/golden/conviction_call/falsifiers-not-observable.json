@@ -1,0 +1,137 @@
+{
+ "artefact": {
+  "artefact_kind": "conviction_call",
+  "cited_tags": [],
+  "confidence": "medium",
+  "expected_sections": [
+   "我们的看法",
+   "市场的看法",
+   "市场错在哪",
+   "靠拢路径",
+   "预期差",
+   "可观察信号",
+   "风险回报",
+   "证伪条件"
+  ],
+  "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prior": null,
+  "question": null,
+  "ref": "conviction-call-proposal:golden-falsifiers-not-observable",
+  "sections": [
+   {
+    "body": "时滞被低估，FY27 增速会高于街上的建模",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "我们的看法"
+   },
+   {
+    "body": "卖方多数把 FY27 收入增速建在 5% 附近，理由是 discretionary 支出还在收缩；DebateMap 记的 market_position 是 bear",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场的看法"
+   },
+   {
+    "body": "街上把 bookings 与收入建成同期",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场错在哪"
+   },
+   {
+    "body": "9 月 25 日的业绩会披露 book-to-bill",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "靠拢路径"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这个 Core 上还没有 consensus authority（P11b 未建），所以我们的预测与街上的差没有办法逐项算出来"
+    ],
+    "numbers": [],
+    "title": "预期差"
+   },
+   {
+    "body": "2026-09-25：业绩会披露的 book-to-bill 高于 1.1",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "可观察信号"
+   },
+   {
+    "body": "上行：约 55% 上行\n下行：约 20% 下行\n对照 Playbook 标准：met——55% upside against a 50% standard",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "风险回报"
+   },
+   {
+    "body": "基本面恶化；竞争格局变差",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "证伪条件"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company:sec-cik:0001467373 long (6_12_months)"
+ },
+ "case_ref": "falsifiers-not-observable",
+ "expected": {
+  "deterministic": {},
+  "rationale": "证伪条件挂对了 thesis（机械检查因此放行），但「基本面恶化」不可观测，没有人能据以退出。falsifiers_bound_to_a_thesis 给 1–2：挂对了是 1 分的部分，不可观测是扣掉的那部分。",
+  "score_ranges": {
+   "consensus_gap_named": [
+    3,
+    4
+   ],
+   "falsifiers_bound_to_a_thesis": [
+    1,
+    2
+   ],
+   "horizon_matches_the_direction": [
+    3,
+    4
+   ],
+   "not_a_paraphrase_of_the_price": [
+    3,
+    4
+   ],
+   "pathway_is_observable": [
+    3,
+    4
+   ],
+   "risk_reward_against_the_standard": [
+    3,
+    4
+   ],
+   "variant_view_is_variant": [
+    3,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "反例：机械半边只能问「证伪条件挂在这份 call 引用的 thesis 上吗」，问不了「它可观测吗」。这一条是判官层存在的边界。",
+ "rubric": "conviction_call",
+ "source": "手写；用 conviction_call.conviction_call_artefact 从手写的 ConvictionCallProposal 记录渲染，论断取自 live Core 只读副本 2026-09-09 里 ACN 的真实材料（订单时滞、GCC 内部化）"
+}

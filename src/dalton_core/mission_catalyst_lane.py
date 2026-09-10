@@ -11,10 +11,14 @@ literally: one child per company per calendar day, which is five calls a day
 against a free source that never agreed to serve us. Asking more often would
 buy nothing and cost the goodwill the market layer runs on.
 
-**The grant.** This lane writes dated observations about covered companies, so
-the mission has to say it may: ``observation`` in ``autonomy.may_write``. A
-mission that does not grant it gets ``ungranted`` and no child, every tick,
-which is the correct behaviour rather than a bug to route around.
+**Two grants, and they are not the same one.** Publishing the calendar needs
+``observation`` in ``autonomy.may_write``; a mission without it gets
+``ungranted`` and no child, every tick. Recording what the calendar opens is a
+write to P14a's event ledger and needs *its* scope, ``market_event``, which the
+ledger checks for itself. A mission with the first and not the second keeps a
+correct calendar and records no events, and the tick says so
+(``events_ungranted``) rather than counting it as a broken run: it is a
+permission the owner has not granted yet, not a lane that is failing.
 
 **The events.** When a confirmed date enters the P14f preview window (T-30) or
 its calibration window (T+0..T+2), or when any date moves, this lane records a
@@ -134,11 +138,6 @@ class MissionCatalystLaneCoordinator:
         self._asked: dict[str, str] = {}
         self._failures: dict[str, int] = {}
         self._failure_reason: dict[str, str] = {}
-        # Event keys already recorded in this process, so a preview window that
-        # stays open for thirty days produces one event rather than thirty.
-        # The key is deterministic and travels in the payload, so a durable
-        # check can replace this without changing what is emitted.
-        self._emitted: set[str] = set()
 
     # -- the day -----------------------------------------------------------
 
@@ -229,35 +228,36 @@ class MissionCatalystLaneCoordinator:
     def _emit(
         self, company_ref: str, moved_entry_refs: Sequence[str]
     ) -> dict[str, Any]:
-        """Record the windows this company's calendar has open today."""
+        """Record the windows this company's calendar has open today.
+
+        There is no de-duplication here and there used to be. The event
+        ledger's identity is ``(company_ref, kind, payload_hash)``, so a window
+        that stays open for a month produces the same payload every morning and
+        the ledger answers ``duplicate`` and writes nothing. A set held in this
+        process was a second answer to a question that already had one, and it
+        was the worse answer: it forgot everything on restart, so the first
+        tick after a deploy re-recorded every open window.
+        """
 
         from .catalyst_calendar import emit_calendar_events  # noqa: PLC0415
 
         latest = self.authority.latest_version(company_ref)
         if latest is None:
             return {"status": "no_calendar", "emitted": []}
+        if self.record_event is None:
+            return {
+                "status": "events_unwired", "emitted": [], "recorded_count": 0,
+                "reason": (
+                    "no ResearchEvent writer is wired to this lane; no window "
+                    "this calendar opens is being recorded"
+                ),
+            }
         recorded: list[dict[str, Any]] = []
 
         def writer(**event: Any) -> Any:
-            """Write one event, and remember it the instant it is written.
-
-            Marking the whole batch afterwards was wrong in the case that
-            matters: a company with a preview and a date change gets two, and
-            if the second one raised, the first was recorded and forgotten --
-            so the next day's tick wrote it again. Whatever the writer accepted
-            is marked before anything else can fail.
-            """
-
-            if self.record_event is not None:
-                result = self.record_event(**event)
-                self._emitted.add(event["payload"]["event_key"])
-                recorded.append(event)
-                return result
-            # Nothing was written, so nothing is marked. The windows keep
-            # showing up in the tick summary until a writer is wired, which is
-            # the nagging this state deserves.
+            result = self.record_event(**event)
             recorded.append(event)
-            return None
+            return result
 
         try:
             emitted = emit_calendar_events(
@@ -267,25 +267,31 @@ class MissionCatalystLaneCoordinator:
                 now=self.clock(),
                 version_ref=latest["id"],
                 moved_entry_refs=moved_entry_refs,
-                is_emitted=self._emitted.__contains__,
             )
         except Exception as exc:  # noqa: BLE001 - one company, not the tick
+            reason = f"{type(exc).__name__}: {exc}"
+            # A mission that has not granted the event scope is the expected
+            # state of a Core the owner has not published a new mission for. It
+            # is not a broken lane, it is a missing permission, and calling it
+            # a failure would spend this company's retry budget on it.
+            status = "events_ungranted" if "may_write" in reason or (
+                "does not grant" in reason) else "failed"
             return {
-                "status": "failed", "reason": f"{type(exc).__name__}: {exc}",
-                # What did get written before it broke, so a reader can tell a
-                # run that emitted nothing from one that emitted half.
+                "status": status, "reason": reason,
+                # What did get written before it stopped, so a reader can tell
+                # a run that recorded nothing from one that recorded half.
                 "emitted": [event["payload"] for event in recorded],
                 "recorded_count": len(recorded),
             }
         return {
-            "status": "recorded" if self.record_event is not None else "events_unwired",
+            "status": "recorded",
             "emitted": emitted,
-            "reason": (
-                None if self.record_event is not None else
-                "no ResearchEvent writer is wired to this lane; the windows "
-                "below opened and nothing recorded them"
-            ),
             "recorded_count": len(recorded),
+            # The resting state of an open window: asked for, already there.
+            "fresh_count": sum(
+                1 for item in emitted if item.get("status") == "fresh"),
+            "duplicate_count": sum(
+                1 for item in emitted if item.get("status") == "duplicate"),
         }
 
     # -- the tick ----------------------------------------------------------
@@ -400,6 +406,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         from .catalyst_calendar import CatalystCalendarAuthority
+        from .research_event import ResearchEventAuthority, record_event
 
         def mission() -> Any:
             pointer = server.store.connection.execute(
@@ -409,14 +416,32 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
+        # P14a's ledger, on the writer's own store, bound to the mission this
+        # tick is running under.
+        #
+        # This used to read ``record_research_event`` off the server, which no
+        # writer has ever had, so the attribute was always None and the lane
+        # reported ``events_unwired`` on every tick of its life -- a fallback
+        # that looked like wiring. The authority is built the same way this
+        # lane builds the calendar authority, which is the shape every other
+        # lane here uses and the one that cannot be absent by accident.
+        events = ResearchEventAuthority(server.store)
+
+        def record(**event: Any) -> Any:
+            current = mission()
+            if current is None:
+                raise LaneChildRejected("no mission to record an event under")
+            return record_event(
+                events, mission=current,
+                actor_ref=current["autonomy"]["automation_principal"],
+                **event,
+            )
+
         coordinator = MissionCatalystLaneCoordinator(
             authority=CatalystCalendarAuthority(server.store),
             launcher=launcher,
             mission=mission,
-            # P14a owns ``research_event.record_event``. Until the integrator
-            # binds it here, the windows are computed and reported and nothing
-            # is written -- which the tick summary says out loud.
-            record_event=getattr(server, "record_research_event", None),
+            record_event=record,
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

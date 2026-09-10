@@ -132,8 +132,26 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     "rating_change": frozenset({
         "document_ref", "source_ref", "broker", "from_rating", "to_rating", "price_target",
     }),
+    # C1: widened once a producer existed. The first five were written before
+    # the catalyst calendar did, and four of them were right; what they could
+    # not carry is which P14f window opened, which occurrence it was about, and
+    # whether the two sources for that date agree. A preview and a calibration
+    # for the same company are not the same news, and a reader that cannot tell
+    # them apart cannot act on either.
+    #
+    # ``confirmed`` stays as it was -- the Cockpit already renders it -- and
+    # ``date_confidence`` is the same fact as a word, which is what the plan
+    # asks the event to carry and what a third value would need one day.
+    # ``catalyst_calendar.calendar_event_payload`` derives both from one place.
+    #
+    # Widening a payload contract is safe only while nothing has been written
+    # under the old one, because an old row would validate under the new set
+    # and read as though it had said nothing about the new fields. Verified
+    # before the change: the live Core has no ``research_events`` table at all,
+    # so no event of any kind has ever been recorded, let alone a calendar one.
     "calendar": frozenset({
-        "event_kind", "expected_date", "confirmed", "calendar_version_ref", "source_ref",
+        "event_kind", "expected_date", "confirmed", "calendar_version_ref",
+        "source_ref", "window", "entry_ref", "date_confidence", "disagreement",
     }),
     "reconciliation": frozenset({
         "reconciliation_ref", "metric_ref", "period_end", "deviation_percent", "band",

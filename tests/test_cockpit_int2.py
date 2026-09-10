@@ -438,14 +438,55 @@ class ApprovalsTests(Int2Case):
         # same when a person is deciding, so they arrive together.
         self.assertEqual(item["reflection"]["what_happened"], "这个季度就开始了")
 
-    def test_a_checkpoint_with_no_decision_path_offers_no_buttons(self) -> None:
-        # A button that goes nowhere is worse than an item that says who owes
-        # what: the ops that decide these are on another branch.
+    def test_buttons_appear_only_where_the_decision_path_exists(self) -> None:
+        """P14b landed the ops; the page still reads the Core rather than assuming.
+
+        A button that goes nowhere is worse than an item that says who owes
+        what, so what decides whether the row offers one is the thing that
+        would have to be there for the decision to land: the append-only
+        ledger the writer's ``decide_thesis_revision_candidate`` writes to. A
+        Core whose writer predates it shows the item and says so.
+        """
+
         self.candidate()
-        item = next(i for i in self.plane.approvals()["items"]
+        bare = next(i for i in self.plane.approvals()["items"]
                     if i["kind"] == "thesis_revision_candidate")
-        self.assertEqual(item["actions"], [])
-        self.assertIn("ADR-0007", item["note"])
+        self.assertEqual(bare["actions"], [])
+        self.assertFalse(bare["needs_rationale"])
+        self.assertIn("ADR-0007", bare["note"])
+
+        with closing(sqlite3.connect(self.c.core_path)) as core:
+            core.execute(
+                "CREATE TABLE thesis_revision_decisions(decision_id TEXT PRIMARY KEY,"
+                "candidate_ref TEXT, terminal INTEGER)")
+            core.commit()
+        wired = next(i for i in self.plane.approvals()["items"]
+                     if i["kind"] == "thesis_revision_candidate")
+        self.assertEqual([a["decision"] for a in wired["actions"]],
+                         ["accept", "reject", "defer"])
+        self.assertTrue(wired["needs_rationale"])
+        self.assertNotIn("note", wired)
+
+    def test_a_deferred_candidate_stays_and_a_terminal_one_does_not(self) -> None:
+        # P14b: deferring is a decision about *when*, not about *whether*, so
+        # the row comes back. Only accept and reject close it.
+        candidate = self.candidate()
+        with closing(sqlite3.connect(self.c.core_path)) as core:
+            core.execute(
+                "CREATE TABLE thesis_revision_decisions(decision_id TEXT PRIMARY KEY,"
+                "candidate_ref TEXT, terminal INTEGER)")
+            core.execute("INSERT INTO thesis_revision_decisions VALUES(?,?,0)",
+                         ("d:defer", candidate["id"]))
+            core.commit()
+            self.assertIn(
+                "thesis_revision_candidate",
+                {i["kind"] for i in self.plane.approvals()["items"]})
+            core.execute("INSERT INTO thesis_revision_decisions VALUES(?,?,1)",
+                         ("d:reject", candidate["id"]))
+            core.commit()
+        self.assertNotIn(
+            "thesis_revision_candidate",
+            {i["kind"] for i in self.plane.approvals()["items"]})
 
     def test_a_gate_reopen_row_renders_when_a_table_exists(self) -> None:
         # Written by hand because the lane that writes them is not on this
@@ -465,7 +506,11 @@ class ApprovalsTests(Int2Case):
         item = next(i for i in self.plane.approvals()["items"]
                     if i["kind"] == "gate_reopen")
         self.assertEqual(item["title"], "一道已经过掉的闸，现在有证据说可以重开")
+        # No diff on this hand-written row, so the summary falls back to what
+        # the row does say rather than failing to render.
         self.assertEqual(item["summary"], "现在有了四个季度的纪要")
+        self.assertEqual(item["actions"], [])
+        self.assertIn("ADR-0008", item["note"])
 
     def test_a_decided_checkpoint_drops_off_when_a_decisions_table_exists(self) -> None:
         candidate = self.candidate()
