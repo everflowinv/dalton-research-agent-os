@@ -55,13 +55,24 @@ validate_model_pair "DALTON_EARNINGS" \
   "${DALTON_EARNINGS_MODEL_PROFILE:-}" "${DALTON_EARNINGS_MODEL_TIER:-}" \
   "${DALTON_EARNINGS_VERIFIER_MODEL_PROFILE:-}" "${DALTON_EARNINGS_VERIFIER_MODEL_TIER:-}"
 
-mkdir -p "$config_dir" "$runtime_dir" "$log_dir" "$launch_agents_dir"
-chmod 700 "$dalton_root" "$config_dir" "$runtime_dir" "$log_dir"
-
 if [[ ! -x "$python_source" ]]; then
   print -u2 "Python 3.11+ not found at $python_source; set PYTHON_SOURCE to an absolute executable."
   exit 2
 fi
+
+# Refuse before creating directories or stopping services unless the volume
+# can retain the current runtime and databases while pip builds and unpacks
+# the replacement. The optional reserve is bytes, so operators can add a
+# workload-specific margin without changing the audited sizing formula.
+disk_reserve_args=()
+if [[ -n "${DALTON_INSTALL_DISK_RESERVE_BYTES:-}" ]]; then
+  disk_reserve_args+=(--reserve-bytes "$DALTON_INSTALL_DISK_RESERVE_BYTES")
+fi
+"$python_source" "$repo_root/src/dalton_core/install_disk_preflight.py" \
+  --repo-root "$repo_root" --dalton-root "$dalton_root" "${disk_reserve_args[@]}"
+
+mkdir -p "$config_dir" "$runtime_dir" "$log_dir" "$launch_agents_dir"
+chmod 700 "$dalton_root" "$config_dir" "$runtime_dir" "$log_dir"
 
 # Quiesce the old runtime before replacing any installed code. The drain is
 # stdlib-only and runs from this checkout, including newly added lane types.

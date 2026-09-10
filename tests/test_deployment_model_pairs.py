@@ -138,7 +138,7 @@ class DeploymentModelPairTests(unittest.TestCase):
         script = (Path(__file__).parents[1] / "deploy/macos/install.sh").read_text("utf-8")
         # Execute the installer's actual preflight, stopping before its first
         # filesystem mutation; no service, venv or owner state is touched.
-        prefix = script.split('mkdir -p "$config_dir"', 1)[0] + '\nprint PRECHECK_OK\n'
+        prefix = script.split('disk_reserve_args=()', 1)[0] + '\nprint PRECHECK_OK\n'
         cases = [
             {"DALTON_DOSSIER_MODEL_TIER": "brain"},
             {"DALTON_DOSSIER_MODEL_TIER": "brain", "DALTON_DOSSIER_VERIFIER_MODEL_TIER": "brain"},
