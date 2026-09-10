@@ -269,6 +269,56 @@ class RoutedTranscriptPolishModelWorker:
     def _after_accounting(self, work, route, accounting):
         """Specialized tasks settle only after durable usage/cost records."""
 
+    def _complete_route_rejection(self, work, lease, route):
+        attempt_number = lease["attempt"]["attempt_number"]
+        result = self._control_result(
+            work, attempt_number, code="MODEL_ROUTE_REJECTED",
+            status="failed", route_ref=route["id"],
+        )
+        completion = self.scheduler.complete(
+            work.id, attempt_number, self.worker_ref, lease["lease_token"], result,
+            idempotency_key=f"{self.namespace}-complete:{work.id}:{attempt_number}",
+        )
+        return {"status": "failed", "route": route, "completion": completion}
+
+    def _complete_adapter_failure(self, work, lease, route, exc):
+        attempt_number = lease["attempt"]["attempt_number"]
+        retryable = isinstance(exc, BrokerConnectionError)
+        result = self._control_result(
+            work,
+            attempt_number,
+            code=(
+                "MODEL_ADAPTER_UNAVAILABLE"
+                if retryable
+                else "MODEL_ADAPTER_REJECTED"
+            ),
+            status=(
+                self._bounded_failure_status(lease) if retryable else "failed"
+            ),
+            route_ref=route["id"],
+        )
+        completion = self.scheduler.complete(
+            work.id,
+            attempt_number,
+            self.worker_ref,
+            lease["lease_token"],
+            result,
+            idempotency_key=(
+                f"{self.namespace}-complete:{work.id}:{attempt_number}"
+            ),
+        )
+        return {
+            "status": (
+                "retryable"
+                if result.status == "retryable"
+                and completion["work_state"] == "ready"
+                else "failed"
+            ),
+            "route": route,
+            "completion": completion,
+            "error_type": type(exc).__name__,
+        }
+
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -312,96 +362,130 @@ class RoutedTranscriptPolishModelWorker:
         route_replayed = recovery_route is not None
         if recovery_route is not None:
             route = recovery_route
-        else:
-            estimated_input = max(1, self.token_counter(work.question))
-            estimated_output = int(work.budget["max_output_tokens"])
-            routed = self.router.route(
-                work,
-                attempt_number=attempt_number,
-                capability="research",
-                policy_version_ref=self.routing_policy_ref,
-                credential_slot_refs=self.credential_slot_refs,
-                required_modalities=("text",),
-                required_context_tokens=estimated_input + estimated_output,
-                estimated_input_tokens=estimated_input,
-                estimated_output_tokens=estimated_output,
-                decision_kind="initial" if not prior else "retry",
-                previous_decision_ref=None if not prior else prior[-1]["id"],
-                producer_family=None,
-                purpose=self.purpose,
-                idempotency_key=(
-                    f"{self.namespace}-route:{work.id}:{attempt_number}"
-                ),
+            profile = self.router.get_profile(
+                route["selected_profile_version_ref"]
             )
-            route = routed["decision"]
-        if route["outcome"] != "selected":
-            result = self._control_result(
-                work,
-                attempt_number,
-                code="MODEL_ROUTE_REJECTED",
-                status="failed",
-                route_ref=route["id"],
-            )
-            completion = self.scheduler.complete(
-                work.id,
-                attempt_number,
-                self.worker_ref,
-                lease["lease_token"],
-                result,
-                idempotency_key=(
-                    f"{self.namespace}-complete:{work.id}:{attempt_number}"
-                ),
-            )
-            return {"status": "failed", "route": route, "completion": completion}
-        profile = self.router.get_profile(route["selected_profile_version_ref"])
-        try:
-            self._before_model_call(work, route, profile, route_replayed)
-            if route_replayed:
+            try:
+                self._before_model_call(work, route, profile, True)
                 invocation, adapter_result = self.adapter.replay(
                     work, route, profile
                 )
-            else:
-                invocation, adapter_result = self.adapter.execute(
-                    work, route, profile
+            except OpenClawModelAdapterError as exc:
+                return self._complete_adapter_failure(work, lease, route, exc)
+        else:
+            policy = self.router.get_policy(self.routing_policy_ref)
+            has_chain = bool(policy.get("fallback_chains")) or (
+                self.purpose is not None
+                and self.purpose in (policy.get("purpose_overrides") or {})
+            )
+            estimated_input = max(1, self.token_counter(work.question))
+            estimated_output = int(work.budget["max_output_tokens"])
+            if not has_chain:
+                routed = self.router.route(
+                    work,
+                    attempt_number=attempt_number,
+                    capability="research",
+                    policy_version_ref=self.routing_policy_ref,
+                    credential_slot_refs=self.credential_slot_refs,
+                    required_modalities=("text",),
+                    required_context_tokens=estimated_input + estimated_output,
+                    estimated_input_tokens=estimated_input,
+                    estimated_output_tokens=estimated_output,
+                    decision_kind="initial" if not prior else "retry",
+                    previous_decision_ref=None if not prior else prior[-1]["id"],
+                    producer_family=None,
+                    purpose=self.purpose,
+                    idempotency_key=(
+                        f"{self.namespace}-route:{work.id}:{attempt_number}"
+                    ),
                 )
-        except OpenClawModelAdapterError as exc:
-            retryable = isinstance(exc, BrokerConnectionError)
-            result = self._control_result(
-                work,
-                attempt_number,
-                code=(
-                    "MODEL_ADAPTER_UNAVAILABLE"
-                    if retryable
-                    else "MODEL_ADAPTER_REJECTED"
-                ),
-                status=(
-                    self._bounded_failure_status(lease)
-                    if retryable
-                    else "failed"
-                ),
-                route_ref=route["id"],
-            )
-            completion = self.scheduler.complete(
-                work.id,
-                attempt_number,
-                self.worker_ref,
-                lease["lease_token"],
-                result,
-                idempotency_key=(
-                    f"{self.namespace}-complete:{work.id}:{attempt_number}"
-                ),
-            )
-            return {
-                "status": (
-                    "retryable"
-                    if result.status == "retryable"
-                    and completion["work_state"] == "ready"
-                    else "failed"
-                ),
-                "route": route,
-                "completion": completion,
-                "error_type": type(exc).__name__,
-            }
+                route = routed["decision"]
+                if route["outcome"] != "selected":
+                    return self._complete_route_rejection(work, lease, route)
+                profile = self.router.get_profile(
+                    route["selected_profile_version_ref"]
+                )
+                try:
+                    self._before_model_call(work, route, profile, False)
+                    invocation, adapter_result = self.adapter.execute(
+                        work, route, profile
+                    )
+                except OpenClawModelAdapterError as exc:
+                    return self._complete_adapter_failure(work, lease, route, exc)
+            else:
+                # Imported here because the chain registry imports CockpitModel,
+                # whose extraction validator subclasses this worker.
+                from .model_fallback_chain import (
+                    classify_model_failure,
+                    execute_chain,
+                )
+
+
+                def call(route, profile):
+                    try:
+                        self._before_model_call(work, route, profile, False)
+                        value = self.adapter.execute(work, route, profile)
+                    except OpenClawModelAdapterError as exc:
+                        return {
+                            "outcome": "failed",
+                            "failure_class": classify_model_failure(exc),
+                        }
+                    # A returned envelope may represent a paid provider response.
+                    # Preserve it for the normal accounting path; only failures
+                    # before an invocation exists are safe to switch past here.
+                    return {"outcome": "served", "value": value}
+
+                chained = execute_chain(
+                    self.router,
+                    work,
+                    purpose=self.purpose or "document_extraction",
+                    capability="research",
+                    attempt_number=attempt_number,
+                    policy_version_ref=self.routing_policy_ref,
+                    credential_slot_refs=self.credential_slot_refs,
+                    required_modalities=("text",),
+                    required_context_tokens=estimated_input + estimated_output,
+                    estimated_input_tokens=estimated_input,
+                    estimated_output_tokens=estimated_output,
+                    idempotency_prefix=(
+                        f"{self.namespace}-route:{work.id}:{attempt_number}"
+                    ),
+                    call=call,
+                )
+                if chained["status"] != "served":
+                    route_ref = chained.get("route_decision_ref")
+                    if route_ref is None and chained.get("links"):
+                        route_ref = chained["links"][-1]["decision_id"]
+                    result = self._control_result(
+                        work,
+                        attempt_number,
+                        code="MODEL_CHAIN_" + chained["status"].upper(),
+                        status=self._bounded_failure_status(lease),
+                        route_ref=route_ref,
+                    )
+                    completion = self.scheduler.complete(
+                        work.id,
+                        attempt_number,
+                        self.worker_ref,
+                        lease["lease_token"],
+                        result,
+                        idempotency_key=(
+                            f"{self.namespace}-complete:{work.id}:{attempt_number}"
+                        ),
+                    )
+                    return {
+                        "status": (
+                            "retryable"
+                            if result.status == "retryable"
+                            and completion["work_state"] == "ready"
+                            else "failed"
+                        ),
+                        "chain": chained,
+                        "completion": completion,
+                    }
+                route = chained["decision"]
+                profile = chained["profile"]
+                invocation, adapter_result = chained["value"]
         if (
             route_replayed
             and adapter_result.status == "failed"

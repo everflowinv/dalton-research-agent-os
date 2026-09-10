@@ -504,6 +504,13 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             if work.metadata["execution_mode"] != "hermetic_fixture":
                 raise ResearchVerificationError("fixture cannot impersonate broker execution")
             return
+        # One Scheduler attempt may walk an approved provider fallback chain.
+        # The first link reserves the WorkOrder's full per-call ceiling; a
+        # connection/provider failure has no invocation to account, so later
+        # links reuse that durable reservation instead of creating a second
+        # paid-call identity in the same attempt.
+        if self.admission is not None and not replayed:
+            return
         from .openclaw_model_adapter import OpenClawModelAdapterError
         from .thesis_impact_budget import ThesisImpactBudgetError
         try:
@@ -536,10 +543,32 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             day = json.loads(prior["record_json"])["day"] if prior else self.clock().astimezone(timezone.utc).date().isoformat()
             if replayed and prior is None:
                 raise ResearchVerificationConflict("recovery has no original mission reservation")
+            reserve = reservation_micros(work, route, profile)
+            policy = self.router.get_policy(self.routing_policy_ref)
+            purpose_entry = (policy.get("purpose_overrides") or {}).get(
+                self.purpose
+            )
+            chain_ids = (
+                purpose_entry.get("chain", [])
+                if isinstance(purpose_entry, Mapping)
+                else []
+            )
+            for profile_id in chain_ids:
+                try:
+                    candidate = next(
+                        item for item in self.router.latest_profiles()
+                        if item["id"] == profile_id
+                    )
+                except (StopIteration, TypeError):
+                    continue
+                reserve = max(
+                    reserve,
+                    reservation_micros(work, route, candidate),
+                )
             self.admission = self.budget_store.admit(
                 policy_version_id=self.budget_policy_ref, day=day, work_order_ref=work.id,
                 attempt_number=route["attempt_number"], phase="assessment", route_decision_ref=route["id"],
-                reserved_micros=reservation_micros(work, route, profile), mission_binding=scope)
+                reserved_micros=reserve, mission_binding=scope)
             if self.admission.get("status") == "rejected":
                 # The coverage pool is spent for today. Refused before the
                 # call, like every other budget refusal on this path, but

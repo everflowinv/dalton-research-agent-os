@@ -14,6 +14,7 @@ from dalton_core.contracts import (
     WorkOrder,
 )
 from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_model_adapter import BrokerConnectionError
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, content_hash
@@ -189,6 +190,18 @@ class RecordingAdapter(FakeAdapter):
         return super().execute(work, route, selected)
 
 
+class FailFirstRecordingAdapter(RecordingAdapter):
+    def __init__(self, candidate_wire: dict, failed_profile_id: str) -> None:
+        super().__init__(candidate_wire)
+        self.failed_profile_id = failed_profile_id
+
+    def execute(self, work: WorkOrder, route: dict, selected: dict):
+        self.selected_profile_ids.append(selected["id"])
+        if selected["id"] == self.failed_profile_id:
+            raise BrokerConnectionError("fixture provider unavailable")
+        return FakeAdapter.execute(self, work, route, selected)
+
+
 class LateThenReplayAdapter(FakeAdapter):
     def __init__(self, candidate_wire: dict, advance_clock) -> None:
         super().__init__(candidate_wire)
@@ -360,17 +373,13 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
 
     def test_purpose_chain_selects_approved_profile_outside_legacy_pin(self) -> None:
-        unavailable = profile()
-        unavailable.update({
+        first = profile()
+        first.update({
             "profile_version_ref": "model-profile-version:test-transcript-busy:1",
             "id": "profile:test-transcript-busy",
             "model": "transcript-busy",
             "family": "test-transcript-busy",
             "credential_slot_ref": "credential-slot:openclaw:test-busy",
-            "availability": {
-                **unavailable["availability"],
-                "state": "unavailable",
-            },
         })
         second = profile()
         second.update({
@@ -381,7 +390,7 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             "credential_slot_ref": "credential-slot:openclaw:test-backup",
         })
         self.assertEqual(
-            self.router.register_profile(unavailable)["status"], "fresh"
+            self.router.register_profile(first)["status"], "fresh"
         )
         self.assertEqual(self.router.register_profile(second)["status"], "fresh")
         selected_policy = policy()
@@ -391,14 +400,14 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             "purpose_overrides": {
                 "document_extraction": {
                     "mode": "explicit",
-                    "chain": [unavailable["id"], second["id"]],
+                    "chain": [first["id"], second["id"]],
                 }
             },
         })
         self.assertEqual(
             self.router.register_policy(selected_policy)["status"], "fresh"
         )
-        adapter = RecordingAdapter(candidate())
+        adapter = FailFirstRecordingAdapter(candidate(), first["id"])
 
         class PurposeWorker(RoutedTranscriptPolishModelWorker):
             purpose = "document_extraction"
@@ -422,11 +431,19 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
         routed = worker.run_once(model_work)
         self.assertEqual(routed["status"], "succeeded")
         self.assertEqual(
-            adapter.selected_profile_ids, ["profile:test-transcript-backup"]
+            adapter.selected_profile_ids,
+            ["profile:test-transcript-busy", "profile:test-transcript-backup"],
         )
         self.assertEqual(
             routed["route"]["selected_profile_version_ref"],
             second["profile_version_ref"],
+        )
+        self.assertEqual(len(self.router.chain_links(work_order_id=model_work.id)), 2)
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM model_invocations"
+            ).fetchone()[0],
+            1,
         )
 
     def test_late_model_result_replays_without_second_execution(self) -> None:
