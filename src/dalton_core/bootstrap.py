@@ -74,6 +74,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("market_price_schema.sql", None),
     ("mission_deliverable_schema.sql", None),
     ("model_forecast_schema.sql", None),
+    ("prior_model_schema.sql", None),
     ("research_constitution_schema.sql", None),
     ("research_cycle_reflection_schema.sql", None),
     ("research_doctrine_schema.sql", None),
