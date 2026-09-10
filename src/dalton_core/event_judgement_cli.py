@@ -359,6 +359,12 @@ def run_judgement(
         forecast_models, model_versions = _forecast_models(store, tracked)
         admitter = research_admitter_for(store, mission)
         actor = mission["autonomy"]["automation_principal"]
+        # W4: the price authority, read once per run rather than per event.
+        # The buyback context compares what a company paid for its own shares
+        # with what they cost now, and "what they cost now" is one row per
+        # company however many events are in the batch. A Core with no price
+        # series gets an empty map and the context block says so.
+        prices, market_caps = _price_reads(store, tracked)
 
         spent = 0
         # Four calls, not two: a divergence or a revise-shaped decision owes a
@@ -378,6 +384,8 @@ def run_judgement(
                 source_table=table,
                 recent_events=events.events(company_ref=event["company_ref"], limit=40),
                 source_keys=() if policy is None else sorted(policy["cadences"]),
+                price=prices.get(event["company_ref"]),
+                market_cap=market_caps.get(event["company_ref"]),
             )
             request_id = f"{fingerprint}{event['id'].split(':', 1)[-1]}"[:32]
             decided = judge(
@@ -527,6 +535,40 @@ def run_judgement(
     finally:
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()
+
+
+def _price_reads(
+    store: DaltonStore, companies: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The latest close and market capitalisation per company, or nothing.
+
+    Read by name and defensively: the price lane is a different slice and a
+    Core that has not run it has no such table. A judgement that failed because
+    the price authority was absent would be the market data deciding whether
+    the brain gets to think.
+    """
+
+    try:
+        from .market_price import MarketPriceSeriesAuthority
+    except ImportError:  # pragma: no cover - the module ships with the package
+        return {}, {}
+    closes: dict[str, Any] = {}
+    caps: dict[str, Any] = {}
+    try:
+        prices = MarketPriceSeriesAuthority(store)
+    except Exception:  # noqa: BLE001 - no price schema on this Core
+        return {}, {}
+    for ref in companies:
+        try:
+            close = prices.latest_close(ref)
+            cap = prices.latest_observation(ref, "market_cap")
+        except Exception:  # noqa: BLE001 - one company, not the run
+            continue
+        if close is not None:
+            closes[ref] = close
+        if cap is not None:
+            caps[ref] = cap
+    return closes, caps
 
 
 def _playbook(store: DaltonStore, mission: Any) -> dict[str, Any] | None:

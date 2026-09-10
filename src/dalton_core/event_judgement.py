@@ -210,6 +210,14 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
         f"occurred_at: {event['occurred_at']}",
         *_payload_lines(event),
         f"source refs: {', '.join(event['source_refs'])}",
+        # W4: the arithmetic that turns a filing into something readable --
+        # what fraction of a director's holding they just sold, what the
+        # company paid for its own shares against what they cost now. All of
+        # it is derived from filings this Core holds, none of it is a
+        # judgement, and it is printed here rather than left to the model to
+        # infer from a payload because a model asked to divide two numbers in
+        # its head will sometimes divide them wrong and never say so.
+        *(context.get("derived_lines") or ()),
         "",
         f"## Company: {context.get('ticker') or context['company_ref']} ({context['company_ref']})",
     ]
@@ -289,6 +297,11 @@ def allowed_refs(context: Mapping[str, Any]) -> set[str]:
         value = context["event"]["payload"].get(field)
         if isinstance(value, str) and value:
             refs.add(value)
+    # W4: the derived context prints refs of its own -- the prior Form 4s in
+    # the trailing window, the Form 144 that anticipated the sale, the price
+    # version behind the close it compared against -- and a citation is
+    # permitted exactly when the prompt printed it.
+    refs.update(str(ref) for ref in (context.get("derived_refs") or ()) if ref)
     refs.update(thesis["ref"] for thesis in context.get("theses") or ())
     refs.update(driver["ref"] for driver in context.get("drivers") or ())
     refs.update(claim["ref"] for claim in context.get("claims") or ())
@@ -1707,6 +1720,78 @@ def recent_claims(
     return claims
 
 
+#: W4: which event kinds carry a derived context block, and who builds it.
+#: A kind that is not here gets no block, which is the correct behaviour for
+#: the eleven kinds whose payload already says everything there is to say.
+DERIVED_CONTEXT_KINDS: frozenset[str] = frozenset({
+    "insider_transaction", "buyback_disclosure",
+})
+
+
+def derived_context(
+    event: Mapping[str, Any],
+    *,
+    connection: sqlite3.Connection,
+    recent_events: Sequence[Mapping[str, Any]] = (),
+    price: Mapping[str, Any] | None = None,
+    market_cap: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The computed block for one event, or ``None`` when the kind has none.
+
+    Deterministic and free: every figure is arithmetic over ledgers this Core
+    already holds, so building it costs a handful of queries and no model call,
+    and the same ledger produces the same block a month later when somebody
+    re-reads the judgement and wants to check it.
+
+    Failure is a missing block and a reason, never a raised exception: a
+    judgement that cannot be made because a derived comparison could not be
+    computed would be the arithmetic deciding what gets judged.
+    """
+
+    kind = event.get("kind")
+    if kind not in DERIVED_CONTEXT_KINDS:
+        return None
+    company_ref = str(event.get("company_ref"))
+    try:
+        if kind == "insider_transaction":
+            from .insider_context import build_insider_context
+            from .insider_context import prompt_block as insider_block
+
+            built = build_insider_context(
+                event, company_events=recent_events, connection=connection
+            )
+            return {"context": built, "lines": insider_block(built),
+                    "refs": built["refs"]}
+        from .buyback_context import build_buyback_context, statement_figures
+        from .buyback_context import prompt_block as buyback_block
+        from .buyback_disclosure import transcript_mentions_buyback
+
+        built = build_buyback_context(
+            event,
+            company_events=recent_events,
+            price=price,
+            market_cap=market_cap,
+            statements=statement_figures(connection, company_ref),
+            transcript_claims=transcript_mentions_buyback(
+                connection, company_ref=company_ref,
+                document_ref=(event.get("payload") or {}).get("document_ref"),
+            ),
+        )
+        return {"context": built, "lines": buyback_block(built), "refs": built["refs"]}
+    except Exception as exc:  # noqa: BLE001 - a block that cannot be built is a
+        # missing block, not a refusal to judge the event.
+        return {
+            "context": None,
+            "lines": [
+                "",
+                f"## Derived context for this {kind} could not be built: "
+                f"{type(exc).__name__}: {exc}",
+                "Judge the event on its payload alone and say that you did.",
+            ],
+            "refs": [],
+        }
+
+
 def build_context(
     *,
     event: Mapping[str, Any],
@@ -1718,10 +1803,16 @@ def build_context(
     recent_events: Sequence[Mapping[str, Any]] = (),
     source_keys: Sequence[str] = (),
     prior_view: Sequence[Mapping[str, Any]] = (),
+    price: Mapping[str, Any] | None = None,
+    market_cap: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the one bounded call is allowed to see, and nothing else."""
 
     company_ref = event["company_ref"]
+    derived = derived_context(
+        event, connection=connection, recent_events=recent_events,
+        price=price, market_cap=market_cap,
+    )
     ticker = next(
         (member.get("ticker") for member in mission["universe"]
          if member["company_ref"] == company_ref),
@@ -1749,6 +1840,9 @@ def build_context(
         # nothing.
         "prior_view": list(prior_view or ()),
         "source_keys": list(source_keys),
+        "derived": None if derived is None else derived["context"],
+        "derived_lines": [] if derived is None else list(derived["lines"]),
+        "derived_refs": [] if derived is None else list(derived["refs"]),
     }
 
 
@@ -1954,6 +2048,7 @@ def apply_effect(
 __all__ = [
     "ACTION_VOCABULARY",
     "DECISION_ACTIONS",
+    "DERIVED_CONTEXT_KINDS",
     "EventJudgementAuthority",
     "EventJudgementConflict",
     "EventJudgementError",
@@ -1977,6 +2072,7 @@ __all__ = [
     "build_reflection_verifier_prompt",
     "build_verifier_prompt",
     "company_theses",
+    "derived_context",
     "judge",
     "market_view_rows",
     "model_drivers",

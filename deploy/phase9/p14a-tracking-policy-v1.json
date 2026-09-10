@@ -2,7 +2,7 @@
   "schema_version": "0.1",
   "policy_ref": "tracking-policy:p14a:v1",
   "title": "Daily tracking baselines and abnormal-move thresholds",
-  "note": "Baselines, not decisions. The brain may publish a TrackingCadenceVersion that changes an adjustable interval with a reason and refs; it may never change a fixed one, and it may never skip a baseline pull. Owner instruction 2026-09-09: tracking is resident once a company has passed its Initial Screen.",
+  "note": "Baselines, not decisions. The brain may publish a TrackingCadenceVersion that changes an adjustable interval with a reason and refs; it may never change a fixed one, and it may never skip a baseline pull. Owner instruction 2026-09-09: tracking is resident once a company has passed its Initial Screen. Owner instruction 2026-09-10: filings are part of daily tracking, management share sales and buyback announcements especially -- hence sec and sec-ownership are both here, both daily, both fixed.",
   "cadences": [
     {
       "source_key": "yfinance",
@@ -14,7 +14,13 @@
       "source_key": "sec",
       "interval_seconds": 86400,
       "adjustable": false,
-      "because": "8-K and the filing calendar are checked daily whatever else is happening; a filing nobody looked for is the one event a covering analyst may not miss"
+      "because": "8-K and the filing calendar are checked daily whatever else is happening; a filing nobody looked for is the one event a covering analyst may not miss. This key covers the filings index and everything derived from the block it returns: the 8-K items, the earnings-release dates, and the 10-Q/10-K Item 2 issuer-purchases table once the filing itself has been fetched. US repurchases have no faster source than this -- there is no daily buyback return in America -- so the cadence that matters for a buyback is the one that notices the 10-Q on the day it lands."
+    },
+    {
+      "source_key": "sec-ownership",
+      "interval_seconds": 86400,
+      "adjustable": false,
+      "because": "Form 4 is due within two business days of the trade, so once per trading day is enough to be never more than a day behind the filer, and more often would spend the operation's quota re-reading filings that cannot have changed. Fixed rather than adjustable for the same reason the filings index is: management selling and a 13D arriving are the two things a covering analyst may not find out about late, and the brain sets rates -- it does not decide whether we look. The lane's own run covers the gap a weekend leaves: a Monday run reads the whole window back to Friday's trades, because it derives what is unread from the filings index rather than from when it last ran."
     },
     {
       "source_key": "alphaengine",

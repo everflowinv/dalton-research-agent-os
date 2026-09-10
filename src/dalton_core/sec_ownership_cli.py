@@ -53,6 +53,7 @@ from .sec_ownership_adapter import (
     parse_form13f,
     parse_form144,
     parse_form4,
+    rule_10b5_1_checkbox,
 )
 from .sec_ownership_core import (
     BENEFICIAL_OWNERSHIP_OPERATION,
@@ -227,10 +228,25 @@ def _day(value: str | None) -> str | None:
 
 
 def _form4_events(
-    wire: dict[str, Any], *, filed_at: str | None, invocation: str, artifact_hash: str
+    wire: dict[str, Any],
+    *,
+    filed_at: str | None,
+    invocation: str,
+    artifact_hash: str,
+    plan_10b5_1: bool | None = None,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     form = wire["document_type"] + ("/A" if wire["is_amendment"] else "")
+    # W4: the filing's footnotes, named rather than copied. A payload is an
+    # index of what happened, not a second copy of the document, and the
+    # footnote that matters here -- "effected pursuant to a Rule 10b5-1 trading
+    # plan adopted on ..." -- is prose that must not be read as the checkbox.
+    # The hash makes it addressable in the spooled artifact and interpretable
+    # by nobody.
+    footnotes_hash = (
+        content_hash({"footnotes": list(wire["footnotes"])})
+        if wire["footnotes"] else None
+    )
     for owner in wire["reporting_owners"]:
         for row in wire["transactions"]:
             occurred = (
@@ -261,6 +277,11 @@ def _form4_events(
                     "shares_owned_following": row["shares_owned_following"],
                     "direct_or_indirect": row["direct_or_indirect"],
                     "issuer_name": wire["issuer_name"],
+                    # Verbatim, and ``None`` when the form has no such box.
+                    # See ``sec_ownership_adapter.rule_10b5_1_checkbox`` for
+                    # why absent is not False.
+                    "plan_10b5_1": plan_10b5_1,
+                    "footnotes_hash": footnotes_hash,
                     "invocation_ref": invocation,
                     "artifact_hash": artifact_hash,
                     # The row *and the owner it is reported for*. A joint
@@ -534,6 +555,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
             events = _form4_events(
                 wire, filed_at=args.filed_at, invocation=invocation,
                 artifact_hash=artifact.content_hash,
+                # Read from the same bytes, outside the frozen connector wire:
+                # the wire's shape is hashed into the approval this writer
+                # holds for ``form4_transactions`` and must not move.
+                plan_10b5_1=rule_10b5_1_checkbox(text),
             )
             summary["parsed_row_count"] = len(wire["transactions"])
         elif args.operation == BENEFICIAL_OWNERSHIP_OPERATION:

@@ -55,6 +55,14 @@ CONTENT_KINDS: tuple[str, ...] = (
     "news",
     "filing",
     "financial_statement",
+    # W4. Two kinds, not one, because the brain has to be able to ask for the
+    # right one. An ``ownership_filing`` says who bought or sold the company's
+    # shares (Form 4, SC 13D/G, 144, 13F); a ``buyback_disclosure`` says what
+    # the company did with its own. They come from different operations, they
+    # answer different questions, and a research decision that named "filing"
+    # for either would have chosen nothing.
+    "ownership_filing",
+    "buyback_disclosure",
     "price",
     "consensus",
     "calendar",
@@ -75,14 +83,72 @@ class SourceCapabilityError(ValueError):
 # "prefer a specific source; these two are the fallback".
 CAPABILITIES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     "sec": MappingProxyType({
-        "content_kinds": ("filing", "financial_statement"),
+        "content_kinds": (
+            "filing", "financial_statement", "buyback_disclosure",
+        ),
         "evidence_tier": "primary_filing", "markets": ("US",), "generic": False,
-        "note": "filings index and XBRL company facts; the numeric authority",
+        "note": (
+            "filings index (list_filings) and XBRL company facts; the numeric "
+            "authority. CAN deliver: every form a US issuer has filed, by "
+            "accession and date, with the item numbers on an 8-K; the 10-Q and "
+            "10-K text once a filing has been fetched, which is where the Item 2 "
+            "issuer-purchases table lives (monthly shares, average price paid, "
+            "remaining authorisation). CANNOT deliver: a daily buyback figure -- "
+            "the US has no such disclosure at all. A US repurchase is visible "
+            "only in a 10-Q/10-K Item 2 table, in an 8-K announcing a board "
+            "authorisation, or on the earnings call, and the first is up to a "
+            "quarter stale on the day it appears. Hong Kong's daily buyback "
+            "return is a different connector and is being built in parallel; "
+            "do not expect it here"
+        ),
+    }),
+    # W4. Its own row rather than a footnote on ``sec``, because the four
+    # ownership operations are approved one at a time and a brain deciding
+    # where to look needs to see them as a thing it can ask for. Same source,
+    # same politeness budget; the inventory profile is shared (see
+    # SLUG_INVENTORY_ALIASES) and the operations column is narrowed to the four
+    # this row actually describes.
+    "sec-ownership": MappingProxyType({
+        "content_kinds": ("ownership_filing",),
+        "evidence_tier": "primary_filing", "markets": ("US",), "generic": False,
+        "note": (
+            "Form 4/3/5, SC 13D/G, Form 144 and 13F for a named issuer. CAN "
+            "deliver: who bought or sold, in what role, how many shares, at what "
+            "price, what they hold afterwards, and -- on forms filed under the "
+            "2023 schema -- the Rule 10b5-1 checkbox. A Form 144 is a notice of a "
+            "*proposed* sale and is the leading indicator of the Form 4 that "
+            "follows it. CANNOT deliver: why anybody sold, whether a pre-2023 "
+            "form's sale was under a plan (the element does not exist on it), or "
+            "the holdings of the institutions that own this company -- a 13F in "
+            "an issuer's own submissions index is one the issuer filed as a "
+            "manager, not one filed about it"
+        ),
     }),
     "sec-financials": MappingProxyType({
         "content_kinds": ("financial_statement",),
         "evidence_tier": "primary_filing", "markets": ("US",), "generic": False,
         "note": "statement structure, line by line, from the filed statements",
+    }),
+    # W4. Declared so the brain can see where a *daily* buyback figure lives
+    # and that it is not here yet. The vendor's ``buybacks`` operation is the
+    # mainland A-share market-wide table (eastmoney), filtered to one issuer;
+    # it is not the HKEX daily repurchase return, which is a separate connector
+    # another agent is building. Naming both in one place is what stops a
+    # research decision reaching for the A-share table to answer a Hong Kong
+    # question.
+    "cn-hk-findata": MappingProxyType({
+        "content_kinds": (
+            "financial_statement", "filing", "buyback_disclosure",
+        ),
+        "evidence_tier": "primary_filing", "markets": ("CN", "HK"), "generic": False,
+        "note": (
+            "A-share and H-share fundamentals, shareholders, margin balance and "
+            "the market-wide buyback table. CAN deliver: announced A-share "
+            "repurchase programmes and what has been bought under them, with the "
+            "vendor's own caliber note. CANNOT deliver: a US repurchase, and not "
+            "yet the HKEX daily buyback return -- that connector is being built "
+            "in parallel and this slice does not build it"
+        ),
     }),
     "cninfo": MappingProxyType({
         "content_kinds": ("filing",), "evidence_tier": "primary_filing",
@@ -193,6 +259,31 @@ SOURCE_PLAN_ALIASES: Mapping[str, str] = MappingProxyType({
     "source:web-search": "source:public-web",
 })
 
+#: W4: slugs in this map that are served by another slug's inventory profile.
+#:
+#: ``sec-ownership`` is not a second connector. Its four operations are on the
+#: SEC template, under the SEC identity, against the same politeness budget;
+#: what makes it a row of its own here is that it answers a different question
+#: and is approved separately. So the profile is borrowed and the operation
+#: list is narrowed, rather than the row reporting ``in_inventory: false`` --
+#: which would be a false statement about an operation this Core holds an
+#: approval for.
+SLUG_INVENTORY_ALIASES: Mapping[str, str] = MappingProxyType({
+    "sec-ownership": "sec",
+})
+
+#: The operations each aliased slug actually describes. Narrowed rather than
+#: inherited: a map that told the brain ``sec-ownership`` could read company
+#: facts would be offering a capability that approval does not carry.
+SLUG_OPERATIONS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "sec-ownership": (
+        "form4_transactions", "beneficial_ownership", "form144_notices",
+        "form13f_holdings",
+    ),
+    "sec": ("list_filings", "list_official_attachments", "get_official_attachment",
+            "read_item", "get_company_facts"),
+})
+
 # Slugs that have no inventory profile yet.  Derived, so it cannot go stale.
 def _inventory() -> dict[str, Mapping[str, Any]]:
     return {definition["slug"]: definition for definition in PROFILE_DEFINITIONS}
@@ -209,7 +300,9 @@ def _quotas() -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
-def _completeness(definition: Mapping[str, Any] | None) -> str | None:
+def _completeness(
+    definition: Mapping[str, Any] | None, operations: Sequence[str] | None = None
+) -> str | None:
     """The weakest completeness any of a connector's operations promises.
 
     Weakest rather than best: a connector one of whose operations only returns
@@ -220,15 +313,36 @@ def _completeness(definition: Mapping[str, Any] | None) -> str | None:
     if definition is None:
         return None
     order = ("sampled", "bounded", "enumerated")
-    seen = [op.get("completeness") for op in definition["operations"]]
+    wanted = None if operations is None else set(operations)
+    seen = [
+        op.get("completeness") for op in definition["operations"]
+        if wanted is None or op["name"] in wanted
+    ]
     known = [value for value in seen if value in order]
     if not known:
         return None
     return min(known, key=order.index)
 
 
+def _definition_for(slug: str) -> Mapping[str, Any] | None:
+    """The inventory profile that serves this slug, following the aliases."""
+
+    inventory = _inventory()
+    return inventory.get(SLUG_INVENTORY_ALIASES.get(slug, slug))
+
+
+def _operations_for(slug: str, definition: Mapping[str, Any] | None) -> tuple[str, ...]:
+    if definition is None:
+        return ()
+    declared = SLUG_OPERATIONS.get(slug)
+    available = tuple(op["name"] for op in definition["operations"])
+    if declared is None:
+        return available
+    return tuple(name for name in declared if name in available)
+
+
 def source_ref_for(slug: str) -> str | None:
-    definition = _inventory().get(slug)
+    definition = _definition_for(slug)
     if definition is not None:
         return definition["source_ref"]
     return f"source:{slug}"
@@ -242,7 +356,7 @@ def capability(slug: str) -> dict[str, Any]:
             f"{slug!r} is not a source this map describes; "
             f"known slugs: {sorted(CAPABILITIES)}"
         )
-    definition = _inventory().get(slug)
+    definition = _definition_for(slug)
     entry = CAPABILITIES[slug]
     if entry["evidence_tier"] not in EVIDENCE_TIERS:
         raise SourceCapabilityError(f"{slug}: evidence tier is not in the frozen vocabulary")
@@ -252,16 +366,22 @@ def capability(slug: str) -> dict[str, Any]:
         "in_inventory": definition is not None,
         "source_type": None if definition is None else definition["source_type"],
         "transport": None if definition is None else definition["transport"],
-        "operations": () if definition is None else tuple(
-            op["name"] for op in definition["operations"]
-        ),
+        "operations": _operations_for(slug, definition),
         "content_kinds": tuple(entry["content_kinds"]),
         "evidence_tier": entry["evidence_tier"],
         "markets": tuple(entry["markets"]),
         "generic": bool(entry["generic"]),
-        "completeness_ceiling": _completeness(definition),
+        "completeness_ceiling": _completeness(definition, _operations_for(slug, definition)),
+        # The governed quota rows for the operations *this row* describes.
+        # An aliased slug borrows its profile and must not borrow the whole
+        # connector's quota table with it: ``sec-ownership`` showing
+        # ``get_company_facts``'s daily ceiling would be telling the brain about
+        # a budget its four operations do not spend.
         "quotas": tuple(
-            tuple(sorted(row.items())) for row in _quotas().get(slug, ())
+            tuple(sorted(row.items()))
+            for row in _quotas().get(SLUG_INVENTORY_ALIASES.get(slug, slug), ())
+            if not SLUG_OPERATIONS.get(slug)
+            or row["operation"] in SLUG_OPERATIONS[slug]
         ),
         "note": entry["note"],
     }
@@ -373,6 +493,8 @@ __all__ = [
     "CAPABILITIES",
     "CONTENT_KINDS",
     "SCHEMA_VERSION",
+    "SLUG_INVENTORY_ALIASES",
+    "SLUG_OPERATIONS",
     "SOURCE_PLAN_ALIASES",
     "SourceCapabilityError",
     "build_map",

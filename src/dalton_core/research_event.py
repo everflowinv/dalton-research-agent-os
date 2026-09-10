@@ -93,15 +93,9 @@ EVENT_KINDS: tuple[str, ...] = (
     "insider_transaction",
     "ownership_change",
     "holdings_change",
-    # W4 (and the US buy-back slice landing beside it).  A company buying its
-    # own shares is the one disclosure that is neither a person trading nor an
-    # institution repositioning: it is the issuer's own capital decision, and
-    # in Hong Kong it arrives *every trading day* under Main Board Rule
-    # 10.06(4)(a).  Its own kind rather than ``filing`` because the judgement
-    # prompt renders these fields -- shares, prices, how much of the company
-    # has now been retired -- and none of them survives a document-shaped
-    # event; and its own kind rather than ``insider_transaction`` because the
-    # buyer is the company, which has no holding to disclose.
+    # The issuer buying its own shares: HK daily returns and US quarterly
+    # purchases / board authorisations share a kind, with market and period
+    # explicit in the payload. Neither is an insider's personal transaction.
     "buyback_disclosure",
     # A company's own IR page moved.  Not a filing -- nothing was filed with
     # anybody and a marketing page is edited without a revision history -- so
@@ -198,16 +192,12 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "security_title", "shares", "price_per_share", "acquired_disposed",
         "shares_owned_following", "direct_or_indirect", "issuer_name",
         "invocation_ref", "artifact_hash", "event_key",
-        # W4.  Hong Kong's Part XV notices carry facts this payload has no
-        # field for -- the SFC capacity code the shares are held under, the
-        # short position beside the long one, the class and the issued count --
-        # and the difference between a director who owns shares and a director
-        # who is a trustee of somebody else's changes what the number means.
-        # The text is composed from the filing, carried in full on the
-        # connector's wire, and named here by its hash so that the ledger stays
-        # an index rather than a second copy of the filing.  Null on every SEC
-        # row, which have no such text.
+        # HK Part XV context not represented by scalar fields stays on the
+        # connector wire, addressed here by hash. SEC rows leave this null.
         "notes_text_hash",
+        # The SEC checkbox is distinct from legal prose in footnotes; absence
+        # is unknown, never evidence that no trading plan exists.
+        "plan_10b5_1", "footnotes_hash",
     }),
     "ownership_change": frozenset({
         "accession", "form", "is_amendment", "amendment_no",
@@ -241,6 +231,33 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "prior_quarter", "cusip", "issuer_name", "title_of_class", "put_call",
         "action", "shares", "prior_shares", "share_change", "value_usd",
         "prior_value_usd", "value_unit", "value_unit_basis",
+        "invocation_ref", "artifact_hash", "event_key",
+    }),
+    # W4. Two producers write this kind and the payload has to hold both
+    # without either pretending to be the other, which is what
+    # ``disclosure_kind`` is for:
+    #
+    # - ``issuer_purchases_table``: one monthly row of the Item 2 table in a
+    #   10-Q or 10-K. Shares bought, average price paid, how many of them were
+    #   under the announced programme, and what is left to spend. This is what
+    #   the company *did*.
+    # - ``authorisation``: a board authorisation announced in an 8-K. A new
+    #   programme or an increase to one. This is what the company *may* do, and
+    #   the two are read very differently -- an authorisation is a permission
+    #   with no obligation attached and companies let them lapse.
+    #
+    # Every figure is text, because every one of them is a filed number and a
+    # float is not what was filed. ``excerpt`` is the exact rendered text the
+    # numbers were read out of, so the verbatim check can be re-run by anyone
+    # holding the event.
+    "buyback_disclosure": frozenset({
+        "disclosure_kind", "accession", "form", "filing_date", "period_end",
+        "period_label", "shares_purchased", "average_price_paid",
+        "shares_purchased_under_plans", "remaining_authorisation",
+        "remaining_authorisation_unit", "currency",
+        "authorised_amount", "authorised_amount_unit", "authorisation_change",
+        "announced_date", "items", "exhibit",
+        "document_ref", "source_ref", "excerpt", "excerpt_hash",
         "invocation_ref", "artifact_hash", "event_key",
     }),
     "ir_page_change": frozenset({
@@ -279,8 +296,8 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     "insider_transaction": "primary_filing",
     "ownership_change": "primary_filing",
     "holdings_change": "primary_filing",
-    # Filed with the exchange by the company itself, under a rule that makes
-    # the filing compulsory the next morning.
+    # Exchange returns and SEC issuer-purchase filings are primary filings,
+    # which does not grant admission as a financial statement line.
     "buyback_disclosure": "primary_filing",
     # The company speaking in its own voice on its own site.
     "ir_page_change": "management_direct",

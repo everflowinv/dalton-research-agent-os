@@ -46,6 +46,7 @@ from .research_event import (
     reconciliation_event_candidates,
     record_event,
 )
+from .buyback_disclosure import buyback_event_candidates
 from .store import DaltonStore
 from .tracking_cadence import (
     TrackingCadenceAuthority,
@@ -216,6 +217,15 @@ def company_events(
     candidates += reconciliation_event_candidates(
         connection, company_ref=company_ref, now=now, lookback_days=lookback_days,
     )
+    # W4: what the company did with its own shares. Not windowed by
+    # ``lookback_days`` like the three above, and deliberately: a US issuer
+    # discloses repurchases once a quarter in a 10-Q, so a seven-day window
+    # would see the table on exactly the days the filing landed and never
+    # again. The scan is bounded by the number of filings held instead, and
+    # re-reading one costs a lookup because the ledger is idempotent on what
+    # the event says.
+    buybacks = buyback_event_candidates(connection, company_ref=company_ref)
+    candidates += buybacks["events"]
     for candidate in candidates:
         candidate.setdefault("company_ref", company_ref)
     return candidates
