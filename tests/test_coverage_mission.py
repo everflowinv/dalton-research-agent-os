@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import unittest
+from datetime import datetime, timedelta
 
 from dalton_core.coverage_mission import (
     CoverageMissionAuthority,
     CoverageMissionConflict,
     CoverageMissionNotFound,
     CoverageMissionValidationError,
+    fold_stage_status,
     validate_coverage_mission_version,
     validate_mission_stage_claim,
     validate_mission_stage_record,
@@ -31,7 +33,9 @@ CTSH = "company:sec-cik:0001058290"
 AUTOMATION = "automation:coverage-mission"
 
 
-class CoverageMissionTests(unittest.TestCase):
+class MissionHarness(unittest.TestCase):
+    """A Core with the method authorities bootstrapped and one mission to publish."""
+
     def setUp(self) -> None:
         self.store = DaltonStore(":memory:")
         self.addCleanup(self.store.close)
@@ -57,6 +61,8 @@ class CoverageMissionTests(unittest.TestCase):
             idempotency_key=key or f"{company}:{stage_ref}:{status}:{actor}",
         )
 
+
+class CoverageMissionTests(MissionHarness):
     def test_manifest_creates_mission_and_replays(self) -> None:
         mission = self.create()
         self.assertEqual(mission["status"], "fresh")
@@ -316,6 +322,266 @@ class CoverageMissionTests(unittest.TestCase):
                 "UPDATE coverage_mission_pointer SET content_hash='x' WHERE mission_ref=?",
                 (mission["mission_ref"],),
             )
+
+
+class StageLadderAcrossVersionsTests(MissionHarness):
+    """P14-S: a stage state is a fact about (mission_ref, company).
+
+    The live mission rolled v7 -> v13 in two days and each roll left the
+    ladder looking empty: every version carries its own five ``entered`` rows
+    and only v13 carries the four ``gate_passed``.  These pin the rule that
+    the version is provenance and the state carries forward.
+    """
+
+    def roll(self, prior, number: int):
+        """Publish the next version of the same mission and return it."""
+
+        return self.create(
+            version_id=f"coverage-mission-version:us-it-services:{number}",
+            idempotency_key=f"coverage-mission:us-it-services:{number}",
+            prior_version_ref=prior["id"],
+            title=f"v{number}",
+        )
+
+    def test_the_fold_rules_are_last_decision_wins_and_entered_never_supersedes(self) -> None:
+        self.assertIsNone(fold_stage_status([]))
+        self.assertEqual(fold_stage_status(["entered"]), "entered")
+        self.assertEqual(fold_stage_status(["entered", "gate_failed"]), "gate_failed")
+        self.assertEqual(
+            fold_stage_status(["entered", "gate_failed", "gate_passed"]), "gate_passed"
+        )
+        # A reopen: the later gate_failed supersedes the earlier gate_passed.
+        self.assertEqual(
+            fold_stage_status(["entered", "gate_passed", "gate_failed"]), "gate_failed"
+        )
+        # A new version re-seeding ``entered`` cannot walk a decision back.
+        self.assertEqual(
+            fold_stage_status(["entered", "gate_passed", "entered"]), "gate_passed"
+        )
+
+    def test_a_gate_passed_two_versions_ago_still_opens_the_next_stage(self) -> None:
+        # P12d's shape, end to end: the screen passes under v1, the owner rolls
+        # the mission twice, and the deep-insight decision is taken under v3.
+        # Before P14-S the enter was refused with "deep_insight_gate cannot be
+        # entered before initial_screen gate_passed" -- on a company that had
+        # demonstrably passed it -- and the decision died with it.
+        first = self.create()
+        self.stage(first, ACN, "initial_screen", "entered")
+        self.stage(
+            first, ACN, "initial_screen", "gate_passed",
+            evidence=["artifact-version:acn-initial-screen-v1"],
+        )
+        second = self.roll(first, 2)
+        third = self.roll(second, 3)
+
+        def decide_deep_insight_gate(mission, *, company_ref, passed, evidence):
+            """A stand-in for P12d: enter the stage, then a person decides it."""
+
+            entered = self.authority.record_stage(
+                mission_version_ref=mission["id"],
+                mission_version_hash=mission["content_hash"],
+                company_ref=company_ref, stage_ref="deep_insight_gate", status="entered",
+                evidence_refs=[mission["id"]], rationale="deep insight work started",
+                actor_ref=AUTOMATION,
+                idempotency_key=f"{mission['id']}:{company_ref}:deep_insight_gate:entered",
+            )
+            decided = self.authority.record_stage(
+                mission_version_ref=mission["id"],
+                mission_version_hash=mission["content_hash"],
+                company_ref=company_ref, stage_ref="deep_insight_gate",
+                status="gate_passed" if passed else "gate_failed",
+                evidence_refs=list(evidence), rationale="the four questions are answered",
+                actor_ref=OWNER,
+                idempotency_key=f"{mission['id']}:{company_ref}:deep_insight_gate:decided",
+            )
+            return entered, decided
+
+        entered, decided = decide_deep_insight_gate(
+            third, company_ref=ACN, passed=True,
+            evidence=["artifact-version:acn-deep-insights-v1"],
+        )
+        self.assertEqual(entered["status_marker"], "fresh")
+        self.assertEqual(decided["status"], "gate_passed")
+        # The record binds the ACTIVE version, which is the provenance.
+        self.assertEqual(entered["mission_version_ref"], third["id"])
+        self.assertEqual(decided["mission_version_ref"], third["id"])
+
+        state = self.authority.current_stage_state(third["mission_ref"], ACN)
+        self.assertEqual(state["current_stage"], "deep_insight_gate")
+        self.assertEqual(state["current_status"], "gate_passed")
+        self.assertEqual(state["next_stage"], "industry_model")
+        self.assertEqual(
+            state["completed_stages"], ["initial_screen", "deep_insight_gate"]
+        )
+        # Provenance per stage: where each fact was written, not where it is read.
+        self.assertEqual(
+            state["stages"]["initial_screen"]["mission_version_ref"], first["id"]
+        )
+        self.assertEqual(state["stages"]["initial_screen"]["mission_version_number"], 1)
+        self.assertEqual(
+            state["stages"]["deep_insight_gate"]["mission_version_ref"], third["id"]
+        )
+        # ...and the per-version reader still shows only that version's rows.
+        self.assertEqual(self.authority.stage_records(second["id"], ACN), [])
+        self.assertEqual(
+            [r["status"] for r in self.authority.stage_records(first["id"], ACN)],
+            ["entered", "gate_passed"],
+        )
+        progress = self.authority.mission_progress(first["mission_ref"])
+        acn = next(item for item in progress["companies"] if item["company_ref"] == ACN)
+        self.assertEqual(acn["current_stage"], "deep_insight_gate")
+        self.assertEqual(acn["record_count"], 4)
+
+    def test_a_new_version_resets_nothing_the_company_already_did(self) -> None:
+        first = self.create()
+        self.stage(first, ACN, "initial_screen", "entered")
+        second = self.roll(first, 2)
+        # Entering again under the new version is the same fact, and refused.
+        with self.assertRaisesRegex(CoverageMissionConflict, "already entered"):
+            self.stage(second, ACN, "initial_screen", "entered", key="reseed")
+        # The gate can be decided under the new version against the old entry.
+        passed = self.stage(
+            second, ACN, "initial_screen", "gate_passed",
+            evidence=["artifact-version:acn-initial-screen-v1"],
+        )
+        self.assertEqual(passed["mission_version_ref"], second["id"])
+        third = self.roll(second, 3)
+        with self.assertRaisesRegex(CoverageMissionConflict, "already passed"):
+            self.stage(
+                third, ACN, "initial_screen", "gate_passed",
+                evidence=["artifact-version:acn-initial-screen-v2"], key="repass",
+            )
+        self.assertEqual(
+            self.authority.current_stage_state(third["mission_ref"], ACN)["current_status"],
+            "gate_passed",
+        )
+
+    def reopened(self, mission, company_ref: str, stage_ref: str) -> None:
+        """A ``gate_failed`` written after a ``gate_passed``, straight into the table.
+
+        ``record_stage`` will not write this one: a pass is terminal to the
+        writer, because reopening a gate a company has passed is a human
+        checkpoint (``gate_reopen``) and ADR-0008 gives it no automatic writer.
+        The *fold* must nonetheless get it right the day that writer exists,
+        and two live readers already depend on it -- the reopen lane must not
+        offer an already-reopened gate a second time.  So the row is written
+        the way the authority would write it, and the reading is tested.
+        """
+
+        with self.authority._transaction() as cur:
+            # One microsecond after the newest record there is, so it folds
+            # after the pass and a later real-clock write still folds after it.
+            latest = cur.execute(
+                "SELECT MAX(created_at) FROM coverage_mission_stage_records"
+            ).fetchone()[0]
+            at = (
+                datetime.fromisoformat(latest) + timedelta(microseconds=1)
+            ).isoformat(timespec="microseconds")
+            cur.execute(
+                "INSERT INTO coverage_mission_stage_records(record_id,mission_version_ref,"
+                "company_ref,stage_ref,status,actor_ref,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (f"mission-stage-record:reopen:{company_ref}:{at}", mission["id"], company_ref,
+                 stage_ref, "gate_failed", OWNER, '{"rationale":"reopened"}', "e" * 64, at),
+            )
+
+    def test_a_later_gate_failed_supersedes_an_earlier_gate_passed(self) -> None:
+        first = self.create()
+        self.stage(first, ACN, "initial_screen", "entered")
+        self.stage(
+            first, ACN, "initial_screen", "gate_passed",
+            evidence=["artifact-version:acn-initial-screen-v1"],
+        )
+        second = self.roll(first, 2)
+        self.assertEqual(
+            self.authority.current_stage_state(second["mission_ref"], ACN)["current_status"],
+            "gate_passed",
+        )
+        self.reopened(second, ACN, "initial_screen")
+        state = self.authority.current_stage_state(second["mission_ref"], ACN)
+        self.assertEqual(state["current_status"], "gate_failed")
+        self.assertEqual(state["completed_stages"], [])
+        self.assertEqual(state["next_stage"], "initial_screen")
+        # Provenance follows the fact that decided it: the roll, not the pass.
+        self.assertEqual(state["stages"]["initial_screen"]["mission_version_ref"], second["id"])
+        # A superseded pass does not open the next stage.
+        with self.assertRaisesRegex(CoverageMissionConflict, "cannot be entered before"):
+            self.stage(second, ACN, "deep_insight_gate", "entered")
+        # ...and the stage can be decided again, which is the point of a reopen.
+        self.stage(
+            second, ACN, "initial_screen", "gate_passed",
+            evidence=["artifact-version:acn-initial-screen-v2"], key="repass",
+        )
+        self.assertEqual(
+            self.authority.current_stage_state(second["mission_ref"], ACN)["current_status"],
+            "gate_passed",
+        )
+
+    def test_companies_at_or_past_crosses_versions_and_stays_monotone(self) -> None:
+        first = self.create()
+        self.stage(first, ACN, "initial_screen", "entered")
+        self.stage(first, CTSH, "initial_screen", "entered")
+        self.assertEqual(
+            self.authority.companies_at_or_past("initial_screen", first["mission_ref"]),
+            sorted([ACN, CTSH]),
+        )
+        self.assertEqual(
+            self.authority.companies_at_or_past("deep_insight_gate", first["mission_ref"]),
+            [],
+        )
+        self.stage(
+            first, ACN, "initial_screen", "gate_passed",
+            evidence=["artifact-version:acn-initial-screen-v1"],
+        )
+        second = self.roll(first, 2)
+        # Passing the screen is the same fact as being past it, and it crosses
+        # the roll: this is P14a's residency rule.
+        self.assertEqual(
+            self.authority.companies_at_or_past("deep_insight_gate", second["mission_ref"]),
+            [ACN],
+        )
+        # Monotone: a reopen does not un-reach a stage that was reached.
+        self.reopened(second, ACN, "initial_screen")
+        self.assertEqual(
+            self.authority.companies_at_or_past("deep_insight_gate", second["mission_ref"]),
+            [ACN],
+        )
+        # ...which is exactly where it differs from the current state.
+        self.assertEqual(
+            self.authority.current_stage_state(second["mission_ref"], ACN)["current_status"],
+            "gate_failed",
+        )
+
+    def test_the_folded_map_carries_every_version_in_time_order(self) -> None:
+        first = self.create()
+        self.stage(first, ACN, "initial_screen", "entered")
+        self.stage(first, ACN, "initial_screen", "gate_failed", rationale="thin")
+        second = self.roll(first, 2)
+        self.stage(
+            second, ACN, "initial_screen", "gate_passed",
+            evidence=["artifact-version:acn-initial-screen-v1"],
+        )
+        state = self.authority.stage_state_by_company(second["mission_ref"])
+        self.assertEqual(
+            state[ACN]["initial_screen"], ["entered", "gate_failed", "gate_passed"]
+        )
+        self.assertNotIn(CTSH, state)
+        history = self.authority.current_stage_state(
+            second["mission_ref"], ACN
+        )["stages"]["initial_screen"]["history"]
+        self.assertEqual(
+            [(item["status"], item["mission_version_number"]) for item in history],
+            [("entered", 1), ("gate_failed", 1), ("gate_passed", 2)],
+        )
+
+    def test_a_company_with_no_records_reads_as_never_started(self) -> None:
+        mission = self.create()
+        state = self.authority.current_stage_state(mission["mission_ref"], CTSH)
+        self.assertEqual(state["record_count"], 0)
+        self.assertEqual(state["stages"], {})
+        self.assertIsNone(state["current_stage"])
+        self.assertIsNone(state["current_status"])
+        self.assertEqual(state["next_stage"], "initial_screen")
 
 
 if __name__ == "__main__":

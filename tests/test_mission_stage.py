@@ -223,6 +223,43 @@ class StageEntryTests(StageHarness):
         self.assertEqual((company["stage"], company["stage_status"]), (FIRST_STAGE, "gate_passed"))
         self.assertEqual(company["stage_status_label"], "已通过")
 
+    def test_a_version_roll_re_seeds_nothing_and_the_ladder_carries_forward(self) -> None:
+        # P14-S. The live mission rolled v7 -> v13 in two days and each roll
+        # wrote five fresh ``initial_screen entered`` rows for the same five
+        # companies -- 30 of 41 stage records -- while the four gates that had
+        # actually passed read as unpassed under the new version.
+        self.driver().run_once()
+        first = self.missions.active_mission(self.mission_ref)
+        self.missions.record_stage(
+            mission_version_ref=first["id"], mission_version_hash=first["content_hash"],
+            company_ref=ACN, stage_ref=FIRST_STAGE, status="gate_passed",
+            evidence_refs=[first["id"]], rationale="fixture", actor_ref=AUTOMATION,
+            idempotency_key="fixture:initial-screen-pass",
+        )
+        before = len(self.missions.stage_records(first["id"]))
+
+        params = dict(self.params)
+        params.update({"version_id": "coverage-mission-version:us-it-services:2",
+                       "prior_version_ref": first["id"],
+                       "idempotency_key": "coverage-mission:us-it-services:2",
+                       "title": "v2"})
+        second = self.missions.create_mission(self.mission_ref, **params)
+
+        result = self.driver().run_once()
+        self.assertEqual((result["status"], result["entered"], result["skipped"]),
+                         ("idle", [], []),
+                         "a roll re-seeds nothing and refuses nothing")
+        self.assertEqual(self.missions.stage_records(second["id"]), [],
+                         "the new version carries no stage records of its own")
+        self.assertEqual(len(self.missions.stage_records(first["id"])), before,
+                         "and the old version's ledger is untouched")
+
+        # The checklist still reads the ladder the companies actually walked.
+        companies = {item["company_ref"]: item for item in result["missions"][0]["companies"]}
+        self.assertEqual(companies[ACN]["stage_status"], "gate_passed")
+        self.assertEqual(companies[CTSH]["stage_status"], "entered")
+        self.assertEqual({c["stage"] for c in companies.values()}, {FIRST_STAGE})
+
 
 class LaneOrderTests(StageHarness):
     def test_needs_put_the_priority_company_and_the_playbook_reading_order_first(self) -> None:
