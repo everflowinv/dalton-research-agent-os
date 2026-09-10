@@ -1,0 +1,146 @@
+{
+  "schema_version": "fund-deliverable-template-layout-0.1",
+  "sources": {
+    "workbook": {
+      "sha256": "545709e06eb0c1452cf74224d92e8ecb70bef4764f316e74595b2f41f87567b0",
+      "format": "xlsx",
+      "macro_present": false,
+      "external_link_parts": 12,
+      "external_formula_count": 0,
+      "plugin_formula_family": "Capital IQ UDF",
+      "sheet_count": 18
+    },
+    "document": {
+      "sha256": "3e38446b2797eb9bc4a0411d057a997415871562cc67704e36db44287f9b6ba7",
+      "format": "docx",
+      "rendered_pages": 71,
+      "sections": 1,
+      "inline_shapes": 37,
+      "media_parts": 52,
+      "embedded_workbooks": 15
+    }
+  },
+  "workbook": {
+    "sheet_order": [
+      "Global Comps", "TAM", "Monthly Tracking", "US Expenditure", "Raw",
+      "AMZN >>", "Valuation - AMZN", "_CIQHiddenCacheSheet",
+      "Financials - AMZN", "Driver - AMZN", "Category Analysis - AMZN",
+      "SHOP >>", "Valuation - SHOP", "Financials - SHOP", "Driver - SHOP",
+      "Shareholding - SHOP", "CIQ Comps - SHOP", "Census"
+    ],
+    "hidden_sheets": {
+      "Raw": "hidden",
+      "_CIQHiddenCacheSheet": "veryHidden"
+    },
+    "sheet_dimensions": {
+      "Global Comps": "A1:AM44",
+      "TAM": "A1:BE146",
+      "Monthly Tracking": "A1:CI96",
+      "US Expenditure": "A1:AB160",
+      "Raw": "A1:S89",
+      "AMZN >>": "A1:A1",
+      "Valuation - AMZN": "A1:Y84",
+      "_CIQHiddenCacheSheet": "A1:FM1",
+      "Financials - AMZN": "A1:BK342",
+      "Driver - AMZN": "A1:BK425",
+      "Category Analysis - AMZN": "A1:BB120",
+      "SHOP >>": "A1:A1",
+      "Valuation - SHOP": "A1:Y56",
+      "Financials - SHOP": "A1:BK199",
+      "Driver - SHOP": "A1:BK120",
+      "Shareholding - SHOP": "A1:H31",
+      "CIQ Comps - SHOP": "A1:EI23",
+      "Census": "A1:AV44"
+    },
+    "amzn": {
+      "period_axis": {
+        "annual_actual": "E:P (2014-2025)",
+        "annual_estimate": "Q:R (2026E-2027E)",
+        "annual_cagr": "T",
+        "quarterly_actual": "V:BG (1Q17-2Q26)",
+        "quarterly_estimate": "BH:BI (3Q26E-4Q26E)"
+      },
+      "sheets": {
+        "Driver - AMZN": {
+          "role": "operating assumptions and driver calculations",
+          "sections": [
+            "reported retail", "business-line revenue", "regional revenue",
+            "country mix", "goods revenue", "service revenue", "cost of sales",
+            "opex", "1P and 3P unit economics", "logistics", "AWS"
+          ],
+          "formula_templates": {
+            "retail_revenue": "=SUM(period_business_line_rows)",
+            "third_party_services": "=third_party_GMV*take_rate",
+            "prime_revenue": "=paid_members*ARPPU",
+            "annual_from_quarters": "=SUM(Q1:Q4)",
+            "quarterly_forecast": "=prior_comparable_quarter*(1+growth_assumption)"
+          }
+        },
+        "Financials - AMZN": {
+          "role": "annual and quarterly statements linked to drivers",
+          "sections": [
+            "income statement", "non-GAAP measures", "segment breakdown",
+            "cash flow statement", "balance sheet", "property and capex",
+            "consensus and earnings history"
+          ],
+          "formula_templates": {
+            "revenue": "=retail_and_subscription+AWS",
+            "operating_income": "=gross_profit+fulfillment+other_opex",
+            "net_income": "=pretax_income+tax+equity_method_activity",
+            "free_cash_flow": "=operating_cash_flow+capex",
+            "balance_check": "=assets-liabilities-equity"
+          }
+        },
+        "Valuation - AMZN": {
+          "role": "market data, consensus comparison, SOTP and target price",
+          "sections": ["market bridge", "forecast comparison", "multiples", "SOTP"],
+          "formula_templates": {
+            "enterprise_value": "=market_cap+minority_interest+debt-cash",
+            "retail_value": "=retail_metric*retail_multiple",
+            "aws_value": "=AWS_NOPAT*AWS_PE",
+            "equity_value": "=SUM(segment_values)*(1-holdco_discount)",
+            "target_price": "=equity_value/diluted_shares",
+            "discounted_target": "=future_target/(1+required_return)^year_fraction"
+          }
+        },
+        "Category Analysis - AMZN": {
+          "role": "monthly external category dataset with mix and growth calculations"
+        }
+      },
+      "style_contract_observed": {
+        "manual_inputs": "blue font",
+        "same_sheet_formulas": "predominantly black or theme font",
+        "cross_sheet_formulas": "predominantly green font",
+        "external_or_attention_cells": "red font in selected cells",
+        "section_headers": "dark blue fill with white font",
+        "zero_display": "dash",
+        "negative_display": "parentheses",
+        "amount_precision": "usually whole USD millions",
+        "percent_precision": "usually one decimal",
+        "per_share_precision": "usually two decimals"
+      }
+    }
+  },
+  "document": {
+    "main_sections": [
+      "Summary", "Company Overview", "Industry Overview", "Key Questions",
+      "Financials", "Risks", "Valuation", "Management", "Shareholding", "Tracking"
+    ],
+    "content_roles": [
+      "investment conclusion", "company and segment description", "industry map",
+      "key-question analysis", "forecast rationale", "risk analysis", "valuation",
+      "management and incentives", "ownership", "monitoring plan"
+    ],
+    "layout": {
+      "page_size": "A4 portrait",
+      "rendered_pages": 71,
+      "single_cell_callout_tables": 31,
+      "inline_shapes": 37,
+      "embedded_workbooks": 15,
+      "native_hyperlinks": 0,
+      "comments": false,
+      "footnotes": false,
+      "endnotes": false
+    }
+  }
+}
