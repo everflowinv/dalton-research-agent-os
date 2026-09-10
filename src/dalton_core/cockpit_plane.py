@@ -1070,6 +1070,52 @@ class CockpitPlane:
             }
         return out
 
+    def _invariants(self, core: Any) -> dict[str, dict[str, Any]]:
+        """P17b: which outputs are missing because an economic invariant refused.
+
+        Read from the head of each verdict chain rather than from a count of
+        refusals: what a reader needs is not how often the gate fired, it is
+        whether the number they came to look at is absent right now and which
+        sentence says why. A chain whose head is a pass is not shown, because
+        an output that is there does not need a note saying it was allowed.
+        """
+
+        if not _table_exists(core, "economic_invariant_verdicts"):
+            return {}
+        from .economic_invariants import (
+            INVARIANT_LABELS, OUTPUT_KIND_LABELS, UNAVAILABLE,
+        )
+
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._rows(core,
+            "SELECT v.* FROM economic_invariant_verdicts v JOIN ("
+            "SELECT verdict_ref, MAX(version_number) AS top "
+            "FROM economic_invariant_verdicts GROUP BY verdict_ref) h "
+            "ON v.verdict_ref=h.verdict_ref AND v.version_number=h.top "
+            "WHERE v.status=? ORDER BY v.company_ref, v.output_kind",
+            (UNAVAILABLE,),
+        ):
+            record = json.loads(row["record_json"])
+            kind = str(record.get("output_kind"))
+            out.setdefault(str(record.get("company_ref")), {})[kind] = {
+                "output_kind": kind,
+                "output_kind_label": OUTPUT_KIND_LABELS.get(kind, kind),
+                "output_ref": record.get("output_ref"),
+                "status": record.get("status"),
+                "refused_at": record.get("created_at"),
+                "rule_ref": record.get("rule_ref"),
+                "reasons": list(record.get("reasons") or []),
+                "failed": [{
+                    "invariant": item.get("invariant"),
+                    "label": INVARIANT_LABELS.get(
+                        str(item.get("invariant")), item.get("invariant")),
+                    "findings": list(item.get("findings") or []),
+                } for item in (record.get("results") or [])
+                    if item.get("status") == "fail"],
+                "note": "这个产出没有发布：它没通过经济不变量检查，理由在下面逐条列出",
+            }
+        return out
+
     def _forecast(self, core: Any) -> dict[str, dict[str, Any]]:
         """P13-M2: how much of each company's model actually stands up."""
 
@@ -1591,6 +1637,7 @@ class CockpitPlane:
             market = self._market(core)
             valuation = self._valuation(core)
             forecasts = self._forecast(core)
+            invariants = self._invariants(core)
             quality = self._quality(core)
             journal = self._journal(core)
             # INT2: P14a's daily tracking, C1's calendar and P14e's tasks.
@@ -1678,6 +1725,10 @@ class CockpitPlane:
                 # P13-M2: how much of this company's forecast model stands up,
                 # counted rather than scored.
                 "model": forecasts.get(company_ref),
+                # P17b: the outputs that are absent from the three cards above
+                # because an economic invariant refused them, each with the
+                # reasons. An empty dict is the normal case and reads as one.
+                "invariants": invariants.get(company_ref) or {},
                 # Q1: what the PM has said about this company's work so far.
                 "feedback": journal["by_company"].get(company_ref),
                 # P14a 今日事件: what happened to this company, by kind, each
@@ -2793,6 +2844,10 @@ class CockpitPlane:
                 "WHERE company_ref=? ORDER BY version_number DESC", (ref,))
             if not rows:
                 raise CockpitError("这家公司还没有预测模型")
+            # P17b: a version that was refused never reached the table above,
+            # so the page would otherwise show the last version that *did*
+            # publish with nothing saying a newer one was stopped and why.
+            refused = self._invariants(core).get(ref) or {}
             record = json.loads(rows[0]["record_json"])
             history = [{
                 "version": row["version_number"], "created_at": row["created_at"],
@@ -2814,6 +2869,7 @@ class CockpitPlane:
             "readiness": readiness, "note": self._forecast_note(readiness),
             "table": render_forecast_model(record, entity_name=label),
             "history": history,
+            "invariants": refused,
         }
 
     # -- INT2: 来源 and 模型 --------------------------------------------------

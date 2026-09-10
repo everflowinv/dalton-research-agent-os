@@ -126,6 +126,7 @@ def actualize_for_report(
     ``actualize_model`` does not touch them and this does not ask it to.
     """
 
+    from .economic_invariants import EconomicInvariantRefused
     from .model_forecast_driver import (
         ForecastModelError,
         actualize_model,
@@ -152,6 +153,12 @@ def actualize_for_report(
             return {"status": "idle", "reason": "no forecast quarter has been filed yet",
                     "prior_version_ref": prior.get("id")}
         published = forecast_models.publish(body)
+    except EconomicInvariantRefused as exc:
+        # P17b: the actual arrived and the chain it lands in does not hold up.
+        # Recorded ``unavailable`` with the reasons rather than published with
+        # a filed quarter written into an impossible model.
+        return {"status": "unavailable", "reason": "; ".join(exc.report.reasons),
+                "prior_version_ref": prior.get("id")}
     except ForecastModelError as exc:
         return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
                 "prior_version_ref": prior.get("id")}

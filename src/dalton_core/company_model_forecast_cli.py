@@ -53,6 +53,7 @@ from .model_forecast_driver import (
     ForecastModelError,
     ForecastModelUnavailable,
 )
+from .economic_invariants import EconomicInvariantRefused
 from .store import DaltonStore, canonical_json
 
 SUMMARY_SCHEMA_VERSION = "0.1"
@@ -224,6 +225,18 @@ def run_model_forecast(
                 mission_version_ref=mission["id"],
                 actor_ref=mission["autonomy"]["automation_principal"],
             )
+        except EconomicInvariantRefused as exc:
+            # P17b. Not a lane failure: the gate did its job, the refusal is
+            # already on the record with every reason, and the tick succeeded
+            # in the only sense that matters -- no impossible number was
+            # published. The reasons travel in the summary so the cockpit's
+            # lane row says the same thing the company card does.
+            summary.update({
+                "status": "succeeded",
+                "forecast_status": "unavailable:economic_invariants",
+                "failure_reason": "; ".join(exc.report.reasons),
+            })
+            return summary
         except (ForecastModelUnavailable, ForecastPublishRefused) as exc:
             # Refused whole. A model whose top line could not be identified is
             # not a model with one line missing; every other line in it is a

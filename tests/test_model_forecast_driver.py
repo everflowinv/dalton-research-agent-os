@@ -933,6 +933,11 @@ class AgedOutRealisedTests(unittest.TestCase):
         revised = authority.publish(revise_assumptions(
             record, [{"driver": f"concept:{REVENUE_CONCEPT}", "period": "2027-02-28",
                       "value": "0.05", "because": "A view was taken.",
+                      # Below every quarter this company has filed, so P17b's
+                      # band invariant wants the sentence saying why.
+                      "outside_band": {
+                          "reason": "the renewal cohort behind the filed range "
+                                    "does not repeat in this quarter"},
                       "refs": [{"kind": "claim", "ref": "claim-version:x",
                                 "concept": None, "period_end": None,
                                 "accession": None}]}],

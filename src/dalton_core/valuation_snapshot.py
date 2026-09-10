@@ -720,6 +720,8 @@ class ValuationSnapshotAuthority:
         fundamental_windows: Sequence[Mapping[str, Any]],
         price_history: Sequence[Mapping[str, Any]] = (),
         share_history: Sequence[Mapping[str, Any]] = (),
+        statement_rows: Sequence[Mapping[str, Any]] = (),
+        solver_results: Sequence[Mapping[str, Any]] = (),
         actor_ref: str = ACTOR_REF,
     ) -> dict[str, Any]:
         """Compute and store one snapshot, or say it is the same as the last."""
@@ -833,6 +835,16 @@ class ValuationSnapshotAuthority:
             "actor_ref": actor_ref,
         })
         available = sum(1 for item in metrics if item["status"] == "available")
+        # P17b. ``_role_input`` checks that a trailing-year role has four
+        # components and that none repeats; it does not check that each of them
+        # is a *quarter*. Four figures that each end on a quarter end and
+        # include a nine-month year-to-date among them pass every check above
+        # and produce a price/sales wrong by the overlap. That is what this
+        # gate is for, and a failure refuses the whole snapshot.
+        from .economic_invariants import evaluate_valuation, gate
+
+        gate(self.store, evaluate_valuation(
+            wire, statement_rows=statement_rows, solver_results=solver_results))
         with self.store._transaction() as cur:
             cur.execute(
                 "INSERT INTO valuation_snapshot_versions "
