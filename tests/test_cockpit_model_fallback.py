@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Importing the lane is what registers its purpose, exactly as the lane's own
@@ -35,6 +35,17 @@ from tests.test_openclaw_catalog_reconcile import _config, _controls
 
 NOW = datetime(2026, 9, 9, 8, 0, tzinfo=timezone.utc)
 BUDGET_POLICY = "thesis-impact-day-budget-policy:p14m:1"
+
+
+class MutableClock:
+    def __init__(self, value=NOW):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += timedelta(seconds=seconds)
 
 
 class ChainAdapter:
@@ -116,15 +127,33 @@ class BusyThenAvailableAdapter(ChainAdapter):
 
 
 class CockpitChainTests(unittest.TestCase):
+    def test_capacity_retry_policy_is_closed_and_install_preserved(self) -> None:
+        retry = {"cooldown_seconds": 90, "max_recovery_epochs": 2,
+                 "scheduler_max_attempts": 4}
+        model = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy,
+                            capacity_retry=retry)
+        self.assertEqual(model.config["capacity_retry"], retry)
+        from dalton_core.budget_config_install import preserved_budget_overrides
+        path = self.root / "model-config.json"
+        path.write_text(json.dumps(model.config))
+        self.assertEqual(preserved_budget_overrides(path)["capacity_retry"], retry)
+        with self.assertRaisesRegex(Exception, "capacity retry"):
+            self._model(ChainAdapter({}), policy_version_ref=self.chain_policy,
+                        capacity_retry={"cooldown_seconds": 0,
+                                        "max_recovery_epochs": 2,
+                                        "scheduler_max_attempts": 4})
+
     def test_a_legacy_terminal_busy_failure_gets_one_versioned_recovery_identity(self) -> None:
         adapter = BusyThenAvailableAdapter({})
-        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        clock = MutableClock()
+        model = self._model(adapter, policy_version_ref=self.chain_policy, clock=clock)
         kwargs = {"purpose": "plan", "request_id": "legacy-busy-recovery",
                   "prompt": "what next?", "mission": self.mission}
         with patch("dalton_core.model_fallback_chain.classify_model_failure",
                    return_value="unclassified_failure"):
             with self.assertRaisesRegex(CockpitModelError, "unclassified_failure"):
                 model.call(**kwargs)
+        clock.advance(1800)
         answer = model.call(**kwargs)
         self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")
         with Scheduler(self.root / "scheduler.sqlite") as scheduler:
@@ -137,6 +166,69 @@ class CockpitChainTests(unittest.TestCase):
         replay = model.call(**kwargs)
         self.assertTrue(replay["replayed"])
         self.assertEqual(len(adapter.served), 2)
+
+    def test_exhausted_busy_waits_then_uses_one_configured_recovery_epoch(self) -> None:
+        adapter = ChainAdapter({
+            "profile:gpt-6-astra": {
+                "code": "BUSY", "message": "broker concurrency limit reached"}
+        })
+        clock = MutableClock()
+        retry = {"cooldown_seconds": 60, "max_recovery_epochs": 1,
+                 "scheduler_max_attempts": 3}
+        model = self._model(adapter, policy_version_ref=self.chain_policy,
+                            capacity_retry=retry, clock=clock)
+        kwargs = {"purpose": "plan", "request_id": "long-busy",
+                  "prompt": "what next?", "mission": self.mission}
+        for _ in range(3):
+            with self.assertRaisesRegex(CockpitModelError, "capacity_busy"):
+                model.call(**kwargs)
+        self.assertEqual(len(adapter.served), 3)
+        adapter.script.clear()
+        with self.assertRaisesRegex(CockpitModelError, "capacity_busy"):
+            model.call(**kwargs)
+        self.assertEqual(len(adapter.served), 3)
+        clock.advance(60)
+        answer = model.call(**kwargs)
+        self.assertEqual(len(adapter.served), 4)
+        self.assertGreater(answer["cost_micros"], 0)
+        restarted = self._model(adapter, policy_version_ref=self.chain_policy,
+                                capacity_retry=retry, clock=clock)
+        self.assertTrue(restarted.call(**kwargs)["replayed"])
+        self.assertEqual(len(adapter.served), 4)
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            charges = [row[0] for row in ledger.connection.execute(
+                "SELECT s.actual_micros FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                "ORDER BY a.created_at,a.attempt_number"
+            )]
+        self.assertEqual(len(charges), 4)
+        self.assertEqual(charges[:3], [0, 0, 0])
+        self.assertEqual(charges[3], answer["cost_micros"])
+
+    def test_configured_capacity_epochs_exhaust_without_new_identities(self) -> None:
+        adapter = ChainAdapter({
+            "profile:gpt-6-astra": {"code": "BUSY", "message": "still busy"}
+        })
+        clock = MutableClock()
+        retry = {"cooldown_seconds": 10, "max_recovery_epochs": 1,
+                 "scheduler_max_attempts": 1}
+        model = self._model(adapter, policy_version_ref=self.chain_policy,
+                            capacity_retry=retry, clock=clock)
+        kwargs = {"purpose": "plan", "request_id": "bounded-long-busy",
+                  "prompt": "what next?", "mission": self.mission}
+        with self.assertRaises(CockpitModelError):
+            model.call(**kwargs)
+        clock.advance(10)
+        with self.assertRaises(CockpitModelError):
+            model.call(**kwargs)
+        clock.advance(10)
+        with self.assertRaisesRegex(CockpitModelError, "capacity_recovery_exhausted"):
+            model.call(**kwargs)
+        self.assertEqual(len(adapter.served), 2)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            count = scheduler.connection.execute(
+                "SELECT count(*) FROM scheduler_work_orders").fetchone()[0]
+        self.assertEqual(count, 2)
 
     def test_broker_busy_retries_same_work_without_fallback_or_double_charge(self) -> None:
         adapter = BusyThenAvailableAdapter({})
@@ -266,7 +358,8 @@ class CockpitChainTests(unittest.TestCase):
         }
 
     def _model(self, adapter: ChainAdapter, *, policy_version_ref: str,
-               slots: list[str] | None = None) -> CockpitModel:
+               slots: list[str] | None = None, capacity_retry=None,
+               clock=None) -> CockpitModel:
         config = {
             "routing_policy_ref": policy_version_ref,
             "credential_slot_refs": list(slots if slots is not None else self.slots),
@@ -277,10 +370,11 @@ class CockpitChainTests(unittest.TestCase):
             "expected_agent_id": "chem",
             "budget_db": str(self.root / "budget.sqlite"),
             "budget_policy_ref": BUDGET_POLICY,
+            **({} if capacity_retry is None else {"capacity_retry": capacity_retry}),
         }
         return CockpitModel(
             config, scheduler_db=str(self.root / "scheduler.sqlite"),
-            adapter_factory=lambda router: adapter, clock=lambda: NOW,
+            adapter_factory=lambda router: adapter, clock=clock or (lambda: NOW),
             # Brain-tier models are 50 USD per million output tokens, so the
             # cockpit default of 3,000 tokens at a 0.05 USD cap is refused by
             # the WorkOrder budget before any of this is reached.

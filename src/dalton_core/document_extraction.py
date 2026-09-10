@@ -81,7 +81,8 @@ def validate_model_config(value):
     """Pure closed installation shape check; never reads a credential file."""
     required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
-    optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets"}
+    optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
+                "capacity_retry"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -105,6 +106,19 @@ def validate_model_config(value):
         resolve_run_budget(config, "validation", defaults={"max_units": 1})
     except CallBudgetError as exc:
         raise ResearchVerificationError(f"invalid model call budget: {exc}") from exc
+    if "capacity_retry" in config:
+        retry = config["capacity_retry"]
+        if not isinstance(retry, Mapping) or set(retry) != {
+                "cooldown_seconds", "max_recovery_epochs", "scheduler_max_attempts"}:
+            raise ResearchVerificationError("invalid capacity retry configuration")
+        for key, maximum in (("cooldown_seconds", 86400),
+                             ("max_recovery_epochs", 10),
+                             ("scheduler_max_attempts", 10)):
+            value = retry[key]
+            minimum = 0 if key == "max_recovery_epochs" else 1
+            if (not isinstance(value, int) or isinstance(value, bool)
+                    or not minimum <= value <= maximum):
+                raise ResearchVerificationError("invalid capacity retry configuration")
     return config
 
 

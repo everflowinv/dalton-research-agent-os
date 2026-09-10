@@ -14,6 +14,14 @@ The retry remains bounded by the Scheduler policy (`max_attempts`, currently thr
 
 The upgrade path recognizes only the exact legacy terminal envelope: `MODEL_CHAIN_EXHAUSTED` with one structured chain failure whose code is exactly `BUSY` and whose old class is `unclassified_failure`. It derives one versioned recovery request identity. It does not reopen or mutate the old Scheduler record, retry arbitrary historical failures, or recursively mint recovery identities. Codes merely containing `BUSY` remain unclassified.
 
+Longer outages use the optional closed `capacity_retry` model-config block:
+
+```json
+{"cooldown_seconds": 1800, "max_recovery_epochs": 1, "scheduler_max_attempts": 3}
+```
+
+Those values are the conservative defaults. Setup preserves an existing validated block. A capacity-only Scheduler exhaustion waits for the configured cooldown, then derives at most `max_recovery_epochs` new content-addressed work identities; the policy hash and epoch are in each identity. Each epoch has the configured finite Scheduler attempt count. Exhausting every epoch reports `capacity_recovery_exhausted`, which follows the existing transient-to-held lane bound. Restart reads the Scheduler history and therefore cannot reset either attempt or epoch limits. Arbitrary failures never enter this path.
+
 No live model call, configuration change, deployment, or budget increase was made.
 
 ## Verification

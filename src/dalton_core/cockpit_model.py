@@ -403,6 +403,32 @@ def _legacy_broker_busy_failure(formal: Mapping[str, Any] | None) -> bool:
     )
 
 
+def _capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
+    if _legacy_broker_busy_failure(formal):
+        return True
+    if not isinstance(formal, Mapping) or formal.get("terminal_state") != "failed":
+        return False
+    envelope = formal.get("result_envelope") or {}
+    failures = (envelope.get("metadata") or {}).get("chain_failures")
+    return (
+        envelope.get("error", {}).get("code") == "MODEL_CHAIN_EXHAUSTED"
+        and isinstance(failures, list)
+        and len(failures) == 1
+        and isinstance(failures[0], Mapping)
+        and failures[0].get("failure_class") == "capacity_busy"
+        and failures[0].get("code") in {
+            "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT"}
+    )
+
+
+def _capacity_retry(config: Mapping[str, Any]) -> dict[str, int]:
+    return dict(config.get("capacity_retry") or {
+        "cooldown_seconds": 1800,
+        "max_recovery_epochs": 1,
+        "scheduler_max_attempts": 3,
+    })
+
+
 def call_cost_micros(invocation: Any, route: Mapping[str, Any],
                      profile: Mapping[str, Any], reserved: int) -> tuple[int, str]:
     """What the link that actually served this call cost, and how we know.
@@ -468,6 +494,7 @@ class CockpitModel:
              producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
         base_request_id = request_id
+        capacity_retry = _capacity_retry(self.config)
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         legacy_budget = {
             "max_input_tokens": self.max_input_tokens,
@@ -540,23 +567,53 @@ class CockpitModel:
         # fast keep the policy they have.
         with Scheduler(
             self.scheduler_db,
-            policy_version_id=f"scheduler-policy-lease-{int(lease_seconds)}s-0.1",
+            clock=self.clock,
+            policy_version_id=(f"scheduler-policy-lease-{int(lease_seconds)}s-"
+                               f"attempts-{capacity_retry['scheduler_max_attempts']}-0.1"),
+            max_attempts=capacity_retry["scheduler_max_attempts"],
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
-            recovery_suffix = ":legacy-broker-busy-recovery:1"
-            if (_legacy_broker_busy_failure(formal)
-                    and not base_request_id.endswith(recovery_suffix)):
-                return self.call(
-                    purpose=purpose,
-                    request_id=base_request_id + recovery_suffix,
-                    prompt=prompt,
-                    mission=mission,
-                    producer_route_decision_refs=producer_refs,
-                )
+            capacity_terminal = formal
+            if formal is None and scheduler.status(work.id)["state"] == "failed":
+                row = scheduler.connection.execute(
+                    "SELECT result_envelope_json,created_at FROM scheduler_result_envelopes "
+                    "WHERE work_order_id=? ORDER BY attempt_number DESC LIMIT 1",
+                    (work.id,),
+                ).fetchone()
+                if row is not None:
+                    capacity_terminal = {
+                        "terminal_state": "failed",
+                        "result_envelope": json.loads(row["result_envelope_json"]),
+                        "created_at": row["created_at"],
+                    }
+            match = re.search(r":capacity-recovery:(\d+):[0-9a-f]{16}$", base_request_id)
+            epoch = int(match.group(1)) if match else 0
+            if (_capacity_busy_terminal(capacity_terminal)
+                    and epoch < capacity_retry["max_recovery_epochs"]):
+                completed_at = datetime.fromisoformat(str(capacity_terminal["created_at"]))
+                elapsed = (self.clock().astimezone(timezone.utc)
+                           - completed_at.astimezone(timezone.utc)).total_seconds()
+                if elapsed >= capacity_retry["cooldown_seconds"]:
+                    policy_hash = content_hash(capacity_retry)[:16]
+                    clean_request = (base_request_id[:match.start()] if match
+                                     else base_request_id)
+                    recovery_request = (f"{clean_request}:capacity-recovery:"
+                                        f"{epoch + 1}:{policy_hash}")
+                    return self.call(
+                        purpose=purpose,
+                        request_id=recovery_request,
+                        prompt=prompt,
+                        mission=mission,
+                        producer_route_decision_refs=producer_refs,
+                    )
+            if _capacity_busy_terminal(capacity_terminal):
+                if epoch >= capacity_retry["max_recovery_epochs"]:
+                    raise CockpitModelError("capacity_recovery_exhausted")
+                raise CockpitModelError("capacity_busy; recovery cooldown has not elapsed")
             replayed = formal is not None
             cost_micros, cost_status = 0, "replayed"
             if formal is None:
