@@ -444,7 +444,7 @@ _RECORD_FIELDS = frozenset({
     "sections", "industry_classification", "variant_view", "drafted_at",
     "bindings", "generator_ref", "actor_ref", "body_hash", "content_hash",
 })
-_RECORD_FIELDS_V2 = _RECORD_FIELDS | frozenset({"input_fingerprint"})
+_RECORD_FIELDS_V2 = _RECORD_FIELDS | frozenset({"input_fingerprints"})
 # What the chain is *about*.  Not the reason it exists, not who asked, not
 # when: two records with the same body say the same thing about the company.
 _BODY_EXCLUDED = frozenset({
@@ -455,7 +455,18 @@ _BODY_EXCLUDED = frozenset({
     # same prose would count as a different dossier purely because the clock
     # moved -- and the identical-body duplicate rule would never fire again.
     "drafted_at",
+    # Provenance metadata about what the producer saw, not dossier semantics.
+    "input_fingerprints",
 })
+
+
+def _unit_was_drafted(record: Mapping[str, Any], unit: str) -> bool:
+    if unit == CLASSIFICATION_UNIT:
+        return (record.get("industry_classification") or {}).get("status") == "drafted"
+    if unit == VARIANT_UNIT:
+        return (record.get("variant_view") or {}).get("status") == "drafted"
+    return any(item.get("aspect") == unit and item.get("status") == "drafted"
+               for item in record.get("sections") or [])
 _BINDING_FIELDS = frozenset({
     "constitution_version", "playbook_version", "mission_version_ref",
     "policy_ref", "policy_hash", "causal_chain_hash", "rubric_ref", "rubric_hash",
@@ -827,8 +838,14 @@ def validate_dossier_version(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["body_hash"] = _sha256(wire["body_hash"], "body_hash")
     wire["content_hash"] = _sha256(wire["content_hash"], "content_hash")
     if schema == SCHEMA_VERSION_INPUT_FINGERPRINT:
-        wire["input_fingerprint"] = _sha256(
-            wire["input_fingerprint"], "input_fingerprint")
+        fingerprints = wire["input_fingerprints"]
+        if not isinstance(fingerprints, Mapping) or set(fingerprints) != set(UNITS):
+            raise CompanyDossierValidationError("input_fingerprints must cover every dossier unit")
+        wire["input_fingerprints"] = {
+            unit: None if fingerprints[unit] is None else _sha256(
+                fingerprints[unit], f"input_fingerprints.{unit}")
+            for unit in UNITS
+        }
     if body_hash(wire) != wire["body_hash"]:
         raise CompanyDossierConflict("company dossier body_hash is not its body")
     base = {key: item for key, item in wire.items() if key != "content_hash"}
@@ -842,7 +859,7 @@ def body_hash(record: Mapping[str, Any]) -> str:
 
     return content_hash({
         key: value for key, value in record.items()
-        if key in _RECORD_FIELDS and key not in _BODY_EXCLUDED
+        if key in _RECORD_FIELDS_V2 and key not in _BODY_EXCLUDED
     })
 
 
@@ -1065,9 +1082,9 @@ class CompanyDossierAuthority:
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         columns = {row["name"] for row in self.connection.execute(
             "PRAGMA table_info(company_dossier_versions)")}
-        if "input_fingerprint" not in columns:
+        if "input_fingerprints_json" not in columns:
             self.connection.execute(
-                "ALTER TABLE company_dossier_versions ADD COLUMN input_fingerprint TEXT")
+                "ALTER TABLE company_dossier_versions ADD COLUMN input_fingerprints_json TEXT")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -1093,13 +1110,13 @@ class CompanyDossierAuthority:
         body = dict(body)
         source = body.pop(SOURCE_VERSION_KEY, _UNSET)
         for field in _BODY_EXCLUDED - {"change_reason", "evidence_refs",
-                                       "decision", "drafted_at"}:
+                                       "decision", "drafted_at", "input_fingerprints"}:
             body.pop(field, None)
         company_ref = _text(body.get("company_ref"), "company_ref", maximum=512)
         dossier_ref = dossier_ref_for(company_ref)
         body["dossier_ref"] = dossier_ref
         body.setdefault("schema_version", SCHEMA_VERSION)
-        if body.get("input_fingerprint") is not None:
+        if body.get("input_fingerprints") is not None:
             body["schema_version"] = SCHEMA_VERSION_INPUT_FINGERPRINT
         body.setdefault("generator_ref", GENERATOR_REF)
         change_reason = _one_of(body.get("change_reason"), CHANGE_REASONS, "change_reason")
@@ -1150,11 +1167,13 @@ class CompanyDossierAuthority:
             cur.execute(
                 "INSERT INTO company_dossier_versions"
                 "(version_id,dossier_ref,version_number,prior_version_id,company_ref,"
-                "change_reason,body_hash,evidence_scope_hash,input_fingerprint,record_json,content_hash,"
+                "change_reason,body_hash,evidence_scope_hash,input_fingerprints_json,record_json,content_hash,"
                 "actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     version_id, dossier_ref, version, head, company_ref, change_reason,
-                    digest, scope_hash, wire.get("input_fingerprint"), canonical_json(wire), wire["content_hash"],
+                    digest, scope_hash, (None if wire.get("input_fingerprints") is None
+                                         else canonical_json(wire["input_fingerprints"])),
+                    canonical_json(wire), wire["content_hash"],
                     wire["actor_ref"], wire["created_at"],
                 ),
             )
@@ -1185,19 +1204,24 @@ class CompanyDossierAuthority:
             or wire["change_reason"] != row["change_reason"]
             or wire["body_hash"] != row["body_hash"]
             or wire["content_hash"] != row["content_hash"]
-            or wire.get("input_fingerprint") != row["input_fingerprint"]
+            or (None if wire.get("input_fingerprints") is None
+                else canonical_json(wire["input_fingerprints"])) != row["input_fingerprints_json"]
             or content_hash(evidence_scope(wire)) != row["evidence_scope_hash"]
         ):
             raise CompanyDossierConflict("company dossier authority drifted")
         return wire
 
-    def input_freshness(self, version_ref: str, current_fingerprint: str) -> str:
+    def input_freshness(self, version_ref: str, current_fingerprints: Mapping[str, Any]) -> str:
         record = self.dossier(version_ref)
-        stored = record.get("input_fingerprint")
+        stored = record.get("input_fingerprints")
         if stored is None:
             return "unknown"
-        current = _sha256(current_fingerprint, "current_fingerprint")
-        return "fresh" if current == stored else "stale"
+        for unit, fingerprint in stored.items():
+            if fingerprint is not None and current_fingerprints.get(unit) != fingerprint:
+                return "stale"
+        return "unknown" if any(
+            stored[unit] is None and _unit_was_drafted(record, unit)
+            for unit in UNITS) else "fresh"
 
     def latest(self, company_ref: str) -> dict[str, Any] | None:
         company_ref = _text(company_ref, "company_ref", maximum=512)

@@ -88,22 +88,17 @@ class FakeModel:
 
 class PromptTests(unittest.TestCase):
     def test_uncited_prompt_material_changes_the_input_fingerprint(self):
-        plan = {"business_model": {
-            "unit": "business_model", "status": "ready", "reason": None,
-            "structure": ["state"], "new_refs": 1, "stale": True,
-            "material": [{"kind": "claim", "ref": "claim-version:a",
-                          "text": "visible but not cited", "created_at": "2026-09-01"}],
-        }}
+        material_rows = material()
         inputs = dict(
-            company=COMPANY,
+            unit="business_model", structure=[{"slot_id": "state", "prompt": "State it"}],
+            company=COMPANY, mission={"id": "mission:1", "content_hash": "a" * 64},
             constitution={"id": "constitution:1", "content_hash": "b" * 64},
             policy=load_policy(),
-            prior=None, profile=None, model_spec=None,
         )
-        first = dossier_input_fingerprint(build_dossier_input(plan=plan, **inputs))
-        changed = json.loads(json.dumps(plan))
-        changed["business_model"]["material"][0]["text"] = "changed prompt input"
-        second = dossier_input_fingerprint(build_dossier_input(plan=changed, **inputs))
+        first = dossier_input_fingerprint(build_dossier_input(material=material_rows, **inputs))
+        changed = json.loads(json.dumps(material_rows))
+        changed[0]["text"] = "changed prompt input"
+        second = dossier_input_fingerprint(build_dossier_input(material=changed, **inputs))
         self.assertNotEqual(first, second)
 
     def test_the_purpose_is_registered_by_importing_the_drafter(self):

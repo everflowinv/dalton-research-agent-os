@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,7 +27,8 @@ from dalton_core.company_dossier import (
     VARIANT_SLOTS, CompanyDossierAuthority, causal_chain_hash, validate_policy,
 )
 from dalton_core.company_dossier_cli import (
-    build_parser, granted_scope, run_dossier, screened_companies, stale_units,
+    build_parser, dossier_freshness, granted_scope, reconstruct_dossier_input, run_dossier,
+    screened_companies, stale_units,
 )
 from dalton_core.company_dossier_launcher import CompanyDossierLauncher, run_digest
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -336,6 +338,43 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(record["change_reason"], "evidence_thicker")
         self.assertTrue(record["evidence_refs"])
 
+    def test_a_real_new_version_reconstructs_fresh_then_uncited_input_is_stale(self):
+        first = self.harness.run(max_units=3)
+        record = self.authority.latest(ACN)
+        policy = json.loads(self.harness.policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(dossier_freshness(
+            self.harness.store.connection, record, self.harness.mission, policy), "fresh")
+        self.assertEqual(first["input_freshness"], "fresh")
+
+        self.harness.tag("d-new", "business_model",
+                         statement="This uncited row still changes the next producer prompt.")
+        self.assertEqual(dossier_freshness(
+            self.harness.store.connection, record, self.harness.mission, policy), "stale")
+
+    def test_reconstruction_is_select_only_on_a_read_only_database(self):
+        self.harness.run(max_units=3)
+        record = self.authority.latest(ACN)
+        policy = json.loads(self.harness.policy_path.read_text(encoding="utf-8"))
+        connection = sqlite3.connect(
+            f"file:{self.harness.state_dir / 'core.sqlite'}?mode=ro", uri=True)
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        denied = []
+        write_ops = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                     sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_ALTER_TABLE,
+                     sqlite3.SQLITE_DROP_TABLE}
+        def authorizer(action, arg1, arg2, database, trigger):
+            if action in write_ops:
+                denied.append((action, arg1))
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        connection.set_authorizer(authorizer)
+        rebuilt = reconstruct_dossier_input(
+            connection, record, self.harness.mission, policy)
+        self.assertEqual(set(rebuilt), set(record["input_fingerprints"]))
+        self.assertEqual(denied, [])
+
     def test_the_guidance_section_carries_the_computed_table_not_a_verdict(self):
         summary = self.harness.run(max_units=12)
         self.assertEqual(summary["dossier_status"], "published")
@@ -359,6 +398,10 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(second["dossier_status"], "published")
         self.assertEqual(len(second["units_drafted"]), 2)
         self.assertFalse(set(first["units_drafted"]) & set(second["units_drafted"]))
+        policy = json.loads(self.harness.policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(dossier_freshness(
+            self.harness.store.connection, self.authority.latest(ACN),
+            self.harness.mission, policy), "unknown")
         third = self.harness.run(max_units=3)
         self.assertEqual(third["dossier_status"], "nothing_new")
         record = self.authority.latest(ACN)

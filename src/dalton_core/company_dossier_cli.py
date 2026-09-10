@@ -54,6 +54,7 @@ from .company_dossier import (
     policy_hash,
     section_body,
     unit_slots,
+    _unit_was_drafted,
 )
 from .company_dossier_draft import (
     MAX_CLAIM_ROWS,
@@ -65,6 +66,7 @@ from .company_dossier_draft import (
     MAX_RUN_COST_USD,
     MAX_UNITS_PER_RUN,
     TIMEOUT_SECONDS,
+    build_unit_prompt,
     draft_unit,
     independence,
     material_rows,
@@ -147,7 +149,7 @@ def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
 
 
 def claim_material(
-    store: DaltonStore, company_ref: str, aspect: str, *, limit: int = MAX_CLAIM_ROWS
+    store: Any, company_ref: str, aspect: str, *, limit: int = MAX_CLAIM_ROWS
 ) -> list[dict[str, Any]]:
     """The canonical Claims for one aspect, importance first, bounded.
 
@@ -195,7 +197,7 @@ def claim_material(
 
 
 def number_material(
-    store: DaltonStore, company_ref: str, *, limit: int = MAX_NUMBER_ROWS
+    store: Any, company_ref: str, *, limit: int = MAX_NUMBER_ROWS
 ) -> list[dict[str, Any]]:
     """Figures the dossier may cite: filed statement lines and forecast cells.
 
@@ -217,7 +219,7 @@ def number_material(
     connection = store.connection
     forecast_quota = min(MAX_FORECAST_ROWS, max(0, limit // 3))
     filed = _statement_line_rows(connection, company_ref, limit=limit)
-    cells = _forecast_cell_rows(store, company_ref, limit=max(forecast_quota, 0))
+    cells = _forecast_cell_rows(connection, company_ref, limit=max(forecast_quota, 0))
     # The quota is a floor, not a ceiling: whatever one kind does not use, the
     # other may have.
     room_for_filed = limit - min(len(cells), forecast_quota)
@@ -301,13 +303,16 @@ def _statement_line_rows(
 
 
 def _forecast_cell_rows(
-    store: DaltonStore, company_ref: str, *, limit: int
+    connection: Any, company_ref: str, *, limit: int
 ) -> list[dict[str, Any]]:
-    if limit <= 0 or not table_exists(store.connection, "forecast_model_versions"):
+    if limit <= 0 or not table_exists(connection, "forecast_model_versions"):
         return []
-    from .model_forecast_driver import ForecastModelAuthority, cell_ref
-
-    model = ForecastModelAuthority(store).latest(company_ref)
+    from .model_forecast_driver import cell_ref
+    row = connection.execute(
+        "SELECT record_json FROM forecast_model_versions WHERE company_ref=? "
+        "ORDER BY version_number DESC LIMIT 1", (company_ref,),
+    ).fetchone()
+    model = None if row is None else json.loads(row["record_json"])
     rows: list[dict[str, Any]] = []
     for line in (model or {}).get("results") or []:
         for cell in line.get("cells") or []:
@@ -601,25 +606,114 @@ def plan_units(
 
 
 def build_dossier_input(
-    *, company: Mapping[str, Any], plan: Mapping[str, Any],
-    constitution: Mapping[str, Any], policy: Mapping[str, Any],
-    prior: Mapping[str, Any] | None, profile: Mapping[str, Any] | None,
-    model_spec: Mapping[str, Any] | None,
+    *, unit: str, structure: Sequence[Mapping[str, str]],
+    material: Sequence[Mapping[str, Any]], company: Mapping[str, Any],
+    mission: Mapping[str, Any], constitution: Mapping[str, Any],
+    policy: Mapping[str, Any], prior_body: str = "", profile_table: str = "",
+    market_view_available: bool = True, classification: str | None = None,
 ) -> dict[str, Any]:
-    """Canonical producer input, reusable by publication and freshness audit."""
+    """Freeze the exact call input plus the governance bindings authorising it."""
 
+    prompt = build_unit_prompt(
+        unit=unit, structure=structure, material=material, company=company,
+        prior_body=prior_body, profile_table=profile_table,
+        market_view_available=market_view_available, classification=classification)
     return {
-        "company": dict(company),
-        "units": {unit: dict(plan[unit]) for unit in sorted(plan)},
+        "unit": unit,
+        "prompt_sha": dossier_input_fingerprint({"prompt": prompt}),
+        "mission": {"ref": mission["id"], "hash": mission["content_hash"]},
         "constitution": {"ref": constitution["id"], "hash": constitution["content_hash"]},
         "policy": {"ref": policy["policy_ref"], "hash": policy_hash(policy)},
-        "prior": None if prior is None else {
-            "ref": prior["id"], "hash": prior["content_hash"],
-            "classification": prior.get("industry_classification"),
-        },
-        "guidance_profile": profile,
-        "company_model_spec": None if model_spec is None else dict(model_spec),
     }
+
+
+class _ReadOnlyStoreView:
+    """Narrow adapter for existing query readers; it exposes only connection."""
+
+    def __init__(self, connection: Any):
+        self.connection = connection
+
+    def claim_index_snapshot(self, *, created_at: str | None = None) -> dict[str, Any]:
+        # This DaltonStore reader only consumes ``connection``. Calling the
+        # unbound method avoids constructing an authority (and therefore DDL).
+        return DaltonStore.claim_index_snapshot(self, created_at=created_at)
+
+
+def _json_row(connection: Any, query: str, params: Sequence[Any]) -> dict[str, Any] | None:
+    row = connection.execute(query, tuple(params)).fetchone()
+    return None if row is None else json.loads(row["record_json"])
+
+
+def reconstruct_dossier_input(
+    connection: Any, record: Mapping[str, Any], current_mission: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Rebuild current producer input using SELECT-only access and a fixed predecessor."""
+
+    prior_ref = record.get("prior_version_ref")
+    prior = None if prior_ref is None else _json_row(
+        connection, "SELECT record_json FROM company_dossier_versions WHERE version_id=?",
+        (prior_ref,),
+    )
+    binding = current_mission["bindings"]["constitution_version"]
+    constitution = _json_row(
+        connection,
+        "SELECT record_json FROM research_constitution_versions WHERE constitution_version_id=?",
+        (binding["ref"],),
+    )
+    if constitution is None or constitution.get("content_hash") != binding["hash"]:
+        raise ValueError("current mission constitution binding does not resolve exactly")
+    company_ref = str(record["company_ref"])
+    view = _ReadOnlyStoreView(connection)
+    plan = plan_units(store=view, company_ref=company_ref, constitution=constitution,
+                      policy=policy, prior=prior)
+    guides, actuals = guidance_material(view, company_ref)
+    profile = build_profile(company_ref=company_ref, guides=guides, actuals=actuals)
+    company = {"company_ref": company_ref, "ticker": next(
+        (member.get("ticker") for member in current_mission.get("universe") or []
+         if member.get("company_ref") == company_ref), None)}
+    prior_classification = str(
+        ((prior or {}).get("industry_classification") or {}).get("classification") or "") or None
+    current_classification = str(
+        (record.get("industry_classification") or {}).get("classification") or "") or None
+    profile_table = render_profile_table(profile)
+    rebuilt = {}
+    prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
+    for unit in UNITS:
+        entry = plan[unit]
+        held = prior_sections.get(unit)
+        if unit == CLASSIFICATION_UNIT:
+            held = (prior or {}).get("industry_classification")
+        elif unit == VARIANT_UNIT:
+            held = (prior or {}).get("variant_view")
+        material = material_rows(
+            [row for row in entry.get("material", []) if "kind" not in row],
+            [row for row in entry.get("material", []) if "kind" in row])
+        rebuilt[unit] = build_dossier_input(
+            unit=unit, structure=entry.get("structure", []), material=material,
+            company=company, mission=current_mission, constitution=constitution,
+            policy=policy, prior_body="" if held is None else section_body(held),
+            profile_table=profile_table if unit == "guidance_style" else "",
+            market_view_available=any(
+                slot["slot_id"] == "market_view" for slot in entry.get("structure", [])),
+            classification=(prior_classification if unit == CLASSIFICATION_UNIT
+                            else current_classification))
+    return rebuilt
+
+
+def dossier_freshness(connection: Any, record: Mapping[str, Any],
+                      current_mission: Mapping[str, Any], policy: Mapping[str, Any]) -> str:
+    stored = record.get("input_fingerprints")
+    if stored is None:
+        return "unknown"
+    rebuilt = reconstruct_dossier_input(connection, record, current_mission, policy)
+    current = {unit: dossier_input_fingerprint(value) for unit, value in rebuilt.items()}
+    for unit, fingerprint in stored.items():
+        if fingerprint is not None and current[unit] != fingerprint:
+            return "stale"
+    return "unknown" if any(
+        stored[unit] is None and _unit_was_drafted(record, unit)
+        for unit in UNITS) else "fresh"
 
 
 def dossier_input_fingerprint(value: Mapping[str, Any]) -> str:
@@ -839,24 +933,15 @@ def run_dossier(
             (member.get("ticker") for member in mission["universe"]
              if member.get("company_ref") == chosen), None)}
 
-        profile = None
-        profile_table = ""
-        if "guidance_style" in wanted:
-            guides, actuals = guidance_material(store, chosen)
-            profile = build_profile(company_ref=chosen, guides=guides, actuals=actuals)
-            profile_table = render_profile_table(profile)
-        frozen_input = build_dossier_input(
-            company=company, plan=plan, constitution=constitution, policy=policy,
-            prior=prior, profile=profile,
-            model_spec=missions.latest_company_model_spec(chosen),
-        )
-        input_fingerprint = dossier_input_fingerprint(frozen_input)
-
+        guides, actuals = guidance_material(store, chosen)
+        profile = build_profile(company_ref=chosen, guides=guides, actuals=actuals)
+        profile_table = render_profile_table(profile)
         held_classification = str(
             ((prior or {}).get("industry_classification") or {}).get("classification")
             or "") or None
         blocks: dict[str, Any] = {}
         draft_routes: list[str | None] = []
+        input_fingerprints = {unit: None for unit in UNITS}
         spent = 0
         prior_sections = {item["aspect"]: item
                           for item in (prior or {}).get("sections") or []}
@@ -872,24 +957,37 @@ def run_dossier(
                 [row for row in entry["material"] if "kind" not in row],
                 [row for row in entry["material"] if "kind" in row],
             )
+            actual_classification = (blocks.get(CLASSIFICATION_UNIT) or {}).get(
+                "classification", held_classification)
+            prior_body = "" if held is None else section_body(held)
+            unit_profile_table = profile_table if unit == "guidance_style" else ""
+            market_view_available = any(
+                slot["slot_id"] == "market_view" for slot in entry["structure"])
+            frozen_input = build_dossier_input(
+                unit=unit, structure=entry["structure"], material=material,
+                company=company, mission=mission, constitution=constitution,
+                policy=policy, prior_body=prior_body,
+                profile_table=unit_profile_table,
+                market_view_available=market_view_available,
+                classification=actual_classification,
+            )
             outcome = draft_unit(
                 model, unit=unit, structure=entry["structure"], material=material,
                 company=company, mission=mission,
                 # Use the classification drafted earlier in this same run;
                 # a first dossier should not need another tick to choose its frame.
-                classification=(blocks.get(CLASSIFICATION_UNIT) or {}).get(
-                    "classification", held_classification),
-                prior_body="" if held is None else section_body(held),
+                classification=actual_classification,
+                prior_body=prior_body,
                 profile=profile if unit == "guidance_style" else None,
-                profile_table=profile_table if unit == "guidance_style" else "",
-                market_view_available=any(
-                    slot["slot_id"] == "market_view" for slot in entry["structure"]),
+                profile_table=unit_profile_table,
+                market_view_available=market_view_available,
             )
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
             if outcome["status"] != "drafted":
                 summary["refused"].append({"unit": unit, "reason": outcome["reason"]})
                 continue
             blocks[unit] = outcome["block"]
+            input_fingerprints[unit] = dossier_input_fingerprint(frozen_input)
             draft_routes.append((outcome.get("model") or {}).get("route_decision_ref"))
         summary["cost_micros"] = spent
         summary["units_drafted"] = sorted(blocks)
@@ -1003,7 +1101,7 @@ def run_dossier(
                     "status": "succeeded", "dossier_status": "unresolvable_refs",
                     "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
                 return summary
-        record["input_fingerprint"] = input_fingerprint
+        record["input_fingerprints"] = input_fingerprints
         gate = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate["summary"]
         if gate["failed"]:
@@ -1029,7 +1127,7 @@ def run_dossier(
             "version_status": published["status"],
             "duplicate_reason": published.get("duplicate_reason"),
             "input_freshness": authority.input_freshness(
-                published["id"], input_fingerprint),
+                published["id"], input_fingerprints),
             **summarise_blocks(blocks),
         })
         return summary
@@ -1226,12 +1324,14 @@ __all__ = [
     "build_parser",
     "claim_material",
     "dossier_input_fingerprint",
+    "dossier_freshness",
     "granted_scope",
     "guidance_material",
     "main",
     "market_view_material",
     "number_material",
     "plan_units",
+    "reconstruct_dossier_input",
     "rubric_gate",
     "run_dossier",
     "screened_companies",

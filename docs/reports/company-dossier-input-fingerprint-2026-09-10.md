@@ -1,52 +1,62 @@
-# CompanyDossier exact producer input fingerprint — 2026-09-10
+# CompanyDossier exact producer-input fingerprints — 2026-09-10
 
-## Boundary and prior-head rule
+## Result
 
-The dossier now freezes one canonical producer-input object before the first
-draft call. It contains the company identity; every planned unit's exact
-structure and bounded material rows; claim-version and claim-index attributes;
-numeric/forecast rows; the current company-model specification; the prior
-classification context; guidance profile; and exact constitution and dossier
-policy refs/hashes. `build_dossier_input` is pure and exported so an audit can
-rebuild the same object, while `dossier_input_fingerprint` supplies its hash.
-No additional model call is introduced.
+New dossier records use wire schema 0.2 and carry a closed map of one nullable
+fingerprint per dossier unit. A fingerprint is frozen immediately before that
+unit's model call, after material rows, prior body, guidance table, market-view
+availability, and the classification produced earlier in the same run have
+been resolved. It binds the exact prompt SHA plus the mission, Constitution,
+and dossier-policy refs and hashes. It adds no model call.
 
-The prior input is the record named by the produced version's
-`prior_version_ref`, including its content hash and classification. A freshness
-audit must rebuild against that predecessor rather than pass the newly
-published dossier as `prior`; using the new head would make publication itself
-change the input and mark every new version stale immediately.
+This replaces the rejected whole-plan design. A three-unit tick assigns hashes
+only to the three outputs it actually produced. A carried unit keeps no newly
+claimed provenance: it is `null` unless this version actually redrafted it.
+Consequently a first version whose other units are unavailable can be fresh,
+while a later partial version carrying drafted units reports `unknown`. Any
+known per-unit mismatch reports `stale` first. This is conservative and cannot
+label inherited prose fresh using the wrong predecessor.
 
-The input is captured once before drafting. It is not re-read after model
-calls, so a concurrent authority change cannot be falsely attributed to the
-output that was produced from the earlier prompt.
+`reconstruct_dossier_input(connection, record, current_mission, policy)` is the
+read-only audit entry point. It fixes historical prompt context to the
+record's `prior_version_ref`, while binding governance to the supplied current
+mission. It uses the same plan, material transformation, prior-body rendering,
+profile-table rendering, and prompt builder as publication. A test opens a
+real fixture database with `mode=ro`, `query_only`, and an authorizer denying
+writes and DDL; reconstruction performs no denied operation.
 
-## Compatibility and authority
+The company model specification is not fingerprinted because it is not an
+input to `draft_unit` or its prompt. Forecast rows derived elsewhere are bound
+when they appear in the exact rendered material. Adding the model spec now
+would create false stale results. If it later becomes a dossier producer
+input, the shared builder must add it at that boundary.
 
-New records use dossier wire schema 0.2 and carry `input_fingerprint`; the
-fingerprint participates in the record content hash. The append-only table has
-a nullable `input_fingerprint` column, added in place when an existing 0.1
-database is opened. Existing 0.1 record JSON, body hashes, and content hashes
-remain byte-compatible and read with freshness `unknown`.
+## Compatibility and integrity
 
-The authority checks the column against the wire value and validates the
-fingerprint as SHA-256. `input_freshness(version_ref, current_fingerprint)`
-returns `fresh`, `stale`, or `unknown`. The CLI reports the state for a newly
-published version. Changing prompt-visible material that the draft did not
-ultimately cite still changes the fingerprint, closing the cited-ref/row-count
-blind spot.
+The migration adds nullable `input_fingerprints_json`. It also tolerates an
+existing abandoned singular `input_fingerprint` column and leaves it intact.
+Schema 0.1 JSON and its hashes remain unchanged and has `unknown` freshness.
+The authority checks the plural column against record JSON, validates every
+non-null SHA, and rejects record tampering.
+
+`input_fingerprints` is explicitly excluded from the semantic body hash, so a
+metadata-only difference cannot bypass the identical-body or no-new-evidence
+publication gates. It remains covered by the immutable record content hash.
+A duplicate publication returns the existing head and therefore cannot attach
+new fingerprint metadata. Such a head remains honestly `unknown` or `stale`;
+an append-only build receipt would be a separate future authority.
 
 ## Validation
-
-Focused tests cover legacy unknown, new fresh/stale states, fingerprint
-tampering, uncited prompt-material changes, authority publication, drafting,
-and the dossier lane:
 
 ```text
 PYTHONPATH=src python3 -m unittest tests.test_company_dossier \
   tests.test_company_dossier_draft tests.test_dossier_lane
-Ran 124 tests in 4.292s — OK
+Ran 127 tests in 4.688s — OK
 ```
 
-No live database, model configuration, deployment state, or network service
-was changed.
+The tests include a real published version that reconstructs as fresh, an
+uncited newly indexed row that makes it stale, a second partial publication
+that remains unknown because it carries older drafted units, exact prompt
+material sensitivity, legacy reads, tamper refusal, plural migration alongside
+the abandoned singular column, and read-only reconstruction. No live state,
+model configuration, deployment state, or network service was changed.

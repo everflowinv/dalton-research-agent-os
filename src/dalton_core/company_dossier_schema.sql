@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS company_dossier_versions (
     evidence_scope_hash TEXT NOT NULL,
     -- 0.2: exact producer input; NULL means a legacy 0.1 version whose
     -- freshness cannot be reconstructed.
-    input_fingerprint TEXT,
+    input_fingerprints_json TEXT,
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     actor_ref TEXT NOT NULL,

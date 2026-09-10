@@ -29,6 +29,7 @@ import unittest
 from dalton_core.company_dossier import (
     CLASSIFICATION_SLOTS,
     SECTIONS,
+    UNITS,
     VARIANT_SLOTS,
     CompanyDossierAuthority,
     CompanyDossierConflict,
@@ -355,6 +356,18 @@ class AuthorityTests(unittest.TestCase):
     def publish(self, **kwargs):
         return self.authority.publish(body(**kwargs))
 
+    def test_plural_migration_coexists_with_the_abandoned_singular_column(self):
+        connection = self.fixture.store.connection
+        connection.execute(
+            "ALTER TABLE company_dossier_versions ADD COLUMN input_fingerprint TEXT")
+        connection.execute(
+            "ALTER TABLE company_dossier_versions DROP COLUMN input_fingerprints_json")
+        CompanyDossierAuthority(self.fixture.store)
+        columns = {row[1] for row in connection.execute(
+            "PRAGMA table_info(company_dossier_versions)").fetchall()}
+        self.assertIn("input_fingerprint", columns)
+        self.assertIn("input_fingerprints_json", columns)
+
     def test_the_first_version_is_a_chain_of_one_and_reads_back(self):
         first = self.publish(drafted_sections={
             "business_model": drafted("business_model", "claim-version:a")})
@@ -368,24 +381,27 @@ class AuthorityTests(unittest.TestCase):
     def test_input_fingerprint_has_fresh_stale_and_legacy_unknown_states(self):
         legacy = self.publish(drafted_sections={
             "business_model": drafted("business_model", "claim-version:a")})
-        self.assertEqual(self.authority.input_freshness(legacy["id"], "a" * 64), "unknown")
+        self.assertEqual(self.authority.input_freshness(
+            legacy["id"], {unit: "a" * 64 for unit in UNITS}), "unknown")
         candidate = body(drafted_sections={
             "business_model": drafted("business_model", "claim-version:a"),
             "segments_and_mix": drafted("segments_and_mix", "claim-version:b")},
             prior_ref=legacy["id"])
-        candidate["input_fingerprint"] = "d" * 64
+        candidate["input_fingerprints"] = {unit: "d" * 64 for unit in UNITS}
         second = self.authority.publish(candidate)
         self.assertEqual(second["schema_version"], "0.2")
-        self.assertEqual(self.authority.input_freshness(second["id"], "d" * 64), "fresh")
-        self.assertEqual(self.authority.input_freshness(second["id"], "e" * 64), "stale")
+        self.assertEqual(self.authority.input_freshness(
+            second["id"], {unit: "d" * 64 for unit in UNITS}), "fresh")
+        self.assertEqual(self.authority.input_freshness(
+            second["id"], {unit: "e" * 64 for unit in UNITS}), "stale")
 
     def test_input_fingerprint_is_bound_by_the_record_hash(self):
         candidate = body(drafted_sections={
             "business_model": drafted("business_model", "claim-version:a")})
-        candidate["input_fingerprint"] = "d" * 64
+        candidate["input_fingerprints"] = {unit: "d" * 64 for unit in UNITS}
         published = self.authority.publish(candidate)
         forged = {key: value for key, value in published.items() if key != "status"}
-        forged["input_fingerprint"] = "e" * 64
+        forged["input_fingerprints"]["business_model"] = "e" * 64
         with self.assertRaises(CompanyDossierConflict):
             validate_dossier_version(forged)
 
