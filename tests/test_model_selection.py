@@ -567,6 +567,13 @@ class SetSelectionTests(StateDirectoryCase):
                     mode="tier", now=NOW)
         self.assertEqual(
             {path: path.read_bytes() for path in (self.config_path, verifier)}, before)
+        retried = set_model_selection(
+            self.root, purpose="event_judgement_verifier", mode="tier", now=NOW)
+        self.assertEqual(retried["status"], "published")
+        self.assertEqual(
+            json.loads(self.config_path.read_text("utf-8"))["routing_policy_ref"],
+            json.loads(verifier.read_text("utf-8"))["routing_policy_ref"],
+        )
 
     def test_every_pinned_configuration_moves_to_the_new_version(self) -> None:
         result = set_model_selection(

@@ -30,7 +30,10 @@ Selection publishes append-only routing-policy versions and repoints every
 present registered configuration. All router paths, policy pins, and the
 requested selection validate before the first publication. Changed config
 files are staged owner-only; a replacement failure restores every file already
-replaced, preventing a mixed set of runtime policy pins.
+replaced, preventing a mixed set of runtime policy pins. If that failure left
+an unused policy version appended, an identical retry recognizes its exact
+semantics, reuses it, and completes the repoint; unrelated policy movement
+still fails as stale.
 
 `research_planner_setup` no longer calls the static catalog seeder. Installation
 must use profiles already registered by the live catalog sync and fails closed
@@ -55,6 +58,8 @@ write fields into the OpenClaw plugin configuration.
   routed call reading the selected policy, rollback after a simulated second
   config replacement failure, complete installed-config registration, actual
   verifier-purpose calls, and refusal to seed a missing static profile.
+- The model-selection unit suite (67 tests) additionally verifies a failed
+  second file replacement restores both pins and an identical retry succeeds.
 - `git diff --check` and Python compilation passed.
 
 No live configuration, deployment, broker call, or model call was performed.

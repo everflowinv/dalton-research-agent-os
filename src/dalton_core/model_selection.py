@@ -250,12 +250,6 @@ def publish_selection(
     pinned = router.get_policy(policy_version_ref)
     checked = validate_selection(router, purpose=purpose, mode=mode, chain=chain)
     latest = _latest_policy(router, pinned["id"])
-    if latest["policy_version_ref"] != pinned["policy_version_ref"]:
-        raise ModelSelectionError(
-            f"{pinned['id']} has moved on since this was read "
-            f"({latest['policy_version_ref']} is current); read it again and "
-            "choose against that"
-        )
     overrides = dict(pinned.get("purpose_overrides") or {})
     entry: dict[str, Any] = {"mode": checked["mode"]}
     if checked["mode"] == "explicit":
@@ -281,6 +275,12 @@ def publish_selection(
             "prior_version_ref": latest["prior_version_ref"],
             **checked,
         }
+    if latest["policy_version_ref"] != pinned["policy_version_ref"]:
+        raise ModelSelectionError(
+            f"{pinned['id']} has moved on since this was read "
+            f"({latest['policy_version_ref']} is current); read it again and "
+            "choose against that"
+        )
     wire.update({
         "version": int(latest["version"]) + 1,
         "prior_version_ref": latest["policy_version_ref"],
