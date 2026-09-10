@@ -84,6 +84,20 @@ class RealInvestmentMemoDecisionTests(unittest.TestCase):
                 "producer_route_decision_refs": [row["route_decision_ref"] for row in producers],
                 **{key: verifier[key] for key in ("work_order_ref", "route_decision_ref",
                                                   "result_envelope_ref", "invocation_ref")}}}
+        from dalton_core.investment_memo_evidence import replay_memo_model_evidence
+        evidence = replay_memo_model_evidence(
+            scheduler_db=self.chain.root / "scheduler.sqlite",
+            model_router_db=self.chain.router_db, gate=gate, mission=self.mission)
+        self.assertEqual(evidence["status"], "verified")
+        self.assertEqual([row["group"] for row in evidence["producer_calls"]],
+                         list(PRODUCER_GROUPS))
+        self.assertTrue(evidence["verifier"]["independent"])
+        missing = json.loads(json.dumps(gate))
+        missing["producer_calls"][0]["work_order_ref"] = "work:missing"
+        self.assertEqual(replay_memo_model_evidence(
+            scheduler_db=self.chain.root / "scheduler.sqlite",
+            model_router_db=self.chain.router_db, gate=missing,
+            mission=self.mission)["status"], "unverified")
         memo = MissionDeliverableAuthority(self.store).publish(kind="investment_memo",
             subject_ref=self.company, mission=self.mission, playbook=self.playbook,
             template_ref="investment_memo", sections=sections, summary="Supported memo", gaps=[],

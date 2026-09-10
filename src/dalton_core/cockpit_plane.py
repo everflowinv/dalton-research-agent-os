@@ -2924,9 +2924,22 @@ class CockpitPlane:
                     validate_memo_gate(record.get("gate") or {},
                                        material_hash=verified_body_hash(record),
                                        expected_questions=questions)
+                    router_path = self._model_router_db()
+                    if router_path is None:
+                        raise ValueError("model router authority is unavailable")
+                    from .investment_memo_evidence import replay_memo_model_evidence
+                    model_evidence = replay_memo_model_evidence(
+                        scheduler_db=self.config.scheduler_db,
+                        model_router_db=Path(router_path), gate=record["gate"],
+                        mission=mission,
+                    )
+                    if model_evidence["status"] != "verified":
+                        raise ValueError(model_evidence.get("reason") or "formal model evidence is unverified")
                 except (ValueError, KeyError, TypeError, sqlite3.OperationalError) as exc:
                     actions = []
                     note = f"暂时不能裁决：memo verification contract failed: {exc}"
+                    model_evidence = {"status": "unverified", "reason": str(exc),
+                                      "producer_calls": [], "verifier": None}
                 gate = record.get("gate") or {}
                 details = {section["title"]: section.get("body") or "（本节为空）"
                            for section in record.get("sections") or []}
@@ -2940,6 +2953,16 @@ class CockpitPlane:
                     "who": self._label(members, record["subject_ref"]),
                     "summary": record.get("summary") or "",
                     "details": details, "actions": actions,
+                    "memo_review": {
+                        "producer_groups": [dict(row) for row in gate.get("producer_calls") or []],
+                        "key_questions": [dict(row) for row in gate.get("key_questions") or []],
+                        "checks": [dict(row) for row in gate.get("checks") or []],
+                        "gaps": list(record.get("gaps") or []),
+                        "input_bindings": [dict(row) for row in gate.get("input_bindings") or []],
+                        "verified_body_hash": gate.get("verified_body_hash"),
+                        "formal_evidence": model_evidence,
+                        "human_signature_required": True,
+                    },
                     "needs_rationale": bool(actions),
                     **({} if note is None else {"note": note}),
                 })
