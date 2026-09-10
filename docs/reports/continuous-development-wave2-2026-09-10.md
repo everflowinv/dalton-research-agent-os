@@ -54,3 +54,8 @@ Next step：收齐 crowd 与 market-proxy 审查修复后冻结一个可部署�
 ### 部署前生命周期修复
 
 安装脚本原先先升级 live venv 再停止服务，且 drain 只读最早五类 ticket。现改为控制器停止并确认 → 当前源码的纯标准库 drain（发现所有两层 lane ticket）→ writer 停止并确认 → 升级运行时；drain 超时中止，不继续打断在飞任务。安装 extras 同时补已有 HK XLS 读取依赖 `hk-filings`。51 项 service/drain 测试通过（1.542s），zsh 语法通过；未运行安装脚本，live 未变。
+
+
+### 首个持续开发验收点
+
+`e7e06bb` 完整主线 6,114 项 / 495.678s 通过（1 skip）；当前 live 只读副本 12 步复演、67 schemas/35 lanes/38 entries/0 escaped；wheel 428 个 Python/SQL 文件匹配。详见 continuous-wave2-integration 报告。对应代码和文档本次 push，未部署。三个 Sol 槽继续做后续切片交叉修复，不能将本检查点标为全部开发完成。

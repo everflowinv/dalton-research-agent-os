@@ -13,7 +13,9 @@ Owner 要求持续开发，不以单个里程碑完成为停点；写代码最�
 | Sol / insider_fixes | HK closed-week 判断与迟到证据增量归组 | `hk-weekly-judgement-incremental` |
 | 主代理 | 交叉审查、真实子进程回归、签署部署材料、集成验收 | `main` |
 
-本轮基线 `4c28816`（已推送、完整 6,055 项通过）。各切片完成即接后续 HK 周调度、W5 market-proxy / 成本模板及 Item 5 交易计划；共享文件先协调归属，聚焦绿分批 commit，集成完整验证后 push。授权材料完成后及时发给 owner，签署不阻塞独立开发。
+本轮首个持续开发验收点 `e7e06bb`：**完整 6,114 项 / 495.678s 通过（1 skip）**，当前 live 只读副本全部 12 步复演通过（67 schemas / 35 lanes / 38 entries / 0 escaped），wheel 428 个 Python/SQL 文件逐字匹配。详见 [验收记录](reports/continuous-wave2-integration-2026-09-10.md)。未部署。
+
+原基线 `4c28816`（6,055 项通过）。各切片完成即接后续 HK 周调度、W5 market-proxy / 成本模板及 Item 5 交易计划；共享文件先协调归属，聚焦绿分批 commit，集成完整验证后 push。授权材料完成后及时发给 owner，签署不阻塞独立开发。
 
 ## 本轮交付（2026-09-10）
 
@@ -30,7 +32,7 @@ W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，最终验
 3. **F13 日缓存与 HK 周调度**：独立 `daily_buyback_tape` 治理提案、跨公司共享 invocation/artifact 的日缓存与重放校验已合入（118 focused + 6 hardening）；新能力默认未批准、未启用。HK closed-week 推理和迟到证据全组重判正在独立开发。
 4. **W5 / D1–D9**：market-proxy 生产→索引→模型规格初版已合入（364 focused），正在补映射版本、权限、故障隔离及部署参数边界；随后接成本侧模板和 Item 5。HK universe、数字权威、慢背离窗口等原待裁决保持显式。周报投递和 Excel 导出继续后排。
 
-本轮详细提交与 next step 见 [持续开发记录](reports/continuous-development-wave2-2026-09-10.md)。当前新增代码尚未完成主线全量、尚未 push / 部署；前一轮 6,055 项通过是历史基线，不代表本轮新增全部验收。
+本轮详细提交与 next step 见 [持续开发记录](reports/continuous-development-wave2-2026-09-10.md)。当前主线至 `e7e06bb` 已完成全量并进入本次 push；下一批成本模板、Item 5、模型安装和 HK failure ledger 仍在独立分支审查，不包含在 6,114 项结果中。未部署。
 ## 2026-09-10 恢复开发背景
 
 已详细审读 PROJECT_STATUS、并行计划 §6b/6c、经济不变量、Chem 复盘、模型选择、既有资料及六份待合分支报告。原工作区干净，`main=694471c`，fetch 后领先 origin/main 11 个提交。以新隔离 worktree 承接 GPT-5.6 Sol 并行工作，避免接管旧 agent 目录；本节与 §6d 覆盖下方历史“只记录不动手”的暂停安排。
