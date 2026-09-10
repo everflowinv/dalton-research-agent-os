@@ -72,7 +72,7 @@ from .company_dossier_draft import (
     summarise_blocks,
     verify,
 )
-from .coverage_mission import CoverageMissionAuthority
+from .coverage_mission import CoverageMissionAuthority, fold_stage_status
 from .guidance_profile import build_profile, render_profile_table
 from .store import DaltonStore, canonical_json
 
@@ -130,10 +130,14 @@ def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
     material the screen exists to assemble.
     """
 
+    # P14-S: folded across every version of the mission_ref. A gate that
+    # passed under v13 is still passed under v14; ``stage_records(mission_id)``
+    # said otherwise and would have stopped every dossier on the next publish.
+    state = missions.stage_state_by_company(mission["mission_ref"])
     passed = {
-        record["company_ref"]
-        for record in missions.stage_records(mission["id"])
-        if record["stage_ref"] == "initial_screen" and record["status"] == "gate_passed"
+        company_ref
+        for company_ref, history in state.items()
+        if fold_stage_status(history.get("initial_screen") or ()) == "gate_passed"
     }
     return [
         str(member["company_ref"])

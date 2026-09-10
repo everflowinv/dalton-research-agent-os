@@ -17,6 +17,15 @@ actor must be the mission's declared principal and hold the ``stage_record``
 write scope; ``gate_passed`` always needs evidence refs.  Nothing here writes
 Evidence, Claims, Theses or models.
 
+P14-S makes those rules version-proof.  A stage state is a fact about
+``(mission_ref, company_ref)`` that carries forward across mission versions
+until something supersedes it; the mission version a record binds is
+provenance, not scope.  ``current_stage_state`` and ``companies_at_or_past``
+fold every version's records by time, ``record_stage`` validates the ladder
+against that fold, and the record it writes still binds the *active* version
+so the provenance stays exact.  Read ``fold_stage_status`` for the ordering
+rules (see the ADR-0008 addendum).
+
 Phase 9b adds a second append-only ledger beside stage transitions.  A
 ``coverage_mission_stage_claim`` binds every automation-created formal Claim
 and its supporting Evidence to the exact mission version and the company's
@@ -240,6 +249,38 @@ REQUIRED_CHECKPOINTS: frozenset[str] = frozenset({
     "thesis_admission", "thesis_revision", "scope_expansion", "budget_expansion",
 })
 STAGE_STATUSES: tuple[str, ...] = ("entered", "gate_passed", "gate_failed")
+# The two statuses that decide a stage.  ``entered`` opens it; these close it.
+STAGE_DECISIONS: frozenset[str] = frozenset({"gate_passed", "gate_failed"})
+
+
+def fold_stage_status(statuses: Sequence[str]) -> str | None:
+    """The one status a stage is in, given every record ever written for it.
+
+    P14-S (ADR-0008 addendum).  A stage state is a fact about
+    ``(mission_ref, company_ref, stage_ref)``; the mission version a record
+    binds is *provenance*, not scope.  The ordering rules, in full:
+
+    - Records fold in time order across **every** version of the mission_ref.
+    - The last **decision** wins.  A later ``gate_failed`` supersedes an
+      earlier ``gate_passed`` -- that is how a reopened gate is expressed --
+      and a later ``gate_passed`` supersedes an earlier ``gate_failed``,
+      which is how the ordinary retry has always worked inside one version.
+    - ``entered`` never supersedes a decision.  Publishing a new mission
+      version and re-seeding ``entered`` under it therefore cannot walk a
+      passed gate backwards; a stage that has been decided stays decided.
+    - No record at all means the stage was never reached: ``None``.
+    """
+
+    decision: str | None = None
+    seen = False
+    for status in statuses:
+        seen = True
+        if status in STAGE_DECISIONS:
+            decision = status
+    if decision is not None:
+        return decision
+    return "entered" if seen else None
+
 
 _BINDING_FIELDS = frozenset({"playbook_version", "constitution_version", "mandate_version"})
 _BODY_FIELDS = frozenset({
@@ -3675,19 +3716,172 @@ class CoverageMissionAuthority:
 
     # -- stage records -------------------------------------------------------
 
-    def _stage_state(
-        self, cur: sqlite3.Cursor, mission_version_ref: str, company_ref: str
+    def _mission_ref_of(self, cur: sqlite3.Cursor, mission_version_ref: str) -> str:
+        """The mission a version belongs to; the version itself if it is unknown.
+
+        Falling back to the ref keeps a folded read on a stray version from
+        silently folding *nothing*: it reads exactly that version instead.
+        """
+
+        row = cur.execute(
+            "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?",
+            (mission_version_ref,),
+        ).fetchone()
+        return row["mission_ref"] if row is not None else mission_version_ref
+
+    def _folded_rows(
+        self, cur: sqlite3.Cursor, mission_ref: str, company_ref: str | None = None
+    ) -> list[Any]:
+        """Every stage record of every version of one mission, in time order.
+
+        Ordered by ``created_at`` then ``record_id`` so two records written in
+        the same microsecond still fold deterministically.  Version number is
+        deliberately *not* in the order: what happened first happened first,
+        and a version roll is not an event in a company's ladder.
+        """
+
+        query = (
+            "SELECT r.record_id AS record_id, r.mission_version_ref AS mission_version_ref, "
+            "r.company_ref AS company_ref, r.stage_ref AS stage_ref, r.status AS status, "
+            "r.actor_ref AS actor_ref, r.created_at AS created_at, r.record_json AS record_json, "
+            "v.version_number AS version_number "
+            "FROM coverage_mission_stage_records r "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+            "WHERE v.mission_ref=?"
+        )
+        params: list[Any] = [mission_ref]
+        if company_ref is not None:
+            query += " AND r.company_ref=?"
+            params.append(company_ref)
+        query += " ORDER BY r.created_at,r.record_id"
+        return cur.execute(query, params).fetchall()
+
+    def _folded_statuses(
+        self, cur: sqlite3.Cursor, mission_ref: str, company_ref: str
     ) -> dict[str, list[str]]:
-        """Ordered status history per stage for one company."""
+        """Ordered status history per stage for one company, across all versions."""
 
         state: dict[str, list[str]] = {stage: [] for stage in STAGE_ORDER}
-        for row in cur.execute(
-            "SELECT stage_ref,status FROM coverage_mission_stage_records "
-            "WHERE mission_version_ref=? AND company_ref=? ORDER BY created_at,record_id",
-            (mission_version_ref, company_ref),
-        ).fetchall():
-            state[row["stage_ref"]].append(row["status"])
+        for row in self._folded_rows(cur, mission_ref, company_ref):
+            if row["stage_ref"] in state:
+                state[row["stage_ref"]].append(row["status"])
         return state
+
+    def stage_state_by_company(self, mission_ref: str) -> dict[str, dict[str, list[str]]]:
+        """``{company_ref: {stage_ref: [status, ...]}}`` folded across versions.
+
+        The shape ``evaluate_mission`` and the cockpit already speak, filled
+        from every version of the mission rather than only the active one.
+        Callers that used to build this map from ``stage_records(mission_id)``
+        were reading a ladder that emptied itself every time the owner
+        published a version.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        state: dict[str, dict[str, list[str]]] = {}
+        for row in self._folded_rows(self.connection.cursor(), mission_ref):
+            state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(
+                row["status"]
+            )
+        return state
+
+    def current_stage_state(self, mission_ref: str, company_ref: str) -> dict[str, Any]:
+        """Where one company stands on the ladder, folded across every version.
+
+        The reader ADR-0008's addendum names: a stage state is a fact about
+        ``(mission_ref, company_ref)`` that carries forward until it is
+        superseded, and the mission version each record binds is provenance --
+        it says *when and under what mission* the state was reached, and it is
+        reported per stage for exactly that reason.  See ``fold_stage_status``
+        for the ordering rules.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        company_ref = _text(company_ref, "company_ref")
+        rows = self._folded_rows(self.connection.cursor(), mission_ref, company_ref)
+        stages: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if row["stage_ref"] not in STAGE_ORDER:
+                continue
+            entry = stages.setdefault(row["stage_ref"], {"history": []})
+            entry["history"].append({
+                "status": row["status"],
+                "at": row["created_at"],
+                "record_ref": row["record_id"],
+                "actor_ref": row["actor_ref"],
+                # Provenance: the mission version this fact was written under.
+                "mission_version_ref": row["mission_version_ref"],
+                "mission_version_number": int(row["version_number"]),
+            })
+        for stage_ref, entry in stages.items():
+            entry["status"] = fold_stage_status([item["status"] for item in entry["history"]])
+            decisive = [item for item in entry["history"] if item["status"] == entry["status"]]
+            settled = decisive[-1] if decisive else entry["history"][-1]
+            entry["at"] = settled["at"]
+            entry["record_ref"] = settled["record_ref"]
+            entry["mission_version_ref"] = settled["mission_version_ref"]
+            entry["mission_version_number"] = settled["mission_version_number"]
+        entered = [stage for stage in STAGE_ORDER if stage in stages]
+        completed = [
+            stage for stage in STAGE_ORDER
+            if stages.get(stage, {}).get("status") == "gate_passed"
+        ]
+        current = entered[-1] if entered else None
+        current_status = stages[current]["status"] if current is not None else None
+        if current is None:
+            next_stage: str | None = STAGE_ORDER[0]
+        elif current_status == "gate_passed":
+            index = STAGE_ORDER.index(current)
+            next_stage = STAGE_ORDER[index + 1] if index + 1 < len(STAGE_ORDER) else None
+        else:
+            next_stage = current
+        return {
+            "projection_kind": "coverage_mission_stage_state",
+            "mission_ref": mission_ref,
+            "company_ref": company_ref,
+            "stages": stages,
+            "entered_stages": entered,
+            "completed_stages": completed,
+            "current_stage": current,
+            "current_status": current_status,
+            "next_stage": next_stage,
+            "record_count": len(rows),
+        }
+
+    def companies_at_or_past(self, stage_ref: str, mission_ref: str) -> list[str]:
+        """Every company of this mission that has ever reached ``stage_ref``.
+
+        Reached means: it entered that stage under some version of the
+        mission, or it passed the stage before it, which is the same event
+        seen from one step back -- live, four companies passed their Initial
+        Screen and none has entered ``deep_insight_gate``, and all four are
+        past the screen.
+
+        Deliberately **monotone**, unlike ``current_stage_state``: this answers
+        "did this ever happen", so a later ``gate_failed`` -- a reopen -- does
+        not un-reach a stage that was reached.  Residency (P14a) is built on
+        that: a company leaves by leaving the mission universe, which is a
+        human act, not by a gate being reopened.  Ask ``current_stage_state``
+        when the question is "where does it stand *now*".
+        """
+
+        stage_ref = _vocabulary(stage_ref, STAGE_ORDER, "stage_ref")
+        mission_ref = _text(mission_ref, "mission_ref")
+        index = STAGE_ORDER.index(stage_ref)
+        at_or_past = STAGE_ORDER[index:]
+        previous = STAGE_ORDER[index - 1] if index > 0 else None
+        histories: dict[str, dict[str, list[str]]] = {}
+        for row in self._folded_rows(self.connection.cursor(), mission_ref):
+            histories.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(
+                row["status"]
+            )
+        reached: list[str] = []
+        for company_ref, history in histories.items():
+            if any(history.get(stage) for stage in at_or_past):
+                reached.append(company_ref)
+            elif previous is not None and "gate_passed" in (history.get(previous) or ()):
+                reached.append(company_ref)
+        return sorted(reached)
 
     def record_stage(
         self,
@@ -3752,19 +3946,27 @@ class CoverageMissionAuthority:
                     raise CoverageMissionConflict(
                         f"{stage_ref} is a human checkpoint; gate_passed requires a human: actor"
                     )
-            state = self._stage_state(cur, mission_version_ref, company_ref)
+            # P14-S: the ladder is validated against the *folded* state --
+            # every version of this mission_ref, in time order -- while the
+            # record itself still binds the active version as provenance.
+            # Before this, a company that passed its Initial Screen under v13
+            # could not enter deep_insight_gate under v14: the new version's
+            # ledger was empty, so "cannot be entered before initial_screen
+            # gate_passed" refused a gate that had demonstrably passed. The
+            # version rolls; what the company did does not un-happen.
+            state = self._folded_statuses(cur, mission["mission_ref"], company_ref)
             index = STAGE_ORDER.index(stage_ref)
             if status == "entered":
                 if state[stage_ref]:
                     raise CoverageMissionConflict(f"{stage_ref} was already entered for this company")
-                if index > 0 and "gate_passed" not in state[STAGE_ORDER[index - 1]]:
+                if index > 0 and fold_stage_status(state[STAGE_ORDER[index - 1]]) != "gate_passed":
                     raise CoverageMissionConflict(
                         f"{stage_ref} cannot be entered before {STAGE_ORDER[index - 1]} gate_passed"
                     )
             else:
                 if "entered" not in state[stage_ref]:
                     raise CoverageMissionConflict(f"{stage_ref} must be entered before its gate is decided")
-                if "gate_passed" in state[stage_ref]:
+                if fold_stage_status(state[stage_ref]) == "gate_passed":
                     raise CoverageMissionConflict(f"{stage_ref} gate was already passed for this company")
             identity = dict(request)
             record_id = _ref("mission-stage-record", identity)
@@ -3952,28 +4154,16 @@ class CoverageMissionAuthority:
         mission = self.active_mission(mission_ref)
         companies = []
         for member in mission["universe"]:
-            history = self._stage_state(self.connection.cursor(), mission["id"], member["company_ref"])
-            completed = [stage for stage in STAGE_ORDER if "gate_passed" in history[stage]]
-            entered = [stage for stage in STAGE_ORDER if history[stage]]
-            current = entered[-1] if entered else None
-            if current is None:
-                current_status = None
-                next_stage = STAGE_ORDER[0]
-            else:
-                current_status = history[current][-1]
-                if "gate_passed" in history[current]:
-                    current_status = "gate_passed"
-                    index = STAGE_ORDER.index(current)
-                    next_stage = STAGE_ORDER[index + 1] if index + 1 < len(STAGE_ORDER) else None
-                else:
-                    next_stage = current
+            # P14-S: folded across every version of the mission_ref. Progress
+            # that reset itself on a version roll was not progress.
+            folded = self.current_stage_state(mission["mission_ref"], member["company_ref"])
             companies.append({
                 **member,
-                "current_stage": current,
-                "current_status": current_status,
-                "completed_stages": completed,
-                "next_stage": next_stage,
-                "record_count": sum(len(items) for items in history.values()),
+                "current_stage": folded["current_stage"],
+                "current_status": folded["current_status"],
+                "completed_stages": folded["completed_stages"],
+                "next_stage": folded["next_stage"],
+                "record_count": folded["record_count"],
                 "claim_count": self.connection.execute(
                     "SELECT COUNT(*) FROM coverage_mission_stage_claims "
                     "WHERE mission_version_ref=? AND company_ref=?",
@@ -4025,7 +4215,9 @@ __all__ = [
     "REQUIRED_CHECKPOINTS",
     "SEC_RUN_SUCCEEDED",
     "SOURCE_STATUSES",
+    "STAGE_DECISIONS",
     "STAGE_STATUSES",
+    "fold_stage_status",
     "sec_run_failure_reason",
     "CoverageMissionAuthority",
     "CoverageMissionConflict",
