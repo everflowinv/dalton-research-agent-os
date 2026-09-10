@@ -22,7 +22,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dalton_core.company_model_cli import choose_company, run_model_spec
+from dalton_core.company_model_cli import (
+    choose_company, model_spec_request_id, run_model_spec,
+)
 from dalton_core.company_model_spec import spec_from_response
 from dalton_core.company_model_state import build_company_model_state
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -129,6 +131,13 @@ class ChooseCompanyTests(unittest.TestCase):
         company_ref, reopened = choose_company(self.missions, self.mission)
         self.assertEqual(company_ref, ACN)
         self.assertEqual(reopened["state_hash"], state["state_hash"])
+
+    def test_scheduler_identity_changes_with_the_spec_contract(self):
+        state_hash = "a" * 64
+        self.assertEqual(model_spec_request_id(state_hash, "b" * 64),
+                         model_spec_request_id(state_hash, "b" * 64))
+        self.assertNotEqual(model_spec_request_id(state_hash, "b" * 64),
+                            model_spec_request_id(state_hash, "c" * 64))
 
     def test_a_named_company_is_used_as_given(self):
         company_ref, state = choose_company(

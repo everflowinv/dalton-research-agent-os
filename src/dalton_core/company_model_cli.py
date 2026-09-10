@@ -48,7 +48,7 @@ from .company_model_state import CompanyModelStateError, build_company_model_sta
 from .driver_template import REGISTRY_HASH as TEMPLATE_REGISTRY_HASH, template_for
 from .coverage_mission import CoverageMissionAuthority
 from .scheduler import SchedulerError
-from .store import DaltonStore, canonical_json
+from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 # The state is a few hundred concept rows; the answer is a page of structured
@@ -64,6 +64,12 @@ MAX_OUTPUT_TOKENS = 6_000
 # structure rather than to look frugal.
 MAX_COST_USD = 2.50
 TIMEOUT_SECONDS = 300
+
+
+def model_spec_request_id(state_hash: str, task_hash: str = TASK_HASH) -> str:
+    """Scheduler identity for one disclosure under one immutable contract."""
+
+    return content_hash({"state_hash": state_hash, "task_hash": task_hash})[:32]
 
 
 def _write_owner_only(path: Path, value: Any) -> None:
@@ -236,7 +242,7 @@ def run_model_spec(
                 purpose="model_spec",
                 # Keyed by the disclosure, so an unchanged company replays
                 # instead of being paid for again.
-                request_id=state["state_hash"][:32],
+                request_id=model_spec_request_id(state["state_hash"]),
                 prompt=build_prompt(state), mission=mission,
             )
         except SchedulerError as exc:
@@ -323,4 +329,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
     sys.exit(main())
 
 
-__all__ = ["MAX_COST_USD", "build_parser", "choose_company", "main", "run_model_spec"]
+__all__ = [
+    "MAX_COST_USD", "build_parser", "choose_company", "main",
+    "model_spec_request_id", "run_model_spec",
+]

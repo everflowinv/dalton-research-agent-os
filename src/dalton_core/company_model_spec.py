@@ -458,6 +458,19 @@ def spec_from_response(
         body.get("revenue_anchor_concept"), concepts, "revenue_anchor_concept")
     if revenue_anchor is None:
         raise CompanyModelSpecError("revenue_anchor_concept must name a filed concept")
+    from .model_forecast_driver import CONCEPT_ROLES, REVENUE
+    anchor_rows = [
+        row
+        for row in ((state.get("statements") or {}).get("income") or [])
+        if isinstance(row, Mapping)
+        and row.get("concept") == revenue_anchor
+        and not row.get("is_breakdown")
+        and not row.get("dimension_axis")
+    ]
+    if CONCEPT_ROLES.get(revenue_anchor) != REVENUE or not anchor_rows:
+        raise CompanyModelSpecError(
+            "revenue_anchor_concept must name a consolidated filed revenue line"
+        )
 
     drivers: list[dict[str, Any]] = []
     driver_refs: set[str] = set()

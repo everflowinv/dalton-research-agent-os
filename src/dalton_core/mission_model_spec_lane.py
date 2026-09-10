@@ -80,6 +80,7 @@ class MissionModelSpecLaneCoordinator:
             # spawned for, or it can never be held back from being retried.
             "company_ref": ticket.get("company_ref"),
             "state_hash": ticket.get("state_hash"),
+            "task_hash": ticket.get("task_hash"),
             "spec_status": summary.get("spec_status"),
             "spec_ref": summary.get("spec_ref"),
             "cost_micros": summary.get("cost_micros"),
@@ -110,8 +111,9 @@ class MissionModelSpecLaneCoordinator:
         )
         company_ref = settled.get("company_ref")
         state_hash = settled.get("state_hash")
-        if failed and company_ref and state_hash:
-            key = f"{company_ref}|{state_hash}"
+        task_hash = settled.get("task_hash")
+        if failed and company_ref and state_hash and task_hash:
+            key = f"{company_ref}|{state_hash}|{task_hash}"
             spec_status = settled.get("spec_status")
             reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
@@ -120,8 +122,9 @@ class MissionModelSpecLaneCoordinator:
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(spec_status or settled.get("status")),
             ).as_wire()
-        elif company_ref and state_hash:
-            settled["resumed"] = self.budget.clear(f"{company_ref}|{state_hash}")
+        elif company_ref and state_hash and task_hash:
+            settled["resumed"] = self.budget.clear(
+                f"{company_ref}|{state_hash}|{task_hash}")
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -144,7 +147,7 @@ class MissionModelSpecLaneCoordinator:
         # about the hash is how this lane first got stuck relaunching one
         # company while the other four waited behind it.
         state_hash = state["state_hash"]
-        business_key = f"{company_ref}|{state_hash}"
+        business_key = f"{company_ref}|{state_hash}|{TASK_HASH}"
 
         permission = current_permission(
 

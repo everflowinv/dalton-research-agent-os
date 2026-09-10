@@ -13,6 +13,7 @@ from __future__ import annotations
 import unittest
 
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildTicketNotFound
+import dalton_core.mission_model_spec_lane as model_spec_lane
 from dalton_core.mission_model_spec_lane import MissionModelSpecLaneCoordinator
 
 
@@ -31,6 +32,7 @@ class FakeLauncher:
         self.tickets[ticket_id] = {
             "id": ticket_id, "status": "running", "summary": None,
             "company_ref": company_ref, "state_hash": state_hash,
+            "task_hash": task_hash,
         }
         return {"id": ticket_id}
 
@@ -157,6 +159,18 @@ class ModelSpecLaneTests(unittest.TestCase):
         # And it stays held rather than being retried on the next tick.
         self.assertEqual(self.lane.dispatch_once()["status"], "held")
         self.assertEqual(len(self.launcher.started), 1)
+
+    def test_an_old_contract_failure_does_not_hold_a_new_contract(self):
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary={
+            "spec_status": "refused", "failure_reason": "old contract"})
+        self.assertEqual(self.lane.dispatch_once()["status"], "held")
+        old_hash = model_spec_lane.TASK_HASH
+        self.addCleanup(setattr, model_spec_lane, "TASK_HASH", old_hash)
+        model_spec_lane.TASK_HASH = "f" * 64
+        resumed = self.lane.dispatch_once()
+        self.assertEqual(resumed["status"], "launched")
+        self.assertEqual(self.launcher.started[-1]["task_hash"], "f" * 64)
 
     def test_a_child_that_died_without_a_summary_spends_one_transient_retry(self):
         launched = self.lane.dispatch_once()

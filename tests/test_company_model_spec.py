@@ -11,7 +11,10 @@ whether you can forecast revenue and margin is not.
 from __future__ import annotations
 
 import copy
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 
 from dalton_core.company_model_spec import (
     MAX_FORECAST_QUARTERS,
@@ -295,6 +298,20 @@ class CompanyModelSpecTests(unittest.TestCase):
         with self.assertRaises(CompanyModelSpecError):
             self.verify(_spec(revenue_anchor_concept="us-gaap:SalesRevenueNet"))
 
+    def test_a_filed_non_revenue_concept_is_refused_as_the_anchor(self):
+        with self.assertRaises(CompanyModelSpecError):
+            self.verify(_spec(revenue_anchor_concept="us-gaap:Assets"))
+
+    def test_a_dimensional_revenue_member_is_not_a_consolidated_anchor(self):
+        state = {**STATE, "statements": {
+            **STATE["statements"],
+            "income": [row for row in STATE["statements"]["income"]
+                       if row["concept"] != "us-gaap:Revenues"
+                       or row["is_breakdown"]],
+        }}
+        with self.assertRaises(CompanyModelSpecError):
+            self.verify(_spec(), state=state)
+
     def test_the_prompt_carries_the_frame_and_the_company(self):
         prompt = build_prompt(STATE)
         self.assertIn("us-gaap:CostOfRevenue", prompt)
@@ -424,3 +441,52 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
         self.assertEqual(held["spec_id"], "company-model-spec:legacy")
         self.assertEqual(held["content_hash"], "c" * 64)
         self.assertNotIn("revenue_anchor_concept", held)
+
+    def test_schema_places_the_anchor_only_on_model_specs(self):
+        plan_columns = {row[1] for row in self.store.connection.execute(
+            "PRAGMA table_info(coverage_mission_research_plans)")}
+        spec_columns = {row[1] for row in self.store.connection.execute(
+            "PRAGMA table_info(coverage_mission_company_model_specs)")}
+        self.assertNotIn("revenue_anchor_json", plan_columns)
+        self.assertIn("revenue_anchor_json", spec_columns)
+
+    def test_concurrent_same_contract_inserts_are_idempotent(self):
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.store import DaltonStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "core.sqlite")
+            initial = DaltonStore(path)
+            CoverageMissionAuthority(initial)
+            initial.close()
+            spec = spec_from_response(STATE, _spec(), decided_by=DECIDED_BY)
+            barrier = threading.Barrier(2)
+            results: list[str] = []
+            errors: list[BaseException] = []
+
+            def record() -> None:
+                store = DaltonStore(path)
+                try:
+                    authority = CoverageMissionAuthority(store)
+                    barrier.wait()
+                    result = authority.record_company_model_spec(
+                        spec, mission_version_ref="coverage-mission-version:test")
+                    results.append(result["status"])
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    store.close()
+
+            threads = [threading.Thread(target=record) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            self.assertFalse(errors)
+            self.assertEqual(sorted(results), ["duplicate", "fresh"])
+            check = DaltonStore(path)
+            try:
+                self.assertEqual(
+                    len(CoverageMissionAuthority(check).company_model_specs(ACN)), 1)
+            finally:
+                check.close()

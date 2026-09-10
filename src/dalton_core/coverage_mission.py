@@ -3397,16 +3397,12 @@ class CoverageMissionAuthority:
         company_ref = _text(spec["company_ref"], "company_ref")
         state_hash = _text(spec["state_hash"], "state_hash")
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        task_hash = _sha256(spec["task_hash"], "task_hash")
+        spec_content_hash = _sha256(spec["content_hash"], "content_hash")
         spec_id = _ref("company-model-spec", {
             "company_ref": company_ref, "state_hash": state_hash,
-            "task_hash": spec["task_hash"],
+            "task_hash": task_hash,
         })
-        existing = self.connection.execute(
-            "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
-            (spec_id,),
-        ).fetchone()
-        if existing is not None:
-            return {**self._model_spec_row(existing), "status": "duplicate"}
         now = _now()
         with self._transaction() as cur:
             cur.execute(
@@ -3415,7 +3411,8 @@ class CoverageMissionAuthority:
                 "revenue_anchor_json,revenue_drivers_json,expense_lines_json,forecast_statements_json,"
                 "operating_metrics_json,horizon_json,task_hash,model_profile_ref,"
                 "work_order_ref,decided_by,created_at,content_hash) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(company_ref,state_hash,task_hash) DO NOTHING",
                 (
                     spec_id, company_ref, mission_version_ref, state_hash,
                     spec["assessment"],
@@ -3425,17 +3422,19 @@ class CoverageMissionAuthority:
                     canonical_json(spec["forecast_statements"]),
                     canonical_json(spec["operating_metrics"]),
                     canonical_json(spec["horizon"]),
-                    _sha256(spec["task_hash"], "task_hash"),
+                    task_hash,
                     model_profile_ref, work_order_ref,
                     _text(spec["decided_by"], "decided_by"), now,
-                    _sha256(spec["content_hash"], "content_hash"),
+                    spec_content_hash,
                 ),
             )
+            inserted = cur.rowcount == 1
             row = cur.execute(
                 "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
                 (spec_id,),
             ).fetchone()
-        return {**self._model_spec_row(row), "status": "fresh"}
+        return {**self._model_spec_row(row),
+                "status": "fresh" if inserted else "duplicate"}
 
     @staticmethod
     def _model_spec_row(row: Any) -> dict[str, Any]:
