@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .lane_child_launcher import LaneChildConflict, LaneChildRejected, LaneChildTicketNotFound
 from .lane_failure_ledger import lane_budget
@@ -17,7 +17,7 @@ VERIFIER_CONFIG = "company-dossier-verifier-model-config.json"
 LEGACY_VERIFIER_CONFIG = "dossier-verifier-model-config.json"
 QUIET = frozenset({"no_company", "nothing_new"})
 TERMINAL = frozenset({"draft_refused", "authority_validation_failed",
-                      "deterministic_gate_failed", "verification_failed"})
+                      "deterministic_gate_failed"})
 
 
 def ledger_signature(connection: Any, launcher: Any) -> str:
@@ -39,11 +39,54 @@ def ledger_signature(connection: Any, launcher: Any) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
+def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
+    """Bind a memo attempt to its exact frozen company input and model pair."""
+
+    from .store import content_hash
+
+    mission = frozen["mission"]
+    playbook = frozen["playbook"]
+    payload = {
+        "schema_version": "0.1",
+        "company_ref": frozen["company"]["company_ref"],
+        "mission": {"ref": mission["id"], "hash": mission["content_hash"]},
+        "playbook": {"ref": playbook["id"], "hash": playbook["content_hash"]},
+        "input_bindings": frozen["input_bindings"],
+    }
+    parts = [content_hash(payload)]
+    for path in (launcher.model_config_path, launcher.verifier_model_config_path):
+        try:
+            parts.append(hashlib.sha256(Path(path).read_bytes()).hexdigest())
+        except OSError:
+            parts.append("config:missing")
+    return f"{payload['company_ref']}|{hashlib.sha256('|'.join(parts).encode()).hexdigest()}"
+
+
+def _verification_is_content_refusal(settled: Mapping[str, Any]) -> bool:
+    verification = settled.get("verification") or {}
+    return (verification.get("status") == "verified"
+            and verification.get("verdict") == "reject")
+
+
+def _settled_for_failure_classification(settled: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(settled)
+    verification = settled.get("verification") or {}
+    normalized["failure_reason"] = (
+        settled.get("reason") or verification.get("reason")
+        or settled.get("failure_reason") or f"last run: {settled.get('status')}"
+    )
+    return normalized
+
+
 class MissionInvestmentMemoLaneCoordinator:
-    def __init__(self, *, connection: Any, launcher: Any) -> None:
+    def __init__(self, *, connection: Any, launcher: Any,
+                 companies: Callable[[], list[str]] | None = None,
+                 frozen_input: Callable[[str], Mapping[str, Any]] | None = None) -> None:
         self.connection, self.launcher = connection, launcher
+        self.companies = companies
+        self.frozen_input = frozen_input
         self.open_ticket: str | None = None
-        self.quiet_signature: str | None = None
+        self.quiet_signatures: set[str] = set()
         self.budget = lane_budget("investment_memo", state_dir=launcher.state_dir)
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -60,30 +103,56 @@ class MissionInvestmentMemoLaneCoordinator:
             self.open_ticket = None
             memo_status = settled.get("memo_status")
             if memo_status in QUIET:
-                self.quiet_signature = signature
-            elif memo_status in TERMINAL:
+                self.quiet_signatures.add(signature)
+            elif memo_status in TERMINAL or _verification_is_content_refusal(settled):
                 self.budget.record(signature, status=f"content_refused:{memo_status}",
                                    reason=str(settled.get("reason") or memo_status))
             elif settled.get("status") == "succeeded":
                 self.budget.clear(signature)
             else:
-                self.budget.record_settled(signature, settled)
-        signature = ledger_signature(self.connection, self.launcher)
-        if signature == self.quiet_signature:
-            return {"status": "idle", "signature": signature, "settled": settled}
-        held = self.budget.blocked(signature)
-        if held:
-            return {"status": held.action, "reason": held.classification.reason,
-                    "signature": signature, "settled": settled}
-        try:
-            ticket = self.launcher.start(signature=signature)
-        except LaneChildConflict as exc:
-            return {"status": "busy", "reason": str(exc), "settled": settled}
-        except LaneChildRejected as exc:
-            return {"status": "rejected", "reason": str(exc), "settled": settled}
-        self.open_ticket = ticket["id"]
-        return {"status": "launched", "ticket_ref": ticket["id"], "signature": signature,
-                "settled": settled}
+                self.budget.record_settled(
+                    signature, _settled_for_failure_classification(settled))
+        if self.companies is None or self.frozen_input is None:
+            candidates = [(None, ledger_signature(self.connection, self.launcher), None)]
+        else:
+            candidates = []
+            skipped = {}
+            for company_ref in self.companies():
+                frozen = self.frozen_input(company_ref)
+                if frozen.get("status") != "ready":
+                    skipped[company_ref] = str(frozen.get("reason") or frozen.get("status"))
+                    continue
+                candidates.append((company_ref, company_signature(frozen, self.launcher), frozen))
+        held_companies = {}
+        for company_ref, signature, _frozen in candidates:
+            if company_ref is not None:
+                for item in self.budget.permission_items():
+                    if (str(item["item_key"]).startswith(f"{company_ref}|")
+                            and item["item_key"] != signature):
+                        self.budget.retire(item["item_key"])
+            if signature in self.quiet_signatures:
+                continue
+            held = self.budget.blocked(signature)
+            if held:
+                held_companies[str(company_ref or "-")] = held.classification.reason
+                continue
+            try:
+                ticket = self.launcher.start(signature=signature, company_ref=company_ref)
+            except LaneChildConflict as exc:
+                return {"status": "busy", "reason": str(exc), "settled": settled}
+            except LaneChildRejected as exc:
+                return {"status": "rejected", "reason": str(exc), "settled": settled}
+            self.open_ticket = ticket["id"]
+            return {"status": "launched", "ticket_ref": ticket["id"],
+                    "company_ref": company_ref, "signature": signature,
+                    "held": held_companies, "settled": settled}
+        if held_companies:
+            return {"status": "held", "held": held_companies, "settled": settled,
+                    "reason": "; ".join(f"{key}: {value}"
+                                         for key, value in held_companies.items())}
+        return {"status": "idle", "settled": settled,
+                "skipped": skipped if self.companies is not None else {},
+                "reason": "no eligible company memo input changed"}
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -93,8 +162,22 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         return {"status": "unconfigured"}
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
+        from .investment_memo_cli import collect_frozen_input
+
+        def companies() -> list[str]:
+            rows = server.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref"
+            ).fetchall()
+            if len(rows) != 1:
+                return []
+            mission = server.coverage_mission.mission(rows[0]["mission_version_id"])
+            return [str(member["company_ref"]) for member in mission["universe"]]
+
         coordinator = MissionInvestmentMemoLaneCoordinator(connection=server.store.connection,
-                                                             launcher=launcher)
+            launcher=launcher, companies=companies,
+            frozen_input=lambda company_ref: collect_frozen_input(
+                server.store, company_ref=company_ref))
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
 
@@ -129,4 +212,5 @@ LANE = register_lane(LaneSpec(operation="dispatch_investment_memo", order=143,
     argparse=add_arguments, launcher_factory=build_launcher, argv_fragment=argv_fragment,
     note="Four-group Investment Memo draft plus complete independent verification."))
 
-__all__ = ["LANE", "MissionInvestmentMemoLaneCoordinator", "argv_fragment", "ledger_signature"]
+__all__ = ["LANE", "MissionInvestmentMemoLaneCoordinator", "argv_fragment",
+           "company_signature", "ledger_signature"]
