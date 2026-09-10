@@ -37,7 +37,13 @@ from typing import Any
 
 from .cockpit_model import purposes, register_purpose
 from .model_accounting import ModelAccountingError, _route_estimate_micros
-from .model_router import ModelRouter, live_links, policy_chain, resolve_chain
+from .model_router import (
+    ModelRouter,
+    independent_families,
+    live_links,
+    policy_chain,
+    resolve_chain,
+)
 
 
 class FallbackChainError(RuntimeError):
@@ -416,7 +422,7 @@ def validate_selection(
             if profile_id in held
         }
         first = held[links[0]]["family"]
-        if first in producers:
+        if any(not independent_families(first, producer) for producer in producers):
             raise FallbackChainError(
                 f"{links[0]} is in the {first} family, which is what produces the "
                 "work this stage checks; a verifier from the producer's own family "
