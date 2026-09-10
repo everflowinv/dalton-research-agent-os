@@ -803,7 +803,104 @@ def _register_cn_hk_findata_kinds() -> None:
         )
 
 
+# S5: the four SEC ownership operations and the two IR-page-watch ones.
+#
+# Registered by loop for the reason the China / Hong Kong six are: they differ
+# in exactly one thing -- the schema hash -- and six copied blocks, one of
+# which forgets to change it, produce an approval that silently covers the
+# wrong operation.
+SEC_OWNERSHIP_KIND_BY_OPERATION: dict[str, str] = {}
+IR_PAGE_WATCH_KIND_BY_OPERATION: dict[str, str] = {}
+
+
+def _sec_ownership_source_hash() -> str:
+    from .sec_ownership_core import ownership_source_hash
+
+    return ownership_source_hash()
+
+
+def _sec_ownership_permissions() -> dict[str, Any]:
+    from .sec_ownership_core import ownership_permissions
+
+    return ownership_permissions()
+
+
+def _sec_ownership_fixture_hash() -> str:
+    from .sec_ownership_core import ownership_fixture_hash
+
+    return ownership_fixture_hash()
+
+
+def _sec_ownership_schema_hash(operation: str) -> Callable[[], str]:
+    def thunk() -> str:
+        from .sec_ownership_core import ownership_schema_hash
+
+        return ownership_schema_hash(operation)
+
+    return thunk
+
+
+def _ir_page_watch_source_hash() -> str:
+    from .ir_page_watch_core import ir_page_watch_source_hash
+
+    return ir_page_watch_source_hash()
+
+
+def _ir_page_watch_permissions() -> dict[str, Any]:
+    from .ir_page_watch_core import ir_page_watch_permissions
+
+    return ir_page_watch_permissions()
+
+
+def _ir_page_watch_fixture_hash() -> str:
+    from .ir_page_watch_core import ir_page_watch_fixture_hash
+
+    return ir_page_watch_fixture_hash()
+
+
+def _ir_page_watch_schema_hash(operation: str) -> Callable[[], str]:
+    def thunk() -> str:
+        from .ir_page_watch_core import ir_page_watch_schema_hash
+
+        return ir_page_watch_schema_hash(operation)
+
+    return thunk
+
+
+def _register_s5_kinds() -> None:
+    from .ir_page_watch_core import (
+        CAPABILITY_BY_OPERATION as _IR_CAPABILITIES,
+        KIND_BY_OPERATION as _IR_KINDS,
+    )
+    from .sec_ownership_core import (
+        CAPABILITY_BY_OPERATION as _OWNERSHIP_CAPABILITIES,
+        KIND_BY_OPERATION as _OWNERSHIP_KINDS,
+    )
+
+    for operation, kind in _OWNERSHIP_KINDS.items():
+        SEC_OWNERSHIP_KIND_BY_OPERATION[operation] = kind
+        GOVERNANCE_KIND_REGISTRY[kind] = _KindSpec(
+            capability_id=_OWNERSHIP_CAPABILITIES[operation],
+            template_key="sec",
+            source_hash=_sec_ownership_source_hash,
+            schema_hash=_sec_ownership_schema_hash(operation),
+            permissions=_sec_ownership_permissions,
+            fixture_hash=_sec_ownership_fixture_hash,
+        )
+    for operation, kind in _IR_KINDS.items():
+        IR_PAGE_WATCH_KIND_BY_OPERATION[operation] = kind
+        GOVERNANCE_KIND_REGISTRY[kind] = _KindSpec(
+            capability_id=_IR_CAPABILITIES[operation],
+            template_key="ir-page-watch",
+            source_hash=_ir_page_watch_source_hash,
+            schema_hash=_ir_page_watch_schema_hash(operation),
+            permissions=_ir_page_watch_permissions,
+            fixture_hash=_ir_page_watch_fixture_hash,
+        )
+
+
 _register_cn_hk_findata_kinds()
+_register_s5_kinds()
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
 # treat the set as a connector-kind catalog.
@@ -963,6 +1060,36 @@ def build_governance_record(
 
         return build_cn_hk_findata_governance_record(
             operation=CN_HK_OPERATIONS[kind],
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in SEC_OWNERSHIP_KIND_BY_OPERATION.values():
+        from .sec_ownership_core import (
+            OPERATION_BY_KIND as SEC_OWNERSHIP_OPERATIONS,
+            build_sec_ownership_governance_record,
+        )
+
+        return build_sec_ownership_governance_record(
+            operation=SEC_OWNERSHIP_OPERATIONS[kind],
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in IR_PAGE_WATCH_KIND_BY_OPERATION.values():
+        from .ir_page_watch_core import (
+            OPERATION_BY_KIND as IR_PAGE_WATCH_OPERATIONS,
+            build_ir_page_watch_governance_record,
+        )
+
+        return build_ir_page_watch_governance_record(
+            operation=IR_PAGE_WATCH_OPERATIONS[kind],
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,
@@ -1325,6 +1452,7 @@ __all__ = [
     "SALES_NOTES_LIST_CAPABILITY_ID", "SALES_NOTES_LIST_KIND",
     "COMPANY_WIKI_GET_CAPABILITY_ID", "COMPANY_WIKI_GET_KIND",
     "COMPANY_WIKI_LIST_CAPABILITY_ID", "COMPANY_WIKI_LIST_KIND",
+    "IR_PAGE_WATCH_KIND_BY_OPERATION", "SEC_OWNERSHIP_KIND_BY_OPERATION",
     "SEC_CAPABILITY_ID", "SEC_COMPANY_FACTS_KIND", "build_governance_record",
     "governance_kind_for_capability", "load_connector_governance",
     "write_governance_proposal",

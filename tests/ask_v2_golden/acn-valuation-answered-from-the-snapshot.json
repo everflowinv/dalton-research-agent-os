@@ -1,0 +1,89 @@
+{
+ "case_ref": "acn-valuation-answered-from-the-snapshot",
+ "expected": {
+  "cited_tags": [
+   "V1",
+   "P1"
+  ],
+  "confidence": "medium",
+  "quality": {
+   "cites_only_shown_claims": "pass",
+   "confidence_stated": "pass",
+   "numbers_without_refs": "pass"
+  },
+  "question_kind": "valuation",
+  "rationale": "每个数字都在被引的行里逐字出现；分位的口径与数字同句，所以读者能判断它是不是价格自己的分位。",
+  "refused": false,
+  "verification": {
+   "cites_only_shown_rows": "pass",
+   "confidence_in_vocabulary": "pass",
+   "market_vs_us_present": "skipped",
+   "numeric_sentences_cite": "pass",
+   "refresh_names_a_capable_source": "skipped",
+   "refusal_states_why": "pass",
+   "unknowns_typed": "pass"
+  },
+  "wants_market_vs_us": false
+ },
+ "note": "正例：估值类问题，答案引用估值与股价两块，并把分位的口径一起说出来——分位的 basis 不说清，「相对自己历史便宜」就是一句读者无法核对的话。",
+ "question": "ACN 的估值现在贵不贵？",
+ "reply": {
+  "confidence": "medium",
+  "market_vs_us": null,
+  "refresh_suggested": null,
+  "refusal_detail": null,
+  "refusal_reason": null,
+  "refused": false,
+  "sentences": [
+   {
+    "refs": [
+     "V1"
+    ],
+    "text": "按 trailing P/E 看，ACN 现在处在自己历史的 72 分位，不便宜但也谈不上极端。"
+   },
+   {
+    "refs": [
+     "V1"
+    ],
+    "text": "这个分位是股价与已报基本面一起算出来的，不是只反映股价高低。"
+   },
+   {
+    "refs": [
+     "P1"
+    ],
+    "text": "最新收盘是 331.20 美元。"
+   }
+  ],
+  "unknowns": [
+   {
+    "content_kind": "consensus",
+    "source": "yfinance",
+    "what": "缺卖方对 2027 年 EPS 的一致预期，没法给 forward 倍数"
+   }
+  ]
+ },
+ "shown": [
+  {
+   "block": "valuation",
+   "period": "2026-09-08",
+   "ref": "valuation-snapshot-version:acn:4",
+   "statement": "trailing P/E = 24.1x，历史分位 72",
+   "tag": "V1"
+  },
+  {
+   "block": "market_price",
+   "period": "2026-09-08",
+   "ref": "market-price-series-version:acn:31",
+   "statement": "ACN 最新收盘 331.20 USD（2026-09-08）",
+   "tag": "P1"
+  },
+  {
+   "block": "claims",
+   "period": "2026-03-01..2026-05-31",
+   "ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+   "statement": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
+   "tag": "C1"
+  }
+ ],
+ "source": "P11c 的 ValuationSnapshot 与 P11a 的日线，取自 2026-09-09 只读副本的形状；数字是示例。"
+}

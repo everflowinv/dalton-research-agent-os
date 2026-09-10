@@ -24,6 +24,8 @@ from dalton_core.deliverable_reopen import (
     reopen_assessment,
 )
 from dalton_core.initial_screen_cli import _target, reopen_revision
+from dalton_core.mission_reopen_lane import passed_companies
+from dalton_core.mission_stage import evaluate_mission
 from dalton_core.mission_deliverable import (
     MissionDeliverableAuthority,
     MissionDeliverableValidationError,
@@ -200,6 +202,65 @@ class AssessmentTests(ReopenHarness):
         self.assertEqual(found["version_id"], first["id"])
         self.assertEqual(reopen_assessment(self.store.connection,
                                            company_ref=ACN)["flipped"], ["statements"])
+
+    def test_a_gate_that_passed_under_an_earlier_mission_version_is_still_passed(self):
+        # P14-S. The live mission rolled v7 -> v13 in two days. Read off the
+        # active version, the four Initial Screens that passed under v13 come
+        # back as never-screened under v14, and the selection rule -- which
+        # skips a company whose gate has passed -- re-drafts all four.
+        version = self.publish()
+        self.pass_gate(version)
+        first = self.mission["id"]
+        self.grant("forecast_line")
+        self.assertNotEqual(self.mission["id"], first)
+        self.assertEqual(self.missions.stage_records(self.mission["id"]), [],
+                         "the new version carries no stage records of its own")
+
+        stage_state = self.missions.stage_state_by_company(self.mission_ref)
+        self.assertEqual(stage_state[ACN]["initial_screen"], ["entered", "gate_passed"])
+        rows = evaluate_mission(self.store.connection, self.mission,
+                                planned_specs=set(), stage_state=stage_state)
+        acn = next(row for row in rows if row["company_ref"] == ACN)
+        self.assertEqual((acn["stage"], acn["stage_status"]), ("initial_screen", "gate_passed"))
+        _target_entry, skipped = _target(
+            mission=self.mission, stage_rows=rows, deliverables={},
+            claims={ACN: [{"created_at": "2026-09-01T00:00:00+00:00"}]}, reopens={},
+        )
+        self.assertIn({"company_ref": ACN, "reason": "initial screen already passed"},
+                      skipped)
+        # And the diff baseline is still the version the gate cited.
+        self.assertEqual(passed_version(self.store.connection,
+                                        company_ref=ACN)["version_id"], version["id"])
+
+    def test_a_pass_a_reopen_already_superseded_is_not_a_pass(self):
+        # A ``gate_failed`` after a ``gate_passed`` is how a reopened gate
+        # reads. ``record_stage`` will not write it -- reopening a passed gate
+        # is a human checkpoint with no automatic writer (ADR-0008) -- so the
+        # row goes in the way the authority would write it, and the readers
+        # that must respect it are the ones under test: without the fold, the
+        # weekly lane offers an already-open gate for reopening every week.
+        version = self.publish()
+        self.pass_gate(version)
+        self.thicken(lines=250)
+        self.assertEqual(passed_companies(self.store.connection, self.mission), [ACN])
+        with self.missions._transaction() as cur:
+            latest = cur.execute(
+                "SELECT MAX(created_at) FROM coverage_mission_stage_records"
+            ).fetchone()[0]
+            cur.execute(
+                "INSERT INTO coverage_mission_stage_records(record_id,mission_version_ref,"
+                "company_ref,stage_ref,status,actor_ref,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("mission-stage-record:reopen:acn", self.mission["id"], ACN,
+                 "initial_screen", "gate_failed", OWNER, '{"rationale":"reopened"}',
+                 "e" * 64, latest + "1"),
+            )
+        self.assertIsNone(passed_version(self.store.connection, company_ref=ACN))
+        self.assertEqual(
+            reopen_assessment(self.store.connection, company_ref=ACN)["status"],
+            "not_passed",
+        )
+        self.assertEqual(passed_companies(self.store.connection, self.mission), [])
 
     def test_the_same_evidence_base_always_hashes_the_same(self):
         version = self.publish()

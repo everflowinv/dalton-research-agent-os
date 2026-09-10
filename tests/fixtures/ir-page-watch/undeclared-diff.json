@@ -1,0 +1,4 @@
+{
+  "watch": {"url": "https://example.com/blog", "title": "Somebody else's watch"},
+  "history": {"1789000100": "one\n", "1789000200": "one\ntwo\n"}
+}

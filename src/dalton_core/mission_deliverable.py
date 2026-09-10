@@ -51,6 +51,21 @@ DELIVERABLE_KINDS: tuple[str, ...] = (
     # deliverable rather than a new object precisely so that it inherits the
     # rule that a figure with no live Claim behind it is refused.
     "event_note",
+    # P12d: the Deep Insight Gate's twelve answers, rendered for a reader.  The
+    # record of truth is the gate authority's own chain -- that is what the
+    # owner's decision binds by hash and what replays by version -- and this is
+    # the reader's copy, published through the machinery every other document in
+    # this system already appears in.  It is a deliverable rather than a second
+    # object precisely so that it inherits the rule that a figure with no live
+    # Claim behind it is refused.
+    "deep_insight_gate",
+    # P14f: the two windows of an earnings season.  One chain per company per
+    # kind, gaining a version per occurrence, so "what did we say before the
+    # print and what did we say after it" is a version walk like every other
+    # output (ADR-0008).  Deliverables rather than new objects for the same
+    # reason as the two above.
+    "earnings_preview",
+    "earnings_calibration",
 )
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
@@ -83,6 +98,17 @@ _BARE_SMALL_INTEGER = 12
 # document's real bound is the 60-entry cap on a section's numbers.
 MAX_NUMBER_TEXT = 1000
 _VALUE_TOKEN_RE = re.compile(r"[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?%|\d[\d,.]*")
+
+
+def _kind_check_list() -> str:
+    """The CHECK constraint's value list, generated from the vocabulary.
+
+    So that the schema file, the rebuild and the Python vocabulary cannot
+    disagree about which kinds exist -- which is exactly how a Core ends up
+    refusing a kind with an ``IntegrityError`` instead of a readable message.
+    """
+
+    return ",".join(f"'{kind}'" for kind in DELIVERABLE_KINDS)
 
 
 class MissionDeliverableError(RuntimeError):
@@ -298,7 +324,7 @@ class MissionDeliverableAuthority:
         self._widen_kind_check()
 
     def _widen_kind_check(self) -> None:
-        """P14a: admit ``event_note`` on a Core built before that kind existed.
+        """Admit a kind on a Core built before that kind existed.
 
         ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that is already
         there, so a Core created under the seven-kind CHECK keeps refusing the
@@ -308,13 +334,25 @@ class MissionDeliverableAuthority:
         follows ``DaltonStore._migrate_thesis_authority_columns`` exactly,
         including the foreign-key check afterwards, because a rebuild that
         silently orphaned the pointer would be worse than the constraint.
+
+        P14a wrote this for ``event_note`` and keyed it on that one literal;
+        P12d added ``deep_insight_gate`` and moved the sentinel to it.  A
+        sentinel is one kind, and three slices adding kinds in the same week is
+        how a Core ends up having had one migration and not the next: whichever
+        sentinel it already carries, it is left alone.  So the condition is now
+        *every* kind in :data:`DELIVERABLE_KINDS`, and the rebuilt CHECK is
+        generated from that tuple rather than written out again.  Adding a kind
+        is a line in one place.
         """
 
         row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' "
             "AND name='mission_deliverable_versions'"
         ).fetchone()
-        if row is None or "'event_note'" in (row["sql"] or ""):
+        if row is None:
+            return
+        current = row["sql"] or ""
+        if all(f"'{kind}'" in current for kind in DELIVERABLE_KINDS):
             return
         if self.connection.in_transaction:
             raise MissionDeliverableConflict(
@@ -338,8 +376,7 @@ class MissionDeliverableAuthority:
                     playbook_version_ref TEXT NOT NULL,
                     playbook_version_hash TEXT NOT NULL,
                     kind TEXT NOT NULL CHECK(kind IN (
-                        'industry_framework','initial_screen','industry_model','company_model',
-                        'forecast_lines','investment_memo','weekly_brief','event_note'
+                        __KINDS__
                     )),
                     subject_ref TEXT NOT NULL,
                     record_json TEXT NOT NULL,
@@ -364,7 +401,7 @@ class MissionDeliverableAuthority:
                 BEFORE DELETE ON mission_deliverable_versions BEGIN
                     SELECT RAISE(ABORT, 'mission deliverables are append-only'); END;
                 COMMIT;
-                """
+                """.replace("__KINDS__", _kind_check_list())
             )
         finally:
             self.connection.execute("PRAGMA foreign_keys = ON")

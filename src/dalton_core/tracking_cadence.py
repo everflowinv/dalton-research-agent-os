@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from .research_event import rfc3339
+from .research_playbook import STAGE_ORDER
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -212,24 +213,26 @@ def screen_passed_companies(
     write anything.  The document checklist found the same shape and counts
     the same way.
 
+    P14-S turned that fix into the authority's own rule.  ``companies_at_or_past``
+    is the shared folded reader; "past the screen" is spelled as "at or past
+    the stage after it", which is the same fact read one step forward and also
+    catches a company that has since walked further up the ladder.
+
     Deliberately monotone otherwise: no later stage, no research task and no
     judgement decision removes a company.  A company leaves by leaving the
-    mission universe, which is a human act.
+    mission universe, which is a human act.  ``companies_at_or_past`` is
+    monotone for exactly this reason -- a reopened gate does not evict a
+    resident -- which is why this reads it rather than ``current_stage_state``.
     """
 
     mission_ref = mission["mission_ref"]
+    after_screen = STAGE_ORDER[STAGE_ORDER.index(FIRST_STAGE) + 1]
     try:
-        rows = missions.connection.execute(
-            "SELECT DISTINCT company_ref FROM coverage_mission_stage_records "
-            "WHERE stage_ref=? AND status='gate_passed' AND mission_version_ref IN "
-            "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref=?)",
-            (FIRST_STAGE, mission_ref),
-        ).fetchall()
+        passed = set(missions.companies_at_or_past(after_screen, mission_ref))
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc):
             raise
         return []
-    passed = {row["company_ref"] for row in rows}
     universe = [member["company_ref"] for member in mission["universe"]]
     return [ref for ref in universe if ref in passed]
 

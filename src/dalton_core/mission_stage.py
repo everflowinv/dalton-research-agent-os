@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .coverage_mission import CoverageMissionError, STAGE_ORDER
+from .coverage_mission import CoverageMissionError, STAGE_ORDER, fold_stage_status
 
 SCHEMA_VERSION = "0.1"
 FIRST_STAGE = "initial_screen"
@@ -373,10 +373,10 @@ def evaluate_mission(
         history = (stage_state or {}).get(company_ref) or {}
         entered = [stage for stage in STAGE_ORDER if history.get(stage)]
         stage = entered[-1] if entered else None
-        status = None
-        if stage is not None:
-            statuses = list(history.get(stage) or ())
-            status = "gate_passed" if "gate_passed" in statuses else (statuses[-1] if statuses else None)
+        # P14-S: the last *decision* is the status, not the last record and
+        # not "gate_passed appears somewhere". A reopened gate's gate_failed
+        # comes after its gate_passed and must win.
+        status = None if stage is None else fold_stage_status(list(history.get(stage) or ()))
         items = []
         for item in SOURCE_BASE_ITEMS:
             if item["counted_by"] == "quantitative_claim_periods":
@@ -570,12 +570,16 @@ class MissionStageDriver:
         return [self.missions.mission(row["mission_version_id"]) for row in rows]
 
     def _stage_state(self, mission: Mapping[str, Any]) -> dict[str, dict[str, list[str]]]:
-        state: dict[str, dict[str, list[str]]] = {}
-        for record in self.missions.stage_records(mission["id"]):
-            state.setdefault(record["company_ref"], {}).setdefault(record["stage_ref"], []).append(
-                record["status"]
-            )
-        return state
+        """The ladder folded across every version of this mission (P14-S).
+
+        Read by ``mission_ref`` rather than by the active version id.  Reading
+        the active version made the checklist forget the ladder on every
+        publish: live, v7 through v13 each carry their own five ``entered``
+        rows for the same five companies, and the four Initial Screens that
+        passed under v13 would read as never-screened under v14.
+        """
+
+        return self.missions.stage_state_by_company(mission["mission_ref"])
 
     def evaluate(self) -> dict[str, Any]:
         missions = []
@@ -610,7 +614,19 @@ class MissionStageDriver:
         return result
 
     def run_once(self) -> dict[str, Any]:
-        """Enter ``initial_screen`` for every company that has no stage record yet."""
+        """Enter ``initial_screen`` for every company that has no stage record yet.
+
+        P14-S: "yet" means under *any* version of the mission, not under the
+        active one.  The decision is to stop re-seeding rather than to seed a
+        provenance-only duplicate: a second ``entered`` under v14 says nothing
+        the v7 one did not, it cannot move the folded state (``entered`` never
+        supersedes a decision), and it made an append-only ledger grow five
+        rows per publish -- live, 30 of the 41 stage records are re-seeds of
+        the same five ``initial_screen entered`` facts.  A company that has
+        entered has entered.  ``record_stage`` refuses the duplicate anyway
+        now that it folds; skipping it keeps the tick silent instead of
+        reporting five refusals it caused itself.
+        """
 
         entered: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []

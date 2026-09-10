@@ -162,6 +162,7 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_consensus_lane",
     "dalton_core.mission_tracking_lane",
     "dalton_core.mission_catalyst_lane",
+    "dalton_core.mission_ownership_lane",
     "dalton_core.mission_model_spec_lane",
     "dalton_core.mission_guidepoint_lane",
     "dalton_core.mission_model_forecast_lane",
@@ -172,10 +173,12 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_feed_lane",
     "dalton_core.mission_research_task_lane",
     "dalton_core.mission_event_judgement_lane",
+    "dalton_core.mission_earnings_season_lane",
     "dalton_core.mission_reopen_lane",
     "dalton_core.mission_reflection_lane",
     "dalton_core.mission_debate_map_lane",
     "dalton_core.mission_dossier_lane",
+    "dalton_core.mission_deep_insight_lane",
     "dalton_core.mission_conviction_lane",
 )
 
