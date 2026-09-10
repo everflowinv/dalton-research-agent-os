@@ -155,7 +155,9 @@ def install(
             # Every link of the chain needs its slot supplied or the router
             # refuses it with credential_slot_unavailable -- which reads like a
             # missing key and is really a missing line in a config.
-            credential_slots = credential_slots_for(router, list(tier_chain(tier)))
+            credential_slots = credential_slots_for(
+                router, list(tier_chain(tier)),
+                policy_version_ref=policy["policy_version_ref"])
     target = state_dir / CONFIG_FILE_NAME
     from .budget_config_install import preserved_budget_overrides
     budget_overrides = preserved_budget_overrides(target)

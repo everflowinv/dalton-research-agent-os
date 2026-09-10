@@ -154,15 +154,28 @@ def ensure_planner_policy(
             "policy_version_ref": wire["policy_version_ref"]}
 
 
-def credential_slots_for(router: ModelRouter, profile_ids: list[str]) -> list[str]:
+def credential_slots_for(
+    router: ModelRouter, profile_ids: list[str], *, policy_version_ref: str | None = None,
+) -> list[str]:
     """The credential slots the pinned profiles actually declare.
 
     Read from the registered profiles rather than guessed from the id, because
     a wrong slot here is a call that fails at the broker with no useful reason.
     """
 
+    selected = list(profile_ids)
+    if policy_version_ref is not None:
+        from .model_fallback_chain import effective_chain, profile_families
+
+        policy = router.get_policy(policy_version_ref)
+        profiles = profile_families(router)
+        for purpose in policy.get("purpose_overrides") or {}:
+            # A stage can select a provider outside the installer's base tier.
+            # Carry its effective chain's credential references as well as its
+            # immutable policy, including an explicit return to tier routing.
+            selected.extend(effective_chain(policy, purpose, profiles=profiles)["chain"])
     slots: list[str] = []
-    for profile_id in profile_ids:
+    for profile_id in dict.fromkeys(selected):
         row = router.connection.execute(
             "SELECT profile_json FROM model_endpoint_profile_versions WHERE profile_id=? "
             "ORDER BY rowid DESC LIMIT 1",
@@ -208,7 +221,8 @@ def install(
         # longer offers and make a later setup run override catalog authority.
         policy = ensure_planner_policy(router, profile_ids=list(profile_ids), now=now,
                                        policy_id=policy_id, tier=tier)
-        slots = credential_slots_for(router, list(profile_ids))
+        slots = credential_slots_for(
+            router, list(profile_ids), policy_version_ref=policy["policy_version_ref"])
     target = state_dir / config_file_name
     from .budget_config_install import BudgetConfigInstallError, preserved_budget_overrides
     try:
