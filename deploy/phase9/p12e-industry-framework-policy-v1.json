@@ -1,0 +1,151 @@
+{
+  "schema_version": "0.1",
+  "policy_ref": "industry-framework-policy:us-it-services:v1",
+  "causal_chain_titles": [
+    {
+      "constitution_ref": "constitution:us-it-services",
+      "causal_chain_hash": "b1781893ffcc079653ac07106408dc794ecb1237ab6b2ad4dc5db782c307f454",
+      "titles": [
+        "预算与宏观：审批周期与滞后",
+        "新签订单：领先收入两到四个季度",
+        "AI 与 reinvention：新增预算池",
+        "managed services：年金化与波动抑制",
+        "交付经济学：需求如何传导到利润率",
+        "现金转换与资本回报：滞后确认"
+      ],
+      "note": "The six links of the US IT services chain, titled in the order the Constitution states them and bound to the hash of the whole chain. A chain that gains, loses or reorders a link no longer matches this entry and every section goes unavailable until a person titles it again. That is deliberate: a title is a claim about what a link is for, and a rule that inferred one from keywords would quietly rewrite the methodology into whatever the wording suggested."
+    }
+  ],
+  "driver_horizons": [
+    {
+      "driver_ref": "driver:revenue-growth-usd-gaap",
+      "horizons": ["short_term"],
+      "note": "Reported quarterly growth is the thing being explained, not a long-run driver of it. It belongs to the short-term block because a quarter's print is what moves in a quarter."
+    },
+    {
+      "driver_ref": "driver:bookings-mix-and-conversion",
+      "horizons": ["short_term", "long_term"],
+      "note": "Both, and the Constitution says why: bookings lead revenue by two to four quarters, which is a short-horizon signal, while the mix between consulting and managed services is a statement about what the business becomes."
+    },
+    {
+      "driver_ref": "driver:ai-reinvention-demand",
+      "horizons": ["long_term"],
+      "note": "A new budget pool is a multi-year claim. Filing it under the short term would make every quarter's genAI bookings number look like a verdict on it."
+    },
+    {
+      "driver_ref": "driver:delivery-economics",
+      "horizons": ["short_term", "long_term"],
+      "note": "Utilisation and attrition move within a quarter; workforce mix and pricing structure are what the margin can be over a cycle."
+    },
+    {
+      "driver_ref": "driver:cash-conversion-and-capital-return",
+      "horizons": ["long_term"],
+      "note": "The Constitution's last link is explicit that cash conversion is a trailing confirmation and cannot lead the inflection call, so it is not a short-horizon driver of anything."
+    }
+  ],
+  "gap_checklist": [
+    {
+      "gap_ref": "gap:tam-and-share",
+      "label": "行业 TAM 与份额分布",
+      "what_is_missing": "整体 IT 服务支出的规模、分部拆分与五家之外的份额分布。库里没有任何一条 Claim 承载 TAM，driver pack 也没有对应的 metric。",
+      "content_kind": "expert_excerpt",
+      "driver_refs": [],
+      "cost_note": "Guidepoint 专家访谈或卖方行业报告；Guidepoint 未接入，接入后每次访谈按合同限 20 词逐字引用。没有任何免费源能给出可核对的 TAM。",
+      "blocks_links": [0, 2]
+    },
+    {
+      "gap_ref": "gap:supply-capacity",
+      "label": "供给侧：交付产能",
+      "what_is_missing": "总人数、离岸比例、分包商可得性与产能利用的行业口径。五家各自披露 workforce，但没有共同口径，也没有行业层的产能数据。",
+      "content_kind": "expert_excerpt",
+      "driver_refs": ["driver:delivery-economics"],
+      "cost_note": "Guidepoint 专家访谈；未接入。次优是各家 IR 的 workforce 披露（company-ir，未接入）。",
+      "blocks_links": [4]
+    },
+    {
+      "gap_ref": "gap:high-frequency-demand",
+      "label": "高频需求读数",
+      "what_is_missing": "季报之间没有任何高频需求指标：招聘岗位数、人力派遣指数、企业 IT 支出调查。因果链第一环说预算重配是季度节奏，而我们只能按季度观察它。",
+      "content_kind": "web_page",
+      "driver_refs": ["driver:revenue-growth-usd-gaap", "driver:bookings-mix-and-conversion"],
+      "cost_note": "gemini-web-search 每次十条结果，web-fetch 按 host 一个 profile；两者都是 generic 源，只能定位不能枚举。真正的高频数据需要第三方数据源，尚未评估。",
+      "blocks_links": [0, 1]
+    },
+    {
+      "gap_ref": "gap:pricing",
+      "label": "定价与折让",
+      "what_is_missing": "实际 bill rate、按服务线的定价走势与折让幅度。driver pack 的 delivery-economics 有 metric 位置，但没有一条 Claim 填过它。",
+      "content_kind": "expert_excerpt",
+      "driver_refs": ["driver:delivery-economics"],
+      "cost_note": "Guidepoint（未接入）或 sales note 的人工投喂入口（sales-notes，尚未进 inventory）。卖方研报偶有定价评论，属于二手。",
+      "blocks_links": [4]
+    },
+    {
+      "gap_ref": "gap:labour-market",
+      "label": "劳动力市场",
+      "what_is_missing": "薪资通胀、主动离职率与招聘节奏的行业读数。attrition 是 driver pack 里 verification_kind 为 semantic 的 metric，只能靠管理层原话，而管理层只在电话会上说。",
+      "content_kind": "employee_review",
+      "driver_refs": ["driver:delivery-economics"],
+      "cost_note": "employee-reviews 连接器尚未进 inventory（S3 分支）；作为滞后读数使用，永远不能单独支撑一条定量 Claim。",
+      "blocks_links": [4]
+    },
+    {
+      "gap_ref": "gap:bookings-detail",
+      "label": "新签订单明细",
+      "what_is_missing": "总额之外的订单结构：咨询 / managed services 拆分、转化周期、可终止条款。因果链第二环整条建立在这上面，而它不进财报表。",
+      "content_kind": "management_minutes",
+      "driver_refs": ["driver:bookings-mix-and-conversion"],
+      "cost_note": "AlphaEngine 的电话会纪要（probe_only，24 小时 30 次上限）；company-ir 的 earnings release 与 8-K exhibit 未接入。",
+      "blocks_links": [1, 3]
+    },
+    {
+      "gap_ref": "gap:ai-budget-pool",
+      "label": "AI 预算池的可比披露",
+      "what_is_missing": "五家里只有部分公司披露 genAI bookings 与 revenue，口径互不相同，无法横向比较，也无法判断这个池子是新增还是挪用。",
+      "content_kind": "sell_side_report",
+      "driver_refs": ["driver:ai-reinvention-demand"],
+      "cost_note": "AlphaEngine 研报库是密度最高的单一来源，也是日配额最紧的；ACN 30 篇、EPAM 38 篇可用，IBM 只有 8 篇。",
+      "blocks_links": [2]
+    },
+    {
+      "gap_ref": "gap:competitive-wins",
+      "label": "覆盖范围外的竞争",
+      "what_is_missing": "Infosys / TCS / Wipro 等印度系厂商的份额变化与单笔大单的输赢，不在 universe 内，因此库里没有任何 Claim。",
+      "content_kind": "sales_note",
+      "driver_refs": [],
+      "cost_note": "sales-notes 的人工投喂入口（S1 分支，尚未进 inventory）；这是 owner 点名要接的第一类来源。",
+      "blocks_links": [1, 3]
+    },
+    {
+      "gap_ref": "gap:cash-conversion",
+      "label": "现金转换与资本回报",
+      "what_is_missing": "五家的 free cash flow 与 FCF 转换率没有一家被建模规格绑定到 filed concept，因此横向表里没有这一行。",
+      "content_kind": "filing",
+      "driver_refs": ["driver:cash-conversion-and-capital-return"],
+      "cost_note": "SEC 已接入且免费：这一条不需要新来源，需要的是建模规格把现金流量表的科目绑上去（P13-M2 的工作）。",
+      "blocks_links": [5]
+    }
+  ],
+  "output_rubric_bindings": [
+    {
+      "criterion_hash": "27f861e631002a629a69c9d68b6a5d392222c69d031ead5ab769e461f42c691f",
+      "checks": [],
+      "reason": "This criterion is about the weekly brief's contents. An industry framework is not a weekly brief, so there is nothing here for a structural check to read. Declared rather than skipped: a criterion nobody mentions is a standard nobody applied."
+    },
+    {
+      "criterion_hash": "7c0bf3a19bcfd2f750b366987d0d677349f9e91783132848a671d590dd7a8ee6",
+      "checks": ["numbers_trace_to_refs"],
+      "reason": "Every number in an output traces to evidence: each figure in the prose must appear verbatim in a row the sentence cites, which for this deliverable is usually a computed comparison cell."
+    },
+    {
+      "criterion_hash": "b404c93b91337588629d4721e1f1280d2f83929ed46e1f0f404f9749e4a09049",
+      "checks": ["no_investment_conclusion"],
+      "reason": "Outputs never auto-generate investment conclusions. A framework that says undervalued or names a target price has stopped being a file and become a call, and a call is admitted by a person (ADR-0001)."
+    },
+    {
+      "criterion_hash": "99ea4d51515b906b5ef5c391e6178e2dc8ce9331b815af63c971f22ab82dac2c",
+      "checks": ["not_a_restatement", "open_gaps_name_a_source"],
+      "reason": "A good research output reduces the open question set. Two structural readings, both required: the version cites something the current one does not, and every gap it still carries names the source kind that would close it. A framework that advanced the prose and left the gap list mute has not reduced the open question set, it has only moved words."
+    }
+  ]
+}

@@ -14,10 +14,12 @@ from dalton_core.initial_screen import (
     section_titles,
 )
 from dalton_core.mission_deliverable import (
+    CELL_SOURCE_KINDS,
     MissionDeliverableAuthority,
     MissionDeliverableConflict,
     MissionDeliverableValidationError,
     unsourced_numbers,
+    validate_cell_citation,
     value_tokens,
 )
 from dalton_core.store import DaltonStore, content_hash
@@ -276,6 +278,138 @@ class LaneTests(DeliverableHarness):
         self.assertEqual(summary["status"], "held")
         self.assertIn("deliverable", summary["failure_reason"])
         self.assertEqual(summary["sections"], [])
+
+
+class ComputedCellCitationTests(DeliverableHarness):
+    """P12e / P14f: a figure may cite a computed cell instead of a Claim.
+
+    Two layers now produce figures that are arithmetic over things the Core
+    already holds -- the industry framework's comparison cells and the
+    forecast model's cells -- and neither has a Claim behind it. Minting one
+    would be manufacturing a quotation for a calculation. What does not change
+    is the rule that matters: a figure this Core cannot re-derive is refused.
+    """
+
+    ACCESSION = "0001467373-26-000032"
+
+    def filing(self, accession: str | None = None) -> str:
+        """One held 10-Q, through the authority that owns the table."""
+
+        accession = accession or self.ACCESSION
+        authorization = self.missions.authorize_sec_lane(
+            company_ref=ACN, ticker="ACN", actor_ref=AUTOMATION,
+            mission_version_ref=self.mission["id"],
+            mission_version_hash=self.mission["content_hash"])
+        dispatch = self.missions.queue_statement_dispatch(
+            authorization=authorization, attempt=0)
+        self.missions.mark_statement_dispatch_launched(
+            dispatch["dispatch_id"], "sec-financials-run:" + "0" * 24)
+        self.missions.record_statement_observation(
+            dispatch_id=dispatch["dispatch_id"],
+            observation={
+                "schema_version": "0.1", "cik": "0001467373",
+                "entity_name": "Accenture plc",
+                "filings": [{
+                    "accession": accession, "form": "10-Q", "filed": "2026-07-01",
+                    "report_date": "2026-05-31",
+                    "lines": [{
+                        "statement": "income", "concept": "us-gaap:Revenues",
+                        "label": "Revenues", "level": 0, "parent_concept": None,
+                        "is_breakdown": False, "dimension_axis": None,
+                        "dimension_member": None, "period_start": "2026-03-01",
+                        "period_end": "2026-05-31", "value": "18718144000",
+                        "unit": "USD", "balance": "credit",
+                    }],
+                }],
+                "source_record_refs": ["raw-sink:" + "c" * 64],
+                "next_cursor": None, "provider_status": 200,
+            },
+            governance_ref="g", governance_hash="b" * 64)
+        self.missions.settle_statement_dispatch(
+            dispatch["dispatch_id"], outcome="succeeded")
+        return accession
+
+    def cell_number(self, accession: str, *, text="ACN 2026Q2 revenue 18718144000"):
+        return {"text": text,
+                "cell": {"kind": "statement_accession",
+                         "ref": "comparison-cell:acn:revenue:2026Q2",
+                         "accession": accession},
+                "period": "2026Q2"}
+
+    def test_the_shape_is_closed_per_kind(self) -> None:
+        self.assertEqual(CELL_SOURCE_KINDS,
+                         ("statement_accession", "forecast_cell"))
+        with self.assertRaises(MissionDeliverableValidationError):
+            validate_cell_citation({"kind": "vibes", "ref": "r"})
+        with self.assertRaises(MissionDeliverableValidationError):
+            # a statement cell carrying a forecast's field
+            validate_cell_citation({"kind": "statement_accession", "ref": "r",
+                                    "version_ref": "v"})
+        self.assertEqual(
+            validate_cell_citation({"kind": "forecast_cell", "ref": "r@2026-06-30:estimate",
+                                    "version_ref": "forecast-model-version:x"})["kind"],
+            "forecast_cell")
+
+    def test_a_figure_backed_by_a_held_filing_publishes(self) -> None:
+        self.grant("deliverable")
+        accession = self.filing()
+        record = self.publish([{
+            "title": "S1", "body": "本季收入 18718144000。", "claim_refs": [],
+            "numbers": [self.cell_number(accession)], "gaps": [],
+        }])
+        entry = record["sections"][0]["numbers"][0]
+        self.assertEqual(entry["cell"]["accession"], accession)
+        self.assertNotIn("claim_version_ref", entry)
+
+    def test_a_dangling_cell_ref_is_refused(self) -> None:
+        self.grant("deliverable")
+        with self.assertRaises(MissionDeliverableConflict) as caught:
+            self.publish([{
+                "title": "S1", "body": "本季收入 18718144000。", "claim_refs": [],
+                "numbers": [self.cell_number("0000000000-00-000000")], "gaps": [],
+            }])
+        self.assertIn("does not resolve", str(caught.exception))
+
+    def test_a_dangling_forecast_cell_is_refused(self) -> None:
+        self.grant("deliverable")
+        with self.assertRaises(MissionDeliverableConflict):
+            self.publish([{
+                "title": "S1", "body": "预测收入 19000000000。", "claim_refs": [],
+                "numbers": [{
+                    "text": "revenue 2026-12-31 estimate 19000000000",
+                    "cell": {"kind": "forecast_cell",
+                             "ref": "result:revenue@2026-12-31:estimate",
+                             "version_ref": "forecast-model-version:nope"},
+                    "period": "2026Q4"}],
+                "gaps": [],
+            }])
+
+    def test_a_number_citing_both_a_claim_and_a_cell_is_refused(self) -> None:
+        self.grant("deliverable")
+        accession = self.filing()
+        ref = self.claim(statement="Accenture reported Revenues of 18718144000.",
+                         value=1.87e10)
+        with self.assertRaises(MissionDeliverableValidationError) as caught:
+            self.publish([{
+                "title": "S1", "body": "本季收入 18718144000。", "claim_refs": [],
+                "numbers": [{**self.cell_number(accession), "claim_version_ref": ref}],
+                "gaps": [],
+            }])
+        self.assertIn("exactly one", str(caught.exception))
+
+    def test_a_number_citing_neither_is_still_refused(self) -> None:
+        self.grant("deliverable")
+        with self.assertRaises(MissionDeliverableValidationError):
+            self.publish([{
+                "title": "S1", "body": "本季收入 18718144000。", "claim_refs": [],
+                "numbers": [{"text": "revenue 18718144000", "period": "2026Q2"}],
+                "gaps": [],
+            }])
+
+    def test_a_resolvable_cell_makes_its_figure_sourced(self) -> None:
+        numbers = [self.cell_number("x", text="ACN 2026Q2 revenue 18718144000")]
+        self.assertEqual(unsourced_numbers("本季收入 18718144000。", numbers), [])
+        self.assertEqual(unsourced_numbers("利润率 14.2%。", numbers), ["14.2%"])
 
 
 class LauncherTests(unittest.TestCase):

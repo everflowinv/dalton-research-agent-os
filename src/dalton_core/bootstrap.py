@@ -53,6 +53,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("agenda_schema.sql", None),
     ("model_input_schema.sql", None),
     ("industry_research_schema.sql", None),
+    ("industry_framework_schema.sql", None),
     ("analyst_journal_schema.sql", None),
     ("answer_routing_schema.sql", None),
     ("bounded_planner_loop_schema.sql", None),
