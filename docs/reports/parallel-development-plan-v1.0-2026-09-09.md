@@ -234,6 +234,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 凌晨 | 合并 P14e 四条发现修复（probe 轮次可恢复不再永久失败；grant 解析器注入；两个绑不上的模板退役；行业 inquiry 拒绝理由）。P12d Deep Insight Gate、P15d ConvictionCall 交付在审；P12d 发现档案 `variant_view` 丢 `gaps` 的 blocker，档案作者在修 | 进行中 |
 | 09-10 凌晨 | 更正：三个「静默死亡」的 agent 其实还活着，重派造成同一 worktree 双写；已裁决归属（consensus 归原 agent，P14f 与 planner 日账本归新 agent），多余的一方退出并交接笔记。教训：重派前看 worktree 改动时间 | 完成 |
 | 09-10 凌晨 | 合并演练脚本修正与修订回路 P14b + P14d（含 socket 测试期限在 import 时算死的根因修复）。INT3 与演练修法三文件冲突，交回 INT3 调和。P12d review：三 blocker（重画时旧版 dossier 引用无法解析并反复付费；mission 版本一滚动裁决即失效），已发回修；派出 stage-ladder（阶段记录跨 mission 版本随行）。C1 日历事件与 P14a 合同不一致、lane 调用不存在的 writer 方法——交 C1 作者修桥接 | 进行中 |
+| 09-10 凌晨 | 合并档案 `variant_view` 修复（附「normaliser 输出必须自校验」通用测试）；修订回路两个 schema 补进演练迁移清单。交付在审：S5（SEC 所有权四 op + IR 监视）、ask v2；P15d review 一 blocker（inf/nan 百分比过风险收益标准）已发回并要求补 ADR-0008 版本化 | 进行中 |
 
 ---
 
