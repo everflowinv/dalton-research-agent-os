@@ -126,8 +126,8 @@ class SourceBaseTests(StageHarness):
             ("Nordic Semiconductor Q2 2026 Post Call", "Nordic Semiconductor"),
             ("Remitly Global Q3 2026 Earnings Call", "Remitly Global"),
             ("SoftBank Q4 2026 Investor Call", "SoftBank"),
-            ("Citi discusses Cognizant after Nordic Semiconductor Q1 2027 Earnings Call",
-             "Nordic Semiconductor"),
+            ("Remitly Q1 2027 Earnings Call — Cognizant comparison",
+             "Remitly Global; Cognizant"),
         ):
             self.document(CTSH, TRANSCRIPTS, "acquired", title=title,
                           named_companies=[issuer])
@@ -160,7 +160,8 @@ class SourceBaseTests(StageHarness):
         self.assertEqual(calls["required_periods"],
                          ["FY2025-Q3", "FY2025-Q4", "FY2026-Q1", "FY2026-Q2"])
         self.assertEqual(calls["missing_periods"], ["FY2025-Q3", "FY2025-Q4"])
-        self.assertEqual(calls["unclassified"], 2)
+        self.assertEqual(calls["unclassified"], 1)
+        self.assertEqual(calls["not_attributed"], 1)
 
     def test_four_nonconsecutive_historical_calls_do_not_pass_recent_window(self) -> None:
         for title in ("ACN Q1 2024", "ACN Q3 2024", "ACN Q1 2025",

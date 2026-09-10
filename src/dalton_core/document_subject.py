@@ -138,12 +138,39 @@ def document_names_subject(text: Any, subject: Any) -> dict[str, Any]:
     }
 
 
+def earnings_call_names_issuer(title: Any, subject: Any) -> dict[str, Any]:
+    """Whether a transcript title names the subject in the issuer position."""
+    names = subject_names(subject)
+    if not names or not isinstance(title, str):
+        return {"checked": bool(names), "names_issuer": False, "matched": []}
+    folded = _fold(title)
+    quarter = re.search(r"(?:q[1-4]\s+20\d{2}|20\d{2}\s+q[1-4]|[1-4]q\s+20\d{2})", folded)
+    if quarter is None:
+        return {"checked": True, "names_issuer": False, "matched": []}
+    call = re.search(
+        r"(?:earnings\s+(?:conference\s+)?call|conference\s+call|post\s+call|investor\s+call)",
+        folded[quarter.end():],
+    )
+    issuer_zone = folded[:quarter.start()]
+    if call is not None:
+        issuer_zone += " " + folded[quarter.end():quarter.end() + call.end()]
+    matched = _mentions(issuer_zone, names)
+    other_names = tuple(
+        name for aliases in COMPANY_NAMES.values() for name in aliases
+        if name not in names
+    )
+    ambiguous = _mentions(issuer_zone, other_names)
+    return {"checked": True, "names_issuer": bool(matched) and not ambiguous,
+            "matched": matched, "ambiguous_with": ambiguous}
+
+
 __all__ = [
     "COMPANY_NAMES",
     "INDUSTRY_NAMES",
     "MIN_TICKER_CHARS",
     "SCHEMA_VERSION",
     "document_names_subject",
+    "earnings_call_names_issuer",
     "subject_label",
     "subject_names",
 ]

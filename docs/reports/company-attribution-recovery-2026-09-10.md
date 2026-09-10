@@ -16,3 +16,9 @@ This is a read-side recovery. A future qualifying ingestion must carry the real 
 - A Cognizant earnings conference call that mentions EPAM qualifies for CTSH.
 - Missing provenance remains non-attributed rather than raising or being counted.
 - `tests.test_mission_stage`, `tests.test_discovery_satisfied_gate`, `tests.test_stage_reopen_ledger`, and `tests.test_research_planner`: 129 passed.
+
+## Issuer-position refinement
+
+A company mentioned anywhere in a title is not necessarily the issuer. The final rule requires the target in a closed issuer zone: before the fiscal-quarter token, or between that token and the earnings/conference/post/investor-call marker. If another covered issuer also appears in that zone, attribution is ambiguous and refused. The source named-company list must independently name the target. Thus `Remitly Q2 2026 Earnings Call — Cognizant comparison` cannot count for Cognizant, while `Q2 2026 Cognizant Earnings Conference Call — EPAM comparison` can.
+
+The same earnings-specific source-metadata check now feeds the existing qualitative, numeric, and metric-discovery admission floor. General industry and multi-company research retain their existing body-level attribution behavior.

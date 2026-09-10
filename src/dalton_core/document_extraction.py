@@ -1215,6 +1215,38 @@ class DocumentExtractionService:
         if cached is None:
             cached = self._subject_cache = {}
         if key not in cached:
+            if self._document_spec_ref(context) == "earnings-call-transcripts":
+                from .document_subject import (
+                    document_names_subject as names_subject,
+                    earnings_call_names_issuer,
+                )
+                row = self.writer.store.connection.execute(
+                    "SELECT title,named_companies_json,metadata_seen "
+                    "FROM document_provenance_records WHERE document_ref=?",
+                    (context["document_ref"],),
+                ).fetchone()
+                if row is None or not row["metadata_seen"]:
+                    cached[key] = {"checked": False, "names_subject": False,
+                                   "matched": [], "basis": "issuer_metadata_missing"}
+                    return cached[key]
+                try:
+                    named = json.loads(row["named_companies_json"])
+                except (TypeError, ValueError):
+                    named = []
+                issuer = earnings_call_names_issuer(
+                    row["title"], context.get("company_ticker"))
+                listed = names_subject(
+                    " | ".join(str(value) for value in named),
+                    context.get("company_ticker"),
+                )
+                cached[key] = {
+                    "checked": issuer.get("checked", False),
+                    "names_subject": bool(issuer.get("names_issuer"))
+                    and bool(listed.get("names_subject")),
+                    "matched": list(issuer.get("matched") or ()),
+                    "basis": "source_issuer_position_and_named_company",
+                }
+                return cached[key]
             try:
                 text = self._document_text(context)
             except Exception:  # noqa: BLE001 - unreadable is not attributed

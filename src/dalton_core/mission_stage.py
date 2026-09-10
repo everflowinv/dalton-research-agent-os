@@ -325,9 +325,9 @@ def _document_counts(
                     entry_counts["not_attributed"] += 1
                     continue
                 title = None if source_metadata is None else source_metadata["title"]
-                from .document_subject import document_names_subject
+                from .document_subject import document_names_subject, earnings_call_names_issuer
                 name_key = (company_name_keys or {}).get(company_ref)
-                attribution = document_names_subject(title, name_key)
+                attribution = earnings_call_names_issuer(title, name_key)
                 try:
                     named_companies = json.loads(source_metadata["named_companies_json"])
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -335,7 +335,7 @@ def _document_counts(
                 named_attribution = document_names_subject(
                     " | ".join(str(value) for value in named_companies), name_key)
                 if (not attribution.get("checked")
-                        or not attribution.get("names_subject")
+                        or not attribution.get("names_issuer")
                         or not named_attribution.get("names_subject")):
                     entry_counts["not_attributed"] += 1
                     continue
