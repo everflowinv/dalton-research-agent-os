@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <formData>
+    <issuerName>DXC TECHNOLOGY CO</issuerName>
+    <issuerCik>0001688568</issuerCik>
+    <cusip>23355L106</cusip>
+    <titleOfClass>Common Stock</titleOfClass>
+    <eventDateRequiresFilingThisStatement>2026-08-30</eventDateRequiresFilingThisStatement>
+    <filingPersonName>SYNTHETIC ACTIVIST PARTNERS LP</filingPersonName>
+    <aggregateAmountBeneficiallyOwned>9,600,000</aggregateAmountBeneficiallyOwned>
+    <percentOfClass>5.4</percentOfClass>
+    <purposeOfTransaction>
+      The Reporting Person acquired the Shares because it believes they are
+      undervalued and intends to engage with the board regarding capital
+      allocation.
+    </purposeOfTransaction>
+  </formData>
+</edgarSubmission>

@@ -197,6 +197,40 @@ for cn_hk_kind in financial-statements shareholders buybacks margin-balance \
     chmod 600 "$cn_hk_file"
   fi
 done
+# S5: the four SEC ownership records and the two IR-page-watch ones. Two
+# blocks, because they are two lanes' worth of switch even though one lane
+# drives both.
+#
+# The four SEC records are all-or-nothing by the INT1 rule above: the lane's
+# plist argument is the governance *directory*, and the launcher asks that
+# directory which of the four operations it may run. Seeding three of four
+# would give the owner a lane that reads Form 4s and reports 13F as unapproved
+# for ever without anyone deciding that, so all four go down together as
+# *proposed*. Four schema hashes, four separate approvals -- approving an
+# insider's transactions is not approving an institution's whole book.
+for ownership_kind in sec-form4-transactions sec-beneficial-ownership \
+                      sec-form144-notices sec-form13f-holdings; do
+  ownership_file="$governance_dir/${ownership_kind}-v1.json"
+  if [[ ! -f "$ownership_file" && -f "$repo_root/deploy/connector-governance/${ownership_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/${ownership_kind}-v1.json" "$ownership_file"
+    chmod 600 "$ownership_file"
+  fi
+done
+# The IR-page watcher's two records. They turn nothing on by themselves: the
+# watcher's switch is the declared-pages file, and this install deliberately
+# does not put one down -- the ten URLs in
+# deploy/phase9/p9-us-it-services-ir-pages-v1.json are the ones a human has to
+# confirm before Dalton reads a word from any of them, and a wrong entry files
+# one company's news under another. So the records are seeded for the owner to
+# read and approve, and the lane reports the watcher as unconfigured until
+# somebody copies that file to $state_dir/ir-pages.json on purpose.
+for ir_watch_kind in ir-page-watch-list-watches ir-page-watch-get-diff; do
+  ir_watch_file="$governance_dir/${ir_watch_kind}-v1.json"
+  if [[ ! -f "$ir_watch_file" && -f "$repo_root/deploy/connector-governance/${ir_watch_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/${ir_watch_kind}-v1.json" "$ir_watch_file"
+    chmod 600 "$ir_watch_file"
+  fi
+done
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

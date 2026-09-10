@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<edgarSubmission>
+  <headerData>
+    <submissionType>SC 13G/A</submissionType>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <issuerName>ACCENTURE PLC</issuerName>
+      <issuerCik>0001467373</issuerCik>
+      <cusipNumber>G1151C 10 1</cusipNumber>
+      <securitiesClassTitle>Class A Ordinary Shares</securitiesClassTitle>
+      <amendmentNo>007</amendmentNo>
+      <eventDateRequiresFilingThisStatement>2026-06-30</eventDateRequiresFilingThisStatement>
+      <signatureDate>2026-07-10</signatureDate>
+    </coverPageHeader>
+    <reportingPerson>
+      <reportingPersonName>SYNTHETIC ASSET MANAGEMENT LLC</reportingPersonName>
+      <reportingPersonCik>0001900002</reportingPersonCik>
+      <citizenshipOrPlaceOfOrganization>Delaware</citizenshipOrPlaceOfOrganization>
+      <typeOfReportingPerson>IA</typeOfReportingPerson>
+      <soleVotingPower>38,120,455</soleVotingPower>
+      <sharedVotingPower>0</sharedVotingPower>
+      <soleDispositivePower>41,003,900</soleDispositivePower>
+      <sharedDispositivePower>0</sharedDispositivePower>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>41,003,900</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <classPercent>6.7</classPercent>
+    </reportingPerson>
+    <reportingPerson>
+      <reportingPersonName>SYNTHETIC HOLDINGS PARENT INC</reportingPersonName>
+      <reportingPersonCik>0001900003</reportingPersonCik>
+      <citizenshipOrPlaceOfOrganization>Delaware</citizenshipOrPlaceOfOrganization>
+      <typeOfReportingPerson>HC</typeOfReportingPerson>
+      <soleVotingPower>0</soleVotingPower>
+      <sharedVotingPower>38,120,455</sharedVotingPower>
+      <soleDispositivePower>0</soleDispositivePower>
+      <sharedDispositivePower>41,003,900</sharedDispositivePower>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>41,003,900</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <classPercent>6.7</classPercent>
+    </reportingPerson>
+  </formData>
+</edgarSubmission>
