@@ -216,7 +216,8 @@ class WebDiscoveryLedgerTests(unittest.TestCase):
         self.assertEqual(
             set(DISCOVERY_SOURCES),
             {ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF, "source:sec-edgar", "source:guidepoint",
-             "source:sales-notes", "source:company-wiki"},
+             "source:sales-notes", "source:company-wiki",
+             "source:prior-research"},
         )
         params = mission_params(self.state)
         ref = params.pop("mission_ref")

@@ -1468,7 +1468,7 @@ class AuthoritySeamTests(unittest.TestCase):
     #: removing the name. The lane itself already refuses with
     #: "not registered in coverage_mission.DISCOVERY_SOURCES" until then, so
     #: an un-integrated feed is absent rather than half-wired.
-    AWAITING_AUTHORITY_ROW = frozenset({"source:prior-research"})
+    AWAITING_AUTHORITY_ROW = frozenset()
 
     def test_the_feed_sources_are_shaped_like_the_ones_already_registered(self) -> None:
         existing = next(iter(coverage_mission_module.DISCOVERY_SOURCES.values()))

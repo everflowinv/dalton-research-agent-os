@@ -222,6 +222,13 @@ DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
         "operation": "get_document",
         "document_ref_prefix": "company-wiki-doc:sha256:",
     }),
+    # P16: the fund's own prior research (old screens, memos, models) filed
+    # under a declared directory; a governed internal_prior source, not truth.
+    "source:prior-research": MappingProxyType({
+        "connector_source_ref": "source:prior-research",
+        "operation": "get_document",
+        "document_ref_prefix": "prior-research-doc:sha256:",
+    }),
 })
 DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
     "discovered", "already_in_authority", "acquisition_launched", "acquired",
