@@ -168,7 +168,7 @@ def render(
         if candidate_socket.exists() and candidate_key.exists():
             web_search_broker_socket = candidate_socket
             web_search_broker_auth_key = candidate_key
-    environment = {"PYTHONUNBUFFERED": "1"}
+    environment = {"PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"}
     if workspace_manifest_path is not None:
         manifest_path = Path(workspace_manifest_path).expanduser().resolve()
         from .workspace import load_workspace_manifest

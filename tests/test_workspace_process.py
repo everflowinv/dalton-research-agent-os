@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,20 +20,28 @@ from dalton_core.service import ServiceConfig
 from dalton_core.workspace_control_setup import configure_workspace_control
 
 
+def stub_wheel(path):
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("dalton_core/__init__.py", "VERSION = 'test'\n")
+    return __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+
+
+def stub_install(_wheel, venv):
+    (venv / "bin").mkdir(parents=True)
+    for executable in ("python", "dalton-writer", "daltond"):
+        path = venv / "bin" / executable
+        path.write_text("stub")
+        path.chmod(0o700)
+    package = venv / "lib" / "python3.14" / "site-packages" / "dalton_core"
+    package.mkdir(parents=True)
+    package.joinpath("__init__.py").write_text("VERSION = 'test'\n")
+
+
 class WorkspaceLaunchAgentTests(unittest.TestCase):
     def _workspace(self, root, slug, port):
         wheel = root / "dalton-test-py3-none-any.whl"
-        wheel.write_bytes(b"workspace release")
-        digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
-
-        def installer(_wheel, venv):
-            (venv / "bin").mkdir(parents=True)
-            for executable in ("python", "dalton-writer", "daltond"):
-                path = venv / "bin" / executable
-                path.write_text("stub")
-                path.chmod(0o700)
-
-        release = Path(install_release(root, wheel, digest, installer=installer)["release_path"])
+        digest = stub_wheel(wheel)
+        release = Path(install_release(root, wheel, digest, installer=stub_install)["release_path"])
         return create_workspace_manifest(
             root, slug, port, "release:sha256:" + digest, release,
             shared_readonly_paths=["/usr/bin/false"],
@@ -138,6 +147,18 @@ class WorkspaceLaunchAgentTests(unittest.TestCase):
             self.assertEqual(config.control.port, workspace.cockpit_port)
             self.assertEqual(config.control.writer_socket, workspace.writer_socket)
             self.assertFalse(result["tailscale_published"])
+            tokens = json.loads((workspace.state_dir / "writer-tokens.json").read_text())
+            self.assertIn(
+                "dashboard-control",
+                [principal["principal_id"] for principal in tokens["principals"]],
+            )
+            again = configure_workspace_control(
+                workspace.manifest_path,
+                owner_login="owner@example.com",
+                tailscale_host="analyst-a.example.ts.net",
+                tailscale_executable="/usr/bin/false",
+            )
+            self.assertEqual(again["port"], workspace.cockpit_port)
 
     def test_concurrent_workspace_creation_cannot_claim_the_same_port(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,22 +226,51 @@ class WorkspaceLaunchAgentTests(unittest.TestCase):
 
 
 class ImmutableReleaseTests(unittest.TestCase):
+    def test_real_offline_venv_console_script_runs_after_atomic_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wheel = root / "dalton_test-0.1-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("dalton_core/__init__.py", "")
+                archive.writestr(
+                    "dalton_core/fixture_cli.py",
+                    "def main():\n    print('final-release-ok')\n",
+                )
+                archive.writestr(
+                    "dalton_test-0.1.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: dalton-test\nVersion: 0.1\n",
+                )
+                archive.writestr(
+                    "dalton_test-0.1.dist-info/WHEEL",
+                    "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+                )
+                archive.writestr(
+                    "dalton_test-0.1.dist-info/entry_points.txt",
+                    "[console_scripts]\ndaltond=dalton_core.fixture_cli:main\ndalton-writer=dalton_core.fixture_cli:main\n",
+                )
+                archive.writestr("dalton_test-0.1.dist-info/RECORD", "")
+            digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
+            result = install_release(root, wheel, digest)
+            environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            environment.pop("PYTHONPATH", None)
+            completed = subprocess.run(
+                [str(Path(result["release_path"]) / "bin" / "daltond")],
+                capture_output=True, text=True, check=False,
+                env=environment,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "final-release-ok")
+
     def test_install_is_atomic_and_reinstall_only_validates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             wheel = root / "dalton-1-py3-none-any.whl"
-            wheel.write_bytes(b"reviewed wheel bytes")
-            digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
+            digest = stub_wheel(wheel)
             calls = []
 
             def installer(_wheel, venv):
                 calls.append(str(_wheel))
-                (venv / "bin").mkdir(parents=True)
-                (venv / "bin" / "python").write_bytes(b"python")
-                (venv / "bin" / "daltond").write_bytes(b"controller")
-                (venv / "bin" / "dalton-writer").write_bytes(b"writer")
-                for path in (venv / "bin").iterdir():
-                    path.chmod(0o700)
+                stub_install(_wheel, venv)
 
             first = install_release(root, wheel, digest, installer=installer)
             before = {
@@ -244,8 +294,7 @@ class ImmutableReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             wheel = root / "dalton-1-py3-none-any.whl"
-            wheel.write_bytes(b"wheel")
-            digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
+            digest = stub_wheel(wheel)
             with self.assertRaisesRegex(RuntimeError, "installer failed"):
                 install_release(
                     root, wheel, digest,
@@ -255,12 +304,7 @@ class ImmutableReleaseTests(unittest.TestCase):
             self.assertFalse(release.exists())
 
             def installer(_wheel, venv):
-                (venv / "bin").mkdir(parents=True)
-                (venv / "bin" / "python").write_bytes(b"python")
-                (venv / "bin" / "daltond").write_bytes(b"controller")
-                (venv / "bin" / "dalton-writer").write_bytes(b"writer")
-                for path in (venv / "bin").iterdir():
-                    path.chmod(0o700)
+                stub_install(_wheel, venv)
 
             install_release(root, wheel, digest, installer=installer)
             (release / "bin" / "daltond").write_bytes(b"tampered")

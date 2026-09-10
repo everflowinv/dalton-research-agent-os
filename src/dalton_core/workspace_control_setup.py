@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .cockpit_setup import install as install_cockpit
+from .bootstrap import bootstrap
 from .service import ServiceConfig
 from .workspace import WorkspaceError, load_workspace_manifest
+from .workspace import validate_service_mapping_paths
 
 
 def _atomic(path: Path, value: dict[str, Any]) -> None:
@@ -60,14 +62,35 @@ def configure_workspace_control(
         },
     }
     existing = raw.get("control")
-    if existing is not None and existing != desired:
-        raise WorkspaceError("workspace control is already configured differently")
+    if existing is not None:
+        existing_base = json.loads(json.dumps(existing))
+        if isinstance(existing_base.get("config"), dict):
+            existing_base["config"].pop("cockpit", None)
+        if existing_base != desired:
+            raise WorkspaceError("workspace control is already configured differently")
+    original = config.read_bytes()
     if existing is None:
         candidate = {**raw, "control": desired}
         ServiceConfig.from_mapping(candidate)
+        validate_service_mapping_paths(candidate, workspace)
         _atomic(config, candidate)
-    cockpit = install_cockpit(config)
-    ServiceConfig.from_file(config)
+    try:
+        bootstrap(
+            workspace.state_dir,
+            workspace.config_path,
+            workspace_manifest=workspace.manifest_path,
+        )
+        cockpit = install_cockpit(config)
+        ServiceConfig.from_file(config)
+    except BaseException:
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{config.name}.", dir=config.parent)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(original)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, config)
+        raise
     return {
         "status": "configured",
         "workspace_id": workspace.workspace_id,
@@ -84,7 +107,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--owner-login", required=True)
     parser.add_argument("--tailscale-host", required=True)
     parser.add_argument("--tailscale-executable", type=Path, required=True)
-    print(json.dumps(configure_workspace_control(**vars(parser.parse_args(argv))), sort_keys=True))
+    args = parser.parse_args(argv)
+    print(json.dumps(configure_workspace_control(
+        args.manifest, owner_login=args.owner_login,
+        tailscale_host=args.tailscale_host,
+        tailscale_executable=args.tailscale_executable,
+    ), sort_keys=True))
     return 0
 
 

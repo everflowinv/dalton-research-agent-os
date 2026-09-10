@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -31,11 +32,14 @@ def _sha(path: Path) -> str:
 def _inventory(venv: Path) -> list[dict[str, Any]]:
     rows = []
     for path in sorted(venv.rglob("*")):
+        if path.is_symlink():
+            raise WorkspaceError("release contains a symbolic link")
         if path.is_file() and path.name != MARKER:
             rows.append(
                 {
                     "path": path.relative_to(venv).as_posix(),
                     "size": path.stat().st_size,
+                    "mode": path.stat().st_mode & 0o777,
                     "sha256": _sha(path),
                 }
             )
@@ -66,7 +70,7 @@ def validate_release(path: str | Path, expected_wheel_sha256: str) -> dict[str, 
 
 
 def _default_installer(wheel: Path, venv: Path) -> None:
-    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    subprocess.run([sys.executable, "-m", "venv", "--copies", str(venv)], check=True)
     subprocess.run(
         [
             str(venv / "bin" / "python"), "-m", "pip", "install",
@@ -75,6 +79,30 @@ def _default_installer(wheel: Path, venv: Path) -> None:
         ],
         check=True,
     )
+
+
+def _relocate(staging: Path, final: Path) -> None:
+    old = str(staging).encode()
+    new = str(final).encode()
+    for path in [staging / "pyvenv.cfg", *(staging / "bin").glob("*")]:
+        if path.is_file() and not path.is_symlink():
+            raw = path.read_bytes()
+            if old in raw:
+                path.write_bytes(raw.replace(old, new))
+
+
+def _verify_wheel_payload(wheel: Path, venv: Path) -> None:
+    sites = list(venv.glob("lib/python*/site-packages"))
+    if len(sites) != 1:
+        raise WorkspaceError("installed release has no unique site-packages")
+    with zipfile.ZipFile(wheel) as archive:
+        members = [name for name in archive.namelist() if name.startswith("dalton_core/") and not name.endswith("/")]
+        if not members:
+            raise WorkspaceError("wheel contains no dalton_core package")
+        for name in members:
+            installed = sites[0] / name
+            if not installed.is_file() or installed.read_bytes() != archive.read(name):
+                raise WorkspaceError(f"installed Dalton payload differs from wheel: {name}")
 
 
 def install_release(
@@ -106,6 +134,8 @@ def install_release(
         try:
             staging = staging_root / "venv"
             installer(wheel, staging)
+            _relocate(staging, target)
+            _verify_wheel_payload(wheel, staging)
             files = _inventory(staging)
             executables = [
                 staging / "bin" / name
@@ -140,7 +170,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--host-root", type=Path, required=True)
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--wheel-sha256", required=True)
-    print(json.dumps(install_release(**vars(parser.parse_args(argv))), sort_keys=True))
+    args = parser.parse_args(argv)
+    print(json.dumps(install_release(args.host_root, args.wheel, args.wheel_sha256), sort_keys=True))
     return 0
 
 
