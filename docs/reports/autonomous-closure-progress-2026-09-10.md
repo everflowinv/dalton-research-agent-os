@@ -32,3 +32,14 @@ Memo + 模型阶段 + registry 集成75项 /2.823s通过；真实company model a
 桌面顶层已定位 `US eCommerce_Model_20260801.xlsx` 与 `STRL_Initial Screen_20260612.docx`（同桌面子目录还有其他模型，暂不推定为本次目标）。完成当前恢复与Cockpit后，详细阅读这两份：作为既有研究导入的实际样本，并重点拆解AMZN多个sheet的年度/季度预测、公式依赖、基金格式。原件不改、不提交仓库。
 
 文字最终交付采用HTML，可放图表与图片；Excel必须从Dalton内部模型导出到基金相同格式。因此原先计划的通用Excel exporter先不盲做，等样本审读后按真实格式实施。历史预测作为prior assumption，不作为actual写入权威；导入须保留原始来源/版本/日期/公式与来源级别。
+
+## 18:33 UTC 冻结与最终交付开发
+
+- `9952a4a` 全量6397项/594.450s：2 failures、1 skip；没有部署。新lane人类标签与crowd测试消费者分类修复后124项/24.215s通过。
+- 当前运行+Cockpit候选 `726ee7d`（此处Cockpit为完整页面重构）重新冻结，全量、wheel、副本演练并行执行。Live仍为38721e4。
+- 合法inquiry discovery在真实writer/template/mission/plan/round authority下执行，集成94项/9.917s通过；随后新增driver Pending显式恢复同round测试。 proposed模板未自动发布。
+- Cockpit审批刷新6/6、Ask恢复4/4、最终阅读器7/7均通过，live写入0；移动端长表、焦点与草稿保留已验收。
+- 样本审读已提交：18-sheet Excel真实结构与AMZN公式链、71页Word/31 callout/52 media/15 embedded workbook。已知年度/季度不齐如实保留，不能blank当0。
+- 最后三个Sol并行实现完整prior import、基金Excel exporter、HTML final deliverable。源文件和私有研究不进入仓库。
+
+Next step：接受完整运行候选后备份部署、health与逐字核对、实际产物复查；最终交付代码独立验收后再冻结，报告所有未满足的模型或人审条件。
