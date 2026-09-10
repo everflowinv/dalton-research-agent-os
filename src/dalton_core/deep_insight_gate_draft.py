@@ -477,7 +477,11 @@ def parse_group_output(
                 "question_ref": question_ref, "question": questions[question_ref],
                 "group": group, "status": "unknown", "confidence": None,
                 "unknown": {
-                    "reason": "no_material_shown",
+                    # The model was shown a table and could not answer from it.
+                    # Recording that as "no material was shown" would send the
+                    # owner to look for a wiring gap that is not there: the
+                    # material arrived and it does not settle the question.
+                    "reason": "material_insufficient",
                     "missing": row["missing"],
                     "evidence_that_would_answer": row["evidence_that_would_answer"],
                 },

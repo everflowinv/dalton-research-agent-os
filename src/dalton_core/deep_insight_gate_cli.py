@@ -257,20 +257,36 @@ def unanswered(question_ref: str, question: str, reason: str,
     }
 
 
-def unresolved_refs(
-    connection: Any,
-    record: Mapping[str, Any],
-    *,
-    forecast_cells: set[str],
-    valuation_metrics: set[str],
-    dossier_sections: set[str],
-    debates: set[str],
-) -> list[dict[str, str]]:
+def _version_scoped(ref: str, prefix: str) -> tuple[str, str] | None:
+    """Split ``<prefix>:<version id>:<member>`` into the version and the member.
+
+    The version ids these refs carry contain colons of their own
+    (``company-dossier-version:acn:3``), so the split is from the *right*: the
+    member is one token and everything between the prefix and it is the version.
+    """
+
+    if not ref.startswith(prefix + ":"):
+        return None
+    rest = ref[len(prefix) + 1:]
+    version, _, member = rest.rpartition(":")
+    if not version or not member:
+        return None
+    return version, member
+
+
+def unresolved_refs(connection: Any, record: Mapping[str, Any]) -> list[dict[str, str]]:
     """Every ref the draft cites, checked against the authority that owns it.
 
     Six kinds and six doors.  A ref nobody can open is the one defect a
     citation-bearing document must not have, and the gate cites more kinds than
     any document before it.
+
+    Every kind resolves against its *authority*, not against the rows this run
+    happened to show.  That distinction is the whole of this function: a draft
+    that carries an answer forward cites the dossier version that answer was
+    written from, which is by definition not the version this run read, and
+    checking against "what was on the table today" would make every redraft
+    after a returned gate refuse itself -- after paying for four calls.
     """
 
     kinds: dict[str, str] = {}
@@ -284,6 +300,14 @@ def unresolved_refs(
                 "SELECT claim_version_ref FROM claim_retirement_decisions "
                 "WHERE decision='retired'").fetchall()
         }
+
+    def stored(table: str, column: str, value: str) -> Mapping[str, Any] | None:
+        if not table_exists(connection, table):
+            return None
+        return connection.execute(
+            f"SELECT record_json FROM {table} WHERE {column}=?", (value,)
+        ).fetchone()
+
     missing: list[dict[str, str]] = []
     for ref, kind in sorted(kinds.items()):
         if kind == "claim":
@@ -294,18 +318,36 @@ def unresolved_refs(
                 missing.append({"ref": ref, "reason": "no such claim version"})
             elif ref in retired:
                 missing.append({"ref": ref, "reason": "the Claim was retired"})
-        elif kind == "forecast_cell":
-            if ref not in forecast_cells:
-                missing.append({"ref": ref, "reason": "no such forecast cell"})
-        elif kind == "valuation_metric":
-            if ref not in valuation_metrics:
-                missing.append({"ref": ref, "reason": "no such valuation metric"})
         elif kind == "dossier_section":
-            if ref not in dossier_sections:
-                missing.append({"ref": ref, "reason": "no such dossier section"})
+            parts = _version_scoped(ref, "dossier-section")
+            row = None if parts is None else stored(
+                "company_dossier_versions", "version_id", parts[0])
+            if parts is None or row is None:
+                missing.append({"ref": ref, "reason": "no such dossier version"})
+            elif parts[1] not in _dossier_members(row["record_json"]):
+                missing.append({"ref": ref,
+                                "reason": "that dossier version has no such section"})
         elif kind == "debate":
-            if ref not in debates:
-                missing.append({"ref": ref, "reason": "no such live debate"})
+            parts = _version_scoped(ref, "debate")
+            row = None if parts is None else stored(
+                "debate_map_versions", "version_id", parts[0])
+            if parts is None or row is None:
+                missing.append({"ref": ref, "reason": "no such debate map version"})
+            elif parts[1] not in _debate_members(row["record_json"]):
+                missing.append({"ref": ref,
+                                "reason": "that debate map version has no such debate"})
+        elif kind == "valuation_metric":
+            parts = _version_scoped(ref, "valuation-metric")
+            row = None if parts is None else stored(
+                "valuation_snapshot_versions", "version_id", parts[0])
+            if parts is None or row is None:
+                missing.append({"ref": ref, "reason": "no such valuation snapshot"})
+            elif parts[1] not in _metric_members(row["record_json"]):
+                missing.append({"ref": ref,
+                                "reason": "that snapshot has no such metric"})
+        elif kind == "forecast_cell":
+            if not _forecast_cell_exists(connection, ref):
+                missing.append({"ref": ref, "reason": "no such forecast cell"})
         elif ref.startswith("statement-line:"):
             row = connection.execute(
                 "SELECT 1 FROM coverage_mission_statement_lines WHERE line_id=?",
@@ -323,6 +365,78 @@ def unresolved_refs(
         else:
             missing.append({"ref": ref, "reason": "unrecognised figure ref shape"})
     return missing
+
+
+def _dossier_members(record_json: str) -> set[str]:
+    record = json.loads(record_json)
+    members = {section["aspect"] for section in record.get("sections") or []}
+    return members | {"industry_classification", "variant_view"}
+
+
+def _debate_members(record_json: str) -> set[str]:
+    return {str(item["debate_ref"])
+            for item in json.loads(record_json).get("debates") or []}
+
+
+def _metric_members(record_json: str) -> set[str]:
+    return {str(item["metric"])
+            for item in json.loads(record_json).get("metrics") or []}
+
+
+def _forecast_cell_exists(connection: Any, ref: str) -> bool:
+    """Whether one ``forecast-cell:`` ref still names a cell of a stored model.
+
+    Any version of the chain, not just the head: a cell an earlier answer cited
+    was real when it was cited, and a model that has since gained a version has
+    not made the old citation false.
+    """
+
+    if not table_exists(connection, "forecast_model_versions"):
+        return False
+    from .model_forecast_driver import cell_ref
+
+    for row in connection.execute(
+        "SELECT record_json FROM forecast_model_versions"
+    ).fetchall():
+        record = json.loads(row["record_json"])
+        for line in record.get("results") or []:
+            for cell in line.get("cells") or []:
+                period = cell.get("period") or {}
+                if ref == cell_ref(str(line["ref"]), str(period.get("end")),
+                                   str(cell.get("kind"))):
+                    return True
+    return False
+
+
+def demote_unresolved(
+    record: Mapping[str, Any], broken: set[str], *, drafted: set[str]
+) -> tuple[dict[str, Any], list[str]]:
+    """Turn carried answers whose evidence has gone into honest unknowns.
+
+    A ref that stopped resolving is a defect in whichever answer cites it.  In
+    an answer drafted just now that is a bad draft and the run is refused.  In
+    an answer carried forward from an earlier version -- a Claim retired since,
+    a dossier version whose section list changed -- refusing would freeze the
+    whole chain on one stale answer for ever, so that answer becomes
+    ``unknown`` and says what happened.  The old version keeps what it said;
+    nothing is edited.
+    """
+
+    out = dict(record)
+    answers = []
+    demoted: list[str] = []
+    for answer in record.get("answers") or []:
+        refs = {row["ref"] for row in answer.get("sources") or []}
+        if answer["question_ref"] in drafted or not (refs & broken):
+            answers.append(answer)
+            continue
+        demoted.append(answer["question_ref"])
+        answers.append(unanswered(
+            answer["question_ref"], answer["question"], "source_unavailable",
+            "上一版这一问引用的材料现在解析不到了",
+            "等这一组重新起草；本轮的运行摘要里记了具体是哪几条引用"))
+    out["answers"] = answers
+    return out, demoted
 
 
 def rubric_gate(
@@ -532,6 +646,8 @@ def run_gate(
         "rubric": None,
         "output_rubric_findings": [],
         "dropped_groups": [],
+        "demoted_questions": [],
+        "demoted_refs": [],
         "version_ref": None,
         "version_status": None,
         "answered": 0,
@@ -642,7 +758,8 @@ def run_gate(
                     blocked[candidate] = f"decided:{decision['decision']}"
                     continue
             current_map = debate_map_version(store, candidate)
-            digest = evidence_fingerprint(file_version, current_map)
+            digest = evidence_fingerprint(
+                file_version, current_map, questions_hash(questions))
             if head is not None and fingerprint_of(head) == digest:
                 blocked[candidate] = "nothing_new"
                 continue
@@ -831,23 +948,35 @@ def run_gate(
             actor_ref=actor_ref, change_reason=change_reason, drafted_at=stamped,
             evidence_refs=fresh, group_outcomes=group_outcomes,
         )
-        missing = unresolved_refs(
-            store.connection, record,
-            forecast_cells={row["ref"] for row in numbers
-                            if row["kind"] == "forecast_cell"},
-            valuation_metrics={row["ref"] for row in numbers
-                               if row["kind"] == "valuation_metric"},
-            dossier_sections={row["ref"] for group in GROUPS
-                              for row in plan[group][0]
-                              if row["kind"] == "dossier_section"},
-            debates={row["ref"] for group in GROUPS for row in plan[group][0]
-                     if row["kind"] == "debate"},
-        )
+        missing = unresolved_refs(store.connection, record)
         if missing:
-            summary.update({
-                "status": "succeeded", "gate_status": "unresolvable_refs",
-                "failure_reason": json.dumps(missing[:5], ensure_ascii=False)})
-            return summary
+            # A ref that stopped resolving is a defect in whichever answer cites
+            # it. In an answer drafted just now that is a bad draft and the run
+            # is refused whole. In an answer carried forward it is the world
+            # having moved, so that answer becomes an honest unknown and the
+            # lane redrafts its group next time -- refusing here would freeze
+            # the chain on one stale answer for ever, and would do it *after*
+            # paying for four calls.
+            broken = {item["ref"] for item in missing}
+            drafted_refs = {row["ref"] for answer in answers.values()
+                            for row in answer.get("sources") or []}
+            if broken & drafted_refs:
+                summary.update({
+                    "status": "succeeded", "gate_status": "unresolvable_refs",
+                    "failure_reason": json.dumps(
+                        [item for item in missing if item["ref"] in drafted_refs][:5],
+                        ensure_ascii=False)})
+                return summary
+            record, demoted = demote_unresolved(
+                record, broken, drafted=set(answers))
+            summary["demoted_questions"] = demoted
+            summary["demoted_refs"] = [dict(item) for item in missing][:5]
+            still = unresolved_refs(store.connection, record)
+            if still:
+                summary.update({
+                    "status": "succeeded", "gate_status": "unresolvable_refs",
+                    "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
+                return summary
         gate_result = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate_result["summary"]
         if gate_result["failed"]:
@@ -987,6 +1116,7 @@ __all__ = [
     "build_parser",
     "debate_map_version",
     "deliverable_sections",
+    "demote_unresolved",
     "fresh_evidence",
     "granted_scope",
     "group_material",

@@ -118,7 +118,7 @@ def answered(question_ref, ref, *, text="这一问的判断由所引材料支撑
     }
 
 
-def unknown(question_ref, *, reason="no_material_shown"):
+def unknown(question_ref, *, reason="material_insufficient"):
     return {
         "question_ref": question_ref,
         "question": QUESTIONS[QUESTION_REFS.index(question_ref)],
@@ -206,7 +206,7 @@ class AnswerShapeTests(unittest.TestCase):
 
     def test_an_unknown_must_say_what_evidence_would_answer_it(self):
         row = unknown("q1")
-        row["unknown"] = {"reason": "no_material_shown", "missing": "不知道"}
+        row["unknown"] = {"reason": "material_insufficient", "missing": "不知道"}
         with self.assertRaises(DeepInsightGateValidationError):
             validate_answer(row, "answers[0]", question_ref="q1")
 
@@ -345,14 +345,23 @@ class ChainTests(unittest.TestCase):
         self.assertEqual([row["version"] for row in history], [1, 2])
         self.assertEqual(history[1]["refs"], ["claim-2"])
 
-    def test_the_fingerprint_is_the_two_files_the_draft_was_made_from(self):
+    def test_the_fingerprint_is_everything_the_draft_was_made_from(self):
         published = self.authority.publish(
             body(answers={"q1": answered("q1", "claim-1")}))
         dossier = {"id": "company-dossier-version:acn:1", "content_hash": "e" * 64}
+        digest = questions_hash(QUESTIONS)
         self.assertEqual(fingerprint_of(published),
-                         evidence_fingerprint(dossier, None))
+                         evidence_fingerprint(dossier, None, digest))
         self.assertNotEqual(fingerprint_of(published),
-                            evidence_fingerprint(dossier, {"id": "debate-map:1"}))
+                            evidence_fingerprint(dossier, {"id": "debate-map:1"}, digest))
+        # A person publishing a new Playbook has changed what the gate asks, so
+        # the head answered under the old wording is stale and the lane looks
+        # again. Without the questions in the fingerprint it would look current
+        # for ever.
+        self.assertNotEqual(
+            fingerprint_of(published),
+            evidence_fingerprint(dossier, None,
+                                 questions_hash(QUESTIONS[:11] + ["换了一问"])))
 
 
 class DecisionTests(unittest.TestCase):

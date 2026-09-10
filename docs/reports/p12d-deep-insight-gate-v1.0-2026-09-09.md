@@ -1,7 +1,7 @@
 # P12d：Deep Insight Gate 十二问草稿与人裁决 v1.0
 
-日期：2026-09-09
-分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`，3,932 项）
+日期：2026-09-09（v1.1：按 review 修完三个 blocker 与四项意见，已并 main `9813b44`）
+分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `9813b44`）
 蓝图：[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §3 ③ / §5.2 P12d；
 [并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（版本化四条硬规则）、C3、D2
 依赖：P12a 档案（`company_dossier`）、P12c DebateMap、P13-M2 预测行、P11c 估值快照、Q1 rubric/scorer、ADR-0006 / ADR-0008
@@ -175,6 +175,20 @@ ACN 的 489 条 Claim 里最密的几个 `metric_or_aspect`（说明档案跑起
 第七问（过去五到十年股价驱动）与第八问（共识与多空）在 live 上**结构性没有材料**：
 没有价格序列、没有 consensus、没有 debate map。这与蓝图第 236 行的判断一致。
 
+## 3.4 review 之后修了什么
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| **B1** | 退回补充之后重出的那一版会**自己拒绝自己**——而且是在付完四次调用之后。`unresolved_refs` 把 `dossier_section` / `debate` / `valuation_metric` 只对着「本轮展示过的行」解析，而沿用的旧答案引用的是**它当时那一版**档案的分节，按定义不是本轮读的那一版。 | 每一种引用都回它自己的 **authority** 解析，不再对着「今天桌上有什么」。版本域从 ref 里拆出来（`dossier-section:<版本 id>:<分节>`，从右边切一刀，因为版本 id 自己带冒号），再查 `company_dossier_versions` / `debate_map_versions` / `valuation_snapshot_versions` 里那一版有没有这个成员。`forecast_cell` 查整条链而不只是链头：一格在被引用的当时是真的，模型后来出了新版并不能让旧引用变假。**沿用的答案解析不到时降级成 `unknown/source_unavailable`，永不整份拒绝**；只有**本轮新起草的**答案引用解析不到才整份拒绝。新增三个用例：一组被拒的重出、沿用答案的证据被退役后降级、新起草的引用被退役后整份拒绝。 |
+| **B2** | `decide_deep_insight_gate` 在 mission 版本滚动之后会崩。阶段账本按版本记，live 的 mission 一直在滚；新版本只把 `entered` 带过来，不带 `gate_passed`，所以草稿绑定的那一版之外写不进去。 | **在 owner 点之前就判出来。** 新增 `deep_insight_gate.decidability(core, record)`（纯 SQL，cockpit 与 writer 共用一个谓词，两边不可能对「这个按钮开不开」有两种说法）：版本滚了 / 当前版本下初筛没过 / 已经过了闸 / 没绑 mission 版本，四个理由都有 owner 读得懂的中文。审批页与 `deep_insight_gate_submissions` 都带 `decidable` 与理由；不可裁决时**条目仍然在页面上**（它仍然是 owner 要处理的事），只是没有按钮、带一句 `note`——照 INT2/P14b 的 `_revision_checkpoints` 的做法。写入端 op 先问同一个谓词，不通过就抛可读的 `WriterServerError`。`return_for_more_work` 不受影响：它根本不写阶段记录。**耐久解法（阶段账本跨版本带 `gate_passed`）不在本线**，见 §5 集成项。 |
+| **B3** | 新 schema 没有进部署预演。 | `scripts/rehearse_deploy.py` 加 `MigrationSpec("deep_insight_gate_schema.sql", "dalton_core.deep_insight_gate", "DeepInsightGateAuthority", "core")`。 |
+| **4** | `QUIET_STATUSES` 是白名单，漏掉的拒绝状态（`classification_conflict`、`verification_failed`、`rubric_refused`…）会在签名不变时每 tick 重跑、重付四次调用。 | 反过来写：`RELAUNCH_STATUSES = {"submitted", "duplicate"}`，其余一律安静。长名单每加一条拒绝路径就要记得加一个词，忘记的那天就是这条 lane 把当天预算烧在循环里的那天。用例对四个状态逐个断言只启动一次。 |
+| **5** | 审批页把十二个答案当**对象数组**塞进 `details`；页面对数组是 `v.join("、")`、对对象是 `JSON.stringify`，实际会渲染成十二个 `[object Object]` 连在一起。 | 每一问预先拼成**一行字符串**，并按 `q1`…`q12` 做成 details 的键，于是每一问是自己的一行。cockpit 测试改成**真的调 `approvals()`**（起一个 CockpitPlane 打真 Core），断言标题、按钮、每个 detail 值都是字符串、裁决后条目离场——不再 grep 源码。 |
+| **6** | 换了 Playbook（十二问改了措辞）之后，链头看起来永远是最新的。 | `evidence_fingerprint` 加 `questions_hash`：问题是输入不是标签，换了问法链头就该被判为陈旧，要不要出新版本再交给 ADR-0008。 |
+| **7** | 阶段记录写完、裁决记录还没写就崩，重试时阶段记录已在，`stage_record_ref` 会留成 `None`——自愈路径愈了个寂寞。 | 重试时把已存在的那一行找回来填进裁决记录。用例直接模拟「只做了前一半」再调 op。 |
+| 小 | 回复里的 `unknown.reason` 一律写成 `no_material_shown`，即使材料明明给了。 | 词表改成 `material_insufficient`（看过了，定不了）与 `source_unavailable`（根本没有可看的），两条路把 owner 送到不同的地方。 |
+| 小 | `argv_fragment` 不看 verifier 配置，缺它时 lane 会被打开、然后每 tick 报同一个 `no_verifier`。 | 三个文件齐了才吐参数。 |
+
 ## 4. 发现的问题（不是本线的文件，没有改）
 
 **P12a 的 `variant_view` 一旦被起草就发布不出去。**
@@ -227,7 +241,11 @@ variant 单元始终走 `unavailable`；`test_company_dossier` 的 drafted varia
      --param decision=approve --param reason='<一句理由>'
    ```
    通过会在同一次调用里补 `deep_insight_gate entered` 并写 `gate_passed`，都记在 owner 名下。
-5. **`p12a-dossier-policy-v1.json` 被两条 lane 共用**：门读的是它的 `output_rubric_bindings`，
+5. **B2 的耐久解法（另派）**：阶段账本按 mission 版本记，carry-forward 只把 `entered` 带到新版本。
+   只要 live 的 mission 还在滚，任何跨版本的人类闸都会撞上这一条——不只是深度认知门。
+   正确的修法是让 `gate_passed` 跟着 carry-forward 走（或者让 `record_stage` 按 `mission_ref` 而不是
+   `mission_version_ref` 判前置阶段）。本线只做了「点之前就说清楚」，没有改 `coverage_mission`。
+6. **`p12a-dossier-policy-v1.json` 被两条 lane 共用**：门读的是它的 `output_rubric_bindings`，
    因为那些 criterion 属于 Constitution 而不属于任何一份文档。若将来门要自己的绑定，
    加一个 `p12d-*` 文件并把 `--gate-policy` 指过去即可，代码不用改。
 

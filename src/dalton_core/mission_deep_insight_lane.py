@@ -11,8 +11,10 @@ the debate map and the Playbook's twelve questions.  The coordinator's whole job
 is to avoid spawning a child that will report ``nothing_new``: it keeps a
 signature of the evidence (where each dossier chain's head is, where each debate
 map's is, how many gate drafts and decisions exist) and does not launch again on
-an unchanged signature after a run that found nothing.  A signature cannot
-disagree with the child, because it is not an opinion about what to do.
+an unchanged signature after a run that did not submit anything -- a refusal is
+as good a reason to stay quiet as an idle tick, because the same evidence will
+be refused the same way and the four calls will be paid for again.  A signature
+cannot disagree with the child, because it is not an opinion about what to do.
 
 **A pending decision is part of the signature.**  That is what makes the whole
 lane stop while the owner is thinking: the draft is on the chain, no decision
@@ -39,12 +41,15 @@ from .lane_registry import LaneSpec, register_lane
 
 MAX_FAILURE_DETAIL_CHARS = 500
 LAUNCHER_KWARG = "deep_insight_gate_launcher"
-# Statuses that mean "this run looked and found nothing to do".  After one of
-# these, an unchanged signature is a reason to stay quiet.
-QUIET_STATUSES = frozenset({
-    "no_eligible_company", "no_screened_company", "no_mission", "not_authorized",
-    "no_dossier_authority", "no_checkpoint", "no_new_evidence",
-})
+# The only two outcomes that are a reason to look again on an unchanged
+# signature.  Everything else -- idle, held, and every one of the refusal
+# statuses -- means this exact evidence has already been tried and did not
+# produce a submission, so trying it again would re-pay for four model calls to
+# reach the same refusal.  Stated as the short list rather than the long one
+# because the long one grows every time a refusal path is added, and the day
+# somebody forgets to add a word is the day the lane burns the day's budget in
+# a loop.
+RELAUNCH_STATUSES = frozenset({"submitted", "duplicate"})
 
 
 def ledger_signature(connection: Any) -> str:
@@ -130,7 +135,7 @@ class MissionDeepInsightLaneCoordinator:
             if signature:
                 self._failed[str(signature)] = (
                     settled.get("failure_reason") or f"last run: {settled.get('status')}")
-        elif status in QUIET_STATUSES and signature:
+        elif status not in RELAUNCH_STATUSES and signature:
             self._quiet_signature = str(signature)
         return settled
 
@@ -227,18 +232,21 @@ GATE_POLICY = "p12a-dossier-policy-v1.json"
 
 
 def argv_fragment(context: Any) -> list[str]:
-    # Gated on what this lane itself needs.  The policy path is passed through
-    # because its default only resolves inside a source checkout.
+    # Gated on all three files, the verifier's included.  Without a separate
+    # verifier configuration the child holds on every tick without drafting
+    # anything (D2: one configuration routes both calls the same way, so the
+    # verdict could never be shown to be independent), and a lane switched on to
+    # report the same refusal for ever is worse than a lane that is off.  The
+    # policy path is passed through because its default only resolves inside a
+    # source checkout.
     config = context.state / GATE_MODEL_CONFIG
     policy = context.state / GATE_POLICY
-    if not config.is_file() or not policy.is_file():
-        return []
-    argv = ["--deep-insight-gate-model-config", str(config),
-            "--deep-insight-gate-policy", str(policy)]
     verifier = context.state / GATE_VERIFIER_MODEL_CONFIG
-    if verifier.is_file():
-        argv += ["--deep-insight-gate-verifier-model-config", str(verifier)]
-    return argv
+    if not (config.is_file() and policy.is_file() and verifier.is_file()):
+        return []
+    return ["--deep-insight-gate-model-config", str(config),
+            "--deep-insight-gate-policy", str(policy),
+            "--deep-insight-gate-verifier-model-config", str(verifier)]
 
 
 LANE = register_lane(LaneSpec(
@@ -266,7 +274,7 @@ __all__ = [
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
-    "QUIET_STATUSES",
+    "RELAUNCH_STATUSES",
     "MissionDeepInsightLaneCoordinator",
     "add_arguments",
     "argv_fragment",

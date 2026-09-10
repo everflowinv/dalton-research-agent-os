@@ -160,9 +160,12 @@ CONFIDENCE_LEVELS: tuple[str, ...] = ("high", "medium", "low")
 # authority that would answer this does not exist yet" are different facts, and
 # the second is a roadmap item rather than a gap in the research.
 UNKNOWN_REASONS: tuple[str, ...] = (
-    # no material at all was shown for this question
-    "no_material_shown",
-    # the authority that would answer it is not on this Core
+    # material was shown and it did not answer this question.  Distinct from
+    # the next one on purpose: "we looked and the evidence does not say" and
+    # "there was nothing to look at" send the owner to different places.
+    "material_insufficient",
+    # nothing this question rests on is on this Core, or the section it rests
+    # on is unavailable in the file it was drafted from
     "source_unavailable",
     # this question's group came back outside its contract and was refused whole
     "group_refused",
@@ -631,21 +634,30 @@ def new_refs(record: Mapping[str, Any], prior: Mapping[str, Any] | None) -> list
 
 
 def evidence_fingerprint(
-    dossier: Mapping[str, Any] | None, map_version: Mapping[str, Any] | None
+    dossier: Mapping[str, Any] | None,
+    map_version: Mapping[str, Any] | None,
+    questions_digest: str = "-",
 ) -> str:
-    """The exact state of the two files a gate draft is made from.
+    """The exact state of everything a gate draft is made from.
 
-    The lane's idempotency key.  A gate answered from dossier version 3 and
-    debate-map version 2 is the same gate however many ticks pass, so a run that
-    finds this fingerprint already on the chain's head has nothing to do -- and
-    it can say so before spending a model call, rather than drafting four groups
-    and having ADR-0008 refuse the result.
+    The lane's idempotency key.  A gate answered from dossier version 3, debate
+    map version 2 and this set of twelve questions is the same gate however many
+    ticks pass, so a run that finds this fingerprint already on the chain's head
+    has nothing to do -- and it can say so before spending a model call, rather
+    than drafting four groups and having ADR-0008 refuse the result.
+
+    The questions are in it because they are an input, not a label.  A person
+    who publishes a new Playbook has changed what the gate asks, and a chain
+    head answered under the old wording is stale in exactly the way this
+    fingerprint exists to detect -- ADR-0008 would then decide whether the
+    redraft is a version, which is the right place for that decision.
     """
 
     return content_hash([
         str((dossier or {}).get("id") or "-"),
         str((dossier or {}).get("content_hash") or "-"),
         str((map_version or {}).get("id") or "-"),
+        str(questions_digest or "-"),
     ])
 
 
@@ -657,6 +669,7 @@ def fingerprint_of(record: Mapping[str, Any]) -> str:
         str(bindings.get("dossier_version_ref") or "-"),
         str(bindings.get("dossier_version_hash") or "-"),
         str(bindings.get("debate_map_version_ref") or "-"),
+        str(bindings.get("questions_hash") or "-"),
     ])
 
 
@@ -699,6 +712,106 @@ def classification_agrees(
     return False, (
         f"question one classifies this company as {drafted or 'nothing'}, and the "
         f"dossier it was drafted from says {filed or 'nothing'}")
+
+
+# ---------------------------------------------------------------------------
+# can this draft be decided at all
+# ---------------------------------------------------------------------------
+
+# Why an undecided draft cannot be decided right now.  Closed, because each of
+# these sends the owner somewhere different, and "the button did nothing" is
+# what this vocabulary exists to replace.
+UNDECIDABLE_REASONS: Mapping[str, str] = MappingProxyType({
+    "mission_version_rolled": (
+        "这份草稿绑定的研究目标版本已经不是当前版本了。阶段账本按版本记，"
+        "新版本只把 entered 带过来，所以现在写不进 gate_passed。"
+        "等阶段账本能跨版本带 gate_passed 之后，这条会自动可裁决。"
+    ),
+    "screen_not_passed_here": (
+        "当前研究目标版本下，这家公司还没有 initial_screen 的 gate_passed 记录，"
+        "而深度认知门必须排在它后面。"
+    ),
+    "already_passed": "这家公司的深度认知门在当前版本下已经过了。",
+    "no_mission_version": "这份草稿没有绑定任何研究目标版本。",
+})
+
+
+def decidability(core: Any, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Whether the ladder would accept this draft's decision, asked before it is made.
+
+    The mission stage ledger is scoped *by version*, and the live mission rolls
+    constantly.  A draft published under version N carries version N's ref; by
+    the time the owner reads it the pointer may be at N+1, where carry-forward
+    re-seeds ``entered`` but not ``gate_passed`` -- so ``record_stage`` would
+    refuse to enter ``deep_insight_gate`` because ``initial_screen`` has not
+    passed *in that version*, and the owner would learn this by clicking.
+
+    So it is read off the Core beforehand, by both the page that offers the
+    button and the operation behind it.  Plain SQL rather than the CoverageMission
+    authority because the cockpit process holds no Core write handle (ADR-0006)
+    and reads the Core directly; one predicate, two callers, no second answer.
+
+    ``return_for_more_work`` is decidable whatever this says: it writes no stage
+    record at all, so the ladder has no opinion about it.
+    """
+
+    def table(name: str) -> bool:
+        return core.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+
+    bound = str((record.get("bindings") or {}).get("mission_version_ref") or "")
+    company_ref = str(record.get("company_ref") or "")
+    if not bound:
+        return {"decidable": False, "reason_code": "no_mission_version",
+                "reason": UNDECIDABLE_REASONS["no_mission_version"],
+                "active_mission_version_ref": None}
+    if not table("coverage_mission_versions") or not table("coverage_mission_pointer"):
+        # No mission tables at all is not this draft's problem to diagnose; the
+        # operation will say so in the authority's own words.
+        return {"decidable": True, "reason_code": None, "reason": None,
+                "active_mission_version_ref": None}
+    row = core.execute(
+        "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?",
+        (bound,),
+    ).fetchone()
+    pointer = None if row is None else core.execute(
+        "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+        (row[0],),
+    ).fetchone()
+    active = None if pointer is None else str(pointer[0])
+    if active is not None and active != bound:
+        return {"decidable": False, "reason_code": "mission_version_rolled",
+                "reason": UNDECIDABLE_REASONS["mission_version_rolled"],
+                "active_mission_version_ref": active}
+    if not table("coverage_mission_stage_records"):
+        return {"decidable": True, "reason_code": None, "reason": None,
+                "active_mission_version_ref": active}
+    rows = core.execute(
+        "SELECT stage_ref,status,record_json FROM coverage_mission_stage_records "
+        "WHERE mission_version_ref=? AND company_ref=?", (bound, company_ref),
+    ).fetchall()
+    statuses = {(str(item[0]), str(item[1])) for item in rows}
+    passed_by_another = any(
+        str(item[0]) == STAGE_REF and str(item[1]) == "gate_passed"
+        and str(record.get("id") or "") not in
+        [str(ref) for ref in (json.loads(item[2]).get("evidence_refs") or ())]
+        for item in rows
+    )
+    if passed_by_another:
+        # Already passed, and not by this draft.  A row this draft *did* write
+        # is a retry -- the stage write goes first precisely so that a crash
+        # between the two heals -- and refusing it would turn the healing path
+        # into a dead end.
+        return {"decidable": False, "reason_code": "already_passed",
+                "reason": UNDECIDABLE_REASONS["already_passed"],
+                "active_mission_version_ref": active}
+    if ("initial_screen", "gate_passed") not in statuses:
+        return {"decidable": False, "reason_code": "screen_not_passed_here",
+                "reason": UNDECIDABLE_REASONS["screen_not_passed_here"],
+                "active_mission_version_ref": active}
+    return {"decidable": True, "reason_code": None, "reason": None,
+            "active_mission_version_ref": active}
 
 
 # ---------------------------------------------------------------------------
@@ -1353,6 +1466,7 @@ __all__ = [
     "SENTENCES_PER_ANSWER",
     "SOURCE_VERSION_KEY",
     "STAGE_REF",
+    "UNDECIDABLE_REASONS",
     "UNKNOWN_REASONS",
     "WRITE_SCOPE",
     "DeepInsightGateAuthority",
@@ -1365,6 +1479,7 @@ __all__ = [
     "body_hash",
     "classification_agrees",
     "company_slug",
+    "decidability",
     "evidence_fingerprint",
     "evidence_scope",
     "fingerprint_of",

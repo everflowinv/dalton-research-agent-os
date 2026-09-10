@@ -423,6 +423,41 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.assertEqual(second["probes_executed"], 1)
         self.assertEqual(second["executed"][0]["outcome_kind"], "observed")
 
+    def test_a_transient_transport_failure_holds_the_round_and_resumes(self) -> None:
+        # The AlphaEngine branch of the probe is a writer RPC, so "the writer
+        # is busy or restarting" arrives here as an ordinary exception.  It
+        # used to be recorded as a refused probe, which made a coverage item
+        # permanently source_unavailable for a failure that was over a minute
+        # later.
+        from unittest.mock import patch
+
+        from dalton_core.writer_server import write_token_config
+        write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
+        driver = self._driver(FakeTransport(FakeResponse(200, company_facts_body())))
+        with patch(
+            "dalton_core.bounded_planner_driver.execute_probe_work_order",
+            side_effect=RuntimeError("writer socket is restarting"),
+        ):
+            first = driver.run_once()
+        self.assertEqual(first["probes_executed"], 0)
+        self.assertEqual(first["executed"], [])
+        held = first["skipped"][0]
+        self.assertEqual(held["reason"], "probe_transport_unavailable:RuntimeError")
+        store = DaltonStore(str(self.root / "core.sqlite"))
+        self.addCleanup(store.close)
+        authority = BoundedPlannerAuthority(store)
+        # Nothing terminal was written: the round is still waiting.
+        self.assertEqual(authority.outcomes(self.loop["id"]), [])
+
+        # The next tick picks the same round up and finishes it.
+        second = driver.run_once()
+        self.assertEqual(second["probes_executed"], 1)
+        entry = second["executed"][0]
+        self.assertTrue(entry["resumed"])
+        self.assertEqual(entry["round_ref"], held["round_ref"])
+        self.assertEqual(entry["outcome_kind"], "observed")
+        self.assertEqual(len(authority.outcomes(self.loop["id"])), 1)
+
     def test_driver_runs_loop_to_terminal_one_probe_per_tick(self) -> None:
         from dalton_core.writer_server import write_token_config
         write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
@@ -717,7 +752,12 @@ class StalledLoopTests(unittest.TestCase):
                         "cost_units_remaining": 4, "seconds_remaining": 600,
                     },
                 }
-            if operation == "bounded_planner_propose_next_with_context":
+            if operation in {
+                "bounded_planner_propose_next",
+                "bounded_planner_propose_next_with_context",
+            }:
+                # No ``round`` in the reply, so the driver has nothing to
+                # resume and reports the pending round as the skip it is.
                 return {"status": "pending_round"}
             if operation == "llm_planner_execute":
                 raise AssertionError("the planner model must not be called here")

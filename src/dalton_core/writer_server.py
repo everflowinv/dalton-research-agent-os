@@ -97,6 +97,8 @@ from .analyst_journal import (
     AnalystJournalError,
     AnalystJournalValidationError,
 )
+from .deliverable_reopen import GateReopenAuthority
+from .thesis_revision import ThesisRevisionAuthority
 from .document_extraction import DocumentExtractionService, validate_model_config
 from .transcript_candidate_staging import (
     stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
@@ -417,6 +419,15 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # and the authority refuses a non-``human:`` actor a second time.
     "decide_deep_insight_gate",
     "deep_insight_gate_draft", "deep_insight_gate_submissions",
+    # P14b / P14d: the two decisions the evolution layer hands back. ADR-0007
+    # says automation may propose that a thesis is wrong and only a person may
+    # accept; ADR-0008 says a passed gate may be re-opened and that reopening
+    # is a human checkpoint by construction, not a rule the machine can
+    # satisfy. Both are here rather than in CORE_OPERATIONS for the same
+    # reason: there is no principal a lane could authenticate as that would
+    # let it decide either one.
+    "decide_thesis_revision_candidate",
+    "decide_gate_reopen",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -698,6 +709,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     }),
     "deep_insight_gate_draft": frozenset({"version_ref"}),
     "deep_insight_gate_submissions": frozenset(),
+    "decide_thesis_revision_candidate": frozenset({
+        "candidate_ref", "candidate_hash", "verdict", "reason", "content", "actor_ref",
+    }),
+    "decide_gate_reopen": frozenset({
+        "proposal_ref", "proposal_hash", "verdict", "reason", "actor_ref",
+    }),
     "record_backlog_question": frozenset({"mandate_version_ref", "company_ref", "question", "answer_criteria", "source_refs", "actor_ref", "idempotency_key"}),
     "publish_probe_template": frozenset({"template_ref", "capability_ref", "operation", "runtime_profile_ref", "parameter_contract", "output_contract_ref", "verifier_ref", "permission_scope", "declared_side_effects", "cost", "actor_ref", "prior_version_ref"}),
     "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
@@ -951,6 +968,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
     "decide_deep_insight_gate": "actor_ref",
+    "decide_thesis_revision_candidate": "actor_ref",
+    "decide_gate_reopen": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
     "create_bounded_planner_loop": "actor_ref",
@@ -1266,6 +1285,8 @@ class WriterServer:
         self._weekly_brief: WeeklyBriefAuthority | None = None
         self._research_doctrine: ResearchDoctrineAuthority | None = None
         self._analyst_journal: AnalystJournalAuthority | None = None
+        self._thesis_revision: ThesisRevisionAuthority | None = None
+        self._gate_reopen: GateReopenAuthority | None = None
         self._model_forecast: ModelForecastAuthority | None = None
         self._forecast_reconciliation: ForecastReconciliationAuthority | None = None
         self._research_constitution: ResearchConstitutionAuthority | None = None
@@ -1544,6 +1565,13 @@ class WriterServer:
         # and nothing else; an entry only ever arrives from a human principal
         # through record_analyst_journal_entry.
         self._analyst_journal = AnalystJournalAuthority(self._store)
+        # P14b / P14d: opening these installs two append-only decision
+        # ledgers and nothing else. Neither authority can propose anything --
+        # the candidate comes from the judgement lane and the reopen proposal
+        # from the weekly assessment -- so what arrives here is only ever a
+        # person's answer.
+        self._thesis_revision = ThesisRevisionAuthority(self._store)
+        self._gate_reopen = GateReopenAuthority(self._store)
         self._model_forecast = ModelForecastAuthority(self._store)
         self._forecast_reconciliation = ForecastReconciliationAuthority(self._store)
         self._research_constitution = ResearchConstitutionAuthority(self._store)
@@ -1765,6 +1793,8 @@ class WriterServer:
         self._weekly_brief = None
         self._research_doctrine = None
         self._analyst_journal = None
+        self._thesis_revision = None
+        self._gate_reopen = None
         self._model_forecast = None
         self._forecast_reconciliation = None
         self._research_constitution = None
@@ -2476,7 +2506,7 @@ class WriterServer:
         """
 
         from .deep_insight_gate import (
-            DECISION_STAGE_STATUS, DeepInsightGateNotFound, STAGE_REF,
+            DECISION_STAGE_STATUS, DeepInsightGateNotFound, STAGE_REF, decidability,
         )
 
         values = dict(p)
@@ -2493,17 +2523,20 @@ class WriterServer:
         stage_record_ref = None
         status = DECISION_STAGE_STATUS.get(decision)
         if status is not None:
-            if not mission_version_ref:
+            # Asked before anything is written, and by the same predicate the
+            # approvals page uses to decide whether to show the button at all.
+            # The mission stage ledger is scoped by version and the live mission
+            # rolls constantly, so a draft published under version N can become
+            # undecidable without anybody touching it; the owner should not
+            # learn that from a stack trace after clicking.
+            verdict = decidability(self.store.connection, draft)
+            if not verdict["decidable"]:
                 raise WriterServerError(
-                    "this gate draft names no mission version, so its decision "
-                    "cannot be written to the stage ladder"
+                    f"this gate draft cannot be decided right now: {verdict['reason']}"
                 )
             mission = self.coverage_mission.mission(mission_version_ref)
-            state = {
-                (record["stage_ref"], record["status"])
-                for record in self.coverage_mission.stage_records(
-                    mission["id"], company_ref)
-            }
+            records = self.coverage_mission.stage_records(mission["id"], company_ref)
+            state = {(record["stage_ref"], record["status"]) for record in records}
             if (STAGE_REF, "entered") not in state:
                 # The gate stage has to be entered before its gate is decided,
                 # and nothing enters it: the drafting lane holds no stage_record
@@ -2519,8 +2552,20 @@ class WriterServer:
                     actor_ref=actor_ref,
                     idempotency_key=f"deep-insight-gate:{gate_version_ref}:entered",
                 )
-                state.add((STAGE_REF, "entered"))
-            if (STAGE_REF, status) not in state:
+            if (STAGE_REF, status) in state:
+                # The ladder already carries this decision: a previous call
+                # wrote the stage record and then failed, or the caller is
+                # retrying. Reuse the row that exists rather than leaving the
+                # decision unable to name the stage record it produced -- the
+                # whole reason the stage write goes first is that this retry
+                # heals, and a retry that healed the ladder and lost the link
+                # would have healed nothing worth having.
+                existing = next(
+                    (record for record in records
+                     if record["stage_ref"] == STAGE_REF
+                     and record["status"] == status), None)
+                stage_record_ref = None if existing is None else existing["id"]
+            else:
                 record = self.coverage_mission.record_stage(
                     mission_version_ref=mission["id"],
                     mission_version_hash=mission["content_hash"],
@@ -2550,24 +2595,67 @@ class WriterServer:
         return {**draft, "decision": gates.decision_for(draft["id"])}
 
     def _op_deep_insight_gate_submissions(self, p: Mapping[str, Any]) -> Any:
-        """Every gate draft waiting for a person, oldest first."""
+        """Every gate draft waiting for a person, oldest first.
+
+        Each one says whether the ladder would accept its decision today. A
+        draft whose mission version has rolled is still shown -- it is still
+        what the owner has to deal with -- but it says so, and says why, rather
+        than offering a verdict the writer would refuse.
+        """
+
+        from .deep_insight_gate import decidability
 
         gates = self._deep_insight_gates()
-        return {
-            "projection_kind": "deep_insight_gate_submissions",
-            "drafts": [
-                {
-                    "version_ref": draft["id"],
-                    "content_hash": draft["content_hash"],
-                    "company_ref": draft["company_ref"],
-                    "version": draft["version"],
-                    "created_at": draft["created_at"],
-                    "classification": draft["classification"],
-                    "answers": draft["answers"],
-                }
-                for draft in gates.undecided()
-            ],
-        }
+        drafts = []
+        for draft in gates.undecided():
+            verdict = decidability(self.store.connection, draft)
+            drafts.append({
+                "version_ref": draft["id"],
+                "content_hash": draft["content_hash"],
+                "company_ref": draft["company_ref"],
+                "version": draft["version"],
+                "created_at": draft["created_at"],
+                "classification": draft["classification"],
+                "answers": draft["answers"],
+                "decidable": verdict["decidable"],
+                "undecidable_reason": verdict["reason"],
+                "undecidable_reason_code": verdict["reason_code"],
+            })
+        return {"projection_kind": "deep_insight_gate_submissions", "drafts": drafts}
+
+    def _op_decide_thesis_revision_candidate(self, p: Mapping[str, Any]) -> Any:
+        """P14b: accept, reject or defer one ThesisRevisionCandidate.
+
+        ADR-0007 drew the line at who accepts, and this is where that line is
+        a line of code. ``actor_ref`` has already been replaced by the
+        authenticated principal's, the operation is human-governance only so
+        an automation principal is refused before this method runs, and the
+        authority refuses a non-``human:`` actor again -- the same
+        belt-and-braces the analyst journal uses, for the same reason: the one
+        place carrying a person's judgement should not depend on one gate.
+
+        ``content`` is optional and is how a person revises the thesis further
+        than the candidate proposed. Omitted, the new version takes the
+        candidate's statement and confidence and carries everything else
+        forward unchanged.
+        """
+
+        if self._thesis_revision is None:
+            raise WriterServerError("thesis-revision authority is unavailable")
+        return self._thesis_revision.decide(**dict(p))
+
+    def _op_decide_gate_reopen(self, p: Mapping[str, Any]) -> Any:
+        """P14d: approve or decline re-issuing an Initial Screen that passed.
+
+        Approving writes no deliverable. It writes a permission the Initial
+        Screen lane reads, spends once, and cites in the new version's
+        ``prior_version_ref`` chain; the old version and its ``gate_passed``
+        stage record are never touched (ADR-0008).
+        """
+
+        if self._gate_reopen is None:
+            raise WriterServerError("gate-reopen authority is unavailable")
+        return self._gate_reopen.decide(**dict(p))
 
     def _op_publish_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
         if self._research_doctrine is None:

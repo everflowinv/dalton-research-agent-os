@@ -43,6 +43,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .bounded_planner_loop import (
@@ -127,7 +128,12 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
     },
     {
         "template_ref": "probe-template:adhoc-alphaengine-search-library:v1",
-        "status": ACTIVE_STATUS,
+        # Retired, not active: a template whose operation no executor runs and
+        # whose parameters ``_parameters_for`` cannot build is not a capability
+        # this system has.  Publishing it as active advertised a probe that
+        # could never appear in a binding.
+        "status": RETIRED_STATUS,
+        "retired_reason": "no executor: bounded_alphaengine_probe runs alphaengine_get_document only",
         "capability_ref": "capability:dalton:connector:alphaengine-search-library",
         "operation": "alphaengine_search_library",
         "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
@@ -149,7 +155,12 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
     },
     {
         "template_ref": "probe-template:adhoc-web-search:v1",
-        "status": ACTIVE_STATUS,
+        # Retired, not active: a template whose operation no executor runs and
+        # whose parameters ``_parameters_for`` cannot build is not a capability
+        # this system has.  Publishing it as active advertised a probe that
+        # could never appear in a binding.
+        "status": RETIRED_STATUS,
+        "retired_reason": "no executor: no bounded probe executor runs public_web_search",
         "capability_ref": "capability:dalton:connector:gemini-web-search",
         "operation": "public_web_search",
         "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
@@ -321,6 +332,15 @@ def admitted_adhoc_templates(
     return admitted
 
 
+def _withdrawn_template_refs(retired: Sequence[str] = ()) -> set[str]:
+    """Every ad-hoc template ref that must not be bound, from either source."""
+
+    return {
+        spec["template_ref"] for spec in ADHOC_PROBE_TEMPLATES
+        if spec.get("status") == RETIRED_STATUS
+    } | {str(item) for item in retired}
+
+
 def bindable_templates(
     authority: BoundedPlannerAuthority,
     *,
@@ -340,10 +360,7 @@ def bindable_templates(
     """
 
     executable = executable_probe_contracts()
-    withdrawn = {
-        spec["template_ref"] for spec in ADHOC_PROBE_TEMPLATES
-        if spec.get("status") == RETIRED_STATUS
-    } | {str(item) for item in retired}
+    withdrawn = _withdrawn_template_refs(retired)
     return {
         ref: template
         for ref, template in admitted_adhoc_templates(authority).items()
@@ -430,6 +447,124 @@ def read_grant(store: Any, *, retired: Sequence[str] = ()) -> dict[str, Any]:
         **grant(mission, bindable_templates(authority, retired=retired)),
         "mission": mission,
     }
+
+
+def readonly_grant(
+    core_db: Any, *, retired: Sequence[str] = (), mission_ref: str | None = None,
+) -> dict[str, Any]:
+    """The same grant, read from a process that holds no Core write handle.
+
+    The cockpit is such a process.  ``read_grant`` above goes through the two
+    authorities, and both of them run their schema script on construction --
+    harmless against a live Core, impossible against a read-only connection.
+    So this one asks the two questions directly and verifies each record
+    against the hash its own row carries.
+
+    Anything it cannot answer is not a licence: a missing table, a missing
+    pointer or a record whose hash drifted all come back ungranted with a
+    reason, never granted by default.
+    """
+
+    import sqlite3
+
+    path = Path(str(core_db)).expanduser()
+    reasons_prefix: list[str] = []
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, ValueError):
+        return {
+            "granted": False, "reasons": ["core_unreadable"], "pool": None,
+            "template_refs": [],
+        }
+    connection.row_factory = sqlite3.Row
+    try:
+        mission = _readonly_mission(connection, mission_ref)
+        templates = _readonly_templates(connection, retired=retired)
+    except sqlite3.Error:
+        return {
+            "granted": False, "reasons": ["core_unreadable"], "pool": None,
+            "template_refs": [],
+        }
+    finally:
+        connection.close()
+    decision = grant(mission, templates)
+    decision["reasons"] = reasons_prefix + decision["reasons"]
+    return decision
+
+
+def _readonly_row_record(row: Any) -> dict[str, Any] | None:
+    """One stored record, or ``None`` when its hash does not match its row."""
+
+    import json
+
+    try:
+        wire = json.loads(row["record_json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(wire, dict) or wire.get("content_hash") != row["content_hash"]:
+        return None
+    return wire
+
+
+def _readonly_mission(connection: Any, mission_ref: str | None) -> dict[str, Any] | None:
+    if mission_ref is None:
+        pointer = connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer "
+            "ORDER BY mission_ref LIMIT 1"
+        ).fetchone()
+    else:
+        pointer = connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer "
+            "WHERE mission_ref=?", (mission_ref,),
+        ).fetchone()
+    if pointer is None:
+        return None
+    row = connection.execute(
+        "SELECT record_json, content_hash FROM coverage_mission_versions "
+        "WHERE mission_version_id=?", (pointer["mission_version_id"],),
+    ).fetchone()
+    return None if row is None else _readonly_row_record(row)
+
+
+def _readonly_templates(
+    connection: Any, *, retired: Sequence[str] = ()
+) -> dict[str, dict[str, Any]]:
+    executable = executable_probe_contracts()
+    withdrawn = _withdrawn_template_refs(retired)
+    templates: dict[str, dict[str, Any]] = {}
+    for template_ref in ADHOC_TEMPLATE_REFS:
+        if template_ref in withdrawn:
+            continue
+        row = connection.execute(
+            "SELECT record_json, content_hash FROM bounded_probe_template_versions "
+            "WHERE template_ref=? ORDER BY version_number DESC LIMIT 1",
+            (template_ref,),
+        ).fetchone()
+        if row is None:
+            continue
+        wire = _readonly_row_record(row)
+        if wire is None:
+            continue
+        if (wire.get("operation"), wire.get("permission_scope")) in executable:
+            templates[template_ref] = wire
+    return templates
+
+
+def cockpit_grant_resolver(
+    core_db: Any, *, retired: Sequence[str] = (), mission_ref: str | None = None,
+) -> Any:
+    """A callable the cockpit can hold: "is ad-hoc research granted right now".
+
+    Read at call time rather than at start-up, because the two owner acts that
+    grant it -- a mission version and a published template -- happen while the
+    cockpit is running, and a flag decided at boot would be wrong until the
+    next restart.
+    """
+
+    def resolve() -> dict[str, Any]:
+        return readonly_grant(core_db, retired=retired, mission_ref=mission_ref)
+
+    return resolve
 
 
 # -- the pool ---------------------------------------------------------------
@@ -564,9 +699,12 @@ def _parameters_for(
             # An industry-wide inquiry has no CIK, so the filings index has
             # nothing to look up.  Absent, not faked.
             return None
+        # A company ref carries the CIK as it was written; the EDGAR locator
+        # wants exactly ten digits.  DXC is the live universe's nine-digit
+        # ref, and an unpadded locator is a 404 the day the grant opens.
         return {
             "source_ref": "source:sec-edgar",
-            "locator": f"company-facts/CIK{matched.group(1)}",
+            "locator": f"company-facts/CIK{matched.group(1).zfill(10)}",
             # The executor reads concept candidates and the form out of these.
             "query_terms": [
                 "Revenues",
@@ -574,6 +712,10 @@ def _parameters_for(
                 "10-Q",
             ],
         }
+    # Every other operation in the catalogue is retired for exactly this
+    # reason: there is no parameter this module could build that any executor
+    # would accept.  A branch here without an executor would only move the
+    # failure later.
     return None
 
 
@@ -668,8 +810,19 @@ def plan_admissions(
         entry["subject_ref"] = company_ref
         bindings, template_refs = _bindings_for(digest, company_ref, templates)
         if not bindings:
+            # Two different facts, and reporting them as one sent the reader
+            # looking for a missing template that is not missing.  An
+            # industry-wide inquiry is refused because every probe this
+            # catalogue can bind fetches by CIK, and an industry is not a
+            # company -- the planner schema allows the question and this
+            # system cannot yet go and answer it.
             results.append({
-                **entry, "admissible": False, "reason": "no_bindable_template",
+                **entry, "admissible": False,
+                "reason": (
+                    "industry_inquiry_has_no_company_probe"
+                    if inquiry.get("company_ref") is None
+                    else "no_bindable_template"
+                ),
             })
             continue
         budget = task_budget(bindings, templates)
@@ -846,9 +999,15 @@ def research_task_view(
             for company, tasks in sorted(by_company.items())
         ],
     }
+    # What the cockpit is told this lane can do is the bindable set, never the
+    # published one: a template in the catalogue that no executor runs is not
+    # a capability, and showing it as one is how an owner comes to believe the
+    # web search happened.
+    bindable = bindable_templates(authority, retired=retired)
+    view["templates"] = sorted(bindable)
     if mission is not None:
         view["pool"] = pool_state(authority, mission, day=day)
-        view["grant"] = grant(mission, bindable_templates(authority, retired=retired))
+        view["grant"] = grant(mission, bindable)
     return view
 
 
@@ -883,6 +1042,7 @@ __all__ = [
     "admit_inquiry",
     "admitted_adhoc_templates",
     "bindable_templates",
+    "cockpit_grant_resolver",
     "coverage_item_ref",
     "day_reserved_micros",
     "default_planner_cost_usd",
@@ -898,6 +1058,7 @@ __all__ = [
     "pool_state",
     "publication_arguments",
     "read_grant",
+    "readonly_grant",
     "research_task_view",
     "task_budget",
     "task_estimate_micros",
