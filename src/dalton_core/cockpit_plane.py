@@ -3534,6 +3534,8 @@ class CockpitPlane:
             (
                 {
                     "model": profile_id,
+                    "profile_version_ref": profile.get("profile_version_ref"),
+                    "profile_hash": profile.get("content_hash"),
                     "family": profile.get("family"),
                     "capabilities": list(profile.get("capabilities") or []),
                     "unpriced": bool(profile.get("unpriced")),
@@ -3875,6 +3877,9 @@ class CockpitPlane:
         if not isinstance(value, Mapping):
             raise CockpitError("模型元数据必须是一个对象")
         profile_id = _text(value.get("profile_id"), "profile_id", maximum=256)
+        profile_version_ref = _text(
+            value.get("profile_version_ref"), "profile_version_ref", maximum=256)
+        profile_hash = _text(value.get("profile_hash"), "profile_hash", maximum=128)
         family = _text(value.get("family"), "family", maximum=128)
         capabilities = value.get("capabilities")
         if not isinstance(capabilities, list) or not capabilities or any(
@@ -3888,7 +3893,9 @@ class CockpitPlane:
         result = self._governance(
             login, "declare_model_profile_metadata",
             {"profile_id": profile_id, "family": family,
-             "capabilities": capabilities},
+             "capabilities": capabilities,
+             "profile_version_ref": profile_version_ref,
+             "profile_hash": profile_hash},
             failure="模型元数据没有发布",
         )
         declaration = result.get("declaration") or {}

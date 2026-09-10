@@ -741,7 +741,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     # path to write would be an operation that writes anywhere.
     "allow_openclaw_model": frozenset({"model_ref", "actor_ref"}),
     "declare_model_profile_metadata": frozenset({
-        "profile_id", "family", "capabilities", "actor_ref"}),
+        "profile_id", "profile_version_ref", "profile_hash", "family",
+        "capabilities", "actor_ref"}),
     "acknowledge_model_fallback_notice": frozenset({"notice_id", "actor_ref"}),
     "decide_deep_insight_gate": frozenset({
         "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
@@ -2736,24 +2737,57 @@ class WriterServer:
                      if item["id"] == profile_id), None)
                 if profile is None or profile.get("status") == "retired":
                     raise WriterServerError("the profile is not live in this Core")
+                if (profile.get("profile_version_ref") !=
+                        values.get("profile_version_ref")
+                        or profile.get("content_hash") != values.get("profile_hash")):
+                    raise WriterServerError(
+                        "the profile route changed since the Cockpit read it; reload and confirm")
                 prior = router.latest_profile_metadata(profile_id)
-                version = 1 if prior is None else int(prior["version"]) + 1
-                slug = profile_id.removeprefix("profile:")
-                result = router.declare_profile_metadata(
-                    declaration_ref=(
-                        f"model-profile-metadata-declaration:{slug}:{version}"),
-                    profile_id=profile_id, version=version,
-                    prior_declaration_ref=(None if prior is None
-                                           else prior["declaration_ref"]),
-                    provider=profile["provider"], model=profile["model"],
-                    family=str(values["family"]), capabilities=capabilities,
-                    actor_ref=str(values["actor_ref"]),
-                    created_at=datetime.now(timezone.utc).isoformat(
-                        timespec="microseconds"),
-                )
+                requested_capabilities = list(capabilities)
+                if (prior is not None
+                        and prior["provider"] == profile["provider"]
+                        and prior["model"] == profile["model"]
+                        and prior["family"] == values["family"]
+                        and prior["capabilities"] == requested_capabilities):
+                    result = {"status": "duplicate", "declaration": prior}
+                else:
+                    version = 1 if prior is None else int(prior["version"]) + 1
+                    slug = profile_id.removeprefix("profile:")
+                    result = router.declare_profile_metadata(
+                        declaration_ref=(
+                            f"model-profile-metadata-declaration:{slug}:{version}"),
+                        profile_id=profile_id, version=version,
+                        prior_declaration_ref=(None if prior is None
+                                               else prior["declaration_ref"]),
+                        provider=profile["provider"], model=profile["model"],
+                        family=str(values["family"]), capabilities=capabilities,
+                        actor_ref=str(values["actor_ref"]),
+                        created_at=datetime.now(timezone.utc).isoformat(
+                            timespec="microseconds"),
+                    )
         except (ModelRouterError, KeyError, ValueError) as exc:
             raise WriterServerError(str(exc)) from exc
+        result["application_status"] = self._sync_model_metadata_now()
         return result
+
+    def _sync_model_metadata_now(self) -> str:
+        """Apply declarations now when this writer follows a broker catalog."""
+
+        from .mission_model_catalog_lane import LAUNCHER_KWARG, load_lane_config
+        from .openclaw_catalog_reconcile import (
+            load_openclaw_config, sync_openclaw_model_catalog,
+        )
+        from .model_router import ModelRouter
+
+        launcher = self.lane_launcher(LAUNCHER_KWARG)
+        if launcher is None:
+            return "pending_catalog_sync"
+        settings = load_lane_config(launcher.config_path)
+        config = load_openclaw_config(settings["openclaw_config_path"])
+        with ModelRouter(settings["model_router_db"]) as router:
+            sync_openclaw_model_catalog(
+                router, config, checked_at=datetime.now(timezone.utc))
+        return "applied"
 
     def _deep_insight_gates(self) -> Any:
         """The gate authority, opened on first use.

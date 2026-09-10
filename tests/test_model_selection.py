@@ -1316,7 +1316,8 @@ class GovernanceOperationTests(unittest.TestCase):
         )
         self.assertEqual(
             writer_server.OPERATION_FIELDS["declare_model_profile_metadata"],
-            frozenset({"profile_id", "family", "capabilities", "actor_ref"}),
+            frozenset({"profile_id", "profile_version_ref", "profile_hash",
+                       "family", "capabilities", "actor_ref"}),
         )
 
     def test_writer_binds_metadata_to_the_current_profile_route_and_actor(self) -> None:
@@ -1329,11 +1330,16 @@ class GovernanceOperationTests(unittest.TestCase):
             with ModelRouter(router_path) as router:
                 profile = openclaw_broker_profiles(checked_at=NOW)[0]
                 router.register_profile(profile)
+                profile = next(item for item in router.latest_profiles()
+                               if item["id"] == profile["id"])
             server = object.__new__(WriterServer)
             server._model_router_db = lambda: str(router_path)
+            server.lane_launcher = lambda _name: None
             result = server._op_declare_model_profile_metadata({
                 "profile_id": profile["id"], "family": "declared-family",
                 "capabilities": ["research", "verify"], "actor_ref": OWNER,
+                "profile_version_ref": profile["profile_version_ref"],
+                "profile_hash": profile["content_hash"],
             })
             declaration = result["declaration"]
             self.assertEqual(
@@ -1341,8 +1347,96 @@ class GovernanceOperationTests(unittest.TestCase):
                 (profile["provider"], profile["model"]),
             )
             self.assertEqual(declaration["actor_ref"], OWNER)
+            self.assertEqual(result["application_status"], "pending_catalog_sync")
+            again = server._op_declare_model_profile_metadata({
+                "profile_id": profile["id"], "family": "declared-family",
+                "capabilities": ["research", "verify"], "actor_ref": OWNER,
+                "profile_version_ref": profile["profile_version_ref"],
+                "profile_hash": profile["content_hash"],
+            })
+            self.assertEqual(again["status"], "duplicate")
+            with ModelRouter(router_path, read_only=True) as router:
+                count = router.connection.execute(
+                    "SELECT COUNT(*) FROM model_profile_metadata_declarations"
+                ).fetchone()[0]
+            self.assertEqual(count, 1)
             self.assertNotIn("provider", writer_server.OPERATION_FIELDS[
                 "declare_model_profile_metadata"])
+
+    def test_writer_refuses_a_stale_profile_version_without_writing(self) -> None:
+        from dalton_core.writer_server import WriterServer, WriterServerError
+        from dalton_core.model_deployment import openclaw_broker_profiles
+
+        with tempfile.TemporaryDirectory() as directory:
+            router_path = Path(directory) / "router.sqlite"
+            with ModelRouter(router_path) as router:
+                profile = openclaw_broker_profiles(checked_at=NOW)[0]
+                router.register_profile(profile)
+            server = object.__new__(WriterServer)
+            server._model_router_db = lambda: str(router_path)
+            server.lane_launcher = lambda _name: None
+            with self.assertRaisesRegex(WriterServerError, "route changed"):
+                server._op_declare_model_profile_metadata({
+                    "profile_id": profile["id"], "family": "family",
+                    "capabilities": ["research"], "actor_ref": OWNER,
+                    "profile_version_ref": profile["profile_version_ref"],
+                    "profile_hash": "0" * 64,
+                })
+            with ModelRouter(router_path, read_only=True) as router:
+                self.assertIsNone(router.latest_profile_metadata(profile["id"]))
+
+    def test_writer_applies_the_declaration_to_the_routable_profile_now(self) -> None:
+        from types import SimpleNamespace
+        from dalton_core.writer_server import WriterServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router_path = root / "router.sqlite"
+            openclaw_path = root / "openclaw.json"
+            openclaw_path.write_text(json.dumps(_allowing_config()), encoding="utf-8")
+            with ModelRouter(router_path) as router:
+                sync_openclaw_model_catalog(
+                    router, _allowing_config(), checked_at=NOW)
+                profile = router.latest_profiles()[0]
+            lane_config = root / "model-catalog-sync.json"
+            lane_config.write_text(json.dumps({
+                "openclaw_config_path": str(openclaw_path),
+                "model_router_db": str(router_path),
+            }), encoding="utf-8")
+            server = object.__new__(WriterServer)
+            server._model_router_db = lambda: str(router_path)
+            server.lane_launcher = lambda _name: SimpleNamespace(
+                config_path=lane_config)
+            result = server._op_declare_model_profile_metadata({
+                "profile_id": profile["id"], "family": "owner-declared-family",
+                "capabilities": ["research", "verify"], "actor_ref": OWNER,
+                "profile_version_ref": profile["profile_version_ref"],
+                "profile_hash": profile["content_hash"],
+            })
+            self.assertEqual(result["application_status"], "applied")
+            with ModelRouter(router_path, read_only=True) as router:
+                current = next(
+                    item for item in router.latest_profiles()
+                    if item["id"] == profile["id"])
+            self.assertEqual(current["family"], "owner-declared-family")
+            self.assertEqual(current["capabilities"], ["research", "verify"])
+            with ModelRouter(router_path) as router:
+                policy = ensure_planner_policy(
+                    router, profile_ids=[profile["id"]], now=NOW,
+                    policy_id="model-routing-policy:metadata-ui-route")
+                routed = router.route(
+                    _work("work:metadata-ui-next-route"), attempt_number=1,
+                    capability="research",
+                    policy_version_ref=policy["policy_version_ref"],
+                    credential_slot_refs=[current["credential_slot_ref"]],
+                    required_modalities=["text"], required_context_tokens=2_000,
+                    estimated_input_tokens=1_000, estimated_output_tokens=500,
+                    idempotency_key="metadata-ui-next-route:1",
+                    tier=None, purpose=None,
+                )["decision"]
+            self.assertEqual(routed["outcome"], "selected", routed)
+            self.assertEqual(routed["selected_profile_version_ref"],
+                             current["profile_version_ref"])
 
     def test_writer_refuses_metadata_for_a_profile_that_is_not_live(self) -> None:
         from dalton_core.writer_server import WriterServer, WriterServerError
@@ -1353,10 +1447,13 @@ class GovernanceOperationTests(unittest.TestCase):
                 pass
             server = object.__new__(WriterServer)
             server._model_router_db = lambda: str(router_path)
+            server.lane_launcher = lambda _name: None
             with self.assertRaisesRegex(WriterServerError, "not live"):
                 server._op_declare_model_profile_metadata({
                     "profile_id": "profile:missing", "family": "family",
                     "capabilities": ["research"], "actor_ref": OWNER,
+                    "profile_version_ref": "model-profile-version:missing:1",
+                    "profile_hash": "0" * 64,
                 })
 
 
@@ -1429,6 +1526,12 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertFalse(view["available"])
         self.assertIn("模型路由库", view["reason"])
 
+    def test_page_uses_the_server_restart_status_after_selection(self) -> None:
+        page = (Path(__file__).resolve().parents[1]
+                / "src/dalton_core/cockpit_control.html").read_text("utf-8")
+        self.assertIn("out.requires_restart", page)
+        self.assertIn("out.reload_note", page)
+
     def test_the_page_shows_every_stage_its_chain_and_the_three_diff_sets(self) -> None:
         self.install()
         view = self.plane(with_model_config=True).models()
@@ -1470,6 +1573,8 @@ class CockpitModelPageTests(unittest.TestCase):
         plane.declare_model_metadata("owner@example.com", {
             "profile_id": "profile:gpt-6-astra", "family": "openai-gpt",
             "capabilities": ["research", "verify"],
+            "profile_version_ref": "model-profile-version:gpt-6-astra:1",
+            "profile_hash": "0" * 64,
         })
         plane.acknowledge_model_notice(
             "owner@example.com", {"ref": "model-fallback-notice:abc"}
@@ -1505,6 +1610,8 @@ class CockpitModelPageTests(unittest.TestCase):
             plane.declare_model_metadata("owner@example.com", {
                 "profile_id": "profile:deepseek-v4-flash",
                 "family": "deepseek", "capabilities": [],
+                "profile_version_ref": "model-profile-version:deepseek:1",
+                "profile_hash": "0" * 64,
             })
         self.assertEqual(self.calls, [])
 
