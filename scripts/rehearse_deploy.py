@@ -776,6 +776,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("claim_retirement_schema.sql", "dalton_core.claim_retirement", "ClaimRetirementAuthority", "core"),
     MigrationSpec("company_dossier_schema.sql", "dalton_core.company_dossier", "CompanyDossierAuthority", "core"),
     MigrationSpec("connector_schema.sql", "dalton_core.connector", "ConnectorStore", "core"),
+    MigrationSpec("conviction_call_schema.sql", "dalton_core.conviction_call", "ConvictionCallAuthority", "core"),
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),

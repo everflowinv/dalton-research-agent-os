@@ -36,6 +36,10 @@ PINNED = {
     # Q2. The three above did not move when this one was added, and they must
     # not: every score already written binds one of them.
     "rubric:weekly-brief": "ca2c06585715903e456bf4b14d309f52f46380e52643741d71f0bc003046d740",
+    # P15d. Same rule again: the four above did not move when this one was
+    # added, and a run that says they did is a standard that changed under a
+    # score already written against it.
+    "rubric:conviction-call": "02f15431bdb70a2936f563603757d8ce63f295eb64376b179b7ccd4041c2e630",
 }
 
 

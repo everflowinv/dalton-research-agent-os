@@ -1,7 +1,7 @@
 # P12d：Deep Insight Gate 十二问草稿与人裁决 v1.0
 
 日期：2026-09-09（v1.1：按 review 修完三个 blocker 与四项意见）
-分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `88a9325`）
+分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `eb8e5fb`）
 蓝图：[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §3 ③ / §5.2 P12d；
 [并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（版本化四条硬规则）、C3、D2
 依赖：P12a 档案（`company_dossier`）、P12c DebateMap、P13-M2 预测行、P11c 估值快照、Q1 rubric/scorer、ADR-0006 / ADR-0008
@@ -42,6 +42,7 @@ Playbook 从 Phase 9 起就对每家公司问了十二个问题，从来没有�
 | `cockpit_plane.py` | 审批页列出未裁决的门（十二问与引用随条目一起给），`decide` 分支，registry lane 标签一行 |
 | `cockpit_model.register_purpose("deep_insight_gate")` | 在 `deep_insight_gate_draft` 模块内登记（Wave 0 的接口，未改 `cockpit_model.py`） |
 | `scripts/rehearse_deploy.py` | 一行 `MigrationSpec`，让新 schema 进部署预演（review B3） |
+| `bootstrap.py` `SCHEMA_DATABASES` | 一行 `("deep_insight_gate_schema.sql", None)`，INT3 之后安装时就建表，而不是等某条 lane 第一次构造 authority |
 
 没有碰：`coverage_mission`（含 schema）、`bounded_planner_driver`、`macos_launchagent`、`install.sh`、
 `PROJECT_STATUS`、`tests/test_service`、`tests/test_lane_registry`、其他 agent 的模块。

@@ -514,7 +514,12 @@ class LaneRegistrationTests(unittest.TestCase):
         from dalton_core.mission_crowd_source_lane import LANE
 
         self.assertEqual(LANE.operation, "dispatch_mission_crowd_sources")
-        not_evidence = {"dispatch_research_task", "dispatch_mission_reflection"}
+        # P15d's conviction call belongs in this set for the same reason as
+        # the other two: it acquires nothing. It reads the theses, the map and
+        # the model that the evidence lanes above it produced, and proposes a
+        # judgement about them.
+        not_evidence = {"dispatch_research_task", "dispatch_mission_reflection",
+                        "dispatch_conviction_call"}
         evidence_lanes = [
             spec.operation for spec in self.registry.tick_lanes()
             if spec.operation not in not_evidence
