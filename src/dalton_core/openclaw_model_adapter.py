@@ -86,6 +86,11 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "0.1", "quality-verifier-provider-output-v0.1.schema.json",
         "quality_verifier_provider_output_v0_1", frozenset({"quality_verifier"}),
     ),
+    "investment-memo-verifier-provider-output-0.1": (
+        "0.1", "investment-memo-verifier-provider-output-v0.1.schema.json",
+        "investment_memo_verifier_provider_output_v0_1",
+        frozenset({"investment_memo_verifier"}),
+    ),
     "event-judgement-verifier-provider-output-0.1": (
         "0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json",

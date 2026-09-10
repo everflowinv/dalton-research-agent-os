@@ -111,6 +111,7 @@ dalton_core = [
   "zero-base-review-verifier-provider-output-v0.1.schema.json",
   "earnings-verifier-provider-output-v0.1.schema.json",
   "quality-verifier-provider-output-v0.1.schema.json",
+  "investment-memo-verifier-provider-output-v0.1.schema.json",
   "call_budget_defaults.json",
   "run_budget_defaults.json",
   "dashboard.html",

@@ -1,0 +1,38 @@
+{
+  "$id": "https://dalton.local/schemas/investment-memo-verifier-provider-output-v0.1.schema.json",
+  "title": "InvestmentMemoVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "verified_body_hash",
+    "finding_codes"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "verified_body_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "finding_codes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "unsupported_statement",
+          "number_not_in_source",
+          "missing_required_section",
+          "question_not_answered",
+          "variant_not_compared",
+          "anti_thesis_incomplete",
+          "risk_reward_incomplete"
+        ]
+      }
+    }
+  }
+}

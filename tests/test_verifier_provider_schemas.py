@@ -5,6 +5,7 @@ from importlib import resources
 from dalton_core.company_dossier_draft import VERIFIER_FINDING_CODES as DOSSIER_CODES, validate_verifier_output as validate_dossier
 from dalton_core.deep_insight_gate_draft import VERIFIER_FINDING_CODES as GATE_CODES, validate_verifier_output as validate_gate
 from dalton_core.earnings_preview import VERIFIER_FINDING_CODES as EARNINGS_CODES, validate_verifier_output as validate_earnings
+from dalton_core.investment_memo_draft import FINDING_CODES as MEMO_CODES
 from dalton_core.research_quality_score import VERIFIER_FINDING_CODES as QUALITY_CODES
 
 
@@ -40,5 +41,7 @@ class VerifierProviderSchemaTests(unittest.TestCase):
         quality = self.schema("quality-verifier-provider-output-v0.1.schema.json")
         self.assertEqual(set(quality["properties"]["findings"]["items"]["properties"]["code"]["enum"]),
                          set(QUALITY_CODES))
+        memo = self.schema("investment-memo-verifier-provider-output-v0.1.schema.json")
+        self.assertEqual(set(memo["properties"]["finding_codes"]["items"]["enum"]), set(MEMO_CODES))
         zero = self.schema("zero-base-review-verifier-provider-output-v0.1.schema.json")
         self.assertEqual(zero["properties"]["findings"]["items"]["maxLength"], 500)

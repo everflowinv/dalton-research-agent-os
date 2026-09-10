@@ -85,6 +85,9 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "quality_verifier": (
         "quality-verifier-provider-output-0.1",
         "quality-verifier-provider-output-v0.1.schema.json"),
+    "investment_memo_verifier": (
+        "investment-memo-verifier-provider-output-0.1",
+        "investment-memo-verifier-provider-output-v0.1.schema.json"),
     "event_judgement_verifier": (
         "event-judgement-verifier-provider-output-0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json"),

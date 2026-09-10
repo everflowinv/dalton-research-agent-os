@@ -579,6 +579,9 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             ("quality_verifier", "quality-verifier-provider-output-0.1",
              "quality-verifier-provider-output-v0.1.schema.json",
              "quality_verifier_provider_output_v0_1", "criterion_id"),
+            ("investment_memo_verifier", "investment-memo-verifier-provider-output-0.1",
+             "investment-memo-verifier-provider-output-v0.1.schema.json",
+             "investment_memo_verifier_provider_output_v0_1", None),
         )
         for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
             with self.subTest(purpose=purpose):
