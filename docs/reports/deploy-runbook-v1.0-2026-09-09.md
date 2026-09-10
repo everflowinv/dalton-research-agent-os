@@ -68,11 +68,13 @@ cp "$CONFIG" "$DALTON_ROOT/config/service.pre-ebd2ea8-$(date -u +%Y%m%d).json"
 
 Expected: a snapshot id on stdout; note it, step 12 needs it.
 
-The `cp -R` of the governance directory is **not optional**. The rehearsal
-found that `sec-filings-index-v1.json` exists on the live Core and in no
-repository — `install.sh` cannot re-create it, and the writer's plist names it
-unconditionally. Losing it means a writer that will not start its filings lane
-and an approval nobody can reproduce.
+Keep the `cp -R` of the governance directory. `sec-filings-index-v1.json` used
+to exist on the live Core and in no repository; INT3 recovered it into
+`deploy/connector-governance/` (byte for byte, and it re-derives from the
+packaged SEC contract), and `install.sh` now seeds it, so this is no longer the
+only copy. The backup is still worth taking: it is the only record of *which*
+approvals this machine has given, and seeding is copy-once — a record already
+on disk is never overwritten, which is exactly why losing one is expensive.
 
 ## 3. Run the installer
 
@@ -96,6 +98,28 @@ Two things to watch:
 If you want the reading throughput and model tiers the live Core is already
 running, they are persisted in `service.json` and a plain re-install keeps
 them. Only set the environment variables if you are changing one.
+
+**Three lanes are switched on by environment variables set on this command**
+(INT3). Each writes a model configuration into the state directory; unset, the
+lane is simply not installed and costs nothing. They have to be set *here*,
+because the writer's plist is rendered at the end of this script and a lane
+whose configuration is not yet on disk gets no argument.
+
+```sh
+# P12b, the claim index. Lands in C2's maintenance pool, which is the tightest
+# at 5% of the day cap.
+DALTON_CLAIM_INDEX_MODEL_TIER=cheap \
+# P14a, the judgement lane. Both or neither, and they must be different model
+# families -- a judge verified by its own model is not verified, and the route
+# check refuses it with gated:same_family before anything is paid for.
+DALTON_EVENT_JUDGEMENT_MODEL_TIER=brain \
+DALTON_EVENT_VERIFIER_MODEL_TIER=verifier \
+  deploy/macos/install.sh
+```
+
+Setting only one of the judgement pair exits 2 and installs nothing. Setting
+both to the same value exits 2 for the same reason. Skipping all three is a
+supported deploy: `claim_index` and `event_judgement` stay `unconfigured`.
 
 ## 4. Reload the gateway
 
@@ -171,10 +195,12 @@ code path to look at first.
 one).
 
 ```sh
-"$VENV/bin/dalton-connector-governance" show --path "$STATE/connector-governance/yfinance-daily-prices-v1.json"
-"$VENV/bin/dalton-connector-governance" approve \
-  --path "$STATE/connector-governance/yfinance-daily-prices-v1.json" \
-  --approved-by "$OWNER"
+for record in yfinance-daily-prices-v1 yfinance-calendar-v1; do
+  "$VENV/bin/dalton-connector-governance" show --path "$STATE/connector-governance/$record.json"
+  "$VENV/bin/dalton-connector-governance" approve \
+    --path "$STATE/connector-governance/$record.json" \
+    --approved-by "$OWNER"
+done
 ```
 
 Expected: `show` prints `"status": "proposed"`, `approve` prints the record
@@ -189,31 +215,36 @@ step 3 already put `--market-price-governance` into the writer plist. Approving
 in place is enough; you do **not** need to re-run `install.sh`. You do need the
 writer restart in step 11.
 
-**Corrected 2026-09-10 (INT2 landed on main).** An earlier draft of this step
-said the catalyst calendar, the China records, the crowd sources and the S1
-feeds were not seeded by `install.sh`. They are now — every committed
-governance record has a seed path. What is left is a set of approvals, not a
-set of gaps:
+**Corrected 2026-09-10 (INT2 and INT3 landed on main).** An earlier draft of
+this step said the catalyst calendar, the China records, the crowd sources and
+the S1 feeds were not seeded by `install.sh`. They are. What is left is a set
+of approvals, a set of environment gates, and three records nobody is going to
+seed on purpose.
 
-```sh
-"$VENV/bin/dalton-connector-governance" approve --approved-by "$OWNER" \
-  --path "$STATE/connector-governance/yfinance-calendar-v1.json"
-```
+**Approvals.** The loop above covers both. `yfinance-calendar-v1.json` is the
+whole switch for the C1 catalyst-calendar lane, and the lane needs no new
+mission version — the live mission already grants `observation`. Until you
+approve it the lane still *runs* every tick and its child fails closed with
+`yfinance calendar governance record is not approved`, which the rehearsal
+observed on a copy with no network call made. So the lane reads `launched` in
+the tick summary rather than `unconfigured`; the refusal is one layer down, in
+the next tick's `settled`. `launched` means a child started, not that it did
+anything.
 
-That one record is the whole switch for the C1 catalyst-calendar lane, and the
-lane needs no new mission version — the live mission already grants
-`observation`. Until you approve it the lane still *runs* every tick and its
-child fails closed with `yfinance calendar governance record is not approved`,
-which the rehearsal observed on a copy. So the lane will read `launched` in the
-tick summary rather than `unconfigured`; the refusal is one layer down, in the
-next tick's `settled`.
-
-The two Guidepoint records behave the same way — `install.sh` now seeds their
+The two Guidepoint records behave the same way — `install.sh` seeds their
 discovery plan too, so the lane is installed and reports
 `idle / all_grants_refused` until you approve them.
 
-Three seed groups are **gated** on this machine's environment rather than on an
-approval. `install.sh` skips them silently and so does the rehearsal:
+`sec-filings-index-v1.json` needs no approval: it is committed and seeded
+**already `approved`**, because the approval is yours, given on 2026-08-26,
+and it predates the repository carrying the record. It re-derives from the
+packaged SEC contract hash for hash, and seeding is copy-once, so this machine's
+copy is untouched and a rebuilt Core gets the same bytes. Two committed records
+already carry an approval for the same reason
+(`alphaengine-get-document-v1.json`, `sec-company-facts-v1.json`).
+
+**Gated on this machine's environment, not on an approval.** `install.sh` skips
+these silently and so does the rehearsal:
 
 | group | installs when |
 | --- | --- |
@@ -230,13 +261,15 @@ wave — the mission universe is US-listed. Seeding them turns nothing on. They
 are on disk so you can approve six schema hashes separately, whenever S4 grows
 a lane.
 
-One record is deliberately **not** in `connector-governance/`:
-`guidepoint-get-transcript-narrowing-v1.json` goes to
-`$STATE/governance-decisions/`. Nothing loads it. It is the note to read before
-deciding what to do about an approval for an operation the upstream does not
-have. Do not move it — a permanently-`proposed` record under
-`connector-governance/` is a lane the cockpit shows as waiting for an approval
-about nothing.
+**Deliberately not seeded** (INT3). Three committed records, named in a
+`DELIBERATELY_UNSEEDED` array in `install.sh` with the reason beside each, and
+held there by a test that asserts every committed record is either seeded or
+listed:
+
+| record | why |
+| --- | --- |
+| `roic-list-transcripts-v1.json`, `roic-get-transcript-v1.json` | roic.ai answers 403 on every page, site-wide, since 2026-08-29. Nothing in the writer loads either record, so seeding them would be two approvals to make about a source that answers nothing. |
+| `guidepoint-get-transcript-narrowing-v1.json` | Seeded to `$STATE/governance-decisions/`, not `connector-governance/`. Nothing loads it; it is the note to read before deciding what to do about an approval for an operation the upstream does not have. Do not move it — a permanently-`proposed` record under `connector-governance/` is a lane the cockpit shows as waiting for an approval about nothing. |
 
 ## 7. Publish the mission version
 
@@ -363,23 +396,23 @@ the live `service.json`, so nothing is calling the verifier today — this can b
 deferred, but it must not be *forgotten*, because turning thesis-impact back on
 without it fails closed on every call.
 
-## 10. Install the lane switches you want on
+## 10. Lane switches — nothing to do here any more
 
-Four lanes are files-on-disk away from existing, and `install.sh` writes none
-of them. Skip any you do not want; a lane that is absent costs nothing.
+All four are `install.sh`'s job now (INT3). The tracking policy is seeded
+unconditionally; the three model configurations are written when you name them
+at step 3. Verify what you got:
 
 ```sh
-# P14a tracking lane
-cp "$REPO/deploy/phase9/p14a-tracking-policy-v1.json" "$STATE/tracking-policy.json"
-chmod 600 "$STATE/tracking-policy.json"
+ls "$STATE"/tracking-policy.json "$STATE"/*-model-config.json
 ```
 
-`event-judgement-model-config.json`, `event-verifier-model-config.json` and
-`claim-index-model-config.json` have no setup module wired into `install.sh`
-either. The two judgement configs must point at routing policies in **different
-model families**, or every judgement fails closed on the independence check.
-Writing them is a change to `install.sh` and belongs to the P14a / P12b owners,
-not to this deploy.
+Expected: `tracking-policy.json`, `document-extraction-model-config.json`, and
+one file per model tier you named at step 3. `initial-screen-model-config.json`
+and `research-planner-model-config.json` are on this machine already.
+
+If you skipped an environment variable at step 3 and want the lane after all,
+re-run `deploy/macos/install.sh` with it set — the script is idempotent and the
+plist is re-rendered from what is on disk.
 
 ## 11. Start, and watch the first tick
 
@@ -406,15 +439,18 @@ Expected: **no lane whose status begins `unavailable:`**. Every lane should
 read one of `idle`, `launched`, `ungranted`, `unconfigured`, `held` or
 `deferred`, and `tick_ledger` should read `recorded`. The rehearsal's table for
 this exact code against a copy of this exact state is in
-`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md` (§6 has the table for
-merged main). The lanes that should *change* after the later steps:
+`docs/reports/int3-seeds-v1.0-2026-09-09.md`, which is the same script run
+against merged main (`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md` §6
+has the run before INT3's seeds). The lanes that should *change* after the
+later steps:
 
 | lane | before | after |
 | --- | --- | --- |
 | `mission_market_prices` | `ungranted` | `launched` once step 7 grants `market_price` |
 | `mission_catalyst_calendar` | `launched`, child refuses | `launched`, child succeeds once step 6 approves the calendar record |
+| `mission_tracking` | `launched`, child reports `ungranted` | `launched`, child records events once step 7 grants `market_event` |
 | `guidepoint_discovery` | `idle / all_grants_refused` | `idle`/`launched` once step 6 approves the two Guidepoint records |
-| `claim_index` | `unconfigured` | stays `unconfigured` until step 10 writes its model config |
+| `claim_index`, `event_judgement` | `unconfigured` | installed only if you named their models at step 3 |
 
 `launched` means a child was started, not that it did anything: the outcome
 arrives in the next tick's `settled`. A lane reading `launched` whose record is
