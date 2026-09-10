@@ -644,8 +644,19 @@ class DocumentExtractionService:
         from .model_router import _policy_wire
         if _policy_wire(policy) != policy or policy["policy_version_ref"] != policy_ref:
             raise ResearchVerificationConflict("extraction routing policy binding drifted")
-        if len(policy.get("filters", {}).get("allowed_profile_ids", [])) != 1:
-            raise ResearchVerificationError("extraction must pin exactly one approved model")
+        # Routing policies can now carry an ordered eligible chain. The router
+        # still selects one exact immutable profile for each call; requiring
+        # the policy itself to contain one profile made Cockpit's approved
+        # fallback chain unreadable before routing even began.
+        allowed = policy.get("filters", {}).get("allowed_profile_ids", [])
+        purposes = policy.get("purpose_overrides") or {}
+        extraction_purposes = {
+            "document_extraction", "document_numeric_extraction",
+            "metric_discovery_extraction",
+        }
+        if not allowed and not extraction_purposes.intersection(purposes):
+            raise ResearchVerificationError(
+                "extraction routing policy has no approved model candidates")
         if router.connection.execute(
             "SELECT 1 FROM model_routing_policy_versions WHERE policy_id=? AND version>?",
             (policy["id"], policy["version"]),
