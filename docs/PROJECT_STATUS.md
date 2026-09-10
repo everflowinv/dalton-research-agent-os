@@ -1,26 +1,26 @@
 # Dalton 项目进度
 
-更新日期：2026-09-10（恢复开发；以下历史时间记录保留）
+更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
 ## 最新签署与产物验收（2026-09-10）
 
-**mission v14 已由 owner 签署并完成语义／哈希核验，服务运行正常。** 实际签署哈希以 [v14 产物验收进度](reports/mission-v14-product-acceptance-progress-2026-09-10.md) 为准；时间戳与演练不同是正常记录差异。正在修复实际产物路径中的旧 dossier 拒绝缓存、scheduler 初始化锁竞争、事件判断预算边界，并补 controller 单实例保护。当前 0/15 目标产物，不能称产物验收通过；下面“待签署”记录均已由本节覆盖。
+**mission v14 已由 owner 签署并完成语义／哈希核验，服务运行正常。** 实际签署哈希以 [v14 产物验收进度](reports/mission-v14-product-acceptance-progress-2026-09-10.md) 为准；时间戳与演练不同是正常记录差异。旧 dossier 拒绝缓存、scheduler 初始化锁竞争、完整事件上下文与可配置预算、controller 单实例保护均已集成，等待新冻结版本全量验收和部署。调用、每轮任务、预算池、planner、抽取、thesis-impact 与 Guidepoint 限额均有实际配置消费路径；AlphaEngine probe 的独立限额与精确 mission 绑定正在补齐。385 项集成聚焦测试通过，不替代新全量验收。当前 0/15 目标产物，不能称产物验收通过；下面“待签署”记录均已由本节覆盖。
 
 ## 最新 live 状态（2026-09-10，部署恢复）
 
-Owner 的首次部署因目录同步晚于抽取配置而中断，mission 签署未执行。安装顺序修复 `67373c0` 已提交；11 项针对性测试在 Python 3.13/3.14 均通过，433 个运行文件保持与全量验收版本一致。已重试部署并清理确认的旧 unmanaged controller，新服务 health 全部通过。**现在只需 owner 签署 mission v14，然后验收真实产物。** 详见 [部署恢复记录](reports/wave4-live-deployment-recovery-2026-09-10.md)。下方“尚未部署”是此前验收阶段的历史记录。后续补 controller 单实例锁与升级前遗留进程检测。
+Owner 的首次部署因目录同步晚于抽取配置而中断，mission 签署未执行。安装顺序修复 `67373c0` 已提交；11 项针对性测试在 Python 3.13/3.14 均通过，433 个运行文件保持与全量验收版本一致。已重试部署并清理确认的旧 unmanaged controller，新服务 health 全部通过。**随后 owner 已签署 mission v14；当前无需重签，正在验收后续修复。** 详见 [部署恢复记录](reports/wave4-live-deployment-recovery-2026-09-10.md)。下方“尚未部署”是此前验收阶段的历史记录。后续补 controller 单实例锁与升级前遗留进程检测。
 
 ## 当前开发与验收（2026-09-10，覆盖下方历史状态）
 
-Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 commit/push；部署和人工签署交给 owner。代码在隔离分支 `continuous-integration-wave4` 集成，原 main 中另一会话的四个 DeepSeek 文件完整保留。
+Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 commit/push；owner 保留人工签署；最新指示允许本会话在当前工作验收后部署。代码在隔离分支 `continuous-integration-wave4` 集成，原 main 中另一会话的四个 DeepSeek 文件完整保留。
 
-**当前验收代码 `79e0ef7`：6,248 项全量测试 / 519.224s 通过（1 skip），尚未部署。** 同一冻结代码通过 wheel、页面语法及当前 live 副本 13 步演练，12 份模型配置内部路径全部 confined；模型页成功读取 32 个环节（26 configured / 6 unconfigured）。详见 [最终验收报告](reports/continuous-wave4-release-2026-09-10.md)。前一个 `f1d61b8` 的 6,243 项结果仅保留为历史检查点。
+**上一轮已部署代码基准 `79e0ef7`：6,248 项全量测试 / 519.224s 通过（1 skip）；安装顺序修复后以 `67373c0` 部署。** 同一冻结代码通过 wheel、页面语法及当前 live 副本 13 步演练，12 份模型配置内部路径全部 confined；模型页成功读取 32 个环节（26 configured / 6 unconfigured）。详见 [最终验收报告](reports/continuous-wave4-release-2026-09-10.md)。前一个 `f1d61b8` 的 6,243 项结果仅保留为历史检查点。
 
 模型路由使用当前 broker 公开目录，别名、价格、容量与凭据变化追加为不可变 profile 版本。Cockpit 按实际消费配置显示并切换各环节模型，生成和独立核验有各自 purpose；动态外部配置明确显示只读或未配置。新别名的模型家族不靠名字猜测，由 owner 在当前页面作 route-bound 声明。切换常驻服务配置会提示需要重启。
 
 最终候选 wheel 已通过 430 个 Python/SQL 文件及 3 个 HTML 文件逐字校验，页面 JavaScript 语法通过。三个 Sol 代理分别完成配置读取交叉修复、最终 wheel 校验、演练路径隔离与当前副本复验；主代理做集成、全量回归、签署包及最终交付。详见 [wave 4 进度](reports/continuous-wave4-progress-2026-09-10.md)。
 
-**当前 next step：** 部署包已绑定通过验收的精确代码、wheel 和报告。由 owner 执行部署及 mission v14 签署，再对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
+**当前 next step：** 冻结预算与 post-signature 修复，完成全量测试、wheel 和当前副本演练后更新部署包并部署；沿用已签 mission v14，对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。随后系统检查 Cockpit 页面与交互，按 [owner 期待差距复核](reports/owner-expectations-gap-refresh-2026-09-10.md) 推进真实缺口；Investment Memo 闭环优先，Excel 导出仍后排。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
 
 历史验收：wave 3 `d21de7d` 为 6,184 项通过；wave 2 `e7e06bb` 为 6,114 项通过。此前 DeepSeek route drift 已由 wave 4 的 Dalton 目录迁移处理，不再要求另一个仅更新模型的会话承担 Dalton 迁移。
 

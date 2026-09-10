@@ -99,9 +99,10 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
 
 
 def call_budget_view(state_dir: str | Path, purpose: str, **kwargs: Any) -> dict[str, Any]:
+    from .bounded_planner_driver import BoundedPlannerDriverError
     try:
         return _call_budget_view(state_dir, purpose, **kwargs)
-    except (OSError, ValueError, ModelSelectionError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, ModelSelectionError, BoundedPlannerDriverError) as exc:
         return {"editable": False, "reason": f"预算配置无法读取：{exc}"}
 
 
