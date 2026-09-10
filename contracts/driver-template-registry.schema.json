@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/driver-template-registry.schema.json",
+  "title": "DriverTemplateRegistry",
+  "description": "W4: the frozen mapping from a company's industry_classification to the driver slots its model specification, dossier demand_drivers section and DebateMap are read against. Pure constants -- no version chain, because there is nothing here that one run learns and the next has to be told; a changed table is a changed content_hash and a new file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "registry_ref",
+    "generic_classification",
+    "templates",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "registry_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generic_classification": {
+      "const": "generic"
+    },
+    "templates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/template"
+      }
+    },
+    "content_hash": {
+      "$ref": "#/$defs/hash"
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "template": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification",
+        "label",
+        "generic",
+        "because",
+        "slots"
+      ],
+      "properties": {
+        "classification": {
+          "enum": [
+            "commodity_cycle",
+            "capital_cycle",
+            "contract_compounder",
+            "structural_growth",
+            "turnaround",
+            "generic"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generic": {
+          "type": "boolean"
+        },
+        "because": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/slot"
+          }
+        }
+      }
+    },
+    "slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot_id",
+        "label",
+        "question",
+        "basis_concepts",
+        "evidence_kinds",
+        "cues"
+      ],
+      "properties": {
+        "slot_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basis_concepts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Statement concept local names this slot would rest on where the company files them. Empty is the normal case for a spread or a TAM: nobody files those, which is why market_proxy exists."
+        },
+        "evidence_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "company_figure",
+              "market_proxy",
+              "third_party_estimate",
+              "own_assumption",
+              "qualitative"
+            ]
+          },
+          "description": "The claim index evidence-kind vocabulary. market_proxy is a public quantity at a stated distance from the company's realised figure; a forecast assumption citing one carries a proxy_gap or is refused whole."
+        },
+        "cues": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Lowercase substrings matched against folded text to decide whether an output covers this slot. Deterministic and deliberately under-reporting."
+        }
+      }
+    }
+  }
+}

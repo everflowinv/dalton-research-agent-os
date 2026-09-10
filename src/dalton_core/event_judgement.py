@@ -54,6 +54,7 @@ from .cockpit_model import (
     register_purpose,
     unwrap_json_object,
 )
+from .claim_index_authority import EVIDENCE_KINDS, EVIDENCE_KIND_DEFINITIONS
 from .research_event import EVIDENCE_TIERS, worst_tier
 from .research_playbook import DECISION_VOCABULARY
 from .store import canonical_json, content_hash
@@ -183,6 +184,14 @@ def _payload_lines(event: Mapping[str, Any]) -> list[str]:
     ]
 
 
+#: The evidence-kind vocabulary as prompt lines.  Built once at import: the
+#: definitions are frozen constants and rebuilding them per call would put the
+#: same bytes through the same join on every judgement.
+EVIDENCE_KIND_LINES: tuple[str, ...] = tuple(
+    f"  {kind}: {EVIDENCE_KIND_DEFINITIONS[kind]}" for kind in EVIDENCE_KINDS
+)
+
+
 def build_judge_prompt(context: Mapping[str, Any]) -> str:
     """The whole table the brain reads: event, theses, drivers, history, sources.
 
@@ -198,6 +207,14 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
         "",
         "Weigh the event by its evidence tier. A company-filed number and a crowd post are",
         "not the same kind of fact; a sales note is what the desk heard, not what happened.",
+        "",
+        "Weigh it also by what kind of quantity it is. These are the kinds this system",
+        "records, and they are not interchangeable:",
+        *EVIDENCE_KIND_LINES,
+        "A market_proxy is never the company's own number. If a driver or an assumption",
+        "below rests on one, the distance from what the company realises is written",
+        "beside it, and a decision that treats the proxy as the realised figure is wrong",
+        "however good the proxy is.",
         "",
         "Standing instruction: agreeing with the market is worth nothing. In `because`,",
         "say whether our view differs from what the price and the street imply, and if it",
@@ -247,6 +264,10 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
                 f"    {assumption['period_end']}: {assumption['measure']} = "
                 f"{assumption['value']} ({assumption['kind']})"
             )
+            for gap in assumption.get("proxy_gaps") or ():
+                # The one thing that must travel with a proxy: without it the
+                # judge reads a spread as the company's realised margin.
+                lines.append(f"      market_proxy gap: {gap}")
     history = context.get("recent_judgements") or ()
     lines.append("")
     lines.append("## The last decisions taken on this company")
@@ -1661,6 +1682,11 @@ def model_drivers(model_version: Mapping[str, Any] | None) -> list[dict[str, Any
 
     if not model_version:
         return []
+    # Imported here rather than at module scope, as ``revise_assumptions``
+    # already is: the forecast layer reaches back into this one, and the two
+    # modules only meet when a model version is actually in hand.
+    from .model_forecast_driver import proxy_gaps
+
     by_driver: dict[str, list[dict[str, Any]]] = {}
     for assumption in model_version.get("assumptions") or ():
         if assumption.get("superseded_by"):
@@ -1670,6 +1696,12 @@ def model_drivers(model_version: Mapping[str, Any] | None) -> list[dict[str, Any
             "measure": str(assumption["measure"]),
             "value": str(assumption["value"]),
             "kind": str(assumption["kind"]),
+            # W4: a market proxy travels with the distance between it and what
+            # the company realises, or it does not travel. The forecast layer
+            # refuses an assumption that cites one without saying; carrying the
+            # sentence here is what makes the refusal worth having, because the
+            # judge is who would otherwise read a spread as a realised margin.
+            "proxy_gaps": proxy_gaps(assumption),
         })
     drivers = []
     for driver in model_version.get("drivers") or ():

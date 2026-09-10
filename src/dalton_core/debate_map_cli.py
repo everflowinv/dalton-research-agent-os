@@ -42,6 +42,7 @@ from .debate_map_draft import (
     subject_claim_rows,
     subject_driver_rows,
 )
+from .driver_template import debate_map_gaps
 from .research_constitution import ResearchConstitutionAuthority
 from .scheduler import SchedulerError
 from .store import DaltonStore
@@ -98,6 +99,8 @@ def run_debate_map(
         "failure_reason": None,
         "policy_ref": POLICY_REF,
         "policy_hash": POLICY_HASH,
+        "industry_classification": None,
+        "template_gaps": [],
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
@@ -128,6 +131,8 @@ def run_debate_map(
         constitution = ResearchConstitutionAuthority(store).constitution(binding["ref"])
         method = constitution["method"]
 
+        classification = subject_classification(store, subject_ref)
+        summary["industry_classification"] = classification
         rows = subject_claim_rows(store, subject_ref)
         summary["claims"] = len(rows)
         seeds = contested_aspects(rows)
@@ -142,6 +147,7 @@ def run_debate_map(
             thesis=_thesis(store, subject_ref),
             method=method,
             previous=previous,
+            industry_classification=classification,
         )
         summary["prompt_bytes"] = len(build_prompt(table).encode("utf-8"))
         if dry_run:
@@ -180,6 +186,10 @@ def run_debate_map(
             return summary
         debates = drafted["debates"]
         summary["debates"] = len(debates)
+        # Reported, never a refusal: a driver question this kind of company is
+        # normally argued about that nothing on this map argues about is a hole
+        # in the map, and the reader is the one who decides whether it matters.
+        summary["template_gaps"] = debate_map_gaps(debates, classification)
         refs = change_evidence(debates, previous)
         if not refs:
             summary.update({"status": "succeeded", "map_status": "duplicate",
@@ -214,6 +224,28 @@ def run_debate_map(
     finally:
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()
+
+
+def subject_classification(store: Any, subject_ref: str) -> str | None:
+    """The subject's current ``industry_classification``, when it has one.
+
+    Companies have dossiers; industries do not, so an industry subject simply
+    has no classification and gets the generic template. Read rather than
+    inferred: the classification is a versioned judgement in the dossier, and a
+    second place that decided it would be a second answer to one question.
+    """
+
+    from .company_dossier import CompanyDossierAuthority
+    from .company_dossier_cli import table_exists
+
+    if not table_exists(store.connection, "company_dossier_versions"):
+        return None
+    record = CompanyDossierAuthority(store).latest(subject_ref)
+    if record is None:
+        return None
+    word = str((record.get("industry_classification") or {})
+               .get("classification") or "")
+    return word or None
 
 
 def _thesis(store: Any, subject_ref: str) -> dict[str, Any] | None:

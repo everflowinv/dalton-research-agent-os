@@ -46,6 +46,7 @@ from .debate_map import (
     screen_candidates,
     tier_of,
 )
+from .driver_template import prompt_block
 from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -129,6 +130,7 @@ def build_input_table(
     policy: Mapping[str, Any] = DEBATE_POLICY,
     max_claim_rows: int = MAX_CLAIM_ROWS,
     max_statement_chars: int = MAX_STATEMENT_CHARS,
+    industry_classification: Any = None,
 ) -> dict[str, Any]:
     """Everything one drafting call may look at, and the ids it may cite.
 
@@ -209,6 +211,16 @@ def build_input_table(
         "causal_chain": list(method.get("causal_chain") or []),
         "previous_debates": previous_debates,
         "citable": citable,
+        # W4: which driver questions this *kind* of company is argued about,
+        # shown to the drafter beside the drivers it may bind to. Not a gate --
+        # the constitution gate is the gate, and it checks driver refs, not
+        # subject matter -- but a map of a commodity producer with nothing on
+        # it about the spread has a hole in it, and the drafter is the cheapest
+        # place to notice.
+        "industry_classification": (
+            None if industry_classification is None
+            else str(industry_classification)),
+        "driver_template": prompt_block(industry_classification),
         "policy_ref": POLICY_REF,
         "policy_hash": POLICY_HASH,
     }
@@ -258,6 +270,7 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         f"{thesis}\n\n"
         "PREVIOUS DEBATES -- <debate_ref>\\t<status>\\t<question>:\n"
         f"{previous}\n\n"
+        f"{table.get('driver_template') or ''}\n\n"
         "CLAIMS, one per row, tab separated. The tier is how much the source "
         "is worth and the publisher is who said it:\n"
         "  <row id>\\t<aspect>\\t<tier>\\t<publisher>\\t<as of>\\t<statement>\n"

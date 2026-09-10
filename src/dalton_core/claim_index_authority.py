@@ -89,6 +89,58 @@ AS_OF_BASES: tuple[str, ...] = (
 ASPECT_SOURCES: tuple[str, ...] = ("rule", "model")
 REVISION_REASONS: tuple[str, ...] = ("tagged", "recanonicalised")
 
+# W4 / Chem retrospective §7.2: *what kind of quantity* a number is, which is a
+# different question from ``importance`` above.  ``importance`` says who said
+# it; this says what it is.  The Chem review's sharpest single finding is that
+# the two get conflated: an MDI--benzene spread published by a price reporting
+# agency is a perfectly reliable public number that is *not* the cash margin of
+# a plant, and a system that files it beside a filed figure has quietly told
+# itself the company earned it.
+#
+#   company_figure       the company published this quantity for itself
+#   market_proxy         a public quantity that stands in for one the company
+#                        does not publish, and sits at a distance from what the
+#                        company realises: spreads, list prices, futures
+#                        continuations, industry operating rates
+#   third_party_estimate somebody outside the company forecast or estimated it
+#                        -- a broker, a consensus, an industry consultancy
+#   own_assumption       this fund decided it; nobody published it at all
+#   qualitative          a statement rather than a quantity
+#
+# ``market_proxy`` is the one with a rule attached, and it is deliberately the
+# only one: a forecast assumption that cites a market proxy must say how far
+# that proxy sits from the company's realised figure (``proxy_gap``), or the
+# assumption is refused whole.  See ``model_forecast_driver.REF_KINDS``.
+EVIDENCE_KINDS: tuple[str, ...] = (
+    "company_figure",
+    "market_proxy",
+    "third_party_estimate",
+    "own_assumption",
+    "qualitative",
+)
+EVIDENCE_KIND_DEFINITIONS: Mapping[str, str] = {
+    "company_figure": (
+        "the company published this quantity for itself, in a filing, a press "
+        "release or a disclosed operating metric"
+    ),
+    "market_proxy": (
+        "a public quantity standing in for one the company does not publish -- "
+        "a spread, a list price, a futures continuation, an industry operating "
+        "rate -- which sits at a stated distance from what the company realises"
+    ),
+    "third_party_estimate": (
+        "somebody outside the company estimated or forecast it: a broker, a "
+        "consensus, an industry consultancy"
+    ),
+    "own_assumption": (
+        "this fund decided it; no source outside this building published it"
+    ),
+    "qualitative": "a statement about the business rather than a quantity",
+}
+#: The evidence kind that may not be cited without saying how far it is from
+#: the company's own realised figure.
+MARKET_PROXY = "market_proxy"
+
 _ENTRY_FIELDS = frozenset({
     "schema_version", "id", "created_at", "entry_ref", "version",
     "prior_version_ref", "claim_version_ref", "claim_version_hash", "claim_ref",
@@ -750,8 +802,11 @@ class ClaimIndexAuthority:
 __all__ = [
     "AS_OF_BASES",
     "ASPECT_SOURCES",
+    "EVIDENCE_KINDS",
+    "EVIDENCE_KIND_DEFINITIONS",
     "IMPORTANCE_RANK",
     "IMPORTANCE_TIERS",
+    "MARKET_PROXY",
     "REVISION_REASONS",
     "SCHEMA_VERSION",
     "TABLE",

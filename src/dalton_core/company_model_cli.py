@@ -34,15 +34,17 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .company_model_spec import (
     CompanyModelSpecError,
     build_prompt,
     spec_from_response,
+    spec_template_gaps,
 )
 from .company_model_state import CompanyModelStateError, build_company_model_state
+from .driver_template import REGISTRY_HASH as TEMPLATE_REGISTRY_HASH, template_for
 from .coverage_mission import CoverageMissionAuthority
 from .scheduler import SchedulerError
 from .store import DaltonStore, canonical_json
@@ -70,9 +72,38 @@ def _write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
+def filed_classifications(store: Any) -> dict[str, str]:
+    """Each company's current ``industry_classification``, or nothing.
+
+    Read from the dossier rather than asked of anybody: the classification is
+    the Deep Insight Gate's first question and the dossier is where its answer
+    is versioned. A company with no dossier, an undrafted classification block,
+    or ``insufficient_evidence`` is simply absent from the map, and the
+    specification lane then works from the generic template and says so.
+    """
+
+    from .company_dossier import CompanyDossierAuthority
+    from .company_dossier_cli import table_exists
+
+    if not table_exists(store.connection, "company_dossier_versions"):
+        return {}
+    dossiers = CompanyDossierAuthority(store)
+    out: dict[str, str] = {}
+    for company_ref in dossiers.companies():
+        record = dossiers.latest(company_ref)
+        if record is None:
+            continue
+        word = str((record.get("industry_classification") or {})
+                   .get("classification") or "")
+        if word and word != "insufficient_evidence":
+            out[company_ref] = word
+    return out
+
+
 def choose_company(
     missions: CoverageMissionAuthority, mission: dict[str, Any],
     *, company_ref: str | None = None,
+    classifications: Mapping[str, str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The company to decide about, and the disclosure to decide from.
 
@@ -105,8 +136,13 @@ def choose_company(
         if company_ref is None and held not in universe:
             continue
         try:
-            state = build_company_model_state(missions, held,
-                                              ticker=universe.get(held))
+            state = build_company_model_state(
+                missions, held, ticker=universe.get(held),
+                # In the hash, deliberately: reclassifying a company is a
+                # reason to decide its model again, and a selector that
+                # ignored the reclassification would keep replaying the
+                # specification written under the old frame.
+                industry_classification=(classifications or {}).get(held))
         except CompanyModelStateError:
             if company_ref is not None:
                 raise
@@ -157,7 +193,9 @@ def run_model_spec(
             return summary
         mission = missions.mission(pointer["mission_version_id"])
         try:
-            chosen, state = choose_company(missions, mission, company_ref=company_ref)
+            chosen, state = choose_company(
+                missions, mission, company_ref=company_ref,
+                classifications=filed_classifications(store))
         except CompanyModelStateError as exc:
             summary.update({"status": "idle", "spec_status": "no_statements",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
@@ -170,6 +208,12 @@ def run_model_spec(
         summary["company_ref"] = chosen
         summary["state_hash"] = state["state_hash"]
         summary["concepts"] = len(state["concepts"])
+        template = template_for(state.get("industry_classification"))
+        summary["driver_template"] = {
+            "classification": template["classification"],
+            "generic": bool(template["generic"]),
+            "registry_hash": TEMPLATE_REGISTRY_HASH,
+        }
         if dry_run or model_config_path is None:
             summary.update({
                 "status": "succeeded", "spec_status": "gated",
@@ -220,6 +264,11 @@ def run_model_spec(
             spec, mission_version_ref=mission["id"],
             work_order_ref=call.get("work_order_ref"),
         )
+        # Reported beside the specification, not enforced over it: a template
+        # slot the model did not model is a question for the reader, and a
+        # refusal here would make a table about a *kind* of company the
+        # gatekeeper over a judgement about *this* one.
+        summary["template_gaps"] = spec_template_gaps(spec, state)
         summary.update({
             "status": "succeeded", "spec_status": stored["status"],
             "spec_ref": stored["spec_id"],

@@ -62,6 +62,7 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .claim_index_authority import MARKET_PROXY
 from .company_model_inputs import AMBIGUOUS, ESTIMATED, FILED, NOT_FOUND, SHARED
 from .model_forecast import (
     DRIVER_FORMULA_HASH,
@@ -203,10 +204,24 @@ MEASURES: tuple[str, ...] = (
     # A share of forecast operating income.
     "operating_income_share",
 )
+# What an assumption may stand on. ``market_proxy`` is W4's addition and the
+# Chem retrospective (§7.2) is why: a spread, a list price or a futures
+# continuation is a real public number that is *not* this company's realised
+# figure, and an assumption that files one beside a filed cell has quietly
+# asserted the company earned it. It is admitted as evidence -- refusing it
+# would mean forecasting a commodity producer with nothing but its own lagging
+# disclosure -- but it is admitted with a rule: see ``PROXY_GAP_REQUIRED``.
 REF_KINDS: tuple[str, ...] = (
     "input_cell", "claim", "figure", "prior_period", "filing", "event",
-    "human_decision",
+    "human_decision", "market_proxy",
 )
+#: The ref kinds that may not be cited without saying how far the quantity sits
+#: from what the company realises. One word, and it is the whole point of the
+#: kind: "MDI--benzene spread, which is a chemical margin and not a plant cash
+#: margin -- it excludes utilities, freight and the discount on contract
+#: volumes" is a sentence a reader can argue with, and a bare spread is not.
+PROXY_GAP_REQUIRED: frozenset[str] = frozenset({MARKET_PROXY})
+MAX_PROXY_GAP_CHARS = 400
 CELL_STATUSES: tuple[str, ...] = ("computed", "unavailable")
 RESULT_STATUSES: tuple[str, ...] = ("computed", "partial", "unavailable")
 
@@ -240,6 +255,8 @@ _ASSUMPTION_FIELDS = frozenset({
 })
 _OUTSIDE_BAND_FIELDS = frozenset({"reason"})
 _REF_FIELDS = frozenset({"kind", "ref", "concept", "period_end", "accession"})
+# Present only where it means something -- see ``_closed``.
+_REF_OPTIONAL_FIELDS = frozenset({"proxy_gap"})
 _PROVENANCE_FIELDS = frozenset({"rule_ref", "work_order_ref", "decided_by"})
 _RESULT_FIELDS = frozenset({
     "ref", "role", "label", "unit", "formula", "driver_ref", "status",
@@ -297,14 +314,29 @@ def _sha256(value: Any, name: str) -> str:
     return value
 
 
-def _closed(value: Any, fields: frozenset[str], name: str) -> dict[str, Any]:
+def _closed(
+    value: Any, fields: frozenset[str], name: str,
+    *, optional: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """The shape, exactly, plus any of ``optional`` that happen to be present.
+
+    ``optional`` exists for one field and is deliberately narrow. ``proxy_gap``
+    means something only on a ``market_proxy`` ref, and normalising it to
+    ``None`` on every other ref would change the body bytes -- and therefore
+    the content hash -- of every model already recorded, producing a version
+    chain step in which nothing about the company changed. A field that is
+    absent where it has no meaning keeps those chains still.
+    """
+
     if not isinstance(value, Mapping):
         raise ForecastModelValidationError(f"{name} must be an object")
     wire = dict(value)
-    if set(wire) != fields:
+    present = set(wire)
+    if present - optional != fields:
         raise ForecastModelValidationError(
             f"{name} has an invalid closed shape; "
-            f"missing={sorted(fields - set(wire))}, unknown={sorted(set(wire) - fields)}"
+            f"missing={sorted(fields - present)}, "
+            f"unknown={sorted(present - fields - optional)}"
         )
     return wire
 
@@ -646,6 +678,31 @@ def assumption_ref(driver_ref: str, period_end: str, kind: str) -> str:
     """
 
     return f"assumption:{driver_ref}@{period_end}:{kind}"
+
+
+def market_proxy_ref(
+    ref: str, *, proxy_gap: str, concept: str | None = None,
+    period_end: str | None = None,
+) -> dict[str, Any]:
+    """One citation of a public quantity, with its distance from the company.
+
+    A constructor rather than a dict literal at each call site, because the
+    field that makes this kind admissible is the one a hurried caller leaves
+    out, and a keyword-only parameter cannot be left out.
+    """
+
+    return {
+        "kind": MARKET_PROXY, "ref": ref, "concept": concept,
+        "period_end": period_end, "accession": None, "proxy_gap": proxy_gap,
+    }
+
+
+def proxy_gaps(assumption: Mapping[str, Any]) -> list[str]:
+    """Every market-proxy distance one assumption stands on, in ref order."""
+
+    return [str(item.get("proxy_gap") or "")
+            for item in (assumption.get("refs") or ())
+            if isinstance(item, Mapping) and item.get("kind") == MARKET_PROXY]
 
 
 def _assumption(
@@ -1822,7 +1879,7 @@ def _normalize_driver(value: Any, name: str) -> dict[str, Any]:
 
 
 def _normalize_ref(value: Any, name: str) -> dict[str, Any]:
-    wire = _closed(value, _REF_FIELDS, name)
+    wire = _closed(value, _REF_FIELDS, name, optional=_REF_OPTIONAL_FIELDS)
     wire["kind"] = _one_of(wire["kind"], REF_KINDS, f"{name}.kind")
     wire["ref"] = _optional_text(wire["ref"], f"{name}.ref")
     wire["concept"] = _optional_text(wire["concept"], f"{name}.concept")
@@ -1834,6 +1891,27 @@ def _normalize_ref(value: Any, name: str) -> dict[str, Any]:
         raise ForecastModelValidationError(f"{name} must name a concept and a period")
     if wire["kind"] in ("claim", "figure") and wire["ref"] is None:
         raise ForecastModelValidationError(f"{name} must name the thing it cites")
+    if wire["kind"] in PROXY_GAP_REQUIRED:
+        if wire["ref"] is None:
+            raise ForecastModelValidationError(
+                f"{name} is a market proxy and must name the series it cites")
+        gap = wire.get("proxy_gap")
+        if not isinstance(gap, str) or not gap.strip():
+            # Refused, never repaired: a proxy whose distance from the company
+            # is unstated is indistinguishable from a figure the company filed,
+            # and a default sentence written here would be this module
+            # inventing the one judgement the field exists to carry.
+            raise ForecastModelValidationError(
+                f"{name} cites a market proxy and does not say how far it sits "
+                "from what this company realises (proxy_gap)")
+        gap = gap.strip()
+        if len(gap) > MAX_PROXY_GAP_CHARS:
+            raise ForecastModelValidationError(
+                f"{name}.proxy_gap is longer than {MAX_PROXY_GAP_CHARS} characters")
+        wire["proxy_gap"] = gap
+    elif "proxy_gap" in wire:
+        raise ForecastModelValidationError(
+            f"{name} is not a market proxy and cannot carry a proxy_gap")
     return wire
 
 
@@ -2288,9 +2366,15 @@ __all__ = [
     "CELL_KINDS",
     "CHANGE_REASONS",
     "CONCEPT_ROLES",
+    "MARKET_PROXY",
+    "MAX_PROXY_GAP_CHARS",
     "MAX_REALISED_PERIODS",
+    "PROXY_GAP_REQUIRED",
+    "REF_KINDS",
     "actualize_model",
     "assumption_ref",
+    "market_proxy_ref",
+    "proxy_gaps",
     "cell_ref",
     "chain_base",
     "filing_refs",

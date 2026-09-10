@@ -54,6 +54,12 @@ class ContractTests(unittest.TestCase):
                     "LLMPlannerCandidateV0.1",
                     "TranscriptPolishCandidateV0.1",
                     "DocumentExtractionSuggestionsV0.1",
+                    # W4's driver templates are a frozen constants table, not a
+                    # record any authority writes: there is no instance of one,
+                    # so there is nothing for an id or a created_at to name. Its
+                    # identity is its content hash and the file it is published
+                    # in, which the registry test checks against the constants.
+                    "DriverTemplateRegistry",
                 }:
                     # Model-owned output is bound by its WorkOrder and target
                     # assessment; authority adds id/created_at only after validation.
