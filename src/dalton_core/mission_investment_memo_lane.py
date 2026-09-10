@@ -124,7 +124,7 @@ def argv_fragment(context: Any) -> list[str]:
             "--investment-memo-verifier-model-config", str(verifier)]
 
 
-LANE = register_lane(LaneSpec(operation="dispatch_investment_memo", order=142,
+LANE = register_lane(LaneSpec(operation="dispatch_investment_memo", order=143,
     driver_key="investment_memo", handler=dispatch, init_kwarg=LAUNCHER_KWARG,
     argparse=add_arguments, launcher_factory=build_launcher, argv_fragment=argv_fragment,
     note="Four-group Investment Memo draft plus complete independent verification."))

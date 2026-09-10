@@ -72,7 +72,7 @@ Memo 候选必须同时满足：
 最小实现应先增加一个纯确定性 `model_stage_readiness` evaluator，而不是让 memo lane自行宣布前置阶段完成：
 
 - `industry_model`：Industry Framework 当前版本存在；playbook 三问逐项有 machine-checkable result；所有输入
-  带 source/as-of；同行差距和高频日历缺失则 `gate_failed`。
+  带 source/as-of；五家公司收入/增速/margin 对比与可比性说明必须可核对；未接入 TAM/供给/高频数据按 vision v1.1 P10e 如实列缺口，不用任意日历链接冒充接入。
 - `company_model`：statement/model invariant checks 全绿；forecast readiness 非 unavailable；每项 assumption
   有 because/refs；consensus bridge 量化。三问全是才由 mission automation 写 `gate_passed`。
 - 每阶段先写 `entered`，再写一次 `gate_passed` 或 `gate_failed`；evidence refs 必须是 framework/model/
