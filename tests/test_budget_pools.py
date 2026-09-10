@@ -339,6 +339,23 @@ class PoolAdmissionTests(unittest.TestCase):
         # The pool now counts what was spent, not what was held.
         self.assertEqual(status["pools"]["event_response"]["spent_micros"], 400_000)
 
+    def test_pool_report_reads_the_append_only_correction(self) -> None:
+        admitted = self.admit("historical", "event_response", 1_000_000)
+        settled = self.store.settle(admitted["admission_id"], actual_micros=1)
+        self.store.correct_uncertain_settlement(
+            admitted["admission_id"], settlement_id=settled["settlement_id"],
+            corrected_micros=900_000, evidence_ref="result:historical",
+            evidence_hash="c" * 64, actor_ref="operator:owner",
+            idempotency_key="correction:historical-pool",
+        )
+        status = pool_status(self.store, mission=self.mission, day=DAY, now=MORNING)
+        self.assertEqual(status["pools"]["event_response"]["spent_micros"], 900_000)
+        unchanged = self.store.connection.execute(
+            "SELECT actual_micros FROM thesis_impact_day_settlements WHERE admission_id=?",
+            (admitted["admission_id"],),
+        ).fetchone()[0]
+        self.assertEqual(unchanged, 1)
+
     def test_pool_status_names_the_lanes_that_ran_out_today(self) -> None:
         self.admit("one", "adhoc", 2_500_000, lane="dispatch_research_task")
         self.admit("two", "adhoc", 1, lane="dispatch_research_task")

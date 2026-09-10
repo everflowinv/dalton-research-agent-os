@@ -224,6 +224,28 @@ class DayAdmissionTests(unittest.TestCase):
                 policy="budget-policy:day:2",
             )
 
+    def test_correction_survives_policy_rollover_without_freeing_headroom(self) -> None:
+        opened = admit(self.authority, work="work:historical", reserved=600_000)
+        settled = self.authority.settle(opened["admission_id"], actual_micros=1)
+        self.authority.register_policy(
+            policy_version_id="budget-policy:day:2",
+            day_cap_micros=700_000,
+            prior_version_id="budget-policy:day:1",
+        )
+        self.authority.correct_uncertain_settlement(
+            opened["admission_id"], settlement_id=settled["settlement_id"],
+            corrected_micros=600_000, evidence_ref="result:historical",
+            evidence_hash="b" * 64, actor_ref="operator:owner",
+            idempotency_key="correction:historical",
+        )
+        summary = self.authority.day_summary(
+            policy_version_id="budget-policy:day:2", day="2026-08-22")
+        self.assertEqual(summary["committed_micros"], 600_000)
+        self.assertEqual(summary["remaining_micros"], 100_000)
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            admit(self.authority, work="work:no-free-headroom", reserved=100_001,
+                  policy="budget-policy:day:2")
+
     def test_file_backed_authority_is_owner_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "budget.sqlite"
