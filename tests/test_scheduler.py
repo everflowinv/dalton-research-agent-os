@@ -526,6 +526,31 @@ class SchedulerTests(unittest.TestCase):
             with self.assertRaises(SchedulerConflict):
                 Scheduler(path, clock=self.clock, max_attempts=3, policy_version_id="policy:v1")
 
+    def test_reopening_existing_policy_does_not_need_the_writer_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "scheduler.db"
+            first = Scheduler(
+                path, clock=self.clock, max_attempts=2,
+                policy_version_id="policy:existing",
+            )
+            first.close()
+            writer = sqlite3.connect(path, isolation_level=None)
+            self.addCleanup(writer.close)
+            writer.execute("BEGIN IMMEDIATE")
+            try:
+                reopened = Scheduler(
+                    path, clock=self.clock, max_attempts=2,
+                    policy_version_id="policy:existing",
+                )
+            finally:
+                writer.rollback()
+            self.addCleanup(reopened.close)
+            stored = reopened.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_policy_versions "
+                "WHERE policy_version_id='policy:existing'"
+            ).fetchone()[0]
+            self.assertEqual(stored, 1)
+
     def test_claim_and_renew_use_work_orders_frozen_policy_after_reopen(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "scheduler.db"

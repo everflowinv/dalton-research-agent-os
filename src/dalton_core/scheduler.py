@@ -269,6 +269,21 @@ class Scheduler:
         # able to reopen the same policy version at a later trusted time.
         semantic = {k: v for k, v in policy.items() if k != "created_at"}
         policy_hash = content_hash(semantic)
+        # Reopening a worker against an existing immutable policy is a read.
+        # Do that read before BEGIN IMMEDIATE so concurrent children do not
+        # serialize on a no-op transaction (or fail behind another writer's
+        # RESERVED lock). The transaction below still rechecks on first boot,
+        # closing the race between two creators without weakening identity.
+        row = self.connection.execute(
+            "SELECT policy_hash FROM scheduler_policy_versions WHERE policy_version_id=?",
+            (self.policy_version_id,),
+        ).fetchone()
+        if row:
+            if row["policy_hash"] != policy_hash:
+                raise SchedulerConflict(
+                    "scheduler policy version id already has different settings"
+                )
+            return
         with self._transaction() as cur:
             row = cur.execute(
                 "SELECT policy_hash FROM scheduler_policy_versions WHERE policy_version_id=?",
