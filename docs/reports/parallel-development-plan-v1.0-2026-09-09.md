@@ -225,6 +225,8 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 晚 | Wave 2 派出：档案 P12a/P12f、DebateMap P12c、consensus P11b、预算池 C2；INT1 与 Q2 在修 review 意见 | 进行中 |
 | 09-09 夜 | 合并 INT1（cockpit 接线、journal op、install.sh 种子、claim-index lane 登记）与 Q2（周报 rubric、ResearchCycleReflection）。main `d509897`，3,620 项通过 | 完成 |
 | 09-09 夜 | 派出 Wave 3 首批：P14f 业绩季工作流、P14b + P14d 修订候选裁决与版本化重出、INT2 第二批接线；抽取吞吐诊断在跑 | 进行中 |
+| 09-09 深夜 | 合并 C2 预算池 + tick 账本、P12c DebateMap、P12a/P12f 档案 + guidance 档案、P14e 测试修复。main `64d3f94`，3,932 项通过。用量上限中断 5 个 agent 一次，全部从上下文恢复 | 完成 |
+| 09-09 深夜 | 派出：planner 日账本（C2 发现 BoundedPlannerLoop 模型调用绕过日账本）、P12d Deep Insight Gate 12 问、P12e 行业框架、P15a ask v2、P15d ConvictionCall | 进行中 |
 
 ---
 
