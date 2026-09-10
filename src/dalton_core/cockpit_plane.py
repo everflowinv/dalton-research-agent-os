@@ -120,6 +120,17 @@ CHANGE_REASON_LABELS = {
     "evidence_thicker": "证据变厚了",
     "human_revision": "人改的",
 }
+# P14b: the Playbook's five decision words, in the words the person deciding
+# would use. The vocabulary is frozen by contract, so this map is total and a
+# sixth word would show as itself -- which is the right failure, because the
+# authority would have refused the candidate anyway.
+DECISION_WORD_LABELS = {
+    "NO_CHANGE": "不用改",
+    "THESIS_STRENGTHENED": "论点更站得住了",
+    "THESIS_WEAKENED": "论点被削弱了",
+    "THESIS_BROKEN": "论点破了",
+    "NEW_THESIS": "这是一条新论点",
+}
 ASSUMPTION_KIND_LABELS = {"estimate": "模型估的", "human": "人写的", "actual": "已报实际"}
 QUALITY_CHECK_LABELS = {
     "numbers_without_refs": "每个数字都有出处",
@@ -174,8 +185,8 @@ REGISTRY_LANE_LABELS = {
     "company_wiki_feed": "读公司维基与访谈纪要",
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
-    "mission_reopen": "看已过闸的公司够不够重写一版",
     "company_dossier": "写公司档案",
+    "mission_reopen": "看已过闸的公司够不够重写一版",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
@@ -1596,6 +1607,83 @@ class CockpitPlane:
                                 {"decision": "kept", "label": "保留"}],
                     "needs_rationale": False,
                 })
+        with self._core() as core:
+            # P14b / ADR-0007: automation says a thesis may be weaker than we
+            # said. It is the one proposal in this list that comes with a
+            # second document -- the reflection, which says what we may have
+            # missed -- and the two are shown together because deciding on the
+            # proposal alone is deciding on half of it.
+            for row in self._rows(core,
+                "SELECT c.* FROM thesis_revision_candidates c LEFT JOIN "
+                "thesis_revision_decisions d ON d.candidate_ref=c.candidate_id "
+                "AND d.terminal=1 WHERE d.decision_id IS NULL ORDER BY c.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                reflection = None
+                for reflection_row in self._rows(core,
+                    "SELECT record_json FROM thesis_reflections WHERE reflection_id=?",
+                    (record.get("reflection_ref") or "",),
+                ):
+                    reflection = json.loads(reflection_row["record_json"])
+                details = {
+                    "五词判断": DECISION_WORD_LABELS.get(record["decision"], record["decision"]),
+                    "提议改成": record.get("proposed_statement"),
+                    "提议的信心": record.get("proposed_confidence"),
+                    "为什么": record.get("because"),
+                    "依据": record.get("evidence_refs"),
+                    "当前版本": record["thesis_version_ref"],
+                }
+                if reflection is not None:
+                    details["我们当时怎么想"] = reflection.get("what_we_expected")
+                    details["实际发生了什么"] = reflection.get("what_happened")
+                    details["可能漏了的 debate"] = reflection.get("missed_debates")
+                items.append({
+                    "kind": "thesis_revision", "ref": record["id"], "hash": row["content_hash"],
+                    "at": row["created_at"],
+                    "title": "自动化说这条论点可能要改",
+                    "who": self._label(members, record["company_ref"]),
+                    "summary": record.get("proposed_statement") or record.get("because") or "",
+                    "details": details,
+                    "actions": [{"decision": "accept", "label": "接受，出新版本"},
+                                {"decision": "reject", "label": "不接受"},
+                                {"decision": "defer", "label": "先放着，再看看"}],
+                    "needs_rationale": True,
+                })
+            # P14d / ADR-0008: a gate that passed is the state of a version,
+            # not of the company. The diff is the whole argument, so it is in
+            # the details rather than summarised away.
+            for row in self._rows(core,
+                "SELECT p.* FROM gate_reopen_proposals p LEFT JOIN gate_reopen_decisions d "
+                "ON d.proposal_ref=p.proposal_id WHERE d.decision_id IS NULL "
+                "ORDER BY p.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                flipped = [
+                    f"{entry['label']}：{entry['was']['mark']}（{entry['was']['value']}）"
+                    f" → {entry['now']['mark']}（{entry['now']['value']}）"
+                    for entry in record.get("diff") or ()
+                    if entry.get("flipped")
+                ]
+                items.append({
+                    "kind": "gate_reopen", "ref": record["id"], "hash": row["content_hash"],
+                    "at": row["created_at"],
+                    "title": "证据变厚了，是否重出这份 Initial Screen",
+                    "who": self._label(members, record["company_ref"]),
+                    "summary": "；".join(flipped) or "证据底座有项目从缺变成了有。",
+                    "details": {
+                        "变化": flipped,
+                        "过闸的那一版": f"v{record['passed_version_number']}"
+                                        f"（{record['passed_version_ref']}）",
+                        "过闸时间": record["passed_at"],
+                        "改版理由": CHANGE_REASON_LABELS.get(
+                            record["change_reason"], record["change_reason"]),
+                        "依据": record.get("evidence_refs"),
+                        "退步的项目": record.get("regressed"),
+                    },
+                    "actions": [{"decision": "approve", "label": "重出一版"},
+                                {"decision": "decline", "label": "不重出"}],
+                    "needs_rationale": True,
+                })
         for row in self.journal.rows("SELECT * FROM cockpit_drafts WHERE status='open' ORDER BY created_at"):
             draft = json.loads(row["draft_json"])
             items.append({
@@ -1663,6 +1751,29 @@ class CockpitPlane:
                 "reconciliation_ref": ref, "reconciliation_hash": digest, "decision": decision, "rationale": rationale.strip(),
                 "idempotency_key": f"cockpit-overturn:{ref}:{request_id}"}
             title = ("维持了预测" if decision == "keep_forecast" else "决定修订预测") + f"：{ref}"
+        elif kind == "thesis_revision":
+            # ADR-0007: automation may never take this branch. The cockpit
+            # mints an ephemeral *human* principal for the call, and the
+            # writer refuses the operation for anything else.
+            if decision not in {"accept", "reject", "defer"}:
+                raise CockpitError("decision must be accept, reject or defer")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_thesis_revision_candidate", {
+                "candidate_ref": ref, "candidate_hash": digest,
+                "verdict": decision, "reason": rationale.strip()}
+            title = {"accept": "接受了论点修订", "reject": "没有接受论点修订",
+                     "defer": "把论点修订放了放"}[decision] + f"：{ref}"
+        elif kind == "gate_reopen":
+            if decision not in {"approve", "decline"}:
+                raise CockpitError("decision must be approve or decline")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_gate_reopen", {
+                "proposal_ref": ref, "proposal_hash": digest,
+                "verdict": decision, "reason": rationale.strip()}
+            title = ("同意重出 Initial Screen" if decision == "approve"
+                     else "不重出 Initial Screen") + f"：{ref}"
         else:
             raise CockpitError("unknown approval kind")
         try:
