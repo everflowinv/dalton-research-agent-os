@@ -392,6 +392,40 @@ class SharedCapacityAuthority:
             self.connection.rollback()
             raise
 
+    def cancel_undispatched(
+        self, reservation_ref: str, *, reason: str = "definitely_not_sent",
+    ) -> dict[str, Any]:
+        """Release a reservation only while no transport bytes were sent."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise SharedCapacityConflict("cancellation reason is invalid")
+        now = self._now().isoformat(timespec="microseconds")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM shared_capacity_reservations WHERE reservation_ref=?",
+                (reservation_ref,),
+            ).fetchone()
+            row = self._require_owned_reservation(row)
+            if row["status"] == "reserved":
+                self.connection.execute(
+                    "UPDATE shared_capacity_reservations "
+                    "SET status='settled',settled_at=?,charged_micros=0,outcome=? "
+                    "WHERE reservation_ref=?",
+                    (now, reason.strip(), reservation_ref),
+                )
+                self._event(reservation_ref, "undispatched_cancelled", now,
+                            {"charged_micros": 0, "outcome": reason.strip()})
+            elif row["status"] != "settled" or row["charged_micros"] != 0:
+                raise SharedCapacityConflict("dispatched reservation cannot be cancelled")
+            self.connection.commit()
+            return dict(self.connection.execute(
+                "SELECT * FROM shared_capacity_reservations WHERE reservation_ref=?",
+                (reservation_ref,),
+            ).fetchone())
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def settle(
         self, reservation_ref: str, *, actual_cost_micros: int | None,
         outcome: str,

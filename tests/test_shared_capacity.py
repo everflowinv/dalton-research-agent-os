@@ -324,6 +324,24 @@ class SharedCapacityTests(unittest.TestCase):
                 reservation["reservation_ref"], actual_cost_micros=50,
                 outcome="broker_succeeded")
         self.assertEqual(settled["charged_micros"], 50)
+
+    def test_only_an_undispatched_reservation_can_be_cancelled_without_charge(self):
+        record = self.init(calls=2, concurrency=1)
+        with self.open(record) as authority:
+            reservation = authority.reserve(
+                workspace_id=str(uuid.uuid4()), invocation_ref="invocation:not-sent",
+                provider="openai", credential_slot_ref="credential-slot:openai:dalton",
+                maximum_cost_micros=100, expires_at=NOW + timedelta(minutes=1))
+            cancelled = authority.cancel_undispatched(reservation["reservation_ref"])
+            self.assertEqual((cancelled["status"], cancelled["charged_micros"]),
+                             ("settled", 0))
+            dispatched = authority.reserve(
+                workspace_id=str(uuid.uuid4()), invocation_ref="invocation:sent",
+                provider="openai", credential_slot_ref="credential-slot:openai:dalton",
+                maximum_cost_micros=100, expires_at=NOW + timedelta(minutes=1))
+            authority.mark_dispatched(dispatched["reservation_ref"])
+            with self.assertRaisesRegex(SharedCapacityConflict, "cannot be cancelled"):
+                authority.cancel_undispatched(dispatched["reservation_ref"])
     def test_idempotence_expiry_and_dispatched_conservatism(self):
         record = self.init(calls=2, concurrency=1)
         current = [NOW]

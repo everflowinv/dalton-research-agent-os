@@ -32,7 +32,11 @@ from .call_budget import budget_fingerprint, resolve_call_budget
 from .document_extraction import validate_model_config
 from .model_accounting import ModelAccountingError, _route_estimate_micros
 from .model_router import ModelRouter, RoutingPolicyNotFound, independent_families
-from .openclaw_model_adapter import OpenClawModelAdapter, OpenClawModelAdapterError
+from .openclaw_model_adapter import (
+    BrokerDefinitelyNotSent,
+    OpenClawModelAdapter,
+    OpenClawModelAdapterError,
+)
 from .scheduler import Scheduler
 from .store import content_hash
 from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
@@ -845,7 +849,7 @@ class CockpitModel:
                  scope: Mapping[str, Any],
                  call_budget: Mapping[str, Any],
                  producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
-        """Walk the tier's chain under one reservation, settled by what served."""
+        """Walk the tier's chain under one reservation, retaining uncertain spend."""
 
         from .model_fallback_chain import classify_model_failure, execute_chain
 
@@ -855,6 +859,7 @@ class CockpitModel:
         admission: dict[str, Any] | None = None
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
+        uncertain_spend = False
         refusal: list[str] = []
         pool_rejection: dict[str, Any] | None = None
 
@@ -886,20 +891,34 @@ class CockpitModel:
             return {"status": "admitted"}
 
         def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+            nonlocal uncertain_spend
             try:
                 invocation, envelope = self._adapter(
                     router, timeout_seconds=call_budget["timeout_seconds"]
                 ).execute(work, route, profile)
             except OpenClawModelAdapterError as exc:
-                spend[route["id"]] = (0, "failed")
-                return {"outcome": "failed", "failure_class": classify_model_failure(exc),
+                definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent)
+                spend[route["id"]] = (
+                    (0, "not_sent") if definitely_not_sent else (ceiling, "reserved")
+                )
+                uncertain_spend = uncertain_spend or not definitely_not_sent
+                return {"outcome": "failed",
+                        "failure_class": (classify_model_failure(exc)
+                                          if definitely_not_sent else "unclassified_failure"),
                         "reason": f"the model call failed: {exc}"}
             if envelope.status != "succeeded":
                 # The broker answered and the answer is a failure. Its error
                 # code, not a guess, decides whether another model may be asked.
-                spend[route["id"]] = (0, "failed")
+                failure_class = classify_model_failure(envelope.error or {})
+                may_have_reached_provider = failure_class in {
+                    "transport_failure", "provider_failure", "model_unavailable",
+                }
+                spend[route["id"]] = ((ceiling, "reserved")
+                                      if may_have_reached_provider else (0, "failed"))
+                uncertain_spend = uncertain_spend or may_have_reached_provider
                 return {"outcome": "failed",
-                        "failure_class": classify_model_failure(envelope.error or {}),
+                        "failure_class": ("unclassified_failure" if may_have_reached_provider
+                                          else failure_class),
                         "error_code": (envelope.error or {}).get("code"),
                         "reason": (envelope.error or {}).get("message", "the model call failed"),
                         "value": envelope}
@@ -926,10 +945,12 @@ class CockpitModel:
                 served_micros, served_status = spend.get(
                     outcome["route_decision_ref"], (0, "failed"))
         finally:
-            # The reservation is released whatever happened: an open one holds
-            # the day's budget against a call that has already finished.
+            # A proved pre-send failure costs zero. Once bytes may have left,
+            # missing telemetry cannot release the reservation: the provider
+            # may still have completed and charged the call.
             if admission is not None:
-                budget.settle(admission["admission_id"], actual_micros=served_micros)
+                settlement = ceiling if uncertain_spend else served_micros
+                budget.settle(admission["admission_id"], actual_micros=settlement)
 
         route_ref = outcome.get("route_decision_ref") or first_route_ref
         if outcome["status"] == "served":
@@ -945,7 +966,8 @@ class CockpitModel:
             reason = refusal[-1] if refusal else "the day cap is exhausted"
             return {"result": _failure(work, "BUDGET_REFUSED", route_ref),
                     "failure": f"today's research budget refused the call: {reason}",
-                    "cost_micros": 0, "cost_status": "failed",
+                    "cost_micros": ceiling if uncertain_spend else 0,
+                    "cost_status": "reserved" if uncertain_spend else "failed",
                     "pool_rejection": None}
         if not outcome["links"]:
             return {"result": _failure(work, "MODEL_ROUTE_REJECTED", route_ref),
@@ -972,7 +994,8 @@ class CockpitModel:
                     message=failure, chain_failures=details,
                     status="retryable" if retryable else "failed"),
                 "failure": failure,
-                "cost_micros": 0, "cost_status": "failed",
+                "cost_micros": ceiling if uncertain_spend else 0,
+                "cost_status": "reserved" if uncertain_spend else "failed",
                 "pool_rejection": None}
 
 

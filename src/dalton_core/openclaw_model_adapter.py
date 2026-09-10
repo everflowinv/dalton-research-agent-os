@@ -192,6 +192,10 @@ class BrokerConnectionError(OpenClawModelAdapterError):
     """The configured local broker socket could not be used safely."""
 
 
+class BrokerDefinitelyNotSent(BrokerConnectionError):
+    """The broker request was proven not to have reached ``sendall``."""
+
+
 class BrokerTimeout(BrokerConnectionError):
     """The one-shot broker exchange exceeded its trusted wall-clock budget."""
 
@@ -913,15 +917,18 @@ class OpenClawModelAdapter:
         try:
             info = self._socket_path.lstat()
         except OSError as exc:
-            raise BrokerConnectionError("broker socket is unavailable") from exc
+            raise BrokerDefinitelyNotSent("broker socket is unavailable") from exc
         if not stat.S_ISSOCK(info.st_mode):
-            raise BrokerConnectionError("broker endpoint is not a Unix-domain socket")
+            raise BrokerDefinitelyNotSent("broker endpoint is not a Unix-domain socket")
         if info.st_uid != os.geteuid():
-            raise BrokerConnectionError("broker socket is owned by another OS identity")
+            raise BrokerDefinitelyNotSent("broker socket is owned by another OS identity")
         if stat.S_IMODE(info.st_mode) & 0o077:
-            raise BrokerConnectionError("broker socket permissions must not grant group/world access")
+            raise BrokerDefinitelyNotSent("broker socket permissions must not grant group/world access")
 
-    def _exchange(self, request: Mapping[str, Any], timeout: float) -> Mapping[str, Any]:
+    def _exchange(
+        self, request: Mapping[str, Any], timeout: float, *,
+        before_send: Callable[[], None] | None = None,
+    ) -> Mapping[str, Any]:
         frame = canonical_json(request).encode("utf-8") + b"\n"
         if len(frame) > self._max_frame_bytes:
             raise BrokerFrameTooLarge("broker request exceeds max_frame_bytes")
@@ -932,6 +939,15 @@ class OpenClawModelAdapter:
         try:
             client.settimeout(_remaining_timeout(deadline, self._monotonic))
             client.connect(os.fspath(self._socket_path))
+        except socket.timeout as exc:
+            client.close()
+            raise BrokerDefinitelyNotSent("broker connect exceeded its wall-clock budget") from exc
+        except OSError as exc:
+            client.close()
+            raise BrokerDefinitelyNotSent("broker socket connect failed") from exc
+        try:
+            if before_send is not None:
+                before_send()
             client.settimeout(_remaining_timeout(deadline, self._monotonic))
             client.sendall(frame)
             while True:
@@ -1116,6 +1132,8 @@ class OpenClawModelAdapter:
         work_order: WorkOrder | Mapping[str, Any],
         route_decision: Mapping[str, Any],
         model_profile: Mapping[str, Any],
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> tuple[ModelInvocation, ResultEnvelope]:
         """Run exactly the selected route and return uncommitted Core contracts."""
 
@@ -1124,6 +1142,7 @@ class OpenClawModelAdapter:
             route_decision,
             model_profile,
             replay_only=False,
+            before_send=before_send,
         )
 
     def replay(
@@ -1144,6 +1163,7 @@ class OpenClawModelAdapter:
             route_decision,
             model_profile,
             replay_only=True,
+            before_send=None,
         )
 
     def _execute(
@@ -1153,6 +1173,7 @@ class OpenClawModelAdapter:
         model_profile: Mapping[str, Any],
         *,
         replay_only: bool,
+        before_send: Callable[[], None] | None,
     ) -> tuple[ModelInvocation, ResultEnvelope]:
 
         work = _work_order(work_order)
@@ -1287,13 +1308,21 @@ class OpenClawModelAdapter:
                     maximum_cost_micros=maximum_cost_micros,
                     expires_at=now_dt + timedelta(seconds=timeout + 30),
                 )
-                capacity.mark_dispatched(reservation["reservation_ref"])
             except SharedCapacityError as exc:
                 if capacity is not None:
                     capacity.close()
                 raise ModelAdmissionError(f"shared model capacity refused: {exc}") from exc
+        dispatched = False
         try:
-            response = self._exchange(request, timeout)
+            def dispatch() -> None:
+                nonlocal dispatched
+                if before_send is not None:
+                    before_send()
+                if capacity is not None and reservation is not None:
+                    capacity.mark_dispatched(reservation["reservation_ref"])
+                dispatched = True
+
+            response = self._exchange(request, timeout, before_send=dispatch)
             usage, cost = self._validate_response(
                 response, core_request, profile, self._expected_agent_id
             )
@@ -1310,10 +1339,14 @@ class OpenClawModelAdapter:
         except Exception:
             if capacity is not None and reservation is not None:
                 try:
-                    capacity.settle(
-                        reservation["reservation_ref"], actual_cost_micros=None,
-                        outcome="transport_or_protocol_unknown",
-                    )
+                    if dispatched:
+                        capacity.settle(
+                            reservation["reservation_ref"], actual_cost_micros=None,
+                            outcome="transport_or_protocol_unknown",
+                        )
+                    else:
+                        capacity.cancel_undispatched(
+                            reservation["reservation_ref"], reason="definitely_not_sent")
                 except SharedCapacityError:
                     pass
             raise
@@ -1450,6 +1483,7 @@ __all__ = [
     "RouteAuthorityError",
     "BrokerProtocolError",
     "BrokerConnectionError",
+    "BrokerDefinitelyNotSent",
     "BrokerTimeout",
     "BrokerFrameTooLarge",
     "BrokerBudgetExceeded",

@@ -26,6 +26,10 @@ from dalton_core.contracts import ModelInvocation, ResultEnvelope
 from dalton_core.model_fallback_chain import register_purpose_tier, tier_chain
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
+from dalton_core.openclaw_model_adapter import (
+    BrokerDefinitelyNotSent,
+    BrokerTimeout,
+)
 from dalton_core.research_planner_setup import credential_slots_for, ensure_planner_policy
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import content_hash
@@ -127,6 +131,39 @@ class BusyThenAvailableAdapter(ChainAdapter):
 
 
 class CockpitChainTests(unittest.TestCase):
+    def test_only_a_proved_pre_send_failure_may_fall_back(self) -> None:
+        adapter = ChainAdapter({
+            "profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed")})
+        answer = self._model(adapter, policy_version_ref=self.chain_policy).call(
+            purpose="plan", request_id="not-sent", prompt="draft", mission=self.mission)
+        self.assertEqual(adapter.served,
+                         ["profile:gpt-6-astra", "profile:claude-fable-5-1"])
+        self.assertIn("claude", answer["text"])
+
+    def test_post_send_timeout_halts_and_keeps_the_full_reservation(self) -> None:
+        adapter = ChainAdapter({"profile:gpt-6-astra": BrokerTimeout("recv timed out")})
+        with self.assertRaises(CockpitModelError):
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="unknown-timeout", prompt="draft",
+                mission=self.mission)
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions").fetchone()[0])
+            settlement = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements").fetchone()[0])
+        self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
+        self.assertGreater(settlement["actual_micros"], 0)
+
+    def test_host_completion_failure_halts_without_a_second_paid_call(self) -> None:
+        adapter = ChainAdapter({"profile:gpt-6-astra": {
+            "code": "HOST_COMPLETION_FAILED", "message": "host completion failed"}})
+        with self.assertRaises(CockpitModelError):
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="host-failed", prompt="draft",
+                mission=self.mission)
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+
     def test_capacity_retry_policy_is_closed_and_install_preserved(self) -> None:
         retry = {"cooldown_seconds": 90, "max_recovery_epochs": 2,
                  "scheduler_max_attempts": 4}
@@ -296,10 +333,8 @@ class CockpitChainTests(unittest.TestCase):
         ):
             with self.subTest(verifier_purpose=verifier_purpose):
                 producer_adapter = ChainAdapter({
-                    "profile:gpt-6-astra": {
-                        "code": "PROVIDER_UNAVAILABLE",
-                        "message": "scripted producer fallback",
-                    },
+                    "profile:gpt-6-astra": BrokerDefinitelyNotSent(
+                        "scripted producer connect failure"),
                 })
                 producer = self._model(
                     producer_adapter, policy_version_ref=self.chain_policy
@@ -427,7 +462,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_a_failed_first_link_falls_back_inside_the_same_attempt(self) -> None:
         adapter = ChainAdapter({
-            "profile:gpt-6-astra": {"code": "PROVIDER_OVERLOADED", "message": "no capacity"}
+            "profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed")
         })
         answer = self._model(adapter, policy_version_ref=self.chain_policy).call(
             purpose="plan", request_id="one", prompt="what next?", mission=self.mission,
@@ -439,7 +474,7 @@ class CockpitChainTests(unittest.TestCase):
         links = self._links()
         self.assertEqual(
             [(link["chain_position"], link["served"], link["skip_reason"]) for link in links],
-            [(1, False, "model_unavailable"), (2, True, None)],
+            [(1, False, "transport_failure"), (2, True, None)],
         )
         self.assertEqual({link["attempt_number"] for link in links}, {1})
         self.assertEqual({link["tier"] for link in links}, {"brain"})
@@ -484,9 +519,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_verifier_uses_the_producers_served_family_before_buying_a_call(self) -> None:
         producer_adapter = ChainAdapter({
-            "profile:gpt-6-astra": {
-                "code": "PROVIDER_OVERLOADED", "message": "no capacity"
-            }
+            "profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed")
         })
         producer = self._model(
             producer_adapter, policy_version_ref=self.chain_policy
@@ -704,7 +737,7 @@ class CockpitChainTests(unittest.TestCase):
         # deepseek-v4-flash is 0.22/0.66 and glm-5.3-flash 0.075/0.25, so "which
         # model was charged for" is a question with two different answers.
         adapter = ChainAdapter({
-            "profile:deepseek-v4-flash": {"code": "UPSTREAM_TIMEOUT", "message": "gone"}
+            "profile:deepseek-v4-flash": BrokerDefinitelyNotSent("connect failed")
         })
         answer = self._model(
             adapter, policy_version_ref=self.cheap_policy, slots=self.cheap_slots
@@ -750,7 +783,7 @@ class CockpitChainTests(unittest.TestCase):
                 mode="explicit", chain=links, now=NOW,
             )["policy_version_ref"]
             slots = credential_slots_for(router, links)
-        adapter = ChainAdapter({links[0]: {"code": "UPSTREAM_TIMEOUT", "message": "gone"}})
+        adapter = ChainAdapter({links[0]: BrokerDefinitelyNotSent("connect failed")})
         answer = self._model(adapter, policy_version_ref=selected, slots=slots).call(
             purpose="claim_index", request_id="selected-reservation", prompt="tag these",
             mission=self.mission,
@@ -795,10 +828,8 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_every_link_failing_is_one_refusal_naming_all_of_them(self) -> None:
         adapter = ChainAdapter({
-            "profile:gpt-6-astra": {
-                "code": "PROVIDER_ERROR", "message": "upstream down token=secret-one"},
-            "profile:claude-fable-5-1": {
-                "code": "MODEL_UNAVAILABLE", "message": "alias is not installed"},
+            "profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed token=secret-one"),
+            "profile:claude-fable-5-1": BrokerDefinitelyNotSent("alias is not installed"),
         })
         with self.assertRaisesRegex(CockpitModelError, "every model in the brain chain failed"):
             self._model(adapter, policy_version_ref=self.chain_policy).call(
@@ -813,12 +844,12 @@ class CockpitChainTests(unittest.TestCase):
             formal = scheduler.formal_result(row["work_order_id"])
         envelope = formal["result_envelope"]
         self.assertEqual(envelope["error"]["code"], "MODEL_CHAIN_EXHAUSTED")
-        self.assertIn("MODEL_UNAVAILABLE", envelope["error"]["message"])
+        self.assertIn("transport_failure", envelope["error"]["message"])
         self.assertIn("alias is not installed", envelope["error"]["message"])
         self.assertNotIn("secret-one", json.dumps(envelope))
         self.assertEqual(
             envelope["metadata"]["chain_failures"][0]["message"],
-            "upstream down token=[REDACTED]",
+            "the model call failed: connect failed token=[REDACTED]",
         )
 
     def test_a_policy_with_no_chain_keeps_routing_exactly_as_before(self) -> None:
@@ -841,7 +872,7 @@ class CockpitChainTests(unittest.TestCase):
             )
 
     def test_the_same_question_replays_the_chain_it_already_walked(self) -> None:
-        script = {"profile:gpt-6-astra": {"code": "PROVIDER_ERROR", "message": "down"}}
+        script = {"profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed")}
         first = self._model(ChainAdapter(dict(script)), policy_version_ref=self.chain_policy).call(
             purpose="plan", request_id="seven", prompt="what next?", mission=self.mission,
         )

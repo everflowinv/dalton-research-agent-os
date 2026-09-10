@@ -334,6 +334,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         route_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         auth_key_provider: Callable[[], bytes] | None = None,
         provider_control_mode: str = "provider-controlled-v1",
+        before_send: Callable[[], None] | None = None,
     ):
         broker = FakeBroker(self.directory, responder)
         try:
@@ -360,6 +361,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                 work or self.work,
                 route or self.route,
                 profile or self.profile,
+                before_send=before_send,
             )
             return result, broker
         except Exception:
@@ -953,6 +955,17 @@ class OpenClawModelAdapterTests(unittest.TestCase):
 
         with self.assertRaises(BrokerTimeout):
             self.run_with(slow, timeout=0.05)
+
+    def test_before_send_runs_after_connect_and_can_prevent_all_request_bytes(self) -> None:
+        called: list[str] = []
+
+        def refuse() -> None:
+            called.append("connected")
+            raise RuntimeError("local admission refused")
+
+        with self.assertRaisesRegex(RuntimeError, "local admission refused"):
+            self.run_with(success_response, before_send=refuse)
+        self.assertEqual(called, ["connected"])
 
     def test_repeated_invocation_rechecks_authority_and_accepts_broker_duplicate(self) -> None:
         resolve_calls: list[str] = []
