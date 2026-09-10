@@ -2,6 +2,12 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
+## 当前检查点（2026-09-10，17:49 UTC）
+
+Live 仍为 `38721e4`。新恢复候选 `a108f0e` 已冻结：521 个运行文件与 wheel 逐字相同，67 schema / 38 tick entries 的当前状态副本演练通过，全量测试正在运行，尚未部署。详见 [核验恢复验收](reports/verifier-recovery-acceptance-2026-09-10.md)。
+
+CTSH 的限额解释已更正：17:32 UTC 实际为 54/130 次，获取已恢复；仍缺两次有效电话会，搜索被7天间隔压住。现正修真实分页续取与旧失败恢复，保持原调用上限。Investment Memo 的生产、人审及准确状态/费用在三个 Sol 工作树持续开发和交叉验收；filing 原始行证明尚需兼容合法累计差分季度，暂不合入。最后再完整重构浅色 Cockpit。
+
 ## 最新部署与当前工作（2026-09-10，17:12 UTC）
 
 **预算与运行恢复版本 `38721e4` 已部署。** 同一冻结版本 6,323 项测试 / 530.413s 通过（1 skip），wheel、当前状态副本演练及部署后 518 个运行文件逐字校验通过，服务 health 全部正常。沿用 owner 已签 mission v14，没有重签。首次产物检查仍为 0/15，正在检查新运行的具体结果；详见 [冻结验收与部署](reports/v14-product-recovery-acceptance-2026-09-10.md)。
@@ -10,15 +16,15 @@
 
 **最新视觉要求：** 暂停零碎视觉修补；功能完成后完整重构 Cockpit 的视觉和页面逻辑，以苹果式浅色、精致华丽的方向创造性呈现研究工作流。响应式补丁保留在独立分支，暂不合入。详见 [页面检查与最终设计要求](reports/cockpit-browser-review-2026-09-10.md)。
 
-## 最新签署与产物验收（2026-09-10）
+## 历史检查点：签署与产物验收（2026-09-10）
 
 **mission v14 已由 owner 签署并完成语义／哈希核验，服务运行正常。** 实际签署哈希以 [v14 产物验收进度](reports/mission-v14-product-acceptance-progress-2026-09-10.md) 为准；时间戳与演练不同是正常记录差异。旧 dossier 拒绝缓存、scheduler 初始化锁竞争、完整事件上下文与可配置预算、controller 单实例保护均已集成，等待新冻结版本全量验收和部署。调用、每轮任务、预算池、planner、抽取、thesis-impact 与 Guidepoint 限额均有实际配置消费路径；AlphaEngine probe 的独立限额与精确 mission 绑定正在补齐。385 项集成聚焦测试通过，不替代新全量验收。当前 0/15 目标产物，不能称产物验收通过；下面“待签署”记录均已由本节覆盖。
 
-## 最新 live 状态（2026-09-10，部署恢复）
+## 历史检查点：部署恢复（2026-09-10）
 
 Owner 的首次部署因目录同步晚于抽取配置而中断，mission 签署未执行。安装顺序修复 `67373c0` 已提交；11 项针对性测试在 Python 3.13/3.14 均通过，433 个运行文件保持与全量验收版本一致。已重试部署并清理确认的旧 unmanaged controller，新服务 health 全部通过。**随后 owner 已签署 mission v14；当前无需重签，正在验收后续修复。** 详见 [部署恢复记录](reports/wave4-live-deployment-recovery-2026-09-10.md)。下方“尚未部署”是此前验收阶段的历史记录。后续补 controller 单实例锁与升级前遗留进程检测。
 
-## 当前开发与验收（2026-09-10，覆盖下方历史状态）
+## 历史检查点：wave 4 开发与验收（2026-09-10）
 
 Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 commit/push；owner 保留人工签署；最新指示允许本会话在当前工作验收后部署。代码在隔离分支 `continuous-integration-wave4` 集成，原 main 中另一会话的四个 DeepSeek 文件完整保留。
 
@@ -28,7 +34,7 @@ Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 com
 
 最终候选 wheel 已通过 430 个 Python/SQL 文件及 3 个 HTML 文件逐字校验，页面 JavaScript 语法通过。三个 Sol 代理分别完成配置读取交叉修复、最终 wheel 校验、演练路径隔离与当前副本复验；主代理做集成、全量回归、签署包及最终交付。详见 [wave 4 进度](reports/continuous-wave4-progress-2026-09-10.md)。
 
-**当前 next step：** 冻结预算与 post-signature 修复，完成全量测试、wheel 和当前副本演练后更新部署包并部署；沿用已签 mission v14，对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。随后系统检查 Cockpit 页面与交互，按 [owner 期待差距复核](reports/owner-expectations-gap-refresh-2026-09-10.md) 推进真实缺口；Investment Memo 闭环优先，Excel 导出仍后排。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
+**该历史检查点的 next step（已由顶部覆盖）：** 冻结预算与 post-signature 修复，完成全量测试、wheel 和当前副本演练后更新部署包并部署；沿用已签 mission v14，对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。随后系统检查 Cockpit 页面与交互，按 [owner 期待差距复核](reports/owner-expectations-gap-refresh-2026-09-10.md) 推进真实缺口；Investment Memo 闭环优先，Excel 导出仍后排。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
 
 历史验收：wave 3 `d21de7d` 为 6,184 项通过；wave 2 `e7e06bb` 为 6,114 项通过。此前 DeepSeek route drift 已由 wave 4 的 Dalton 目录迁移处理，不再要求另一个仅更新模型的会话承担 Dalton 迁移。
 
