@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -69,7 +70,8 @@ class StageHarness(unittest.TestCase):
 
     def document(self, company_ref: str, spec_ref: str, status: str, *, read: bool = False,
                  source_ref: str = "source:alphaengine", created_at: str | None = None,
-                 title: str | None = None) -> str:
+                 title: str | None = None,
+                 named_companies: list[str] | None = None) -> str:
         discovery_ref = self.discovery(company_ref, spec_ref, source_ref=source_ref)
         self._seq += 1
         record_id = f"mission-discovered-document:{self._seq:032d}"
@@ -83,13 +85,19 @@ class StageHarness(unittest.TestCase):
             )
             if spec_ref == TRANSCRIPTS:
                 if title is None:
-                    title = f"Issuer Q{((self._seq // 2 - 1) % 4) + 1} 2026 Earnings Call"
+                    ticker = next(member["ticker"] for member in self.mission["universe"]
+                                  if member["company_ref"] == company_ref)
+                    title = f"{ticker} Q{((self._seq // 2 - 1) % 4) + 1} 2026 Earnings Call"
+                else:
+                    ticker = next(member["ticker"] for member in self.mission["universe"]
+                                  if member["company_ref"] == company_ref)
                 cur.execute(
                     "INSERT INTO document_provenance_records(document_ref,source_ref,spec_ref,"
                     "provenance_tier,title,named_companies_json,metadata_seen,record_json,content_hash,created_at) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (document_ref, source_ref, spec_ref, "management_direct", title,
-                     "[]", 1, "{}", "4" * 64, at),
+                     json.dumps([ticker] if named_companies is None else named_companies),
+                     1, "{}", "4" * 64, at),
                 )
             if read:
                 cur.execute(
@@ -113,14 +121,39 @@ class StageHarness(unittest.TestCase):
 
 
 class SourceBaseTests(StageHarness):
+    def test_wrong_issuer_quarters_never_count_for_the_search_target(self) -> None:
+        for title, issuer in (
+            ("Nordic Semiconductor Q2 2026 Post Call", "Nordic Semiconductor"),
+            ("Remitly Global Q3 2026 Earnings Call", "Remitly Global"),
+            ("SoftBank Q4 2026 Investor Call", "SoftBank"),
+            ("Citi discusses Cognizant after Nordic Semiconductor Q1 2027 Earnings Call",
+             "Nordic Semiconductor"),
+        ):
+            self.document(CTSH, TRANSCRIPTS, "acquired", title=title,
+                          named_companies=[issuer])
+        calls = self.item(self.evaluate(), CTSH, "earnings_calls")
+        self.assertEqual(calls["have"], 0)
+        self.assertEqual(calls["classified_periods"], [])
+        self.assertEqual(calls["period_coverage"], "unknown")
+        self.assertEqual(calls["not_attributed"], 4)
+
+    def test_target_issuer_title_may_mention_another_company(self) -> None:
+        self.document(
+            CTSH, TRANSCRIPTS, "acquired",
+            title="Cognizant Q2 2026 Earnings Conference Call including EPAM comparison",
+        )
+        calls = self.item(self.evaluate(), CTSH, "earnings_calls")
+        self.assertEqual(calls["classified_periods"], ["FY2026-Q2"])
+        self.assertEqual(calls["not_attributed"], 0)
+
     def test_earnings_calls_require_distinct_explicit_fiscal_periods(self) -> None:
-        self.document(ACN, TRANSCRIPTS, "acquired", title="Issuer Q2 2026")
+        self.document(ACN, TRANSCRIPTS, "acquired", title="ACN Q2 2026")
         self.document(ACN, TRANSCRIPTS, "acquired",
-                      title="Issuer Q2 2026 Earnings Conference Call")
+                      title="ACN Q2 2026 Earnings Conference Call")
         self.document(ACN, TRANSCRIPTS, "acquired",
-                      title="Issuer Q3 2026 Citi Global TMT Conference")
-        self.document(ACN, TRANSCRIPTS, "acquired", title="Issuer fireside chat")
-        self.document(ACN, TRANSCRIPTS, "acquired", title="Issuer 2026 Q1 Earnings Call")
+                      title="ACN Q3 2026 Citi Global TMT Conference")
+        self.document(ACN, TRANSCRIPTS, "acquired", title="ACN fireside chat")
+        self.document(ACN, TRANSCRIPTS, "acquired", title="ACN 2026 Q1 Earnings Call")
         calls = self.item(self.evaluate(), ACN, "earnings_calls")
         self.assertEqual(calls["have"], 2)
         self.assertEqual(calls["classified_periods"], ["FY2026-Q1", "FY2026-Q2"])
@@ -130,8 +163,8 @@ class SourceBaseTests(StageHarness):
         self.assertEqual(calls["unclassified"], 2)
 
     def test_four_nonconsecutive_historical_calls_do_not_pass_recent_window(self) -> None:
-        for title in ("Issuer Q1 2024", "Issuer Q3 2024", "Issuer Q1 2025",
-                      "Issuer Q2 2026 Earnings Conference Call"):
+        for title in ("ACN Q1 2024", "ACN Q3 2024", "ACN Q1 2025",
+                      "ACN Q2 2026 Earnings Conference Call"):
             self.document(ACN, TRANSCRIPTS, "acquired", title=title)
         calls = self.item(self.evaluate(), ACN, "earnings_calls")
         self.assertEqual(calls["have"], 1)

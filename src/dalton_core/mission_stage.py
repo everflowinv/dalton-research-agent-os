@@ -222,7 +222,8 @@ _STATUS_RANK = {
 
 
 def _document_counts(
-    connection: sqlite3.Connection, mission_version_ref: str
+    connection: sqlite3.Connection, mission_version_ref: str,
+    *, company_name_keys: Mapping[str, str] | None = None,
 ) -> dict[tuple[str, str], dict[str, int]]:
     """(company_ref, spec_ref) → acquired / pending / failed / read counts.
 
@@ -246,7 +247,8 @@ def _document_counts(
         return counts.setdefault(
             (company, spec), {"acquired": 0, "pending": 0, "failed": 0,
                               "read": 0, "periods": [], "required_periods": [],
-                              "missing_periods": [], "unclassified": 0}
+                              "missing_periods": [], "unclassified": 0,
+                              "not_attributed": 0}
         )
 
     row = connection.execute(
@@ -304,20 +306,40 @@ def _document_counts(
             best[key] = status
     try:
         provenance_rows = connection.execute(
-            "SELECT document_ref,title FROM document_provenance_records"
+            "SELECT document_ref,title,named_companies_json,metadata_seen "
+            "FROM document_provenance_records"
         ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc):
             raise
         provenance_rows = []
-    provenance = {row["document_ref"]: row["title"] for row in provenance_rows}
+    provenance = {row["document_ref"]: row for row in provenance_rows}
     earnings_periods: dict[tuple[str, str], set[str]] = {}
     document_period: dict[tuple[str, str], str] = {}
     for (company_ref, spec_ref, document_ref), status in best.items():
         entry_counts = bucket(company_ref, spec_ref)
         if status in ACQUIRED_STATUSES:
             if spec_ref == "earnings-call-transcripts":
-                period = _earnings_call_period(provenance.get(document_ref))
+                source_metadata = provenance.get(document_ref)
+                if source_metadata is None or not source_metadata["metadata_seen"]:
+                    entry_counts["not_attributed"] += 1
+                    continue
+                title = None if source_metadata is None else source_metadata["title"]
+                from .document_subject import document_names_subject
+                name_key = (company_name_keys or {}).get(company_ref)
+                attribution = document_names_subject(title, name_key)
+                try:
+                    named_companies = json.loads(source_metadata["named_companies_json"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    named_companies = []
+                named_attribution = document_names_subject(
+                    " | ".join(str(value) for value in named_companies), name_key)
+                if (not attribution.get("checked")
+                        or not attribution.get("names_subject")
+                        or not named_attribution.get("names_subject")):
+                    entry_counts["not_attributed"] += 1
+                    continue
+                period = _earnings_call_period(title)
                 if period is None:
                     entry_counts["unclassified"] += 1
                     continue
@@ -468,7 +490,11 @@ def evaluate_mission(
     """The Initial Screen source base, per company, as plain counted items."""
 
     planned = set(planned_specs or set())
-    counts = _document_counts(connection, mission["id"])
+    counts = _document_counts(
+        connection, mission["id"],
+        company_name_keys={member["company_ref"]: member.get("ticker", "")
+                           for member in mission["universe"]},
+    )
     periods = _claim_periods(connection)
     connected = {
         entry["source_ref"]
@@ -494,7 +520,7 @@ def evaluate_mission(
                 read = have
                 pending = failed = 0
             else:
-                have = read = pending = failed = unclassified = 0
+                have = read = pending = failed = unclassified = not_attributed = 0
                 classified_periods: set[str] = set()
                 required_periods: set[str] = set()
                 missing_periods: set[str] = set()
@@ -507,6 +533,7 @@ def evaluate_mission(
                     pending += entry["pending"]
                     failed += entry["failed"]
                     unclassified += int(entry.get("unclassified") or 0)
+                    not_attributed += int(entry.get("not_attributed") or 0)
                     classified_periods.update(entry.get("periods") or ())
                     required_periods.update(entry.get("required_periods") or ())
                     missing_periods.update(entry.get("missing_periods") or ())
@@ -527,7 +554,8 @@ def evaluate_mission(
                     "required_periods": sorted(required_periods),
                     "missing_periods": sorted(missing_periods),
                     "period_coverage": "known" if required_periods else "unknown",
-                    "unclassified": unclassified}
+                    "unclassified": unclassified,
+                    "not_attributed": not_attributed}
                    if item["item_ref"] == "earnings_calls" else {}),
             })
         blocking = [i for i in items if i["status"] in {"partial", "missing"}]
