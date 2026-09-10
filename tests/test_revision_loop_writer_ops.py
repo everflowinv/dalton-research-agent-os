@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dalton_core.cockpit_plane import (
     CHANGE_REASON_LABELS,
-    DECISION_WORD_LABELS,
+    JUDGEMENT_DECISION_LABELS,
     CockpitError,
 )
 from dalton_core.deliverable_reopen import GateReopenAuthority, reopen_assessment
@@ -230,18 +230,22 @@ class CockpitApprovalTests(unittest.TestCase):
             "decision_id TEXT PRIMARY KEY, candidate_ref TEXT, terminal INTEGER)")
         self.write(
             "CREATE TABLE IF NOT EXISTS thesis_reflections ("
-            "reflection_id TEXT PRIMARY KEY, record_json TEXT, content_hash TEXT)")
+            "reflection_id TEXT PRIMARY KEY, judgement_ref TEXT, company_ref TEXT,"
+            "record_json TEXT, content_hash TEXT, created_at TEXT)")
         reflection = {"id": "thesis-reflection:r", "content_hash": "b" * 64,
+                      "trigger_kind": "revision",
                       "what_we_expected": "Bookings convert within two quarters.",
-                      "what_happened": "They fell.",
-                      "missed_debates": [{"question": "Federal exposure?"}]}
-        self.write("INSERT INTO thesis_reflections VALUES(?,?,?)",
-                   ("thesis-reflection:r", json.dumps(reflection), "b" * 64))
+                      "what_happened": "They fell.", "why": "We misread a pipeline comment.",
+                      "missed_debates": [{"question": "Federal exposure?", "refs": []}]}
+        self.write("INSERT INTO thesis_reflections VALUES(?,?,?,?,?,?)",
+                   ("thesis-reflection:r", "event-judgement:j", ACN,
+                    json.dumps(reflection), "b" * 64, "2026-09-20T00:00:00+00:00"))
         record = {
             "id": "thesis-revision-candidate:c1", "content_hash": "a" * 64,
             "created_at": "2026-09-20T00:00:00+00:00",
             "company_ref": self.c.h.mission["universe"][0]["company_ref"],
             "decision": "THESIS_WEAKENED", "thesis_version_ref": "thesis-version:1",
+            "judgement_ref": "event-judgement:j",
             "proposed_statement": "Reinvention demand is weaker than we said.",
             "proposed_confidence": "low", "because": "Bookings fell six percent.",
             "evidence_refs": ["claim-version:1"], "reflection_ref": "thesis-reflection:r",
@@ -284,13 +288,13 @@ class CockpitApprovalTests(unittest.TestCase):
     def test_a_candidate_appears_with_a_plain_title_and_its_reflection(self):
         self.seed_candidate()
         items = self.c.plane.approvals()["items"]
-        row = next(item for item in items if item["kind"] == "thesis_revision")
-        self.assertEqual(row["title"], "自动化说这条论点可能要改")
+        row = next(item for item in items if item["kind"] == "thesis_revision_candidate")
+        self.assertEqual(row["title"], "有事情发生，可能要改我们对这家公司的判断")
         self.assertEqual(row["ref"], "thesis-revision-candidate:c1")
         self.assertEqual(row["hash"], "a" * 64)
-        self.assertEqual(row["details"]["五词判断"],
-                         DECISION_WORD_LABELS["THESIS_WEAKENED"])
-        self.assertEqual(row["details"]["实际发生了什么"], "They fell.")
+        self.assertEqual(row["details"]["大脑的判断"],
+                         JUDGEMENT_DECISION_LABELS["THESIS_WEAKENED"])
+        self.assertEqual(row["reflection"]["what_happened"], "They fell.")
         self.assertEqual([a["decision"] for a in row["actions"]],
                          ["accept", "reject", "defer"])
         self.assertTrue(row["needs_rationale"])
@@ -300,7 +304,7 @@ class CockpitApprovalTests(unittest.TestCase):
         self.seed_reopen()
         items = self.c.plane.approvals()["items"]
         row = next(item for item in items if item["kind"] == "gate_reopen")
-        self.assertEqual(row["title"], "证据变厚了，是否重出这份 Initial Screen")
+        self.assertEqual(row["title"], "一道已经过掉的闸，现在有证据说可以重开")
         self.assertIn("缺（0）", row["summary"])
         self.assertIn("有（2926）", row["summary"])
         self.assertEqual(row["details"]["改版理由"],
@@ -312,7 +316,7 @@ class CockpitApprovalTests(unittest.TestCase):
         self.seed_candidate()
         self.seed_reopen()
         out = self.c.plane.decide(self.login, {
-            "kind": "thesis_revision", "ref": "thesis-revision-candidate:c1",
+            "kind": "thesis_revision_candidate", "ref": "thesis-revision-candidate:c1",
             "hash": "a" * 64, "decision": "defer",
             "rationale": "再看一个季度。", "request_id": "r1"})
         self.assertEqual(out["status"], "decided")
@@ -336,9 +340,9 @@ class CockpitApprovalTests(unittest.TestCase):
         self.seed_candidate()
         self.seed_reopen()
         for value in (
-            {"kind": "thesis_revision", "ref": "thesis-revision-candidate:c1",
+            {"kind": "thesis_revision_candidate", "ref": "thesis-revision-candidate:c1",
              "hash": "a" * 64, "decision": "admit", "rationale": "x", "request_id": "r"},
-            {"kind": "thesis_revision", "ref": "thesis-revision-candidate:c1",
+            {"kind": "thesis_revision_candidate", "ref": "thesis-revision-candidate:c1",
              "hash": "a" * 64, "decision": "accept", "rationale": "  ", "request_id": "r"},
             {"kind": "gate_reopen", "ref": "gate-reopen-proposal:p1", "hash": "c" * 64,
              "decision": "retired", "rationale": "x", "request_id": "r"},

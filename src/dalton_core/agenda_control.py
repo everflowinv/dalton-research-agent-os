@@ -823,6 +823,14 @@ class AgendaControlApplication:
         # renderer rather than re-laid-out here.
         if path == "/v1/cockpit/model":
             return {**plane.company_model(query.get("company", "")), "enabled": True}
+        # INT2 / P14a: what every connector can actually hand over, at what
+        # tier, under what quota and how often -- plus the same question about
+        # the model side. The owner asked for the first table by name.
+        if path == "/v1/cockpit/sources":
+            return {**plane.sources(), "enabled": True}
+        # INT2 / Q2: 每周回头看 -- the latest week's "我们把时间花在哪".
+        if path == "/v1/cockpit/reflection":
+            return {**plane.cycle_reflection(), "enabled": True}
         if path == "/v1/cockpit/history":
             kind = query.get("kind", "ask")
             if kind not in {"ask", "goal", "steer"}:

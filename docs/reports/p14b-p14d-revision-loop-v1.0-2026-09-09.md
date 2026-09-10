@@ -1,19 +1,19 @@
 # P14b / P14d 修订回路：论点修订候选的人裁决，与过闸后的版本化重出 v1.0
 
 日期：2026-09-09
-分支：`w3-revision-loop`（worktree `~/Projects/dalton-w3-revision-loop-worktree`），基线 main `8110b23`，交付前已 `git merge` 到 main `64d3f94`
+分支：`w3-revision-loop`（worktree `~/Projects/dalton-w3-revision-loop-worktree`），基线 main `8110b23`，交付前已 `git merge` 到 main `1fc7c5f`（与 INT2 的 approvals 渲染合流，见 §5.1）
 作者：Wave 3 `revision-loop` agent（Opus 5）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) §1（owner 第二批裁决：ADR-0007 接受；gate 重开必须版本化；机制 vs 判断）与 D5 行、[ADR-0007](../adr/0007-thesis-revision-candidates-and-verified-figures-in-the-ledger.md)、[ADR-0008](../adr/0008-research-outputs-are-never-terminal.md)、[ADR-0001](../adr/0001-thesis-confidence-and-coverage-admission.md)、[P14a 每日跟踪](p14a-daily-tracking-v1.0-2026-09-09.md)、[模型路由与回退 v1.0](model-routing-fallback-v1.0-2026-09-09.md)、[INT1 cockpit 与安装](int1-cockpit-install-v1.0-2026-09-09.md)、[P10c Initial Screen](p10c-initial-screen-v0.1-2026-09-07.md)
 
 全量测试：
 
 ```
-Ran 4011 tests in 394.933s
+Ran 4063 tests in 502.195s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；合并 main `64d3f94`（3,932）之后，本片 +79。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；合并 main `1fc7c5f`（3,983）之后，本片 +80。）
 
 ---
 
@@ -32,7 +32,7 @@ P14a 让机器能说出「这条 Claim 支撑的论点可能比我们说的弱�
 | `thesis_impact_reopen.py` | 新增 | verifier 相位钉的第二版、独立性预检、离线资格重跑（两条路径）、`service.json` 开关的规则、producer 产出 → `ThesisRevisionCandidate` 的接线 |
 | `mission_reopen_lane.py` | 新增 | 每周一次、每家过闸公司一次的确定性检查 + 只读 CLI；lane order 118 |
 | `writer_server.py` | 共享（加法） | 两个 human-governance op：`decide_thesis_revision_candidate`、`decide_gate_reopen`（照 INT1 的 `record_analyst_journal_entry` 五处登记） |
-| `cockpit_plane.py` | 共享（加法） | approvals 视图两种新 checkpoint（`thesis_revision`、`gate_reopen`）+ `decide()` 两条分支 + `DECISION_WORD_LABELS` + lane 名字一行 |
+| `cockpit_plane.py` | 共享（加法） | 与 INT2 的 `_revision_checkpoints()` 合成一份实现：同一批行，有裁决账本就给按钮、没有就照 INT2 原样不给按钮并说明；`decide()` 两条分支；lane 名字一行 |
 | `mission_deliverable.py` | 共享（加法） | `publish(..., revision=...)`：ADR-0008 的 `change_reason` 闭合词表 + 证据 refs + `reopen_ref`，落进 record，**不进 body hash** |
 | `initial_screen_cli.py` | 共享（加法） | 选择规则：有已批准且未被消费的 `gate_reopen` 时不再跳过 `gate_passed`（也跳过 staleness 规则）；重出时带 `revision` |
 | `lane_registry.py` | 共享（加法） | `LANE_MODULES` 一行 |
@@ -253,14 +253,22 @@ decide_gate_reopen:               {proposal_ref, proposal_hash, verdict, reason,
 
 两个都**不在** `CORE_OPERATIONS` / `CORE_DISCOVERY_OPERATIONS`：没有哪个 lane 能认证成的 principal 可以裁决这两件事。actor 由 writer 从认证 principal 注入，caller 传一个不一样的会被 `PermissionError` 拒；多传一个字段是 `ProtocolError`；automation principal 在 handler 跑之前就被 `governance changes require an authenticated human principal` 拒掉。因为 `governance_cli.ephemeral_call` 铸的临时 principal 的 operations 就是 `HUMAN_GOVERNANCE_OPERATIONS`，**加进那个集合就是全部的授权**，不用改 token 配置。
 
-approvals 视图两行，标题是人话，没有机器 ref：
+### 5.1 与 INT2 的合流：一份实现，按钮看 Core 说了算
 
-| kind | 标题 | 按钮 |
+INT2 在 main 上已经把这两种 checkpoint 渲染出来了（`_revision_checkpoints()`），**故意不给按钮**——当时裁决入口在另一条分支上，「一个哪儿也去不了的按钮比一条写清楚谁欠什么的条目更糟」。现在入口在了，两边合成**一份**实现：
+
+- 行的形状、kind（`thesis_revision_candidate` / `gate_reopen`）、标题、`reflection` 字段、`forecast_proposal` 那一段，全部沿用 INT2 的；
+- **要不要给按钮，读 Core，不假设**：判据是 `thesis_revision_decisions` / `gate_reopen_decisions` 这两张 append-only 裁决账本在不在。带这两个 op 的 writer 一定开过它们，所以这张表在不在就是「这台机器上这件事能不能真的被裁决」的诚实检查。在 → 给按钮、`needs_rationale: True`、不带 `note`；不在（老 Core、更早的 state 目录）→ 照 INT2 原样列出来、无按钮、`note` 说明谁欠什么。
+- **`defer` 不关闭候选**这条规则也是读出来的：裁决账本有 `terminal` 列时按 `d.terminal=1` 过滤（defer 的行留在页面上），没有那一列的是更早的形状，任何一行都算已裁决。
+- `gate_reopen` 的 `summary` 在记录里有 `diff` 时是翻项本身（「已入库的财报报表行：缺（0） → 有（2926）」），没有时退回 `because`——INT2 手写的那条最小行仍然渲染得出来。
+- 我这边原来那份 `DECISION_WORD_LABELS` 删了，用 INT2 的 `JUDGEMENT_DECISION_LABELS`：一个词表一份。
+
+| kind | 标题（INT2 的） | 有裁决账本时的按钮 |
 | --- | --- | --- |
-| `thesis_revision` | 自动化说这条论点可能要改 | 接受，出新版本 / 不接受 / 先放着，再看看 |
-| `gate_reopen` | 证据变厚了，是否重出这份 Initial Screen | 重出一版 / 不重出 |
+| `thesis_revision_candidate` | 有事情发生，可能要改我们对这家公司的判断 | 接受，出新版本 / 不接受 / 先放着，再看看 |
+| `gate_reopen` | 一道已经过掉的闸，现在有证据说可以重开 | 重出一版 / 不重出 |
 
-论点那一行的 `details` 里带反思的三段（当时怎么想、实际发生了什么、可能漏了的 debate），重开那一行的 `summary` 直接是翻项：「已入库的财报报表行：缺（0） → 有（2926）」。两行都 `needs_rationale: True`——这两个决定都不该没有理由。`decide()` 里两条分支在把词表外的判词、空理由挡在 cockpit 内（一个临时 principal 都不铸）。
+两行都 `needs_rationale: True`——这两个决定都不该没有理由。`decide()` 里两条分支把词表外的判词、空理由挡在 cockpit 内（一个临时 principal 都不铸）。INT2 的 `ApprovalsTests` 一条没删：`test_a_checkpoint_with_no_decision_path_offers_no_buttons` 改写成 `test_buttons_appear_only_where_the_decision_path_exists`（两半都断言），并加了一条 `test_a_deferred_candidate_stays_and_a_terminal_one_does_not`。
 
 ---
 
@@ -299,7 +307,7 @@ approvals 视图两行，标题是人话，没有机器 ref：
 
 ## 8. 测试
 
-新增 79 项，五个文件。原文行：
+新增 80 项（五个新文件），并改写 INT2 `ApprovalsTests` 的两条断言。原文行：
 
 ```
 Ran 4011 tests in 394.933s
@@ -320,7 +328,8 @@ OK (skipped=1)
 - **重出是新版本、老版本不动**：`ProposalTests.test_an_approval_is_a_permission_that_one_version_spends`
 - **选择规则的改动**：`SelectionRuleTests.test_a_passed_gate_is_skipped_until_a_person_approves_a_reopen`、`…test_an_approval_also_defeats_the_nothing_new_rule`
 - **writer op 闭合字段**：`test_revision_loop_writer_ops.OperationContractTests.test_both_operations_are_human_governance_with_closed_fields`、`WriterDecisionTests.test_an_unknown_parameter_never_reaches_the_authority`
-- **approvals 列表**：`CockpitApprovalTests.test_a_candidate_appears_with_a_plain_title_and_its_reflection`、`…test_a_reopen_appears_with_the_diff_that_argues_for_it`、`…test_each_button_routes_to_its_own_human_governance_operation`、`…test_a_word_outside_the_vocabulary_never_leaves_the_cockpit`
+- **approvals 列表**：`test_revision_loop_writer_ops.CockpitApprovalTests.test_a_candidate_appears_with_a_plain_title_and_its_reflection`、`…test_a_reopen_appears_with_the_diff_that_argues_for_it`、`…test_each_button_routes_to_its_own_human_governance_operation`、`…test_a_word_outside_the_vocabulary_never_leaves_the_cockpit`
+- **按钮的降级（与 INT2 合流）**：`test_cockpit_int2.ApprovalsTests.test_buttons_appear_only_where_the_decision_path_exists`、`…test_a_deferred_candidate_stays_and_a_terminal_one_does_not`、`…test_a_gate_reopen_row_renders_when_a_table_exists`、`…test_a_decided_checkpoint_drops_off_when_a_decisions_table_exists`、`…test_a_forecast_proposal_says_why_it_was_not_applied`
 - **lane 登记**：`test_mission_reopen_lane.RegistrationTests.test_the_lane_is_registered_once_at_its_own_order`、`…test_the_lane_has_a_name_a_person_can_read`
 
 没有一个测试打模型或碰网络。`test_mission_reopen_lane.CliTests` 用的是测试自己建的 Core，不是 live 副本。
