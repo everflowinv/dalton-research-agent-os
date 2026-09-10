@@ -26,7 +26,7 @@ Chem 设计过月度零基复盘、一次都没跑过（`dalton-coverage-zero-ba
 | 权威、提示词、校验、cadence | `src/dalton_core/zero_base_review.py` |
 | 子进程 | `src/dalton_core/zero_base_review_cli.py` |
 | launcher | `src/dalton_core/zero_base_review_launcher.py` |
-| lane（`dispatch_zero_base_review`，order 170） | `src/dalton_core/mission_zero_base_lane.py` |
+| lane（`dispatch_zero_base_review`，order 155） | `src/dalton_core/mission_zero_base_lane.py` |
 
 **形状照 `statement_snapshot.py`**：append-only、`content_hash`、`dalton_authorized()` 三触发器
 （insert guard / no update / no delete，pointer 表另有 update guard）、每公司一条版本链
@@ -132,6 +132,10 @@ lane tick 每次在写进程内**只读**重算一遍 check pass，把 digest �
 digest 比对：有公司到期 → `review`；只有台账动了 → `checks`（不花钱）；都没有 → `idle`。
 崩掉的子进程不许推进 watermark（写了一半就宣称账本是新的，是这里唯一值得单独写测试的坑）。
 
+lane 的序号是 **155**：在判断 lane（116）与专项研究 lane（150）之后（它读它们写的东西），
+在 Q2 周反思（160）**之前**——周反思要报这本台账的计数，让它每周读到晚一个 tick 的数字是
+白白付出的代价。周反思仍然是 tick 的最后一条，那是它自己 lane 的既有不变量。
+
 ### 1.4 reflection reader 与 cockpit
 
 * `research_cycle_reflection.judgement_outcomes(core, window)`：第九条 metric。
@@ -160,9 +164,10 @@ digest 比对：有公司到期 → `review`；只有台账动了 → `checks`�
 * `model_fallback_chain._PURPOSE_TIERS["zero_base_review"] = TIER_BRAIN`，
   并把 `dalton_core.zero_base_review` 加进
   `tests/test_purpose_tiers_cover_every_registered_purpose.REGISTERING_MODULES`（覆盖测试）；
-* `budget_pools.LANE_POOLS["dispatch_zero_base_review"] = "coverage"`，
-  `PURPOSE_POOLS["zero_base_review"] = "coverage"`，
-  `LaneSpec.budget_pool="coverage"`（三处一致，池与账本不会各说各话）；
+* `budget_pools.LANE_POOLS["dispatch_zero_base_review"] = "coverage"` 与
+  `PURPOSE_POOLS["zero_base_review"] = "coverage"`（lane 与 purpose 走同一个池，
+  否则池与账本会各说各话）。`LaneSpec` **不**声明 `budget_pool`：池只在 C2 的中央映射里说一次，
+  注册表里没有一条 lane 自报池，C2 自己的测试守着这条线；
 * `deploy/macos/install.sh`：新增 `DALTON_ZERO_BASE_REVIEW_MODEL_TIER` / `..._PROFILE`
   一块，播种 `zero-base-review-model-config.json`；不设就打印一行 note、lane 整条不进 plist
   （argv fragment 以该文件为门）。没有新增 `deploy/connector-governance` 记录，
@@ -216,7 +221,9 @@ digest 比对：有公司到期 → `review`；只有台账动了 → `checks`�
 .venv/bin/python -m unittest discover -s tests -t .`）：
 
 ```
-RAN_LINE_PLACEHOLDER
+Ran 5486 tests in 444.615s
+
+OK (skipped=1)
 ```
 
 新增测试文件：
@@ -228,6 +235,15 @@ RAN_LINE_PLACEHOLDER
 | `tests/test_mission_zero_base_lane.py` | 12 | tick 的每一个分支、崩溃子进程不推进 watermark、授权缺失、plist 门 |
 | `tests/test_judgement_outcome_reflection.py` | 12 | reflection metric 的在场与缺席、`inputs_hash` 变动、narrative、cockpit 面板、CLI 端到端 |
 | `tests/zero_base_fixtures.py` | — | 共用夹具（价格序列是字典；判断行走真 schema 与触发器） |
+
+（那一条 skip 是主线既有的、与本切片无关的跳过。）
+
+改到的既有测试三处，都是本切片踩到的既有不变量，改的是不变量的表述而不是不变量本身：
+
+* `tests/test_research_cycle_reflection.py`：`compute_metrics` 从八条变九条；
+* `tests/test_crowd_source_lane.py`：`dispatch_zero_base_review` 加进「不取证据的 lane」集合
+  （与 research_task / reflection / conviction_call 同类，它一条证据也不取）；
+* `tests/test_purpose_tiers_cover_every_registered_purpose.py`：新模块加进被扫描的清单。
 
 **确定性**：没有网络、没有模型调用（`FakeModel` 直接返回测试给的 JSON）、
 没有挂钟——`now` 一路注入（`review_state`、`build_context`、`run_zero_base`、

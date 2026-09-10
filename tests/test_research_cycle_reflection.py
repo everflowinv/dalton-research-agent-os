@@ -346,13 +346,14 @@ class MetricTests(unittest.TestCase):
         metrics = compute_metrics(
             store.connection, window=self.window, budget=MISSION["budget"], now=NOW,
         )
-        self.assertEqual(len(metrics), 8)
+        # Nine since W4 added the judgement-outcome counts.
+        self.assertEqual(len(metrics), 9)
         for name, value in metrics.items():
             with self.subTest(metric=name):
                 self.assertIn("available", value)
                 if not value["available"]:
                     self.assertTrue(value["reason"].strip())
-        # Not one of the eight is readable on a bare store, and every one of
+        # Not one of the nine is readable on a bare store, and every one of
         # them says which table it wanted.
         self.assertEqual([name for name, value in metrics.items() if value["available"]], [])
 

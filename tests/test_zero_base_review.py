@@ -574,8 +574,16 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("dalton_core.mission_zero_base_lane", LANE_MODULES)
         spec = lane_for_operation("dispatch_zero_base_review")
         self.assertIsNotNone(spec)
-        self.assertEqual((spec.order, spec.driver_key, spec.budget_pool),
-                         (170, "zero_base_review", "coverage"))
+        self.assertEqual((spec.order, spec.driver_key), (155, "zero_base_review"))
+        # The pool is C2's central mapping's to say, not the lane's.
+        self.assertIsNone(spec.budget_pool)
+        # Before the weekly reflection, which reports the counts this lane
+        # writes, and which keeps the last place in the tick.
+        from dalton_core.lane_registry import tick_lanes
+
+        driven = [lane.driver_key for lane in tick_lanes()]
+        self.assertLess(driven.index("zero_base_review"),
+                        driven.index("mission_reflection"))
         self.assertIn("zero_base_review", REGISTRY_LANE_LABELS)
         self.assertIn("zero_base_review_schema.sql", dict(SCHEMA_DATABASES))
         self.assertIn("zero_base_review_schema.sql",

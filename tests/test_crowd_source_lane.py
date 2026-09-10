@@ -518,8 +518,12 @@ class LaneRegistrationTests(unittest.TestCase):
         # the other two: it acquires nothing. It reads the theses, the map and
         # the model that the evidence lanes above it produced, and proposes a
         # judgement about them.
+        # W4's zero-base review joins them for the same reason again: it
+        # acquires nothing at all. It re-reads the theses, the debates and the
+        # judgement ledger the evidence lanes above it filled, and asks whether
+        # we would write any of it the same way today.
         not_evidence = {"dispatch_research_task", "dispatch_mission_reflection",
-                        "dispatch_conviction_call"}
+                        "dispatch_conviction_call", "dispatch_zero_base_review"}
         evidence_lanes = [
             spec.operation for spec in self.registry.tick_lanes()
             if spec.operation not in not_evidence

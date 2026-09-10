@@ -20,10 +20,11 @@ child runs in ``checks`` mode and costs nothing, which is what keeps the
 Otherwise the lane answers ``idle`` after two reads, which is what it does on
 almost every tick of almost every day.
 
-It runs after the weekly reflection (160) and after the judgement lane (116)
-for the same reason the reflection runs last: it reads what those lanes wrote,
-and one tick of staleness costs nothing while a half-written month costs a
-paid call.
+It runs after the judgement lane (116) and the research-task lane (150),
+because it reads what they wrote, and immediately before the weekly reflection
+(160), because the reflection reports the outcome counts this lane keeps
+fresh.  The reflection stays last in the tick: that is its own invariant and
+this lane has no reason to take it.
 """
 
 from __future__ import annotations
@@ -303,18 +304,21 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_zero_base_review",
-    # After the weekly reflection (160). It reads the judgement ledger, the
-    # deliverable chain and the price series, all of which earlier lanes
-    # write, and it is the lane whose freshness matters least: a review that
-    # runs one tick later is the same review.
-    order=170,
+    # Between the research-task lane (150) and the weekly reflection (160).
+    # After everything that writes what it reads -- the judgement ledger, the
+    # deliverable chain, the price series -- and *before* the reflection,
+    # because the reflection reports the outcome counts this lane keeps fresh
+    # and reading them one tick stale every week is avoidable for nothing.
+    # The reflection stays last, which is its own lane's documented invariant.
+    order=155,
     driver_key="zero_base_review",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,
     argparse=add_arguments,
     launcher_factory=build_launcher,
     argv_fragment=argv_fragment,
-    budget_pool="coverage",
+    # The pool is declared once, in ``budget_pools.LANE_POOLS``; no lane in
+    # this registry names its own, and C2's test holds that line.
     note="W4: once a month per covered company, and after each earnings "
          "calibration, ask from zero whether we would form this view today. "
          "Proposes ThesisRevisionCandidates through ADR-0007; decides nothing. "
