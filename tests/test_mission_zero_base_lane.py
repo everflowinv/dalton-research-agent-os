@@ -62,7 +62,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "launched")
         self.assertEqual(result["mode"], "review")
         self.assertEqual(launcher.started[0]["company_refs"], ["company:ACN"])
-        self.assertIn("monthly:2026-03:company:ACN", launcher.started[0]["batch_ref"])
+        self.assertEqual(len(launcher.started[0]["batch_ref"]), 64)
 
     def test_nothing_due_but_a_moved_ledger_launches_the_free_pass(self) -> None:
         launcher = FakeLauncher()

@@ -108,6 +108,19 @@ class LaneTests(ResearchTaskFixture):
         self.now = self.now + timedelta(hours=2)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
+    def test_idle_child_permission_is_not_success_and_config_change_recovers(self):
+        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.launcher.model_config = self.state_dir / "model.json"
+        self.launcher.model_config.write_text("{}")
+        first = self.coordinator.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], status="succeeded", summary={
+            "status": "idle", "failure_reason": "not_granted"})
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "not_permitted")
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "not_permitted")
+        self.assertEqual(len(self.launcher.started), 1)
+        self.launcher.model_config.write_text('{"route": "ready"}')
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
     def test_a_failed_child_is_held_rather_than_respawned_every_tick(self) -> None:
         self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
         first = self.coordinator.dispatch_once()

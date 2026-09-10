@@ -42,6 +42,9 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
+from .lane_permission_control import (
+    permission_key, clear_obsolete_permissions, record_controlled_failure,
+)
 from .store import canonical_json
 
 # The lane exists where its own configuration does.  A research task spends the
@@ -174,17 +177,19 @@ class ResearchTaskCoordinator:
         retired = getattr(self.launcher, "retired_templates", ())
         decision = grant(mission, bindable_templates(authority, retired=retired))
         settled = self.settle()
+        top_permission = permission_key(
+            "permission|research_task", mission, self.launcher, connection=self.store.connection)
+        clear_obsolete_permissions(self.failure_budget, top_permission, scope_prefix="permission|")
         if not decision["granted"]:
             # The switch, stated rather than hidden: the reasons are the two
             # owner acts that are missing.
-            permission = self.failure_budget.record(
-                f"permission|{mission.get('id')}",
-                status="gated:not permitted " + ",".join(decision["reasons"]),
-            )
+            permission = self.failure_budget.blocked(top_permission)
+            if permission is None:
+                permission = self.failure_budget.record(
+                    top_permission, status="gated:not permitted " + ",".join(decision["reasons"]))
             return {"status": "not_granted", "reasons": decision["reasons"],
                     "failure": permission.as_wire(), **settled}
-        for row in self.failure_budget.permission_items():
-            self.failure_budget.clear(row["item_key"])
+        self.failure_budget.retire(top_permission, reason="mission_grant_available")
         day = self.clock().astimezone(timezone.utc).date().isoformat()
         state = pool_state(
             authority, mission, day=day, budget_db=self.budget_db)
@@ -206,7 +211,8 @@ class ResearchTaskCoordinator:
                     "refused": summary.get("refused"),
                     "failure_reason": summary.get("failure_reason"),
                 }
-                if ticket["status"] in {"failed", "orphaned"}:
+                if (ticket["status"] in {"failed", "orphaned"}
+                        or summary.get("failure_reason") == "not_granted"):
                     # The hold starts when the failure was seen, not when the
                     # child was launched: a run that took fifty minutes to
                     # fail would otherwise be retried ten minutes later, and a
@@ -214,9 +220,12 @@ class ResearchTaskCoordinator:
                     # a timestamp that meant something else.
                     failed_item = canonical_json(latest.get("idle_signature") or {})
                     if latest.get("failure_ticket_ref") != ticket["id"]:
-                        failure = self.failure_budget.record_settled(
-                            failed_item, {**result["last"],
-                                          "failure_reason": summary.get("failure_reason")},
+                        failure = record_controlled_failure(
+                            self.failure_budget, failed_item, mission, self.launcher,
+                            connection=self.store.connection,
+                            reason=str(summary.get("failure_reason") or "research task failed"),
+                            status=("gated" if summary.get("failure_reason") == "not_granted"
+                                    else ticket["status"]),
                         )
                         write_owner_only(self._latest_path(), {
                             **latest, "failure_ticket_ref": ticket["id"],
@@ -243,7 +252,15 @@ class ResearchTaskCoordinator:
             row["item_key"] == failure_item
             for row in self.failure_budget.parked_items()
         )
-        blocked = self.failure_budget.blocked(failure_item)
+        control = permission_key(failure_item, mission, self.launcher,
+                                 connection=self.store.connection)
+        permission_recovered = any(
+            row["item_key"] != control for row in self.failure_budget.permission_items())
+        for row in (self.failure_budget.parked_items() + self.failure_budget.terminal_items()
+                    + self.failure_budget.permission_items()):
+            if row["item_key"] not in {failure_item, control}:
+                self.failure_budget.retire(row["item_key"])
+        blocked = self.failure_budget.blocked(control) or self.failure_budget.blocked(failure_item)
         if blocked is not None:
             return {**result, "status": blocked.action, "signature": signature,
                     "reason": self.failure_budget.failure_reason(failure_item),
@@ -253,6 +270,7 @@ class ResearchTaskCoordinator:
             and latest.get("idle_signature") == signature
             and self._within(latest.get("idle_at"), IDLE_HOLD)
             and not dependency_probe
+            and not permission_recovered
         ):
             return {**result, "status": "held", "signature": signature,
                     "reason": "计划和已派发的专项研究都没有变化"}

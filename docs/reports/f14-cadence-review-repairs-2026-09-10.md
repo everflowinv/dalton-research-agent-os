@@ -1,0 +1,7 @@
+# F14 cadence cross-review repairs
+
+Zero-base review now carries the selected company list through the real child CLI, and returns each company's actual context inputs hash with both refusal and success. The coordinator records per-company semantic refusals even when the child process succeeds. Identical refused inputs remain terminal across restarts, changed evidence retires only the superseded company input, and free outcome checks can proceed while paid reviews are blocked. Batch identities use complete hashes rather than truncated concatenations.
+
+Zero-base, reflection and research-task top-level permission holds are deduplicated and isolated from child permissions. Child permission failures bind mission, Core control pointers and model/policy file fingerprints. A control change can recover the same business input without erasing unchanged holds every tick. Research-task's actual idle/not_granted child result is no longer treated as successful admission; permission recovery bypasses its ordinary one-hour idle delay. Reflection uses its registered lane key for ops projections and retires obsolete week/input failures.
+
+Validation: 124 focused tests passed in 0.997s, including a real Core/mission and real zero-base CLI/producer refusal, repeated company flags through launcher/CLI parsing, durable refusal/restart recovery, and actual research-task permission status semantics. No live mutation or deployment. Crowd-source's equivalent input/control repairs are developed separately; full integration follows all slices.

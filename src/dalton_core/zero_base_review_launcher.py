@@ -62,7 +62,8 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
                 and self.verifier_model_config is not None
                 and self.verifier_model_config.is_file())
 
-    def _command(self, *, ticket_dir: Path, mode: str = "review", **_: Any) -> list[str]:
+    def _command(self, *, ticket_dir: Path, mode: str = "review",
+                 company_refs: Sequence[str] = (), **_: Any) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
@@ -77,6 +78,8 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
             command += ["--tracking-policy", str(self.policy_path)]
         if self.scheduler_db is not None:
             command += ["--scheduler", str(self.scheduler_db)]
+        for company_ref in company_refs:
+            command += ["--company-ref", company_ref]
         return command
 
     def start(
@@ -97,7 +100,7 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
             digest=digest,
             record={"mode": mode, "batch_ref": batch_ref.strip(),
                     "company_refs": list(company_refs)},
-            mode=mode,
+            mode=mode, company_refs=list(company_refs),
         )
 
 

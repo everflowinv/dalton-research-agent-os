@@ -53,6 +53,9 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
+from .lane_permission_control import (
+    permission_key, clear_obsolete_permissions, record_controlled_failure,
+)
 from .research_cycle_reflection import (
     WRITE_SCOPE,
     build_reflection,
@@ -65,7 +68,7 @@ LAUNCHER_KWARG = "reflection_launcher"
 TICKET_PREFIX = "research-cycle-reflection"
 TICKETS_DIRNAME = "research-cycle-reflections"
 MAX_FAILURE_DETAIL_CHARS = 500
-DRIVER_KEY = "reflection"
+DRIVER_KEY = "mission_reflection"
 MAX_TRANSIENT_FAILURES = 1
 
 
@@ -170,8 +173,11 @@ class MissionReflectionLaneCoordinator:
         week_state: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]],
         clock: Callable[[], datetime] | None = None,
         failure_ledger_dir: Any | None = None,
+        connection: Any | None = None,
     ) -> None:
         self.launcher = launcher
+        self.connection = connection
+        self._launch_mission: Mapping[str, Any] = {}
         self.mission = mission
         # (mission, window) -> {"inputs_hash", "already_recorded"}. Named as a
         # collaborator rather than done inline so the tick's decision can be
@@ -228,7 +234,12 @@ class MissionReflectionLaneCoordinator:
         if week and digest:
             item = f"{week}|{digest}"
             if settled.get("status") != "succeeded":
-                settled["failure"] = self.budget.record_settled(item, settled).as_wire()
+                settled["failure"] = record_controlled_failure(
+                    self.budget, item, self._launch_mission, self.launcher,
+                    connection=self.connection,
+                    reason=str(settled.get("failure_reason") or "reflection failed"),
+                    status=str(settled.get("status")),
+                ).as_wire()
             else:
                 resumed = self.budget.clear(item)
                 if resumed:
@@ -245,11 +256,14 @@ class MissionReflectionLaneCoordinator:
         mission = self.mission()
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
+        top_permission = permission_key(
+            "permission|reflection", mission, self.launcher, connection=self.connection)
+        clear_obsolete_permissions(self.budget, top_permission, scope_prefix="permission|")
         if not may_write_reflection(mission):
-            permission = self.budget.record(
-                f"permission|{mission.get('id') or mission.get('mission_ref')}",
-                status="gated:mission does not grant deliverable",
-            )
+            permission = self.budget.blocked(top_permission)
+            if permission is None:
+                permission = self.budget.record(
+                    top_permission, status="gated:mission does not grant deliverable")
             return {
                 "status": "ungranted", "settled": settled,
                 "failure": permission.as_wire(),
@@ -259,8 +273,7 @@ class MissionReflectionLaneCoordinator:
                     "published without the grant"
                 ),
             }
-        for row in self.budget.permission_items():
-            self.budget.clear(row["item_key"])
+        self.budget.retire(top_permission, reason="mission_grant_available")
         week = closed_week(self.clock())
         iso_week = week["iso_week"]
         try:
@@ -270,7 +283,15 @@ class MissionReflectionLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         digest = str(state["inputs_hash"])
         reflection_ref = reflection_ref_for(str(mission["mission_ref"]), iso_week)
+        item = f"{iso_week}|{digest}"
+        control = permission_key(item, mission, self.launcher, connection=self.connection)
+        for row in (self.budget.parked_items() + self.budget.terminal_items()
+                    + self.budget.permission_items()):
+            if row["item_key"] not in {item, control}:
+                self.budget.retire(row["item_key"])
         if state["already_recorded"]:
+            self.budget.clear(item)
+            self.budget.retire(control, reason="reflection_exists")
             # The normal resting state, six days out of seven. Named
             # "duplicate" rather than "idle" because it is not that there was
             # nothing to do -- this exact reading of the week exists, and
@@ -281,7 +302,7 @@ class MissionReflectionLaneCoordinator:
                 "reason": f"{iso_week} 已经有一条 reflection，且它的输入没有变",
             }
         item = f"{iso_week}|{digest}"
-        blocked = self.budget.blocked(item)
+        blocked = self.budget.blocked(control) or self.budget.blocked(item)
         if blocked is not None:
             return {"status": blocked.action, "iso_week": iso_week,
                     "inputs_hash": digest, "settled": settled,
@@ -295,6 +316,7 @@ class MissionReflectionLaneCoordinator:
         except LaneChildRejected as exc:
             return {"status": "rejected", "iso_week": iso_week, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
+        self._launch_mission = mission
         self._open = ticket["id"]
         return {
             "status": "launched", "iso_week": iso_week, "inputs_hash": digest,
@@ -361,6 +383,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         coordinator = MissionReflectionLaneCoordinator(
             launcher=launcher, mission=mission, week_state=week_state,
             failure_ledger_dir=getattr(server, "state_dir", None),
+            connection=server.store.connection,
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

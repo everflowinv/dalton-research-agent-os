@@ -213,6 +213,21 @@ class SettlementTests(unittest.TestCase):
         self.assertEqual(result["settled"]["reflection_status"], "fresh")
         self.assertEqual(result["settled"]["backlog_candidates"], 1)
 
+    def test_child_permission_survives_ticks_and_recovers_when_config_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = FakeLauncher()
+            launcher.model_config = Path(directory) / "model.json"
+            launcher.model_config.write_text("{}")
+            lane = coordinator(launcher)
+            first = lane.dispatch_once()
+            launcher.settle(first["ticket_ref"], status="failed", summary={
+                "reason": "mission does not grant deliverable"})
+            self.assertEqual(lane.dispatch_once()["status"], "not_permitted")
+            self.assertEqual(lane.dispatch_once()["status"], "not_permitted")
+            self.assertEqual(len(launcher.started), 1)
+            launcher.model_config.write_text('{"route": "ready"}')
+            self.assertEqual(lane.dispatch_once()["status"], "launched")
+
     def test_a_failed_week_is_held_rather_than_retried_every_five_minutes(self):
         launcher = FakeLauncher()
         lane = coordinator(launcher)

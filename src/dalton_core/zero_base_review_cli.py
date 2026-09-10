@@ -149,6 +149,7 @@ def run_zero_base(
     policy_path: Path | None = None,
     scheduler_db: Path | None = None,
     company_ref: str | None = None,
+    company_refs: list[str] | None = None,
     max_reviews: int = MAX_REVIEWS_PER_RUN,
     model: Any = None,
     verifier_model: Any = None,
@@ -196,8 +197,10 @@ def run_zero_base(
         actor = mission["autonomy"]["automation_principal"]
         policy = load_policy(policy_path)
         tracked = screen_passed_companies(missions, mission)
-        if company_ref is not None:
-            tracked = [ref for ref in tracked if ref == company_ref]
+        selected = ({company_ref} if company_ref is not None else
+                    set(company_refs) if company_refs is not None else None)
+        if selected is not None:
+            tracked = [ref for ref in tracked if ref in selected]
 
         # The derived ledger first, and in both modes: it costs nothing, it is
         # what the review's prompt reads, and a review written against last
@@ -297,6 +300,7 @@ def _review_one(
     if answered["status"] != "reviewed":
         return {"company_ref": company_ref, "status": "refused",
                 "trigger": item["trigger"], "period_label": item["period_label"],
+                "inputs_hash": context["inputs_hash"],
                 "reason": answered.get("reason"),
                 "lane_status": answered.get("lane_status")}
     verified = verify_review(
@@ -306,6 +310,7 @@ def _review_one(
     if verified["status"] != "verified":
         return {"company_ref": company_ref, "status": "refused",
                 "trigger": item["trigger"], "period_label": item["period_label"],
+                "inputs_hash": context["inputs_hash"],
                 "reason": verified.get("reason"), "lane_status": verified.get("lane_status"),
                 "verification": verified}
     body = build_review_body(
@@ -317,6 +322,7 @@ def _review_one(
     result = {
         "company_ref": company_ref, "status": written["status"],
         "trigger": item["trigger"], "period_label": item["period_label"],
+                "inputs_hash": context["inputs_hash"],
         "review_ref": written["review_ref"], "review_version_ref": written["id"],
         "version": written["version"], "form_a_view": written["answers"]["form_a_view"],
         "candidates": 0, "candidates_ungranted": 0,
@@ -359,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verifier-model-config")
     parser.add_argument("--tracking-policy")
     parser.add_argument("--scheduler")
-    parser.add_argument("--company-ref")
+    parser.add_argument("--company-ref", action="append")
     parser.add_argument("--max-reviews", type=int, default=MAX_REVIEWS_PER_RUN)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
@@ -372,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
                                else Path(args.verifier_model_config)),
         policy_path=None if not args.tracking_policy else Path(args.tracking_policy),
         scheduler_db=None if not args.scheduler else Path(args.scheduler),
-        company_ref=args.company_ref,
+        company_refs=args.company_ref,
         max_reviews=args.max_reviews,
     )
     if not args.quiet:

@@ -40,6 +40,10 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
+from .store import content_hash
+from .lane_permission_control import (
+    permission_key, clear_obsolete_permissions, record_controlled_failure,
+)
 from .zero_base_review import WRITE_SCOPE
 
 LAUNCHER_KWARG = "zero_base_review_launcher"
@@ -65,6 +69,13 @@ def may_write_review(mission: Mapping[str, Any] | None) -> bool:
     return WRITE_SCOPE in set(scopes)
 
 
+def review_item_key(item: Mapping[str, Any]) -> str:
+    """A refusal belongs to one company's actual review input, not its month."""
+    fingerprint = item.get("inputs_hash") or content_hash(dict(item))
+    return (f"review:{item['company_ref']}|{item['trigger']}|"
+            f"{item['period_label']}|{fingerprint}")
+
+
 class MissionZeroBaseLaneCoordinator:
     """Settle the open child, then start the one this tick owes, if any."""
 
@@ -76,8 +87,11 @@ class MissionZeroBaseLaneCoordinator:
         lane_state: Callable[[Mapping[str, Any], datetime], dict[str, Any]],
         clock: Callable[[], datetime] | None = None,
         failure_ledger_dir: Any | None = None,
+        connection: Any | None = None,
     ) -> None:
         self.launcher = launcher
+        self.connection = connection
+        self._launch_mission: Mapping[str, Any] = {}
         self.mission = mission
         # (mission, now) -> {"due": [...], "checks_digest": "..."}.  Named as a
         # collaborator so the tick's decision can be tested without a Core, and
@@ -116,6 +130,8 @@ class MissionZeroBaseLaneCoordinator:
             "due": summary.get("due"),
             "reviewed": summary.get("reviewed"),
             "refused": summary.get("refused"),
+            "reviews": summary.get("reviews") or [],
+            "child_status": summary.get("status"),
             "candidates": summary.get("candidates"),
             "checked": checks.get("checked"),
             "checks_fresh": checks.get("fresh"),
@@ -144,12 +160,35 @@ class MissionZeroBaseLaneCoordinator:
                 self._checked = str(digest)
         if mode and batch:
             item = f"{mode}|{batch}"
-            if settled.get("status") == "succeeded":
+            mission = self._launch_mission
+            if (settled.get("status") == "succeeded"
+                    and not settled.get("failure_reason")):
                 resumed = self.budget.clear(item)
                 if resumed:
                     settled["resumed"] = resumed
             else:
-                settled["failure"] = self.budget.record_settled(item, settled).as_wire()
+                settled["failure"] = record_controlled_failure(
+                    self.budget, item, mission, self.launcher,
+                    connection=self.connection,
+                    reason=str(settled.get("failure_reason") or "child failed"),
+                    status=str(settled.get("review_status") or settled.get("status")),
+                ).as_wire()
+            for outcome in settled["reviews"]:
+                if not all(outcome.get(k) for k in (
+                    "company_ref", "trigger", "period_label", "inputs_hash"
+                )):
+                    continue
+                key = review_item_key(outcome)
+                if outcome.get("status") in {"fresh", "duplicate"}:
+                    self.budget.clear(key)
+                else:
+                    failure = record_controlled_failure(
+                        self.budget, key, mission, self.launcher,
+                        connection=self.connection,
+                        reason=str(outcome.get("reason") or "review refused"),
+                        status=str(outcome.get("lane_status") or outcome.get("status")),
+                    )
+                    outcome["failure"] = failure.as_wire()
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -159,22 +198,20 @@ class MissionZeroBaseLaneCoordinator:
         mission = self.mission()
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
+        top_permission = permission_key(
+            "permission|review", mission, self.launcher, connection=self.connection)
+        clear_obsolete_permissions(self.budget, top_permission, scope_prefix="permission|")
         if not may_write_review(mission):
-            permission = self.budget.record(
-                f"permission|{mission.get('id') or mission.get('mission_ref')}",
-                status="gated:mission does not grant deliverable",
-            )
+            permission = self.budget.blocked(top_permission)
+            if permission is None:
+                permission = self.budget.record(
+                    top_permission, status="gated:mission does not grant deliverable")
             return {
                 "status": "ungranted", "settled": settled,
                 "failure": permission.as_wire(),
-                "reason": (
-                    f"this mission does not grant {WRITE_SCOPE} in autonomy.may_write; "
-                    "a zero-base review is a deliverable-class artefact and is not "
-                    "published without the grant"
-                ),
+                "reason": f"this mission does not grant {WRITE_SCOPE} in autonomy.may_write",
             }
-        for row in self.budget.permission_items():
-            self.budget.clear(row["item_key"])
+        self.budget.retire(top_permission, reason="mission_grant_available")
         now = self.clock()
         try:
             state = self.lane_state(mission, now)
@@ -183,22 +220,40 @@ class MissionZeroBaseLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         due = list(state.get("due") or ())
         digest = str(state.get("checks_digest") or "")
-        if due:
+        eligible = []
+        holds = []
+        for candidate in due:
+            key = review_item_key(candidate)
+            scope = f"review:{candidate['company_ref']}|"
+            control = permission_key(key, mission, self.launcher, connection=self.connection)
+            for row in (self.budget.parked_items() + self.budget.terminal_items()
+                        + self.budget.permission_items()):
+                old = row["item_key"]
+                if old.startswith(scope) and old not in {key, control}:
+                    self.budget.retire(old)
+            blocked = self.budget.blocked(control) or self.budget.blocked(key)
+            if blocked is None:
+                eligible.append(candidate)
+            else:
+                holds.append(blocked)
+        if eligible:
             mode = "review"
-            companies = [str(item["company_ref"]) for item in due]
-            batch = "|".join(sorted(
-                f"{item['trigger']}:{item['period_label']}:{item['company_ref']}"
-                for item in due
-            ))[:400]
+            companies = [str(item["company_ref"]) for item in eligible]
+            batch = content_hash(sorted(review_item_key(item) for item in eligible))
         elif digest and digest != self._checked:
             mode = "checks"
             companies = []
             batch = digest
+        elif holds:
+            return {"status": holds[0].action, "mode": "review", "settled": settled,
+                    "failure": holds[0].as_wire(), "blocked_reviews": len(holds)}
         else:
             return {"status": "idle", "settled": settled, "checks_digest": digest,
                     "reason": "每家公司这个月都已经从零重问过，判断结果台账也没有变动"}
         item = f"{mode}|{batch}"
-        blocked = self.budget.blocked(item)
+        control = permission_key(item, mission, self.launcher, connection=self.connection)
+        clear_obsolete_permissions(self.budget, control, scope_prefix=f"{mode}|")
+        blocked = self.budget.blocked(control) or self.budget.blocked(item)
         if blocked is not None:
             return {"status": blocked.action, "mode": mode, "settled": settled,
                     "reason": self.budget.failure_reason(item),
@@ -213,6 +268,7 @@ class MissionZeroBaseLaneCoordinator:
         except LaneChildRejected as exc:
             return {"status": "rejected", "mode": mode, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
+        self._launch_mission = mission
         self._open = ticket["id"]
         return {"status": "launched", "mode": mode, "ticket_ref": ticket["id"],
                 "due": len(due), "settled": settled}
@@ -235,8 +291,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         # guard on the tables anyway, but a Core that has this lane installed
         # should have the tables from the first tick rather than from the first
         # child that happens to finish.
-        ZeroBaseReviewAuthority(server.store)
-        JudgementOutcomeAuthority(server.store)
+        reviews = ZeroBaseReviewAuthority(server.store)
+        outcomes = JudgementOutcomeAuthority(server.store)
         prices = MarketPriceSeriesAuthority(server.store)
 
         def mission() -> Any:
@@ -255,7 +311,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             from .judgement_outcome import build_outcome_checks, checks_digest
             from .tracking_cadence import load_policy, screen_passed_companies
             from .tracking_lane_cli import thesis_stances
-            from .zero_base_review import due_reviews
+            from .zero_base_review import due_reviews, build_context
 
             connection = server.store.connection
             tracked = screen_passed_companies(server.coverage_mission, mission_record)
@@ -263,6 +319,15 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
                 connection, mission_ref=str(mission_record["mission_ref"]),
                 company_refs=tracked, now=now,
             )
+            for item in due:
+                context = build_context(
+                    connection, mission=mission_record, company_ref=item["company_ref"],
+                    trigger=item["trigger"], period_label=item["period_label"], now=now,
+                    calibration=item.get("calibration"),
+                    prior_review=reviews.for_company(mission_record["mission_ref"], item["company_ref"]),
+                    outcome_counts=outcomes.counts(item["company_ref"]),
+                )
+                item["inputs_hash"] = context["inputs_hash"]
             policy = load_policy(getattr(launcher, "policy_path", None))
             universe = [
                 member["company_ref"] for member in mission_record["universe"]
@@ -278,6 +343,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         coordinator = MissionZeroBaseLaneCoordinator(
             launcher=launcher, mission=mission, lane_state=lane_state,
             failure_ledger_dir=getattr(server, "state_dir", None),
+            connection=server.store.connection,
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
