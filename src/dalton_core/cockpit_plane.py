@@ -200,6 +200,8 @@ REGISTRY_LANE_LABELS = {
     "mission_reopen": "看已过闸的公司够不够重写一版",
     "catalog_sync": "跟住网关有哪些模型可用",
     "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
+    "model_stage_bridge": "核对行业与公司模型，推进研究阶段",
+    "investment_memo": "起草投资备忘录，独立核验后交给你裁决",
     "zero_base_review": "每月从零重问：今天第一次看会不会建立观点",
 }
 # Already shown by name above the registry rows, with their budgets.

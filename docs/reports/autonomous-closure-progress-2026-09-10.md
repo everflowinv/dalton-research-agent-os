@@ -26,3 +26,9 @@ Owner 已授权自主部署，沿用已签 mission v14；不自动进行 Deep In
 `ab903d4` 全量6349项 /535.009s发现15个兼容错误（1 skip），未部署：11个来自初页/网页launcher不接受额外cursor关键字，4个来自纯cadence测试被新增不必要authority读取影响。修复只在真实续页传cursor，并先尊重cadence/open dispatch，再检查是否有短缺可续页。失败冻结树与日志保留，新恢复候选会包含该修复。
 
 Memo + 模型阶段 + registry 集成75项 /2.823s通过；真实company model authority测试捕获并修复sensitivity状态词和无关industry表依赖；DebateMap正式失败重放保留code，生成合同修复允许准确恢复，144项 /2.249s通过。未把失败候选或正常child退出写成部署/研究产物成功。
+
+## Owner追加的最终交付要求
+
+桌面顶层已定位 `US eCommerce_Model_20260801.xlsx` 与 `STRL_Initial Screen_20260612.docx`（同桌面子目录还有其他模型，暂不推定为本次目标）。完成当前恢复与Cockpit后，详细阅读这两份：作为既有研究导入的实际样本，并重点拆解AMZN多个sheet的年度/季度预测、公式依赖、基金格式。原件不改、不提交仓库。
+
+文字最终交付采用HTML，可放图表与图片；Excel必须从Dalton内部模型导出到基金相同格式。因此原先计划的通用Excel exporter先不盲做，等样本审读后按真实格式实施。历史预测作为prior assumption，不作为actual写入权威；导入须保留原始来源/版本/日期/公式与来源级别。
