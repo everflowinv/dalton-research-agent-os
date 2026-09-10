@@ -1169,7 +1169,13 @@ class SensitivityProjectionAuthority:
         finally:
             self._authorized = False
 
-    def publish(self, body: Mapping[str, Any]) -> dict[str, Any]:
+    def publish(
+        self,
+        body: Mapping[str, Any],
+        *,
+        statement_rows: Sequence[Mapping[str, Any]] = (),
+        solver_results: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
         """Store one projection, or say it is the one already stored.
 
         A projection is derived: it holds no judgement, so unlike a forecast
@@ -1213,6 +1219,16 @@ class SensitivityProjectionAuthority:
         wire = validate_projection(record)
         wire["content_hash"] = content_hash(
             {key: value for key, value in wire.items() if key != "content_hash"})
+        # P17b. Four columns of the same chain at four levels of one
+        # assumption: the frozen formula fixes which way each has to move, and
+        # a column that moves the other way is a what-if nobody should read.
+        # A failure refuses the whole table rather than the offending column,
+        # because the ranking is computed across all of them.
+        from .economic_invariants import evaluate_projection, gate
+
+        gate(self.store, evaluate_projection(
+            wire, statement_rows=statement_rows, solver_results=solver_results),
+            mission_version_ref=wire.get("mission_version_ref"))
         with self._transaction() as cur:
             if cur.execute(
                 "SELECT 1 FROM sensitivity_projections WHERE projection_id=?",

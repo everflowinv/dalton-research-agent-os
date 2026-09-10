@@ -174,6 +174,21 @@ class LaneTests(unittest.TestCase):
         self.assertIn("forecast_line", held["reason"])
         self.assertEqual(len(self.launcher.started), 1)
 
+    def test_an_economic_invariant_refusal_is_held_like_any_other_refusal(self):
+        # P17b. The run *succeeded*: the gate refused, the reasons are on the
+        # record, nothing was published. Relaunching the identical digest next
+        # tick would refuse identically, so this holds until the assumptions
+        # move.
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "forecast_status": "unavailable:economic_invariants",
+            "failure_reason": "assumption_band: assumption:x assumes 0.20, "
+                              "outside the filed range 0.78 to 0.82"})
+        held = self.lane.dispatch_once()
+        self.assertEqual(held["status"], "held")
+        self.assertIn("outside the filed range", held["reason"])
+        self.assertEqual(len(self.launcher.started), 1)
+
     def test_a_failed_child_with_no_summary_is_still_attributable(self):
         first = self.lane.dispatch_once()
         self.launcher.finish(first["ticket_ref"], status="orphaned")

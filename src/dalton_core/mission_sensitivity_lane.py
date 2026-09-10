@@ -99,7 +99,12 @@ class MissionSensitivityLaneCoordinator:
             return settled
         self._open = None
         status = str(settled.get("sensitivity_status") or "")
-        failed = settled.get("status") != "succeeded" or status.startswith("refused:")
+        # ``unavailable:`` is P17b's economic-invariant refusal. It belongs on
+        # the same list as ``refused:``: the run succeeded, nothing was
+        # published, and retrying the identical digest every tick would refuse
+        # the identical way until the assumptions change.
+        failed = settled.get("status") != "succeeded" or status.startswith(
+            ("refused:", "unavailable:"))
         company_ref = settled.get("company_ref")
         digest = settled.get("projection_digest")
         if failed and company_ref and digest:

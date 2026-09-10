@@ -1885,6 +1885,7 @@ def apply_effect(
             return {"kind": "revise_forecast", "status": "proposed",
                     "reason": "the mission does not grant forecast_line writes; "
                               "the revision is a proposal for the human checkpoint"}
+        from .economic_invariants import UNAVAILABLE, EconomicInvariantRefused
         from .model_forecast_driver import ForecastModelError, revise_assumptions
 
         # Keyed on the event, because the judgement row is written after this
@@ -1916,6 +1917,12 @@ def apply_effect(
                 mission_version_ref=mission["id"],
             )
             published = forecast_models.publish(body)
+        except EconomicInvariantRefused as exc:
+            # P17b: a judgement may move an assumption; it may not move one
+            # into a chain that could not describe a company. The refusal is
+            # already on the record with every reason.
+            return {"kind": "revise_forecast", "status": UNAVAILABLE,
+                    "reason": "; ".join(exc.report.reasons)}
         except ForecastModelError as exc:
             return {"kind": "revise_forecast", "status": "refused",
                     "reason": f"{type(exc).__name__}: {exc}"}

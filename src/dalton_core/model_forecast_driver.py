@@ -236,8 +236,9 @@ _CELL_FIELDS = frozenset({
 })
 _ASSUMPTION_FIELDS = frozenset({
     "ref", "driver_ref", "period", "measure", "value", "unit", "kind",
-    "because", "refs", "provenance", "superseded_by",
+    "because", "refs", "provenance", "superseded_by", "outside_band",
 })
+_OUTSIDE_BAND_FIELDS = frozenset({"reason"})
 _REF_FIELDS = frozenset({"kind", "ref", "concept", "period_end", "accession"})
 _PROVENANCE_FIELDS = frozenset({"rule_ref", "work_order_ref", "decided_by"})
 _RESULT_FIELDS = frozenset({
@@ -652,6 +653,7 @@ def _assumption(
     unit: str, because: str, refs: Sequence[Mapping[str, Any]], decided_by: str,
     kind: str = "estimate", rule_ref: str | None = GENERATOR_REF,
     work_order_ref: str | None = None,
+    outside_band: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "ref": assumption_ref(driver_ref, str(period["end"]), kind),
@@ -668,6 +670,12 @@ def _assumption(
             "decided_by": decided_by,
         },
         "superseded_by": None,
+        # P17b: an assumption outside the range this company has actually filed
+        # is allowed and is not allowed to be silent. ``None`` says the value
+        # was not claimed to be outside anything; a mapping with a ``reason``
+        # says it is, and why. The economic-invariant gate refuses a value
+        # outside the filed band that carries neither.
+        "outside_band": None if outside_band is None else dict(outside_band),
     }
 
 
@@ -1650,7 +1658,8 @@ def revise_assumptions(
             unit=str(existing["unit"]), kind=kind,
             because=_text(change.get("because"), f"changes[{position}].because"),
             refs=change_refs, decided_by=actor_ref, rule_ref=None,
-            work_order_ref=change.get("work_order_ref"))
+            work_order_ref=change.get("work_order_ref"),
+            outside_band=change.get("outside_band"))
 
     forecast = [periods_by_end[end] for end in sorted(periods_by_end)]
     drivers = prior.get("drivers") or []
@@ -1829,6 +1838,11 @@ def _normalize_ref(value: Any, name: str) -> dict[str, Any]:
 
 
 def _normalize_assumption(value: Any, name: str, *, driver_refs: set[str]) -> dict[str, Any]:
+    # ``outside_band`` arrived after the first models were written and absence
+    # means "nothing was claimed", so a record from before it existed reads
+    # back unchanged rather than being refused for a field it could not have
+    # carried.
+    value = {"outside_band": None, **dict(value)} if isinstance(value, Mapping) else value
     wire = _closed(value, _ASSUMPTION_FIELDS, name)
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
     wire["driver_ref"] = _text(wire["driver_ref"], f"{name}.driver_ref")
@@ -1877,8 +1891,24 @@ def _normalize_assumption(value: Any, name: str, *, driver_refs: set[str]) -> di
     if wire["superseded_by"] is not None and wire["kind"] == "actual":
         raise ForecastModelValidationError(
             f"{name} is an actual and cannot have been superseded")
+    wire["outside_band"] = _normalize_outside_band(
+        wire["outside_band"], f"{name}.outside_band")
     wire["provenance"] = provenance
     return wire
+
+
+def _normalize_outside_band(value: Any, name: str) -> dict[str, str] | None:
+    """The flag, or nothing. A flag with no sentence behind it is not a flag."""
+
+    if value is None:
+        return None
+    wire = _closed(value, _OUTSIDE_BAND_FIELDS, name)
+    reason = _text(wire["reason"], f"{name}.reason")
+    if len(reason.split()) < 3:
+        raise ForecastModelValidationError(
+            f"{name}.reason must be a sentence saying why this company is "
+            "expected to leave the range it has filed")
+    return {"reason": reason}
 
 
 def _normalize_result(value: Any, name: str, *, assumption_refs: set[str],
@@ -2112,7 +2142,13 @@ class ForecastModelAuthority:
         finally:
             self._authorized = False
 
-    def publish(self, body: Mapping[str, Any]) -> dict[str, Any]:
+    def publish(
+        self,
+        body: Mapping[str, Any],
+        *,
+        statement_rows: Sequence[Mapping[str, Any]] = (),
+        solver_results: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
         """Store one model version, or say it is the one already stored.
 
         The body carries its own ``change_reason``, ``evidence_refs`` and, for
@@ -2168,6 +2204,18 @@ class ForecastModelAuthority:
         record.setdefault("decision", None)
         record["content_hash"] = content_hash(record)
         wire = validate_forecast_model(record)
+        # P17b. The structural validation above says the record is well formed;
+        # this says the company it describes could exist. Chem's workbook
+        # passed forty-two of the first kind and shipped a loss scenario as a
+        # zero percent return. A failure here is the whole version refused and
+        # recorded ``unavailable`` with its reasons -- never a repaired cell,
+        # because the arithmetic that produced the impossible line produced
+        # every other line too.
+        from .economic_invariants import evaluate_forecast_model, gate
+
+        gate(self.store, evaluate_forecast_model(
+            wire, statement_rows=statement_rows, solver_results=solver_results),
+            mission_version_ref=wire.get("mission_version_ref"))
         with self._transaction() as cur:
             if cur.execute(
                 "SELECT 1 FROM forecast_model_versions WHERE version_id=?", (version_id,)

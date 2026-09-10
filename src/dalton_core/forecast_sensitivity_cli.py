@@ -46,6 +46,7 @@ from .forecast_sensitivity import (
     projection_readiness,
 )
 from .model_forecast_driver import ForecastModelAuthority
+from .economic_invariants import EconomicInvariantRefused
 from .store import DaltonStore, canonical_json
 
 SUMMARY_SCHEMA_VERSION = "0.1"
@@ -258,7 +259,18 @@ def run_sensitivity(
             summary.update({"status": "succeeded",
                             "sensitivity_status": f"refused:{exc}"})
             return summary
-        stored = projections.publish(body)
+        try:
+            stored = projections.publish(body)
+        except EconomicInvariantRefused as exc:
+            # P17b, and the same rule as the model lane: the refusal is
+            # already recorded with its reasons, so the tick succeeded and the
+            # table is simply not there.
+            summary.update({
+                "status": "succeeded",
+                "sensitivity_status": "unavailable:economic_invariants",
+                "failure_reason": "; ".join(exc.report.reasons),
+            })
+            return summary
         readiness = projection_readiness(stored)
         summary.update({
             "status": "succeeded",
