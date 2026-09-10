@@ -40,8 +40,11 @@ def _evaluate(connection: Any, mission: Mapping[str, Any], company_ref: str,
 
         model = _latest(connection, ForecastModelAuthority, company_ref)
         sensitivity = _latest(connection, SensitivityProjectionAuthority, company_ref)
+        proof = (None if model is None else
+                 _reader(connection, ForecastModelAuthority).filing_proof(model["id"]))
         return company_model_readiness(model, sensitivity, mission=mission,
                                        company_ref=company_ref,
+                                       filing_proof=proof,
                                        peer_comparison=(framework or {}).get(
                                            "cross_company_comparison"))
     except Exception as exc:

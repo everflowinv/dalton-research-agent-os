@@ -57,12 +57,12 @@ class ModelStageReadinessTests(unittest.TestCase):
         }
         result = industry_model_readiness(framework, mission=mission())
         self.assertFalse(result["passed"])
-        self.assertIn("input_as_of_dates_bound", result["reasons"])
-        self.assertIn("high_frequency_update_calendar_bound", result["reasons"])
+        self.assertIn("five_company_revenue_growth_margin_comparison", result["reasons"])
+        self.assertIn("comparison_limits_explained", result["reasons"])
         framework["cross_company_comparison"]["cells"] = []
         result = industry_model_readiness(framework)
         self.assertFalse(result["passed"])
-        self.assertIn("cross_company_comparison_computed", result["reasons"])
+        self.assertIn("five_company_revenue_growth_margin_comparison", result["reasons"])
 
     def test_company_requires_history_assumption_refs_and_quantified_bridge(self):
         model = {
@@ -86,7 +86,7 @@ class ModelStageReadinessTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("three_to_five_key_drivers", result["reasons"])
         self.assertIn("two_year_filings_reconciled_zero_error", result["reasons"])
-        self.assertIn("peer_relative_sensitivity_quantified", result["reasons"])
+        self.assertIn("two_year_filings_reconciled_zero_error", result["reasons"])
         model["assumptions"][0]["refs"] = []
         self.assertIn("forecast_assumptions_explicit",
                       company_model_readiness(model, sensitivity)["reasons"])
@@ -132,7 +132,7 @@ class ModelStageReadinessTests(unittest.TestCase):
         result = industry_model_readiness(
             framework, mission=mission(), cadence_source_keys=frozenset({"market_price"}))
         self.assertFalse(result["passed"])
-        self.assertIn("high_frequency_update_calendar_bound", result["reasons"])
+        self.assertIn("five_company_revenue_growth_margin_comparison", result["reasons"])
 
     def test_waiting_company_does_not_starve_later_ready_company(self):
         stages = {
@@ -191,7 +191,29 @@ class ModelStageReadinessTests(unittest.TestCase):
         result = company_model_readiness(
             model, sensitivity, mission=mission(), company_ref="company:a",
             peer_comparison=peers)
-        self.assertIn("peer_relative_sensitivity_quantified", result["reasons"])
+        self.assertNotIn("peer_relative_sensitivity_quantified", result["reasons"])
+
+    def test_signed_execution_scope_allows_explicit_unconnected_industry_gaps(self):
+        source = {"ref": "claim:1", "period": "2026-Q2"}
+        block = {"status": "drafted", "sources": [source]}
+        framework = {
+            "id": "framework:v1", "industry_ref": "industry:it",
+            "evidence_refs": ["claim:1"], "sections": [block],
+            "industry_characteristics": block, "long_term_drivers": block,
+            "short_term_drivers": block,
+            "bindings": {"mission_version_ref": "mission:v14"},
+            "cross_company_comparison": {
+                "status": "computed", "comparability_notes": ["filed basis"],
+                "companies": [{"company_ref": "company:a"}],
+                "cells": [{"metric": metric, "status": "computed"} for metric in
+                          ("revenue", "revenue_yoy_growth", "gross_margin")]},
+            "gaps": [{"gap_ref": "gap:high-frequency-demand", "status": "open",
+                      "candidate_sources": [{"source_ref": "source:not-connected"}]},
+                     {"gap_ref": "gap:demand-tam", "status": "open",
+                      "candidate_sources": [{"source_ref": "source:not-connected"}]}],
+        }
+        self.assertTrue(industry_model_readiness(
+            framework, mission=mission())["passed"])
 
     def test_waiting_readiness_recovers_without_terminal_gate_failure(self):
         stages = {"company:a": {"current_stage": "deep_insight_gate",

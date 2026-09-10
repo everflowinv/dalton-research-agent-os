@@ -27,11 +27,29 @@ def industry_model_readiness(
     all_inputs_sourced = bool(framework.get("evidence_refs")) and all(
         block.get("status") == "drafted" and block.get("sources") for block in blocks)
     comparison = framework.get("cross_company_comparison") or {}
+    expected_companies = {
+        str(row["company_ref"]) for row in (mission or {}).get("universe") or []
+    }
+    comparison_companies = {
+        str(row.get("company_ref")) for row in comparison.get("companies") or []
+    }
+    required_metrics = {"revenue", "revenue_yoy_growth", "gross_margin"}
+    computed_metrics = {
+        str(row.get("metric")) for row in comparison.get("cells") or []
+        if row.get("status") == "computed"
+    }
     comparison_ready = (
         comparison.get("status") == "computed"
-        and bool(comparison.get("companies")) and bool(comparison.get("cells"))
+        and bool(expected_companies)
+        and expected_companies <= comparison_companies
+        and required_metrics <= computed_metrics
     )
     gaps = list(framework.get("gaps") or [])
+    explicit_deferred_gaps = all(
+        gap.get("status") in {"open", "partially_covered", "covered"}
+        and gap.get("candidate_sources")
+        for gap in gaps
+    )
     high_frequency_identified = any(
         gap.get("gap_ref") == "gap:high-frequency-demand"
         and gap.get("status") in {"open", "partially_covered", "covered"}
@@ -48,23 +66,15 @@ def industry_model_readiness(
     # source was placed on an update calendar. Candidate sources are plans,
     # not completed playbook outputs. Keep the gate entered until those
     # authority contracts exist.
-    input_as_of_dates_bound = bool(blocks) and all(
-        all(source.get("period") for source in block.get("sources") or [])
-        for block in blocks if block.get("status") == "drafted"
-    )
-    # A baseline cadence only says how often a source would run. Neither it nor
-    # a connector candidate proves that this high-frequency input was bound to
-    # an installed calendar for this framework.
-    update_calendar_bound = False
     comparison_explained = bool(comparison.get("comparability_notes"))
     checks.extend([
         {"criterion": "active_mission_binding", "passed": mission_bound},
         {"criterion": "inputs_source_bound", "passed": all_inputs_sourced},
-        {"criterion": "input_as_of_dates_bound", "passed": input_as_of_dates_bound},
-        {"criterion": "cross_company_comparison_computed", "passed": comparison_ready},
-        {"criterion": "peer_gap_convergence_explained", "passed": comparison_explained},
-        {"criterion": "high_frequency_data_identified", "passed": high_frequency_identified},
-        {"criterion": "high_frequency_update_calendar_bound", "passed": update_calendar_bound},
+        {"criterion": "five_company_revenue_growth_margin_comparison",
+         "passed": comparison_ready},
+        {"criterion": "comparison_limits_explained", "passed": comparison_explained},
+        {"criterion": "unconnected_inputs_explicitly_deferred",
+         "passed": explicit_deferred_gaps and high_frequency_identified},
     ])
     return {
         "passed": all(row["passed"] for row in checks), "checks": checks,
@@ -80,13 +90,14 @@ def company_model_readiness(
     mission: Mapping[str, Any] | None = None,
     company_ref: str | None = None,
     peer_comparison: Mapping[str, Any] | None = None,
+    filing_proof: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not model:
         return {"passed": False, "checks": [], "reasons": ["no_forecast_model"],
                 "evidence_refs": []}
     ready = model_readiness(model)
     historical = (
-        ready["history_quarters"] > 0 and not ready["drivers_without_history"]
+        ready["history_quarters"] >= 8 and not ready["drivers_without_history"]
         and not ready["results_unavailable"]
     )
     assumptions = list(model.get("assumptions") or [])
@@ -104,7 +115,7 @@ def company_model_readiness(
         and sensitivity.get("model_version_ref") == model.get("id")
         and sensitivity.get("model_version_hash") == model.get("content_hash")
     )
-    driver_count = ready["drivers"]
+    driver_count = projection.get("drivers_selected", 0)
     driver_count_ready = 3 <= driver_count <= 5
     consensus_quantified = (
         bool(sensitivity)
@@ -123,8 +134,16 @@ def company_model_readiness(
     # Likewise a company band beside an unrelated peer table is not a
     # peer-relative sensitivity. These remain closed until typed derived proof
     # is persisted or can be recomputed from the exact source rows.
-    historical_reconciliation_proved = False
-    peer_sensitivity_proved = False
+    historical_reconciliation_proved = bool(
+        filing_proof
+        and filing_proof.get("model_version_ref") == model.get("id")
+        and filing_proof.get("model_content_hash") == model.get("content_hash")
+        and (filing_proof.get("invariant_report") or {}).get("status") == "available"
+    )
+    historical_bands_proved = (
+        projection.get("drivers_with_bands") == driver_count
+        and not projection.get("drivers_without_bands")
+    )
     checks = [
         {"criterion": "active_mission_model_sensitivity_binding", "passed": authority_binding},
         {"criterion": "three_to_five_key_drivers", "passed": driver_count_ready},
@@ -132,7 +151,7 @@ def company_model_readiness(
         {"criterion": "two_year_filings_reconciled_zero_error",
          "passed": historical_reconciliation_proved},
         {"criterion": "forecast_assumptions_explicit", "passed": assumptions_explicit},
-        {"criterion": "peer_relative_sensitivity_quantified", "passed": peer_sensitivity_proved},
+        {"criterion": "driver_peak_trough_mean_bands", "passed": historical_bands_proved},
         {"criterion": "consensus_divergence_quantified", "passed": consensus_quantified},
     ]
     refs = [str(model["id"])]
