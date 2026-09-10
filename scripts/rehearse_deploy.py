@@ -405,6 +405,10 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "connector-governance/sec-financial-statements-v2.json",
     ),
     SeedSpec(
+        "deploy/connector-governance/sec-financial-statements-v3.json",
+        "connector-governance/sec-financial-statements-v3.json",
+    ),
+    SeedSpec(
         "deploy/connector-governance/yfinance-daily-prices-v1.json",
         "connector-governance/yfinance-daily-prices-v1.json",
     ),

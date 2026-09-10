@@ -38,7 +38,8 @@ def _model_spec(*, historical_quarters):
     """The smallest specification the frame accepts, with a chosen horizon."""
 
     return {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
+        "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: heads times realised rate.",
         "revenue_drivers": [{
             "ref": "heads", "label": "Billable headcount", "kind": "volume",
@@ -331,7 +332,8 @@ class StatementLaneTests(unittest.TestCase):
         self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
         spec = spec_from_response(
             {"company_ref": ACN, "state_hash": "a" * 64,
-             "concepts": ["us-gaap:Revenues"]},
+             "concepts": ["us-gaap:Revenues"],
+             "statements": {"income": _observation()["filings"][0]["lines"]}},
             _model_spec(historical_quarters=20), decided_by="automation:x")
         self.missions.record_company_model_spec(
             spec, mission_version_ref=self.mission["id"])
@@ -343,7 +345,8 @@ class StatementLaneTests(unittest.TestCase):
     def test_a_specification_asking_for_less_never_goes_below_the_floor(self):
         spec = spec_from_response(
             {"company_ref": ACN, "state_hash": "a" * 64,
-             "concepts": ["us-gaap:Revenues"]},
+             "concepts": ["us-gaap:Revenues"],
+             "statements": {"income": _observation()["filings"][0]["lines"]}},
             _model_spec(historical_quarters=1), decided_by="automation:x")
         self.missions.record_company_model_spec(
             spec, mission_version_ref=self.mission["id"])

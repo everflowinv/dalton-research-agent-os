@@ -89,7 +89,7 @@ class ChildTests(unittest.TestCase):
 
         record = build_governance_record(
             SEC_FINANCIALS_KIND, approved_by=OWNER, status="approved",
-            effective_from="2026-09-09T00:00:00+00:00", version=1)
+            effective_from="2026-09-09T00:00:00+00:00", version=2)
         path = self.root / "other.json"
         path.write_text(json.dumps(record), encoding="utf-8")
         summary = self.run_child(governance=path)
