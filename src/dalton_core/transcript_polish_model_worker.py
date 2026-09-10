@@ -269,6 +269,11 @@ class RoutedTranscriptPolishModelWorker:
     def _after_accounting(self, work, route, accounting):
         """Specialized tasks settle only after durable usage/cost records."""
 
+    def _execute_model(self, work, route, profile):
+        """Admit immediately before the adapter's execution boundary."""
+        self._before_model_call(work, route, profile, False)
+        return self.adapter.execute(work, route, profile)
+
     def _complete_route_rejection(self, work, lease, route):
         attempt_number = lease["attempt"]["attempt_number"]
         result = self._control_result(
@@ -406,8 +411,7 @@ class RoutedTranscriptPolishModelWorker:
                     route["selected_profile_version_ref"]
                 )
                 try:
-                    self._before_model_call(work, route, profile, False)
-                    invocation, adapter_result = self.adapter.execute(
+                    invocation, adapter_result = self._execute_model(
                         work, route, profile
                     )
                 except OpenClawModelAdapterError as exc:
@@ -419,16 +423,21 @@ class RoutedTranscriptPolishModelWorker:
                     classify_model_failure,
                     execute_chain,
                 )
+                from .openclaw_model_adapter import BrokerDefinitelyNotSent
 
 
                 def call(route, profile):
                     try:
-                        self._before_model_call(work, route, profile, False)
-                        value = self.adapter.execute(work, route, profile)
-                    except OpenClawModelAdapterError as exc:
+                        value = self._execute_model(work, route, profile)
+                    except BrokerDefinitelyNotSent as exc:
                         return {
                             "outcome": "failed",
                             "failure_class": classify_model_failure(exc),
+                        }
+                    except OpenClawModelAdapterError:
+                        return {
+                            "outcome": "failed",
+                            "failure_class": "unclassified_failure",
                         }
                     # A returned envelope may represent a paid provider response.
                     # Preserve it for the normal accounting path; only failures
@@ -460,7 +469,11 @@ class RoutedTranscriptPolishModelWorker:
                         work,
                         attempt_number,
                         code="MODEL_CHAIN_" + chained["status"].upper(),
-                        status=self._bounded_failure_status(lease),
+                        status=(
+                            self._bounded_failure_status(lease)
+                            if chained["status"] == "exhausted"
+                            else "failed"
+                        ),
                         route_ref=route_ref,
                     )
                     completion = self.scheduler.complete(

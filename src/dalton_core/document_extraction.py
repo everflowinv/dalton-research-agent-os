@@ -497,19 +497,13 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         self.budget_policy_ref = budget_policy_ref
         self.mission_resolver = mission_resolver
         self.admission = None
+        self._admission_identity = None
         super().__init__(adapter=adapter, polish_worker=None, **kwargs)
 
     def _before_model_call(self, work, route, profile, replayed):
         if type(self.adapter) is HermeticExtractionAdapter:
             if work.metadata["execution_mode"] != "hermetic_fixture":
                 raise ResearchVerificationError("fixture cannot impersonate broker execution")
-            return
-        # One Scheduler attempt may walk an approved provider fallback chain.
-        # The first link reserves the WorkOrder's full per-call ceiling; a
-        # connection/provider failure has no invocation to account, so later
-        # links reuse that durable reservation instead of creating a second
-        # paid-call identity in the same attempt.
-        if self.admission is not None and not replayed:
             return
         from .openclaw_model_adapter import OpenClawModelAdapterError
         from .thesis_impact_budget import ThesisImpactBudgetError
@@ -521,6 +515,12 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                 content_hash(self.router.get_policy(self.routing_policy_ref)) != binding["routing_policy_hash"] or
                 self.budget_store.policy(self.budget_policy_ref)["content_hash"] != binding["budget_policy_hash"]):
                 raise ResearchVerificationConflict("model configuration drifted")
+            admission_identity = (work.id, route["attempt_number"])
+            if self._admission_identity != admission_identity:
+                self.admission = None
+                self._admission_identity = admission_identity
+            if self.admission is not None and not replayed:
+                return
             if len(work.question.encode("utf-8")) > work.budget["max_input_tokens"]:
                 raise ResearchVerificationError("source exceeds conservative provider input-token bound; no call")
             mission = self.mission_resolver(work.metadata["context"])
@@ -580,6 +580,19 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                 )
         except Exception as exc:
             raise OpenClawModelAdapterError("document extraction budget/source admission rejected") from exc
+
+    def _execute_model(self, work, route, profile):
+        if type(self.adapter) is HermeticExtractionAdapter:
+            self._before_model_call(work, route, profile, False)
+            return self.adapter.execute(work, route, profile)
+        return self.adapter.execute(
+            work,
+            route,
+            profile,
+            before_send=lambda: self._before_model_call(
+                work, route, profile, False
+            ),
+        )
 
     def _after_accounting(self, work, route, accounting):
         if self.budget_store is None:

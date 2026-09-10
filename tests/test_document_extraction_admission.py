@@ -225,7 +225,9 @@ class BrokerAdmissionTests(unittest.TestCase):
         h.writer._document_extraction_model_config=checked._document_extraction_model_config
         self.calls=0;self.outputs={};self.actual_cost=0.001;self.invalid=False
 
-    def execute(self,adapter,work,route,pr):
+    def execute(self,adapter,work,route,pr,*,before_send=None):
+        if before_send is not None:
+            before_send()
         self.calls+=1
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0],1)
         context=work.metadata['context']
@@ -289,7 +291,12 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute('SELECT actual_micros FROM thesis_impact_day_settlements').fetchone()[0],1000)
 
     def test_disconnect_keeps_full_reservation_and_no_automatic_paid_retry(self):
-        with patch.object(OpenClawModelAdapter,'execute',side_effect=BrokerConnectionError('synthetic disconnect')) as call:
+        def uncertain_disconnect(adapter, work, route, profile, *, before_send=None):
+            before_send()
+            raise BrokerConnectionError('synthetic disconnect after admission')
+
+        with patch.object(OpenClawModelAdapter,'execute',autospec=True,
+                          side_effect=uncertain_disconnect) as call:
             result=self.h.generate();self.assertEqual(result['status'],'failed',result)
             self.h.generate();self.assertEqual(call.call_count,1)
         # P10x: the whole reservation stays open, and "the whole reservation"

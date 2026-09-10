@@ -14,7 +14,10 @@ from dalton_core.contracts import (
     WorkOrder,
 )
 from dalton_core.model_router import ModelRouter
-from dalton_core.openclaw_model_adapter import BrokerConnectionError
+from dalton_core.openclaw_model_adapter import (
+    BrokerConnectionError,
+    BrokerDefinitelyNotSent,
+)
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, content_hash
@@ -198,8 +201,14 @@ class FailFirstRecordingAdapter(RecordingAdapter):
     def execute(self, work: WorkOrder, route: dict, selected: dict):
         self.selected_profile_ids.append(selected["id"])
         if selected["id"] == self.failed_profile_id:
-            raise BrokerConnectionError("fixture provider unavailable")
+            raise BrokerDefinitelyNotSent("fixture provider unavailable")
         return FakeAdapter.execute(self, work, route, selected)
+
+
+class UncertainFailureRecordingAdapter(RecordingAdapter):
+    def execute(self, work: WorkOrder, route: dict, selected: dict):
+        self.selected_profile_ids.append(selected["id"])
+        raise BrokerConnectionError("fixture outcome is uncertain")
 
 
 class LateThenReplayAdapter(FakeAdapter):
@@ -445,6 +454,47 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+
+    def test_uncertain_connection_failure_does_not_walk_to_second_profile(self):
+        second = profile()
+        second.update({
+            "profile_version_ref": "model-profile-version:test-uncertain-backup:1",
+            "id": "profile:test-uncertain-backup",
+            "model": "uncertain-backup",
+            "family": "test-uncertain-backup",
+            "credential_slot_ref": "credential-slot:openclaw:uncertain-backup",
+        })
+        self.router.register_profile(second)
+        selected_policy = policy()
+        selected_policy.update({
+            "policy_version_ref": "model-routing-policy-version:test-uncertain:1",
+            "id": "model-routing-policy:test-uncertain",
+            "purpose_overrides": {
+                "document_extraction": {
+                    "mode": "explicit",
+                    "chain": [profile()["id"], second["id"]],
+                }
+            },
+        })
+        self.router.register_policy(selected_policy)
+        adapter = UncertainFailureRecordingAdapter(candidate())
+
+        class PurposeWorker(RoutedTranscriptPolishModelWorker):
+            purpose = "document_extraction"
+
+        model_work = self._prepare()
+        result = PurposeWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref=selected_policy["policy_version_ref"],
+            credential_slot_refs=(profile()["credential_slot_ref"],
+                                  second["credential_slot_ref"]),
+            clock=lambda: NOW,
+        ).run_once(model_work)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(adapter.selected_profile_ids, [profile()["id"]])
+        self.assertEqual(len(self.router.chain_links(work_order_id=model_work.id)), 1)
 
     def test_late_model_result_replays_without_second_execution(self) -> None:
         model_work = self._prepare()

@@ -20,17 +20,20 @@ exact profile selection. No code indexes the allow-list or silently chooses
 its first member.
 
 For a policy carrying a purpose chain, the worker now uses the shared
-`execute_chain` authority. A positively classified pre-invocation provider or
-transport failure advances to the next approved link within the same bounded
-Scheduler attempt. A returned result envelope remains on the normal accounting
-path because it may already represent paid work; it is never skipped in order
-to try another model. The served invocation is persisted and charged once.
+`execute_chain` authority. Only `BrokerDefinitelyNotSent`, emitted after a
+proved socket/preflight failure before any request bytes, advances to the next
+approved link. A generic connection error, timeout, protocol error, or returned
+result may describe paid or uncertain work, so it halts the chain and retains
+the conservative reservation. The served invocation is persisted and charged
+once.
 
-Document extraction reserves once for the attempt, at the greatest
-rate-card-derived amount among the configured purpose-chain candidates. A
-pre-invocation failure can therefore reuse that reservation for the next link
-without a second budget identity, while a more expensive fallback cannot
-silently exceed the first profile's reservation.
+The adapter calls the document-extraction admission hook after connecting and
+immediately before shared-capacity dispatch and socket send. Thus a proved
+not-sent first link creates no paid admission; the second link's immutable
+admission names the route that actually serves. Admission state is bound to
+`(work_order_ref, attempt_number)` and config authority is revalidated before
+reuse, so one long-lived worker cannot lend the first WorkOrder's admission to
+a second WorkOrder.
 
 ## Evidence
 
@@ -47,11 +50,10 @@ Command:
 PYTHONPATH=src python3 -m unittest tests.test_transcript_polish_model_worker tests.test_document_extraction_policy_chain
 ```
 
-Focused transcript/policy result: 8 tests passed. A broader extraction and
-budget run passed 50 tests:
+The final focused run passed 75 tests:
 
 ```text
-PYTHONPATH=src python3 -m unittest tests.test_transcript_polish_model_worker tests.test_document_extraction tests.test_document_extraction_admission tests.test_document_extraction_policy_chain
+PYTHONPATH=src python3 -m unittest tests.test_transcript_polish_model_worker tests.test_document_extraction tests.test_document_extraction_admission tests.test_document_extraction_policy_chain tests.test_openclaw_model_adapter
 ```
 
 No network, paid model call, live state write or deployment was performed.
