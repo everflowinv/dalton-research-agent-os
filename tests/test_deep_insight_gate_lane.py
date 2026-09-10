@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 
 from dalton_core.company_dossier import (
-    CLASSIFICATION_SLOTS, SECTIONS, CompanyDossierAuthority,
+    CLASSIFICATION_SLOTS, SECTIONS, VARIANT_SLOTS, CompanyDossierAuthority,
     causal_chain_hash, policy_hash, validate_policy,
 )
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -266,17 +266,20 @@ class Harness:
                              "text": "合同期限为五年", "period": None}],
                 "gaps": [],
             },
-            # Unavailable rather than drafted, and not by choice: a drafted
-            # variant view cannot round-trip through P12a's validator today
-            # (``validate_variant_view`` drops ``gaps`` on the drafted branch,
-            # so the body hash it publishes is not the body it re-reads). The
-            # gate handles the absence the way it handles any missing source --
-            # the questions that rest on it come back unknown -- and the report
-            # names the one-line fix for the integrator.
+            # Drafted, which is what the eighth, ninth and eleventh questions
+            # rest on: "what the market is paying for and where we think it is
+            # wrong" already lives here, and a gate that re-derived it from the
+            # same Claims would produce a second opinion nobody asked for.
             "variant_view": {
-                "status": "unavailable", "reason": "no_canonical_claims",
-                "market_view_available": False, "market_view_reason": None,
-                "structure": [], "slots": [], "sources": [],
+                "status": "drafted", "reason": None, "market_view_available": False,
+                "market_view_reason": "没有卖方或共识材料",
+                "structure": [slot for slot in VARIANT_SLOTS if slot != "market_view"],
+                "slots": [{"slot_id": slot,
+                           "sentences": [{"text": f"{slot} 的一句话。",
+                                          "refs": [self.claims["c-variant"]]}]}
+                          for slot in VARIANT_SLOTS if slot != "market_view"],
+                "sources": [{"kind": "claim", "ref": self.claims["c-variant"],
+                             "text": "我们与市场的分歧在这里", "period": None}],
                 "gaps": ["没有共识数字，市场那一侧只能留白"],
             },
             "bindings": self.dossier_bindings(),
@@ -454,6 +457,18 @@ class MaterialTests(unittest.TestCase):
                 map_version=self.harness.map_version, numbers=[])
             with self.subTest(group=group):
                 self.assertTrue(rows, "a group with no material cannot be drafted")
+
+    def test_the_variant_view_reaches_the_questions_that_rest_on_it(self):
+        # The plan makes the variant view a first-class field, and three of the
+        # twelve questions are about the market rather than the company. It is
+        # shown as the dossier's own block rather than re-derived, so the gate
+        # and the file cannot end up with two opinions about the same week.
+        for group in ("market", "thesis"):
+            rows, _ = group_material(group=group, dossier=self.dossier,
+                                     map_version=self.harness.map_version, numbers=[])
+            with self.subTest(group=group):
+                self.assertTrue(any(row["importance"] == "variant_view"
+                                    for row in rows))
 
     def test_the_file_is_citable_as_itself_and_so_are_the_debates(self):
         rows, _ = group_material(group="market", dossier=self.dossier,

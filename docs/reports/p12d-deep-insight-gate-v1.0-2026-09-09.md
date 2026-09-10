@@ -1,7 +1,7 @@
 # P12d：Deep Insight Gate 十二问草稿与人裁决 v1.0
 
-日期：2026-09-09（v1.1：按 review 修完三个 blocker 与四项意见，已并 main `9813b44`）
-分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `9813b44`）
+日期：2026-09-09（v1.1：按 review 修完三个 blocker 与四项意见）
+分支：`w2-deep-insight-gate`（基线 main `ebd2ea8`；已 `git merge main` 到 `88a9325`）
 蓝图：[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §3 ③ / §5.2 P12d；
 [并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（版本化四条硬规则）、C3、D2
 依赖：P12a 档案（`company_dossier`）、P12c DebateMap、P13-M2 预测行、P11c 估值快照、Q1 rubric/scorer、ADR-0006 / ADR-0008
@@ -30,7 +30,7 @@ Playbook 从 Phase 9 起就对每家公司问了十二个问题，从来没有�
 | `src/dalton_core/deep_insight_gate_launcher.py` | `LaneChildLauncher` 子类，票据按（公司 × 证据签名）命名 |
 | `src/dalton_core/mission_deep_insight_lane.py` | `LaneSpec(order=138)` + 协调器（签名去抖，待裁决即静默） |
 | `tests/test_deep_insight_gate.py`（37 项） | authority、答案形状、裁决、结构标准 |
-| `tests/test_deep_insight_gate_lane.py`（44 项） | 子进程、拒绝路径、重出、写入端 op、lane 注册、deliverable 迁移 |
+| `tests/test_deep_insight_gate_lane.py`（55 项） | 子进程、拒绝路径、沿用与降级、mission 版本滚动、崩溃重试、审批页、lane 注册、deliverable 迁移 |
 
 ### 1.2 共享文件的增量改动（只加，不改既有行为）
 
@@ -41,6 +41,7 @@ Playbook 从 Phase 9 起就对每家公司问了十二个问题，从来没有�
 | `writer_server.py` | 三个人类治理 op：`decide_deep_insight_gate`、`deep_insight_gate_draft`、`deep_insight_gate_submissions`；`OPERATION_FIELDS` 与 actor 绑定各一行 |
 | `cockpit_plane.py` | 审批页列出未裁决的门（十二问与引用随条目一起给），`decide` 分支，registry lane 标签一行 |
 | `cockpit_model.register_purpose("deep_insight_gate")` | 在 `deep_insight_gate_draft` 模块内登记（Wave 0 的接口，未改 `cockpit_model.py`） |
+| `scripts/rehearse_deploy.py` | 一行 `MigrationSpec`，让新 schema 进部署预演（review B3） |
 
 没有碰：`coverage_mission`（含 schema）、`bounded_planner_driver`、`macos_launchagent`、`install.sh`、
 `PROJECT_STATUS`、`tests/test_service`、`tests/test_lane_registry`、其他 agent 的模块。
@@ -108,29 +109,27 @@ approve / reject 之后本 lane 不再重出——重开一个已裁决的门是
 ### 3.1 全量测试（原文）
 
 ```
-Ran 4013 tests in 559.918s
+Ran 4305 tests in 735.234s
 
 OK (skipped=1)
 ```
 
-（基线 main `ebd2ea8` 为 3,932 项；本线新增 81 项，另加 cockpit lane 标签一行使既有用例继续通过。）
+（对齐当前 main `88a9325` 跑的。本线新增 92 项；另加 cockpit lane 标签一行、
+`rehearse_deploy` 一行 `MigrationSpec`，使既有用例继续通过。）
 
 本线两个文件单独跑：
 
 ```
-Ran 37 tests in 0.142s
+Ran 37 tests in 0.263s
 
 OK
 ```
 
 ```
-Ran 44 tests in 4.401s
+Ran 55 tests in 8.171s
 
 OK
 ```
-
-（合并后的最终计数是 37 + 44 = 81 项；`tests/test_deep_insight_gate_lane.py` 里最后加的一项是
-交付物 CHECK 迁移。）
 
 ### 3.2 蓝图 §5.2 的验收条款
 
@@ -189,36 +188,15 @@ ACN 的 489 条 Claim 里最密的几个 `metric_or_aspect`（说明档案跑起
 | 小 | 回复里的 `unknown.reason` 一律写成 `no_material_shown`，即使材料明明给了。 | 词表改成 `material_insufficient`（看过了，定不了）与 `source_unavailable`（根本没有可看的），两条路把 owner 送到不同的地方。 |
 | 小 | `argv_fragment` 不看 verifier 配置，缺它时 lane 会被打开、然后每 tick 报同一个 `no_verifier`。 | 三个文件齐了才吐参数。 |
 
-## 4. 发现的问题（不是本线的文件，没有改）
+## 4. 之前报告的 P12a bug：已在 main 上修好
 
-**P12a 的 `variant_view` 一旦被起草就发布不出去。**
-`company_dossier.validate_variant_view` 的 `drafted` 分支返回值里**没有 `gaps`**，
-而它的闭合形状检查**要求 `gaps` 在**。于是：
+v1.0 报告里记了一条：`company_dossier.validate_variant_view` 的 drafted 分支返回值漏了 `gaps`，
+导致任何**起草过** variant view 的档案都发布不出去（`body_hash is not its body`）。
+合并 main `88a9325` 时带进来了 `f76618d Merge w2-dossier-fix`，那一行已经补上。
 
-- `publish()` 用带 `gaps` 的 body 算 `body_hash`；
-- `validate_dossier_version()` 把 `variant_view` 归一化成不带 `gaps` 的形状，再算 `body_hash`；
-- 两者不等，抛 `CompanyDossierConflict: company dossier body_hash is not its body`。
-
-复现：
-
-```python
-out = validate_variant_view(v)          # v 是一份 drafted 的 variant_view
-validate_variant_view(out)              # -> variant_view has an invalid closed shape
-```
-
-现有测试没有覆盖，因为 `test_dossier_lane` 的 fixture 里 `market_view_material` 永远为空，
-variant 单元始终走 `unavailable`；`test_company_dossier` 的 drafted variant 只进 `validate_*`，不进 `publish`。
-
-**影响**：owner 明确把 variant view 定为一等字段（计划第 1 节「Dalton 要能自我反思」），
-而 P12d 的第八、九、十一问就靠它。今天这三问只能靠档案分节与 debate map。
-
-**一行修复**（`company_dossier.py`，`validate_variant_view` 的 drafted 分支返回值里补上）：
-
-```python
-"gaps": _gaps(wire["gaps"], f"{name}.gaps"),
-```
-
-本线的 fixture 用 `unavailable` 的 variant view 绕过，并在测试里写明了原因。请集成时决定谁来修。
+本线相应地把测试 fixture 从「unavailable 的 variant view」改回**drafted**，并新增一个用例断言
+variant view 真的到达了第八、九、十一问所在的两个组——那三问是关于市场而不是关于公司的，
+计划第 1 节把 variant view 定为一等字段，正是为了它们。
 
 ## 5. 集成时要接的线 / owner 步骤
 
@@ -264,11 +242,10 @@ variant 单元始终走 `unavailable`；`test_company_dossier` 的 drafted varia
 
 ## 7. 未决问题（留给 owner / 主 agent）
 
-1. P12a 的 `variant_view` 那个 bug 谁修（§4）。在它修好之前，第八、九、十一问拿不到 variant view。
-3. 四个问题分组的边界是本线定的（`QUESTION_SOURCE_MAP_REF = deep-insight-gate-source-map:p12d:v1`，
+1. 四个问题分组的边界是本线定的（`QUESTION_SOURCE_MAP_REF = deep-insight-gate-source-map:p12d:v1`，
    带哈希写进每一版）。owner 若认为某一问该看别的分节，改这张表会让新版本的 `source_map_hash` 变化——
    这是有意的，旧版本仍能按当时的映射回放。
-4. 一轮四次调用 × 0.60 美元上限 = 每家公司一版最多 3.00 美元（含复核）。
+2. 一轮四次调用 × 0.60 美元上限 = 每家公司一版最多 3.00 美元（含复核）。
    `MAX_RUN_COST_USD` 是否要按 C2 的池子再收一道，等 owner 看到第一版真实开销之后再定。
-5. 「退回补充」之后 owner 常常想指定「重答第七问」。今天没有这个入口（档案有 `--revise`，门没有）。
+3. 「退回补充」之后 owner 常常想指定「重答第七问」。今天没有这个入口（档案有 `--revise`，门没有）。
    加起来不难，但要先确认 owner 真的想要按问重答，而不是整份重出。
