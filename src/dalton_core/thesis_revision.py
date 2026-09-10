@@ -11,7 +11,11 @@ Three things happen here and nothing else.
 **A reader.**  ``ThesisRevisionAuthority.undecided()`` returns the candidates
 nobody has closed yet, each with the ``ThesisReflection`` P14a attached to it,
 because the reflection is the half that says what we may have *missed* and a
-person deciding without it is deciding on the proposal alone.
+person deciding without it is deciding on the proposal alone.  W4 added a
+second raiser -- the monthly zero-base review, which proposes a rewrite with
+no event behind it at all -- and its candidates come back through this same
+reader, carrying the review instead of a reflection.  There is one queue, one
+decision ledger and one thesis chain whatever raised the proposal.
 
 **A decision.**  ``decide()`` records one of three words -- ``accept``,
 ``reject``, ``defer`` -- against the candidate's content hash, append-only,
@@ -205,19 +209,38 @@ class ThesisRevisionAuthority:
 
     # -- reading -----------------------------------------------------------
 
+    # W4: the two tables a candidate can have been written into.
+    #
+    # The judgement lane's candidates hang off the judgement that raised them
+    # and its table's ``judgement_ref`` is a foreign key into
+    # ``event_judgements``.  A zero-base review raises the same proposal with
+    # no event behind it -- that is the point of it -- so its candidates live
+    # in their own table rather than in a fake judgement row or a rewritten
+    # append-only authority.  Both are read here, and everything downstream of
+    # the read is one code path: one decision ledger, one thesis chain, one
+    # place a person answers.  Order matters only for ``undecided``: the rows
+    # are merged and sorted by time.
+    CANDIDATE_TABLES: tuple[str, ...] = (
+        "thesis_revision_candidates", "zero_base_revision_candidates",
+    )
+
     def _candidate_row(self, candidate_ref: str) -> sqlite3.Row:
-        try:
-            row = self.connection.execute(
-                "SELECT * FROM thesis_revision_candidates WHERE candidate_id=?",
-                (candidate_ref,),
-            ).fetchone()
-        except sqlite3.OperationalError as exc:  # pragma: no cover - old Core
+        missing = 0
+        for table in self.CANDIDATE_TABLES:
+            try:
+                row = self.connection.execute(
+                    f"SELECT * FROM {table} WHERE candidate_id=?", (candidate_ref,),
+                ).fetchone()
+            except sqlite3.OperationalError:  # pragma: no cover - old Core
+                missing += 1
+                continue
+            if row is not None:
+                return row
+        if missing == len(self.CANDIDATE_TABLES):  # pragma: no cover - old Core
             raise ThesisRevisionNotFound(
                 "this Core has no thesis revision candidates yet"
-            ) from exc
-        if row is None:
-            raise ThesisRevisionNotFound("thesis revision candidate was not found")
-        return row
+            )
+        raise ThesisRevisionNotFound("thesis revision candidate was not found")
 
     def candidate(self, candidate_ref: str) -> dict[str, Any]:
         """One candidate, with its reflection and its decision history."""
@@ -227,6 +250,7 @@ class ThesisRevisionAuthority:
         return {
             **record,
             "reflection": self._reflection(record.get("reflection_ref")),
+            "zero_base_review": self._review(record.get("review_version_ref")),
             "decisions": self.decisions(record["id"]),
         }
 
@@ -241,6 +265,39 @@ class ThesisRevisionAuthority:
         except sqlite3.OperationalError:  # pragma: no cover - old Core
             return None
         return None if row is None else _decode(row, "ThesisReflection")
+
+    def _review(self, review_version_ref: Any) -> dict[str, Any] | None:
+        """W4: the zero-base review a candidate came out of, if it did.
+
+        The judgement lane's candidate arrives with a ``ThesisReflection``
+        attached, because the person deciding needs the account of what we may
+        have missed.  A zero-base candidate's equivalent is the review itself:
+        "nothing happened and we would still write it differently" is only an
+        argument if the four answers behind it can be read beside it.
+        """
+
+        if not review_version_ref:
+            return None
+        try:
+            row = self.connection.execute(
+                "SELECT record_json, content_hash FROM zero_base_review_versions "
+                "WHERE version_id=?", (review_version_ref,),
+            ).fetchone()
+        except sqlite3.OperationalError:  # pragma: no cover - old Core
+            return None
+        if row is None:
+            return None
+        record = _decode(row, "ZeroBaseReview")
+        return {
+            "id": record["id"],
+            "review_ref": record["review_ref"],
+            "version": record["version"],
+            "trigger": record["trigger"],
+            "period_label": record["period_label"],
+            "form_a_view": record["answers"]["form_a_view"],
+            "because": record["answers"]["because"],
+            "next_verification": record["answers"]["next_verification"],
+        }
 
     def decisions(self, candidate_ref: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
@@ -267,16 +324,20 @@ class ThesisRevisionAuthority:
         rides along so the caller can say "you deferred this on Tuesday".
         """
 
-        query = "SELECT * FROM thesis_revision_candidates"
-        params: list[Any] = []
-        if company_ref is not None:
-            query += " WHERE company_ref=?"
-            params.append(_text(company_ref, "company_ref"))
-        query += " ORDER BY created_at, candidate_id"
-        try:
-            rows = self.connection.execute(query, params).fetchall()
-        except sqlite3.OperationalError:  # pragma: no cover - old Core
+        rows: list[sqlite3.Row] = []
+        for table in self.CANDIDATE_TABLES:
+            query = f"SELECT * FROM {table}"
+            params: list[Any] = []
+            if company_ref is not None:
+                query += " WHERE company_ref=?"
+                params.append(_text(company_ref, "company_ref"))
+            try:
+                rows.extend(self.connection.execute(query, params).fetchall())
+            except sqlite3.OperationalError:  # pragma: no cover - old Core
+                continue
+        if not rows:
             return []
+        rows.sort(key=lambda row: (row["created_at"], row["candidate_id"]))
         closed = self.closed_candidate_refs()
         open_candidates: list[dict[str, Any]] = []
         for row in rows:
@@ -287,6 +348,7 @@ class ThesisRevisionAuthority:
             open_candidates.append({
                 **record,
                 "reflection": self._reflection(record.get("reflection_ref")),
+                "zero_base_review": self._review(record.get("review_version_ref")),
                 "deferred": bool(history),
                 "last_verdict": history[-1]["verdict"] if history else None,
                 "last_reason": history[-1]["reason"] if history else None,

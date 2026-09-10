@@ -125,6 +125,10 @@ _PURPOSE_TIERS: dict[str, str] = {
     "earnings_preview": TIER_BRAIN,
     "earnings_calibration": TIER_BRAIN,
     "conviction_call": TIER_BRAIN,
+    # W4: asking, from a zero position, whether we would form this view
+    # today is the hardest question in the set -- there is no event to
+    # anchor it and the whole file argues for the answer we already hold.
+    "zero_base_review": TIER_BRAIN,
     # Reading a rating and a target price off page one of a broker note is
     # "apply a stated standard to a lot of items" -- cheap.
     "street_estimate": TIER_CHEAP,

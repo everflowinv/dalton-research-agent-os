@@ -50,7 +50,9 @@ _SCHEMA_PATH = Path(__file__).with_name("research_cycle_reflection_schema.sql")
 
 # Bumped when a metric changes what it counts.  Part of ``inputs_hash``, so a
 # fixed counter re-reflects a week that a broken one already reflected on.
-REFLECTION_VERSION = "0.1"
+# 0.2: W4 added the judgement-outcome counts, so a week already reflected
+# on under 0.1 is re-reflected once rather than reading as unchanged.
+REFLECTION_VERSION = "0.2"
 
 # The write scope a reflection belongs to.  It is a deliverable-class artefact:
 # a dated document about the mission, produced on a cadence, read by a human.
@@ -713,6 +715,83 @@ def journal_feedback(core: sqlite3.Connection, window: Mapping[str, Any]) -> dic
     }
 
 
+def judgement_outcomes(core: sqlite3.Connection, window: Mapping[str, Any]) -> dict[str, Any]:
+    """W4 / Chem §3.3: how the judgements we already made turned out.
+
+    The one metric here that is not about *this* week's work.  It is about
+    whether the work of every earlier week was right, which is the question
+    Chem's 89-out-of-92 ``NO_CHANGE`` could never be asked.  Two readings, and
+    both are wanted:
+
+    ``this_week``
+        checks whose newest version landed inside the window -- the ones that
+        *changed their mind* about a past decision this week, usually because
+        the window finally had enough settled sessions in it.
+    ``to_date``
+        the newest version of every check, ever.  This is the ledger; the
+        weekly slice is the news.
+
+    Nothing is computed here: the rows were derived by
+    ``judgement_outcome.build_outcome_checks`` under a frozen formula and this
+    only counts them.  A Core where the zero-base lane has never run reports
+    ``available: false`` with the reason rather than a page of zeroes, because
+    "no judgement was ever wrong" and "nobody has looked" are opposite
+    findings that a table of zeroes renders identically.
+    """
+
+    if not _table_exists(core, "judgement_outcome_check_pointer"):
+        return _unavailable(
+            "judgement_outcome_check_pointer 不在这个 Core 里：W4 的判断结果台账还没有部署"
+        )
+    from .judgement_outcome import FORMULA_REF, OUTCOMES
+
+    rows = _rows(core, (
+        "SELECT p.outcome AS outcome, p.check_kind AS check_kind, "
+        "p.company_ref AS company_ref, v.created_at AS created_at, "
+        "v.formula_ref AS formula_ref "
+        "FROM judgement_outcome_check_pointer p "
+        "JOIN judgement_outcome_check_versions v ON v.version_id = p.version_id"
+    ))
+    if not rows:
+        return _unavailable(
+            "判断结果台账是空的：零基复盘 lane 还没有跑过一次，或者还没有可评的判断",
+            checked=0,
+        )
+    to_date = {outcome: 0 for outcome in OUTCOMES}
+    this_week = {outcome: 0 for outcome in OUTCOMES}
+    by_kind = {"no_change": 0, "revise": 0}
+    formulas: set[str] = set()
+    companies: set[str] = set()
+    for row in rows:
+        outcome = str(row["outcome"])
+        if outcome in to_date:
+            to_date[outcome] += 1
+            if _in_window(row["created_at"], window):
+                this_week[outcome] += 1
+        kind = str(row["check_kind"])
+        if kind in by_kind:
+            by_kind[kind] += 1
+        formulas.add(str(row["formula_ref"]))
+        companies.add(str(row["company_ref"]))
+    return {
+        "available": True,
+        "checked": len(rows),
+        "companies": len(companies),
+        "by_kind": by_kind,
+        "to_date": to_date,
+        "this_week": this_week,
+        # The two the owner asked for, promoted so a reader does not have to
+        # know the whole vocabulary to find them.
+        "should_have_moved": to_date["should_have_moved"],
+        "moved_right": to_date["moved_right"],
+        # A pass under an older formula is legible as such rather than being
+        # silently mixed in with the current one.
+        "formula_refs": sorted(formulas),
+        "current_formula_ref": FORMULA_REF,
+        "stale_formula": sorted(formulas - {FORMULA_REF}),
+    }
+
+
 # ---------------------------------------------------------------------------
 # the metrics, together
 # ---------------------------------------------------------------------------
@@ -739,6 +818,7 @@ def compute_metrics(
         "human_checkpoints": open_human_checkpoints(core, window, now=moment),
         "quality_scores": quality_scores_published(core, window),
         "journal": journal_feedback(core, window),
+        "judgement_outcomes": judgement_outcomes(core, window),
     }
 
 
@@ -910,6 +990,22 @@ def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str
             f"这一周没有人给过任何一条反馈{partial}。"
             "五个词的反馈词表还没有 UI，所以「没有反馈」暂时不能读成「读过而没有意见」。"
         )
+    outcomes = metrics.get("judgement_outcomes") or {}
+    if outcomes.get("available"):
+        # Chem §3.3, in one sentence: 不动也要能被评价. Cumulative rather than
+        # weekly, because a decision made in March is graded by what happened
+        # in April, and a weekly-only line would report almost always zero.
+        to_date = outcomes["to_date"]
+        lines.append(
+            f"判断结果台账里有 {outcomes['checked']} 条已评的判断："
+            f"{to_date['should_have_moved']} 条「当时该动没动」候选，"
+            f"{to_date['moved_right']} 条「动对了」，"
+            f"{to_date['held']} 条按兵不动是对的，"
+            f"{to_date['pending'] + to_date['unavailable']} 条还评不出来。"
+            "这是候选，不是绩效考核。"
+        )
+    elif outcomes:
+        lines.append(f"判断结果台账读不出来：{outcomes.get('reason')}")
     return {"title": NARRATIVE_TITLE, "prose": "\n".join(lines), "table": table[:MAX_TABLE_ROWS]}
 
 
@@ -1299,6 +1395,7 @@ __all__ = [
     "inputs_hash",
     "iso_week_label",
     "journal_feedback",
+    "judgement_outcomes",
     "narrative",
     "open_human_checkpoints",
     "planner_inquiries",

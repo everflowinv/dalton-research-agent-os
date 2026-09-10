@@ -860,6 +860,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("forecast_driver_schema.sql", "dalton_core.model_forecast_driver", "ForecastModelAuthority", "core"),
     MigrationSpec("forecast_reconciliation_schema.sql", "dalton_core.forecast_reconciliation", "ForecastReconciliationAuthority", "core"),
     MigrationSpec("forecast_sensitivity_schema.sql", "dalton_core.forecast_sensitivity", "SensitivityProjectionAuthority", "core"),
+    MigrationSpec("judgement_outcome_schema.sql", "dalton_core.judgement_outcome", "JudgementOutcomeAuthority", "core"),
     MigrationSpec("market_price_schema.sql", "dalton_core.market_price", "MarketPriceSeriesAuthority", "core"),
     MigrationSpec("mission_deliverable_schema.sql", "dalton_core.mission_deliverable", "MissionDeliverableAuthority", "core"),
     MigrationSpec("model_forecast_schema.sql", "dalton_core.model_forecast", "ModelForecastAuthority", "core"),
@@ -883,6 +884,8 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("answer_routing_schema.sql", "dalton_core.answer_routing", "AnswerRoutingAuthority", "core"),
     MigrationSpec("thesis_revision_schema.sql", "dalton_core.thesis_revision", "ThesisRevisionAuthority", "core"),
     MigrationSpec("thesis_impact_schema.sql", "dalton_core.thesis_impact", "ThesisImpactAuthority", "core"),
+    # W4: the zero-base review chain, and the ADR-0007 candidates it raises.
+    MigrationSpec("zero_base_review_schema.sql", "dalton_core.zero_base_review", "ZeroBaseReviewAuthority", "core"),
     # P10x: the only Core authority that takes the store's *connection* rather
     # than the store.  It lives in core.sqlite all the same -- it reads the
     # discovered-document rows the debate map's independence ladder reads --
