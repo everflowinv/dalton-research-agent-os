@@ -49,6 +49,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -406,12 +407,43 @@ def _daily_acquisition(*, state: Path, as_of: str,
                 if digest != (manifest.get("artifact") or {}).get("content_hash"):
                     raise HkexFilingsRunError("daily acquisition cached artifact is corrupt")
                 locator = str((manifest.get("artifact") or {}).get("storage_locator") or "")
-                if not locator.startswith("spool:"):
+                if not re.fullmatch(r"spool:objects/[0-9a-f]{2}/[0-9a-f]{64}", locator):
+                    raise HkexFilingsRunError("daily acquisition cached artifact locator is corrupt")
+                if locator.rsplit("/", 1)[-1] != digest:
                     raise HkexFilingsRunError("daily acquisition cached artifact locator is corrupt")
                 artifact_bytes = (state / DEFAULT_SPOOL_NAME / "connector-spool" /
                                   locator.removeprefix("spool:")).read_bytes()
                 if hashlib.sha256(artifact_bytes).hexdigest() != digest:
                     raise HkexFilingsRunError("daily acquisition spooled artifact is corrupt")
+                expected_invocation = build_invocation_ref(
+                    operation=DAILY_BUYBACK_TAPE_OPERATION,
+                    governance_ref=governance.id,
+                    governance_hash=governance.content_hash,
+                    parameters={"as_of": as_of}, artifact_hash=digest,
+                )
+                if manifest.get("invocation_ref") != expected_invocation:
+                    raise HkexFilingsRunError("daily acquisition cached invocation is corrupt")
+                documents = capture.get("documents") or []
+                if len(documents) != 1 or not isinstance(documents[0], dict):
+                    raise HkexFilingsRunError("daily acquisition cached document is corrupt")
+                document = documents[0]
+                expected_wire = {
+                    "schema_version": CAPTURE_SCHEMA_VERSION,
+                    "operation": DAILY_BUYBACK_TAPE_OPERATION,
+                    "report_printed_on": as_of, "report_url": url,
+                    "report_sha256": hashlib.sha256(raw).hexdigest(),
+                    "universe_grid": document.get("grid"),
+                    "artifact_hash": digest,
+                    "source_record_refs": [SOURCE_REF, f"raw-sink:{digest}"],
+                    "next_cursor": None, "provider_status": 200,
+                }
+                if document.get("url") != url or document.get("sha256") != expected_wire["report_sha256"]:
+                    raise HkexFilingsRunError("daily acquisition cached document identity is corrupt")
+                if manifest.get("wire") != expected_wire:
+                    raise HkexFilingsRunError("daily acquisition cached output is corrupt")
+                from .authority_resolver import _schema_matches
+                _schema_matches(expected_wire, hkex_output_schema(DAILY_BUYBACK_TAPE_OPERATION),
+                                "cached daily acquisition output")
                 return dict(manifest, cache_status="hit")
             raw, content_type = fetch(url, operation=DAILY_BUYBACK_TAPE_OPERATION)
             source_sha = hashlib.sha256(raw).hexdigest()

@@ -246,6 +246,22 @@ class DailyAcquisitionTests(ChildHarness):
         self.assertIn("corrupt", second["failure_reason"])
         self.assertIsNone(second["wire"])
 
+    def test_manifest_invocation_and_output_tampering_fail_closed(self) -> None:
+        with mock.patch("dalton_core.hkex_filings_cli.fetch",
+                        return_value=(b"workbook", "application/vnd.ms-excel")), \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid):
+            first = run(self.network_args())
+        manifest_path = (self.root / "hkex-daily-acquisitions" /
+                         first["acquisition"]["key"] / "manifest.json")
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["invocation_ref"] = "connector-invocation:hkex-filings:" + "0" * 32
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with mock.patch("dalton_core.hkex_filings_cli.fetch") as fetcher:
+            refused = run(self.network_args("00001"))
+        self.assertEqual(refused["status"], "failed")
+        self.assertIn("invocation is corrupt", refused["failure_reason"])
+        fetcher.assert_not_called()
+
     def test_unapproved_acquisition_cannot_use_an_existing_cache(self) -> None:
         with mock.patch("dalton_core.hkex_filings_cli.fetch",
                         return_value=(b"workbook", "application/vnd.ms-excel")), \
