@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from dalton_core.cockpit_plane import CockpitPlane
+from dalton_core.bootstrap import bootstrap
 from dalton_core.workspace import WorkspaceError, create_workspace_manifest
 from dalton_core.workspace_cockpit import cockpit_workspace_context
 
@@ -76,3 +77,17 @@ class WorkspaceCockpitTests(unittest.TestCase):
         self.assertEqual(result["mode"], "legacy")
         self.assertIsNone(result["workspace_id"])
 
+    def test_fresh_workspace_overview_reports_no_mission_without_fake_progress(self):
+        bootstrap(self.one.state_dir, self.one.config_path,
+                  workspace_manifest=self.one.manifest_path)
+        config = self.config(self.one)
+        config.mission_ref = None
+        with patch.dict("os.environ", {"DALTON_WORKSPACE_MANIFEST": str(self.one.manifest_path)}):
+            plane = CockpitPlane(config, writer_socket=self.one.writer_socket,
+                                 token_config=self.one.state_dir / "writer-tokens.json")
+        self.addCleanup(plane.close)
+        result = plane.overview()
+        self.assertEqual(result["state"], "awaiting_mission")
+        self.assertEqual(result["workspace"]["workspace_id"], self.one.workspace_id)
+        self.assertIsNone(result["goal"])
+        self.assertNotIn("companies", result)

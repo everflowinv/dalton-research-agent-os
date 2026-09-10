@@ -474,6 +474,19 @@ function renderOverview(o){
   $("workspace-name").textContent=workspace&&workspace.mode==="isolated"?workspace.slug:"自主研究系统";
   $("workspace-name").title=workspace&&workspace.workspace_id?`分析师工作区 ${workspace.workspace_id}`:"";
   document.title=workspace&&workspace.mode==="isolated"?`${workspace.slug} · Dalton 研究台`:"Dalton 研究台";
+  const awaiting=o.state==="awaiting_mission";
+  document.querySelectorAll("#view-goal > :not(#goal-hero),#goal-hero > .mission-fold,#hero-models").forEach(el=>{
+    if(awaiting&&!el.hidden){el.dataset.hiddenForWorkspace="true";el.hidden=true}
+    else if(!awaiting&&el.dataset.hiddenForWorkspace){el.hidden=false;delete el.dataset.hiddenForWorkspace}
+  });
+  if(awaiting){
+    $("goal-title").textContent="为这位分析师设定研究目标";
+    $("goal-objective").textContent="工作区已准备好。发布行业覆盖任务，明确公司范围、研究问题和预算后，研究进展会显示在这里。";
+    $("goal-tags").replaceChildren(node("span","尚未发布覆盖任务","tag"));
+    $("page-sub").textContent="独立工作区 · 等待研究目标";
+    $("svc-text").textContent="工作区已连接";$("svc-dot").className="dot";
+    return;
+  }
   const g=o.goal;
   $("goal-title").textContent=g.title;$("goal-objective").textContent=g.objective;
   const tags=$("goal-tags");tags.replaceChildren(node("span",`第 ${g.version} 版 · ${fmtDate(g.published_at)} 发布`,"tag"),node("span",`${o.companies.length} 家公司`,"tag"),node("span",`${o.totals.theses} 条研究论点`,"tag"));

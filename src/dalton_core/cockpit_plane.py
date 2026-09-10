@@ -532,6 +532,10 @@ class CockpitConflict(CockpitError):
     """The record the owner acted on changed underneath them."""
 
 
+class CockpitMissionMissing(CockpitError):
+    """An initialized workspace has no published research mandate yet."""
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -876,7 +880,7 @@ class CockpitPlane:
                 "ON p.mission_version_id=v.mission_version_id ORDER BY p.updated_at DESC LIMIT 1",
             ).fetchone()
         if row is None:
-            raise CockpitError("no research goal has been published yet")
+            raise CockpitMissionMissing("no research goal has been published yet")
         return json.loads(row["record_json"])
 
     def _mission_versions(self, core: sqlite3.Connection, mission_ref: str) -> list[dict[str, Any]]:
@@ -1723,7 +1727,14 @@ class CockpitPlane:
     def overview(self) -> dict[str, Any]:
         heartbeat = _load_json(self.config.heartbeat_path) or {}
         with self._core() as core:
-            mission = self._mission(core)
+            try:
+                mission = self._mission(core)
+            except CockpitMissionMissing:
+                return {"schema_version": SCHEMA_VERSION,
+                        "as_of": _iso(self.clock()),
+                        "state": "awaiting_mission",
+                        "workspace": self.workspace_context,
+                        "goal": None}
             members = self._members(mission)
             claims = self._claims(core)
             versions = self._mission_versions(core, mission["mission_ref"])
