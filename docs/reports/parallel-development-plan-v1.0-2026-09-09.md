@@ -364,3 +364,26 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | `tests/test_service.py`、`test_packaging.py`、`test_connector_inventory.py` | | 同上 |
 
 参考实现：statements lane（P13ak，`107a20d` / `719206b`）、model spec lane（P13am，`c71136a` / `8bc019e`）、`LaneChildLauncher`（P13aj）、`statement_snapshot.py`（authority 样板）、`sec_financials_core.py`（连接器身份样板，「库在进程内调用、原始输出哈希替代字节校验」的先例）。
+
+
+### 6d. 2026-09-10 恢复后的集成进度（覆盖 §6b / §6c 历史状态）
+
+owner 已要求继续开发、并行 GPT-5.6 Sol、及时 commit/push。六条待合分支已全部合入，三条独立修复 worktree 完成交付与交叉审查，主线代码里程碑 `48cc315`。完整实现与验证证据见 [本轮集成报告](resume-w4-integration-2026-09-10.md)。下表为当前状态，§6c 的“未派”保留作当时审读记录。
+
+| 项目 | 当前状态 |
+| --- | --- |
+| F1–F3 | 完成；含重复 filing 的一致分部选取与首次模型拒绝展示 |
+| F4 | 无代码修改需要 |
+| F5 / F5b / F5c | 六分支共享契约、cockpit、lane registry 集成完成 |
+| F6–F9 | 完成；v1 保留/v2 新增、月度回购分组且不重复收费/评分、薄覆盖 unknown、首版先分类 |
+| F10 | W5 待排：market-proxy claim 存储与生产者 |
+| F11–F12 | 完成；单一跨市场回购契约、累计期间、四位 .HK 价格路径 |
+| F13 | 可行性审查完成，实现待 acquisition/view 治理身份设计；未上线缓存 |
+| F14 | 16 条 lane 失败账本迁移待后续逐条交付 |
+| F15 | 完成 document extraction not_permitted；配置/mission/policy 更新恢复，cockpit 单列待授权 |
+| F16–F17 | 完成；30 天/财报触发、独立家族 verifier、在档正文及超限拒绝 |
+| F18–F19 | 完成；inventory 补 source_plan 行、ask 两种启用状态的契约同步 |
+| HK 周调度 | 新增后续项：日期标识不是周级调度，需定义增量归组 |
+| D1–D9 | 原裁决问题继续保留；本轮没有通过修改 live 隐式裁决 |
+
+最终复演（冻结代码 `48cc315`，旧 live 快照副本）：66 schemas、35 lanes、38 entries、0 escaped；缺授权/开关与 retired verifier pin 仍需运行激活时解决。本轮未部署。下一步优先当前 live 新快照复演与五家公司产物验收，再做 F14 / F13 / W5；主线全量结果与 push 状态以集成报告及 PROJECT_STATUS 顶部为准。

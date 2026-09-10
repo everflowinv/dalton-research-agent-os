@@ -1,18 +1,25 @@
 # Dalton 项目进度
 
-更新日期：2026-09-11
+更新日期：2026-09-10（恢复开发；以下历史时间记录保留）
 
-## 下一步（2026-09-10 恢复开发，以本节覆盖此前暂停安排）
+## 本轮交付（2026-09-10）
 
-1. **恢复 W4 集成与修复**：owner 本轮要求继续开发、尽量并行、允许 GPT-5.6 Sol subagent，并及时 commit / push。三个独立新 worktree 分别修 F1–F3（预测）、F6–F8（内幕交易 / 回购）、F16–F17（ZeroBaseReview）；主 agent 审读报告、按 hkex → insider → framework → failure → zero-base → rehearsal-2 集成。
-2. **合并后补契约与运行修复**：F11 回购 payload 统一、F12 港股 ticker、F9 分类先于需求段、F15 治理拒绝分类、F18 来源计划补行、F19 ask policy；F13 日缓存与 F14 lane 失败账本按依赖安排。完整历史清单仍在并行计划 §6c。
-3. **验证后 push**：先 import / 聚焦测试，再合并版本全量测试；仅在全量通过后 push main。已有本地 11 个提交保留。测试日志与交付结果写入本轮报告。
-4. **部署前复演**：合并后的 main 使用 `--source-root` 重跑 fail-closed 复演，再按 owner 步骤 v2 处理部署 / mission / policy。D1–D9 未裁决事项仍保留，不把开发授权当作扩 universe 或重签治理的决定。
-5. **上线后的产品验收**：五家公司各出第一版档案与 DebateMap，判断层跑一轮，优先于 W5 新切片。周报投递与 Excel 导出继续排在最后。
+W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，代码冻结于 `48cc315`。完成预测不变量接线、分部 filing 去重、跨 US/HK 回购契约与港股行情、月度回购判断分组及费用/评分去重、首版档案先分类、独立 ZeroBase verifier、待授权分类及恢复、来源计划补行与 ask 契约。详见 [本轮集成报告](reports/resume-w4-integration-2026-09-10.md) 与 [清单当前状态 §6d](reports/parallel-development-plan-v1.0-2026-09-09.md#6d-2026-09-10-恢复后的集成进度覆盖-6b--6c-历史状态)。
 
-## 2026-09-10 恢复开发
+**验证**：最终聚焦 277 项 + 57 项通过；完整主线测试正在运行。最终隔离复演全部 12 步通过：66/66 schemas、35 lanes、38 tick entries、0 escaped。Python wheel 构建、connector inventory 一致性、cockpit JavaScript 语法均通过。本次使用既有 `20260910T073000Z` 快照，没有部署或修改 live；其缺授权/开关不计作已激活功能。
 
-已详细审读 PROJECT_STATUS、并行计划 §6b/6c、经济不变量报告与 Chem 复盘，继续审读模型选择、既有资料及未合分支报告。原工作区干净，`main=694471c`，fetch 后领先 origin/main 11 个提交。新建独立 worktree 防止接管旧 agent 的写入目录；本轮模型使用 GPT-5.6 Sol，不沿用历史 Claude 作者署名。当前尚未完成合并验证、push 或部署。
+**Git**：已按功能及时提交；完整主线绿后统一 push。起点 `694471c` 之前尚未推送的 11 个提交保留在历史中。
+
+## 下一步（本节覆盖此前暂停安排）
+
+1. **运行激活与产品验收优先**：按 [更新后的 owner runbook](reports/owner-steps-after-deploy-v2.0-2026-09-10.md)，用当前 live 新快照复演，核对 11 个 may_write / 3 个 checkpoint 缺项、模型开关、retired verifier pin 与 tracking policy v2。部署后验收五家公司首版 dossier、DebateMap 与一轮判断，不能用旧快照演练代替产物验收。
+2. **F14 失败账本覆盖**：将剩余 16 条 lane 的真实依赖失败逐条接入公共账本，保留正常“输入未变”的等待语义，每条都测恢复路径。
+3. **F13 日缓存与 HK 周调度**：先定全市场 acquisition / 公司 derived view 的治理身份，再做一次 invocation/artifact 的共享缓存；HK 日期标识尚未变成周级推理调度，需连同增量归组另做。见 [缓存可行性报告](reports/resume-hk-cache-feasibility-2026-09-10.md)。
+4. **W5 / D1–D9**：market-proxy producer 与成本侧模板后续排期；HK universe、数字权威、慢背离窗口等原待裁决保持显式，不因本轮开发授权而隐式改变。周报投递和 Excel 导出继续后排。
+
+## 2026-09-10 恢复开发背景
+
+已详细审读 PROJECT_STATUS、并行计划 §6b/6c、经济不变量、Chem 复盘、模型选择、既有资料及六份待合分支报告。原工作区干净，`main=694471c`，fetch 后领先 origin/main 11 个提交。以新隔离 worktree 承接 GPT-5.6 Sol 并行工作，避免接管旧 agent 目录；本节与 §6d 覆盖下方历史“只记录不动手”的暂停安排。
 
 ## 当前状态速览（2026-09-09 收盘）
 

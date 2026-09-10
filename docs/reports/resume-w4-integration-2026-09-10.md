@@ -41,3 +41,27 @@ connector inventory `--check` 通过，`git diff --check` 通过。此前两次�
 复演 harness 原本将 escaped lane 仅计入 findings、仍返回通过；现在任何 escaped lane 都使 tick 步骤失败，并加回归测试。这是发现即变成机器检查，不依赖操作者阅读告警。
 
 验证：cockpit/回归 115 项（36.215s）通过；回归/复演 108 项（1.520s）通过；内嵌 JavaScript `node --check` 通过。
+
+## 最终代码集成（`48cc315`）
+
+三条 GPT-5.6 Sol 修复分支及交叉审查已集成：F1–F3、F6–F9、F11–F12、F15–F19 完成；F5 / F5b / F5c 为共享文件集成完成，F4 无代码修复。F10 仍属于 W5，F13 / F14 未实现，不将可行性审查写成已交付功能。
+
+- F2 补修同一比较期来自多份 filing 时的重复分部累计，按同一份最新 filing 选完整的合并值与分部组。
+- F6 保留 v1 原始字节，新增 v2；F7 月份行保留独立事件、共享一次 producer/verifier 判断，两个 prompt 都包含所有月份；别名费用为 0 并指回 primary，事后评分排除这些别名，避免同一决定重复计分。F8 薄覆盖的未匹配出售计划为 unknown。
+- F15 document extraction 的治理拒绝进入单独待授权账本与 cockpit 区域，重启后仍不重复调用；mission pointer、governance policy pointer 或相关配置文件改变时自动解除 hold 并重新检查。没有将其他十六条 lane 冒充已接失败账本。
+- F16 以最近复盘后 30 天为周期，未复盘的新财报可提前触发并重置周期；F17 独立家族 verifier 看到在档 thesis/debate/claim 正文，拒绝错误引用、超大上下文或验证失败。producer/verifier 必须成对配置。
+- 主线补回归 277 项（10.077s）与最后的评分/权限恢复 57 项（0.346s）通过。完整主线测试已在 `48cc315` 冻结代码后启动；最终结果在下节记录。
+
+## 最终隔离复演
+
+`48cc315` 使用同一个已有 `20260910T073000Z` live 快照重跑，输出 `/tmp/dalton-resume-final-rehearsal-20260910`，命令与首轮相同但换了独立 temp-root/report。全部 12 步通过：23 个文件 / 818 MB 副本、66/66 schemas、27 seeded（15 already present / 12 gated）、35 registered lanes、38 tick entries、0 escaped。tick 3.9s，仅为离线单轮样本，不代表线上吞吐验收。
+
+快照仍缺 11 个 may_write、3 个 checkpoint，只有 5/11 lane switches；ZeroBase、judgement、dossier 等仍 unconfigured。旧 verifier pin 指向本次 catalog sync 标为 retired 的 `profile:gemini-3-7-flash`，部署前需按现有模型路由机制修正。完整 findings 保存在上述临时报告。本次只用复制的 SQLite / 配置、模型 stub 与拒绝外网 transport，没有启动/替换 live LaunchAgent，也没有实际发布五家公司研究产物。
+
+## 下一里程碑
+
+1. **运行激活与产品验收优先**：按更新后的 owner runbook，用当前 live 新快照复演，核对 verifier pin、mission grants/checkpoints、producer/verifier switches 和 tracking policy v2；部署后验收五家公司首版 dossier、DebateMap 与一轮判断。历史快照通过不能代替当前 live 核对。
+2. **F14**：逐条迁移仍未接公共失败账本的 16 条 lane，区分输入未变的正常等待与真正依赖失败；依赖恢复回归随每条 lane 交付。
+3. **F13**：先定义全市场日 acquisition + 各公司 derived view 的受治理身份，再实现一次 invocation/artifact 缓存；详见 `resume-hk-cache-feasibility-2026-09-10.md`。当前 ticker 是治理请求身份的一部分，不能仅从 hash 中删除来假装去重。
+4. **HK 周分组新增待办**：独立审查指出 payload 的 ISO周+申报日标识不等于周级调度，HK 日披露仍逐事件判断。F11 按原清单保留该标识；下一轮需明确已判断日的新增记录如何增量归组，再实现稳定周级推理单元。简单按周合并未判断行也不能保证一周只调用一次，不以本轮 US 月份分组冒充已解决。
+5. **W5 / D1–D9**：market-proxy producer 与成本侧模板另开切片；HK universe、数字权威边界、60日慢背离等既有待裁决保持显式。周报投递与 Excel 导出仍后排。

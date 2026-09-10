@@ -17,7 +17,7 @@ Baseline: `694471c`
 - Review regression: `PYTHONPATH=$PWD/src python3 -m unittest tests.test_company_model_forecast.LaneStateTests tests.test_economic_invariants`
 - Result: 81 tests passed in 11.098 seconds, including two individually balanced filings carrying the same comparative period.
 - Full: `PYTHONPATH=$PWD/src python3 -m unittest discover -s tests -t .`
-- Result: running at the time of the implementation commit; complete output is retained in `full-test-resume-forecast.log` and this report will be updated when it finishes.
+- Result: 5,519 tests in 468.036s, OK (skipped=1), on the author branch before the coherent-filing follow-up. Output is retained in that worktree’s `full-test-resume-forecast.log`. Final merged-main validation is recorded in `resume-w4-integration-2026-09-10.md`.
 
 ## Limits
 
