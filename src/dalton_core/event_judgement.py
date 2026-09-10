@@ -50,6 +50,7 @@ from typing import Any, Callable
 
 from .cockpit_model import (
     CockpitModelError,
+    independent_model_call,
     lane_status_for,
     register_purpose,
     unwrap_json_object,
@@ -901,7 +902,11 @@ def verify_reflection(
                           "an unverifiable independence claim is not independence"}
     prompt = build_reflection_verifier_prompt(context, reflection)
     try:
-        call = model.call(
+        call = independent_model_call(
+            model,
+            producer_route_decision_refs=[
+                (reflection.get("model") or {}).get("route_decision_ref")
+            ],
             purpose=REFLECTION_PURPOSE, request_id=request_id, prompt=prompt,
             mission=mission,
         )
@@ -1084,7 +1089,11 @@ def verify(
                           "an unverifiable independence claim is not independence"}
     prompt = build_verifier_prompt(context, judgement)
     try:
-        call = model.call(
+        call = independent_model_call(
+            model,
+            producer_route_decision_refs=[
+                (judgement.get("model") or {}).get("route_decision_ref")
+            ],
             purpose=PURPOSE, request_id=request_id, prompt=prompt, mission=mission
         )
     except CockpitModelError as exc:

@@ -58,6 +58,7 @@ from typing import Any, Callable
 
 from .cockpit_model import (
     CockpitModelError,
+    independent_model_call,
     lane_status_for,
     register_purpose,
     unwrap_json_object,
@@ -786,8 +787,13 @@ def verify_review(
         return {"status": "refused", "reason": str(exc), "model": None,
                 "independence": independence}
     try:
-        call = model.call(purpose=VERIFIER_PURPOSE, request_id=request_id,
-                          prompt=prompt, mission=mission)
+        call = independent_model_call(
+            model,
+            producer_route_decision_refs=[
+                (answered.get("model") or {}).get("route_decision_ref")
+            ],
+            purpose=VERIFIER_PURPOSE, request_id=request_id,
+            prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"the verifier call did not succeed: {exc}",
                 "lane_status": lane_status_for(exc, "refused"), "model": None,

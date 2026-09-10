@@ -18,12 +18,13 @@ Claim.  The control process owns no Core write handle and gets none.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import ResultEnvelope, WorkOrder
 from .document_extraction import validate_model_config
@@ -75,6 +76,19 @@ IDENTITY_VERSION = 2
 
 class CockpitModelError(RuntimeError):
     """The call was refused or failed; the message is safe to show."""
+
+
+def independent_model_call(model: Any, *, producer_route_decision_refs: Sequence[str],
+                           **kwargs: Any) -> dict[str, Any]:
+    """Call a verifier with producer routes, preserving legacy test doubles."""
+    supplied = tuple(producer_route_decision_refs)
+    refs = tuple(ref for ref in supplied if isinstance(ref, str) and ref)
+    if not refs or len(refs) != len(supplied):
+        raise CockpitModelError(
+            "independent verification requires every producer route decision")
+    if "producer_route_decision_refs" in inspect.signature(model.call).parameters:
+        return model.call(producer_route_decision_refs=refs, **kwargs)
+    return model.call(**kwargs)
 
 
 class CockpitModelPoolExhausted(CockpitModelError):
@@ -318,8 +332,13 @@ class CockpitModel:
             expected_agent_id=config["expected_agent_id"], timeout_seconds=float(self.timeout_seconds),
         )
 
-    def call(self, *, purpose: str, request_id: str, prompt: str, mission: Mapping[str, Any]) -> dict[str, Any]:
+    def call(self, *, purpose: str, request_id: str, prompt: str,
+             mission: Mapping[str, Any],
+             producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
+        producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
+        if producer_refs:
+            request_id = f"{request_id}:producer:{content_hash(list(producer_refs))[:16]}"
         # P13aa: the WorkOrder id is content-addressed on (purpose, request_id,
         # mission version, prompt) and deliberately excludes the clock -- but
         # the scheduler hashes the whole wire, which carried a wall-clock
@@ -387,6 +406,18 @@ class CockpitModel:
                     prompt_bytes = len(prompt.encode("utf-8"))
                     pool_rejection: dict[str, Any] | None = None
                     result: ResultEnvelope
+                    from .model_fallback_chain import served_family
+                    try:
+                        producer_families = {
+                            served_family(router, ref) for ref in producer_refs}
+                    except Exception as exc:  # noqa: BLE001 - unknown is not independent
+                        result = _failure(work, "PRODUCER_ROUTE_UNRESOLVED", None)
+                        scheduler.complete(
+                            work.id, attempt, WORKER_REF, lease["lease_token"], result,
+                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                        raise CockpitModelError(
+                            "a producer route decision could not prove its model family"
+                        ) from exc
                     tier = self._chain_tier(router, purpose)
                     if tier is not None:
                         # P14-M: the pinned policy carries this tier's fallback
@@ -396,6 +427,7 @@ class CockpitModel:
                         outcome = self._chained(
                             router, budget, work=work, purpose=purpose, tier=tier,
                             attempt=attempt, prompt_bytes=prompt_bytes, scope=scope,
+                            producer_route_decision_refs=producer_refs,
                         )
                         result = outcome["result"]
                         failure = outcome["failure"]
@@ -416,12 +448,21 @@ class CockpitModel:
                         required_context_tokens=prompt_bytes + self.max_output_tokens,
                         estimated_input_tokens=prompt_bytes, estimated_output_tokens=self.max_output_tokens,
                         idempotency_key=f"cockpit-route:{work.id}:{attempt}",
+                        producer_family=next(iter(producer_families), None),
                     )["decision"]
                     if route["outcome"] != "selected":
                         result = _failure(work, "MODEL_ROUTE_REJECTED", route["id"])
                         failure = "no model route is available right now"
                     else:
                         profile = router.get_profile(route["selected_profile_version_ref"])
+                        if producer_refs:
+                            if profile.get("family") in producer_families:
+                                result = _failure(work, "MODEL_ROUTE_REJECTED", route["id"])
+                                failure = "verifier_not_independent"
+                                completion = scheduler.complete(
+                                    work.id, attempt, WORKER_REF, lease["lease_token"], result,
+                                    idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                                _raise_failure(failure)
                         reserved = int(Decimal(str(self.max_cost_usd)) * 1_000_000)
                         decision = admit_day_ledger(
                             budget,
@@ -532,7 +573,8 @@ class CockpitModel:
 
     def _chained(self, router: ModelRouter, budget: Any, *, work: WorkOrder, purpose: str,
                  tier: str, attempt: int, prompt_bytes: int,
-                 scope: Mapping[str, Any]) -> dict[str, Any]:
+                 scope: Mapping[str, Any],
+                 producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Walk the tier's chain under one reservation, settled by what served."""
 
         from .model_fallback_chain import classify_model_failure, execute_chain
@@ -603,6 +645,7 @@ class CockpitModel:
                 estimated_output_tokens=self.max_output_tokens,
                 idempotency_prefix=f"cockpit-route:{work.id}:{attempt}",
                 call=call, admit=admit,
+                producer_decision_refs=producer_route_decision_refs,
             )
             if outcome["status"] == "served":
                 served_micros, served_status = spend.get(
@@ -669,6 +712,6 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
 __all__ = [
     "CockpitModel", "CockpitModelError", "CockpitModelPoolExhausted",
     "WORKER_REF", "admit_day_ledger", "build_work", "call_cost_micros",
-    "lane_status_for", "pool_refusal_message", "purposes", "register_purpose",
+    "independent_model_call", "lane_status_for", "pool_refusal_message", "purposes", "register_purpose",
     "settle_day_ledger", "unwrap_json_object",
 ]

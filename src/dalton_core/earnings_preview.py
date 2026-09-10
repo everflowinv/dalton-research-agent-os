@@ -31,7 +31,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
-from .cockpit_model import CockpitModelError, lane_status_for, unwrap_json_object
+from .cockpit_model import (CockpitModelError, independent_model_call,
+                            lane_status_for, unwrap_json_object)
 from .earnings_season import (
     MAX_THESES,
     PREVIEW_KIND,
@@ -577,7 +578,11 @@ def verify_preview(
                           "an unverifiable independence claim is not independence"}
     prompt = build_preview_verifier_prompt(context, draft)
     try:
-        call = model.call(
+        call = independent_model_call(
+            model,
+            producer_route_decision_refs=[
+                (draft.get("model") or {}).get("route_decision_ref")
+            ],
             purpose=PREVIEW_PURPOSE, request_id=request_id, prompt=prompt,
             mission=mission,
         )

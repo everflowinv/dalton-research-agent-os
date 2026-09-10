@@ -279,7 +279,10 @@ class VerifierTests(unittest.TestCase):
     def test_the_verdict_is_bound_to_the_draft_it_read(self):
         blocks = {"demand_drivers": self.block()}
         model = FakeModel(json.dumps({"verdict": "pass", "findings": []}))
-        verdict = verify(model, blocks, company=COMPANY, mission=MISSION)
+        verdict = verify(
+            model, blocks, company=COMPANY, mission=MISSION,
+            producer_route_decision_refs=["route:producer"],
+        )
         self.assertEqual(verdict["status"], "verified")
         self.assertEqual(verdict["verified_draft_hash"], draft_hash(blocks))
 

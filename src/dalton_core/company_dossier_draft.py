@@ -41,7 +41,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
 from .claim_aspect_vocabulary import DEFINITIONS
-from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
+from .cockpit_model import (CockpitModelError, independent_model_call,
+                            register_purpose, unwrap_json_object)
 from .company_dossier import (
     CLASSIFICATION_UNIT,
     MAX_GAPS as MAX_DOSSIER_GAPS,
@@ -668,6 +669,7 @@ def verify(
     *,
     company: Mapping[str, Any],
     mission: Mapping[str, Any],
+    producer_route_decision_refs: Sequence[str | None] = (),
 ) -> dict[str, Any]:
     """A second, separate call that returns only a verdict on the draft."""
 
@@ -676,8 +678,10 @@ def verify(
     digest = draft_hash(blocks)
     prompt = build_verifier_prompt(blocks, company=company)
     try:
-        call = model.call(purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
-                          prompt=prompt, mission=mission)
+        call = independent_model_call(
+            model, producer_route_decision_refs=producer_route_decision_refs,
+            purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
+            prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
     provenance = {

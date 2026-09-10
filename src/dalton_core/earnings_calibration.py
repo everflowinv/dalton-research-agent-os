@@ -42,7 +42,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .cockpit_model import CockpitModelError, lane_status_for, unwrap_json_object
+from .cockpit_model import (CockpitModelError, independent_model_call,
+                            lane_status_for, unwrap_json_object)
 from .earnings_preview import (
     VERIFIER_FINDING_CODES,
     VERIFIER_VERDICTS,
@@ -945,7 +946,11 @@ def verify_calibration(
                           "independence"}
     prompt = build_calibration_verifier_prompt(context, draft)
     try:
-        call = model.call(
+        call = independent_model_call(
+            model,
+            producer_route_decision_refs=[
+                (draft.get("model") or {}).get("route_decision_ref")
+            ],
             purpose=CALIBRATION_PURPOSE, request_id=request_id, prompt=prompt,
             mission=mission,
         )

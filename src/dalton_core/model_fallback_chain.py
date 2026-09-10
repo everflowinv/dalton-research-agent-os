@@ -492,6 +492,7 @@ def execute_chain(
     call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
     admit: Callable[[Mapping[str, Any], Mapping[str, Any], int], Any] | None = None,
     producer_decision_ref: str | None = None,
+    producer_decision_refs: Sequence[str] = (),
     tier: str | None = None,
 ) -> dict[str, Any]:
     """Walk the chain until one link serves, and record every step of it.
@@ -529,12 +530,12 @@ def execute_chain(
     chain = tuple(resolved["chain"]) if resolved is not None else tier_chain(tier)
     # Independence is measured against the producer's own route decision, so a
     # verification cannot be told a producer it did not have.
-    producer_family = (
-        served_family(router, producer_decision_ref)
-        if producer_decision_ref is not None
-        else None
-    )
-    if producer_family is not None:
+    refs = list(producer_decision_refs)
+    if producer_decision_ref is not None:
+        refs.append(producer_decision_ref)
+    producer_families = {served_family(router, ref) for ref in refs}
+    producer_family = next(iter(producer_families), None)
+    if producer_families:
         # The router refuses a same-family candidate one at a time, which for a
         # chain whose every link is the producer's family reads as "no link is
         # routable" -- true, and useless. Said once, in front, it reads as what
@@ -548,7 +549,7 @@ def execute_chain(
         available = live_links(chain, held)
         independent = [
             profile_id for profile_id in available
-            if (held.get(profile_id) or {}).get("family") != producer_family
+            if (held.get(profile_id) or {}).get("family") not in producer_families
         ]
         if not independent:
             gone = [profile_id for profile_id in chain if profile_id not in available]
@@ -559,7 +560,7 @@ def execute_chain(
                 "reason": "verifier_not_independent",
                 "message": (
                     f"no model left for {purpose} is independent of the "
-                    f"{producer_family} family that produced the work being "
+                    f"{', '.join(sorted(producer_families))} family set that produced the work being "
                     "checked"
                     + (
                         f"; {', '.join(gone)} has been retired" if gone
@@ -640,6 +641,9 @@ def execute_chain(
             return link
 
         previous_decision_ref = route["id"]
+        if profile.get("family") in producer_families:
+            _record(served=False, skip_reason="verifier_not_independent")
+            continue
         if admit is not None:
             admission = admit(route, profile, reserved_micros(route, profile))
             # Explicit, not truthy. A budget authority that returns something

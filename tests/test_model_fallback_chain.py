@@ -217,7 +217,8 @@ class ChainExecutionTests(unittest.TestCase):
             )["policy_version_ref"]
 
     def _run(self, tier, broker, *, purpose="plan", capability="research",
-             work_id=None, producer_decision_ref=None, admit=None):
+             work_id=None, producer_decision_ref=None, producer_decision_refs=(),
+             admit=None):
         work = _work(work_id or f"work:p14m-{tier}", capability=capability)
         return execute_chain(
             self.router,
@@ -238,6 +239,7 @@ class ChainExecutionTests(unittest.TestCase):
             call=broker,
             admit=admit,
             producer_decision_ref=producer_decision_ref,
+            producer_decision_refs=producer_decision_refs,
         )
 
     def test_the_first_link_serves_and_the_chain_records_which_one(self) -> None:
@@ -415,6 +417,61 @@ class ChainExecutionTests(unittest.TestCase):
             )
         )
         self.assertIn("model_family_not_independent", fable["rejection_reasons"])
+
+    def test_multiple_producer_families_are_skipped_before_charge_or_call(self) -> None:
+        openai = self._run("brain", FakeBroker({}), work_id="work:producer-openai")
+        anthropic = self._run("brain", FakeBroker({
+            "profile:gpt-6-astra": {
+                "outcome": "failed", "failure_class": "provider_failure"
+            }
+        }), work_id="work:producer-anthropic")
+        called = FakeBroker({})
+        admitted = []
+        result = self._run(
+            "verifier", called, purpose="p14m_verify_probe", capability="verify",
+            work_id="work:verify-multiple",
+            producer_decision_refs=(openai["route_decision_ref"],
+                                    anthropic["route_decision_ref"]),
+            admit=lambda route, profile, micros: admitted.append(profile["id"]) or
+            {"status": "admitted"},
+        )
+        self.assertEqual(result["profile_id"], "profile:zai-glm-5-3")
+        self.assertEqual(called.calls[0][0], "profile:zai-glm-5-3")
+        self.assertEqual(admitted, ["profile:zai-glm-5-3"])
+
+    def test_no_independent_verifier_means_no_admission_or_model_call(self) -> None:
+        anthropic = self._run("brain", FakeBroker({
+            "profile:gpt-6-astra": {
+                "outcome": "failed", "failure_class": "provider_failure"
+            }
+        }), work_id="work:producer-anthropic-all")
+        glm = self._run("cheap", FakeBroker({
+            "profile:deepseek-v4-flash": {
+                "outcome": "failed", "failure_class": "provider_failure"
+            }
+        }), purpose="p14m_cheap_probe", work_id="work:producer-glm")
+        gemini = self._run("cheap", FakeBroker({
+            "profile:deepseek-v4-flash": {
+                "outcome": "failed", "failure_class": "provider_failure"
+            },
+            "profile:zai-glm-5-3-flash": {
+                "outcome": "failed", "failure_class": "provider_failure"
+            },
+        }), purpose="p14m_cheap_probe", work_id="work:producer-gemini")
+        called = FakeBroker({})
+        admitted = []
+        result = self._run(
+            "verifier", called, purpose="p14m_verify_probe", capability="verify",
+            work_id="work:verify-none",
+            producer_decision_refs=(anthropic["route_decision_ref"],
+                                    glm["route_decision_ref"],
+                                    gemini["route_decision_ref"]),
+            admit=lambda route, profile, micros: admitted.append(profile["id"]),
+        )
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["reason"], "verifier_not_independent")
+        self.assertEqual(admitted, [])
+        self.assertEqual(called.calls, [])
 
     def test_a_retired_link_is_skipped_and_the_chain_carries_on(self) -> None:
         dropped = _config()

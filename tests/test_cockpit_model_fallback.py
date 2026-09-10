@@ -11,9 +11,13 @@ from pathlib import Path
 # Importing the lane is what registers its purpose, exactly as the lane's own
 # child process does before it builds a WorkOrder.
 import dalton_core.claim_index_tagging  # noqa: F401
-from dalton_core.cockpit_model import CockpitModel, CockpitModelError
+from dalton_core.cockpit_model import (
+    CockpitModel,
+    CockpitModelError,
+    independent_model_call,
+)
 from dalton_core.contracts import ModelInvocation, ResultEnvelope
-from dalton_core.model_fallback_chain import tier_chain
+from dalton_core.model_fallback_chain import register_purpose_tier, tier_chain
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
 from dalton_core.research_planner_setup import credential_slots_for, ensure_planner_policy
@@ -96,6 +100,13 @@ class CockpitChainTests(unittest.TestCase):
                 policy_id="model-routing-policy:p14m-cockpit-cheap",
             )["policy_version_ref"]
             self.cheap_slots = credential_slots_for(router, list(tier_chain("cheap")))
+            register_purpose_tier("p14m_route_verify", "verifier")
+            self.verifier_policy = ensure_planner_policy(
+                router, tier="verifier", now=NOW,
+                policy_id="model-routing-policy:p14m-cockpit-verifier",
+            )["policy_version_ref"]
+            self.verifier_slots = credential_slots_for(
+                router, list(tier_chain("verifier")))
             self.pinned_policy = ensure_planner_policy(
                 router, profile_ids=["profile:gpt-6-astra"], now=NOW,
                 policy_id="model-routing-policy:p14m-cockpit-pinned",
@@ -165,6 +176,100 @@ class CockpitChainTests(unittest.TestCase):
         decisions = self._decisions()
         self.assertEqual([item["decision_kind"] for item in decisions], ["initial", "switch"])
         self.assertEqual(answer["route_decision_ref"], decisions[1]["id"])
+
+    def test_independent_call_fails_closed_and_keeps_legacy_fakes_compatible(self) -> None:
+        class Legacy:
+            def __init__(self):
+                self.calls = 0
+
+            def call(self, *, purpose, request_id, prompt, mission):
+                self.calls += 1
+                return {"text": "ok"}
+
+        fake = Legacy()
+        with self.assertRaisesRegex(CockpitModelError, "every producer"):
+            independent_model_call(
+                fake, producer_route_decision_refs=(), purpose="plan",
+                request_id="missing", prompt="x", mission=self.mission)
+        self.assertEqual(fake.calls, 0)
+        self.assertEqual(
+            independent_model_call(
+                fake, producer_route_decision_refs=["route:producer"],
+                purpose="plan", request_id="valid", prompt="x",
+                mission=self.mission)["text"],
+            "ok",
+        )
+        self.assertEqual(fake.calls, 1)
+
+        class BrokenLegacy(Legacy):
+            def call(self, *, purpose, request_id, prompt, mission):
+                raise TypeError("inside fake")
+
+        with self.assertRaisesRegex(TypeError, "inside fake"):
+            independent_model_call(
+                BrokenLegacy(), producer_route_decision_refs=["route:producer"],
+                purpose="plan", request_id="broken", prompt="x",
+                mission=self.mission)
+
+    def test_verifier_uses_the_producers_served_family_before_buying_a_call(self) -> None:
+        producer_adapter = ChainAdapter({
+            "profile:gpt-6-astra": {
+                "code": "PROVIDER_OVERLOADED", "message": "no capacity"
+            }
+        })
+        producer = self._model(
+            producer_adapter, policy_version_ref=self.chain_policy
+        ).call(purpose="plan", request_id="producer-fallback", prompt="draft",
+               mission=self.mission)
+        self.assertEqual(producer_adapter.served[-1], "profile:claude-fable-5-1")
+
+        verifier_adapter = ChainAdapter({})
+        verified = self._model(
+            verifier_adapter, policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,
+        ).call(
+            purpose="p14m_route_verify", request_id="same-verification",
+            prompt="verify", mission=self.mission,
+            producer_route_decision_refs=[producer["route_decision_ref"]],
+        )
+        self.assertEqual(verified["text"], "answered by profile:zai-glm-5-3")
+        self.assertEqual(verifier_adapter.served, ["profile:zai-glm-5-3"])
+
+        # Producer evidence is part of the WorkOrder identity. The same
+        # request and prompt with a different producer cannot replay this one.
+        openai = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="plan", request_id="producer-openai", prompt="draft",
+               mission=self.mission)
+        another = ChainAdapter({})
+        second = self._model(
+            another, policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,
+        ).call(
+            purpose="p14m_route_verify", request_id="same-verification",
+            prompt="verify", mission=self.mission,
+            producer_route_decision_refs=[openai["route_decision_ref"]],
+        )
+        self.assertFalse(second["replayed"])
+        self.assertEqual(another.served, ["profile:claude-fable-5-1"])
+
+    def test_unknown_producer_route_fails_before_adapter_or_budget_charge(self) -> None:
+        adapter = ChainAdapter({})
+        with self.assertRaisesRegex(CockpitModelError, "could not prove"):
+            self._model(
+                adapter, policy_version_ref=self.verifier_policy,
+                slots=self.verifier_slots,
+            ).call(
+                purpose="p14m_route_verify", request_id="unknown-producer",
+                prompt="verify", mission=self.mission,
+                producer_route_decision_refs=["model-route-decision:missing"],
+            )
+        self.assertEqual(adapter.served, [])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            count = ledger.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
 
     def test_the_budget_is_charged_for_the_model_that_actually_ran(self) -> None:
         # The cheap chain, because its links have genuinely different rate cards:
