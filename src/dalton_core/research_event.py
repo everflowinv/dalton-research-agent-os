@@ -208,6 +208,7 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "current_snapshot_hash", "changed_at", "added_line_count",
         "removed_line_count", "title", "excerpt", "artifact_hash",
         "invocation_ref", "event_key",
+    }),
     "calibration": frozenset({
         "occurrence_ref", "period_end", "model_version_ref", "reconciliation_count",
         "overturn_candidates", "notable", "within_tolerance", "decision",
