@@ -6,9 +6,10 @@ immutable formal result contains exactly `HOST_COMPLETION_FAILED` or
 
 `dalton-controlled-redrive` prepares a read-only candidate bound to the old
 WorkOrder and result hashes, exact mission version/hash, admission and
-settlement hashes, full original reservation, and the SHA-256 of the installed
-adapter source. The adapter is accepted only when its known repaired transport
-markers are present. Apply requires the reviewed candidate hash, reconstructs
+settlement hashes, full original reservation, and the exact managed OpenClaw
+2026.9.3 package and completion-bundle SHA-256 values. The installed bundle is
+accepted only when the complete controlled-transport patch has each strict
+post-patch anchor exactly once. Apply requires the reviewed candidate hash, reconstructs
 the candidate from current authorities, first appends the conservative cost
 correction, then appends one immutable recovery authorization. Repeating apply
 is idempotent; another authorization for the old work is refused.
@@ -27,7 +28,7 @@ Validation:
 PYTHONPATH=src python3 -m unittest tests.test_controlled_failure_redrive tests.test_cockpit_model_fallback tests.test_scheduler tests.test_thesis_impact_budget
 ```
 
-Result: 61 tests passed. The candidate-only test compares Scheduler database
-bytes before and after prepare; apply/replay preserve the original WorkOrder
+Result: 61 tests passed. The candidate-only test compares Scheduler and budget
+database bytes plus directory sidecars before and after prepare; apply/replay preserve the original WorkOrder
 authority bytes and append one correction and one recovery record. No live
 state, network, model call, signature or deployment was used.

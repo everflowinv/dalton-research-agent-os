@@ -15,15 +15,19 @@ def main(argv=None) -> int:
     parser.add_argument("--scheduler-db", required=True)
     parser.add_argument("--budget-db", required=True)
     parser.add_argument("--old-work-order-ref")
+    parser.add_argument("--openclaw-root")
     parser.add_argument("--candidate")
     parser.add_argument("--expected-candidate-hash")
     args = parser.parse_args(argv)
     if bool(args.old_work_order_ref) == bool(args.candidate):
         parser.error("choose exactly one of --old-work-order-ref or --candidate")
     if args.old_work_order_ref:
+        if not args.openclaw_root:
+            parser.error("prepare requires --openclaw-root")
         result = prepare(
             scheduler_db=args.scheduler_db, budget_db=args.budget_db,
             old_work_order_ref=args.old_work_order_ref,
+            openclaw_root=args.openclaw_root,
         )
     else:
         if not args.expected_candidate_hash:

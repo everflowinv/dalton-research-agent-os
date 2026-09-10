@@ -597,6 +597,7 @@ class CockpitModel:
 
                 recovery_suffix = approved_request(
                     self.scheduler_db,
+                    self.config["budget_db"],
                     old_work_order_ref=work.id,
                     formal=formal,
                     mission=mission,
