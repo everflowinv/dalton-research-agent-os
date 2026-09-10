@@ -204,6 +204,7 @@ PURPOSE_POOLS: dict[str, str] = {
     "tracking": "event_response",
     # W4: the same pool its lane spends from, or the two would disagree.
     "zero_base_review": "coverage",
+    "zero_base_review_verifier": "coverage",
 }
 
 DEFAULT_POOL = "coverage"

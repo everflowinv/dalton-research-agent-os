@@ -98,7 +98,7 @@ def answer(**overrides):
         "stale_debates": [{"debate_ref": DEBATE["ref"], "because": "定价已经稳了四个季度"}],
         "next_verification": {"what": "Q2 的 managed services 毛利率",
                               "date": "2026-07-20", "because": "那是曲线第一次可证伪的点"},
-        "citations": ["claim-version:one", "research-event:one"],
+        "citations": ["claim-version:one"],
     }
     body.update(overrides)
     return body
@@ -281,6 +281,18 @@ class ValidationTests(unittest.TestCase):
                 answer(citations=["claim-version:invented"]), context()
             )
 
+    def test_event_refs_cannot_stand_in_for_archived_evidence(self) -> None:
+        with self.assertRaisesRegex(ZeroBaseReviewValidationError, "archived"):
+            validate_review_output(
+                answer(rewritten_lines=[], stale_debates=[],
+                       citations=["research-event:one"]), context()
+            )
+
+    def test_a_rewrite_cannot_use_an_event_as_its_evidence(self) -> None:
+        line = {**answer()["rewritten_lines"][0], "refs": ["research-event:one"]}
+        with self.assertRaisesRegex(ZeroBaseReviewValidationError, "archived"):
+            validate_review_output(answer(rewritten_lines=[line]), context())
+
     def test_a_rewrite_of_a_thesis_this_company_has_not_is_refused(self) -> None:
         with self.assertRaises(ZeroBaseReviewValidationError):
             validate_review_output(
@@ -385,7 +397,8 @@ class ModelCallTests(unittest.TestCase):
             family_resolver={"route:1": "openai", "route:verifier": "anthropic"}.get,
         )
         self.assertEqual(found["status"], "verified")
-        self.assertIn("Archived refs", verifier.calls[0]["prompt"])
+        self.assertIn("Archived evidence", verifier.calls[0]["prompt"])
+        self.assertIn("毛利率 32.1%", verifier.calls[0]["prompt"])
         self.assertIn('"next_verification"', verifier.calls[0]["prompt"])
 
     def test_a_same_family_verifier_is_refused(self) -> None:
@@ -403,6 +416,7 @@ class ModelCallTests(unittest.TestCase):
 
         self.assertEqual(tier_for("zero_base_review"), "brain")
         self.assertEqual(pool_for_purpose("zero_base_review"), "coverage")
+        self.assertEqual(pool_for_purpose("zero_base_review_verifier"), "coverage")
 
 
 class AuthorityTests(unittest.TestCase):

@@ -543,7 +543,9 @@ def build_review_prompt(context: Mapping[str, Any]) -> str:
         "",
         f"At most {MAX_REWRITTEN_LINES} rewritten lines and {MAX_STALE_DEBATES} stale",
         "debates; empty lists are correct answers. The verification date must be on or",
-        "after the as-of date. Do not add keys and do not cite a ref that is not listed.",
+        "after the as-of date. Do not add keys. Answer citations and rewrite refs must",
+        "use only the archived thesis, debate, and claim refs listed above; event refs",
+        "are context, not grounding for these four answers.",
     ]
     prompt = "\n".join(lines)
     if len(prompt) > MAX_PROMPT_CHARS:
@@ -589,6 +591,8 @@ def validate_review_output(
     permitted = set(context.get("allowed_refs") or ())
     thesis_refs = {str(thesis["ref"]) for thesis in context.get("theses") or ()}
     debate_refs = {str(debate["ref"]) for debate in context.get("debates") or ()}
+    claim_refs = {str(claim["ref"]) for claim in context.get("claims") or ()}
+    archived_refs = thesis_refs | debate_refs | claim_refs
 
     rewritten = value["rewritten_lines"]
     if not isinstance(rewritten, Sequence) or isinstance(rewritten, (str, bytes)):
@@ -629,6 +633,10 @@ def validate_review_output(
         if not refs:
             raise ZeroBaseReviewValidationError(
                 "a rewritten line must name the evidence that occasioned it (ADR-0007)"
+            )
+        if not set(refs) <= archived_refs:
+            raise ZeroBaseReviewValidationError(
+                "a rewritten line may cite only archived thesis, debate, or claim refs"
             )
         lines.append({
             "thesis_ref": thesis_ref,
@@ -680,6 +688,12 @@ def validate_review_output(
             "the next verification point is in the past; a date behind the review "
             "is not a next look"
         )
+    citations = _refs(value["citations"], "citations", permitted,
+                      maximum=MAX_CITATIONS)
+    if not citations or not set(citations) <= archived_refs:
+        raise ZeroBaseReviewValidationError(
+            "the four answers must cite archived thesis, debate, or claim refs"
+        )
     return {
         "form_a_view": form,
         "because": _text(value["because"], "because", maximum=MAX_BECAUSE_CHARS),
@@ -691,8 +705,7 @@ def validate_review_output(
             "because": _text(verification["because"], "next_verification.because",
                              maximum=MAX_BECAUSE_CHARS),
         },
-        "citations": _refs(value["citations"], "citations", permitted,
-                           maximum=MAX_CITATIONS),
+        "citations": citations,
     }
 
 
@@ -734,19 +747,26 @@ def review(
 
 
 def build_verifier_prompt(context: Mapping[str, Any], answered: Mapping[str, Any]) -> str:
-    archived = [ref for ref in context.get("allowed_refs") or () if str(ref).startswith(
-        ("thesis", "debate", "claim")
-    )]
-    return "\n".join([
+    archived = {
+        "theses": list(context.get("theses") or ()),
+        "debates": list(context.get("debates") or ()),
+        "claims": list(context.get("claims") or ()),
+    }
+    prompt = "\n".join([
         "You are an independent verifier. Check all four zero-base answers.",
         "Each answer must be grounded in archived thesis, debate, or claim refs, and the",
         "next verification point must contain a real date on or after the as-of date.",
         f"As of: {context['as_of']}",
-        "Archived refs: " + ", ".join(archived),
+        "Archived evidence (canonical JSON): " + canonical_json(archived),
         "Review: " + canonical_json({key: answered[key] for key in OUTPUT_KEYS}),
         'Return raw JSON only: {"verdict":"pass|reject","findings":["<reason>"]}',
         "A pass has no findings; a reject has at least one.",
-    ])[:MAX_PROMPT_CHARS]
+    ])
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise ZeroBaseReviewValidationError(
+            f"the verifier prompt is {len(prompt)} characters, over {MAX_PROMPT_CHARS}"
+        )
+    return prompt
 
 
 def verify_review(
