@@ -7,11 +7,13 @@ the router, and produces the same bytes every time. The expensive judgement --
 what the assumptions should actually be -- is a later slice, and the seam for
 it is ``model_forecast_driver.draft_assumptions``.
 
-One run does one of exactly two things and stops:
+One run does one of three bounded things and stops:
 
 * a company with no driver model gets its first one -- drivers from the
   specification, trailing assumptions from the filings, the income chain from
   those -- and its estimates are published as forecast lines;
+* a newly authorized specification gets one new model identity over the same
+  immutable filing inputs;
 * a company whose model estimated a quarter the filings now cover gets those
   estimates **answered**: the actual is written down beside the estimate,
   which keeps its value and is marked as superseded. Nothing about the
@@ -67,14 +69,15 @@ def _write_owner_only(path: Path, value: Any) -> None:
 
 
 def needs_model(latest: Any, spec: Any, table: Any) -> str | None:
-    """What this company needs, if anything: its first model, or its actuals.
+    """What this company needs: its first model, a new spec model, or actuals.
 
-    Two things and no more. The lane does not re-forecast because a document
-    arrived, because a broker changed a rating, or even because a filing
-    landed: a filing settles the quarters it covers and says nothing this
-    system is entitled to conclude about the quarters ahead. What a filing or
-    an event *means* for the forecast is a judgement with a decision word on
-    it, and it reaches the model as an explicit revision.
+    A newly authorized specification is itself an explicit modelling
+    judgement, so it starts a new model identity. The lane does not re-forecast
+    because a document arrived, because a broker changed a rating, or even
+    because a filing landed: a filing settles the quarters it covers and says
+    nothing this system is entitled to conclude about the quarters ahead. What
+    a filing or an event *means* for the forecast is a judgement with a
+    decision word on it, and it reaches the model as an explicit revision.
     """
 
     return pending_action(latest, spec, table)

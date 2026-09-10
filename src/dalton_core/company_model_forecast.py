@@ -45,6 +45,7 @@ from .model_forecast_driver import (
     REVENUE,
     ForecastModelAuthority,
     ForecastModelUnavailable,
+    SOURCE_VERSION_KEY,
     actualize_model,
     build_forecast_model,
     model_readiness,
@@ -118,10 +119,10 @@ def pending_action(
 ) -> str | None:
     """What this lane may do for this company on this tick, if anything.
 
-    Two things, and deliberately only two. A company with no model gets its
-    first one. A company whose model estimated a quarter the filings have now
-    covered gets those estimates answered -- the actual written down beside
-    them, the future untouched.
+    A company with no model gets its first one. A newly authorized
+    specification gets its own model identity. A company whose current model
+    estimated a quarter the filings have now covered gets those estimates
+    answered -- the actual written down beside them, the future untouched.
 
     What this never returns is "the world moved, re-forecast": a new Claim, a
     news item, a broker note, even a new filing, do not by themselves change
@@ -136,9 +137,10 @@ def pending_action(
     if prior is None:
         return "first"
     if str(prior.get("spec_ref")) != str(spec.get("spec_id")):
-        # The specification is a judgement about how to model the company, and
-        # a new one is a new model rather than a new version of this one.
-        return None
+        # The specification is a judgement about how to model the company. A
+        # new one starts a new model identity; it is not an actualisation of
+        # the old specification's model.
+        return "new_specification"
     return "actualize" if realised_ends(prior, table) else None
 
 
@@ -260,10 +262,17 @@ def run_company_forecast(
     if backfill_proof:
         body = prior
         action = "filing_proof_backfill"
-    elif action == "first":
+    elif action in {"first", "new_specification"}:
         body = build_forecast_model(
             spec, table, actor_ref=actor_ref,
-            mission_version_ref=mission_version_ref)
+            mission_version_ref=mission_version_ref,
+            change_reason=("assumption_review" if action == "new_specification"
+                           else "evidence_thicker"))
+        if action == "new_specification":
+            # This is a fresh model identity, while the authority still owns
+            # one append-only company history. Bind the append to the head we
+            # inspected so a concurrent revision cannot be overwritten.
+            body[SOURCE_VERSION_KEY] = str(prior["id"])
     else:
         body = actualize_model(prior, table, actor_ref=actor_ref)
     # A comparative quarter can occur in several filings.  Segment arithmetic

@@ -194,6 +194,21 @@ class LaneTests(unittest.TestCase):
         self.assertIn("outside the filed range", held["reason"])
         self.assertEqual(len(self.launcher.started), 1)
 
+    def test_a_refused_old_spec_does_not_hold_a_new_spec_identity(self):
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "forecast_status": "unavailable:economic_invariants",
+            "failure_reason": "segment_sum: no consolidated revenue anchor"})
+        self.assertEqual(self.lane.dispatch_once()["status"], "held")
+
+        self.spec = {**self.spec, "spec_id": "company-model-spec:replacement",
+                     "content_hash": "f" * 64}
+        self.missions.specification = self.spec
+        resumed = self.lane.dispatch_once()
+        self.assertEqual(resumed["status"], "launched")
+        self.assertNotEqual(resumed["model_digest"], first["model_digest"])
+        self.assertEqual(len(self.launcher.started), 2)
+
     def test_a_failed_child_with_no_summary_spends_one_transient_retry(self):
         first = self.lane.dispatch_once()
         self.launcher.finish(first["ticket_ref"], status="orphaned")

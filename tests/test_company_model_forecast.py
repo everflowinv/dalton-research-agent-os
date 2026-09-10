@@ -61,7 +61,7 @@ from dalton_core.forecast_sensitivity import (
 )
 from dalton_core.model_stage_readiness import company_model_readiness
 from dalton_core.mission_model_stage_lane import advance_once
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_forecast_reconciliation import (
     ForecastReconciliationFixture,
@@ -355,6 +355,62 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(summary["forecast_status"], "nothing_to_model")
         self.assertEqual(
             len(ForecastModelAuthority(self.store).versions(ACN)), 1)
+
+    def test_a_new_spec_contract_builds_one_new_model_without_rewriting_the_old(self):
+        self.child()
+        authority = ForecastModelAuthority(self.store)
+        old = authority.latest(ACN)
+        old_bytes = self.store.connection.execute(
+            "SELECT record_json FROM forecast_model_versions WHERE version_id=?",
+            (old["id"],),
+        ).fetchone()["record_json"]
+        old_lines = {
+            row["version_id"]: dict(row)
+            for row in self.store.connection.execute(
+                "SELECT * FROM model_forecast_line_versions"
+            ).fetchall()
+        }
+
+        current = self.missions.latest_company_model_spec(ACN)
+        replacement = {"schema_version": "0.2", **{
+            key: current[key] for key in (
+                "company_ref", "state_hash", "assessment",
+                "revenue_anchor_concept", "revenue_drivers", "expense_lines",
+                "forecast_statements", "operating_metrics", "horizon",
+                "decided_by",
+            )
+        }}
+        replacement["task_hash"] = "f" * 64
+        replacement["content_hash"] = content_hash(replacement)
+        new_spec = self.missions.record_company_model_spec(
+            replacement, mission_version_ref=self.mission["id"])
+
+        company_ref, selected, table = choose_company(
+            self.missions, authority, self.mission)
+        self.assertEqual(company_ref, ACN)
+        self.assertEqual(selected["spec_id"], new_spec["spec_id"])
+        self.assertEqual(pending_action(old, selected, table), "new_specification")
+
+        first = self.child()
+        new_model = authority.latest(ACN)
+        self.assertEqual(first["action"], "new_specification")
+        self.assertEqual(first["model_version"], 2)
+        self.assertEqual(new_model["prior_version_ref"], old["id"])
+        self.assertEqual(new_model["spec_ref"], new_spec["spec_id"])
+        self.assertEqual(first["change_reason"], "assumption_review")
+        self.assertEqual(self.store.connection.execute(
+            "SELECT record_json FROM forecast_model_versions WHERE version_id=?",
+            (old["id"],),
+        ).fetchone()["record_json"], old_bytes)
+        for version_id, original in old_lines.items():
+            self.assertEqual(dict(self.store.connection.execute(
+                "SELECT * FROM model_forecast_line_versions WHERE version_id=?",
+                (version_id,),
+            ).fetchone()), original)
+
+        second = self.child()
+        self.assertEqual(second["forecast_status"], "nothing_to_model")
+        self.assertEqual(len(authority.versions(ACN)), 2)
 
     def test_unchanged_legacy_model_backfills_proof_without_new_version(self):
         self.child()
