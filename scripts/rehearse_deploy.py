@@ -688,11 +688,6 @@ class LaneSwitch:
 
 LANE_SWITCHES: tuple[LaneSwitch, ...] = (
     LaneSwitch(
-        "prior_research (W3)", "feeds/prior-research", None, True,
-        "a symlink to DALTON_PRIOR_RESEARCH_DIR; seeded with its two records "
-        "or not at all",
-    ),
-    LaneSwitch(
         "mission_tracking (P14a)", "tracking-policy.json",
         "deploy/phase9/p14a-tracking-policy-v1.json", True,
         "INT2 seed block; one file, so all-or-nothing is automatic",
