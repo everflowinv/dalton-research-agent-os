@@ -301,7 +301,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | --- | --- | --- |
 | w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 交付（`c768473`，5,442 项）；未合；待审项 F9–F10，裁决 D3 |
 | w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 交付（5,451 项）；已合入本地 main 未 push；待修 F1–F3 |
-| w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
+| w4-zero-base-review（交付 `a208d04`，5,486 项通过；未合；待审项 F16–F17，裁决 D8）| `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
 | w4-insider-buyback-tracking（交付 `e529cf5`，5,475 项通过；未合；待审项 F5–F8）| owner 09-10：tracking 要含 filings，尤其管理层减持与回购。Form 4 派生上下文（占持股比、90 日聚合、10b5-1、是否已被预期）进判断层提示；新增 `buyback_disclosure` 事件（10-Q/10-K Item 2、8-K 授权）+ 派生上下文（均价 vs 现价、节奏、趋势、占市值 / FCF、是否只对冲稀释）；ownership 与 filings index 进常驻 daily tracking；capability map 写明美股回购只在 10-Q/10-K/8-K/电话会 | 派出 |
 | w4-hkex-filings（交付，5,534 项通过；未合；待审项 F11–F13，裁决 D4–D5）| 港股 `hkex-filings` 连接器：翌日回购申报、月报表、权益披露（DI）、公告索引；发 `buyback_disclosure` / `insider_transaction` / `ownership_change`；`company:hk-secucode:*` 仅在连接器内引入，universe 扩展留给 owner | 派出 |
 | w4-failure-classes（交付 `51c4b81`，5,442 项通过；未合；待审项 F14–F15，裁决 D6–D7）| lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
@@ -331,6 +331,10 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | F15 | w4-failure-classes 未映射项 | `gated:<gate_reason>`（document_extraction 的治理拒绝）没有归属，暂落 `transient` | 主 agent 决定：加第四类 `not_permitted`，不重试、不消耗预算、进 cockpit「待授权」而不是「停摆失败」（它本来就是 ungranted / unapproved 的同一件事）；`stop_reason` 契约同步加词并在 `contracts/` 与测试里钉住 | 已记录，未派 |
 | D6 | w4-failure-classes 开放问题 2 | 依赖探测间隔一刀切 30 分钟 | 主 agent 建议分层：配额类 30 分钟自动探测；会话类（AlphaEngine 桌面、Guidepoint 登录）探测一次失败后转 owner 待办、不再自动探测直到 cockpit 标记已恢复；owner 只需确认这个分法 | 待 owner 点头 |
 | D7 | w4-failure-classes 开放问题 3 | statements / sec_quarters 两条 lane 的失败预算在 SQL 里，迁移会改 P13「未归因 → 我们的配置」默认与 `attempt_voids` 语义 | 主 agent 建议：不迁移，只映射词表（作者现状），记入 ADR 备注 | 待 owner 点头 |
+| F16 | w4-zero-base-review 开放问题 3 | 「月度」按日历月判定，1 月 31 日与 2 月 1 日各得一个版本 | subagent：改为「距该公司上一版 ZeroBaseReview ≥ 30 天」或「其后出现新的 earnings_calibration」两者之一触发；财报触发后 30 天计时重置；测试：31 日 / 1 日只出一版 | 已记录，未派 |
+| F17 | w4-zero-base-review 开放问题 1 | 复盘无独立 verifier，判断 lane 有 | 主 agent 决定：要。复用判断 lane 的 verifier 谓词（verifier 家族 ≠ 生产者家族），校验四问答案每条都引用了在档的 thesis / debate / claim ref、且「下一个验证点」有日期；不通过 = refused 不发布 | 已记录，未派 |
+| F5d | w4-zero-base-review | 改了 `thesis_revision.py`（加同形兄弟表读取）、`cockpit_plane.py`（判断结果面板）、`research_cycle_reflection`（第九个指标，版本 0.1→0.2）、`install.sh`、`bootstrap.py`、`rehearse_deploy.py` | 合并时与 failure-classes、model-selection 在 cockpit / bootstrap / rehearse 同文件；调和后 import 检查 | 已记录 |
+| D8 | w4-zero-base-review 开放问题 2、4 | (2) 复盘是否也发布进 `MissionDeliverableAuthority`（需 `DELIVERABLE_KINDS` 加一个词）；(4) 事后验证窗口沿用 price_divergence 的 10 个交易日 / 6%，季度窗口要改 tracking policy | 主 agent 建议：(2) 要，词 `zero_base_review`，这样 cockpit 的交付列表与验收 rubric 能看到它；(4) 加第二个窗口 60 个交易日 / 15% 作为「慢背离」，写进 tracking policy v2（与 F6 同一次重签） | 待 owner 点头 |
 | D1 | w4-insider-buyback 开放问题 2 | 8-K 正文不可取（`sec_earnings_release` 记录了原因），回购授权抽取只在 Core 已持有 8-K 文本时触发；要真正生效需要 `form: 8-K` 的 discovery spec = 新 plan 版本 + owner 发布 | 进 owner 最终裁决清单 | 待 owner |
 | D2 | w4-insider-buyback 开放问题 1 | 10-Q Item 5「Trading Arrangements」（10b5-1 计划的采用 / 终止，含人、日期、窗口、股数）比 Form 144 更强的「预期减持」信号，可解析 | 作为后续切片 W5 候选，不阻塞 | 待排期 |
 | F4 | 我给七个 agent 的恢复消息 | 消息里写的 `pgrep -fc` 在 macOS 不支持 `-c` | 无需修代码；agent 自行改用 `pgrep -f ... \| wc -l`。记录以免误判为环境故障 | 已记录 |
