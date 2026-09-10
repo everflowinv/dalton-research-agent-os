@@ -56,12 +56,14 @@ DRIVER_KEY = "mission_conviction"
 PUBLISHED_STATUS = "fresh"
 
 
-def _business_key(company_ref: str, fingerprint: str) -> str:
+def _business_key(company_ref: str, fingerprint: str, launcher: Any = None) -> str:
     from .cockpit_model import verifier_provider_contract_fingerprint
 
     contract = verifier_provider_contract_fingerprint(
         "conviction_call_verifier")
-    return f"{company_ref}|{fingerprint}|verifier_contract:{contract}"
+    from .model_route_recovery import configured_business_key
+    return configured_business_key(
+        f"{company_ref}|{fingerprint}|verifier_contract:{contract}", launcher)
 
 
 class MissionConvictionLaneCoordinator:
@@ -79,6 +81,7 @@ class MissionConvictionLaneCoordinator:
         self.launcher = launcher
         self.mission = mission
         self._open: str | None = None
+        self._open_business_key: str | None = None
         # Runs that produced nothing, keyed by (company, fingerprint), so a
         # company whose call was refused does not take the slot every five
         # minutes while the others never get a turn.  Process-local: a restart
@@ -126,6 +129,8 @@ class MissionConvictionLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         self._open = None
+        business_key = self._open_business_key
+        self._open_business_key = None
         call_status = settled.get("call_status")
         published = (
             settled.get("status") == "succeeded" and call_status == PUBLISHED_STATUS
@@ -134,7 +139,7 @@ class MissionConvictionLaneCoordinator:
         company_ref = settled.get("company_ref")
         fingerprint = settled.get("evidence_fingerprint")
         if hold and company_ref and fingerprint:
-            key = _business_key(str(company_ref), str(fingerprint))
+            key = business_key or _business_key(str(company_ref), str(fingerprint), self.launcher)
             reason = settled.get("failure_reason") or f"last run: {call_status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
@@ -144,7 +149,7 @@ class MissionConvictionLaneCoordinator:
             ).as_wire()
         elif company_ref and fingerprint:
             settled["resumed"] = self.budget.clear(
-                _business_key(str(company_ref), str(fingerprint)))
+                business_key or _business_key(str(company_ref), str(fingerprint), self.launcher))
         return settled
 
     # -- the tick ---------------------------------------------------------
@@ -211,7 +216,7 @@ class MissionConvictionLaneCoordinator:
                         company_ref, fingerprint,
                         f"{company_ref} already has a call in {week_key(now)}")
                     continue
-            business_key = _business_key(str(company_ref), str(fingerprint))
+            business_key = _business_key(str(company_ref), str(fingerprint), self.launcher)
 
             permission = current_permission(
 
@@ -261,6 +266,8 @@ class MissionConvictionLaneCoordinator:
             return {"status": "rejected", "company_ref": company_ref,
                     "settled": settled, "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
+        self._open_business_key = _business_key(
+            str(company_ref), str(fingerprint), self.launcher)
         return {
             "status": "launched", "company_ref": company_ref,
             "evidence_fingerprint": fingerprint, "ticket_ref": ticket["id"],

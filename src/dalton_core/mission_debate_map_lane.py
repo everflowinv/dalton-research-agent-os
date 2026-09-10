@@ -53,16 +53,17 @@ DEBATE_MAP_MODEL_CONFIG = "initial-screen-model-config.json"
 
 
 def _business_key(subject_ref: str, fingerprint: str,
-                  mission: dict[str, Any]) -> str:
+                  mission: dict[str, Any], launcher: Any = None) -> str:
     from .debate_map_draft import DRAFT_CONTRACT_HASH
     from .cockpit_model import verifier_provider_contract_fingerprint
 
     verifier_contract = verifier_provider_contract_fingerprint(
         "debate_map_verifier")
-    return (
+    from .model_route_recovery import configured_business_key
+    return configured_business_key(
         f"{subject_ref}|{fingerprint}|{mission['id']}|"
         f"{mission['content_hash']}|contract:{DRAFT_CONTRACT_HASH}|"
-        f"verifier_contract:{verifier_contract}"
+        f"verifier_contract:{verifier_contract}", launcher
     )
 
 
@@ -214,7 +215,7 @@ class MissionDebateMapLaneCoordinator:
             # claim set is byte-identical.  Keeping it in the persistent
             # signature also prevents an old terminal/permission outcome from
             # suppressing the rebind.
-            business_key = _business_key(subject_ref, fingerprint, mission)
+            business_key = _business_key(subject_ref, fingerprint, mission, self.launcher)
 
             permission = current_permission(
 
@@ -263,7 +264,7 @@ class MissionDebateMapLaneCoordinator:
             return {"status": "rejected", "subject_ref": subject_ref,
                     "settled": settled, "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
-        self._open_business_key = _business_key(subject_ref, fingerprint, mission)
+        self._open_business_key = _business_key(subject_ref, fingerprint, mission, self.launcher)
         return {
             "status": "launched", "subject_ref": subject_ref,
             "evidence_fingerprint": fingerprint, "ticket_ref": ticket["id"],

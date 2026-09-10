@@ -2,19 +2,19 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-10，20:45 UTC）
+## 当前检查点（2026-09-10，21:12 UTC）
 
-**运行恢复版本 `c84d076` 已部署并核验；基础研究产物仍在验收。** 同一冻结 commit 全量 6,576 项 / 551.999s 通过（1 skip），550 个安装文件与源码/wheel 逐字一致，67-schema/40-tick 副本演练无路径逃逸，服务 health 全部通过。12 份配置的模型选择和预算原样保留，Mission v14 人类签署及 hash 不变。详见 [本次验收](reports/runtime-boundary-recovery-acceptance-2026-09-10.md)。
+**基础研究闭环优先，实际产物尚未验收通过。** 当前 live 仍为 `c84d076`，冻结全量 6,576 项通过（1 skip）、550 个安装文件一致、67-schema/40-tick 副本演练和服务 health 通过；这些不能替代真实产物。最新只读验收仍为 0/15，五家公司正式 forecast model 仍为空。Mission v14 原人类签署及 hash 不变。
 
-本次修复真实 provider-output 契约兼容、旧 BUSY 失败恢复、全拒绝摘要误报成功、抽取配置更新未解除旧 idle hold。11 个核验 purpose 沿用 Cockpit 可调整的显式选择。首轮检查仍为 0/15，正在观察自然调度结果。
+部署后实际调度暴露三个基础阻塞：transcript polish 仍要求单模型 pin；模型选择虽保留，安装器未保留跨 tier 的 credential slot 准入；OpenClaw 的实际 Google transport 绕过已安装的 provider controls，生成后因缺 proof 被拒。前两者分别在修复和集成验收，第三项已有源码补丁，正在加强真实依赖边界的离线验证。未知调用结果不得按零费用处理或自动多模型重试，Sol 正修复这条预算边界。
 
-五家公司存在模型规格，但正式 forecast model 仍为零。四家公司的分部/维度检查有误报，IBM 缺季度收入计算锚点；Sol 正并行修复并独立审查。分部修改因完整多维 provenance 及“未检查”可见性问题暂未合入；IBM 新规格合同及不可变迁移另行审查。长期容量阻塞的可配置冷却与有限恢复也尚未部署。
+财务基础修复已合入但未部署：IBM 的 filed revenue anchor 与经济 driver 分离、模型规格按 task contract 追加；分部检查必须有完整单维 provenance，缺证明明确显示未检查；SEC statements v2 保持旧批准合同可用，新增 v3 仍需独立来源批准。310 项聚焦测试通过。可配置长期 BUSY 冷却/有限恢复和跨 tier credential retention 分别有 177/112 项聚焦验收，尚待下一次统一冻结。
 
-Office 完整导入、基金格式 HTML/XLSX、Cockpit 下载与页面重构已部署；缺真实有效模型时拒绝导出。多分析师隔离、共享账户容量与 connector binding CLI 已部署；未创建新真实分析师或迁移原工作区。价格/预期/估值来源仍有三项 proposed 治理记录，旧 thesis-impact 仍有 superseded-policy 人类裁决，不因部署而自动放行。
+Office 导入、基金格式 HTML/XLSX、Cockpit 下载与页面重构已经部署；缺真实有效模型时拒绝导出。多分析师隔离基础也已部署，未创建新的真实分析师工作区。价格/预期/估值来源的三项 proposed 记录，以及旧 thesis-impact 的 superseded-policy 人类裁决，仍与部署授权分开。
 
-**顺序不变：先完成基础能力及真实研究闭环，再做高层投资判断。** 行业认识、Initial Screen、业务本质与护城河研究保持主线；不超过 12 个月的盈利/预期/估值与贝叶斯迭代目前仅设计记录。
+**执行顺序：资料获取与抽取 → 可靠模型调用和费用账 → 财务模型/预测及交付 → 实际覆盖与持续跟踪验收。** 行业认识、Initial Screen、业务本质和护城河是主线。新增不超过 12 个月的盈利/预期/估值、叙事与贝叶斯判断要求只做需求记录，基础能力完备前不扩展实现。
 
-Next step：观察本次新调度产物，完成可配置长期恢复及财务模型完整性/锚点修复的独立验收后再发布；真实缺材料和人类 checkpoint 单列，不以单测或服务启动代替产物。
+Next step：完成 transport、确定未发送/可能已付费的重试边界、路由配置修复后的旧拒绝恢复；独立审查后冻结全量、wheel、副本演练，再按现有授权部署并观察真实研究产物。详见 [持续进展](reports/autonomous-closure-progress-2026-09-10.md)。
 
 ## 最新部署与当前工作（2026-09-10，17:12 UTC）
 

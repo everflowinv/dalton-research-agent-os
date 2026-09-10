@@ -55,6 +55,10 @@ class DebateMapLauncher(LaneChildLauncher):
             None if scheduler_db is None else Path(scheduler_db).expanduser().resolve()
         )
 
+    def configuration_fingerprint(self) -> str | None:
+        from .model_route_recovery import configuration_fingerprint
+        return configuration_fingerprint(self.model_config_path)
+
     @property
     def configured(self) -> bool:
         """A debate map is judgement end to end; without a model there is none.
@@ -91,7 +95,11 @@ class DebateMapLauncher(LaneChildLauncher):
         from .cockpit_model import verifier_provider_contract_fingerprint
         contract_fingerprint = verifier_provider_contract_fingerprint(
             "debate_map_verifier")
-        digest = run_digest(subject_ref, fingerprint, contract_fingerprint)
+        config_fingerprint = self.configuration_fingerprint()
+        ticket_contract = contract_fingerprint
+        if config_fingerprint is not None:
+            ticket_contract += ":model-config:" + config_fingerprint
+        digest = run_digest(subject_ref, fingerprint, ticket_contract)
         return self.spawn(
             digest=digest,
             record={
@@ -100,6 +108,7 @@ class DebateMapLauncher(LaneChildLauncher):
                 "run_digest": digest,
                 "verifier_provider_contract": contract_fingerprint,
                 "model_configured": self.configured,
+                "model_config_fingerprint": config_fingerprint,
             },
             subject_ref=subject_ref,
         )
