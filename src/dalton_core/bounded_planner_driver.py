@@ -22,6 +22,7 @@ from .bounded_probe_executor import (
     WORKER_REF,
     execute_probe_work_order,
 )
+from .budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
 from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
 from .public_http_transport import PublicHttpTransport
 from .scheduler import Scheduler
@@ -305,17 +306,25 @@ class BoundedPlannerDriver:
         self.transport = transport or PublicHttpTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def _model_proposal(self, context: Mapping[str, Any]) -> dict[str, Any]:
+    def _model_proposal(self, context: Mapping[str, Any],
+                        *, pool: str | None = None) -> dict[str, Any]:
         """One bounded model attempt for a loop that can act on the answer."""
 
+        params: dict[str, Any] = {
+            "context_pack_ref": context["id"],
+            "max_input_tokens": 16_000,
+            "max_output_tokens": 1_200,
+            "max_cost_usd": self.config.planner_max_cost_usd,
+            "max_seconds": 180,
+        }
+        # C2b: which capacity pool this loop's call spends from, as the active
+        # loops projection reported it. The writer checks it against the loop
+        # record and refuses a disagreement, so this is a declaration rather
+        # than an instruction.
+        if pool is not None:
+            params["pool"] = pool
         try:
-            return self.client.call("llm_planner_execute", {
-                "context_pack_ref": context["id"],
-                "max_input_tokens": 16_000,
-                "max_output_tokens": 1_200,
-                "max_cost_usd": self.config.planner_max_cost_usd,
-                "max_seconds": 180,
-            })
+            return self.client.call("llm_planner_execute", params)
         except Exception as exc:  # noqa: BLE001 - one loop's failure is not the tick's
             return {"status": f"unavailable:{type(exc).__name__}"}
 
@@ -402,7 +411,25 @@ class BoundedPlannerDriver:
                     # and can still propose the terminal this loop needs.
                     executed_model = {"status": "budget_exhausted"}
                 else:
-                    executed_model = self._model_proposal(context)
+                    executed_model = self._model_proposal(
+                        context, pool=loop.get("pool"))
+                if (executed_model.get("status") == "rejected"
+                        and executed_model.get("reason") == POOL_EXHAUSTED_REASON):
+                    # C2b: this loop's pool is spent for today. That is a
+                    # budget decision, not a fault and not an outage, so the
+                    # loop is held rather than handed to the free
+                    # deterministic planner: falling through would admit a
+                    # round the pool said no to, and the loop would arrive at
+                    # tomorrow with one fewer round and nothing to show. The
+                    # writer refused before leasing anything, so nothing was
+                    # billed and nothing has to be undone.
+                    skipped.append({
+                        "loop_version_ref": loop["loop_version_ref"],
+                        "reason": POOL_EXHAUSTED_REASON,
+                        "pool": executed_model.get("pool"),
+                        "lane_status": POOL_EXHAUSTED_STATUS,
+                    })
+                    continue
                 if executed_model.get("status") == "proposal_ready":
                     proposal = executed_model["proposal"]
                 elif executed_model.get("status") == "core_action":

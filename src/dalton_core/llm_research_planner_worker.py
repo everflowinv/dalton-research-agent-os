@@ -5,8 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
 
+from .budget_pools import (
+    POOL_EXHAUSTED_REASON,
+    POOL_EXHAUSTED_STATUS,
+    pool_decision,
+)
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .llm_research_planner import (
     LLM_RESEARCH_PLANNER_HASH,
@@ -28,6 +34,11 @@ from .store import canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
+# The day ledger admits by phase, and a planning call is an assessment: it is
+# the work deciding what to look at, not a second opinion on something already
+# produced.  Named once so the pre-lease gate and the admission cannot name
+# two different phases and quietly reserve twice.
+BUDGET_PHASE = "assessment"
 
 
 class LLMResearchPlannerWorkerError(RuntimeError):
@@ -62,6 +73,9 @@ class LLMResearchPlannerModelWorker:
         observability: Any,
         routing_policy_ref: str,
         credential_slot_refs: Sequence[str],
+        budget: Any | None = None,
+        budget_policy_ref: str | None = None,
+        mission_binding: Mapping[str, Any] | None = None,
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -93,8 +107,22 @@ class LLMResearchPlannerModelWorker:
         self.adapter = adapter
         self.store = store
         self.observability = observability
+        # C2b: the day ledger, the budget policy version this call accounts
+        # against, and the mission binding that carries the capacity pool.
+        # All three or none: a worker holding two of them would look budgeted
+        # and admit nothing, which is exactly the hole this closes.
+        wired = (budget is not None, budget_policy_ref is not None,
+                 mission_binding is not None)
+        if any(wired) and not all(wired):
+            raise ValueError(
+                "a budgeted planner worker needs the ledger, the policy "
+                "version and the mission binding together"
+            )
         self.routing_policy_ref = routing_policy_ref
         self.credential_slot_refs = slots
+        self.budget = budget
+        self.budget_policy_ref = budget_policy_ref
+        self.mission_binding = None if mission_binding is None else dict(mission_binding)
         self.token_counter = token_counter
         self.lease_seconds = lease_seconds
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -213,6 +241,135 @@ class LLMResearchPlannerModelWorker:
             )
         return ModelInvocation.from_dict(saved)
 
+    # -- the day ledger (C2b) -----------------------------------------------
+
+    @property
+    def budgeted(self) -> bool:
+        """Whether this worker's calls reach the mission's day ledger at all.
+
+        False is the behaviour every deployment had before C2b: the call is
+        routed, made and accounted, but the mission's daily caps and its four
+        capacity pools never see it.  The op result says ``unbudgeted`` in that
+        case rather than saying nothing, because a budget that silently does
+        not apply is worse than one that is visibly absent.
+        """
+
+        return self.budget is not None
+
+    def _day(self) -> str:
+        return self.clock().astimezone(timezone.utc).date().isoformat()
+
+    @staticmethod
+    def _reserved_micros(work: WorkOrder) -> int:
+        """What the call reserves: the WorkOrder's own cost ceiling.
+
+        The same number P14e's ad-hoc pool reserves per round, because it is
+        the same number: ``planner_max_cost_usd`` travels from the driver's
+        config into this WorkOrder's budget.
+        """
+
+        return int(
+            (Decimal(str(work.budget["max_cost_usd"])) * 1_000_000).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+
+    def _next_attempt_number(self, work_order_id: str) -> int:
+        history = self.scheduler.attempt_history(work_order_id)
+        return max(
+            (int(event["attempt_number"]) for event in history), default=0
+        ) + 1
+
+    def _pool_gate(self, work: WorkOrder) -> dict[str, Any] | None:
+        """Refuse a spent pool *before* the WorkOrder is leased, or return None.
+
+        The gate has to come before the claim, not after.  A rejection found
+        after claiming holds a lease and has spent one of the WorkOrder's
+        bounded attempts; a pool stays spent for the rest of the day, so the
+        next few ticks would burn the remaining attempts and leave the loop's
+        planning WorkOrder permanently exhausted -- a budget decision turned
+        into a dead loop.  Refusing before the lease costs the loop nothing and
+        it resumes when the pool refills at midnight.
+
+        ``pool_decision`` is a pure read on the ledger's own connection, and
+        the admission inside :meth:`ThesisImpactBudgetStore.admit` re-runs it
+        inside the write transaction, so this gate is an early answer rather
+        than a second authority.
+        """
+
+        if not self.budgeted:
+            return None
+        decision = pool_decision(
+            self.budget.connection,
+            mission_binding=self.mission_binding,
+            day=self._day(),
+            reserved_micros=self._reserved_micros(work),
+            work_order_ref=work.id,
+            attempt_number=self._next_attempt_number(work.id),
+            phase=BUDGET_PHASE,
+            now=self.clock(),
+        )
+        if decision["status"] != "rejected":
+            return None
+        return self._pool_refusal(work, decision, gate="pre_lease")
+
+    @staticmethod
+    def _pool_refusal(
+        work: WorkOrder, rejection: Mapping[str, Any], *, gate: str,
+        completion: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The returned -- never raised -- shape of a spent pool."""
+
+        wire = {
+            "status": "rejected",
+            "reason": POOL_EXHAUSTED_REASON,
+            "lane_status": POOL_EXHAUSTED_STATUS,
+            "pool": rejection.get("pool"),
+            "day": rejection.get("day"),
+            "spent": rejection.get("spent"),
+            "cap": rejection.get("cap"),
+            "work_order_ref": work.id,
+            "gate": gate,
+            "rejection": dict(rejection),
+        }
+        if completion is not None:
+            wire["completion"] = dict(completion)
+        return wire
+
+    def _budget_report(
+        self, admission: Mapping[str, Any] | None, micros: int, status: str,
+    ) -> dict[str, Any]:
+        """What the day ledger did with this call, including doing nothing.
+
+        ``unbudgeted`` is the honest word for a planner configuration with no
+        ``budget_db``: the call was made and accounted, and the mission's day
+        caps and pools did not see it.  It is reported rather than omitted so
+        that "is the planner on the ledger yet?" is answerable from one tick
+        summary instead of from the installer's history.
+        """
+
+        if not self.budgeted:
+            return {"status": "unbudgeted"}
+        if admission is None:
+            return {"status": "not_admitted", "pool": self._pool_name()}
+        return {
+            "status": "settled",
+            "pool": admission.get("pool", self._pool_name()),
+            "admission_id": admission["admission_id"],
+            "reserved_micros": admission.get("reserved_micros"),
+            "settled_micros": micros,
+            "cost_status": status,
+        }
+
+    def _pool_name(self) -> str | None:
+        return None if self.mission_binding is None else self.mission_binding.get("pool")
+
+    def _settle(self, admission: Mapping[str, Any] | None, micros: int) -> None:
+        if admission is None:
+            return
+        from .cockpit_model import settle_day_ledger
+
+        settle_day_ledger(self.budget, admission, actual_micros=micros)
+
     def run_once(self, work_order: WorkOrder | Mapping[str, Any]) -> dict[str, Any]:
         work = self._work(work_order)
         self._validate_work(work)
@@ -229,6 +386,11 @@ class LLMResearchPlannerModelWorker:
                 "formal_result": formal,
                 "replayed": True,
             }
+        # C2b: before the lease, because a spent pool must cost the loop
+        # neither an attempt nor a held lease.
+        refused = self._pool_gate(work)
+        if refused is not None:
+            return refused
         lease = self.scheduler.claim(
             WORKER_REF, work_order_id=work.id, lease_seconds=self.lease_seconds
         )
@@ -289,12 +451,75 @@ class LLMResearchPlannerModelWorker:
             )
             return {"status": "failed", "route": route, "completion": completion}
         profile = self.router.get_profile(route["selected_profile_version_ref"])
+        # C2b: the reservation, against the same day ledger and the same four
+        # pools as every cockpit-shaped call.  It happens here -- after the
+        # route decision the ledger records, before the broker is spoken to --
+        # so nothing is ever paid for that the day did not admit.
+        admission: dict[str, Any] | None = None
+        reserved = self._reserved_micros(work)
+        if self.budgeted:
+            from .cockpit_model import admit_day_ledger
+
+            decision = admit_day_ledger(
+                self.budget,
+                policy_version_id=self.budget_policy_ref,
+                day=self._day(),
+                work_order_ref=work.id,
+                attempt_number=attempt_number,
+                phase=BUDGET_PHASE,
+                route_decision_ref=route["id"],
+                reserved_micros=reserved,
+                mission_binding=self.mission_binding,
+            )
+            if decision["status"] != "admitted":
+                # The gate above already answered the common case; reaching
+                # here means the pool went empty between the read and the
+                # write, or the day cap itself refused.  Either way the lease
+                # is live and has to be handed back as a completed attempt.
+                exhausted = decision["status"] == "pool_exhausted"
+                result = self._control_result(
+                    work,
+                    attempt_number,
+                    code=("MODEL_POOL_EXHAUSTED" if exhausted else "BUDGET_REFUSED"),
+                    status=(
+                        self._bounded_failure_status(lease) if exhausted
+                        else "failed"
+                    ),
+                    route_ref=route["id"],
+                )
+                completion = self.scheduler.complete(
+                    work.id,
+                    attempt_number,
+                    WORKER_REF,
+                    lease["lease_token"],
+                    result,
+                    idempotency_key=(
+                        f"llm-planner-complete:{work.id}:{attempt_number}"
+                    ),
+                )
+                if exhausted:
+                    return self._pool_refusal(
+                        work, decision["rejection"], gate="admission",
+                        completion=completion,
+                    )
+                return {
+                    "status": "failed",
+                    "reason": "budget_refused",
+                    "work_order_ref": work.id,
+                    "failure": decision["failure"],
+                    "route": route,
+                    "completion": completion,
+                }
+            admission = decision["admission"]
         try:
             if route_replayed:
                 invocation, adapter_result = self.adapter.replay(work, route, profile)
             else:
                 invocation, adapter_result = self.adapter.execute(work, route, profile)
         except OpenClawModelAdapterError as exc:
+            # Nothing was served, so nothing is charged: settling zero hands
+            # the whole reservation back to the pool in the same day.
+            self._settle(admission, 0)
             retryable = isinstance(exc, BrokerConnectionError)
             result = self._control_result(
                 work,
@@ -325,6 +550,17 @@ class LLMResearchPlannerModelWorker:
                 "completion": completion,
                 "error_type": type(exc).__name__,
             }
+        # Settled with the rate card of the link that actually served, exactly
+        # as a cockpit call is; a non-succeeded envelope means the broker
+        # refused rather than served, and is charged nothing.
+        if adapter_result.status == "succeeded":
+            from .cockpit_model import call_cost_micros
+
+            cost_micros, cost_status = call_cost_micros(
+                invocation, route, profile, reserved)
+        else:
+            cost_micros, cost_status = 0, "failed"
+        self._settle(admission, cost_micros)
         if (
             route_replayed
             and adapter_result.status == "failed"
@@ -410,6 +646,7 @@ class LLMResearchPlannerModelWorker:
             "output_error": output_error,
             "route_replayed": route_replayed,
             "replayed": False,
+            "budget": self._budget_report(admission, cost_micros, cost_status),
         }
 
 

@@ -23,8 +23,10 @@ import stat
 import sys
 import threading
 import traceback
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -744,7 +746,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "publish_forecast_line": frozenset({"line_ref", "subject_ref", "metric_or_aspect", "period", "unit", "currency", "value", "value_kind", "scenario_version_ref", "scenario_version_hash", "actor_ref", "rationale", "version_id", "prior_version_ref", "idempotency_key"}),
     "get_forecast_line": frozenset({"version_ref"}),
     "extend_growth_forecast": frozenset({"base_input_version_ref", "growth_input_version_ref", "periods", "line_ref_prefix", "model_run_ref", "idempotency_key"}),
-    "llm_planner_execute": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
+    # C2b: "pool" is the driver naming which of C2's four capacity pools this
+    # loop's model call spends from. Optional, and checked against the pool the
+    # loop record itself implies -- the driver declares, the Core decides.
+    "llm_planner_execute": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds", "pool"}),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -969,6 +974,46 @@ def _require_owner_only(path: Path, label: str) -> None:
         raise WriterServerError(f"{label} is unavailable") from exc
     if mode & 0o077:
         raise WriterServerError(f"{label} must be owner-only")
+
+
+def planner_budget_config(state_dir: str | Path) -> dict[str, str]:
+    """The day-ledger wiring for the planner's model calls, if it is installed.
+
+    C2b.  Every Tier-1 bounded planner loop's model call used to bypass the
+    mission day ledger entirely: ``planner_model_config`` carried routing and
+    broker wiring and no ``budget_db``, so the day cap, the mission cap and
+    C2's four capacity pools all applied to everything the system pays for
+    *except* the calls that decide what it works on next.
+
+    The budget wiring is read from the model configuration file
+    ``research_planner_setup`` already writes into the state directory rather
+    than from a new command-line argument.  That file is where the installer
+    records which budget policy version a lane accounts against, and it is
+    already in the set a day-cap raise repoints (``model_configurations``);
+    a second copy passed as an argument would be a second thing to repoint,
+    and the one that was forgotten would be this one.
+
+    Absent, unreadable, or missing either key: an empty mapping, and the
+    planner keeps today's behaviour with the writer reporting ``unbudgeted``
+    in the op result so the gap is visible rather than assumed closed.
+    """
+
+    from .research_planner_setup import CONFIG_FILE_NAME
+
+    target = Path(state_dir).expanduser().resolve() / CONFIG_FILE_NAME
+    try:
+        installed = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(installed, Mapping):
+        return {}
+    budget_db = installed.get("budget_db")
+    policy_ref = installed.get("budget_policy_ref")
+    if not isinstance(budget_db, str) or not isinstance(policy_ref, str):
+        return {}
+    if not budget_db or not policy_ref or not Path(budget_db).is_absolute():
+        return {}
+    return {"budget_db": budget_db, "budget_policy_ref": policy_ref}
 
 
 def load_principals(
@@ -2490,24 +2535,96 @@ class WriterServer:
             values["context_pack_ref"], values["work_order"]
         )
 
+    def _active_mission_version(self) -> dict[str, Any] | None:
+        """The one active coverage mission, or None if none is published yet.
+
+        Read by the pointer rather than by a reference the caller supplies:
+        the day ledger's caps belong to the mission version that is live now,
+        and a caller able to name a different one could name a richer one.
+        """
+
+        try:
+            pointer = self.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - no mission table is simply no mission
+            return None
+        if pointer is None:
+            return None
+        try:
+            return self.coverage_mission.mission(pointer["mission_version_id"])
+        except Exception:  # noqa: BLE001 - an unreadable mission is not a binding
+            return None
+
+    def _planner_budget_binding(self, pool: str) -> dict[str, Any] | None:
+        """The mission binding one planner call is admitted against, or None.
+
+        None means the call runs unbudgeted, which is what every deployment
+        did before C2b and what an install that has not re-run the planner
+        setup still does.  The op result says so.
+        """
+
+        from .budget_pools import mission_pool_scope
+
+        config = self._planner_model_config or {}
+        if not config.get("budget_db") or not config.get("budget_policy_ref"):
+            return None
+        mission = self._active_mission_version()
+        if mission is None:
+            return None
+        return {
+            "mission_ref": mission["mission_ref"],
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
+            "max_daily_cost_micros": int(
+                Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000
+            ),
+            **mission_pool_scope(mission, pool=pool, lane="llm_planner_execute"),
+        }
+
     def _op_llm_planner_execute(self, p: Mapping[str, Any]) -> Any:
         # Runs inside the writer: the planner model worker writes model
         # accounting into this Core, which the driver process must not open.
         if self._planner_model_config is None:
             raise WriterServerError("planner model execution is not configured")
+        from .budget_pools import POOL_NAMES, pool_for_loop
+
         config = self._planner_model_config
         values = dict(p)
         context_pack_ref = values.pop("context_pack_ref")
+        declared_pool = values.pop("pool", None)
+        if declared_pool is not None and declared_pool not in POOL_NAMES:
+            raise WriterServerError("pool is not one of the mission's capacity pools")
         budget = {key: value for key, value in values.items() if value is not None}
         coordinator = self._llm_planner_coordinator()
         prepared = coordinator.prepare(context_pack_ref, **budget)
         if prepared.get("status") != "model_work_ready":
             return prepared
         work_order = prepared["work_order"]
+        # The loop decides its own pool. The driver may declare one, and a
+        # declaration that disagrees is refused rather than silently
+        # overridden -- the same shape as the doctrine pack hash the driver
+        # passes and this server verifies.
+        loop = self.bounded_planner.loop(prepared["context"]["loop_version_ref"])
+        pool = pool_for_loop(loop)
+        if declared_pool is not None and declared_pool != pool:
+            raise WriterServerError(
+                f"this loop spends from the {pool} pool, not {declared_pool}"
+            )
+        binding = self._planner_budget_binding(pool)
         from .model_router import ModelRouter
         from .openclaw_model_adapter import OpenClawModelAdapter
+        from .thesis_impact_budget import ThesisImpactBudgetStore
 
-        with ModelRouter(config["model_router_db"]) as router:
+        with ExitStack() as stack:
+            router = stack.enter_context(ModelRouter(config["model_router_db"]))
+            ledger = (
+                None if binding is None
+                else stack.enter_context(
+                    ThesisImpactBudgetStore(config["budget_db"]))
+            )
             adapter = OpenClawModelAdapter(
                 str(config["broker_socket"]),
                 route_resolver=router.get_decision,
@@ -2526,11 +2643,27 @@ class WriterServer:
                 observability=self.observability,
                 routing_policy_ref=config["routing_policy_ref"],
                 credential_slot_refs=config["credential_slot_refs"],
+                budget=ledger,
+                budget_policy_ref=(
+                    None if ledger is None else config["budget_policy_ref"]),
+                mission_binding=binding,
             )
             run = worker.run_once(work_order)
+        if run.get("status") == "rejected":
+            # A spent pool is returned, never raised: this loop has had its
+            # share of the day and the driver holds it until tomorrow.
+            return {**run, "pool": run.get("pool", pool),
+                    "work_order_ref": work_order["id"]}
         if run.get("status") != "succeeded":
-            return {"status": f"model_{run.get('status')}", "work_order_ref": work_order["id"]}
-        return coordinator.advance(context_pack_ref, work_order)
+            return {"status": f"model_{run.get('status')}",
+                    "work_order_ref": work_order["id"],
+                    "pool": pool,
+                    "budget": run.get("budget", {"status": "unbudgeted"})}
+        advanced = coordinator.advance(context_pack_ref, work_order)
+        if isinstance(advanced, dict):
+            return {**advanced, "pool": pool,
+                    "budget": run.get("budget", {"status": "unbudgeted"})}
+        return advanced
 
     @property
     def model_forecast(self) -> ModelForecastAuthority:
@@ -3211,10 +3344,17 @@ class WriterServer:
         return self._dispatch_one_coverage_mission_sec_lane()
 
     def _op_bounded_planner_active_loops(self, p: Mapping[str, Any]) -> Any:
+        from .budget_pools import pool_for_loop
+
         return {
             "projection_kind": "bounded_planner_active_loops",
             "loops": [
-                {"loop_version_ref": loop["id"], "loop_ref": loop["loop_ref"]}
+                # C2b: the pool travels with the loop rather than being
+                # guessed by the driver from a reference prefix. P14e's
+                # inquiry loops are the ad-hoc pool the 25% share exists for;
+                # everything else is the coverage work of the mission.
+                {"loop_version_ref": loop["id"], "loop_ref": loop["loop_ref"],
+                 "pool": pool_for_loop(loop)}
                 for loop in self.bounded_planner.active_loops()
             ],
         }
@@ -3909,6 +4049,11 @@ def main(argv: list[str] | None = None) -> int:
                 "broker_auth_key": args.planner_broker_auth_key,
                 "broker_client_id": args.planner_broker_client_id,
                 "expected_agent_id": args.planner_expected_agent_id,
+                # C2b: found beside the Core rather than passed in, because
+                # the installer already writes it there and a cap raise
+                # already repoints it. See planner_budget_config.
+                **planner_budget_config(
+                    Path(args.db).expanduser().resolve().parent),
             }
         sec_filings_launcher = None
         if args.sec_filings_governance is not None and args.sec_filings_discovery_plan is not None:
