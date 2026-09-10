@@ -2,24 +2,19 @@
 
 更新日期：2026-09-10（恢复开发；以下历史时间记录保留）
 
-## 持续开发中（2026-09-10，owner 最新指令）
+## 当前开发与验收（2026-09-10，覆盖下方历史状态）
 
-Owner 要求持续开发，不以单个里程碑完成为停点；写代码最大化使用 GPT-5.6 Sol 并行，需要签署/部署时提交具体项给 owner。当前工具允许主代理加三个同时活跃子代理；三个新隔离 worktree 已满额工作。
+Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 commit/push；部署和人工签署交给 owner。代码在隔离分支 `continuous-integration-wave4` 集成，原 main 中另一会话的四个 DeepSeek 文件完整保留。
 
-| 负责人 | 当前代码切片 | 工作分支 |
-| --- | --- | --- |
-| Sol / forecast_fixes | Dalton 模型系列声明、目录迁移与真实副本验证 | `dynamic-broker-catalog` |
-| Sol / zero_base_fixes | Cockpit 全环节选择、旧 pin 消费与声明界面 | `cockpit-model-selection` |
-| Sol / insider_fixes | 抽取、thesis-impact 与 agenda 旧调用路径切换 | `debatmap-binding-review` |
-| 主代理 | wave 3 验收 push，wave 4 集成与交叉审查 | `continuous-integration-wave4` |
+**当前候选 `79e0ef7` 正在最终验收，尚未部署。** 前一个冻结点 `f1d61b8` 已通过 6,243 项全量测试 / 514.522s（1 skip）。随后修复了 Cockpit 各环节实际路由库读取、planner 特殊配置字段、多模型候选集合显示，以及演练副本内部路径隔离；配置/Cockpit 142 项重点检查与演练 106 项检查通过。最终候选的全量结果完成后另行记录，不能沿用前一版本的全量结果。
 
-**当前 wave 4**：动态目录已能迁移同一 profile 的模型别名、价格与容量，保留旧版本；真实 live 副本的 11 项角色配置路由通过，无模型调用。Cockpit 已补生成／校验独立 purpose、13 个配置注册、配置写入失败回滚与重试；旧抽取、thesis-impact、agenda 调用路径及模型系列声明 UI 正在补齐。不能把配置文件重指向等同于实际调用已切换。详见 [wave 4 进度](reports/continuous-wave4-progress-2026-09-10.md)。
+模型路由使用当前 broker 公开目录，别名、价格、容量与凭据变化追加为不可变 profile 版本。Cockpit 按实际消费配置显示并切换各环节模型，生成和独立核验有各自 purpose；动态外部配置明确显示只读或未配置。新别名的模型家族不靠名字猜测，由 owner 在当前页面作 route-bound 声明。切换常驻服务配置会提示需要重启。
 
-**最新验收点 `d21de7d`：6,184 项 / 499.999s 全量通过（1 skip）**；wheel 430 文件匹配。当前 live 副本 67 schemas 通过，但 DeepSeek 不可变 profile route 冲突令 catalog sync 失败，激活/启动按预期跳过，不能称部署通过。详见 [wave 3 验收](reports/continuous-wave3-integration-2026-09-10.md)。原 main 外部改动保留，开发结果推独立分支。
+最终候选 wheel 已通过 430 个 Python/SQL 文件及 3 个 HTML 文件逐字校验，页面 JavaScript 语法通过。三个 Sol 代理分别完成配置读取交叉修复、最终 wheel 校验、演练路径隔离与当前副本复验；主代理做集成、全量回归、签署包及最终交付。详见 [wave 4 进度](reports/continuous-wave4-progress-2026-09-10.md)。
 
-本轮首个持续开发验收点 `e7e06bb`：**完整 6,114 项 / 495.678s 通过（1 skip）**，当前 live 只读副本全部 12 步复演通过（67 schemas / 35 lanes / 38 entries / 0 escaped），wheel 428 个 Python/SQL 文件逐字匹配。详见 [验收记录](reports/continuous-wave2-integration-2026-09-10.md)。未部署。
+**当前 next step：** 完成同一冻结代码的全量测试与内部路径隔离后的副本演练，更新部署包的精确代码/wheel/报告绑定。通过后由 owner 执行部署及 mission v14 签署，再对 ACN、CTSH、EPAM、IBM、DXC 的 dossier、DebateMap、事件判断做真实产物验收。当前 15 项目标产物均缺失；stub launch 不算产物成功。SEC 8-K plan 和 DeepSeek 家族声明仍是单独的人工作业，未执行。退役 Agenda 若重启使用，需先明确对齐旧策略 pin。
 
-原基线 `4c28816`（6,055 项通过）。各切片完成即接后续 HK 周调度、W5 market-proxy / 成本模板及 Item 5 交易计划；共享文件先协调归属，聚焦绿分批 commit，集成完整验证后 push。授权材料完成后及时发给 owner，签署不阻塞独立开发。
+历史验收：wave 3 `d21de7d` 为 6,184 项通过；wave 2 `e7e06bb` 为 6,114 项通过。此前 DeepSeek route drift 已由 wave 4 的 Dalton 目录迁移处理，不再要求另一个仅更新模型的会话承担 Dalton 迁移。
 
 ## 本轮交付（2026-09-10）
 
@@ -29,7 +24,7 @@ W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，最终验
 
 **Git**：已按功能及时提交；主线全量通过，代码与交付文档统一推送至 `origin/main`。验收代码基准 `2f64b3a`，之后只有文档变更；起点 `694471c` 之前的 11 个提交保留在历史中。
 
-## 下一步（本节覆盖此前暂停安排）
+## 历史下一步（已由上方当前 next step 覆盖）
 
 1. **运行激活与产品验收优先**：按 [更新后的 owner runbook](reports/owner-steps-after-deploy-v2.0-2026-09-10.md)，当前 live 新快照复演已通过，下一步核对并激活 11 个 may_write / 3 个 checkpoint 缺项、模型开关、retired verifier pin 与 tracking policy v2。部署后验收五家公司首版 dossier、DebateMap 与一轮判断，演练通过不能代替产物验收。
 2. **F14 失败账本覆盖**：13 个初版协调器已合入，A/B 九条交叉修复完成（299 focused）；Reflection / ZeroBase / research task 再审修复完成（124 focused），Crowd source 正补日期/输入和权限边界。共享 replay 无写入、同刻顺序和单项 superseded 已完成。完整集成回归待最后切片冻结。
