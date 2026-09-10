@@ -1,7 +1,8 @@
 # P12e 行业框架交付物 v1.0
 
 日期：2026-09-09（实现完成 2026-09-10）
-分支：`w2-industry-framework`，基线 main `ebd2ea8`，交付前合入 main `77ffe45`
+分支：`w2-industry-framework`，基线 main `ebd2ea8`，交付前合入 main `b1f1345`
+复核：code-review 2026-09-10，四条 findings 与七条 nits 全部处理（§5.7）
 蓝图条目：[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §5.2 P12e、§3 ②「行业特性、长短期驱动」
 计划条目：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) C3、D2
 
@@ -28,7 +29,7 @@ authority：分节由 Constitution 的因果链决定、长短期驱动绑定 In
 | `src/dalton_core/industry_framework_launcher.py` | 一次一个子进程，ticket 由证据签名命名 |
 | `src/dalton_core/mission_industry_framework_lane.py` | LaneSpec，order 139，周频 |
 | `deploy/phase9/p12e-industry-framework-policy-v1.json` | 因果链标题、driver 时间跨度、九条缺口清单、output_rubric 绑定 |
-| `tests/test_industry_framework{,_draft,_lane}.py` | 130 项 |
+| `tests/test_industry_framework{,_draft,_lane}.py` | 139 项 |
 | `tests/golden/industry_framework/*.json` | 六个 golden case |
 | 共享文件（加法） | `lane_registry.LANE_MODULES`、`research_quality_rubrics.INDUSTRY_FRAMEWORK`、`bootstrap.SCHEMA_DATABASES`、`scripts/rehearse_deploy.py`、`cockpit_plane.REGISTRY_LANE_LABELS` 一行、`deploy/macos/install.sh` 一个 seed 块 |
 
@@ -168,24 +169,24 @@ DXC	operating_margin	-	-	-	-	-	-
 
 ## 4. 测试
 
-三个新测试文件，共 130 项；六个 golden case 并入 Q1 既有的 golden 套件。
+三个新测试文件，共 139 项；六个 golden case 并入 Q1 既有的 golden 套件；`tests/test_mission_deliverable.py` 新增 7 项（§5.5 的格子引用契约）。
 
 ```
-Ran 130 tests in 0.650s
+Ran 139 tests in 0.987s
 
 OK
 ```
-（`tests.test_industry_framework` 67 + `tests.test_industry_framework_draft` 37 +
+（`tests.test_industry_framework` 76 + `tests.test_industry_framework_draft` 37 +
 `tests.test_industry_framework_lane` 26）
 
 全量：
 
 ```
-Ran 4834 tests in 839.141s
+Ran 5191 tests in 525.419s
 
 OK (skipped=1)
 ```
-（`python -m unittest discover -s tests -t .`，合入 main `77ffe45` 之后）
+（`python -m unittest discover -s tests -t .`，合入 main `b1f1345`、复核修复之后）
 
 值得单独点名的几项：
 
@@ -196,7 +197,12 @@ OK (skipped=1)
 - `test_a_newly_filed_quarter_is_new_evidence_even_with_unchanged_prose` —— 2.4 那一褶皱。
 - `test_a_gap_with_no_driver_behind_it_is_open_by_construction`、
   `test_high_frequency_demand_has_only_generic_candidates` —— 缺口由能力表派生。
-- `test_the_artefact_shape_matches_what_q1s_own_builder_produces` —— 防漂移（见 §5.1）。
+- `test_the_artefact_shape_matches_what_q1s_own_builder_produces` —— 防漂移（见 §5.1），
+  顶层键与 section / number 行的键都比。
+- `test_the_material_budget_is_allocated_per_company` —— 复核第 1 条，五家全填时每家都有可引的行。
+- `test_a_remapped_chain_does_not_relabel_carried_forward_prose` —— 复核第 2 条。
+- `test_connecting_a_source_moves_the_gap_state_and_occasions_a_version` —— 复核第 4 条。
+- `tests.test_mission_deliverable.ComputedCellCitationTests` 七项 —— §5.5 的两种新格子与悬空引用被拒。
 - `test_independence_fails_closed_on_an_unresolvable_family` —— D2 失败即关闭。
 - `test_the_weekly_interval_holds_a_second_launch_and_says_so` —— 周频，且 `waiting` 带原因。
 
@@ -295,6 +301,16 @@ summary 里的 `deliverable` 字段说明发生了哪一种。
 
 rubric 因为 `gaps_are_actionable` 的改动重新冻结为
 `79e410374685daca3363cefb0e76e5f2bfb0b72fd9db01877e3b96463dad4267`；其余五份仍未移动。
+
+第 1 条修复在只读副本上复跑（`limit=40`，五家）：
+
+```
+citable rows: 32
+  ACN: 8 rows      CTSH: 8 rows      EPAM: 8 rows      IBM: 0 rows      DXC: 8 rows
+```
+
+修复前，尾切会把 ACN 的八行全部挤掉；IBM 现在拿 0 行是对的——它一格都算不出来，所以它不贡献，
+也不借别人的额度。
 
 ---
 
