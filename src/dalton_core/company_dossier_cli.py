@@ -816,6 +816,9 @@ def run_dossier(
             profile = build_profile(company_ref=chosen, guides=guides, actuals=actuals)
             profile_table = render_profile_table(profile)
 
+        held_classification = str(
+            ((prior or {}).get("industry_classification") or {}).get("classification")
+            or "") or None
         blocks: dict[str, Any] = {}
         draft_routes: list[str | None] = []
         spent = 0
@@ -836,6 +839,13 @@ def run_dossier(
             outcome = draft_unit(
                 model, unit=unit, structure=entry["structure"], material=material,
                 company=company, mission=mission,
+                # The classification this file already holds. It is drafted
+                # after the sections in ``UNITS`` order, so a run that is
+                # writing it for the first time frames demand with the generic
+                # template and the next run picks up the answer -- which is the
+                # honest order: the frame follows the classification, not the
+                # other way round.
+                classification=held_classification,
                 prior_body="" if held is None else section_body(held),
                 profile=profile if unit == "guidance_style" else None,
                 profile_table=profile_table if unit == "guidance_style" else "",

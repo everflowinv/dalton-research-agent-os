@@ -1,0 +1,481 @@
+{
+  "content_hash": "bcf8165770e9e8fcd3a6bfd6e0c213c6352465b447640f75dc089adcb9683658",
+  "generic_classification": "generic",
+  "registry_ref": "driver-template-registry:w4:v1",
+  "schema_version": "0.1",
+  "templates": [
+    {
+      "because": "earnings follow the price of an undifferentiated output, so the four questions are what the spread is, how much of the plant is running, where this producer sits on the industry cost curve, and what capacity is coming",
+      "classification": "commodity_cycle",
+      "generic": false,
+      "label": "商品周期",
+      "slots": [
+        {
+          "basis_concepts": [
+            "Revenues",
+            "CostOfRevenue",
+            "CostOfGoodsAndServicesSold"
+          ],
+          "cues": [
+            "spread",
+            "价差",
+            "crack",
+            "netback",
+            "margin over feedstock",
+            "价差走阔",
+            "价差收窄",
+            "product price",
+            "价格差"
+          ],
+          "evidence_kinds": [
+            "market_proxy",
+            "company_figure"
+          ],
+          "label": "价差",
+          "question": "What is the spread between the product price and the main input cost, and how far is it from what this company realises?",
+          "slot_id": "spread"
+        },
+        {
+          "basis_concepts": [
+            "PropertyPlantAndEquipmentNet"
+          ],
+          "cues": [
+            "utilisation",
+            "utilization",
+            "operating rate",
+            "开工率",
+            "产能利用",
+            "run rate of the plant",
+            "负荷率"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "market_proxy"
+          ],
+          "label": "开工率",
+          "question": "How much of the company's capacity is running, and against what industry operating rate?",
+          "slot_id": "utilisation"
+        },
+        {
+          "basis_concepts": [
+            "CostOfRevenue",
+            "CostOfGoodsAndServicesSold",
+            "GrossProfit"
+          ],
+          "cues": [
+            "cost curve",
+            "cost-curve",
+            "成本曲线",
+            "marginal producer",
+            "marginal cost",
+            "边际成本",
+            "cash cost",
+            "现金成本"
+          ],
+          "evidence_kinds": [
+            "market_proxy",
+            "third_party_estimate"
+          ],
+          "label": "成本曲线位置",
+          "question": "Where on the industry cost curve does this producer sit, and what puts it there?",
+          "slot_id": "cost_curve_position"
+        },
+        {
+          "basis_concepts": [
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PropertyPlantAndEquipmentNet"
+          ],
+          "cues": [
+            "capacity addition",
+            "new capacity",
+            "capacity coming",
+            "产能投放",
+            "新增产能",
+            "扩产",
+            "capacity closure",
+            "退出产能",
+            "greenfield",
+            "debottleneck"
+          ],
+          "evidence_kinds": [
+            "market_proxy",
+            "third_party_estimate",
+            "company_figure"
+          ],
+          "label": "产能投放",
+          "question": "What capacity is being added or retired in this industry, by whom, and when does it start up?",
+          "slot_id": "capacity_additions"
+        }
+      ]
+    },
+    {
+      "because": "returns are set by how the industry's capital responds to them, so the questions are what is being spent, what it earns, and where the capacity cycle stands",
+      "classification": "capital_cycle",
+      "generic": false,
+      "label": "资本周期",
+      "slots": [
+        {
+          "basis_concepts": [
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PropertyPlantAndEquipmentNet",
+            "DepreciationDepletionAndAmortization"
+          ],
+          "cues": [
+            "capex",
+            "capital expenditure",
+            "资本开支",
+            "资本支出",
+            "capital spending",
+            "在建工程"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "market_proxy"
+          ],
+          "label": "资本开支",
+          "question": "What is this company spending on capacity, and how does that compare with its own depreciation and with the industry?",
+          "slot_id": "capex"
+        },
+        {
+          "basis_concepts": [
+            "OperatingIncomeLoss",
+            "StockholdersEquity",
+            "Assets"
+          ],
+          "cues": [
+            "return on capital",
+            "roic",
+            "roce",
+            "return on invested",
+            "投入资本回报",
+            "资本回报",
+            "回报率",
+            "cost of capital"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "third_party_estimate"
+          ],
+          "label": "投入资本回报",
+          "question": "What does the capital already in the ground earn, and is that above or below the cost of it?",
+          "slot_id": "returns_on_capital"
+        },
+        {
+          "basis_concepts": [
+            "PropertyPlantAndEquipmentNet"
+          ],
+          "cues": [
+            "capacity cycle",
+            "产能周期",
+            "supply response",
+            "供给响应",
+            "industry capacity",
+            "行业产能",
+            "capacity discipline",
+            "over-capacity",
+            "产能过剩"
+          ],
+          "evidence_kinds": [
+            "market_proxy",
+            "third_party_estimate"
+          ],
+          "label": "产能周期",
+          "question": "Where is the industry in its capacity cycle -- adding, digesting, or retiring -- and what marks the turn?",
+          "slot_id": "capacity_cycle"
+        }
+      ]
+    },
+    {
+      "because": "contracted revenue reinvested at a stable return is a question about price, about how much of the book stays, and about what one unit of it earns -- not about the cycle",
+      "classification": "contract_compounder",
+      "generic": false,
+      "label": "合同型 compounder",
+      "slots": [
+        {
+          "basis_concepts": [
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "cues": [
+            "pricing",
+            "price increase",
+            "定价",
+            "提价",
+            "调价",
+            "price escalator",
+            "list price",
+            "realised price",
+            "议价"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "qualitative"
+          ],
+          "label": "定价",
+          "question": "What can this company charge, what has it charged, and what lets it raise?",
+          "slot_id": "pricing"
+        },
+        {
+          "basis_concepts": [
+            "RevenueRemainingPerformanceObligation",
+            "ContractWithCustomerLiability"
+          ],
+          "cues": [
+            "retention",
+            "renewal",
+            "churn",
+            "留存",
+            "续约",
+            "流失",
+            "backlog",
+            "在手订单",
+            "remaining performance obligation"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "qualitative"
+          ],
+          "label": "留存",
+          "question": "How much of the contract book stays, for how long, and what happens at renewal?",
+          "slot_id": "retention"
+        },
+        {
+          "basis_concepts": [
+            "GrossProfit",
+            "CostOfRevenue",
+            "OperatingIncomeLoss"
+          ],
+          "cues": [
+            "unit economics",
+            "单位经济",
+            "per unit",
+            "单位成本",
+            "contribution margin",
+            "incremental margin",
+            "边际利润",
+            "payback"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "third_party_estimate"
+          ],
+          "label": "单位经济",
+          "question": "What does one unit of this business earn, and what does it cost to add another?",
+          "slot_id": "unit_economics"
+        }
+      ]
+    },
+    {
+      "because": "a durable shift in end demand is a question about how far the shift has run, how large it can get, and how fast it is being taken up",
+      "classification": "structural_growth",
+      "generic": false,
+      "label": "结构成长",
+      "slots": [
+        {
+          "basis_concepts": [
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "cues": [
+            "penetration",
+            "渗透率",
+            "渗透",
+            "attach rate",
+            "installed base",
+            "share of wallet",
+            "覆盖率"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "market_proxy"
+          ],
+          "label": "渗透",
+          "question": "How far into its addressable base has this product got, and what is left?",
+          "slot_id": "penetration"
+        },
+        {
+          "basis_concepts": [],
+          "cues": [
+            "tam",
+            "addressable market",
+            "可及市场",
+            "市场规模",
+            "total addressable",
+            "sam",
+            "市场空间"
+          ],
+          "evidence_kinds": [
+            "market_proxy",
+            "third_party_estimate"
+          ],
+          "label": "可及市场",
+          "question": "How large is the market this can reach, on whose number, and how far is that number from anything the company reports?",
+          "slot_id": "tam"
+        },
+        {
+          "basis_concepts": [
+            "Revenues",
+            "DeferredRevenueCurrent"
+          ],
+          "cues": [
+            "adoption",
+            "采纳",
+            "上量",
+            "ramp",
+            "cohort",
+            "同期群",
+            "new customers",
+            "新增客户",
+            "订阅用户"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "qualitative",
+            "market_proxy"
+          ],
+          "label": "采纳节奏",
+          "question": "How quickly is it being adopted, by which cohort, and what would slow it?",
+          "slot_id": "adoption"
+        }
+      ]
+    },
+    {
+      "because": "a self-help thesis is a question about whether the steps are being taken and whether the cash lasts long enough for them to matter",
+      "classification": "turnaround",
+      "generic": false,
+      "label": "转型公司",
+      "slots": [
+        {
+          "basis_concepts": [
+            "RestructuringCharges",
+            "OperatingIncomeLoss"
+          ],
+          "cues": [
+            "milestone",
+            "里程碑",
+            "restructuring",
+            "重组",
+            "turnaround plan",
+            "转型计划",
+            "cost programme",
+            "cost program",
+            "降本",
+            "disposal",
+            "剥离"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "qualitative"
+          ],
+          "label": "里程碑",
+          "question": "What are the named steps of the plan, which have been done, and by when is the next one due?",
+          "slot_id": "milestones"
+        },
+        {
+          "basis_concepts": [
+            "CashAndCashEquivalentsAtCarryingValue",
+            "NetCashProvidedByUsedInOperatingActivities",
+            "LongTermDebtNoncurrent"
+          ],
+          "cues": [
+            "cash runway",
+            "现金跑道",
+            "runway",
+            "liquidity",
+            "流动性",
+            "burn",
+            "现金消耗",
+            "covenant",
+            "债务到期",
+            "maturity wall",
+            "refinanc"
+          ],
+          "evidence_kinds": [
+            "company_figure"
+          ],
+          "label": "现金跑道",
+          "question": "How long does the cash last at the current burn, and what is due before then?",
+          "slot_id": "cash_runway"
+        }
+      ]
+    },
+    {
+      "because": "nothing is known about which kind of business this is, so the frame is the one that assumes least: what is sold, at what price, and what it costs to sell",
+      "classification": "generic",
+      "generic": true,
+      "label": "通用（未分类）",
+      "slots": [
+        {
+          "basis_concepts": [
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "cues": [
+            "volume",
+            "销量",
+            "出货",
+            "units sold",
+            "shipments",
+            "件数",
+            "seats",
+            "headcount"
+          ],
+          "evidence_kinds": [
+            "company_figure"
+          ],
+          "label": "量",
+          "question": "How much does this company sell, and of what?",
+          "slot_id": "volume"
+        },
+        {
+          "basis_concepts": [
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "cues": [
+            "price",
+            "价格",
+            "单价",
+            "rate",
+            "realisation",
+            "realization",
+            "asp",
+            "定价"
+          ],
+          "evidence_kinds": [
+            "company_figure",
+            "market_proxy"
+          ],
+          "label": "价",
+          "question": "What does it charge, and what moves that?",
+          "slot_id": "price"
+        },
+        {
+          "basis_concepts": [
+            "CostOfRevenue",
+            "CostOfGoodsAndServicesSold",
+            "OperatingExpenses"
+          ],
+          "cues": [
+            "cost structure",
+            "成本结构",
+            "cost of revenue",
+            "营业成本",
+            "fixed cost",
+            "固定成本",
+            "variable cost",
+            "变动成本",
+            "operating expense",
+            "费用率"
+          ],
+          "evidence_kinds": [
+            "company_figure"
+          ],
+          "label": "成本结构",
+          "question": "What are the costs, and which of them move with what is sold?",
+          "slot_id": "cost_structure"
+        }
+      ]
+    }
+  ]
+}

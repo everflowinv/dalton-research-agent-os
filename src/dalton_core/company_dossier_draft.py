@@ -44,6 +44,7 @@ from .claim_aspect_vocabulary import DEFINITIONS
 from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
 from .company_dossier import (
     CLASSIFICATION_UNIT,
+    MAX_GAPS as MAX_DOSSIER_GAPS,
     CLASSIFICATION_DEFINITIONS,
     INDUSTRY_CLASSIFICATIONS,
     MAX_SOURCES_PER_SECTION,
@@ -56,6 +57,12 @@ from .company_dossier import (
     validate_classification,
     validate_section,
     validate_variant_view,
+)
+from .driver_template import (
+    MAX_TEMPLATE_GAPS,
+    dossier_demand_driver_gaps,
+    prompt_block,
+    template_for,
 )
 from .store import content_hash
 
@@ -199,6 +206,13 @@ def _unit_purpose(unit: str) -> str:
             "paying for, where they differ and what would settle it")
 
 
+#: The one section whose slots are the industry's causal chain and whose
+#: *content* W4 gives a per-classification frame.  ``supply_and_cost`` takes
+#: its structure from the same chain but the templates here are about where
+#: demand comes from, so it is deliberately not in this set.
+TEMPLATE_UNITS: frozenset[str] = frozenset({"demand_drivers"})
+
+
 def build_unit_prompt(
     *,
     unit: str,
@@ -208,8 +222,19 @@ def build_unit_prompt(
     prior_body: str = "",
     profile_table: str = "",
     market_view_available: bool = True,
+    classification: Any = None,
 ) -> str:
-    """One unit's prompt: the slots, the rules, the material, the last version."""
+    """One unit's prompt: the slots, the rules, the material, the last version.
+
+    ``classification`` is W4's addition and it changes exactly one section.
+    ``demand_drivers`` still takes its *structure* from the Constitution's
+    causal chain -- that is C3 and it is not the model's to choose -- but the
+    questions worth asking about demand differ by what kind of business this
+    is, so the driver template for the company's ``industry_classification`` is
+    shown beneath the slots as a checklist. It is a checklist and not a
+    structure: a slot it names that the material cannot answer belongs in
+    ``gaps``, which is what the prompt asks for.
+    """
 
     lines = [
         "You are writing one part of a company file for a fundamental, long-biased fund.",
@@ -263,6 +288,15 @@ def build_unit_prompt(
         lines.append("Return raw JSON only, no markdown fence:")
         lines.append('{"slots": [{"slot_id": "<id>", "sentences": [{"text": "<one sentence>",')
         lines.append('   "refs": ["C3","N1"]}]}], "gaps": ["<what is missing>"]}')
+    if unit in TEMPLATE_UNITS:
+        lines += [
+            prompt_block(classification),
+            "",
+            "That template is a checklist, not a structure. Fill the slots "
+            "above; where a template slot has nothing behind it in the "
+            "material, put it in gaps rather than writing round it.",
+            "",
+        ]
     lines.append("")
     if profile_table:
         lines += [
@@ -344,8 +378,17 @@ def parse_unit_output(
     material: Sequence[Mapping[str, Any]],
     market_view_available: bool = True,
     profile: Mapping[str, Any] | None = None,
+    classification: Any = None,
 ) -> dict[str, Any]:
-    """Validate one reply against the closed contract, or refuse it whole."""
+    """Validate one reply against the closed contract, or refuse it whole.
+
+    The driver-template check is the one thing here that does *not* refuse.
+    Template slots the drafted section says nothing about are appended to
+    ``gaps`` -- behind whatever the drafter noticed itself, and only as far as
+    the section's own cap allows -- because a missing driver is a hole in the
+    file that the reader has to see, and a refusal would delete the record that
+    the question was ever asked.
+    """
 
     value = unwrap_json_object(text)
     if value is None:
@@ -356,7 +399,7 @@ def parse_unit_output(
             f"{unit}: the reply has keys {sorted(value)}; the contract is "
             f"{sorted(expected)}")
     slots, sources = _resolve_tags(value["slots"], material, unit=unit)
-    gaps = value.get("gaps") or []
+    gaps = list(value.get("gaps") or [])
     if unit == VARIANT_UNIT:
         grades = {row["ref"]: row.get("importance") for row in material}
         for slot in slots:
@@ -369,6 +412,16 @@ def parse_unit_output(
                             f"{unit}: market_view cites {ref} ({grades.get(ref)}), "
                             "which is the company talking rather than the market")
     ids = [slot["slot_id"] for slot in structure]
+    if unit in TEMPLATE_UNITS:
+        # The drafter's own gaps first: it read the material and this table did
+        # not, so when the cap bites the more specific complaint survives.
+        room = max(0, MAX_DOSSIER_GAPS - len(gaps))
+        if room:
+            found = dossier_demand_driver_gaps(
+                {"structure": ids, "slots": slots, "gaps": gaps},
+                classification, limit=min(room, MAX_TEMPLATE_GAPS),
+            )
+            gaps = gaps + found[:room]
     try:
         if unit == CLASSIFICATION_UNIT:
             return validate_classification({
@@ -408,13 +461,14 @@ def draft_unit(
     profile: Mapping[str, Any] | None = None,
     profile_table: str = "",
     market_view_available: bool = True,
+    classification: Any = None,
 ) -> dict[str, Any]:
     """One bounded call for one unit.  Returns the drafted block or a refusal."""
 
     prompt = build_unit_prompt(
         unit=unit, structure=structure, material=material, company=company,
         prior_body=prior_body, profile_table=profile_table,
-        market_view_available=market_view_available,
+        market_view_available=market_view_available, classification=classification,
     )
     request_id = content_hash({
         "unit": unit, "company": company.get("company_ref"),
@@ -436,6 +490,7 @@ def draft_unit(
         block = parse_unit_output(
             call["text"], unit=unit, structure=structure, material=material,
             market_view_available=market_view_available, profile=profile,
+            classification=classification,
         )
     except DossierDraftRefused as exc:
         return {"status": "refused", "unit": unit, "reason": str(exc),
@@ -669,6 +724,7 @@ __all__ = [
     "VERIFIER_VERDICTS",
     "DossierDraftError",
     "DossierDraftRefused",
+    "TEMPLATE_UNITS",
     "build_unit_prompt",
     "build_verifier_prompt",
     "draft_hash",

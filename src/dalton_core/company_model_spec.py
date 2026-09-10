@@ -48,6 +48,13 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
+from .driver_template import (
+    REGISTRY_HASH as TEMPLATE_REGISTRY_HASH,
+    REGISTRY_REF as TEMPLATE_REGISTRY_REF,
+    prompt_block,
+    spec_gaps,
+    template_for,
+)
 from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -232,6 +239,13 @@ TASK_HASH = content_hash({
     "task": TASK_REF,
     "output": OUTPUT_SCHEMA,
     "authority": "describes_one_company_using_only_concepts_that_company_filed",
+    # W4: the frame is no longer the same four questions for every company, so
+    # the hash of the task has to move when the templates move. Otherwise a
+    # specification decided under the commodity template and one decided under
+    # the generic one would be recorded as answers to the same question.
+    "driver_template_registry": {
+        "ref": TEMPLATE_REGISTRY_REF, "hash": TEMPLATE_REGISTRY_HASH,
+    },
 })
 
 
@@ -269,10 +283,24 @@ def _statement_table(state: Mapping[str, Any]) -> str:
 
 
 def build_prompt(state: Mapping[str, Any]) -> str:
+    """The four questions, plus the driver template this kind of company gets.
+
+    W4 / Chem retrospective §7.1: a commodity producer and a contracted
+    compounder are not two answers to one question, they are two questions.
+    The template is chosen from the dossier's ``industry_classification`` --
+    carried on the state, so it is inside the hash the specification is keyed
+    by -- and its basis concepts are filled from what this company actually
+    filed. A company with no classification gets the generic template and the
+    prompt says so in as many words, because a generic frame presented as a
+    considered one is worse than no frame.
+    """
+
     company = {
         key: state.get(key)
         for key in ("company_ref", "ticker", "entity_name", "cik", "filings")
     }
+    template = prompt_block(state.get("industry_classification"),
+                            state.get("concepts") or ())
     return (
         "You decide how one company should be modelled.\n\n"
         "Below is what this system holds about it: the company, the statements "
@@ -311,6 +339,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "label is not a reason, and neither is a general truth about the "
         "industry.\n"
         "* Return JSON matching OUTPUT_SCHEMA and nothing else.\n\n"
+        f"{template}\n\n"
         f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"
         f"COMPANY:\n{json.dumps(company, ensure_ascii=False, sort_keys=True)}\n\n"
         f"STATEMENTS:\n{_statement_table(state)}\n"
@@ -552,6 +581,22 @@ def spec_from_response(
     return spec
 
 
+def spec_template_gaps(
+    spec: Mapping[str, Any], state: Mapping[str, Any]
+) -> list[str]:
+    """Driver-template slots this specification does not model.
+
+    Reported, never enforced. A model specification is a judgement about one
+    company and the template is a prior about a *kind* of company; a producer
+    that genuinely has no cost-curve position worth modelling exists, and a
+    check that refused the specification for it would be the table overruling
+    the analyst. What the reader gets instead is the list of questions the
+    frame expected and the answer did not contain.
+    """
+
+    return spec_gaps(spec, state.get("industry_classification"))
+
+
 def forecast_statements(spec: Mapping[str, Any]) -> list[str]:
     """The statements this company's model actually has to produce."""
 
@@ -591,6 +636,8 @@ __all__ = [
     "TASK_REF",
     "CompanyModelSpecError",
     "build_prompt",
+    "spec_template_gaps",
+    "template_for",
     "forecast_statements",
     "parse_response",
     "spec_from_response",

@@ -43,12 +43,22 @@ def _line(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def build_company_model_state(
     missions: Any, company_ref: str, *, ticker: str | None = None,
+    industry_classification: str | None = None,
 ) -> dict[str, Any]:
     """Project one company's filed statements down to the structure of them.
 
     Raises when the company has no statements: a model specification decided
     with no filings behind it would be the model deciding what the company
     reports, which is exactly backwards.
+
+    ``industry_classification`` is W4's addition: the dossier's answer to the
+    Deep Insight Gate's first question, carried here so the specification lane
+    can pick the driver template that goes with it. It is *in the hashed body*
+    on purpose -- a company reclassified from a compounder to a commodity
+    producer needs a new specification, and a hash that ignored the
+    reclassification would replay the old one. The key is omitted rather than
+    written as ``null`` when nothing is known, so every state built before this
+    existed still hashes to what it hashed to then.
     """
 
     filings = missions.statement_filings(company_ref)
@@ -94,6 +104,8 @@ def build_company_model_state(
         "statements": {name: statements[name] for name in sorted(statements)},
         "concepts": concepts,
     }
+    if industry_classification:
+        body["industry_classification"] = str(industry_classification)
     return {**body, "state_hash": content_hash(body)}
 
 
