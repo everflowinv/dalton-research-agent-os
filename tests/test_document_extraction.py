@@ -142,6 +142,21 @@ class ExtractionHarness:
 
 
 class DocumentExtractionTests(unittest.TestCase):
+    def test_qualitative_budget_override_is_hash_bound(self):
+        context = self.h.context()
+        configured = build_work(context, model_config={"purpose_call_budgets": {
+            "document_extraction": {
+                "max_input_tokens": 18000, "max_output_tokens": 2100,
+                "max_cost_usd": 0.04, "timeout_seconds": 47,
+            },
+            "document_numeric_extraction": {"max_output_tokens": 99},
+        }})
+        self.assertEqual(configured.budget, {
+            "max_input_tokens": 18000, "max_output_tokens": 2100,
+            "max_total_tokens": 20100, "max_cost_usd": 0.04, "max_seconds": 47,
+        })
+        self.assertNotEqual(configured.id, build_work(context).id)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -183,8 +183,16 @@ def build_prompt(request: Mapping[str, Any]) -> str:
     )
 
 
+LEGACY_CALL_BUDGET = {
+    "max_input_tokens": 32000, "max_output_tokens": 1500,
+    "max_cost_usd": 0.03, "timeout_seconds": 60,
+}
+
+
 def build_work(
-    context: Mapping[str, Any], requests: Sequence[Mapping[str, Any]]
+    context: Mapping[str, Any], requests: Sequence[Mapping[str, Any]], *,
+    model_config: Mapping[str, Any] | None = None,
+    call_budget: Mapping[str, Any] | None = None,
 ) -> Any:
     """One routed model call for one window's numeric slots.
 
@@ -198,13 +206,24 @@ def build_work(
     """
 
     from .contracts import WorkOrder
+    from .call_budget import budget_fingerprint, resolve_call_budget
 
     request = build_request(context, requests)
-    digest = content_hash({
+    explicit = call_budget is not None or any(
+        key in (model_config or {}) for key in ("call_budget", "purpose_call_budgets")
+    )
+    resolved = dict(call_budget or resolve_call_budget(
+        model_config or {}, "document_numeric_extraction", defaults=LEGACY_CALL_BUDGET,
+    ))
+    budget_hash = budget_fingerprint(resolved)
+    identity = {
         "task": TASK_HASH,
         "context": context["content_hash"],
         "slots": [slot["metric_ref"] for slot in request["slots"]],
-    })
+    }
+    if explicit:
+        identity["call_budget"] = budget_hash
+    digest = content_hash(identity)
     return WorkOrder(
         schema_version="0.1",
         id="work:document-numeric-" + digest[:32],
@@ -224,8 +243,11 @@ def build_work(
             # The worst case is a full 12,000-char window with the maximum six
             # slots, about 16.5 KB. This fits it with room for the next
             # sentence somebody adds.
-            "max_input_tokens": 32000, "max_output_tokens": 1500,
-            "max_total_tokens": 33500, "max_cost_usd": 0.03, "max_seconds": 60,
+            "max_input_tokens": resolved["max_input_tokens"],
+            "max_output_tokens": resolved["max_output_tokens"],
+            "max_total_tokens": resolved["max_input_tokens"] + resolved["max_output_tokens"],
+            "max_cost_usd": resolved["max_cost_usd"],
+            "max_seconds": resolved["timeout_seconds"],
         },
         idempotency_key="document-numeric:" + digest,
         declared_side_effects=(),
@@ -240,6 +262,8 @@ def build_work(
             # drift, and it can only do that if it has the same input.
             "request": request,
             "requests": [dict(item) for item in requests],
+            **({"call_budget": resolved, "call_budget_fingerprint": budget_hash}
+               if explicit else {}),
             # The same fixture guard the prose pass carries: a fixture
             # adapter may only run an order that declared itself one, so a
             # test model cannot answer where the broker was expected.

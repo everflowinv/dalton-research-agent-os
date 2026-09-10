@@ -115,6 +115,20 @@ class ResponseTests(unittest.TestCase):
 
 
 class WorkOrderTests(unittest.TestCase):
+    def test_metric_discovery_has_an_independent_configured_budget(self):
+        configured = build_work(CONTEXT, model_config={"purpose_call_budgets": {
+            "metric_discovery_extraction": {
+                "max_input_tokens": 17000, "max_output_tokens": 901,
+                "max_cost_usd": 0.02, "timeout_seconds": 41,
+            },
+            "document_numeric_extraction": {"max_output_tokens": 222},
+        }})
+        self.assertEqual(configured.budget, {
+            "max_input_tokens": 17000, "max_output_tokens": 901,
+            "max_total_tokens": 17901, "max_cost_usd": 0.02, "max_seconds": 41,
+        })
+        self.assertNotEqual(configured.id, build_work(CONTEXT).id)
+
     def test_it_is_its_own_call(self) -> None:
         work = build_work(CONTEXT)
         self.assertTrue(work.id.startswith("work:metric-discovery-"))

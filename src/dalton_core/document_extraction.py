@@ -266,19 +266,43 @@ def build_prompt(context: Mapping[str, Any]) -> str:
     )
 
 
-def build_work(context: Mapping[str, Any]) -> WorkOrder:
-    digest = content_hash({"task": TASK_HASH, "context": context["content_hash"]})
+LEGACY_CALL_BUDGET = {
+    "max_input_tokens": 16000, "max_output_tokens": 3000,
+    "max_cost_usd": 0.05, "timeout_seconds": 60,
+}
+
+
+def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | None = None,
+               call_budget: Mapping[str, Any] | None = None) -> WorkOrder:
+    from .call_budget import budget_fingerprint, resolve_call_budget
+
+    explicit = call_budget is not None or any(
+        key in (model_config or {}) for key in ("call_budget", "purpose_call_budgets")
+    )
+    resolved = dict(call_budget or resolve_call_budget(
+        model_config or {}, "document_extraction", defaults=LEGACY_CALL_BUDGET,
+    ))
+    budget_hash = budget_fingerprint(resolved)
+    identity = {"task": TASK_HASH, "context": context["content_hash"]}
+    if explicit:
+        identity["call_budget"] = budget_hash
+    digest = content_hash(identity)
     return WorkOrder(
         schema_version="0.1", id="work:document-extraction-" + digest[:32],
         created_at=context["created_at"], updated_at=context["created_at"],
         question=build_prompt(context), requested_capabilities=("research",),
         runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
-        budget={"max_input_tokens": 16000, "max_output_tokens": 3000, "max_total_tokens": 19000,
-                "max_cost_usd": 0.05, "max_seconds": 60},
+        budget={"max_input_tokens": resolved["max_input_tokens"],
+                "max_output_tokens": resolved["max_output_tokens"],
+                "max_total_tokens": resolved["max_input_tokens"] + resolved["max_output_tokens"],
+                "max_cost_usd": resolved["max_cost_usd"],
+                "max_seconds": resolved["timeout_seconds"]},
         idempotency_key="document-extraction:" + digest, declared_side_effects=(), status="ready",
         input_refs=(context["id"], context["source_manifest_ref"]),
         metadata={"control_plane": "mission-document-extraction", "task_ref": TASK_REF,
                   "task_hash": TASK_HASH, "context": dict(context), "producer_ref": PRODUCER,
+                  **({"call_budget": resolved, "call_budget_fingerprint": budget_hash}
+                     if explicit else {}),
                   "execution_mode": "broker" if context.get("model_binding") else "hermetic_fixture", "candidate_only": True},
     )
 
@@ -567,10 +591,11 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         from .metric_discovery_extraction import build_work as build_discovery_work
 
         if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
-            return build_numeric_work(current, work.metadata.get("requests") or ())
+            return build_numeric_work(current, work.metadata.get("requests") or (),
+                                      call_budget=work.metadata.get("call_budget"))
         if work.metadata.get("task_ref") == DISCOVERY_TASK_REF:
-            return build_discovery_work(current)
-        return build_work(current)
+            return build_discovery_work(current, call_budget=work.metadata.get("call_budget"))
+        return build_work(current, call_budget=work.metadata.get("call_budget"))
 
     def _parse_candidate(self, text, work):
         from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
@@ -832,7 +857,7 @@ class DocumentExtractionService:
                             actor_ref, require_open=False)
 
     def _suggestions(self, context):
-        work = build_work(context)
+        work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
         scheduler = self.writer._scheduler
         formal = None if scheduler is None else scheduler.formal_result(work.id)
         if formal is None:
@@ -907,7 +932,7 @@ class DocumentExtractionService:
         if not config:
             return None
         from .thesis_impact_budget import ThesisImpactBudgetStore
-        work = build_work(context)
+        work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
         with ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
             row = budget.connection.execute(
                 "SELECT a.admission_id,a.reserved_micros,a.day,s.actual_micros,s.usage_entry_ref "
@@ -943,7 +968,7 @@ class DocumentExtractionService:
         if (type(worker) is not DocumentExtractionModelWorker or worker.store is not self.writer.store
                 or worker.scheduler is not self.writer._scheduler):
             raise ResearchVerificationError("extraction requires the existing Core routed worker")
-        work = build_work(context)
+        work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
         worker.scheduler.enqueue(work)
         worker.run_once(work)
         if self.reread(context, actor_ref) != context:
@@ -1228,7 +1253,10 @@ class DocumentExtractionService:
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
         quotes = {item["quote_id"]: item["raw_text"] for item in context["quotes"]}
-        work = build_numeric_work(context, slots)
+        work = build_numeric_work(
+            context, slots,
+            model_config=getattr(self.writer, "_document_extraction_model_config", None),
+        )
         text, replayed = self._run_secondary(
             work, context, actor_ref, config, factory, "numeric")
         if text is None:
@@ -1289,7 +1317,9 @@ class DocumentExtractionService:
         factory = self.writer._document_extraction_worker_factory
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
-        work = build_discovery_work(context)
+        work = build_discovery_work(
+            context, model_config=getattr(self.writer, "_document_extraction_model_config", None),
+        )
         text, replayed = self._run_secondary(
             work, context, actor_ref, config, factory, "metric discovery")
         if text is None:
@@ -1360,7 +1390,9 @@ class DocumentExtractionService:
         return result.outputs["text"]
 
     def _generate_broker(self, context, actor_ref):
-        self._run_broker_work(build_work(context), context, actor_ref)
+        self._run_broker_work(build_work(
+            context, model_config=self.writer._document_extraction_model_config,
+        ), context, actor_ref)
         return self.view(review_id=context["review_id"],
                          expected_review_hash=context["review_hash"],
                          offset=context["offset"], actor_ref=actor_ref)
@@ -1377,7 +1409,8 @@ class DocumentExtractionService:
             budget = stack.enter_context(ThesisImpactBudgetStore(config["budget_db"]))
             adapter = OpenClawModelAdapter(config["broker_socket"], route_resolver=router.get_decision,
                 auth_client_id=config["broker_client_id"], auth_key_provider=lambda: Path(config["broker_auth_key"]).read_bytes().strip(),
-                expected_agent_id=config["expected_agent_id"], timeout_seconds=65.0)
+                expected_agent_id=config["expected_agent_id"],
+                timeout_seconds=float(work.budget["max_seconds"]))
             worker = DocumentExtractionModelWorker(scheduler=self.writer._scheduler, router=router, adapter=adapter,
                 store=self.writer.store, observability=self.writer.observability,
                 context_resolver=lambda c: self.reread(c, actor_ref),

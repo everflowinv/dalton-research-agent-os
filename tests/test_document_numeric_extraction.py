@@ -8,6 +8,7 @@ import unittest
 from dalton_core.document_numeric_extraction import (
     MAX_FIGURES_PER_WINDOW,
     NumericExtractionError,
+    build_work,
     build_prompt,
     build_request,
     extract_from_window,
@@ -147,6 +148,16 @@ class ResponseTests(unittest.TestCase):
 
 
 class WorkOrderTests(unittest.TestCase):
+    def test_purpose_budget_changes_work_identity(self):
+        config = {"call_budget": {"max_cost_usd": 0.04}, "purpose_call_budgets": {
+            "document_numeric_extraction": {"max_output_tokens": 777},
+            "metric_discovery_extraction": {"max_output_tokens": 333},
+        }}
+        numeric = build_work(self.context(), SLOTS, model_config=config)
+        self.assertEqual(numeric.budget["max_output_tokens"], 777)
+        self.assertEqual(numeric.budget["max_cost_usd"], 0.04)
+        self.assertNotEqual(numeric.id, build_work(self.context(), SLOTS).id)
+
     def context(self) -> dict:
         return {
             **CONTEXT,

@@ -137,13 +137,31 @@ def build_prompt(request: Mapping[str, Any]) -> str:
     )
 
 
-def build_work(context: Mapping[str, Any]) -> Any:
+LEGACY_CALL_BUDGET = {
+    "max_input_tokens": 16000, "max_output_tokens": 1200,
+    "max_cost_usd": 0.03, "timeout_seconds": 60,
+}
+
+
+def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | None = None,
+               call_budget: Mapping[str, Any] | None = None) -> Any:
     """One routed model call asking what this window judges the company on."""
 
     from .contracts import WorkOrder
+    from .call_budget import budget_fingerprint, resolve_call_budget
 
     request = build_request(context)
-    digest = content_hash({"task": TASK_HASH, "context": context["content_hash"]})
+    explicit = call_budget is not None or any(
+        key in (model_config or {}) for key in ("call_budget", "purpose_call_budgets")
+    )
+    resolved = dict(call_budget or resolve_call_budget(
+        model_config or {}, "metric_discovery_extraction", defaults=LEGACY_CALL_BUDGET,
+    ))
+    budget_hash = budget_fingerprint(resolved)
+    identity = {"task": TASK_HASH, "context": context["content_hash"]}
+    if explicit:
+        identity["call_budget"] = budget_hash
+    digest = content_hash(identity)
     return WorkOrder(
         schema_version="0.1",
         id="work:metric-discovery-" + digest[:32],
@@ -153,8 +171,11 @@ def build_work(context: Mapping[str, Any]) -> Any:
         requested_capabilities=("research",),
         runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
         budget={
-            "max_input_tokens": 16000, "max_output_tokens": 1200,
-            "max_total_tokens": 17200, "max_cost_usd": 0.03, "max_seconds": 60,
+            "max_input_tokens": resolved["max_input_tokens"],
+            "max_output_tokens": resolved["max_output_tokens"],
+            "max_total_tokens": resolved["max_input_tokens"] + resolved["max_output_tokens"],
+            "max_cost_usd": resolved["max_cost_usd"],
+            "max_seconds": resolved["timeout_seconds"],
         },
         idempotency_key="metric-discovery:" + digest,
         declared_side_effects=(),
@@ -164,6 +185,8 @@ def build_work(context: Mapping[str, Any]) -> Any:
             "control_plane": "mission-document-extraction",
             "task_ref": TASK_REF, "task_hash": TASK_HASH,
             "context": dict(context), "request": request,
+            **({"call_budget": resolved, "call_budget_fingerprint": budget_hash}
+               if explicit else {}),
             # The same fixture guard the prose pass carries: a fixture
             # adapter may only run an order that declared itself one, so a
             # test model cannot answer where the broker was expected.
