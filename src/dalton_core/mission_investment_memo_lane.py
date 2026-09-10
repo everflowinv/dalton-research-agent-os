@@ -42,6 +42,7 @@ def ledger_signature(connection: Any, launcher: Any) -> str:
 def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     """Bind a memo attempt to its exact frozen company input and model pair."""
 
+    from .cockpit_model import verifier_provider_contract_fingerprint
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -53,7 +54,8 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "playbook": {"ref": playbook["id"], "hash": playbook["content_hash"]},
         "input_bindings": frozen["input_bindings"],
     }
-    parts = [content_hash(payload)]
+    parts = [content_hash(payload), verifier_provider_contract_fingerprint(
+        "investment_memo_verifier")]
     for path in (launcher.model_config_path, launcher.verifier_model_config_path):
         try:
             parts.append(hashlib.sha256(Path(path).read_bytes()).hexdigest())
@@ -119,6 +121,9 @@ class MissionInvestmentMemoLaneCoordinator:
             skipped = {}
             for company_ref in self.companies():
                 frozen = self.frozen_input(company_ref)
+                if not isinstance(frozen, Mapping):
+                    skipped[company_ref] = "frozen input unavailable"
+                    continue
                 if frozen.get("status") != "ready":
                     skipped[company_ref] = str(frozen.get("reason") or frozen.get("status"))
                     continue
@@ -132,12 +137,30 @@ class MissionInvestmentMemoLaneCoordinator:
                         self.budget.retire(item["item_key"])
             if signature in self.quiet_signatures:
                 continue
+            parked = next((item for item in self.budget.parked_items()
+                           if item["item_key"] == signature), None)
             held = self.budget.blocked(signature)
             if held:
                 held_companies[str(company_ref or "-")] = held.classification.reason
                 continue
             try:
-                ticket = self.launcher.start(signature=signature, company_ref=company_ref)
+                recovery_ref = None
+                attempts = self.budget.attempts(signature)
+                if attempts or parked is not None:
+                    from .store import content_hash
+                    probe_epoch = None
+                    if parked is not None:
+                        seconds = max(1, int(self.budget.probe_interval_seconds))
+                        probe_epoch = int(self.budget.clock().timestamp()) // seconds
+                    recovery_ref = content_hash({
+                        "signature": signature, "attempt": attempts,
+                        "dependency": None if parked is None else parked["dependency"],
+                        "probe_epoch": probe_epoch,
+                    })[:16]
+                launch = {"signature": signature, "company_ref": company_ref}
+                if recovery_ref is not None:
+                    launch["recovery_ref"] = recovery_ref
+                ticket = self.launcher.start(**launch)
             except LaneChildConflict as exc:
                 return {"status": "busy", "reason": str(exc), "settled": settled}
             except LaneChildRejected as exc:

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,9 +49,16 @@ class MemoFairnessTests(unittest.TestCase):
             self.failure_summary = None
             self.started = []
 
-        def start(self, *, signature, company_ref=None):
+        def start(self, *, signature, company_ref=None, recovery_ref=None):
+            cached = next((item for item in self.started
+                           if item["signature"] == signature
+                           and item["company_ref"] == company_ref
+                           and item["recovery_ref"] == recovery_ref), None)
+            if cached is not None:
+                return cached
             ticket = {"id": "memo-run:" + str(len(self.started)),
-                      "signature": signature, "company_ref": company_ref}
+                      "signature": signature, "company_ref": company_ref,
+                      "recovery_ref": recovery_ref}
             self.started.append(ticket)
             return ticket
 
@@ -104,7 +112,7 @@ class MemoFairnessTests(unittest.TestCase):
         result = restarted.dispatch_once()
         self.assertEqual(result["company_ref"], "company:B")
         self.assertEqual([item["company_ref"] for item in self.launcher.started],
-                         ["company:A", "company:B", "company:B"])
+                         ["company:A", "company:B"])
 
     def test_input_change_moves_only_its_company_signature(self):
         a_before = company_signature(self.inputs["company:A"], self.launcher)
@@ -114,6 +122,19 @@ class MemoFairnessTests(unittest.TestCase):
                             a_before)
         self.assertEqual(company_signature(self.inputs["company:B"], self.launcher),
                          b_before)
+
+    def test_verifier_provider_contract_change_releases_the_company_identity(self):
+        with patch(
+            "dalton_core.cockpit_model.verifier_provider_contract_fingerprint",
+            return_value="a" * 64,
+        ):
+            before = company_signature(self.inputs["company:A"], self.launcher)
+        with patch(
+            "dalton_core.cockpit_model.verifier_provider_contract_fingerprint",
+            return_value="b" * 64,
+        ):
+            after = company_signature(self.inputs["company:A"], self.launcher)
+        self.assertNotEqual(before, after)
 
     def test_all_held_companies_are_quiet(self):
         self.launcher.failed_company = "company:A"
@@ -132,6 +153,16 @@ class MemoFairnessTests(unittest.TestCase):
         self.assertEqual(result["company_ref"], "company:B")
         self.assertEqual([item["company_ref"] for item in self.launcher.started],
                          ["company:B"])
+
+    def test_missing_frozen_input_is_skipped_without_crashing_or_a_ticket(self):
+        coordinator = MissionInvestmentMemoLaneCoordinator(
+            connection=None, launcher=self.launcher,
+            companies=lambda: ["company:A"], frozen_input=lambda _company: None,
+        )
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["skipped"], {"company:A": "frozen input unavailable"})
+        self.assertEqual(self.launcher.started, [])
 
     def test_broker_capacity_failure_is_recoverable_not_content_terminal(self):
         self.launcher.failure_summary = {

@@ -33,16 +33,19 @@ class InvestmentMemoLauncher(LaneChildLauncher):
             command += ["--company-ref", company_ref]
         return command
 
-    def start(self, *, signature: str, company_ref: str | None = None) -> dict[str, Any]:
+    def start(self, *, signature: str, company_ref: str | None = None,
+              recovery_ref: str | None = None) -> dict[str, Any]:
         if not signature:
             raise LaneChildRejected("a memo run needs an input signature")
         from .cockpit_model import verifier_provider_contract_fingerprint
         provider_contract = verifier_provider_contract_fingerprint(
             "investment_memo_verifier")
         digest = hashlib.sha256(
-            f"memo|{company_ref or '-'}|{signature}|{provider_contract}".encode()
+            f"memo|{company_ref or '-'}|{signature}|{provider_contract}|"
+            f"{recovery_ref or '-'}".encode()
         ).hexdigest()[:24]
-        return self.spawn(digest=digest, record={"signature": signature, "company_ref": company_ref},
+        return self.spawn(digest=digest, record={"signature": signature,
+                          "company_ref": company_ref, "recovery_ref": recovery_ref},
                           company_ref=company_ref)
 
 
