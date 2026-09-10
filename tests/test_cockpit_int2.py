@@ -578,18 +578,22 @@ class RoutingPanelTests(Int2Case):
         self.assertIn("还没有用过", tiers["cheap"]["last_served_note"])
 
     def test_a_purpose_with_no_tier_is_named_rather_than_left_out(self) -> None:
-        # Live, two of them: P14a registered event_judgement and
-        # thesis_reflection as purposes without giving either a tier, so the
-        # day a chain is pinned for their policy both are refused rather than
-        # falling back to a default. That is exactly the kind of thing this
-        # panel exists to make visible before it bites.
+        # P14a once registered event_judgement and thesis_reflection without a
+        # tier; the tier map has since been seeded for them, so the panel is
+        # exercised here with a purpose registered on purpose without a tier.
+        # The day a chain is pinned for such a policy the call is refused
+        # rather than falling back to a default, which is exactly the kind of
+        # thing this panel exists to make visible before it bites.
+        from dalton_core.cockpit_model import register_purpose
         from dalton_core.model_router import ModelRouter
 
+        register_purpose("int2_untiered_probe")
         ModelRouter(str(self.root / "router.sqlite")).close()
         routing = self.plane.sources()["routing"]
         self.assertTrue(routing["purposes"])
-        self.assertIn("event_judgement", routing["unmapped_purposes"])
-        self.assertIn("thesis_reflection", routing["unmapped_purposes"])
+        self.assertIn("int2_untiered_probe", routing["unmapped_purposes"])
+        self.assertNotIn("event_judgement", routing["unmapped_purposes"])
+        self.assertNotIn("thesis_reflection", routing["unmapped_purposes"])
         self.assertIn("层级", routing["unmapped_note"])
 
     def test_without_an_openclaw_config_the_catalog_is_not_guessed(self) -> None:

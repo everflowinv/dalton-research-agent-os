@@ -20,11 +20,17 @@ REGISTERING_MODULES = (
 
 
 class PurposeTierCoverageTests(unittest.TestCase):
-    def test_every_registered_purpose_has_a_tier(self) -> None:
-        from dalton_core import lane_registry
-        from dalton_core.model_fallback_chain import unmapped_purposes
+    def test_every_purpose_a_real_module_registers_has_a_tier(self) -> None:
+        # Other tests register throwaway purposes without a tier on purpose,
+        # so this reads the modules' own purpose constants rather than the
+        # process-global registry.
+        from dalton_core.model_fallback_chain import purpose_tiers
 
-        lane_registry.load_lanes()
+        registered: set[str] = set()
         for name in REGISTERING_MODULES:
-            importlib.import_module(name)
-        self.assertEqual(unmapped_purposes(), ())
+            module = importlib.import_module(name)
+            for attr in dir(module):
+                if attr.endswith("PURPOSE") and isinstance(getattr(module, attr), str):
+                    registered.add(getattr(module, attr))
+        self.assertTrue(registered)
+        self.assertEqual(sorted(registered - set(purpose_tiers())), [])
