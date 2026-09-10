@@ -18,6 +18,7 @@ from dalton_core.model_router import (
     RETIRED_REASON_NOT_IN_BROKER,
     ModelRouter,
     ModelRouterValidationError,
+    independent_families,
 )
 from dalton_core.openclaw_catalog_reconcile import (
     broker_catalog_hash,
@@ -80,7 +81,7 @@ class CatalogSyncTests(unittest.TestCase):
             "WHERE profile_version_ref=?", (before["profile_version_ref"],),
         ).fetchone()[0]
         changed = _config()
-        changed["models"]["providers"]["deepseek"]["models"].append({
+        changed["models"]["providers"]["zai"]["models"].append({
             "id": "deepseek-next", "contextWindow": 200_000, "maxTokens": 12_000,
             "cost": {"input": 0.7, "output": 2.1},
         })
@@ -90,7 +91,7 @@ class CatalogSyncTests(unittest.TestCase):
             if row["id"] == profile_id
         )
         broker.update({
-            "model": "deepseek/deepseek-next", "maxTokens": 10_000,
+            "model": "zai/deepseek-next", "maxTokens": 10_000,
             "family": "deepseek-next", "capabilities": ["research", "verify"],
         })
         rows_before = self.router.connection.execute(
@@ -107,6 +108,8 @@ class CatalogSyncTests(unittest.TestCase):
         current = next(row for row in self.router.latest_profiles() if row["id"] == profile_id)
         self.assertEqual((current["model"], current["family"]),
                          ("deepseek-next", "deepseek-next"))
+        self.assertEqual(current["provider"], "zai")
+        self.assertEqual(current["credential_slot_ref"], "credential-slot:openclaw:zai")
         self.assertEqual(current["cost"]["input_per_million_usd"], 0.7)
         self.assertEqual(current["context"]["max_output_tokens"], 10_000)
         self.assertEqual(current["prior_version_ref"], before["profile_version_ref"])
@@ -116,6 +119,54 @@ class CatalogSyncTests(unittest.TestCase):
         ).fetchone()[0], before_bytes)
         again = sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
         self.assertFalse(again["changed"])
+
+    def test_curated_profile_without_catalog_price_becomes_unpriced(self) -> None:
+        config = _config()
+        self._install(config)
+        changed = _config()
+        model = next(
+            row for row in changed["models"]["providers"]["openai"]["models"]
+            if row["id"] == "gpt-5.6-sol"
+        )
+        model.pop("cost")
+        status = catalog_sync_status(self.router, changed, checked_at=LATER)
+        self.assertIn("profile:gpt-5-6-sol", status["drifted_profile_ids"])
+        sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
+        current = next(
+            row for row in self.router.latest_profiles()
+            if row["id"] == "profile:gpt-5-6-sol"
+        )
+        self.assertTrue(current["unpriced"])
+        self.assertEqual(current["cost"]["input_per_million_usd"], 25.0)
+        self.assertEqual(current["cost"]["output_per_million_usd"], 100.0)
+
+    def test_changed_alias_requires_explicit_family_before_independence(self) -> None:
+        self._install(_config())
+        changed = _config()
+        changed["models"]["providers"]["deepseek"]["models"].append({
+            "id": "deepseek-alias", "contextWindow": 100_000, "maxTokens": 8_000,
+            "cost": {"input": 0.2, "output": 0.6},
+        })
+        broker = next(
+            row for row in changed["plugins"]["entries"]
+            ["dalton-openclaw-model-broker"]["config"]["profiles"]
+            if row["id"] == "profile:deepseek-v4-flash"
+        )
+        broker["model"] = "deepseek/deepseek-alias"
+        sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
+        unknown = next(
+            row for row in self.router.latest_profiles()
+            if row["id"] == "profile:deepseek-v4-flash"
+        )
+        self.assertFalse(independent_families(unknown["family"], "openai-gpt-6"))
+        broker["family"] = "deepseek-v4"
+        recovered = sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
+        self.assertEqual(recovered["updated_profile_ids"], ["profile:deepseek-v4-flash"])
+        explicit = next(
+            row for row in self.router.latest_profiles()
+            if row["id"] == "profile:deepseek-v4-flash"
+        )
+        self.assertTrue(independent_families(explicit["family"], "openai-gpt-6"))
 
     def test_a_profile_the_broker_dropped_is_retired_not_deleted(self) -> None:
         config = _config()

@@ -271,13 +271,12 @@ class UnpricedModelTests(RouterCase):
         )
         self.assertGreater(profile["cost"]["input_per_million_usd"], dearest)
 
-    def test_the_gateway_dropping_a_price_does_not_erase_a_curated_card(
+    def test_the_gateway_dropping_a_price_marks_even_a_curated_route_unpriced(
         self,
     ) -> None:
         # gemini-3.5-flash-lite is curated here and is the cheap chain's last
-        # link. The gateway going quiet about its price must not turn Dalton's
-        # own rate card into a zero, or into an "unknown" that can then only be
-        # a last link.
+        # link. Runtime catalog facts supersede the static bootstrap card: an
+        # absent price becomes a conservative ceiling and a last-link marker.
         before = next(
             item for item in self.router.latest_profiles()
             if item["id"] == "profile:gemini-3-5-flash-lite"
@@ -288,9 +287,9 @@ class UnpricedModelTests(RouterCase):
             item for item in self.router.latest_profiles()
             if item["id"] == "profile:gemini-3-5-flash-lite"
         )
-        self.assertEqual(after["cost"], before["cost"])
-        self.assertGreater(after["cost"]["input_per_million_usd"], 0)
-        self.assertNotIn("unpriced", after)
+        self.assertNotEqual(after["cost"], before["cost"])
+        self.assertEqual(after["cost"]["input_per_million_usd"], 25.0)
+        self.assertTrue(after["unpriced"])
 
     def test_an_unpriced_model_may_be_last_and_may_not_be_first(self) -> None:
         checked = validate_selection(

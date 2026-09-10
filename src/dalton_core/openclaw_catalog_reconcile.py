@@ -310,6 +310,9 @@ def openclaw_broker_profiles_from_config(
             route_changed = static_route["model_ref"] != model_ref
             profile["provider"] = provider_model["provider"]
             profile["model"] = provider_model["model"]
+            profile["credential_slot_ref"] = (
+                f"credential-slot:openclaw:{provider_model['provider']}"
+            )
             if route_changed:
                 profile["family"] = f"unclassified:{provider_model['provider']}"
             if broker["family"] is not None:
@@ -328,12 +331,20 @@ def openclaw_broker_profiles_from_config(
                 "max_context_tokens": context_window,
                 "max_output_tokens": max_output,
             }
-            if not provider_model["unpriced"]:
+            if provider_model["unpriced"]:
+                profile["cost"] = {
+                    "currency": "USD",
+                    "input_per_million_usd": UNPRICED_CEILING_INPUT_PER_MILLION_USD,
+                    "output_per_million_usd": UNPRICED_CEILING_OUTPUT_PER_MILLION_USD,
+                }
+                profile["unpriced"] = True
+            else:
                 profile["cost"] = {
                     "currency": "USD",
                     "input_per_million_usd": provider_model["input_cost"],
                     "output_per_million_usd": provider_model["output_cost"],
                 }
+                profile.pop("unpriced", None)
             profile["limits"] = {
                 "max_input_tokens": max(1, context_window - max_output),
                 "max_output_tokens": max_output,
@@ -346,12 +357,6 @@ def openclaw_broker_profiles_from_config(
                 "checked_at": created,
                 "valid_until": valid_until,
             }
-            # A curated profile carries a rate card of Dalton's own, and the
-            # gateway dropping its published price does not make that card
-            # unknown. So the curated card stands and the profile is *not*
-            # marked unpriced: we do know what this costs, we simply are no
-            # longer reading it off the provider entry.
-            profile.pop("unpriced", None)
             output.append(profile)
             continue
 
