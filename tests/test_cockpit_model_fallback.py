@@ -330,6 +330,33 @@ class CockpitChainTests(unittest.TestCase):
             ]
         self.assertEqual(settled, [expected])
 
+    def test_reservation_covers_expensive_fallback_in_owner_selected_chain(self) -> None:
+        from dalton_core.model_selection import publish_selection
+
+        links = ["profile:deepseek-v4-flash", "profile:gpt-6-astra"]
+        with ModelRouter(self.router_db) as router:
+            pinned = ensure_planner_policy(
+                router, profile_ids=links, now=NOW,
+                policy_id="model-routing-policy:selected-budget",
+            )["policy_version_ref"]
+            selected = publish_selection(
+                router, policy_version_ref=pinned, purpose="claim_index",
+                mode="explicit", chain=links, now=NOW,
+            )["policy_version_ref"]
+            slots = credential_slots_for(router, links)
+        adapter = ChainAdapter({links[0]: {"code": "UPSTREAM_TIMEOUT", "message": "gone"}})
+        answer = self._model(adapter, policy_version_ref=selected, slots=slots).call(
+            purpose="claim_index", request_id="selected-reservation", prompt="tag these",
+            mission=self.mission,
+        )
+        self.assertEqual(adapter.served, links)
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admissions = [json.loads(row[0]) for row in ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions"
+            )]
+        self.assertEqual(len(admissions), 1)
+        self.assertGreaterEqual(admissions[0]["reserved_micros"], answer["cost_micros"])
+
     def test_a_content_refusal_does_not_buy_a_second_opinion(self) -> None:
         adapter = ChainAdapter({
             "profile:gpt-6-astra": {"code": "CONTENT_REFUSAL", "message": "declined"}

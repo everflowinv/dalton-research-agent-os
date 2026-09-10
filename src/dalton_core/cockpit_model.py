@@ -554,7 +554,8 @@ class CockpitModel:
             )
         return tier if tier in declared or override is not None else None
 
-    def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int) -> int:
+    def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int,
+                       *, purpose: str) -> int:
         """The most this attempt could cost, whichever link ends up serving.
 
         The day ledger identifies an admission by (work order, attempt, phase),
@@ -566,10 +567,17 @@ class CockpitModel:
         """
 
         from .model_fallback_chain import tier_chain
+        from .model_router import resolve_chain
 
-        wanted = set(tier_chain(tier))
+        profiles = router.latest_profiles()
+        policy = router.get_policy(self.config["routing_policy_ref"])
+        resolved = resolve_chain(
+            policy, tier=tier, purpose=purpose,
+            profiles={profile["id"]: profile for profile in profiles},
+        )
+        wanted = set(resolved["chain"] if resolved is not None else tier_chain(tier))
         ceiling = Decimal(0)
-        for profile in router.latest_profiles():
+        for profile in profiles:
             if profile["id"] not in wanted or profile.get("status") == "retired":
                 continue
             cost = profile["cost"]
@@ -590,7 +598,7 @@ class CockpitModel:
         from .model_fallback_chain import classify_model_failure, execute_chain
 
         day = self.clock().astimezone(timezone.utc).date().isoformat()
-        ceiling = self._chain_ceiling(router, tier, prompt_bytes)
+        ceiling = self._chain_ceiling(router, tier, prompt_bytes, purpose=purpose)
         admission: dict[str, Any] | None = None
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
