@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime
+from html.parser import HTMLParser
 from typing import Any
 
 from .buyback_disclosure import buyback_documents
@@ -20,7 +21,46 @@ _ACTION = re.compile(r"\b(adopted|terminated)\b", re.I)
 _ON_PREFIX = re.compile(rf"^On\s+({_DATE}),\s+(.+?)\s+\b(adopted|terminated)\b", re.I)
 _ACTION_DATE = re.compile(rf"\b(?:adopted|terminated)\b.{{0,180}}?\bon\s+({_DATE})", re.I)
 _SHARES = re.compile(r"\b(?:up to|maximum of)\s+(?:an aggregate of\s+)?([\d,]+)\s+shares\b", re.I)
-_EXPIRY = re.compile(rf"\b(?:expire|expiration date(?: of)?|terminate)\w*\s+(?:on\s+)?({_DATE})", re.I)
+_EXPIRY = re.compile(
+    rf"\b(?:expire\w*|expiration date(?: of)?|will terminate)\b.{{0,100}}?({_DATE})",
+    re.I,
+)
+_MAX_DOCUMENT_CHARS = 1_000_000
+_MAX_SECTION_CHARS = 200_000
+
+
+class _VisibleText(HTMLParser):
+    """The small HTML projection this parser needs from archived SEC pages."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style"}:
+            self.hidden += 1
+        if not self.hidden and tag in {"br", "div", "p", "tr", "td", "th", "li"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and self.hidden:
+            self.hidden -= 1
+        elif not self.hidden and tag in {"div", "p", "tr", "td", "th", "li"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def _visible_text(value: str) -> str:
+    if not re.search(r"<(?:html|table|div|span|td|body)\b", value, re.I):
+        return value
+    parser = _VisibleText()
+    parser.feed(value)
+    parser.close()
+    return "".join(parser.parts)
 
 
 def _item5_text(text: str) -> str | None:
@@ -60,11 +100,20 @@ def trading_arrangement_events(
     if not all((company_ref, accession, filing_date, issuer_name,
                 document_ref, artifact_hash)):
         return {"status": "refused", "reason": "the filing lacks accession, issuer, filing date, document ref, or artifact hash", "events": []}
-    section = _item5_text(text or "")
+    raw = text or ""
+    if len(raw) > _MAX_DOCUMENT_CHARS:
+        return {"status": "refused", "reason": "the archived filing exceeds the bounded Item 5 parser input", "events": []}
+    section = _item5_text(_visible_text(raw))
     if section is None:
         return {"status": "absent", "reason": "no bounded Item 5 or SEC insider-trading-arrangements fact was found", "events": []}
+    if len(section) > _MAX_SECTION_CHARS:
+        return {"status": "refused", "reason": "the located Item 5 disclosure exceeds the parser section bound", "events": []}
+    # Inline-XBRL commonly puts several ``On <date>`` disclosures in one table
+    # cell.  The visible-text projection retains a line break between its divs,
+    # so make those explicit action boundaries before paragraph parsing.
+    section = re.sub(rf"\n(?=On\s+{_DATE},)", "\n\n", section, flags=re.I)
     paragraphs = [" ".join(part.split()) for part in re.split(r"\n\s*\n", section)]
-    paragraphs = [part for part in paragraphs if part]
+    paragraphs = [part.lstrip("• \t") for part in paragraphs if part]
     relevant = [part for part in paragraphs if _PLAN_WORDS.search(part)]
     if relevant and all(_NEGATIVE.search(part) for part in relevant):
         return {"status": "empty", "reason": "the filing explicitly reports no adopted or terminated trading arrangements", "events": []}
@@ -112,6 +161,12 @@ def trading_arrangement_events(
                      else "sale" if re.search(r"\b(?:sale|sell|sold)\w*\b", paragraph, re.I)
                      else "unknown")
         shares = _SHARES.search(paragraph)
+        # A colon announces an enumerated set of terms in the next blocks.
+        # Its first ``up to N shares`` is one leg, not the aggregate plan size.
+        # Leaving the aggregate unknown is preferable to recording that leg as
+        # the whole arrangement.
+        aggregate_shares = (None if paragraph.rstrip().endswith(":") else
+                            shares.group(1).replace(",", "") if shares else None)
         expiry = _EXPIRY.search(paragraph)
         if title:
             titles[person] = title
@@ -124,7 +179,7 @@ def trading_arrangement_events(
             "person_name": person, "person_title": title,
             "action": action, "action_date": action_date, "plan_type": plan_type,
             "securities_direction": direction,
-            "aggregate_shares": shares.group(1).replace(",", "") if shares else None,
+            "aggregate_shares": aggregate_shares,
             "expiration_date": _date(expiry.group(1)) if expiry else None,
             "material_terms_excerpt": paragraph, "excerpt_hash": excerpt_hash,
             "document_ref": document_ref, "artifact_hash": artifact_hash,

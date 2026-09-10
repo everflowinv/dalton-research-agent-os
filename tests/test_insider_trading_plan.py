@@ -56,6 +56,37 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(rows["Robert E. Landry"]["aggregate_shares"], "2000")
         self.assertEqual(rows["Wendell Wierenga"]["action_date"], "2026-06-10")
         self.assertEqual(rows["Wendell Wierenga"]["aggregate_shares"], "45714")
+        self.assertEqual(rows["Robert E. Landry"]["expiration_date"], "2027-06-04")
+        self.assertEqual(rows["Wendell Wierenga"]["expiration_date"], "2028-05-16")
+
+    def test_archived_sec_html_is_projected_without_crossing_xbrl_members(self):
+        result = parse("two-adoptions-0001193125-26-338217.html",
+                       "0001193125-26-338217")
+        self.assertEqual(result["status"], "read")
+        self.assertEqual(
+            [(row["payload"]["person_name"], row["payload"]["action_date"],
+              row["payload"]["aggregate_shares"])
+             for row in result["events"]],
+            [("Robert E. Landry", "2026-06-12", "2000"),
+             ("Wendell Wierenga", "2026-06-10", "45714")],
+        )
+
+    def test_multi_leg_plan_does_not_call_the_first_leg_an_aggregate(self):
+        for name in ("adopt-terminate-0000821189-26-000149.txt",
+                     "adopt-terminate-0000821189-26-000149.html"):
+            with self.subTest(name=name):
+                result = parse(name, "0000821189-26-000149")
+                adopted = next(row["payload"] for row in result["events"]
+                               if row["payload"]["action"] == "adopted")
+                self.assertIsNone(adopted["aggregate_shares"])
+
+    def test_oversize_archive_is_refused_before_scanning(self):
+        result = trading_arrangement_events(
+            "x" * 1_000_001, company_ref=ACN,
+            accession="0000000000-00-000003", filing_date="2026-01-01",
+            issuer_name="Issuer", document_ref="d", artifact_hash="a" * 64)
+        self.assertEqual((result["status"], result["events"]), ("refused", []))
+        self.assertIn("bounded", result["reason"])
 
     def test_negative_and_unlocatable_disclosures_are_explicit(self):
         negative = trading_arrangement_events(
@@ -84,7 +115,9 @@ class PipelineTests(P14aHarness):
         super().setUp()
         schema = Path(__file__).resolve().parents[1] / "src/dalton_core/document_index_schema.sql"
         self.store.connection.executescript(schema.read_text(encoding="utf-8"))
-        text = fixture("two-adoptions-0001193125-26-338217.txt")
+        # Document Index's builtin UTF-8 extraction retains archived HTML.
+        # Exercise that actual wire rather than a separately rendered fixture.
+        text = fixture("two-adoptions-0001193125-26-338217.html")
         self.store.connection.execute(
             "INSERT INTO document_index_documents(rowid,artifact_version_ref,artifact_version_hash,artifact_ref,artifact_version,artifact_content_hash,title,kind,media_type,access_class,source_record_refs_json,company_refs_json,document_date,source_metadata,extracted_text,extracted_text_ref,extracted_text_hash,extracted_text_size_bytes,input_ref,input_hash,record_json,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (1, "artifact-version:item5", "d"*64, "artifact:item5", 1, "e"*64,
