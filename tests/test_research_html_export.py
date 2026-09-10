@@ -7,8 +7,12 @@ from dalton_core.research_html_export import (
     ResearchHtmlExportError,
     _typed_claims,
 )
-from dalton_core.store import content_hash
+from dalton_core.company_dossier import CompanyDossierAuthority
+from dalton_core.cockpit_research_library import research_library
 from tests.test_research_task import ResearchTaskFixture
+from tests.test_claim_index_entries import LedgerFixture
+from tests import test_company_dossier as dossier_fixtures
+from tests import test_investment_memo_decision_real as memo_fixtures
 
 
 class HtmlRenderTests(unittest.TestCase):
@@ -164,46 +168,19 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         self.assertEqual(result["mission_version_hash"], self.mission["content_hash"])
 
     def test_two_real_claim_rows_resolve_as_one_typed_series(self):
-        refs = []
-        for index, value in enumerate(("10", "12"), 1):
-            claim = {
-                "schema_version": "0.2",
-                "id": f"claim-version:html:{index}",
-                "claim_ref": f"claim:html:revenue:{index}",
-                "version": index,
-                "subject_ref": "company:sec-cik:0001467373",
-                "metric_or_aspect": "revenue",
-                "period": f"FY202{4+index}",
-                "basis": "reported",
-                "normalized_statement": f"Revenue USD {value} billion",
-                "claim_kind": "quantitative",
-                "value": value,
-                "unit": "usd",
-                "currency": "USD",
-                "scale": "billion",
-                "producer_execution_refs": [],
-                "semantic_review_ref": None,
-                "semantic_review_hash": None,
-                "candidate_origin_ref": None,
-                "candidate_origin_hash": None,
-                "actor_ref": "system:test",
-                "prior_version_ref": None,
-                "created_at": f"2026-09-0{index}T00:00:00+00:00",
-            }
-            claim["content_hash"] = content_hash(claim)
-            with self.store._transaction() as cur:
-                cur.execute(
-                    "INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,content_hash,created_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        claim["id"],
-                        claim["claim_ref"],
-                        index,
-                        json.dumps(claim),
-                        claim["content_hash"],
-                        claim["created_at"],
-                    ),
-                )
-            refs.append(claim["id"])
+        fixture = LedgerFixture()
+        self.addCleanup(fixture.close)
+        refs = [
+            fixture.add_claim(
+                f"claim:html:revenue:{period}",
+                value=value,
+                unit="usd",
+                metric="revenue",
+                period=period,
+                statement=f"Revenue USD {value}",
+            )["claim_version_id"]
+            for value, period in ((10, "2025"), (12, "2026"))
+        ]
         library = {
             "products": [
                 {
@@ -213,7 +190,7 @@ class RealReadonlyExportTests(ResearchTaskFixture):
                 }
             ]
         }
-        claims = _typed_claims(self.store.connection, library)
+        claims = _typed_claims(fixture.store.connection, library)
         self.assertEqual(set(claims), set(refs))
         page = render_research_html(
             {
@@ -241,10 +218,84 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         )
         self.assertIn("Typed Claim series: revenue", page)
 
+
+class PublishedAuthorityExportTests(unittest.TestCase):
+    setUp = memo_fixtures.RealInvestmentMemoDecisionTests.setUp
+
+    def _file_copy(self, name):
+        path = self.chain.root / name
+        target = sqlite3.connect(path)
+        try:
+            self.store.connection.backup(target)
+        finally:
+            target.close()
+        return path
+
+    def test_real_approved_memo_exports_exact_human_decision(self):
+        memo_fixtures.RealInvestmentMemoDecisionTests.test_real_store_scheduler_router_publish_and_approve(
+            self
+        )
+        library = research_library(self.store.connection, self.mission, self.company)
+        memo = next(
+            product
+            for product in library["products"]
+            if product["kind"] == "investment_memo"
+        )
+        self.assertEqual(memo["approval"]["status"], "approved")
+
+        output = self.chain.root / "approved-memo.html"
+        manifest = export_research_html(
+            self._file_copy("memo-core.sqlite"),
+            self.company,
+            output,
+            mission_ref=self.mission["mission_ref"],
+        )
+        page = output.read_text(encoding="utf-8")
+        for field in ("decision_record_ref", "actor_ref", "decided_at"):
+            self.assertIn(memo["approval"][field], page)
+        exported = next(
+            product
+            for product in manifest["product_versions"]
+            if product["kind"] == "investment_memo"
+        )
+        self.assertEqual(exported["version_ref"], memo["version_ref"])
+        self.assertEqual(exported["content_hash"], memo["content_hash"])
+        self.assertEqual(exported["approval"], "approved")
+
+    def test_real_published_dossier_renders_structured_sources(self):
+        candidate = dossier_fixtures.body(
+            company_ref=self.company,
+            drafted_sections={
+                "business_model": dossier_fixtures.drafted(
+                    "business_model", "claim-version:structured-source"
+                )
+            },
+        )
+        candidate["bindings"]["mission_version_ref"] = self.mission["id"]
+        published = CompanyDossierAuthority(self.store).publish(candidate)
+
+        output = self.chain.root / "dossier.html"
+        manifest = export_research_html(
+            self._file_copy("dossier-core.sqlite"),
+            self.company,
+            output,
+            mission_ref=self.mission["mission_ref"],
+        )
+        page = output.read_text(encoding="utf-8")
+        self.assertIn("claim-version:structured-source", page)
+        self.assertNotIn("{&#x27;kind&#x27;", page)
+        exported = next(
+            product
+            for product in manifest["product_versions"]
+            if product["kind"] == "dossier"
+        )
+        self.assertEqual(exported["version_ref"], published["id"])
+        self.assertEqual(exported["content_hash"], published["content_hash"])
+
     def test_asset_hash_and_shape_fail_closed(self):
-        asset = self.state_dir / "figure.png"
+        asset = self.chain.root / "figure.png"
         asset.write_bytes(b"not-a-real-png-but-local-bytes")
-        manifest = self.state_dir / "assets.json"
+        manifest = self.chain.root / "assets.json"
         manifest.write_text(
             json.dumps(
                 {
@@ -263,9 +314,10 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         )
         with self.assertRaisesRegex(ResearchHtmlExportError, "hash mismatch"):
             export_research_html(
-                self.state_dir / "core.sqlite",
-                "company:sec-cik:0001467373",
-                self.state_dir / "x.html",
+                self._file_copy("asset-core.sqlite"),
+                self.company,
+                self.chain.root / "x.html",
+                mission_ref=self.mission["mission_ref"],
                 asset_manifest=manifest,
             )
 

@@ -87,6 +87,19 @@ def _typed_claims(
             else None
         )
         status = adjudication[0] if adjudication is not None else "proposed"
+        retired = False
+        if _has_table(connection, "claim_retirement_decisions") and _has_table(
+            connection, "claim_retirement_challenges"
+        ):
+            retired = (
+                connection.execute(
+                    "SELECT 1 FROM claim_retirement_decisions d "
+                    "JOIN claim_retirement_challenges c ON c.challenge_id=d.challenge_ref "
+                    "WHERE c.claim_version_ref=? AND d.decision='retired' LIMIT 1",
+                    (ref,),
+                ).fetchone()
+                is not None
+            )
         if (
             claim.get("id") == ref
             and claim.get("content_hash") == row["content_hash"]
@@ -95,7 +108,8 @@ def _typed_claims(
             and claim.get("claim_kind") == "quantitative"
             and latest is not None
             and latest[0] == ref
-            and status not in {"rejected", "retired", "superseded"}
+            and status not in {"rejected", "retired", "retracted", "superseded"}
+            and not retired
         ):
             claims[ref] = {**claim, "authority_status": status}
     return claims
@@ -125,7 +139,11 @@ def _chart(
         grain = (
             "quarter"
             if re.fullmatch(r"(?:FY)?\d{4}Q[1-4]", period, re.I)
-            else ("year" if re.fullmatch(r"FY?\d{2,4}[AE]?", period, re.I) else None)
+            else (
+                "year"
+                if re.fullmatch(r"(?:FY)?\d{2,4}[AE]?", period, re.I)
+                else None
+            )
         )
         basis = claim.get("basis")
         estimate_kind = (
