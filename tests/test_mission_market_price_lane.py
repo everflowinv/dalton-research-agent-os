@@ -237,6 +237,19 @@ class DispatchTests(LaneTestCase):
         self.assertEqual(result["status"], "idle")
         self.assertEqual(len(result["skipped"]), 2)
 
+    def test_all_permission_blocked_is_held_not_current(self):
+        from dalton_core.lane_failure_class import Classification, NOT_PERMITTED
+
+        lane = self.coordinator(params=mission(universe=[
+            {"company_ref": ACN, "ticker": "ACN", "bootstrap_priority": "P0"},
+        ]))
+        lane.budget.record(lane._permission_key(ACN), classification=Classification(
+            NOT_PERMITTED, "owner approval is absent", "fixture"))
+        result = lane.dispatch_once()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["skipped"][0]["reason"], "not_permitted")
+        self.assertNotIn("current", result["reason"])
+
     def test_a_company_without_a_ticker_is_skipped_rather_than_guessed_at(self):
         lane = self.coordinator(params=mission(universe=[
             {"company_ref": ACN, "bootstrap_priority": "P0"},
@@ -381,7 +394,7 @@ class SettleTests(LaneTestCase):
             })
             lane._settle_open()
         held = lane.dispatch_once()
-        self.assertEqual(held["status"], "idle")
+        self.assertEqual(held["status"], "held")
         self.assertEqual([row["reason"] for row in held["skipped"]], ["held"])
         self.assertIn("no such ticker", held["skipped"][0]["detail"])
 

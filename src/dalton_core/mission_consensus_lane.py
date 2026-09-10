@@ -336,8 +336,13 @@ class MissionConsensusLaneCoordinator:
                 "last_reported_period_end": calendar["last_reported_period_end"],
                 "skipped": skipped,
             }
-        return {"status": "idle", "skipped": skipped,
-                "reason": "every covered company's vendor consensus is current"}
+        from .lane_exhaustion import exhausted_by_failures
+        return {
+            **exhausted_by_failures(
+                skipped,
+                success_reason="every covered company's vendor consensus is current"),
+            "skipped": skipped,
+        }
 
     def _scan(self, universe: Sequence[Mapping[str, str]]) -> dict[str, Any] | None:
         """Read one unscanned broker note, and say what came of it."""

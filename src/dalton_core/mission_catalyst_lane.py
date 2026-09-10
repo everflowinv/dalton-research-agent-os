@@ -391,9 +391,11 @@ class MissionCatalystLaneCoordinator:
                 "as_of": self._today(), "ticket_ref": ticket["id"],
                 "settled": settled, "skipped": skipped,
             }
+        from .lane_exhaustion import exhausted_by_failures
+        resting = exhausted_by_failures(
+            skipped, success_reason="every covered company's diary has been read today")
         return {
-            "status": "idle", "settled": settled, "skipped": skipped,
-            "reason": "every covered company's diary has been read today",
+            **resting, "settled": settled, "skipped": skipped,
             "upcoming": self._upcoming(),
         }
 

@@ -204,6 +204,34 @@ class FetchTests(LaneTestCase):
         self.assertEqual(held[ACN]["reason"], "held")
         self.assertIn("dropped every block", held[ACN]["detail"])
 
+    def test_all_companies_held_is_not_reported_as_current(self):
+        self.mission_value = mission(universe=[
+            {"company_ref": ACN, "ticker": "ACN", "bootstrap_priority": "P0"},
+        ])
+        lane = self.coordinator()
+        for index in range(1, 4):
+            lane.dispatch_once()
+            self.launcher.finish(f"ticket:{index}", status="failed",
+                                 failure_reason="the vendor dropped every block")
+        result = lane.dispatch_once()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["fetch"]["status"], "held")
+        self.assertNotIn("current", result["reason"])
+
+    def test_all_permission_blocked_is_held_not_current(self):
+        from dalton_core.lane_failure_class import Classification, NOT_PERMITTED
+
+        self.mission_value = mission(universe=[
+            {"company_ref": ACN, "ticker": "ACN", "bootstrap_priority": "P0"},
+        ])
+        lane = self.coordinator()
+        lane.budget.record(lane._permission_key(ACN), classification=Classification(
+            NOT_PERMITTED, "owner approval is absent", "fixture"))
+        result = lane.dispatch_once()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["fetch"]["skipped"][0]["reason"], "not_permitted")
+        self.assertNotIn("current", result["reason"])
+
     def test_a_rejected_launch_is_reported_rather_than_raised(self):
         self.launcher.reject = "a consensus run needs an approved record"
         result = self.coordinator().dispatch_once()

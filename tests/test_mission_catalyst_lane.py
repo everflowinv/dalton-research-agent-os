@@ -208,6 +208,20 @@ class DispatchTests(LaneTestCase):
         self.assertEqual(coordinator.dispatch_once()["status"], "idle")
         self.assertEqual(self.launcher.started, [])
 
+    def test_all_permission_blocked_is_held_not_read(self):
+        from dalton_core.lane_failure_class import Classification, NOT_PERMITTED
+
+        coordinator = self.coordinator(mission_value=ONE_COMPANY)
+        coordinator.budget.record(
+            coordinator._permission_key(ACN),
+            classification=Classification(
+                NOT_PERMITTED, "owner approval is absent", "fixture"),
+        )
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["skipped"][0]["reason"], "not_permitted")
+        self.assertNotIn("read today", result["reason"])
+
     def test_a_rejected_launch_charges_the_company_until_it_gives_up_the_slot(self):
         coordinator = self.coordinator(launcher=FakeLauncher(rejected=True))
         for _ in range(MAX_FAILURES_PER_COMPANY):
@@ -408,7 +422,7 @@ class EventTests(LaneTestCase):
             coordinator.dispatch_once()
         self.now = START + timedelta(days=MAX_FAILURES_PER_COMPANY)
         after = coordinator.dispatch_once()
-        self.assertEqual(after["status"], "idle")
+        self.assertEqual(after["status"], "held")
         held = [row for row in after["skipped"] if row["company_ref"] == ACN]
         self.assertEqual(held[0]["reason"], "held")
         self.assertIn("Yahoo returned nothing usable", held[0]["detail"])

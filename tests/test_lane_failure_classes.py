@@ -599,7 +599,7 @@ class MigratedLaneBehaviourTests(unittest.TestCase):
                 "failure_reason": "ConnectionError: yahoo refused the connection"})
             lane._settle_open()
         held = lane.dispatch_once()
-        self.assertEqual(held["status"], "idle")
+        self.assertEqual(held["status"], "held")
         row = held["skipped"][0]
         self.assertEqual(row["reason"], "parked")
         self.assertEqual(row["failure_class"], "dependency_unavailable")

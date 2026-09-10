@@ -433,11 +433,13 @@ class MissionMarketPriceLaneCoordinator:
                 "settled": settled, "skipped": skipped,
                 "market_proxies": proxy_results,
             }
+        from .lane_exhaustion import exhausted_by_failures
+        resting = exhausted_by_failures(
+            skipped, success_reason="every covered company's price history is current")
         return {
-            "status": "idle", "settled": settled, "skipped": skipped,
+            **resting, "settled": settled, "skipped": skipped,
             "market_proxies": proxy_results,
             "failures": self.budget.summary(),
-            "reason": "every covered company's price history is current",
         }
 
 
