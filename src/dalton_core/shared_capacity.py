@@ -246,6 +246,8 @@ class SharedCapacityAuthority:
             if row is None:
                 raise SharedCapacityConflict("shared reservation is missing")
             if row["status"] == "reserved":
+                if row["expires_at"] <= now:
+                    raise SharedCapacityConflict("undispatched shared reservation has expired")
                 self.connection.execute(
                     "UPDATE shared_capacity_reservations SET status='dispatched',dispatched_at=? WHERE reservation_ref=?",
                     (now, reservation_ref))
@@ -273,6 +275,24 @@ class SharedCapacityAuthority:
             charged = row["reserved_micros"] if actual_cost_micros is None else actual_cost_micros
             if isinstance(charged, bool) or not isinstance(charged, int) or charged < 0:
                 raise SharedCapacityConflict("settlement cost is invalid")
+            if actual_cost_micros is None and outcome == "transport_or_protocol_unknown":
+                if row["status"] == "settled":
+                    # A later duplicate caller's timeout cannot overwrite an
+                    # already measured completion from the same invocation.
+                    self.connection.commit()
+                    return dict(row)
+                if row["outcome"] != outcome:
+                    self.connection.execute(
+                        "UPDATE shared_capacity_reservations SET charged_micros=?,outcome=? WHERE reservation_ref=?",
+                        (charged, outcome, reservation_ref))
+                    self._event(reservation_ref, "completion_unknown", now,
+                                {"charged_micros": charged, "outcome": outcome})
+                # The provider may still be running after a socket timeout.
+                # Retain BOTH the maximum cost and the concurrency slot.
+                self.connection.commit()
+                return dict(self.connection.execute(
+                    "SELECT * FROM shared_capacity_reservations WHERE reservation_ref=?",
+                    (reservation_ref,)).fetchone())
             if row["status"] == "settled":
                 if (row["outcome"] == "transport_or_protocol_unknown"
                         and actual_cost_micros is not None):

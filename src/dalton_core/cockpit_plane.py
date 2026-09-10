@@ -830,6 +830,10 @@ class CockpitPlane:
                  model_factory: Callable[[Mapping[str, Any]], CockpitModel] | None = None,
                  clock: Callable[[], datetime] | None = None) -> None:
         self.config = config
+        from .workspace_cockpit import cockpit_workspace_context
+        # Validate the process namespace before opening even the local journal.
+        self.workspace_context = cockpit_workspace_context(
+            config, writer_socket=writer_socket, token_config=token_config)
         self.writer_socket = writer_socket
         self.token_config = token_config
         self.governance_call = governance_call
@@ -1891,6 +1895,7 @@ class CockpitPlane:
             }
         return {
             "schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()),
+            "workspace": self.workspace_context,
             "goal": {
                 "mission_ref": mission["mission_ref"], "version": mission["version"], "id": mission["id"],
                 "hash": mission["content_hash"], "title": mission["title"], "objective": mission["objective"],

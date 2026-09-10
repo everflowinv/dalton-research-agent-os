@@ -18,6 +18,7 @@ from dalton_core.shared_capacity import (
     POLICY_SCHEMA_VERSION,
     SharedCapacityAuthority,
     SharedCapacityExceeded,
+    SharedCapacityConflict,
 )
 from dalton_core.store import content_hash
 from dalton_core.workspace import create_workspace_manifest
@@ -174,7 +175,7 @@ class SharedCapacityTests(unittest.TestCase):
             ).fetchone()
         finally:
             connection.close()
-        self.assertEqual(row, ("settled", 500000, "transport_or_protocol_unknown"))
+        self.assertEqual(row, ("dispatched", 500000, "transport_or_protocol_unknown"))
         # Rebinding the manifest to a missing policy is detected before a new
         # broker transport can be reached.
         raw = json.loads(workspace.manifest_path.read_text())
@@ -200,6 +201,34 @@ class SharedCapacityTests(unittest.TestCase):
                         adapter.execute(fixture.work, fixture.route, fixture.profile)
         finally:
             fixture.tearDown()
+
+    def test_timeout_keeps_concurrency_until_exact_completion(self):
+        record = self.init(concurrency=1)
+        current = [NOW]
+        with self.open(record, clock=lambda: current[0]) as authority:
+            def reserve(ref):
+                return authority.reserve(
+                    workspace_id=str(uuid.uuid4()), invocation_ref=ref,
+                    provider="openai", credential_slot_ref="credential-slot:openai:dalton",
+                    maximum_cost_micros=100, expires_at=current[0] + timedelta(seconds=1))
+            first = reserve("invocation:first")
+            ref = first["reservation_ref"]
+            authority.mark_dispatched(ref)
+            for _ in range(2):
+                held = authority.settle(ref, actual_cost_micros=None,
+                                        outcome="transport_or_protocol_unknown")
+                self.assertEqual(held["status"], "dispatched")
+            current[0] += timedelta(days=2)
+            with self.assertRaises(SharedCapacityExceeded):
+                reserve("invocation:second")
+            settled = authority.settle(ref, actual_cost_micros=40, outcome="broker_succeeded")
+            self.assertEqual(settled["charged_micros"], 40)
+            self.assertEqual(authority.settle(ref, actual_cost_micros=40,
+                                             outcome="broker_succeeded"), settled)
+            second = reserve("invocation:second")
+            current[0] += timedelta(seconds=2)
+            with self.assertRaisesRegex(SharedCapacityConflict, "expired"):
+                authority.mark_dispatched(second["reservation_ref"])
 
 
 if __name__ == "__main__":

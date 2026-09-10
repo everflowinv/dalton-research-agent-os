@@ -265,7 +265,7 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
 <body>
 <div class="app">
 <nav>
-  <div class="brand"><div class="logo">D</div><div><b>Dalton 研究台</b><small>自主研究系统</small></div></div>
+  <div class="brand"><div class="logo">D</div><div><b>Dalton 研究台</b><small id="workspace-name">自主研究系统</small></div></div>
   <button type="button" class="nav-item active" data-view="goal"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="m15 9 6-6M17 3h4v4"/></svg></span>研究目标</button>
   <button type="button" class="nav-item" data-view="steer"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/></svg></span>调整方向</button>
   <button type="button" class="nav-item" data-view="log"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12a7 7 0 0 1 7-7m-7 7a7 7 0 0 0 7 7m-1-7a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm4-5a7 7 0 0 1 0 10"/></svg></span>研究日志<span class="badge" id="log-badge"></span></button>
@@ -470,6 +470,10 @@ async function loadResearchProducts(companyRef,box){try{const r=await getJson(`/
 
 // ---------- overview
 function renderOverview(o){
+  const workspace=o.workspace;
+  $("workspace-name").textContent=workspace&&workspace.mode==="isolated"?workspace.slug:"自主研究系统";
+  $("workspace-name").title=workspace&&workspace.workspace_id?`分析师工作区 ${workspace.workspace_id}`:"";
+  document.title=workspace&&workspace.mode==="isolated"?`${workspace.slug} · Dalton 研究台`:"Dalton 研究台";
   const g=o.goal;
   $("goal-title").textContent=g.title;$("goal-objective").textContent=g.objective;
   const tags=$("goal-tags");tags.replaceChildren(node("span",`第 ${g.version} 版 · ${fmtDate(g.published_at)} 发布`,"tag"),node("span",`${o.companies.length} 家公司`,"tag"),node("span",`${o.totals.theses} 条研究论点`,"tag"));

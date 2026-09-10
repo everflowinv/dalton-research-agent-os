@@ -23,7 +23,7 @@ OpenClaw adapter adds workspace UUID to invocation identity, reserves after all
 local route/request checks, marks dispatch immediately before `_exchange`, and
 settles reported cost afterward. Missing database/policy, wrong provider/slot,
 or exhausted capacity fails before broker transport. Transport, timeout, and
-protocol ambiguity conservatively settle the full reservation. A legacy process
+protocol ambiguity retains the full reservation and its concurrency slot until exact completion is known. A timeout cannot free a slot while the provider may still be running; an undispatched reservation cannot dispatch after expiry. A legacy process
 without a workspace manifest, or a workspace with no shared-capacity binding,
 keeps its existing behavior.
 
