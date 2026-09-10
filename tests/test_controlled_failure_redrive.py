@@ -14,6 +14,7 @@ from pathlib import Path
 from dalton_core.contracts import ResultEnvelope, WorkOrder
 from dalton_core.controlled_failure_redrive import (
     ControlledFailureRedriveError,
+    _connect_existing_writable,
     apply,
     approved_request,
     prepare,
@@ -197,6 +198,30 @@ class ControlledFailureRedriveTests(unittest.TestCase):
                 expected_candidate_hash=candidate["candidate_hash"],
             )
         self.assertFalse(missing.exists())
+
+    def test_failed_writable_probe_closes_opened_connection(self):
+        class FailedProbe:
+            closed = False
+
+            def execute(self, statement):
+                if statement.startswith("SELECT name"):
+                    raise sqlite3.OperationalError("probe failed")
+                return self
+
+            def close(self):
+                self.closed = True
+
+        opened = FailedProbe()
+        with patch(
+            "dalton_core.controlled_failure_redrive.sqlite3.connect",
+            return_value=opened,
+        ):
+            with self.assertRaisesRegex(
+                ControlledFailureRedriveError,
+                "existing writable authority database",
+            ):
+                _connect_existing_writable(self.scheduler_db)
+        self.assertTrue(opened.closed)
 
     def test_prepare_closes_strict_read_only_connections(self):
         from dalton_core.readonly_sqlite import connect_read_only as real_connect

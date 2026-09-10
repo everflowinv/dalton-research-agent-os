@@ -48,6 +48,7 @@ def _connect_existing_writable(path: str | Path) -> sqlite3.Connection:
     if str(path) == ":memory:":
         raise ControlledFailureRedriveError("apply requires an existing authority database")
     target = Path(path).absolute()
+    connection = None
     try:
         with target.open("rb") as stream:
             if stream.read(16) != b"SQLite format 3\x00":
@@ -61,11 +62,13 @@ def _connect_existing_writable(path: str | Path) -> sqlite3.Connection:
         # Opening a WAL database for an ordinary read provisions its transient
         # WAL/SHM pair.  Keep this connection alive across the strict read-only
         # revalidation and both append-only writes below.
-        connection.execute("SELECT 1").fetchone()
+        connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
         return connection
     except ControlledFailureRedriveError:
         raise
     except (OSError, sqlite3.Error) as exc:
+        if connection is not None:
+            connection.close()
         raise ControlledFailureRedriveError(
             "apply requires an existing writable authority database"
         ) from exc
