@@ -177,6 +177,7 @@ REGISTRY_LANE_LABELS = {
     "mission_consensus": "看街上预期什么",
     "company_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
+    "forecast_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
     "claim_index": "给结论建索引",
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",
@@ -196,6 +197,7 @@ REGISTRY_LANE_LABELS = {
     "mission_ownership": "看谁在买卖这家公司",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
+    "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})

@@ -287,6 +287,227 @@ def render_forecast_model(
     return "\n".join(out)
 
 
+SCENARIO_WIDTH = 14
+SENSITIVITY_LABEL_WIDTH = 22
+# How many filed cells a scenario names before the view says "and N more".
+# A mean over eleven quarters cites twenty-two of them, and printed in full
+# they bury the two lines that carry the argument.
+MAX_SHOWN_REFS = 3
+
+
+def _where(ours: Any, band: Mapping[str, Any]) -> str:
+    """Where our estimate sits in the range the company has actually lived in.
+
+    A sentence rather than a number, and it is the point of the whole table.
+    The reader who takes away one thing should take away "we are forecasting a
+    margin the company has never printed" or "we are sitting on the mean".
+    """
+
+    try:
+        value = Decimal(str(ours))
+        low = Decimal(str(band["trough"]["value"]))
+        mean = Decimal(str(band["mean"]["value"]))
+        high = Decimal(str(band["peak"]["value"]))
+    except (InvalidOperation, ValueError, TypeError, KeyError):
+        return ""
+    if value < low:
+        return f"below anything filed in this window (trough {_percent(low)})"
+    if value > high:
+        return f"above anything filed in this window (peak {_percent(high)})"
+    if value == mean:
+        return "exactly on the historical mean"
+    side = "below" if value < mean else "above"
+    span = high - low
+    if span == 0:
+        return "inside a band with no width"
+    position = (value - low) / span * Decimal(100)
+    return (f"{side} the historical mean, "
+            f"{position.quantize(Decimal('1'))}% of the way from trough to peak")
+
+
+def render_sensitivity(
+    record: Mapping[str, Any], *, entity_name: str | None = None,
+) -> str:
+    """Print one SensitivityProjection so a person can argue with the ranking.
+
+    Three decisions in the layout, each about not flattering the work:
+
+    * the band prints **with the quarter each extreme happened in**, because
+      "peak 70.1%" is a number and "70.1%, in the February 2025 quarter" is a
+      fact somebody can go and check;
+    * our own estimate prints as a column of the what-if table rather than
+      above it, so it is read as one scenario among four rather than as the
+      answer with three decorations beside it;
+    * an unavailable line prints its reason where its number would be. A blank
+      column in a sensitivity table reads as "no sensitivity", which is the
+      opposite of what a missing line means.
+    """
+
+    out: list[str] = []
+    title = entity_name or record.get("company_ref") or "company"
+    metric = record.get("impact_metric") or {}
+    horizon = record.get("horizon") or []
+    window = record.get("history_window") or {}
+    selection = record.get("selection") or {}
+    out.append(f"SENSITIVITY  {title}")
+    out.append(f"{record.get('id')}  version {record.get('version')}  "
+               f"({record.get('value_kind')})")
+    out.append(f"model {record.get('model_version_ref')}")
+    out.append(f"rule {record.get('selection_rule_ref')}   "
+               f"ranked on {metric.get('label') or metric.get('result_ref')} "
+               f"over {len(horizon)} quarters"
+               + (f" to {horizon[-1]['end']}" if horizon else ""))
+    out.append(f"history {window.get('first')} .. {window.get('last')} "
+               f"({window.get('quarters')} quarters)   figures in millions")
+    if selection.get("status") != "available":
+        out.append(f"selection {selection.get('status')}: {selection.get('reason')}")
+    out.append("")
+
+    drivers = list(record.get("drivers") or [])
+    for driver in drivers:
+        band = driver.get("band") or {}
+        impact = driver.get("impact") or {}
+        swing = driver.get("swing") or {}
+        ours = driver.get("ours") or {}
+        out.append(f"#{driver.get('rank')}  {driver.get('label') or driver.get('driver_ref')}"
+                   f"  [{driver.get('measure')}]")
+        if band.get("status") == "available":
+            out.append(
+                f"      trough {_percent(band['trough']['value'])} "
+                f"({band['trough']['period_end']})"
+                f"   mean {_percent(band['mean']['value'])}"
+                f"   peak {_percent(band['peak']['value'])} "
+                f"({band['peak']['period_end']})"
+                f"   latest {_percent(band['latest']['value'])} "
+                f"({band['latest']['period_end']})")
+            out.append(f"      over {band.get('count')} filed quarters "
+                       f"{band.get('first_period')} .. {band.get('last_period')}")
+            # The next observation in from each end, printed where a reader
+            # looking at the extreme will see it. A peak far above its own
+            # runner-up was one quarter and probably one event, and a scenario
+            # run at it is a scenario about that event.
+            for edge in ("trough", "peak"):
+                runner = (band.get(edge) or {}).get("runner_up")
+                if runner is not None:
+                    out.append(
+                        f"      next {edge} in: {_percent(runner['value'])} "
+                        f"({runner['period_end']})")
+        else:
+            out.append(f"      band unavailable: {band.get('reason')}")
+        if ours.get("value") is not None:
+            out.append(f"      ours {_percent(ours['value'])}"
+                       + (f" -- {_where(ours['value'], band)}"
+                          if band.get("status") == "available" else ""))
+        else:
+            out.append("      ours: not one number across the horizon")
+        if impact.get("status") == "computed":
+            out.append(f"      one point on this assumption moves "
+                       f"{metric.get('label')} by "
+                       f"{_millions(impact['delta'])}m ({impact.get('percent_of_base')}%)")
+        else:
+            out.append(f"      elasticity unavailable: {impact.get('reason')}")
+        if swing.get("status") == "computed":
+            out.append(f"      across its own historical range "
+                       f"{metric.get('label')} moves "
+                       f"{_millions(swing['swing'])}m ({swing.get('percent_of_base')}%)"
+                       "  <- this is what ranks it")
+        else:
+            out.append(f"      range swing unavailable: {swing.get('reason')}")
+
+        rows = list(driver.get("what_if") or [])
+        header = "".ljust(SENSITIVITY_LABEL_WIDTH) + "".join(
+            str(row["scenario"]).rjust(SCENARIO_WIDTH) for row in rows)
+        out.append("      " + header)
+        out.append("      " + "".ljust(SENSITIVITY_LABEL_WIDTH)
+                   + "".join(
+                       (_percent(row["assumption_value"])
+                        if row.get("assumption_value") is not None else "--"
+                        ).rjust(SCENARIO_WIDTH) for row in rows))
+        line_refs: list[tuple[str, str]] = []
+        for row in rows:
+            for line in row.get("lines") or []:
+                key = (str(line["ref"]), str(line.get("label") or line["ref"]))
+                if key not in line_refs:
+                    line_refs.append(key)
+        for ref, label in line_refs:
+            cells = []
+            for row in rows:
+                line = next((item for item in (row.get("lines") or [])
+                             if str(item["ref"]) == ref), None)
+                cells.append(_millions(line["total"])
+                             if line is not None and line.get("total") is not None
+                             else "--")
+            out.append("      " + label[:SENSITIVITY_LABEL_WIDTH].ljust(
+                SENSITIVITY_LABEL_WIDTH) + "".join(
+                    item.rjust(SCENARIO_WIDTH) for item in cells))
+        for ref, label in line_refs:
+            reasons = {str(line.get("reason")) for row in rows
+                       for line in (row.get("lines") or [])
+                       if str(line["ref"]) == ref and line.get("reason")}
+            for reason in sorted(reasons):
+                out.append(f"        {label}: {reason}")
+        for row in rows:
+            if row.get("status") != "computed":
+                out.append(f"        {row['scenario']}: {row.get('reason')}")
+                continue
+            # Capped, and the cap is stated. A mean over eleven quarters cites
+            # twenty-two filed cells; printed in full it buries the two lines
+            # above it, which are the ones that carry the argument. The record
+            # keeps every ref -- this is the view, and it says how many it left.
+            named = sorted({
+                f"{item.get('concept')}@{item.get('period_end')}"
+                + (f" ({item['accession']})" if item.get("accession") else "")
+                for item in (row.get("input_refs") or [])})
+            if not named:
+                continue
+            shown = ", ".join(named[:MAX_SHOWN_REFS])
+            if len(named) > MAX_SHOWN_REFS:
+                shown += f", and {len(named) - MAX_SHOWN_REFS} more filed cells"
+            out.append(f"        {row['scenario']} from {shown}")
+        out.append("")
+
+    bridge = record.get("consensus_bridge") or {}
+    out.append("CONSENSUS BRIDGE")
+    out.append("-" * DRIVER_LABEL_WIDTH)
+    if bridge.get("status") != "available":
+        out.append(f"  unavailable: {bridge.get('reason')}")
+    else:
+        detail = {(str(item["metric"]), str(item["period"])): item
+                  for item in (record.get("bridge_detail") or [])}
+        out.append("  " + "metric".ljust(16) + "period".ljust(14)
+                   + "ours".rjust(16) + "street".rjust(16) + "gap".rjust(16)
+                   + "gap %".rjust(10))
+        for row in bridge.get("metrics") or []:
+            extra = detail.get((str(row["metric"]), str(row["period"])))
+            out.append(
+                "  " + str(row["metric"]).ljust(16)
+                + str(row["period"]).ljust(14)
+                + _millions(row["ours"]).rjust(16)
+                + _millions(row["consensus"]).rjust(16)
+                + (_millions(extra["gap_abs"]) if extra else "--").rjust(16)
+                + str(row["gap_percent"]).rjust(10))
+        for row in record.get("bridge_detail") or []:
+            out.append(f"    {row['metric']} {row['period']}: {row.get('basis')}")
+
+    out.append("")
+    out.append("HOW TO READ IT")
+    out.append("-" * DRIVER_LABEL_WIDTH)
+    out.append("  the band is what the company has filed, not a range anyone chose;")
+    out.append("  the drivers are ranked by how far the metric moves across that")
+    out.append("  band, because every share assumption here is a share of the same")
+    out.append("  revenue and a one-point move in each is the same number. Every")
+    out.append("  column is the model recomputed in memory: none of them was ever")
+    out.append("  published as a forecast, and our own column is the model itself.")
+    out.append("")
+    out.append("  EVERY COLUMN HOLDS ITS LEVEL FLAT ACROSS ALL THE QUARTERS SHOWN.")
+    out.append("  None of them is a path. The trough column is not the trough")
+    out.append("  quarter happening once -- it is the whole horizon spent there.")
+    out.append("  Where an extreme sits far from the next observation, that peak")
+    out.append("  or trough was one quarter and probably one event; the runner-up")
+    out.append("  is printed beside it so you can see the gap and judge it.")
+    return "\n".join(out)
+
+
 def _live(items: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
     """What each column currently says: the actual where there is one."""
 
@@ -306,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="the table itself, not the view")
     parser.add_argument("--forecast", action="store_true",
                         help="the latest driver model rather than the input table")
+    parser.add_argument("--sensitivity", action="store_true",
+                        help="the latest sensitivity table and consensus bridge")
     args = parser.parse_args(argv)
 
     from .coverage_mission import CoverageMissionAuthority
@@ -322,6 +545,25 @@ def main(argv: list[str] | None = None) -> int:
                            for item in missions.company_model_specs()})
         if not refs:
             print("no company has a model specification yet")
+            return 0
+        if args.sensitivity:
+            from .forecast_sensitivity import SensitivityProjectionAuthority
+
+            projections = SensitivityProjectionAuthority(store)
+            for index, ref in enumerate(refs):
+                record = projections.latest(ref)
+                if record is None:
+                    print(f"{ref}: no sensitivity table yet")
+                    continue
+                if args.json:
+                    print(json.dumps(record, ensure_ascii=False, sort_keys=True,
+                                     indent=1))
+                    continue
+                held = missions.statement_filings(ref)
+                if index:
+                    print("\n")
+                print(render_sensitivity(
+                    record, entity_name=held[-1]["entity_name"] if held else None))
             return 0
         if args.forecast:
             models = ForecastModelAuthority(store)
@@ -361,4 +603,5 @@ if __name__ == "__main__":  # pragma: no cover - a reading tool
     sys.exit(main())
 
 
-__all__ = ["main", "render_forecast_model", "render_model_inputs"]
+__all__ = ["main", "render_forecast_model", "render_model_inputs",
+           "render_sensitivity"]

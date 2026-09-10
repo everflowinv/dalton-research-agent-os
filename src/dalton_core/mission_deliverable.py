@@ -34,6 +34,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Iterator
 
 from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
@@ -201,6 +202,52 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
     ]
 
 
+# P12e / P14f: what a figure may cite when no Claim carries it.
+#
+# The rule this document layer was built on -- every timely number traces to a
+# quantitative Claim -- was right about the failure it prevented and wrong
+# about the world it assumed, which was one where every number a research
+# output states has been read out of a source by an extractor.  Two layers now
+# produce figures that are *computed*, deterministically, from things the Core
+# already holds and can re-derive: P12e's cross-company comparison cells, each
+# the arithmetic of filed statement lines, and P14f's forecast cells, each a
+# frozen formula over a stored model version.  Neither has a Claim behind it
+# and neither ever will; minting one would be manufacturing a quotation for a
+# calculation.
+#
+# So a number entry cites a Claim *or* a cell, never both and never neither,
+# and a cell is admitted only when it still resolves at publish time.  The
+# discipline is unchanged in the only sense that matters: a figure in the prose
+# that nothing in this Core can produce is still refused.
+CELL_SOURCE_KINDS: tuple[str, ...] = ("statement_accession", "forecast_cell")
+_CELL_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "statement_accession": frozenset({"kind", "ref", "accession"}),
+    "forecast_cell": frozenset({"kind", "ref", "version_ref"}),
+})
+
+
+def validate_cell_citation(value: Any, name: str = "number.cell") -> dict[str, Any]:
+    """One computed cell a figure may cite.  Shape only; resolving is separate."""
+
+    if not isinstance(value, Mapping):
+        raise MissionDeliverableValidationError(f"{name} must be an object")
+    kind = value.get("kind")
+    if kind not in CELL_SOURCE_KINDS:
+        raise MissionDeliverableValidationError(
+            f"{name}.kind must be one of {list(CELL_SOURCE_KINDS)}")
+    expected = _CELL_FIELDS[kind]
+    if set(value) != expected:
+        raise MissionDeliverableValidationError(
+            f"{name} for {kind} must be exactly {sorted(expected)}")
+    wire = {"kind": kind, "ref": _text(value["ref"], f"{name}.ref", maximum=512)}
+    if kind == "statement_accession":
+        wire["accession"] = _text(value["accession"], f"{name}.accession", maximum=256)
+    else:
+        wire["version_ref"] = _text(value["version_ref"], f"{name}.version_ref",
+                                    maximum=512)
+    return wire
+
+
 # ADR-0008's closed vocabulary.  Imported rather than restated so a sixth
 # reason has one place to be added, and so the cockpit's label map, which
 # already renders these five, cannot drift away from the authority that
@@ -264,16 +311,25 @@ def validate_section(
     section: Mapping[str, Any],
     *,
     live_claim_refs: set[str] | None = None,
+    resolve_cell: Callable[[Mapping[str, Any]], bool] | None = None,
     imported: bool = False,
 ) -> dict[str, Any]:
     """One closed section: a title, a body or a gap, and traceable numbers.
 
+    ``resolve_cell`` answers "does this computed cell still exist in the Core".
+    ``None`` means nobody can answer, and a cell citation is then refused
+    rather than believed -- the same posture ``live_claim_refs=None`` takes for
+    a Claim in the shape-only checks the golden set runs.
+
     ``imported`` relaxes exactly one rule and no others: a figure in the body
-    with no Claim behind it becomes a recorded gap instead of a refusal. An
+    that no citation reaches becomes a recorded gap instead of a refusal. An
     imported v0 is a prior document, not an assertion this system is making,
     and the alternative -- stripping the numbers out of an old screen so it
     would pass -- would destroy the thing being imported. Every other check
-    still applies, and a v0 still may not cite a Claim that does not exist.
+    still applies: a v0 may not cite a Claim that does not exist, may not cite
+    a cell that does not resolve, and may not cite both at once. What it may
+    do is carry its own numbers uncited, which is what a document written
+    somewhere else always does.
     """
 
     if not isinstance(section, Mapping):
@@ -290,10 +346,33 @@ def validate_section(
         raise MissionDeliverableValidationError("section.numbers must be a list of at most 60 entries")
     checked: list[dict[str, Any]] = []
     for item in numbers:
-        if not isinstance(item, Mapping) or set(item) - {"text", "claim_version_ref", "period"} or not {
-            "text", "claim_version_ref"
-        } <= set(item):
-            raise MissionDeliverableValidationError("number entries need text and claim_version_ref")
+        if not isinstance(item, Mapping) or set(item) - {
+            "text", "claim_version_ref", "period", "cell"
+        } or "text" not in item:
+            raise MissionDeliverableValidationError(
+                "number entries need text and either claim_version_ref or cell")
+        cites_claim = item.get("claim_version_ref") is not None
+        cites_cell = item.get("cell") is not None
+        if cites_claim == cites_cell:
+            # Both or neither. Neither is the old refusal; both would let a
+            # figure claim two provenances and be checked against the more
+            # convenient one.
+            raise MissionDeliverableValidationError(
+                "a number cites exactly one of claim_version_ref and cell")
+        if cites_cell:
+            cell = validate_cell_citation(item["cell"])
+            if resolve_cell is None or not resolve_cell(cell):
+                raise MissionDeliverableConflict(
+                    "a figure cites a computed cell that does not resolve in this "
+                    f"Core: {cell['ref']}"
+                )
+            checked.append({
+                "text": _text(item["text"], "number.text", maximum=MAX_NUMBER_TEXT),
+                "cell": cell,
+                "period": (None if item.get("period") is None
+                           else _text(item["period"], "number.period", maximum=120)),
+            })
+            continue
         ref = _text(item["claim_version_ref"], "number.claim_version_ref", maximum=512)
         if live_claim_refs is not None and ref not in live_claim_refs:
             raise MissionDeliverableConflict(
@@ -339,7 +418,7 @@ def validate_section(
     stray = unsourced_numbers(body, checked)
     if stray and not imported:
         raise MissionDeliverableConflict(
-            f"section「{title}」carries figures with no Claim behind them: {stray[:5]}；"
+            f"section「{title}」carries figures with no source behind them: {stray[:5]}；"
             f"写 {GAP_MARKER} 而不是猜一个数字"
         )
     recorded = [gap.strip()[:300] for gap in gaps]
@@ -565,6 +644,50 @@ class MissionDeliverableAuthority:
             retired = set()
         return refs - retired
 
+    def cell_resolver(self) -> Callable[[Mapping[str, Any]], bool]:
+        """Whether a computed cell a figure cites still exists in this Core.
+
+        Two kinds, two reads, and both fail closed on a Core that has never
+        opened the authority in question: an unresolvable cell is not a cell
+        that has been shown to exist, and the whole reason a figure is allowed
+        to cite one is that this Core can re-derive it.
+
+        A statement accession is checked for existence and not for the cell's
+        arithmetic. That is the right depth here: the arithmetic is frozen in
+        ``industry_framework.build_comparison`` and re-run from the same filed
+        lines every time the table is built, so what a document needs to know
+        is that the filing behind the number is still held.
+        """
+
+        def resolve(cell: Mapping[str, Any]) -> bool:
+            try:
+                if cell["kind"] == "statement_accession":
+                    row = self.connection.execute(
+                        "SELECT 1 FROM coverage_mission_statement_filings "
+                        "WHERE accession=? LIMIT 1", (cell["accession"],),
+                    ).fetchone()
+                    return row is not None
+                row = self.connection.execute(
+                    "SELECT record_json FROM forecast_model_versions WHERE version_id=?",
+                    (cell["version_ref"],),
+                ).fetchone()
+                if row is None:
+                    return False
+                record = json.loads(row["record_json"])
+                for line in record.get("results") or ():
+                    for item in line.get("cells") or ():
+                        if item.get("ref") == cell["ref"]:
+                            return True
+                return False
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
+                return False
+            except (ValueError, KeyError, TypeError):
+                return False
+
+        return resolve
+
     def latest(self, deliverable_ref: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT v.record_json AS record_json, v.content_hash AS content_hash "
@@ -657,8 +780,10 @@ class MissionDeliverableAuthority:
                 f"{IMPORT_CHANGE_REASON!r} is only legal on an imported version zero"
             )
         live = self.live_claim_version_refs()
+        resolve_cell = self.cell_resolver()
         checked = [
-            validate_section(section, live_claim_refs=live, imported=as_version_zero)
+            validate_section(section, live_claim_refs=live,
+                             resolve_cell=resolve_cell, imported=as_version_zero)
             for section in sections
         ]
         if not any(section["body"] for section in checked):
@@ -810,6 +935,7 @@ class MissionDeliverableAuthority:
 
 
 __all__ = [
+    "CELL_SOURCE_KINDS",
     "DELIVERABLE_KINDS",
     "GAP_MARKER",
     "IMPORTED_FIGURE_GAP",
@@ -823,6 +949,7 @@ __all__ = [
     "REVISION_FIELDS",
     "WRITE_SCOPE",
     "unsourced_numbers",
+    "validate_cell_citation",
     "validate_revision",
     "validate_section",
     "value_tokens",

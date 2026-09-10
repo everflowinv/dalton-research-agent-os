@@ -40,6 +40,12 @@ PINNED = {
     # added, and a run that says they did is a standard that changed under a
     # score already written against it.
     "rubric:conviction-call": "02f15431bdb70a2936f563603757d8ce63f295eb64376b179b7ccd4041c2e630",
+    # P12e. The five above did not move when this one was added. That is the
+    # whole reason this dict is written out by hand rather than generated:
+    # a standard that changed under a score already written against it is
+    # the failure this test exists to catch, and it is invisible in a diff
+    # that only adds a line.
+    "rubric:industry-framework": "79e410374685daca3363cefb0e76e5f2bfb0b72fd9db01877e3b96463dad4267",
 }
 
 
