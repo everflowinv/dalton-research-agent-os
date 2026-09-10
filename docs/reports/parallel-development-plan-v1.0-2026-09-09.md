@@ -300,9 +300,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 切片 | 内容 | 状态 |
 | --- | --- | --- |
 | w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 派出 |
-| w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 派出 |
+| w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 交付（5,451 项）；已合入本地 main 未 push；待修 F1–F3 |
 | w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
-| w4-insider-buyback-tracking | owner 09-10：tracking 要含 filings，尤其管理层减持与回购。Form 4 派生上下文（占持股比、90 日聚合、10b5-1、是否已被预期）进判断层提示；新增 `buyback_disclosure` 事件（10-Q/10-K Item 2、8-K 授权）+ 派生上下文（均价 vs 现价、节奏、趋势、占市值 / FCF、是否只对冲稀释）；ownership 与 filings index 进常驻 daily tracking；capability map 写明美股回购只在 10-Q/10-K/8-K/电话会 | 派出 |
+| w4-insider-buyback-tracking（交付 `e529cf5`，5,475 项通过；未合；待审项 F5–F8）| owner 09-10：tracking 要含 filings，尤其管理层减持与回购。Form 4 派生上下文（占持股比、90 日聚合、10b5-1、是否已被预期）进判断层提示；新增 `buyback_disclosure` 事件（10-Q/10-K Item 2、8-K 授权）+ 派生上下文（均价 vs 现价、节奏、趋势、占市值 / FCF、是否只对冲稀释）；ownership 与 filings index 进常驻 daily tracking；capability map 写明美股回购只在 10-Q/10-K/8-K/电话会 | 派出 |
 | w4-hkex-filings | 港股 `hkex-filings` 连接器：翌日回购申报、月报表、权益披露（DI）、公告索引；发 `buyback_disclosure` / `insider_transaction` / `ownership_change`；`company:hk-secucode:*` 仅在连接器内引入，universe 扩展留给 owner | 派出 |
 | w4-failure-classes | lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
 
@@ -313,6 +313,12 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | F1 | w4-economic-invariants（已合入 main 本地，未 push，主线全量未跑） | 带宽不变量要求超出历史带的假设带 `outside_band.reason`，但判断层 `event_judgement.py` 的 `forecast_change` 词表被钉死为 `driver_ref / period_end / value / because` 四键（第 384–387 行），`revise_assumptions` 调用（第 1904 行）不传 `outside_band`。结果：大脑任何超出已申报区间的 `revise_forecast`（variant view 恰恰常在带外）在发布时被拒为 `unavailable`，且大脑无从得知要写什么 | 在 `event_judgement.py`：(a) 提示第 273 行后加一句：值若超出该公司已申报区间，须在 `forecast_change` 内加 `outside_band_reason: <一句话说明已申报区间为何不再约束>`，否则发布时拒绝；(b) 校验允许四键或四键 + `outside_band_reason`，reason 用 `_text` 截到 `MAX_BECAUSE_CHARS`，少于 3 个词拒绝；(c) `revise_assumptions` 的 change 字典在存在时带 `"outside_band": {"reason": ...}`。测试：`tests/test_event_judgement.py` `ForecastEffectTests` 加「reason 落到已发布 assumption 的 `outside_band.reason`」（用 `a_driver_and_period()`、`judge(...)` 返回体直接读 `forecast_change`，不是 `judged["judgement"]`）；`OutputContractTests` 加「一个词的 reason 被拒」。注意 harness 夹具历史点数少于 `MIN_BAND_POINTS`，带宽不变量在该夹具上 `not_applicable`，不要在这里断言 `unavailable`，带宽本身由 `test_economic_invariants.py` 覆盖。同样检查 `earnings_calibration.py` 与 `thesis_revision` 候选路径是否也需要携带该字段 | 已记录，未派 |
 | F2 | w4-economic-invariants 报告开放问题 1 | `segment_sum` 因 `company_model_inputs` 过滤掉分部行而恒为 `not_applicable` | 在 `company_model_forecast_cli.py` 发布处把 `sec_financials_normalise` 的分部行经 `statement_rows=` 传入 `publish`；加一条端到端测试：分部之和 ≠ 合并时拒绝 | 已记录，未派 |
 | F3 | w4-economic-invariants 报告开放问题 3 | 不变量拒绝理由已在 `overview()` / `company_model()` wire 上，`cockpit_control.html` 未渲染 | 在公司卡与模型页把 refusal 与 findings 渲染到「本该出现数字的位置」，不做单独的 checks 面板 | 已记录，未派 |
+| F5 | w4-insider-buyback | 分支改了 `event_judgement.py`（渲染 insider / buyback 上下文），主线已合入的 economic-invariants 也改了同一文件（revise_forecast 的 `EconomicInvariantRefused` 捕获）；合并时会冲突 | 合并由主 agent 做：两处改动不相邻，手工调和后先 `python -c "import dalton_core.event_judgement"` 再提交（规则 12）；F1 的修法要在合并后的文件上做 | 已记录 |
+| F6 | w4-insider-buyback | `deploy/phase9/p14a-tracking-policy-v1.json` 内容变了（加 `sec-ownership` 86400s 固定节奏、改 `sec` 的 rationale）。该文件若由 install.sh 播种且被 policy 签名 / 哈希钉住，live 上会出现「已签策略 ≠ 包内策略」 | subagent：查 `install.sh` 与 `tracking_cadence` 如何播种该文件；若哈希被 pin，改为新版本文件 `p14a-tracking-policy-v2.json` 并保留 v1，`DELIBERATELY_UNSEEDED` / 播种逻辑指向 v2，加测试「v1 内容不变」；owner 最终清单加一条「重签 tracking policy v2」 | 已记录，未派 |
+| F7 | w4-insider-buyback 开放问题 5 | 一份 10-Q 产出三条 `buyback_disclosure`（逐月），恰好填满 `event_judgement_cli.MAX_EVENTS_PER_COMPANY = 3`，同日其他事件（价格异动、Form 4）会被挤出本轮 | subagent：不合并月份（哪个月停买是信号）；改为按 `kind` 配额：同一 kind 同一公司同一 accession 的多条事件在判断提示里合并渲染为一张表、只占一个名额；`per_company` 计数按「事件组」而不是行数；测试：3 条 Item 2 行 + 1 条 Form 4 都进同一轮 | 已记录，未派 |
+| F8 | w4-insider-buyback 开放问题 3 | `anticipated: false` 在 Claim 覆盖薄的公司上等于「没写过」 | subagent：当该公司 claim index 中 `management_and_capital_allocation` aspect 的 claim 数低于阈值（建议 5）时降级为 `unknown` 并写明「coverage_thin」；测试两侧 | 已记录，未派 |
+| D1 | w4-insider-buyback 开放问题 2 | 8-K 正文不可取（`sec_earnings_release` 记录了原因），回购授权抽取只在 Core 已持有 8-K 文本时触发；要真正生效需要 `form: 8-K` 的 discovery spec = 新 plan 版本 + owner 发布 | 进 owner 最终裁决清单 | 待 owner |
+| D2 | w4-insider-buyback 开放问题 1 | 10-Q Item 5「Trading Arrangements」（10b5-1 计划的采用 / 终止，含人、日期、窗口、股数）比 Form 144 更强的「预期减持」信号，可解析 | 作为后续切片 W5 候选，不阻塞 | 待排期 |
 | F4 | 我给七个 agent 的恢复消息 | 消息里写的 `pgrep -fc` 在 macOS 不支持 `-c` | 无需修代码；agent 自行改用 `pgrep -f ... \| wc -l`。记录以免误判为环境故障 | 已记录 |
 
 ## 附录 A：接线热点清单（Wave 0 要收掉的）
