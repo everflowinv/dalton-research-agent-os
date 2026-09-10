@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .cockpit_model import CockpitModel
+from .call_budget import resolve_call_budget, resolve_run_budget
 from .company_dossier import load_policy, policy_hash
 from .company_dossier_cli import number_material, table_exists
 from .coverage_mission import CoverageMissionAuthority
@@ -799,6 +800,10 @@ def run_gate(
 
         config = json.loads(
             Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        run_budget = resolve_run_budget(config, "deep_insight_gate", defaults={
+            "max_cost_usd": MAX_RUN_COST_USD, "max_units": len(GROUPS)})
+        run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
+        max_groups = int(run_budget.get("max_units", len(GROUPS)))
 
         def build(settings: Mapping[str, Any]) -> Any:
             return CockpitModel(
@@ -821,6 +826,14 @@ def run_gate(
                                    "verdict from a different model family (D2)")})
             return summary
         model = factory()
+        producer_reserve = int(float(getattr(model, "budget_for", lambda p: {
+            "max_cost_usd": MAX_COST_USD})("deep_insight_gate")["max_cost_usd"]) * 1_000_000)
+        verifier_budget = resolve_call_budget(
+            verifier_config if verifier_model_config_path is not None else {},
+            "deep_insight_gate_verifier", defaults={"max_input_tokens": MAX_INPUT_TOKENS,
+                "max_output_tokens": MAX_OUTPUT_TOKENS, "max_cost_usd": MAX_COST_USD,
+                "timeout_seconds": TIMEOUT_SECONDS})
+        verifier_reserve = int(float(verifier_budget["max_cost_usd"]) * 1_000_000)
         company = {"company_ref": chosen, "ticker": next(
             (member.get("ticker") for member in mission["universe"]
              if member.get("company_ref") == chosen), None)}
@@ -835,14 +848,16 @@ def run_gate(
         draft_routes: list[str | None] = []
         group_outcomes: dict[str, str] = {}
         spent = 0
-        for group in GROUPS:
+        run_bound_blocked = False
+        for group in GROUPS[:max_groups]:
             rows, notes = plan[group]
             if not rows:
                 group_outcomes[group] = "no_material"
                 summary["refused"].append(
                     {"group": group, "reason": "no material was shown for this group"})
                 continue
-            if spent >= int(MAX_RUN_COST_USD * 1_000_000):
+            if spent + producer_reserve + verifier_reserve > run_cost_micros:
+                run_bound_blocked = True
                 group_outcomes[group] = "refused"
                 summary["refused"].append(
                     {"group": group, "reason": "run cost bound reached"})
@@ -868,7 +883,8 @@ def run_gate(
         summary["groups_drafted"] = sorted(
             {answers[ref]["group"] for ref in answers})
         if not answers:
-            summary.update({"status": "succeeded", "gate_status": "nothing_drafted"})
+            summary.update({"status": "succeeded", "gate_status": (
+                "unverified" if run_bound_blocked else "nothing_drafted")})
             return summary
 
         # Question one, checked rather than trusted.  Before the verifier, so a
@@ -896,7 +912,7 @@ def run_gate(
             }
             summary.update({"status": "succeeded", "gate_status": "not_independent"})
             return summary
-        if spent + int(MAX_COST_USD * 1_000_000) > int(MAX_RUN_COST_USD * 1_000_000):
+        if spent + verifier_reserve > run_cost_micros:
             summary["verification"] = {
                 "status": "skipped", "verdict": None, "findings": [],
                 "reason": "the run's cost bound leaves no room for the verifier",

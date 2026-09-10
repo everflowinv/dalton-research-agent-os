@@ -634,13 +634,20 @@ class GateTests(unittest.TestCase):
         self.assertEqual(verifier.prompts, [])
 
     def test_a_run_that_cannot_afford_the_verifier_publishes_nothing(self):
-        from unittest.mock import patch
-
-        with patch("dalton_core.company_dossier_cli.MAX_RUN_COST_USD", 0.001):
-            summary = self.harness.run()
+        config = json.loads(self.harness.model_config.read_text(encoding="utf-8"))
+        config["purpose_run_budgets"] = {"dossier": {"max_cost_usd": 0.001}}
+        self.harness.model_config.write_text(json.dumps(config), encoding="utf-8")
+        summary = self.harness.run()
         self.assertEqual(summary["dossier_status"], "unverified")
-        self.assertIn("cost bound", summary["verification"]["reason"])
+        self.assertIn("run cost bound", summary["refused"][0]["reason"])
         self.assertEqual(self.authority.versions(ACN), [])
+
+    def test_explicit_max_units_overrides_the_configured_run_default(self):
+        config = json.loads(self.harness.model_config.read_text(encoding="utf-8"))
+        config["purpose_run_budgets"] = {"dossier": {"max_units": 3}}
+        self.harness.model_config.write_text(json.dumps(config), encoding="utf-8")
+        summary = self.harness.run(max_units=1)
+        self.assertEqual(len(summary["units_drafted"]), 1)
 
     def test_a_carried_section_whose_claim_was_retired_is_dropped_not_deadlocked(self):
         from dalton_core.claim_retirement import ClaimRetirementAuthority

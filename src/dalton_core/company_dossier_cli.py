@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .cockpit_model import CockpitModel
+from .call_budget import resolve_call_budget, resolve_run_budget
 from .company_dossier import (
     CLASSIFICATION_UNIT,
     SECTIONS,
@@ -773,7 +774,7 @@ def run_dossier(
     company_ref: str | None = None,
     change_reason: str = "evidence_thicker",
     revise_units: Sequence[str] = (),
-    max_units: int = MAX_UNITS_PER_RUN,
+    max_units: int | None = None,
     dry_run: bool = False,
     verifier_model_config_path: Path | None = None,
     model_factory: Callable[..., Any] | None = None,
@@ -867,6 +868,14 @@ def run_dossier(
                 "failure_reason": f"the dossier policy could not be read: {exc}"})
             return summary
         authority = CompanyDossierAuthority(store)
+        config: Mapping[str, Any] = {}
+        if model_config_path is not None:
+            config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        run_budget = resolve_run_budget(config, "dossier", defaults={
+            "max_cost_usd": MAX_RUN_COST_USD, "max_units": MAX_UNITS_PER_RUN})
+        max_units = int(max_units if max_units is not None
+                        else run_budget.get("max_units", MAX_UNITS_PER_RUN))
+        run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
 
         chosen = None
         plan: dict[str, Any] = {}
@@ -910,8 +919,6 @@ def run_dossier(
                             "units_drafted": []})
             return summary
 
-        config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
-
         def build(settings: Mapping[str, Any]) -> Any:
             return CockpitModel(
                 settings,
@@ -937,6 +944,14 @@ def run_dossier(
                                    "from a different model family (D2)")})
             return summary
         model = factory()
+        producer_reserve = int(float(getattr(model, "budget_for", lambda p: {
+            "max_cost_usd": MAX_COST_USD})("dossier")["max_cost_usd"]) * 1_000_000)
+        verifier_budget = resolve_call_budget(
+            verifier_config if verifier_model_config_path is not None else {},
+            "dossier_verifier", defaults={"max_input_tokens": MAX_INPUT_TOKENS,
+                "max_output_tokens": MAX_OUTPUT_TOKENS, "max_cost_usd": MAX_COST_USD,
+                "timeout_seconds": TIMEOUT_SECONDS})
+        verifier_reserve = int(float(verifier_budget["max_cost_usd"]) * 1_000_000)
         company = {"company_ref": chosen, "ticker": next(
             (member.get("ticker") for member in mission["universe"]
              if member.get("company_ref") == chosen), None)}
@@ -951,10 +966,12 @@ def run_dossier(
         draft_routes: list[str | None] = []
         input_fingerprints = {unit: None for unit in UNITS}
         spent = 0
+        run_bound_blocked = False
         prior_sections = {item["aspect"]: item
                           for item in (prior or {}).get("sections") or []}
         for unit in wanted:
-            if spent >= int(MAX_RUN_COST_USD * 1_000_000):
+            if spent + producer_reserve + verifier_reserve > run_cost_micros:
+                run_bound_blocked = True
                 summary["refused"].append({"unit": unit, "reason": "run cost bound reached"})
                 continue
             entry = plan[unit]
@@ -1000,7 +1017,8 @@ def run_dossier(
         summary["cost_micros"] = spent
         summary["units_drafted"] = sorted(blocks)
         if not blocks:
-            summary.update({"status": "succeeded", "dossier_status": "nothing_drafted"})
+            summary.update({"status": "succeeded", "dossier_status": (
+                "unverified" if run_bound_blocked else "nothing_drafted")})
             return summary
 
         resolve = family_resolver or router_family_resolver(config)
@@ -1018,7 +1036,7 @@ def run_dossier(
             summary.update({"status": "succeeded",
                             "dossier_status": "not_independent"})
             return summary
-        if spent + int(MAX_COST_USD * 1_000_000) > int(MAX_RUN_COST_USD * 1_000_000):
+        if spent + verifier_reserve > run_cost_micros:
             # The verification is not optional, so a run that cannot afford it
             # publishes nothing rather than publishing unverified.
             summary["verification"] = {
@@ -1298,7 +1316,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="draft this part again even if nothing new arrived; "
                              "repeatable. The version still has to cite something "
                              "the current one does not.")
-    parser.add_argument("--max-units", type=int, default=MAX_UNITS_PER_RUN)
+    parser.add_argument("--max-units", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true",
                         help="plan and stop; no model call and no write")
     parser.add_argument("--quiet", action="store_true")

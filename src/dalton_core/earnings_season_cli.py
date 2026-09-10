@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .cockpit_model import CockpitModel
+from .call_budget import resolve_call_budget
 from .coverage_mission import CoverageMissionAuthority
 from .earnings_calibration import (
     actualize_for_report,
@@ -56,9 +57,13 @@ from .earnings_preview import (
     verify_preview,
 )
 from .earnings_season import (
+    CALIBRATION_PURPOSE,
+    CALIBRATION_VERIFIER_PURPOSE,
     CALIBRATION_DEADLINE_DAYS,
     CALIBRATION_KIND,
     PREVIEW_KIND,
+    PREVIEW_PURPOSE,
+    PREVIEW_VERIFIER_PURPOSE,
     EarningsSeasonError,
     forecast_rows as season_forecast_rows,
     reported_period,
@@ -412,8 +417,29 @@ def run_earnings_season(
         actor = mission["autonomy"]["automation_principal"]
 
         spent = 0
-        reservation = int(MAX_COST_USD * 2 * 1_000_000)
+        writer_config = (json.loads(Path(model_config).expanduser().read_text(encoding="utf-8"))
+                         if model_config else {})
+        verifier_config = (json.loads(Path(verifier_model_config).expanduser().read_text(encoding="utf-8"))
+                           if verifier_model_config else {})
         for occurrence in due:
+            writer_purpose, verifier_purpose = (
+                (PREVIEW_PURPOSE, PREVIEW_VERIFIER_PURPOSE)
+                if occurrence["window"] == "preview"
+                else (CALIBRATION_PURPOSE, CALIBRATION_VERIFIER_PURPOSE)
+            )
+            def reserve(model: Any, config: Mapping[str, Any], purpose: str) -> int:
+                if hasattr(model, "budget_for"):
+                    budget = model.budget_for(purpose)
+                else:
+                    budget = resolve_call_budget(config, purpose, defaults={
+                        "max_input_tokens": MAX_INPUT_TOKENS,
+                        "max_output_tokens": MAX_OUTPUT_TOKENS,
+                        "max_cost_usd": MAX_COST_USD,
+                        "timeout_seconds": TIMEOUT_SECONDS,
+                    })
+                return int(float(budget["max_cost_usd"]) * 1_000_000)
+            reservation = (reserve(writer_model, writer_config, writer_purpose)
+                           + reserve(verifier_model, verifier_config, verifier_purpose))
             if state["remaining_micros"] - spent < reservation:
                 summary["season_status"] = "skipped:pool_exhausted"
                 break
