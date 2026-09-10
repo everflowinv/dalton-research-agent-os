@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 分支：`w3-earnings-season`（worktree `~/Projects/dalton-w3-earnings-season-worktree`）
-分叉基线：main `eaf48f0`
+分叉基线：main `eaf48f0`；已 `git merge main` 到 `56f666c`（含 C1 事件桥接、P14b/P14d 重出 lane、P15d）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（机制 vs 判断、自我反思）与 Daily tracking 一节、蓝图 §5.2 P14f、ADR-0007、ADR-0008
 消费（按名字，不改）：[C1 事件日历](c1-catalyst-calendar-v1.0-2026-09-09.md)、[P14a 每日跟踪](p14a-daily-tracking-v1.0-2026-09-09.md)、[P13-M2 预测行](p13-m2-forecast-lines-v1.0-2026-09-09.md)、[P12a 公司档案](p12a-company-dossier-v1.0-2026-09-09.md)（guidance profile）、[P12c DebateMap](p12c-debate-map-v1.0-2026-09-09.md)、`forecast_reconciliation`、`mission_deliverable`、`research_playbook`
 全量测试：见第 7 节，原文粘贴
@@ -140,12 +140,16 @@ C1 日历（或它发的 calendar 事件）
 
 ## 5. 集成时要接的线
 
-### 5.1 `mission_catalyst_lane` 发不出事件（main 上的两个已知缺口，非本片所有）
+### 5.1 日历事件到账本这一段（开发过程中发现，已由 main 的 `c1-event-bridge` 修好）
 
-1. `catalyst_calendar.emit_calendar_events` 写的 payload 有十一个字段；`research_event.PAYLOAD_FIELDS["calendar"]` 只声明五个，`validate_payload` 见到没声明的字段整条拒绝。**不要靠加宽 `calendar` 的字段集来修**：那会改掉已有 calendar 事件的 `payload_hash`，也就改掉它们的 id。要么 C1 的 emitter 只写声明过的五个字段（其余进 `source_refs` 或留在日历版本里），要么加一个新的 kind。
-2. `mission_catalyst_lane` 把写入口解析成 `getattr(server, "record_research_event", None)`，而 `writer_server` 上没有这个属性，所以 lane 报 `events_unwired`。
+本片开工时 main 上有两个缺口，两个都会让 P14f 的窗口开在空气里：
 
-**本片对此的处置**：`due_occurrences` 先读事件账本，读不到就直接读 C1 的日历——用 C1 自己的 emitter 配一个收集器代替 writer，窗口规则仍然是 C1 的，一个字节都不写。所以这两个缺口修好之前 P14f 也能跑；修好之后走的是正路，代码不用改。
+1. `catalyst_calendar.emit_calendar_events` 写的 payload 比 `research_event.PAYLOAD_FIELDS["calendar"]` 声明的五个字段宽，`validate_payload` 见到没声明的字段整条拒绝；
+2. `mission_catalyst_lane` 把写入口解析成 `getattr(server, "record_research_event", None)`，而 `writer_server` 上没有这个属性，于是 lane 每一 tick 都报 `events_unwired`——一个长得像接好了的 fallback。
+
+**合入 main（`56f666c`）后两个都已修好**：`calendar` 的字段集加宽到九个（`window` / `entry_ref` / `date_confidence` / `disagreement`），lane 直接构造 `ResearchEventAuthority`。所以本片的 `window_of` 现在走的是「读 emitter 自己写的那个词」这条路，派生只是兜底。
+
+**保留的兜底仍然有用**：`due_occurrences` 先读事件账本，读不到再直接读 C1 的日历——用 C1 自己的 emitter 配一个收集器代替 writer，窗口规则仍然是 C1 的，一个字节都不写。live 今天既没有 `research_events` 表也没有日历版本（第 6 节），日历 lane 第一次跑起来之前，这是唯一能回答「今天该写什么」的读法；也是只读冒烟唯一诚实的读法——不写一条事件就能知道会开哪个窗口。
 
 ### 5.2 deliverable 正文放不下我们自己的预测数字
 
@@ -161,7 +165,7 @@ C1 日历（或它发的 calendar 事件）
 
 | 缺口 | 影响 | 归属 |
 | --- | --- | --- |
-| `catalyst_calendar_versions` 0 行 | 没有 occurrence 可开窗；ACN 10/1 要靠日历 lane 先跑一次 | C1 部署 |
+| `catalyst_calendar_versions` 0 行、没有 `research_events` 表 | 没有 occurrence 可开窗；ACN 10/1 要靠日历 lane 先在 live 上跑一次 | C1 部署 |
 | `forecast_model_versions` 0 行（只有 4 条旧的 `model_forecast_line_versions`） | preview 没有我们自己的数字；calibration 的 `actualize` 报 `unavailable` | P13-M2 在 live 上跑一次 |
 | claim 索引表不在 live | `guidance_profile_for` 返回 `None`，指引块 `available:false` | P12b 部署 |
 | 没有 consensus 权威 | consensus 块永远 `available:false`（**如实如此，不是降级**） | P11b |
@@ -215,10 +219,16 @@ prompt: 9,002 字节
 ### 7.1 全量测试（原文）
 
 ```
-PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
+$ PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
+...
+Ran 4494 tests in 740.176s
+
+OK (skipped=1)
 ```
 
-<!--SUITE-->
+合并 main（`56f666c`）之后一条不红。本片新增 100 项（`tests/test_earnings_season.py` 74、`tests/test_mission_earnings_season_lane.py` 17、`tests/test_earnings_season_cli.py` 9）。
+
+**开发过程中撞到的一个与本片无关但值得记的东西**：`tests/test_openclaw_web_search_broker_client.py` 的 `FUTURE` 是在**模块导入时**算的「五分钟后」，而 `unittest discover` 会先导入全部测试模块再开始跑。全量套件跑到这个模块时早已过了五分钟，于是它的八项全部 `ERROR: web search deadline has already passed`。这不是随机的 flake，是一颗随套件变长必然引爆的定时炸弹：合入前在 main 上量过，`test_[a-n]*.py` 这一段是 4:35（刚好在闸内），本分支加了约 13 秒的测试后是 5:13（刚好在闸外）。已报给主 agent，**main 上已修**，本次全量因此干净。
 
 ### 7.2 逐条对着任务书
 
@@ -258,6 +268,7 @@ PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
 ## 9. 开放问题（攒给 owner）
 
 1. **mission 要不要授 `market_event` 与 `thesis_revision_candidate`？** 不授也能跑：校准照写，但判断层不会被告知这一季结清了，修订候选会排队并点名 ADR-0007。授了之后本片才是完整的。
-2. **`calendar` 事件的 payload 合同谁改？**（第 5.1 节）加宽字段集会改掉已有事件的 id，所以这需要 C1 与 P14a 两个所有者一起定。
-3. **deliverable 正文能不能带预测格的 ref？**（第 5.2 节）不能的话，我们自己的数字永远只出现在文档摘要行里；能的话，preview 会好读很多。
-4. **investor_day / guidance 窗口要不要单独的 prompt？**（第 8 节）
+2. **deliverable 正文能不能带预测格的 ref？**（第 5.2 节）不能的话，我们自己的数字永远只出现在文档摘要行里；能的话，preview 会好读很多。这是 `mission_deliverable` 所有者的一次改动。
+3. **investor_day / guidance 窗口要不要单独的 prompt？**（第 8 节）
+
+（原来的第 2 条「`calendar` 事件 payload 合同谁改」在合并 main 后已由 `c1-event-bridge` 解决，见第 5.1 节。）

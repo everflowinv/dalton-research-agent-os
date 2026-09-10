@@ -893,11 +893,19 @@ class VocabularyTests(unittest.TestCase):
         self.assertIn("calibration", EVENT_KINDS)
         self.assertEqual(set(PAYLOAD_FIELDS), set(EVENT_KINDS))
         self.assertEqual(DEFAULT_TIER_BY_KIND["calibration"], "derived")
-        # The eleven that were there keep their fields, so no existing event's
-        # payload hash moves.
-        self.assertEqual(PAYLOAD_FIELDS["calendar"], frozenset({
-            "event_kind", "expected_date", "confirmed", "calendar_version_ref",
-            "source_ref"}))
+        # Adding a kind adds a key; it does not touch another kind's field
+        # set, so no existing event's payload hash moves.  The calendar's own
+        # set is C1's bridge's business and is only read here: since that
+        # bridge landed it carries ``window`` and ``date_confidence``, which is
+        # why ``window_of`` takes the emitter's own word when it is there.
+        self.assertLessEqual(
+            {"event_kind", "expected_date", "confirmed", "calendar_version_ref",
+             "source_ref"},
+            PAYLOAD_FIELDS["calendar"])
+        self.assertLessEqual(
+            {"window", "entry_ref", "date_confidence"},
+            PAYLOAD_FIELDS["calendar"])
+        self.assertNotIn("occurrence_ref", PAYLOAD_FIELDS["calendar"])
 
     def test_a_core_built_before_these_kinds_is_migrated_rather_than_broken(self):
         store = DaltonStore(":memory:")
