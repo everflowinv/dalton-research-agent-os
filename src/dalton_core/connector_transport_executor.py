@@ -26,6 +26,7 @@ from .raw_spool import (
     RawSpoolLimitExceeded,
 )
 from .runner_journal import RunnerJournal, RunnerJournalConflict, RunnerJournalNotFound
+from .shared_connector_capacity import SharedConnectorCapacityAttemptEnded
 from .store import content_hash
 from .workspace_runtime import ENVIRONMENT_KEY
 from pathlib import Path
@@ -185,13 +186,24 @@ class _SharedConnectorReservation:
         maximum = int(local["reserved"]["cost_micros"])
         maximum = maximum or int(self.policy["max_cost_micros_per_call"])
         with self._authority() as authority:
-            row = authority.reserve(
-                workspace_id=self.workspace_id,
-                invocation_ref=admission.invocation["id"],
-                attempt_number=int(local["physical_attempt_number"]),
-                maximum_cost_micros=maximum,
-                expires_at=_parse_time(local["expires_at"]),
-            )
+            try:
+                row = authority.reserve(
+                    workspace_id=self.workspace_id,
+                    invocation_ref=admission.invocation["id"],
+                    attempt_number=int(local["physical_attempt_number"]),
+                    maximum_cost_micros=maximum,
+                    expires_at=_parse_time(local["expires_at"]),
+                )
+            except Exception:
+                existing = authority.connection.execute(
+                    "SELECT reservation_ref FROM shared_connector_capacity_reservations "
+                    "WHERE workspace_id=? AND invocation_ref=? AND attempt_number=?",
+                    (self.workspace_id, admission.invocation["id"],
+                     int(local["physical_attempt_number"])),
+                ).fetchone()
+                if existing is not None:
+                    self.ref = existing["reservation_ref"]
+                raise
         self.ref = row["reservation_ref"]
         return self.ref
 
@@ -325,16 +337,42 @@ class ConnectorTransportExecutor:
             )
         self._barrier("after_admitted")
 
+        reservation_key = self._key(admission, "reserve")
         reservation = self._gate.reserve_for_admission(
             admission, scheduler_lease_token=scheduler_lease_token,
-            idempotency_key=self._key(admission, "reserve"))
+            idempotency_key=reservation_key)
+        # A shared-capacity refusal happens after the local reservation exists.
+        # The refusal releases that reservation, while the runner journal is
+        # still at ``admitted``.  Re-entering the same request must therefore
+        # advance to a fresh physical attempt instead of replaying the released
+        # local reservation forever.
+        while not any(
+                item["id"] == reservation["id"]
+                for item in self._connector_reader.unsettled_reservations()):
+            reservation_key = self._recovery_key(
+                reservation["id"], "reserve-fresh-attempt")
+            reservation = self._gate.reserve_for_admission(
+                admission, scheduler_lease_token=scheduler_lease_token,
+                idempotency_key=reservation_key)
         try:
+            shared_reservation_ref = shared_capacity.reserve(admission, reservation)
+        except SharedConnectorCapacityAttemptEnded:
+            self._authority.settle_quota(
+                reservation["id"], "released", usage_entry_ref=None,
+                cost_entry_ref=None,
+                idempotency_key=self._recovery_key(reservation["id"], "settle-released"))
+            shared_capacity.release()
+            reservation = self._gate.reserve_for_admission(
+                admission, scheduler_lease_token=scheduler_lease_token,
+                idempotency_key=self._recovery_key(
+                    reservation["id"], "reserve-fresh-attempt"))
             shared_reservation_ref = shared_capacity.reserve(admission, reservation)
         except Exception:
             self._authority.settle_quota(
                 reservation["id"], "released", usage_entry_ref=None,
                 cost_entry_ref=None,
-                idempotency_key=self._recovery_key(reservation["id"], "settle-released"))
+                idempotency_key=self._recovery_key(
+                    reservation["id"], "settle-released"))
             raise
         self._barrier("after_quota_reserved")
         self._journal.append(

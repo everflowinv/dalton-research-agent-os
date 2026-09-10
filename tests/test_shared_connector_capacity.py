@@ -86,6 +86,63 @@ class SharedConnectorCapacityTests(unittest.TestCase):
         self.addCleanup(con.close)
         self.assertEqual(con.connection.execute("SELECT count(*) FROM shared_connector_capacity_reservations").fetchone()[0],1)
 
+    def test_admitted_request_retries_with_fresh_attempt_after_capacity_release(self):
+        policy = self.policy(calls=3, concurrency=1)
+        SharedConnectorCapacityAuthority.initialize(self.database, policy)
+        workspace = self.workspace("analyst-a", 8787, policy)
+        with SharedConnectorCapacityAuthority(
+                self.database, policy_ref=policy["id"],
+                policy_hash=policy["content_hash"], clock=lambda: self.now) as authority:
+            holder = authority.reserve(
+                workspace_id="holder", invocation_ref="connector-invocation:holder",
+                attempt_number=1, maximum_cost_micros=1000,
+                expires_at=self.now + timedelta(hours=1))
+        harness = TransportHarness("success")
+        self.addCleanup(harness.close)
+        with patch.dict("os.environ", {ENVIRONMENT_KEY: str(workspace.manifest_path)},
+                        clear=True):
+            with self.assertRaises(SharedConnectorCapacityExceeded):
+                harness.execute()
+            first = harness.base.core.connection.execute(
+                "SELECT physical_attempt_number FROM connector_quota_reservations"
+            ).fetchone()
+            self.assertEqual(first[0], 1)
+            with SharedConnectorCapacityAuthority(
+                    self.database, policy_ref=policy["id"],
+                    policy_hash=policy["content_hash"], clock=lambda: self.now) as authority:
+                authority.release_undispatched(holder["reservation_ref"])
+            response = harness.execute()
+        self.assertEqual(response["outcome"], "succeeded")
+        attempts = harness.base.core.connection.execute(
+            "SELECT physical_attempt_number FROM connector_quota_reservations "
+            "ORDER BY physical_attempt_number").fetchall()
+        self.assertEqual([row[0] for row in attempts], [1, 2])
+
+    def test_prejournal_ended_shared_reservation_converges_in_one_retry(self):
+        policy = self.policy(calls=3, concurrency=2)
+        SharedConnectorCapacityAuthority.initialize(self.database, policy)
+        workspace = self.workspace("analyst-a", 8787, policy)
+        harness = TransportHarness("success", fault_at="after_quota_reserved")
+        self.addCleanup(harness.close)
+        with patch.dict("os.environ", {ENVIRONMENT_KEY: str(workspace.manifest_path)},
+                        clear=True):
+            with self.assertRaises(BaseException):
+                harness.execute()
+            with SharedConnectorCapacityAuthority(
+                    self.database, policy_ref=policy["id"],
+                    policy_hash=policy["content_hash"], clock=lambda: self.now) as authority:
+                shared_ref = authority.connection.execute(
+                    "SELECT reservation_ref FROM shared_connector_capacity_reservations"
+                ).fetchone()[0]
+                authority.release_undispatched(shared_ref)
+            response = harness.recovery_executor().execute(
+                harness.request(), scheduler_lease_token=harness.base.claim["lease_token"])
+        self.assertEqual(response["outcome"], "succeeded")
+        attempts = harness.base.core.connection.execute(
+            "SELECT physical_attempt_number FROM connector_quota_reservations "
+            "ORDER BY physical_attempt_number").fetchall()
+        self.assertEqual([row[0] for row in attempts], [1, 2])
+
     def test_crash_after_dispatch_retains_concurrency(self):
         policy=self.policy(concurrency=1); SharedConnectorCapacityAuthority.initialize(self.database,policy)
         one=self.workspace("analyst-a",8787,policy); first=TransportHarness("success",fault_at="after_transport_started"); self.addCleanup(first.close)
@@ -125,6 +182,39 @@ class SharedConnectorCapacityTests(unittest.TestCase):
             ref = wrong.connection.execute("SELECT reservation_ref FROM shared_connector_capacity_reservations").fetchone()[0]
             with self.assertRaisesRegex(SharedConnectorCapacityConflict, "another capacity policy"):
                 wrong.settle(ref, actual_cost_micros=0, outcome="succeeded")
+
+    def test_reserved_recovery_is_exact_with_matching_policy_listed_first(self):
+        from dalton_core.store import content_hash
+        policy = self.policy(concurrency=1)
+        other = {**policy, "id": "connector-capacity:other-account",
+                 "provider_account_ref": "provider-account:other",
+                 "quota_scope_ref": "quota-scope:other",
+                 "scopes": [{**self.scope, "capability_ref": "capability:unrelated"}]}
+        other.pop("content_hash")
+        other["content_hash"] = content_hash(other)
+        SharedConnectorCapacityAuthority.initialize(self.database, policy)
+        SharedConnectorCapacityAuthority.initialize(self.database, other)
+        workspace = create_workspace_manifest(
+            self.host, "analyst-a", 8787, "release:sha256:" + "e" * 64,
+            self.release, shared_connector_capacity=[
+                {"database": str(self.database), "policy_ref": item["id"],
+                 "policy_hash": item["content_hash"]}
+                for item in (policy, other)])
+        harness = TransportHarness("success", fault_at="after_reserved")
+        self.addCleanup(harness.close)
+        with patch.dict("os.environ", {ENVIRONMENT_KEY: str(workspace.manifest_path)},
+                        clear=True):
+            with self.assertRaises(BaseException):
+                harness.execute()
+            recovered = harness.recovery_executor().recover(harness.request()["id"])
+        self.assertEqual(recovered["state"], "released_recovered")
+        with SharedConnectorCapacityAuthority(
+                self.database, policy_ref=policy["id"],
+                policy_hash=policy["content_hash"]) as authority:
+            row = authority.connection.execute(
+                "SELECT status,outcome FROM shared_connector_capacity_reservations"
+            ).fetchone()
+        self.assertEqual(tuple(row), ("released", "undispatched_released"))
 
     def test_alphaengine_style_policy_uses_rolling_24_hours(self):
         policy=self.policy(calls=1); SharedConnectorCapacityAuthority.initialize(self.database,policy)

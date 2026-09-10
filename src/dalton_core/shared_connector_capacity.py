@@ -22,6 +22,7 @@ class SharedConnectorCapacityError(RuntimeError): pass
 class SharedConnectorCapacityUnavailable(SharedConnectorCapacityError): pass
 class SharedConnectorCapacityExceeded(SharedConnectorCapacityError): pass
 class SharedConnectorCapacityConflict(SharedConnectorCapacityError): pass
+class SharedConnectorCapacityAttemptEnded(SharedConnectorCapacityConflict): pass
 
 
 def validate_policy(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -200,7 +201,8 @@ class SharedConnectorCapacityAuthority:
                 if old["identity_hash"] != ih: raise SharedConnectorCapacityConflict("attempt already reserved differently")
                 if old["status"] in {"expired", "released"} or (
                         old["status"] == "reserved" and old["expires_at"] <= now):
-                    raise SharedConnectorCapacityConflict("attempt reservation ended; a fresh physical attempt is required")
+                    raise SharedConnectorCapacityAttemptEnded(
+                        "attempt reservation ended; a fresh physical attempt is required")
                 self.connection.commit(); return dict(old)
             self._require_active()
             if maximum_cost_micros > self.policy["max_cost_micros_per_call"]:
