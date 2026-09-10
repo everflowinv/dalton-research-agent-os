@@ -152,6 +152,16 @@ class MissionConsensusLaneCoordinator:
         self._spent_on: str | None = None
         self._spent = 0
 
+    def _failure_key(self, company_ref: str, governance_hash: str | None = None) -> str:
+        if governance_hash is None:
+            resolver = getattr(self.launcher, "governance_identity", None)
+            if resolver is not None:
+                try:
+                    governance_hash = resolver()
+                except LaneChildRejected:
+                    governance_hash = "invalid-governance"
+        return company_ref if not governance_hash else f"{company_ref}|governance:{governance_hash}"
+
     @property
     def daily_unit_limit(self) -> int:
         """The owner-approved ceiling for this operation, read at call time."""
@@ -188,6 +198,7 @@ class MissionConsensusLaneCoordinator:
             # writing one still has to be attributable to the company it was
             # spawned for, or it can never be held back from being retried.
             "company_ref": ticket.get("company_ref"),
+            "governance_hash": ticket.get("governance_hash"),
             "consensus_status": summary.get("consensus_status"),
             "consensus_version_ref": summary.get("consensus_version_ref"),
             "as_of": summary.get("as_of"),
@@ -212,12 +223,12 @@ class MissionConsensusLaneCoordinator:
             return settled
         if settled.get("status") != "succeeded":
             settled["failure"] = self.budget.record_settled(
-                company_ref, settled).as_wire()
+                self._failure_key(company_ref, settled.get("governance_hash")), settled).as_wire()
             return settled
         # A run that succeeded is a run that reached the source, whatever it
         # found. ``duplicate`` is the common and correct answer: the street
         # said today what it said yesterday.
-        resumed = self.budget.clear(company_ref)
+        resumed = self.budget.clear(self._failure_key(company_ref, settled.get("governance_hash")))
         if resumed:
             settled["resumed"] = resumed
         self._refreshed[company_ref] = self.clock()
@@ -249,13 +260,14 @@ class MissionConsensusLaneCoordinator:
                         "units against yfinance/analyst_estimates today")}
         for company in universe:
             company_ref = company["company_ref"]
-            blocked = self.budget.blocked(company_ref)
+            failure_key = self._failure_key(company_ref)
+            blocked = self.budget.blocked(failure_key)
             if blocked is not None:
                 # P17d: three words, not one. ``held`` will change on a deploy,
                 # ``parked`` when the dependency answers, ``terminal`` never.
                 skipped.append({
                     "company_ref": company_ref, "reason": blocked.action,
-                    "detail": self.budget.failure_reason(company_ref),
+                    "detail": self.budget.failure_reason(failure_key),
                     "failure_class": blocked.classification.failure_class,
                     "dependency": blocked.classification.dependency,
                 })
@@ -294,7 +306,7 @@ class MissionConsensusLaneCoordinator:
                         "skipped": skipped, "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                self.budget.record(company_ref, reason=reason)
+                self.budget.record(failure_key, reason=reason)
                 return {"status": "rejected", "company_ref": company_ref,
                         "skipped": skipped, "reason": reason}
             self._open = ticket["id"]

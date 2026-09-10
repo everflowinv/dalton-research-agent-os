@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .connector_governance import ConnectorGovernance, YFINANCE_CALENDAR_KIND
 
 TICKET_PREFIX = "catalyst-calendar-run"
 
@@ -46,6 +47,20 @@ class CatalystCalendarLauncher(LaneChildLauncher):
 
         return self.governance_path is not None
 
+    def load_governance(self):
+        if not self.configured:
+            raise LaneChildRejected("a calendar run needs an approved yfinance-calendar record")
+        try:
+            governance = ConnectorGovernance.load(self.governance_path)
+        except Exception as exc:
+            raise LaneChildRejected(f"invalid yfinance-calendar governance: {exc}") from exc
+        if governance.kind != YFINANCE_CALENDAR_KIND:
+            raise LaneChildRejected("the governance record covers a different capability")
+        return governance
+
+    def governance_identity(self) -> str:
+        return self.load_governance().content_hash
+
     def _command(
         self, *, ticket_dir: Path, company_ref: str, ticker: str,
         issuer: str | None, as_of: str,
@@ -69,10 +84,9 @@ class CatalystCalendarLauncher(LaneChildLauncher):
         self, *, company_ref: str, ticker: str, as_of: str,
         issuer: str | None = None,
     ) -> dict[str, Any]:
-        if not self.configured:
-            raise LaneChildRejected(
-                "a calendar run needs an approved yfinance-calendar record"
-            )
+        governance = self.load_governance()
+        if not governance.approved:
+            raise LaneChildRejected("the yfinance-calendar governance record is not approved")
         for name, value in (
             ("company_ref", company_ref), ("ticker", ticker), ("as_of", as_of),
         ):
@@ -82,7 +96,7 @@ class CatalystCalendarLauncher(LaneChildLauncher):
         as_of = as_of.strip()
         issuer = None if issuer is None else str(issuer).strip() or None
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{company_ref}|{ticker}|{issuer or ''}|{as_of}"
+            f"{self.TICKET_PREFIX}|{company_ref}|{ticker}|{issuer or ''}|{as_of}|{governance.content_hash}"
             .encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
@@ -91,6 +105,8 @@ class CatalystCalendarLauncher(LaneChildLauncher):
                 "company_ref": company_ref, "ticker": ticker,
                 "issuer": issuer, "as_of": as_of,
                 "governance_configured": self.configured,
+                "governance_ref": governance.id,
+                "governance_hash": governance.content_hash,
             },
             company_ref=company_ref, ticker=ticker, issuer=issuer, as_of=as_of,
         )

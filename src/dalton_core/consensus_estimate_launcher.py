@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .connector_governance import ConnectorGovernance, YFINANCE_ANALYST_ESTIMATES_KIND
 
 TICKET_PREFIX = "consensus-estimate-run"
 
@@ -47,6 +48,20 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
 
         return self.governance_path is not None
 
+    def load_governance(self):
+        if not self.configured:
+            raise LaneChildRejected("a consensus run needs an approved yfinance analyst-estimates record")
+        try:
+            governance = ConnectorGovernance.load(self.governance_path)
+        except Exception as exc:
+            raise LaneChildRejected(f"invalid yfinance analyst-estimates governance: {exc}") from exc
+        if governance.kind != YFINANCE_ANALYST_ESTIMATES_KIND:
+            raise LaneChildRejected("the governance record covers a different capability")
+        return governance
+
+    def governance_identity(self) -> str:
+        return self.load_governance().content_hash
+
     def _command(
         self, *, ticket_dir: Path, company_ref: str, ticker: str,
         fiscal_year_end: str, last_reported_period_end: str,
@@ -68,10 +83,9 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
         self, *, company_ref: str, ticker: str, fiscal_year_end: str,
         last_reported_period_end: str, day: str,
     ) -> dict[str, Any]:
-        if not self.configured:
-            raise LaneChildRejected(
-                "a consensus run needs an approved yfinance analyst-estimates record"
-            )
+        governance = self.load_governance()
+        if not governance.approved:
+            raise LaneChildRejected("the yfinance analyst-estimates governance record is not approved")
         for name, value in (
             ("company_ref", company_ref), ("ticker", ticker),
             ("fiscal_year_end", fiscal_year_end),
@@ -84,7 +98,7 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
         fiscal_year_end = fiscal_year_end.strip()
         last_reported_period_end = last_reported_period_end.strip()
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{company_ref}|{ticker}|{day.strip()}".encode("utf-8")
+            f"{self.TICKET_PREFIX}|{company_ref}|{ticker}|{fiscal_year_end}|{last_reported_period_end}|{day.strip()}|{governance.content_hash}".encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,
@@ -94,6 +108,8 @@ class ConsensusEstimateLauncher(LaneChildLauncher):
                 "last_reported_period_end": last_reported_period_end,
                 "day": day.strip(),
                 "governance_configured": self.configured,
+                "governance_ref": governance.id,
+                "governance_hash": governance.content_hash,
             },
             company_ref=company_ref, ticker=ticker,
             fiscal_year_end=fiscal_year_end,

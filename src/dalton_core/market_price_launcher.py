@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .connector_governance import ConnectorGovernance, YFINANCE_DAILY_PRICES_KIND
 
 TICKET_PREFIX = "market-price-run"
 
@@ -51,6 +52,20 @@ class MarketPriceLauncher(LaneChildLauncher):
 
         return self.governance_path is not None
 
+    def load_governance(self):
+        if not self.configured:
+            raise LaneChildRejected("a price run needs an approved yfinance daily-prices record")
+        try:
+            governance = ConnectorGovernance.load(self.governance_path)
+        except Exception as exc:
+            raise LaneChildRejected(f"invalid yfinance daily-prices governance: {exc}") from exc
+        if governance.kind != YFINANCE_DAILY_PRICES_KIND:
+            raise LaneChildRejected("the governance record covers a different capability")
+        return governance
+
+    def governance_identity(self) -> str:
+        return self.load_governance().content_hash
+
     def _command(
         self, *, ticket_dir: Path, company_ref: str, ticker: str,
         start: str, end: str,
@@ -71,10 +86,9 @@ class MarketPriceLauncher(LaneChildLauncher):
     def start(
         self, *, company_ref: str, ticker: str, start: str, end: str,
     ) -> dict[str, Any]:
-        if not self.configured:
-            raise LaneChildRejected(
-                "a price run needs an approved yfinance daily-prices record"
-            )
+        governance = self.load_governance()
+        if not governance.approved:
+            raise LaneChildRejected("the yfinance daily-prices governance record is not approved")
         for name, value in (
             ("company_ref", company_ref), ("ticker", ticker),
             ("start", start), ("end", end),
@@ -86,7 +100,7 @@ class MarketPriceLauncher(LaneChildLauncher):
         if end < start:
             raise LaneChildRejected("a price window cannot end before it starts")
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{company_ref}|{ticker}|{start}|{end}".encode("utf-8")
+            f"{self.TICKET_PREFIX}|{company_ref}|{ticker}|{start}|{end}|{governance.content_hash}".encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,
@@ -94,6 +108,8 @@ class MarketPriceLauncher(LaneChildLauncher):
                 "company_ref": company_ref, "ticker": ticker,
                 "requested_start": start, "requested_end": end,
                 "governance_configured": self.configured,
+                "governance_ref": governance.id,
+                "governance_hash": governance.content_hash,
             },
             company_ref=company_ref, ticker=ticker, start=start, end=end,
         )
