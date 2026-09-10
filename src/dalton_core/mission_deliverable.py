@@ -369,6 +369,13 @@ class MissionDeliverableAuthority:
     def _admit_version_zero(self) -> None:
         """W3: admit v0 on a Core built when 1 was the floor.
 
+        This and ``_widen_kind_check`` rebuild the same table, so each must
+        write *both* constraints from the same source: the kind list from
+        ``_kind_check_list()`` and the version floor as ``>= 0``. Restating
+        either as a literal makes whichever migration runs second silently
+        undo the other -- which is exactly what happened when this one shipped
+        with the eight kinds it knew about frozen into it.
+
         Same shape and the same reason as ``_widen_kind_check`` above: the
         constraint lives in the table, ``CREATE TABLE IF NOT EXISTS`` does not
         revisit a table that exists, and an unmigrated Core would refuse the
@@ -404,8 +411,7 @@ class MissionDeliverableAuthority:
                     playbook_version_ref TEXT NOT NULL,
                     playbook_version_hash TEXT NOT NULL,
                     kind TEXT NOT NULL CHECK(kind IN (
-                        'industry_framework','initial_screen','industry_model','company_model',
-                        'forecast_lines','investment_memo','weekly_brief','event_note'
+                        __KINDS__
                     )),
                     subject_ref TEXT NOT NULL,
                     record_json TEXT NOT NULL,
@@ -430,7 +436,7 @@ class MissionDeliverableAuthority:
                 BEFORE DELETE ON mission_deliverable_versions BEGIN
                     SELECT RAISE(ABORT, 'mission deliverables are append-only'); END;
                 COMMIT;
-                """
+                """.replace("__KINDS__", _kind_check_list())
             )
         finally:
             self.connection.execute("PRAGMA foreign_keys = ON")
@@ -485,7 +491,7 @@ class MissionDeliverableAuthority:
                 CREATE TABLE mission_deliverable_versions_v2 (
                     version_id TEXT PRIMARY KEY,
                     deliverable_ref TEXT NOT NULL,
-                    version_number INTEGER NOT NULL CHECK(version_number >= 1),
+                    version_number INTEGER NOT NULL CHECK(version_number >= 0),
                     prior_version_ref TEXT REFERENCES mission_deliverable_versions_v2(version_id),
                     mission_version_ref TEXT NOT NULL REFERENCES coverage_mission_versions(mission_version_id),
                     mission_version_hash TEXT NOT NULL,
