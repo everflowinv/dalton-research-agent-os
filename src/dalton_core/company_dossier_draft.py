@@ -60,6 +60,9 @@ from .company_dossier import (
 )
 from .driver_template import (
     MAX_TEMPLATE_GAPS,
+    cost_prompt_block,
+    cost_template_gaps,
+    section_texts,
     dossier_demand_driver_gaps,
     prompt_block,
     template_for,
@@ -207,10 +210,10 @@ def _unit_purpose(unit: str) -> str:
 
 
 #: The one section whose slots are the industry's causal chain and whose
-#: *content* W4 gives a per-classification frame.  ``supply_and_cost`` takes
-#: its structure from the same chain but the templates here are about where
-#: demand comes from, so it is deliberately not in this set.
-TEMPLATE_UNITS: frozenset[str] = frozenset({"demand_drivers"})
+#: *content* W4 gives demand its per-classification frame and W5 adds a
+#: separate cost-slot frame for ``supply_and_cost``.  They share the drafting
+#: path, while each unit receives only the registry whose subject it covers.
+TEMPLATE_UNITS: frozenset[str] = frozenset({"demand_drivers", "supply_and_cost"})
 
 
 def build_unit_prompt(
@@ -290,7 +293,8 @@ def build_unit_prompt(
         lines.append('   "refs": ["C3","N1"]}]}], "gaps": ["<what is missing>"]}')
     if unit in TEMPLATE_UNITS:
         lines += [
-            prompt_block(classification),
+            (cost_prompt_block(classification) if unit == "supply_and_cost"
+             else prompt_block(classification)),
             "",
             "That template is a checklist, not a structure. Fill the slots "
             "above; where a template slot has nothing behind it in the "
@@ -417,10 +421,13 @@ def parse_unit_output(
         # not, so when the cap bites the more specific complaint survives.
         room = max(0, MAX_DOSSIER_GAPS - len(gaps))
         if room:
-            found = dossier_demand_driver_gaps(
-                {"structure": ids, "slots": slots, "gaps": gaps},
-                classification, limit=min(room, MAX_TEMPLATE_GAPS),
-            )
+            section = {"structure": ids, "slots": slots, "gaps": gaps}
+            found = (cost_template_gaps(
+                classification, section_texts(section),
+                subject="档案 supply_and_cost", limit=min(room, MAX_TEMPLATE_GAPS))
+                     if unit == "supply_and_cost" else
+                     dossier_demand_driver_gaps(
+                         section, classification, limit=min(room, MAX_TEMPLATE_GAPS)))
             gaps = gaps + found[:room]
     try:
         if unit == CLASSIFICATION_UNIT:

@@ -61,6 +61,7 @@ from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
 REGISTRY_REF = "driver-template-registry:w4:v1"
+COST_REGISTRY_REF = "cost-driver-template-registry:w5:v1"
 
 #: The word used where a classification is absent, unknown, or was refused for
 #: want of evidence.  It is a key in the registry rather than a fallback branch
@@ -371,6 +372,99 @@ _BY_CLASSIFICATION: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     str(item["classification"]): MappingProxyType(item) for item in _TEMPLATES
 })
 
+_COST_SLOTS: Mapping[str, tuple[dict[str, Any], ...]] = MappingProxyType({
+    "commodity_cycle": (
+        _slot("raw_material_spread", "原料价差", "Which product/input spread drives realised gross cost?",
+              ("CostOfRevenue", "CostOfGoodsAndServicesSold"), ("company_figure", "market_proxy"),
+              ("raw material", "feedstock", "spread", "原料", "价差")),
+        _slot("energy_intensity", "能源强度", "How much energy is consumed per unit and at what price?",
+              ("CostOfRevenue",), ("company_figure", "market_proxy"),
+              ("energy", "power", "gas cost", "能源", "电耗")),
+        _slot("utilisation_cost", "开工率成本", "How does utilisation move fixed cost per unit?",
+              ("CostOfRevenue", "PropertyPlantAndEquipmentNet"), ("company_figure", "market_proxy"),
+              ("utilisation", "utilization", "operating rate", "开工率", "负荷率")),
+    ),
+    "capital_cycle": (
+        _slot("depreciation_curve", "折旧曲线", "How does the installed asset base depreciate through the forecast?",
+              ("DepreciationDepletionAndAmortization", "PropertyPlantAndEquipmentNet"), ("company_figure",),
+              ("depreciation", "useful life", "折旧", "使用寿命")),
+        _slot("maintenance_capex", "维护性资本开支", "What spending merely maintains current capacity?",
+              ("PaymentsToAcquirePropertyPlantAndEquipment",), ("company_figure", "own_assumption"),
+              ("maintenance capex", "sustaining capex", "维护性资本开支", "维持性资本开支")),
+    ),
+    "contract_compounder": (
+        _slot("delivery_cost", "交付成本", "What does serving and retaining contracted work cost?",
+              ("CostOfRevenue", "CostOfGoodsAndServicesSold"), ("company_figure", "own_assumption"),
+              ("delivery cost", "cost to serve", "交付成本", "履约成本")),
+        _slot("revenue_per_employee", "人均产出", "What revenue and delivery cost does each employee support?",
+              ("Revenues", "OperatingExpenses"), ("company_figure", "market_proxy"),
+              ("revenue per employee", "utilisation", "人均产出", "人效")),
+    ),
+    "structural_growth": (
+        _slot("unit_cost_curve", "单位成本曲线", "How does unit cost change as adoption scales?",
+              ("CostOfRevenue", "GrossProfit"), ("company_figure", "own_assumption"),
+              ("unit cost", "cost curve", "单位成本", "规模效应")),
+    ),
+    "turnaround": (
+        _slot("fixed_cost_removal", "固定成本剥离进度", "Which fixed costs leave, by when, and with what cash cost?",
+              ("OperatingExpenses", "RestructuringCharges"), ("company_figure", "qualitative"),
+              ("fixed cost", "cost removal", "restructuring", "固定成本", "降本", "剥离")),
+    ),
+    GENERIC: (
+        _slot("fixed_cost", "固定成本", "Which costs persist when revenue changes?",
+              ("OperatingExpenses",), ("company_figure",), ("fixed cost", "固定成本")),
+        _slot("variable_cost", "变动成本", "Which costs move with volume or revenue?",
+              ("CostOfRevenue", "CostOfGoodsAndServicesSold"), ("company_figure",),
+              ("variable cost", "cost of revenue", "变动成本", "营业成本")),
+    ),
+})
+
+COST_DRIVER_TEMPLATES: Mapping[str, Any] = MappingProxyType({
+    "schema_version": SCHEMA_VERSION, "registry_ref": COST_REGISTRY_REF,
+    "generic_classification": GENERIC,
+    "templates": [{"classification": key, "cost_slots": list(value)}
+                  for key, value in _COST_SLOTS.items()],
+})
+COST_REGISTRY_HASH = content_hash(dict(COST_DRIVER_TEMPLATES))
+
+
+def cost_slots_for(classification: Any) -> tuple[Mapping[str, Any], ...]:
+    selected = template_for(classification)["classification"]
+    return tuple(_COST_SLOTS[str(selected)])
+
+
+def cost_slot_ids(classification: Any) -> tuple[str, ...]:
+    return tuple(str(item["slot_id"]) for item in cost_slots_for(classification))
+
+
+def cost_prompt_block(classification: Any, filed_concepts: Iterable[str] = ()) -> str:
+    filed = {_local_name(item): str(item) for item in filed_concepts}
+    selected = template_for(classification)
+    lines = [f"COST DRIVER TEMPLATE ({selected['classification']}):",
+             "Bind each proposed expense line to one cost slot, or use null and explain why it is company-specific.",
+             "<cost slot id>\t<question>\t<filed concepts, or none>\t<evidence kinds>"]
+    for slot in cost_slots_for(classification):
+        matched = [filed[_local_name(name)] for name in slot["basis_concepts"]
+                   if _local_name(name) in filed]
+        lines.append(f"{slot['slot_id']}\t{slot['question']}\t"
+                     f"{', '.join(matched) or 'none filed'}\t"
+                     f"{', '.join(slot['evidence_kinds'])}")
+    return "\n".join(lines)
+
+
+def cost_template_gaps(classification: Any, texts: Iterable[Any], *, subject: str,
+                       limit: int = MAX_TEMPLATE_GAPS) -> list[str]:
+    folded = [_fold(item) for item in texts]
+    gaps = []
+    for slot in cost_slots_for(classification):
+        if any(cue in text for cue in slot["cues"] for text in folded):
+            continue
+        gaps.append(f"{subject} 未覆盖成本模板的「{slot['label']}」（{slot['slot_id']}）："
+                    f"{slot['question']} 期望证据种类：{', '.join(slot['evidence_kinds'])}。")
+        if len(gaps) >= limit:
+            break
+    return gaps
+
 #: Every classification the dossier may record that has no template of its own.
 #: ``insufficient_evidence`` is deliberately in here rather than given an empty
 #: template: "the evidence does not say what kind of company this is" is not a
@@ -669,6 +763,9 @@ def spec_gaps(
 
 
 __all__ = [
+    "COST_DRIVER_TEMPLATES",
+    "COST_REGISTRY_HASH",
+    "COST_REGISTRY_REF",
     "DRIVER_TEMPLATES",
     "DriverTemplateError",
     "GENERIC",
@@ -679,6 +776,10 @@ __all__ = [
     "SCHEMA_VERSION",
     "basis_concept_plan",
     "covered_slots",
+    "cost_prompt_block",
+    "cost_slot_ids",
+    "cost_slots_for",
+    "cost_template_gaps",
     "debate_map_gaps",
     "debate_texts",
     "dossier_demand_driver_gaps",

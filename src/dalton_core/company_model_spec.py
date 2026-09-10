@@ -49,6 +49,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .driver_template import (
+    COST_REGISTRY_HASH, COST_REGISTRY_REF, cost_prompt_block, cost_slot_ids,
     REGISTRY_HASH as TEMPLATE_REGISTRY_HASH,
     REGISTRY_REF as TEMPLATE_REGISTRY_REF,
     prompt_block,
@@ -176,6 +177,9 @@ OUTPUT_SCHEMA = {
                         ),
                     },
                     "because": _BECAUSE,
+                    "cost_driver_slot": {"type": ["string", "null"]},
+                    "cost_driver_unbound_reason": {"type": "string", "minLength": 1,
+                                                   "maxLength": 400},
                 },
                 ("ref", "label", "basis_concept", "behaviour", "driver_ref", "because"),
             ),
@@ -245,6 +249,9 @@ TASK_HASH = content_hash({
     # the generic one would be recorded as answers to the same question.
     "driver_template_registry": {
         "ref": TEMPLATE_REGISTRY_REF, "hash": TEMPLATE_REGISTRY_HASH,
+    },
+    "cost_driver_template_registry": {
+        "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
 })
 
@@ -340,6 +347,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "industry.\n"
         "* Return JSON matching OUTPUT_SCHEMA and nothing else.\n\n"
         f"{template}\n\n"
+        f"{cost_prompt_block(state.get('industry_classification'), state.get('concepts') or ())}\n\n"
         f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"
         f"COMPANY:\n{json.dumps(company, ensure_ascii=False, sort_keys=True)}\n\n"
         "MARKET PROXIES (never company actuals; preserve each proxy_gap when "
@@ -477,7 +485,7 @@ def spec_from_response(
                 raise CompanyModelSpecError(
                     f"expense_lines[{index}].driver_ref {driver_ref!r} names no revenue driver"
                 )
-        expenses.append({
+        expense = {
             "ref": _ref(item.get("ref"), f"expense_lines[{index}].ref", expense_refs),
             "label": _text(item.get("label"), f"expense_lines[{index}].label", limit=120),
             "basis_concept": _basis(
@@ -488,7 +496,29 @@ def spec_from_response(
             "driver_ref": driver_ref,
             "because": _text(item.get("because"), f"expense_lines[{index}].because",
                              limit=400),
-        })
+        }
+        if "cost_driver_slot" in item:
+            slot = item.get("cost_driver_slot")
+            reason = item.get("cost_driver_unbound_reason")
+            if slot is None:
+                expense["cost_driver_slot"] = None
+                expense["cost_driver_unbound_reason"] = _text(
+                    reason, f"expense_lines[{index}].cost_driver_unbound_reason", limit=400)
+            else:
+                slot = _text(slot, f"expense_lines[{index}].cost_driver_slot", limit=60)
+                if slot not in cost_slot_ids(state.get("industry_classification")):
+                    raise CompanyModelSpecError(
+                        f"expense_lines[{index}].cost_driver_slot {slot!r} is not in "
+                        "this classification's cost template")
+                if reason is not None:
+                    raise CompanyModelSpecError(
+                        f"expense_lines[{index}] binds a cost slot and cannot carry "
+                        "cost_driver_unbound_reason")
+                expense["cost_driver_slot"] = slot
+        elif "cost_driver_unbound_reason" in item:
+            raise CompanyModelSpecError(
+                f"expense_lines[{index}].cost_driver_unbound_reason requires cost_driver_slot")
+        expenses.append(expense)
 
     raw_statements = body.get("forecast_statements")
     if not isinstance(raw_statements, list):

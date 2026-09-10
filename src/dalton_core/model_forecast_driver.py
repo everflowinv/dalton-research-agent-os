@@ -451,6 +451,8 @@ def build_drivers(table: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "note": "the specification names no filed counterpart for this line",
                 "history": [],
             }
+            if row.get("cost_driver_slot"):
+                drivers[ref]["cost_driver_slots"] = [str(row["cost_driver_slot"])]
             order.append(ref)
             continue
         concept = str(concept)
@@ -477,13 +479,19 @@ def build_drivers(table: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "status": str(line.get("status") or NOT_FOUND),
                 "role": role,
                 "spec_rows": [], "note": None, "history": cells,
+                "_cost_driver_slots": [],
             }
             drivers[ref] = entry
             order.append(ref)
         entry["spec_rows"].append(str(row["ref"]))
+        if row.get("cost_driver_slot"):
+            entry["_cost_driver_slots"].append(str(row["cost_driver_slot"]))
     for ref in order:
         entry = drivers[ref]
         entry["spec_rows"] = sorted(set(entry["spec_rows"]))
+        cost_slots = sorted(set(entry.pop("_cost_driver_slots", [])))
+        if cost_slots:
+            entry["cost_driver_slots"] = cost_slots
         if entry["concept"] is None:
             continue
         if entry["status"] == FILED and len(entry["spec_rows"]) > 1:

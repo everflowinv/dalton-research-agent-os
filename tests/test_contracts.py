@@ -60,6 +60,7 @@ class ContractTests(unittest.TestCase):
                     # identity is its content hash and the file it is published
                     # in, which the registry test checks against the constants.
                     "DriverTemplateRegistry",
+                    "CostDriverTemplateRegistry",
                 }:
                     # Model-owned output is bound by its WorkOrder and target
                     # assessment; authority adds id/created_at only after validation.

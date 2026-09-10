@@ -65,12 +65,20 @@ def _rows_of(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
             "because": item.get("because"),
         })
     for item in spec.get("expense_lines") or []:
-        rows.append({
+        row = {
             "kind": "expense_line", "ref": item["ref"], "label": item["label"],
             "basis_concept": item.get("basis_concept"),
             "behaviour": item.get("behaviour"), "driver_ref": item.get("driver_ref"),
             "because": item.get("because"),
-        })
+        }
+        # These W5 fields are additive.  Do not synthesize null keys into a
+        # legacy specification: its derived record remains byte-for-byte the
+        # same until an analyst explicitly classifies the expense line.
+        if "cost_driver_slot" in item:
+            row["cost_driver_slot"] = item["cost_driver_slot"]
+        if "cost_driver_unbound_reason" in item:
+            row["cost_driver_unbound_reason"] = item["cost_driver_unbound_reason"]
+        rows.append(row)
     return rows
 
 

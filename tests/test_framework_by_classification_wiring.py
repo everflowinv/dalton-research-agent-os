@@ -128,7 +128,8 @@ def reply(gaps):
 
 class DossierTemplateTests(unittest.TestCase):
     def test_demand_drivers_is_the_section_the_template_frames(self):
-        self.assertEqual(TEMPLATE_UNITS, frozenset({"demand_drivers"}))
+        self.assertEqual(TEMPLATE_UNITS,
+                         frozenset({"demand_drivers", "supply_and_cost"}))
 
     def test_the_prompt_shows_the_template_as_a_checklist(self):
         prompt = build_unit_prompt(
@@ -152,12 +153,14 @@ class DossierTemplateTests(unittest.TestCase):
         self.assertEqual(re.findall(r"^  (\S+)\t", prompt, flags=re.MULTILINE),
                          ["causal_chain:0"])
 
-    def test_another_section_gets_no_template(self):
+    def test_supply_section_gets_the_separate_cost_template(self):
         prompt = build_unit_prompt(
             unit="supply_and_cost", structure=STRUCTURE, material=MATERIAL,
             company={"company_ref": "company:x", "ticker": "WH"},
             classification="commodity_cycle")
-        self.assertNotIn("DRIVER TEMPLATE", prompt)
+        self.assertIn("COST DRIVER TEMPLATE (commodity_cycle)", prompt)
+        self.assertIn("raw_material_spread", prompt)
+        self.assertNotIn("cost_curve_position", prompt)
 
     def test_an_uncovered_template_slot_becomes_a_gap_not_a_refusal(self):
         block = parse_unit_output(
