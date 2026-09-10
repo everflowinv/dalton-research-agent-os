@@ -1,0 +1,368 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:ir-page-watch",
+  "content_hash": "39352c0f29ea9892124b5f955ab10be65d2dc114b31993d02613e7ea93994e7c",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "53361b152eb72f8e40c9dd6ae834a2874ebc23ba5ee111314f7c1f0bc11aa426",
+  "fixture_manifest_ref": "connector-fixture-manifest:ir-page-watch:0.1",
+  "id": "connector-profile-template:ir-page-watch:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "4217a8204b6f056d9d0f83238d9cb511b6a4a6552318877bb70eca0eaacef037",
+      "input_schema_ref": "schema:connector-inventory:ir-page-watch:list_watches:input:0.1",
+      "operation": "list_watches",
+      "output_schema_hash": "6268dc1e510d2ea2e54e70738d66e8560b58e94af674acc05282af891fc95610",
+      "output_schema_ref": "schema:connector-inventory:ir-page-watch:list_watches:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_watches"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "9cf1316852c826e4dbeea43bee8b74e6eca1a84e731dff282412050795719890",
+      "input_schema_ref": "schema:connector-inventory:ir-page-watch:get_watch_diff:input:0.1",
+      "operation": "get_watch_diff",
+      "output_schema_hash": "a1cc98b04fe85ff485b65a9c4611a356b5e3fd2f35cb700d4a2c3cb0ace8e028",
+      "output_schema_ref": "schema:connector-inventory:ir-page-watch:get_watch_diff:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_watch_diff"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:changedetection-io"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:changedetection-create-watch",
+      "route:changedetection-fetch-now"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "since": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "4217a8204b6f056d9d0f83238d9cb511b6a4a6552318877bb70eca0eaacef037",
+      "schema_ref": "schema:connector-inventory:ir-page-watch:list_watches:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "undeclared_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "watches": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "company_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "declared": {
+                  "type": "boolean"
+                },
+                "host": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "last_changed": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "last_checked": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "paused": {
+                  "type": "boolean"
+                },
+                "snapshot_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "watch_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "watch_id",
+                "url",
+                "host",
+                "title",
+                "last_checked",
+                "last_changed",
+                "snapshot_count",
+                "paused",
+                "declared",
+                "company_ref"
+              ],
+              "type": "object"
+            },
+            "maxItems": 500,
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "since",
+          "watches",
+          "undeclared_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status",
+          "content_hash"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "6268dc1e510d2ea2e54e70738d66e8560b58e94af674acc05282af891fc95610",
+      "schema_ref": "schema:connector-inventory:ir-page-watch:list_watches:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "watch_id": {
+            "pattern": "^[0-9a-zA-Z._:-]{1,128}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "watch_id"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "9cf1316852c826e4dbeea43bee8b74e6eca1a84e731dff282412050795719890",
+      "schema_ref": "schema:connector-inventory:ir-page-watch:get_watch_diff:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "added_line_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "company_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "current_snapshot_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "diff_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "excerpt": {
+            "maxLength": 600,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_snapshot_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_snapshot_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "removed_line_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "watch_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "watch_id",
+          "url",
+          "host",
+          "company_ref",
+          "title",
+          "changed_at",
+          "previous_snapshot_at",
+          "diff_hash",
+          "previous_snapshot_hash",
+          "current_snapshot_hash",
+          "added_line_count",
+          "removed_line_count",
+          "excerpt",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status",
+          "content_hash"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "a1cc98b04fe85ff485b65a9c4611a356b5e3fd2f35cb700d4a2c3cb0ace8e028",
+      "schema_ref": "schema:connector-inventory:ir-page-watch:get_watch_diff:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:ir-page-watch",
+    "source_type": "public_web",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "688da4e5a1faeb8b265f5a6538a9ab2db1d91e121195d38cf779bf0022c66737",
+    "target_ref": "host-tool:changedetection-io"
+  }
+}

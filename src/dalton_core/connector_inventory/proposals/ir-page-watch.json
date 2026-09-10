@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:ir-page-watch:0.1",
+  "adapter_source_hash": "4ae5909a91a71e1e9a1546d65a7f0f22357737f765e03e0936fbe5eeebccfd82",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:ir-page-watch:0.1",
+  "connector_ref": "connector:ir-page-watch",
+  "content_hash": "7bf64938105965062772b2ab76aa07adff5c290e41b334933e99b333317b3a1b",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "53361b152eb72f8e40c9dd6ae834a2874ebc23ba5ee111314f7c1f0bc11aa426",
+  "fixture_manifest_ref": "connector-fixture-manifest:ir-page-watch:0.1",
+  "id": "connector-proposal-manifest:ir-page-watch:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "4217a8204b6f056d9d0f83238d9cb511b6a4a6552318877bb70eca0eaacef037",
+      "input_schema_ref": "schema:connector-inventory:ir-page-watch:list_watches:input:0.1",
+      "operation": "list_watches",
+      "output_schema_hash": "6268dc1e510d2ea2e54e70738d66e8560b58e94af674acc05282af891fc95610",
+      "output_schema_ref": "schema:connector-inventory:ir-page-watch:list_watches:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "9cf1316852c826e4dbeea43bee8b74e6eca1a84e731dff282412050795719890",
+      "input_schema_ref": "schema:connector-inventory:ir-page-watch:get_watch_diff:input:0.1",
+      "operation": "get_watch_diff",
+      "output_schema_hash": "a1cc98b04fe85ff485b65a9c4611a356b5e3fd2f35cb700d4a2c3cb0ace8e028",
+      "output_schema_ref": "schema:connector-inventory:ir-page-watch:get_watch_diff:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "39352c0f29ea9892124b5f955ab10be65d2dc114b31993d02613e7ea93994e7c",
+  "profile_template_ref": "connector-profile-template:ir-page-watch:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:changedetection-io",
+    "adapter_version": "inventory-0.1",
+    "source": "source:ir-page-watch",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "688da4e5a1faeb8b265f5a6538a9ab2db1d91e121195d38cf779bf0022c66737",
+  "transport_target_ref": "host-tool:changedetection-io"
+}

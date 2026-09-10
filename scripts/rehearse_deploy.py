@@ -341,6 +341,36 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/connector-governance/yfinance-analyst-estimates-v1.json",
         "connector-governance/yfinance-analyst-estimates-v1.json",
     ),
+    # S5: the four ownership records go down together -- the lane's argument is
+    # the governance directory and the launcher asks it which operations it may
+    # run, so three of four is a lane that reports one operation unapproved for
+    # ever.  The two watcher records turn nothing on by themselves: the
+    # watcher's switch is the declared-pages file, which install.sh does not
+    # write because the ten URLs need a human to confirm them first.
+    SeedSpec(
+        "deploy/connector-governance/sec-form4-transactions-v1.json",
+        "connector-governance/sec-form4-transactions-v1.json",
+    ),
+    SeedSpec(
+        "deploy/connector-governance/sec-beneficial-ownership-v1.json",
+        "connector-governance/sec-beneficial-ownership-v1.json",
+    ),
+    SeedSpec(
+        "deploy/connector-governance/sec-form144-notices-v1.json",
+        "connector-governance/sec-form144-notices-v1.json",
+    ),
+    SeedSpec(
+        "deploy/connector-governance/sec-form13f-holdings-v1.json",
+        "connector-governance/sec-form13f-holdings-v1.json",
+    ),
+    SeedSpec(
+        "deploy/connector-governance/ir-page-watch-list-watches-v1.json",
+        "connector-governance/ir-page-watch-list-watches-v1.json",
+    ),
+    SeedSpec(
+        "deploy/connector-governance/ir-page-watch-get-diff-v1.json",
+        "connector-governance/ir-page-watch-get-diff-v1.json",
+    ),
     SeedSpec(
         "deploy/connector-governance/alphaengine-search-library-v1.json",
         "connector-governance/alphaengine-search-library-v1.json",
@@ -796,6 +826,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),
+    MigrationSpec("deep_insight_gate_schema.sql", "dalton_core.deep_insight_gate", "DeepInsightGateAuthority", "core"),
     MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
     MigrationSpec("event_judgement_schema.sql", "dalton_core.event_judgement", "EventJudgementAuthority", "core"),
     MigrationSpec("forecast_driver_schema.sql", "dalton_core.model_forecast_driver", "ForecastModelAuthority", "core"),

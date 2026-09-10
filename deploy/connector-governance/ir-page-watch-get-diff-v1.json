@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": false,
+    "risk_class": "low",
+    "side_effects": [
+      "read:host-tool-loopback"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:ir-page-watch-get-diff:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:ir-page-watch-get-diff:v1",
+  "capability_id": "capability:dalton:connector:ir-page-watch-get-diff",
+  "content_hash": "c1a626985b12e2fde18eb0b2feb2b88cdc186ab28364826220a0bad12882ee70",
+  "decision_ref": "capability-decision:connector-governance:ir-page-watch-get-diff:v1",
+  "effective_from": "2026-08-26T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "772620b4a1c6d13395a6953a696bf9c69eda728b15fcf6686f65f2af4e1b5656",
+  "expected_source_hash": "9e226991acc0ec84cd3f4c00f066ae55b2c79de5436f32288e231b216b89c438",
+  "id": "connector-governance:ir-page-watch-get-diff:v1",
+  "max_lease_seconds": 120,
+  "policy_ref": "policy:dalton:connector-governance:ir-page-watch-get-diff:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:ir-page-watch-get-diff@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

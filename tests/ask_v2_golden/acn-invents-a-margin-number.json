@@ -1,0 +1,60 @@
+{
+ "case_ref": "acn-invents-a-margin-number",
+ "expected": {
+  "cited_tags": [
+   "C1"
+  ],
+  "confidence": "high",
+  "quality": {
+   "cites_only_shown_claims": "pass",
+   "confidence_stated": "pass",
+   "numbers_without_refs": "fail"
+  },
+  "question_kind": "fact",
+  "rationale": "16.8% 没有任何来源承载；high 的信心让它更糟，但信心本身在词表里，所以那一条仍然 pass。",
+  "refused": false,
+  "verification": {
+   "cites_only_shown_rows": "pass",
+   "confidence_in_vocabulary": "pass",
+   "market_vs_us_present": "skipped",
+   "numeric_sentences_cite": "fail",
+   "refresh_names_a_capable_source": "skipped",
+   "refusal_states_why": "pass",
+   "unknowns_typed": "pass"
+  },
+  "wants_market_vs_us": false
+ },
+ "note": "反例：一个看起来完全合理的数字，被引的行里并不存在。两层都要抓到它——本模块的 numeric_sentences_cite 抓「带数字却不引用」，Q1 的 numbers_without_refs 抓「引用了但数字对不上」。",
+ "question": "ACN 上季度的经营利润率是多少？",
+ "reply": {
+  "confidence": "high",
+  "market_vs_us": null,
+  "refresh_suggested": null,
+  "refusal_detail": null,
+  "refusal_reason": null,
+  "refused": false,
+  "sentences": [
+   {
+    "refs": [
+     "C1"
+    ],
+    "text": "上季度收入是 187.18 亿美元，同比增长 5.59%。"
+   },
+   {
+    "refs": [],
+    "text": "经营利润率大约 16.8%。"
+   }
+  ],
+  "unknowns": []
+ },
+ "shown": [
+  {
+   "block": "claims",
+   "period": "2026-03-01..2026-05-31",
+   "ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+   "statement": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
+   "tag": "C1"
+  }
+ ],
+ "source": "同一批 ACN Claim；答案里的 16.8% 是刻意加进去的，账本里没有这个数。"
+}
