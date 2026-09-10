@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterator
 
 from .cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
 from .claim_retirement import REASON_LABELS as CLAIM_REASON_LABELS
+from .coverage_mission import STAGE_REOPENED
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory, retired_claim_refs
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .store import content_hash
@@ -1768,14 +1769,35 @@ class CockpitPlane:
         # the active version, the whole page reset itself on every publish --
         # live, v7..v13 each hold their own copy of the same five ``entered``
         # rows, and only v13 holds the four ``gate_passed``.
+        #
+        # P14d sequel: the reopen markers fold in beside the records, in one
+        # time order. Without them a company whose passed screen a person has
+        # re-opened would read "已通过" on this page while the lane was
+        # drafting its replacement -- the one state the page exists to show.
         state: dict[str, dict[str, list[str]]] = {}
-        for row in self._rows(core,
-            "SELECT company_ref, stage_ref, status FROM coverage_mission_stage_records "
-            "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
-            "coverage_mission_versions WHERE mission_ref=?) ORDER BY created_at, record_id",
-            (mission["mission_ref"],),
-        ):
-            state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(row["status"])
+        ordered = [
+            (row["created_at"], row["record_id"], row["company_ref"], row["stage_ref"],
+             row["status"])
+            for row in self._rows(core,
+                "SELECT company_ref, stage_ref, status, created_at, record_id "
+                "FROM coverage_mission_stage_records "
+                "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
+                "coverage_mission_versions WHERE mission_ref=?)",
+                (mission["mission_ref"],),
+            )
+        ] + [
+            (row["created_at"], row["record_id"], row["company_ref"], row["stage_ref"],
+             STAGE_REOPENED)
+            for row in self._rows(core,
+                "SELECT company_ref, stage_ref, created_at, record_id "
+                "FROM coverage_mission_stage_reopens "
+                "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
+                "coverage_mission_versions WHERE mission_ref=?)",
+                (mission["mission_ref"],),
+            )
+        ]
+        for _at, _id, company_ref, stage_ref, status in sorted(ordered):
+            state.setdefault(company_ref, {}).setdefault(stage_ref, []).append(status)
         specs = planned_spec_refs_from_directory(self.config.state_dir / "discovery-plans")
         return evaluate_mission(core, mission, planned_specs=specs, stage_state=state)
 
