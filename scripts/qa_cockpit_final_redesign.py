@@ -51,7 +51,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/v1/cockpit/overview"):
             self._send(json.dumps(OVERVIEW).encode(), "application/json")
         elif self.path.startswith("/v1/cockpit/research"):
-            self._send(json.dumps({"company_ref": "company:CTSH", "industry_ref": "industry:it-services", "products": [{"kind": "dossier", "label": "公司档案", "status": "available", "version_ref": "dossier:v3", "content_hash": "a" * 64, "created_at": OVERVIEW["as_of"], "sections": [{"title": "业务与客户", "body": "收入来自数字工程与运营服务。", "sources": ["claim:v8"], "gaps": []}], "gaps": []}, {"kind": "investment_memo", "label": "投资备忘录", "status": "missing", "sections": [], "gaps": ["等待公司模型通过出口门"]}]}).encode(), "application/json")
+            self._send(json.dumps({"company_ref": "company:CTSH", "industry_ref": "industry:it-services", "products": [{"kind": "dossier", "label": "公司档案", "status": "available", "version_ref": "dossier:v3", "content_hash": "a" * 64, "created_at": OVERVIEW["as_of"], "sections": [{"title": "业务与客户", "body": "收入来自数字工程与运营服务。", "sources": [{"kind": "claim", "ref": "claim:v8", "text": "公司披露"}], "gaps": []}], "gaps": []}, {"kind": "investment_memo", "label": "投资备忘录", "status": "missing", "reason": "等待公司模型通过出口门", "sections": [], "gaps": ["等待公司模型通过出口门"]}]}).encode(), "application/json")
         elif self.path.startswith("/v1/cockpit/log"):
             self._send(json.dumps({"events": [], "as_of": OVERVIEW["as_of"], "service_state": "running", "last_tick_at": OVERVIEW["as_of"]}).encode(), "application/json")
         elif self.path.startswith("/v1/cockpit/approvals"):

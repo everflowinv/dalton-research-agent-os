@@ -23,3 +23,9 @@ Screenshots:
 - `output/playwright/cockpit-final/mobile.png`
 
 The QA fixture contains representative synthetic content and performs no mutation, model call, signing, or external request. Backend integration of the research-product endpoint is delivered separately; this frontend fails visibly if that endpoint is unavailable.
+
+## Follow-up acceptance fixes
+
+The final pass moved the journey matrix directly below the mission, restored scale and source-grade rendering for financial figures, and normalized all retained legacy surfaces to the light palette. Every navigation item is now a native button. All readers share dialog setup and close behavior, trap Tab focus, and return focus on Escape.
+
+A browser assertion waited for the research endpoint and confirmed the product body, structured `kind/ref/text` source (`claim · claim:v8 · 公司披露`), and explicit missing reason were rendered, with no `[object Object]` leak. A browser-rendered 12-question Memo fixture confirmed all 12 questions, unknown state, falsifier, formal evidence, group checks, gaps, and bindings were visible. The final desktop screenshot starts at scroll position zero with the journey matrix in the first viewport. The final mobile check reports document width 390 for a 390 viewport and the matrix begins at 656 px.
