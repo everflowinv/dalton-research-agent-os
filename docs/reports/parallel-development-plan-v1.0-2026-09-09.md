@@ -220,6 +220,8 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
    `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
 10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
 11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
+12. **自动化冲突解决只允许用于「两边各追加一行」的字典 / 列表 / 元组条目**，且解决后必须先 `python -c "import <module>"`
+    再提交（09-10 一次「两边都保留」把嵌套字面量的闭合括号吃掉，主线无法解析，被 P13-M3 agent 发现）。
 
 ## 5. 主 agent 的集成流程
 
@@ -260,6 +262,10 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 早 | 合并 P15d ConvictionCall（自动化只提案、人裁决；与市场同向不提案；inf/nan 拒绝；提案版本链与 `supersedes_ref`）。在修：P12d、S5、ask v2；在做：stage-ladder、P12e、consensus、P14f、planner 日账本 | 进行中 |
 | 09-10 早 | 第二次用量上限打断 8 个 agent，全部从上下文恢复。规则：每个新 `*_schema.sql` 须同时登记 `bootstrap.py` 与演练迁移清单（测试强制）。P12d 修完合入（在跑全量）；stage-ladder 完成（阶段状态跨 mission 版本折叠；CTSH 折叠为 v9 `gate_failed`）待合；派出既有资料入职（`prior-research`）与重开账本续篇（reopen 后可再次 `gate_passed`） | 进行中 |
 | 09-10 早 | 合并 P12d（4,486 项通过，已 push）；合入 stage-ladder、S5（SEC 所有权 op：13F 读真正的信息表、联名 Form 4 不丢人）、ask v2（补搜只取本次 discovery 的文档；policy 投影复用 authority；adhoc 路由的旧禁令按 owner 解禁去掉）。P14f 在审 | 进行中 |
+| 09-10 上午 | S5 与 ask v2 合入，main `77ffe45`，4,704 项通过，已 push。consensus review：四 blocker（10-K 后年度期映射死区；新旧目标价取错；lane 喂空券商元数据；lane 序号撞 S5），已发回并定案；P14f 三 blocker 在修；planner 日账本在审 | 进行中 |
+| 09-10 上午 | P14f 业绩季合入（4,810 项通过，已 push）。合并时自动解决吃掉一个闭合括号，主线一度无法解析，未 push，10 分钟修复，写成规则 12。reopen-ledger（重开成为阶段账本记录；修了 authority 授权标志按实例而非按连接的地雷）与 P12e 在审；planner 日账本、consensus 在修；P13-M3、prior-research 在做 | 进行中 |
+| 09-10 中午 | reopen-ledger 合入（4,835 项通过，已 push）。合入 planner 日账本（planner 调用进日账本与四池，四处可观测性修复）与 consensus（财年末从「从不交 10-Q 的季度」推导；页首抽取 15 个目标价；两家独立券商规则）。在审：P12e、P13-M3、prior-research；后续：authority 授权标志统一 | 进行中 |
+| 09-10 中午 | planner 日账本合入（4,876 项通过，已 push）；consensus 合入中。P13-M3 review 一 blocker（bridge 单券商可冒充共识）已发回；P12e、prior-research 在修 | 进行中 |
 
 ---
 

@@ -41,6 +41,29 @@ SCHEMA_VERSION = "0.1"
 
 FILED = "company-filed-document"
 SPOKEN = "earnings-call-transcript"
+# P11b: a third grade, for a figure that is *not about the company at all*.
+#
+# A broker's price target or forward EPS estimate is that broker's statement.
+# It is worth recording -- knowing what the street expects is half of knowing
+# whether a thesis is differentiated -- and it is not a fact about the company
+# under any reading.  So it gets a grade, and the grade is what keeps it out of
+# every path the other two are admitted through: ``FIGURE_ADMISSIBLE_GRADES``
+# in ``research_verification`` is filed-only, so a broker figure can never
+# become a quantitative Claim, and the promotion path in ``claim_index_figures``
+# refuses it by name with the reason attached.
+#
+# It is deliberately absent from ``GRADE_BY_SPEC`` and from ``GRADES``. Adding
+# ``sell-side-reports`` to the first would make ``figure_worthy`` true for
+# broker notes and turn the ordinary numeric pass loose on them, which is the
+# exact failure the module docstring above exists to prevent -- "we model
+# revenue of $17.9bn" passes a digit check perfectly and is not the company's
+# revenue.  Adding it to the second would let ``record_document_figures``
+# accept it into ``coverage_mission_document_figures``, whose ``source_grade``
+# CHECK constraint names only the two grades above; the insert would fail at
+# the database with an opaque constraint error.  Street estimates are stored by
+# ``street_estimate`` in their own append-only table instead, which is also
+# where the broker, the rating and the horizon can live.
+BROKER_RESEARCH = "broker-research-report"
 
 # The document kinds a figure may be taken from, and what taking one means.
 # Anything absent is not read for figures; see the module docstring for why
@@ -59,6 +82,7 @@ GRADE_BY_SPEC: Mapping[str, str] = {
 BASIS_BY_GRADE: Mapping[str, str] = {
     FILED: "company-filed-document",
     SPOKEN: "earnings-call-transcript-spoken",
+    BROKER_RESEARCH: "broker-research-report-estimate",
 }
 
 # The sentence a claim adds about itself. Short, because it is appended to a
@@ -67,9 +91,18 @@ QUALIFIER_BY_GRADE: Mapping[str, str] = {
     FILED: "as published by the company in this document",
     SPOKEN: "as spoken on the earnings call and recorded in this transcript; "
             "not read from a filed statement",
+    BROKER_RESEARCH: "as stated by this broker in its own research note; it is "
+                     "that broker's estimate of the company, not a figure the "
+                     "company published or management spoke",
 }
 
+# The grades a *mission document figure* may be recorded under. Unchanged by
+# P11b on purpose: see BROKER_RESEARCH above for why the third grade is not a
+# member of this tuple.
 GRADES: tuple[str, ...] = (FILED, SPOKEN)
+# Every grade this module can describe -- the two above plus the broker note.
+# What ``basis_for`` and ``qualify`` accept.
+ALL_GRADES: tuple[str, ...] = (FILED, SPOKEN, BROKER_RESEARCH)
 
 # P12h: whether the document is *known to be about the company* it was filed
 # under, and how.
@@ -176,8 +209,10 @@ def qualify(statement: str, grade: str) -> str:
 
 
 __all__ = [
+    "ALL_GRADES",
     "ATTRIBUTED_BY_SPEC",
     "BASIS_BY_GRADE",
+    "BROKER_RESEARCH",
     "FILED",
     "GRADES",
     "GRADE_BY_SPEC",

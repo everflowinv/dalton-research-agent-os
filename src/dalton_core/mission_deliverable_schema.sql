@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS mission_deliverable_versions (
     kind TEXT NOT NULL CHECK(kind IN (
         'industry_framework','initial_screen','industry_model','company_model',
         'forecast_lines','investment_memo','weekly_brief','event_note',
-        'deep_insight_gate'
+        'deep_insight_gate','earnings_preview','earnings_calibration'
     )),
     subject_ref TEXT NOT NULL,
     record_json TEXT NOT NULL,

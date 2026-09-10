@@ -143,6 +143,26 @@ def bounded_counts(result: Mapping[str, Any]) -> dict[str, Any]:
     return counts
 
 
+def _apply_planner_budget_migration(connection: sqlite3.Connection) -> None:
+    """Add C2b's ``planner_budget_json`` column to a ledger that predates it.
+
+    Additive, nullable and idempotent, exactly like C2's own pool migration:
+    ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already exists,
+    so a running installation would otherwise keep a ledger with no room for
+    the column and every append would fail.  Nothing already written changes,
+    and no ``content_hash`` moves -- old rows simply have no answer, which is
+    the truth about them.
+    """
+
+    existing = {
+        row["name"] for row in
+        connection.execute("PRAGMA table_info(tick_ledger_ticks)").fetchall()
+    }
+    if existing and "planner_budget_json" not in existing:
+        connection.execute(
+            "ALTER TABLE tick_ledger_ticks ADD COLUMN planner_budget_json TEXT")
+
+
 def _window(window: Any, *, now: datetime | None = None) -> tuple[str, str]:
     """Normalise a window to ``(since_day, until_day)``, clamped to retention.
 
@@ -196,6 +216,7 @@ class TickLedger:
         self.connection.row_factory = sqlite3.Row
         if not read_only:
             self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+            _apply_planner_budget_migration(self.connection)
             # Deliberately not WAL. A database that has ever been in WAL mode
             # keeps that in its header, and ``connect_read_only`` refuses one
             # whose -wal and -shm sidecars are absent -- which is exactly the
@@ -282,6 +303,9 @@ class TickLedger:
         tick_idle = bool(lane_rows) and idle_lanes == len(lane_rows)
         executed = summary.get("executed") or []
         skipped = summary.get("skipped") or []
+        planner_budget = summary.get("planner_budget")
+        if not isinstance(planner_budget, Mapping):
+            planner_budget = None
         row = {
             "tick_id": tick_id, "day": day, "started_at": started_text,
             "ended_at": ended_text, "status": str(summary.get("status") or ""),
@@ -292,6 +316,12 @@ class TickLedger:
             "lane_count": len(lane_rows), "idle": int(tick_idle),
             "pool_spend_json": canonical_json(delta),
             "pool_cumulative_json": canonical_json(cumulative),
+            # C2b: consumed from the summary rather than recomputed, because
+            # only the driver saw the per-loop answers. Absent (an older
+            # driver) stays NULL: no answer is not the same as no holds.
+            "planner_budget_json": (
+                canonical_json(planner_budget) if planner_budget is not None
+                else None),
         }
         row["content_hash"] = content_hash(row)
         self.connection.execute("BEGIN IMMEDIATE")
@@ -304,14 +334,16 @@ class TickLedger:
                     "INSERT INTO tick_ledger_ticks(tick_id,day,started_at,ended_at,"
                     "status,active_loop_count,probes_executed,executed_count,"
                     "skipped_count,lane_count,idle,pool_spend_json,"
-                    "pool_cumulative_json,content_hash,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "pool_cumulative_json,planner_budget_json,content_hash,"
+                    "created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         row["tick_id"], row["day"], row["started_at"],
                         row["ended_at"], row["status"], row["active_loop_count"],
                         row["probes_executed"], row["executed_count"],
                         row["skipped_count"], row["lane_count"], row["idle"],
                         row["pool_spend_json"], row["pool_cumulative_json"],
+                        row["planner_budget_json"],
                         row["content_hash"], _utc(self.clock()),
                     ),
                 )

@@ -16,13 +16,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .bounded_probe_executor import (
     WORKER_REF,
     BoundedProbeExecutionError,
     execute_probe_work_order,
 )
+from .budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
 from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
 from .public_http_transport import PublicHttpTransport
 from .scheduler import Scheduler
@@ -222,7 +223,39 @@ class BoundedPlannerDriverConfig:
 _RESERVED_SUMMARY_KEYS: frozenset[str] = frozenset({
     "status", "active_loop_count", "probes_executed", "executed", "skipped",
     "mission_sec_dispatch", "forecast_reconciliation", "tick_ledger",
+    # C2b: what the mission day ledger did with this tick's Tier-1 planner
+    # calls -- whether they reached it at all, and how many loops it held.
+    "planner_budget",
 })
+
+
+def _planner_budget_summary(
+    holds: Sequence[str], words: set[str],
+) -> dict[str, Any]:
+    """What the day ledger did with this tick's Tier-1 planner calls.
+
+    Two facts, and both of them used to be unanswerable once the next tick
+    overwrote the heartbeat.  ``pool_holds`` is how many loops were held
+    because their pool was spent -- the number that tells the owner the 25%
+    boundary is doing something rather than merely existing.  ``status`` is
+    whether those calls reached the mission day ledger at all: ``unbudgeted``
+    is an install that has not re-run the planner setup, and it must be
+    visible as a standing condition rather than discovered a month later.
+
+    ``mixed`` is possible and is not a bug: the writer decides per call, so a
+    tick spanning a restart can legitimately see both words.
+    """
+
+    status = "unknown"
+    if len(words) == 1:
+        status = next(iter(words))
+    elif words:
+        status = "mixed"
+    return {
+        "status": status,
+        "pool_holds": len(holds),
+        "held_pools": sorted(set(holds)),
+    }
 
 
 def _refused_probe_envelope(work: Mapping[str, Any], exc: BaseException) -> dict[str, Any]:
@@ -400,17 +433,25 @@ class BoundedPlannerDriver:
             entry["probe_refused"] = probe_refusal
         return {"kind": "probe", "entry": entry}
 
-    def _model_proposal(self, context: Mapping[str, Any]) -> dict[str, Any]:
+    def _model_proposal(self, context: Mapping[str, Any],
+                        *, pool: str | None = None) -> dict[str, Any]:
         """One bounded model attempt for a loop that can act on the answer."""
 
+        params: dict[str, Any] = {
+            "context_pack_ref": context["id"],
+            "max_input_tokens": 16_000,
+            "max_output_tokens": 1_200,
+            "max_cost_usd": self.config.planner_max_cost_usd,
+            "max_seconds": 180,
+        }
+        # C2b: which capacity pool this loop's call spends from, as the active
+        # loops projection reported it. The writer checks it against the loop
+        # record and refuses a disagreement, so this is a declaration rather
+        # than an instruction.
+        if pool is not None:
+            params["pool"] = pool
         try:
-            return self.client.call("llm_planner_execute", {
-                "context_pack_ref": context["id"],
-                "max_input_tokens": 16_000,
-                "max_output_tokens": 1_200,
-                "max_cost_usd": self.config.planner_max_cost_usd,
-                "max_seconds": 180,
-            })
+            return self.client.call("llm_planner_execute", params)
         except Exception as exc:  # noqa: BLE001 - one loop's failure is not the tick's
             return {"status": f"unavailable:{type(exc).__name__}"}
 
@@ -450,6 +491,11 @@ class BoundedPlannerDriver:
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        # C2b: the two things about this tick's planner spending that a
+        # summary overwritten every tick could never answer -- how many loops
+        # the pools held, and whether the calls reached the day ledger at all.
+        planner_holds: list[str] = []
+        planner_budget_words: set[str] = set()
         probes = 0
         for loop in loops:
             if probes >= self.config.max_probes_per_tick:
@@ -504,7 +550,29 @@ class BoundedPlannerDriver:
                     # and can still propose the terminal this loop needs.
                     executed_model = {"status": "budget_exhausted"}
                 else:
-                    executed_model = self._model_proposal(context)
+                    executed_model = self._model_proposal(
+                        context, pool=loop.get("pool"))
+                    reported = executed_model.get("budget")
+                    if isinstance(reported, Mapping) and reported.get("status"):
+                        planner_budget_words.add(str(reported["status"]))
+                if (executed_model.get("status") == "rejected"
+                        and executed_model.get("reason") == POOL_EXHAUSTED_REASON):
+                    # C2b: this loop's pool is spent for today. That is a
+                    # budget decision, not a fault and not an outage, so the
+                    # loop is held rather than handed to the free
+                    # deterministic planner: falling through would admit a
+                    # round the pool said no to, and the loop would arrive at
+                    # tomorrow with one fewer round and nothing to show. The
+                    # writer refused before leasing anything, so nothing was
+                    # billed and nothing has to be undone.
+                    skipped.append({
+                        "loop_version_ref": loop["loop_version_ref"],
+                        "reason": POOL_EXHAUSTED_REASON,
+                        "pool": executed_model.get("pool"),
+                        "lane_status": POOL_EXHAUSTED_STATUS,
+                    })
+                    planner_holds.append(executed_model.get("pool") or "unknown")
+                    continue
                 if executed_model.get("status") == "proposal_ready":
                     proposal = executed_model["proposal"]
                 elif executed_model.get("status") == "core_action":
@@ -625,6 +693,8 @@ class BoundedPlannerDriver:
             "skipped": skipped,
             "mission_sec_dispatch": mission_dispatch,
             "forecast_reconciliation": forecast_reconciliation,
+            "planner_budget": _planner_budget_summary(
+                planner_holds, planner_budget_words),
             **lanes,
         }
         summary["tick_ledger"] = self._record_tick(summary, started_at=started_at)

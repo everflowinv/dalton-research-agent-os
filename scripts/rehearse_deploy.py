@@ -822,6 +822,8 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("claim_retirement_schema.sql", "dalton_core.claim_retirement", "ClaimRetirementAuthority", "core"),
     MigrationSpec("company_dossier_schema.sql", "dalton_core.company_dossier", "CompanyDossierAuthority", "core"),
     MigrationSpec("connector_schema.sql", "dalton_core.connector", "ConnectorStore", "core"),
+    # P11b: what the street expects, from the vendor daily.
+    MigrationSpec("consensus_estimate_schema.sql", "dalton_core.consensus_estimate", "ConsensusEstimateAuthority", "core"),
     MigrationSpec("conviction_call_schema.sql", "dalton_core.conviction_call", "ConvictionCallAuthority", "core"),
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
@@ -844,6 +846,8 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("research_question_backlog_schema.sql", "dalton_core.research_question_backlog", "ResearchQuestionBacklog", "core"),
     MigrationSpec("runner_journal_schema.sql", "dalton_core.runner_journal", "RunnerJournal", "core"),
     MigrationSpec("statement_snapshot_schema.sql", "dalton_core.statement_snapshot", "StatementSnapshotAuthority", "core"),
+    # P11b: the broker notes those expectations were read out of.
+    MigrationSpec("street_estimate_schema.sql", "dalton_core.street_estimate", "StreetEstimateStore", "core"),
     MigrationSpec("tracking_cadence_schema.sql", "dalton_core.tracking_cadence", "TrackingCadenceAuthority", "core"),
     MigrationSpec("transcript_correction_schema.sql", "dalton_core.transcript_correction", "TranscriptCorrectionAuthority", "core"),
     MigrationSpec("transcript_polish_schema.sql", "dalton_core.transcript_polish", "TranscriptPolishAuthority", "core"),
@@ -1309,7 +1313,18 @@ class Rehearsal:
         return findings
 
     def _check_deliverable_check(self) -> list[str]:
-        """P14a: the ``mission_deliverable`` CHECK now has to admit event_note."""
+        """The ``mission_deliverable`` CHECK has to admit *every* declared kind.
+
+        This checked one literal, ``event_note``, because that was the only
+        kind P14a added.  Three slices have added kinds since, and a rehearsal
+        that only ever looks for the first one would pass a Core migrated as
+        far as P14a and no further -- which is exactly the failure the
+        migration exists to prevent, arriving as an ``IntegrityError`` from a
+        constraint the first time somebody publishes the newest kind.  The
+        vocabulary is the list, so the vocabulary is what is checked.
+        """
+
+        from dalton_core.mission_deliverable import DELIVERABLE_KINDS
 
         path = self.temp_state / "core.sqlite"
         with sqlite3.connect(path) as connection:
@@ -1319,8 +1334,13 @@ class Rehearsal:
             ).fetchone()
         if row is None:
             return ["mission_deliverable_versions does not exist after the migration"]
-        if "'event_note'" not in (row[0] or ""):
-            return ["mission_deliverable_versions CHECK still refuses 'event_note'"]
+        sql = row[0] or ""
+        missing = [kind for kind in DELIVERABLE_KINDS if f"'{kind}'" not in sql]
+        if missing:
+            return [
+                "mission_deliverable_versions CHECK still refuses "
+                + ", ".join(repr(kind) for kind in missing)
+            ]
         return []
 
     # -- 5. seeds -----------------------------------------------------------

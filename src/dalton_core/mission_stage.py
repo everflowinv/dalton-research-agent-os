@@ -57,6 +57,11 @@ STAGE_STATUS_LABELS: dict[str, str] = {
     "entered": "进行中",
     "gate_passed": "已通过",
     "gate_failed": "未通过，正在补",
+    # P14d sequel: passed once, and a person has approved re-opening it. The
+    # label says "again" rather than "in progress" because the difference
+    # between a first pass and a second one is the whole point of the version
+    # chain, and a page that hid it would hide that.
+    "reopened": "已通过，但要重出一版",
 }
 
 # The Playbook's Initial Screen required_readings, translated into items a
