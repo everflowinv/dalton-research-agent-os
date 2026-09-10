@@ -3099,7 +3099,8 @@ class WriterServer:
         if (metadata.get("purpose") != purpose
                 or metadata.get("mission_version_ref") != mission["id"]
                 or metadata.get("mission_version_hash") != mission["content_hash"]
-                or list(metadata.get("producer_route_decision_refs") or []) != list(producer_routes)
+                or len(set(producer_routes)) != len(producer_routes)
+                or sorted(metadata.get("producer_route_decision_refs") or []) != sorted(producer_routes)
                 or route.get("work_order_hash") != authority["work_order_hash"]):
             raise WriterServerError("Investment Memo WorkOrder authority binding failed")
         formal = self._scheduler.formal_result(str(call["work_order_ref"]))

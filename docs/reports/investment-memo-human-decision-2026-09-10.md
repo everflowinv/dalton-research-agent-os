@@ -55,7 +55,7 @@ draft consumes.
 
 - `python3 -m py_compile` passed for the shared contract, writer, and Cockpit
   modules.
-- 106 focused contract/decision/writer/Cockpit tests passed, with one existing
+- 107 focused contract/decision/writer/Cockpit tests passed, with one existing
   skip, across `test_investment_memo_contract`,
   `test_investment_memo_decision`, `test_writer_service`,
   `test_cockpit_plane`, and `test_cockpit_int2`.
@@ -67,7 +67,11 @@ draft consumes.
   selected but unexecuted route, a formal verifier body-hash mismatch, and an
   older failed memo followed by a new head. A real Scheduler and ModelRouter
   test executes producer and verifier calls through their authorities, then
-  exercises the same Writer validation helper. Folded-state regressions cover
+  exercises the same Writer validation helper. A full-entry test also uses a
+  real DaltonStore, ResearchPlaybook and CoverageMission authority, advances
+  every prerequisite stage legally, publishes through the real
+  MissionDeliverable authority, validates five real formal calls/routes, and
+  records the human memo pass plus active-coverage entry. Folded-state regressions cover
   a reopened company-model gate and an unrelated old active-coverage entry.
 
 ## Remaining boundary
