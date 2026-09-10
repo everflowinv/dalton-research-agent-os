@@ -1,7 +1,8 @@
 # W2 抽取吞吐：研报为什么没变成 Claim v1.0
 
 日期：2026-09-09
-分支：`w2-extraction-throughput`（worktree `~/Projects/dalton-w2-extraction-throughput-worktree`），基线 main `8198f0f`
+分支：`w2-extraction-throughput`（worktree `~/Projects/dalton-w2-extraction-throughput-worktree`），
+基线 main `8198f0f`，已 `git merge main` 到 `7011104`（含 P12c DebateMap、P12a 档案、C2 预算池）
 数据：live Core 只读副本 `/private/tmp/dalton-ro/core.sqlite`（12:23）、`state/dalton-core/extractions/` 的 506 份
 `summary.json`（09-07 09:51 → 09-09 21:08）、`run/heartbeat.json`（09-09 21:34）、`thesis-impact-budget.sqlite`
 状态：交付在审；无 live 写入、无模型调用、无部署
@@ -119,6 +120,14 @@ mission `max_daily_paid_calls: 9000`。全天全 mission 实付：09-08 $1.90、
 （`ThesisImpactBudgetStore._day_committed` 把已结算的算实付、未结算的算预留）；
 一旦并发或者日上限调低，先撞上的就是这个数。
 
+**但价目表只是下界（review B1）。** 一个窗口有**两条**计价路径，算术不一样：
+provider 回了 usage 就按 token 计量（价目表管得住），没回就走 route 自己的**整请求**估价
+`calculator:model-route-estimate:0.1`（`model_accounting._route_estimate_micros`），
+它跟这个窗口的 token 界没有任何关系。live 上有 **41 个窗口走了这条路，均值 4,471 micros、最大 5,496**，
+都高于价目表推导的 3,080。预留低于扣款 = `MODEL_COST_EXCEEDED_RESERVATION` 告警 + **不调 `settle()`**
+= 这笔预留永远挂在日上限上。所以最终实现取
+`min(契约上限, 2 × max(价目表推导, route 估价))`，headroom 是 2 倍且写在常量里。
+
 真正会先咬人的是**次数**：30 + 10 + 10 = 50 次调用/tick × 288 tick/天 = 14,400 > `max_daily_paid_calls 9000`。
 配置的 30 不是保守，是**没有对着 mission 的调用上限算过**。
 
@@ -161,7 +170,8 @@ CTSH 读了 18 份卖方 → 149 条，ACN 读了 2 份 → 5 条。**每份文�
 | filing | 5 | 17.40 |
 | management | 44 | 5.59 |
 | sell_side | 62 | **2.35** |
-| news | 335 | 2.41 |
+| industry | 219 | 3.07 |
+| news | 116 | 1.17 |
 
 **卖方研报是产出最低的一档**，因为抽取契约拒绝一切数字（目标价、EPS 都进不来）、
 免责声明过滤器又吃掉研报开头的大半页。这对 DebateMap 的验收是个独立的坏消息：
@@ -194,13 +204,18 @@ CTSH 读了 18 份卖方 → 149 条，ACN 读了 2 份 → 5 条。**每份文�
 ### 新增
 
 - **`document_provenance.py`**（纯函数，无 I/O）：tier 词表（`filing` / `management` / `sell_side` /
-  `expert` / `sales_note` / `news` / `crowd` / `other`，与 P12c 独立性阶梯同词）、
+  `expert` / `sales_note` / **`industry`** / `news` / `crowd` / `other`，与 P12c 独立性阶梯同词；
+  **`industry` 是本轮 review S4 新分出来的一档**——一份市场规模报告不是新闻页，它排在「点名公司的研报」
+  之下、新闻之上，而且它正是行业主体 Claim 的来源，混进 `news` 既排错了序也把它藏了起来）、
   `parse_search_metadata`（从 AlphaEngine 搜索原始字节里读回 title / sources / companies）、
   `broker_key`（去掉 "Securities, LLC" 之类的法律外壳，让 "TD Cowen" 和 "TD Cowen, LLC" 是一家）、
   `covered_subjects`、`subjects_for_statement`（一条陈述归谁）。
 - **`extraction_priority.py`**：`review_sort_key`（**证据价值优先**，同档内**覆盖最薄的公司优先**，
   公司优先级只做第三顺位）、`thinness_ranks`、`window_reservation_micros`、`safe_windows_per_tick`
   （从日上限 + 调用上限 + 服务模型的价目表推导，不写死；返回推导过程）。
+  **加上老化（review S4）**：严格优先级就是饿死——永远读最好的那份，就永远不读最差的那份，
+  而「最差的那档」正是行业主体的 Claim 来源。每等满 `STARVE_AFTER_DAYS = 7` 天升一级，
+  是**爬梯子不是插队**，且永远不越过 filing（`BEST_AGED_VALUE = 1`）。
 - **`extraction_backlog.py` + `extraction_backlog_schema.sql`**：追加式 `document_provenance_records`
   表（只写 wire 已经说过的话，no-update / no-delete 触发器）、`DocumentProvenanceStore`、
   `backfill_provenance`（重放 spool 里还在的搜索响应）、`observed_yield`（从本仓库自己写的结案语
@@ -210,15 +225,20 @@ CTSH 读了 18 份卖方 → 149 条，ACN 读了 2 份 → 5 条。**每份文�
 ### 改动
 
 - `document_extraction.py`
-  - `reservation_micros(work, profile)`：预留改成「这个模型对这个窗口最坏能花多少」，
+  - `reservation_micros(work, route, profile)`：预留 = `min(契约上限, 2 × max(价目表推导, route 估价))`。
     上限仍是 WorkOrder 契约里的 `max_cost_usd`。**WorkOrder 的 budget 一个字节没动**——它进
     `content_hash(work.to_dict())`，动了就是让 live 上 1,700 多个已存结果全部 drift。
   - `recorded_subjects` / `statement_subjects`：读追加表；表不存在就返回空，行为与今天逐字节一致。
+    **覆盖范围在读的时候现算**（review S2），不存进哈希：universe 会变，行是 append-only，
+    存进去就意味着「昨天新进覆盖的公司」在上周记录的研报上永远认不出来，而且重放会被判成冲突。
   - `admit_suggestions`：每条 suggestion 按它**自己点名的主体**准入，可以是多个。
-    只点名 review 那家公司（或谁都不点名）时，`pair_key` 与 idempotency key 与今天**完全一致**，
-    重放仍然是 duplicate；只有「额外主体」才把 subject 加进 key。
+    **review 那家公司永远在结果里**（review B2/B3）：这条陈述是带着那家公司当主体起草出来的，
+    去掉它等于无声撤回。额外主体只在陈述**完全不点名 review 公司**时加进去——
+    「分析师在估值上更偏好 Cognizant 而非 Accenture」是一句关于排序的话，起草时的主体是 Cognizant，
+    把它铸成 Accenture 的 Claim 就是往 Accenture 的档案里塞一句从来不是写给它的话。
+    只有一个主体时，`pair_key` 与 idempotency key 与今天**完全一致**，重放仍然是 duplicate。
     行业规则按 owner 的写法保留：行业级 spec 的文档里，一条谁都不点名、但点名了行业的陈述
-    归 `industry:us-it-services`；电话会里的同一句话仍然归公司。
+    **额外**归 `industry:us-it-services`；电话会里的同一句话仍然只归公司。
 - `document_extraction_cli.py`：换用新排序（失败则退回旧排序，排序从来不是闸）、
   每轮先做一次尽力而为的出处回填、把「永久读不了」的 review 单列进 `unreadable_reviews`
   （加密 PDF / 非 UTF-8 / 取件票据丢失 —— 这些明天还是读不了，重试不是耐心是死循环）。
@@ -230,39 +250,76 @@ CTSH 读了 18 份卖方 → 149 条，ACN 读了 2 份 → 5 条。**每份文�
 ## 四、测试
 
 ```
-Ran 3476 tests in 344.983s
+Ran 3855 tests in 370.135s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；基线 main `8198f0f` 是 3,437，
-新增 39 项。）新用例覆盖：队列排序（末位公司的电话会先于首位公司的新闻页、filing > 电话会 > 研报、
-同档内薄的先读）、多公司归因（点名竞争对手 / 两家都点名 / 谁都不点名仍归原公司）、
-行业主体 Claim（行业文档里的市场事实归行业、同一句话在电话会里仍归公司）、
-批量界推导（$0.00308/窗口、调用上限先咬人、上下夹逼、拒绝算不出来的输入）、
-券商落库（一家两种拼法算一家、重放是 duplicate、事实不一致是冲突而非覆盖）。
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，merge main `7011104` 之后。
+本片新增 58 项 + 3 项端到端准入用例。）
 
----
+**注意：main `7011104` 自身带着一条失败**
+`tests.test_mission_research_task_lane.LaneTests.test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`
+（`'launched' != 'skipped:pool_exhausted'`）。在 main 检出上单独跑同样失败，与本分支无关，
+已单列上报，未在本片修改。上面的 `OK` 是把这条排除后的结果。
+
+新用例覆盖：
+
+- **队列排序**：末位公司的电话会先于首位公司的新闻页；filing > 电话会 > 研报；同档内薄的先读；
+  市场报告排在新闻之上、研报之下。
+- **老化（S4）**：不给时钟就是纯优先级；每满一个周期升一级；爬而不跳、永不越过 filing；
+  饿了六个周期的市场报告最终超过刚到的电话会；时间戳读不了或来自未来的一律不升级。
+- **预留（B1）**：pin 在 route 估价那条路上——live 最大值 5,496 micros 时预留 10,992；
+  live 均值 4,471 有 2 倍余量；route 没有精确估价（空快照 / 别的 profile / 不合格候选）时退回价目表下界；
+  极小估价不会把价目表下界拉低；契约上限仍是天花板；没有价目表的 profile 预留上限而不是一分钱。
+- **多主体准入（B2/B3/S1）**：一句完全写别家的陈述额外归那家；**同时点名两家的比较句只归 review 那家**；
+  **review 那家公司在任何情况下都不掉**（五种句式逐一验）；老 Claim 集合 ⊆ 新 Claim 集合（回放固定队列）。
+- **端到端（S1，走真正的 `admit_suggestions` 循环）**：两主体计划产出两个候选、两条 Claim、
+  两个不同的 `candidate_claim_ref`（一个引用只有一个 correction set）；重放两条都是 duplicate；
+  **单主体时的 key 与今天逐字节一致**——先只跑主体、再跑两主体，主体那条是 duplicate、只多写一条 Claim。
+- **行业主体**：行业文档里的市场事实**额外**归行业；同一句话在电话会里仍只归公司。
+- **批量界推导**：$0.00308/窗口、调用上限先咬人、上下夹逼、拒绝算不出来的输入。
+- **出处落库**：一家两种拼法算一家；重放是 duplicate；事实不一致是冲突而非覆盖；
+  tier 不在词表里被拒；**覆盖范围现算（S2）**——universe 收窄/放宽给出不同答案，而重放仍是 duplicate；
+  试图把 `covered_subjects` 写进哈希会被拒；**列名就是 P12c `_ATTRIBUTION_COLUMNS` 找的那些**。
+- **产出统计（S3）**：`windows_per_document` 自带 `windows_basis`，没有窗口证据时如实写 `default`；
+  未定价的 backlog 报 `unknown` 而不是 `$0`。
 
 ## 五、Smoke（只读，`/tmp` 副本）
 
 ### 5.1 新排序下接着读的 50 份
 
-把 446 条 open review 去重成 195 份 distinct 文档，两种排序各取前 50：
+把 446 条 open review 去重成 195 份 distinct 文档，各取前 50：
 
-| | filing | management | sell_side | news | 公司分布 |
-| --- | ---: | ---: | ---: | ---: | --- |
-| **今天**（公司优先） | 1 | 0 | 18 | **31** | CTSH 29、ACN 21，其余 0 |
-| **新排序** | **5** | **17** | **20** | 8 | CTSH 19、EPAM 18、IBM 10、DXC 2、ACN 1 |
+| | filing | management | sell_side | industry | news | 公司分布 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| **今天**（公司优先） | 1 | 0 | 18 | 20 | 11 | CTSH 29、ACN 21，其余 0 |
+| **新排序** | **5** | **17** | **20** | 8 | 0 | EPAM 26、CTSH 19、IBM 2、DXC 2、ACN 1 |
 
-今天的下 50 个窗口里 31 个是新闻页、且只覆盖两家公司；新排序是 5 份 filing + 17 份电话会 + 20 份研报，
-五家都碰得到。ACN 只占 1 份——**因为 ACN 已经没有能读的了**，它的 12 份文档里 3 份取到、都读完了。
+今天的下 50 个窗口只覆盖两家公司、且 31 份是行业报告与新闻；新排序是 5 份 filing + 17 份电话会 +
+20 份研报，五家都碰得到。ACN 只占 1 份——**因为 ACN 已经没有能读的了**，它的 12 份文档里 3 份取到、都读完了。
 这本身就是诊断结论的直接证据。
 
-### 5.2 出处回填（重放 spool 里还在的搜索响应）
+**老化今天不改变任何东西，这是对的。** 队列里最老的 open review 只有 3 天
+（195 条的中位数是 1 天，没有一条满 7 天），所以升级项为零，上表两栏一致。
+把队列冻住往后推，老化才开始咬：
+
+| 停滞 | 前 50 的构成 |
+| --- | --- |
+| +0 天 | filing 5、management 17、sell_side 20、industry 8 |
+| +21 天 | 同上（高档还没读完，轮不到低档） |
+| **+63 天** | filing 5、sell_side 18、**industry 18、news 9** |
+
+也就是说：只要车道在动，老化不打扰它；一旦某档被高档长期压住，它会**爬上来**而不是插队。
+
+### 5.2 出处回填与 P12c 的接缝（重放 spool 里还在的搜索响应）
 
 ```
 {'envelopes': 24, 'recorded': 162, 'duplicate': 318, 'unreadable': 0, 'status': 'complete'}
+document_attribution_rows: 162
+  'alphaengine-doc:320000610220657' -> {'publisher': 'Wells Fargo Securities, LLC',
+                                        'sources': 'Wells Fargo Securities, LLC',
+                                        'title': 'Payments, Processors, and IT Services: ...'}
 distinct houses: 12
 ['Citi','Deutsche Bank','Goldman Sachs','Guggenheim Securities LLC','HSBC','J.P.Morgan',
  'Morgan Stanley','RBC Capital Markets','TD Cowen','UBS','Wells Fargo Securities, LLC','Wolfe Research']
@@ -272,36 +329,60 @@ sell-side documents naming Accenture: 10   ... filed under another company: 3   
 spool 里只剩 24 份搜索响应（早期的已经轮转掉），所以这是**下界**：162 份文档拿回了出处，
 109 份带券商名。新取的每一份文档从此都会带着出处入库。
 
+**与 P12c 的接法。** `debate_map_draft.document_attribution()` 是从
+`coverage_mission_discovered_documents` **的列**上读 `publisher`/`broker`/`authors`/`sources`/`title` 的，
+而那张表是已哈希的合同，本片不能动它。所以两件事：
+(1) `document_provenance_records` 的列名就用它找的那几个（`broker`、`authors`、`sources`、`title`），
+(2) 本片给出同形状的读函数 `document_attribution_rows(connection)`，集成时一行合并即可：
+
+```python
+attribution = {**document_attribution(conn), **document_attribution_rows(conn)}
+```
+
+冲突时以本片为准——上游 wire 说的 publisher 比从标题猜出来的更可信。
+没有这张表的 Core 拿到空 dict，正是那条阶梯已经能处理的情况。
+
 ### 5.3 `extraction_backlog(company)`（第三项交付，供 cockpit 与 P14a）
 
-预留按推导值 3,080 micros/窗口，产出按本机实测：
+预留按 10,992 micros/窗口（价目表 3,080 与 live route 估价最大值 5,496 取大、再乘 2 倍 headroom），
+产出与窗口数都按本机实测：
 
-| 公司 | 排队文档 | 预期 Claim | 预期成本 | 其中卖方（已读 / 待取） |
-| --- | ---: | ---: | ---: | --- |
-| ACN | 46 | 132 | $0.425 | 3 / 9 → 约 21 条 |
-| CTSH | 28 | 68 | $0.259 | 18 / 2 → 约 5 条 |
-| EPAM | 38 | 95 | $0.351 | 18 / 2 → 约 5 条 |
-| IBM | 19 | 49 | $0.176 | 20 / 4 → 约 9 条 |
-| DXC | 66 | 200 | $0.610 | 3 / 17 → 约 40 条 |
+| tier | 读过的文档 | Claim/文档 | 窗口/文档 |
+| --- | ---: | ---: | ---: |
+| filing | 5 | 17.40 | 18 |
+| management | 44 | 5.59 | 3 |
+| sell_side | 62 | **2.35** | 5 |
+| **industry** | 219 | 3.07 | 2 |
+| news | 116 | 1.17 | 1 |
+
+| 公司 | 排队文档 | 预期 Claim | 预期成本（上界） | 已知券商 |
+| --- | ---: | ---: | ---: | ---: |
+| ACN | 46 | 127 | $0.696 | 7 |
+| CTSH | 28 | 68 | $0.326 | 3 |
+| EPAM | 38 | 109 | $0.480 | 7 |
+| IBM | 19 | 56 | $0.308 | 2 |
+| DXC | 66 | 208 | $1.158 | 8 |
 
 **每一档的 `awaiting_extraction` 与 `acquired_unqueued` 都接近 0，整个 backlog 都是 `discovered`。**
-全五家读完剩下的一切，模型成本合计 **$1.82**。
+全五家读完剩下的一切，模型成本上界合计 **$2.97**（按实付均值算是 $0.08）。
+不给 `reservation_micros` 时这一列报 `null` 与 `cost_basis: "unknown"`，不报 `$0`。
 
 ### 5.4 推导出来的每 tick 界
 
 ```
-reservation per window: 3080 micros (was 50000)
-  passes=1: windows/tick=15  bound_by=paid_calls  by_cost=56  by_calls=15
-  passes=3: windows/tick=5   bound_by=paid_calls  by_cost=18  by_calls=5
+reservation floor (rate card): 3080 micros
+reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 50000)
+  passes=1 share=0.5: windows/tick=15  bound_by=paid_calls  by_cost=15  by_calls=15
+  passes=3 share=0.5: windows/tick=5   bound_by=paid_calls  by_cost=5   by_calls=5
+  passes=1 share=1.0: windows/tick=31  bound_by=paid_calls  by_cost=31  by_calls=31
 ```
 
-（日上限 $100、`max_daily_paid_calls 9000`、288 tick/天、车道占一半。）
+（日上限 $100、`max_daily_paid_calls 9000`、288 tick/天。）
 **结论与直觉相反：正确的界比 live 现在配的 30 更小，不是更大。** 30 + 10 + 10 意味着
 满负荷时一天 14,400 次付费调用，超出 mission 自己的 9,000。今天没炸只是因为队列早就空了。
 把车道份额提到 100%、只跑 prose 一档，推导值是 31——这才是 live 那个 30 的合法依据。
-**钱从来不是限制**：按实付均值 294 micros，$100 能买 34 万个窗口。
-
----
+注意补上 route 估价这条路之后，**成本与次数两条界几乎重合**（15 vs 15），
+也就是说预留一旦诚实，钱和次数一样紧——这正是 B1 想说的事。
 
 ## 六、到「ACN 多空各 ≥2 个独立卖方来源」还差多久
 
@@ -313,8 +394,10 @@ reservation per window: 3080 micros (was 50000)
 2. **读**：27 个窗口，新排序下 `sell_side` 排在 news 之前，按推导界 15 窗口/tick、
    五分钟一 tick，**两个 tick 内读完**，成本 $0.083。
 3. **数得出独立来源**：这是本片解决的部分。ACN 现有 3 份 + 新增 9 份 = 12 份，
-   加上多公司归因带来的**另外 3 份挂在别家名下、点名 Accenture 的 Wells Fargo 研报**。
-   出处落库后，独立性阶梯数的是**券商**：live spool 里已经能看到 12 家。
+   加上多公司归因带来的**另外 3 份挂在别家名下、点名 Accenture 的 Wells Fargo 研报**——
+   不过按 owner 裁决（B2）只有那份研报里**完全不点名 Cognizant 的句子**才会成为 Accenture 的 Claim，
+   所以这 3 份的增量是「几条」而不是「几十条」。出处落库后，独立性阶梯数的是**券商**：
+   live spool 重放已经能看到 12 家，ACN 名下 7 家。
 
 **所以：只要第 1 步的 planner 松口，一天之内 ACN 就能有两位数的卖方 Claim 和多家券商的出处。**
 但要提醒 DebateMap：卖方 tier 的实测产出只有 2.35 条 Claim/文档，且抽取契约拒绝一切数字，
@@ -332,10 +415,14 @@ reservation per window: 3080 micros (was 50000)
    建议 DebateMap 自己声明一条按 `broker_key` 去重的需求，而不是把清单下限调大。
 4. **`document_extraction.max_windows_per_tick` 现在配的 30/10/10 超出 mission 的 9,000 次调用上限**
    （满负荷 14,400）。本片给了推导函数，但没有改 `service.json`——那是部署动作。
+5. **main `7011104` 上有一条与本片无关的失败测试**（ad-hoc 研究池
+   `test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`），在 main 检出上单独跑同样失败。
 
 ## 八、接线需求（集成时统一做，本片没碰）
 
 - `extraction_backlog(company)` 接进 cockpit 与 P14a 的 SourceCapabilityMap 消费者。
 - `extraction_backlog_schema.sql` 走 Wave 0 的 `*_schema.sql` glob 打包，无需改 `pyproject.toml`。
-- 抽取子进程 summary 新增 `provenance` 与 `unreadable_reviews` 两个字段，cockpit 可直接读
-  `unreadable_reviews` 来回答「队列深度为什么下不去」。
+- 抽取子进程 summary 新增 `provenance`（按 mission 指针逐条）与 `unreadable_reviews` 两个字段，
+  cockpit 可直接读 `unreadable_reviews` 来回答「队列深度为什么下不去」；六类永久失败里现在也含
+  「渲染出来是空的」（`source offset must be a valid bounded window`）。
+- P12c 的 `document_attribution()` 与本片的 `document_attribution_rows()` 一行合并（见 5.2）。

@@ -26,6 +26,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .budget_pools import (
+    apply_pool_migration,
+    pool_decision,
+    record_pool_rejection,
+)
 from .store import canonical_json, content_hash
 
 
@@ -33,6 +38,9 @@ SCHEMA_VERSION = "0.1"
 ALERT_KINDS = frozenset({"day_budget_exceeded", "work_order_failed"})
 ALERT_SEVERITIES = frozenset({"high", "medium"})
 ALERT_MAX_DELIVERY_ATTEMPTS = 5
+# C2's additions to a mission binding, named so a replay can tell "this
+# admission gained a dimension" from "this admission changed".
+_POOL_BINDING_KEYS = frozenset({"pool", "pool_caps_micros", "pool_lane"})
 _SCHEMA_PATH = Path(__file__).with_name("thesis_impact_budget_schema.sql")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -126,6 +134,10 @@ class ThesisImpactBudgetStore:
         self.connection.execute("PRAGMA foreign_keys=ON")
         if not read_only:
             self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+            # C2: the pool columns and the pool-refusal table. Additive and
+            # idempotent, so an existing live ledger gains the dimension on
+            # first open without a single written row moving.
+            apply_pool_migration(self.connection)
         if not read_only and self.path != ":memory:":
             self.connection.execute("PRAGMA journal_mode=WAL")
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -313,8 +325,39 @@ class ThesisImpactBudgetStore:
         if mission_binding is not None:
             mission_binding = dict(mission_binding)
             fields = {"mission_ref", "mission_version_ref", "mission_version_hash", "max_daily_paid_calls", "max_daily_cost_micros"}
-            if not fields <= set(mission_binding) or set(mission_binding) - fields - {"outer_budget"}:
+            # C2: three optional pool keys. The pool is which of the day's
+            # four capacity pools this call spends from, the caps are that
+            # mission version's split of the day, and the lane is who asked --
+            # recorded so the cockpit can name who ran out rather than only
+            # that somebody did.
+            optional = {"outer_budget", "pool", "pool_caps_micros", "pool_lane"}
+            if not fields <= set(mission_binding) or set(mission_binding) - fields - optional:
                 raise ThesisImpactBudgetValidationError("invalid mission budget binding")
+            if ("pool" in mission_binding) != ("pool_caps_micros" in mission_binding):
+                raise ThesisImpactBudgetValidationError(
+                    "a pooled admission needs both its pool and the day's caps"
+                )
+            if "pool" in mission_binding:
+                from .budget_pools import POOL_NAMES
+
+                if mission_binding["pool"] not in POOL_NAMES:
+                    raise ThesisImpactBudgetValidationError("unknown budget pool")
+                caps = mission_binding["pool_caps_micros"]
+                if not isinstance(caps, Mapping) or set(caps) != set(POOL_NAMES):
+                    raise ThesisImpactBudgetValidationError(
+                        "pool caps must name every pool"
+                    )
+                for key in POOL_NAMES:
+                    _micros(caps[key], f"pool_caps_micros.{key}")
+                if sum(int(caps[key]) for key in POOL_NAMES) > mission_binding["max_daily_cost_micros"]:
+                    raise ThesisImpactBudgetValidationError(
+                        "pool caps exceed the mission's day cost cap"
+                    )
+                mission_binding["pool_caps_micros"] = {
+                    key: int(caps[key]) for key in POOL_NAMES
+                }
+                if mission_binding.get("pool_lane") is not None:
+                    _text(mission_binding["pool_lane"], "pool_lane")
             for key in ("mission_ref", "mission_version_ref", "mission_version_hash"):
                 _text(mission_binding[key], key)
             for key in ("max_daily_paid_calls", "max_daily_cost_micros"):
@@ -362,14 +405,23 @@ class ThesisImpactBudgetStore:
         }
         wire["content_hash"] = content_hash(wire)
         rejection: dict[str, Any] | None = None
+        pool_name: str | None = None
+        borrowed_from: str | None = None
         with self._transaction() as cur:
             existing = cur.execute(
-                "SELECT record_json FROM thesis_impact_day_admissions "
+                "SELECT record_json,pool,borrowed_from FROM thesis_impact_day_admissions "
                 "WHERE work_order_ref=? AND attempt_number=? AND phase=?",
                 (work_order_ref, attempt_number, phase),
             ).fetchone()
             if existing is not None:
                 persisted = json.loads(existing["record_json"])
+                if existing["pool"] is not None:
+                    persisted = {
+                        **persisted, "pool": existing["pool"],
+                        "borrowed_from": (
+                            None if existing["borrowed_from"] is None
+                            else json.loads(existing["borrowed_from"])),
+                    }
                 comparable_fields = (
                     "schema_version", "admission_id", "policy_version_id", "day",
                     "work_order_ref", "attempt_number", "phase",
@@ -381,7 +433,18 @@ class ThesisImpactBudgetStore:
                     )
                 binding_row = cur.execute("SELECT record_json FROM model_mission_budget_bindings WHERE admission_id=?", (persisted["admission_id"],)).fetchone()
                 saved_binding = None if binding_row is None else json.loads(binding_row["record_json"])
-                if saved_binding != mission_binding:
+                comparable = mission_binding
+                if (saved_binding is not None and mission_binding is not None
+                        and not _POOL_BINDING_KEYS & set(saved_binding)):
+                    # C2: a binding saved before the pool dimension existed
+                    # has no pool keys, and the same call replayed after the
+                    # migration carries them. That is the same admission with
+                    # a dimension added, not a different one -- and refusing
+                    # it would strand exactly the work that was in flight when
+                    # the migration ran.
+                    comparable = {key: value for key, value in mission_binding.items()
+                                  if key not in _POOL_BINDING_KEYS}
+                if saved_binding != comparable:
                     raise ThesisImpactBudgetConflict("mission budget binding changed on replay")
                 return {**persisted, "status": "duplicate"}
             prior_row = cur.execute(
@@ -416,6 +479,29 @@ class ThesisImpactBudgetStore:
                 alerts = cur.execute("SELECT detail_json FROM thesis_impact_alerts WHERE kind='work_order_failed'").fetchall()
                 if any(json.loads(a["detail_json"]).get("reason") == "model_reservation_overrun" for a in alerts):
                     raise ThesisImpactBudgetConflict("model reservation overrun requires owner reconciliation")
+                # C2: the pool gate, decided on this cursor inside this
+                # transaction so the spend it reads is the spend the insert
+                # below will join. An exhausted pool is returned, never
+                # raised: the lane has finished for today, not failed, and it
+                # is not written into the rejection table above, whose rows
+                # are permanent verdicts on an admission identity while a pool
+                # refills at midnight.
+                if mission_binding is not None:
+                    decision = pool_decision(
+                        cur, mission_binding=mission_binding, day=day,
+                        reserved_micros=reserved_micros,
+                        work_order_ref=work_order_ref,
+                        attempt_number=attempt_number, phase=phase,
+                        now=self.clock(),
+                    )
+                    if decision["status"] != "admitted":
+                        record_pool_rejection(cur, decision)
+                        return decision
+                    pool_name = decision["pool"]
+                    borrowed_from = (
+                        None if decision["borrowed_from"] is None
+                        else canonical_json(decision["borrowed_from"])
+                    )
                 committed = self._day_committed(cur, policy_version_id, day)
                 mission_exceeded = False
                 if mission_binding is not None:
@@ -493,7 +579,8 @@ class ThesisImpactBudgetStore:
                     "INSERT INTO thesis_impact_day_admissions("
                     "admission_id,policy_version_id,day,work_order_ref,attempt_number,"
                     "phase,route_decision_ref,reserved_micros,record_json,content_hash,"
-                    "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "created_at,pool,borrowed_from,pool_lane) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         wire["admission_id"],
                         policy_version_id,
@@ -506,6 +593,14 @@ class ThesisImpactBudgetStore:
                         canonical_json(wire),
                         wire["content_hash"],
                         wire["created_at"],
+                        # The pool is a column, never a field of the hashed
+                        # wire: an admission written before C2 has to verify
+                        # unchanged, and the pool is a routing fact about the
+                        # day rather than part of the admission's identity.
+                        pool_name,
+                        borrowed_from,
+                        None if mission_binding is None
+                        else mission_binding.get("pool_lane"),
                     ),
                 )
                 if mission_binding is not None:
@@ -513,7 +608,11 @@ class ThesisImpactBudgetStore:
                                 (wire["admission_id"], mission_binding["mission_ref"], canonical_json(mission_binding)))
         if rejection is not None:
             raise ThesisImpactDayBudgetExceeded(rejection)
-        return {**wire, "status": "fresh"}
+        if pool_name is None:
+            return {**wire, "status": "fresh"}
+        return {**wire, "status": "fresh", "pool": pool_name,
+                "borrowed_from": (None if borrowed_from is None
+                                  else json.loads(borrowed_from))}
 
     def settle(
         self,
@@ -540,7 +639,8 @@ class ThesisImpactBudgetStore:
         wire["content_hash"] = content_hash(wire)
         with self._transaction() as cur:
             admission = cur.execute(
-                "SELECT reserved_micros FROM thesis_impact_day_admissions WHERE admission_id=?",
+                "SELECT reserved_micros,pool FROM thesis_impact_day_admissions "
+                "WHERE admission_id=?",
                 (admission_id,),
             ).fetchone()
             if admission is None:
@@ -566,9 +666,14 @@ class ThesisImpactBudgetStore:
                     )
                 return {**persisted, "status": "duplicate"}
             cur.execute(
+                # C2: the settled cost is attributed to the pool of its
+                # admission, read from the admission row in this same
+                # transaction rather than taken from the caller. That is what
+                # makes "pool and ledger cannot disagree" a property of the
+                # schema instead of a convention.
                 "INSERT INTO thesis_impact_day_settlements("
                 "settlement_id,admission_id,actual_micros,usage_entry_ref,"
-                "record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)",
+                "record_json,content_hash,created_at,pool) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     wire["settlement_id"],
                     admission_id,
@@ -577,9 +682,12 @@ class ThesisImpactBudgetStore:
                     canonical_json(wire),
                     wire["content_hash"],
                     wire["created_at"],
+                    admission["pool"],
                 ),
             )
-        return {**wire, "status": "fresh"}
+        if admission["pool"] is None:
+            return {**wire, "status": "fresh"}
+        return {**wire, "status": "fresh", "pool": admission["pool"]}
 
     def record_alert(
         self,

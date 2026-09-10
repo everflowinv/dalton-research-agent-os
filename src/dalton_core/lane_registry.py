@@ -87,6 +87,18 @@ class LaneSpec:
         ``(LaunchAgentContext) -> list[str]``; the writer LaunchAgent
         arguments that turn this lane on, or ``[]`` when this Core has no
         reason to run it.
+    ``budget_pool``
+        C2: which of the day's four capacity pools this lane spends from, or
+        ``None`` to take the answer from ``budget_pools.LANE_POOLS``, which
+        defaults to ``coverage`` -- what every lane effectively was before
+        pools existed.  Declared here only by a lane that wants to say it
+        itself; the mapping is central so that assigning pools did not mean
+        editing fifteen lane modules at once.
+    ``pool_share``
+        C2: the fraction of its pool this lane declares it needs.  Advisory in
+        v1.0: it is reported by ``pool_status`` and not enforced, because a
+        per-lane sub-cap would need per-lane attribution in the day ledger,
+        which today exists only for cockpit-shaped calls.
     """
 
     operation: str
@@ -99,6 +111,8 @@ class LaneSpec:
     argparse: Callable[[Any], None] | None = None
     launcher_factory: Callable[[Any], Any] | None = None
     argv_fragment: Callable[[LaunchAgentContext], list[str]] | None = None
+    budget_pool: str | None = None
+    pool_share: float | None = None
     # Free-form note for the report and for whoever reads the registry next.
     note: str = ""
 
@@ -117,6 +131,25 @@ class LaneSpec:
             raise LaneRegistryError(
                 f"{self.operation}: a launcher factory needs an init_kwarg to arrive on"
             )
+        if self.budget_pool is not None:
+            # Imported inside the check, not at module scope: ``budget_pools``
+            # reads this registry back, and a lane module is imported while the
+            # registry is loading.
+            from .budget_pools import POOL_NAMES
+
+            if self.budget_pool not in POOL_NAMES:
+                raise LaneRegistryError(
+                    f"{self.operation}: {self.budget_pool!r} is not a budget pool; "
+                    "the pools are " + ", ".join(POOL_NAMES)
+                )
+        if self.pool_share is not None and (
+            isinstance(self.pool_share, bool)
+            or not isinstance(self.pool_share, (int, float))
+            or not 0 < self.pool_share <= 1
+        ):
+            raise LaneRegistryError(
+                f"{self.operation}: pool_share is a fraction of its pool, 0 < n <= 1"
+            )
 
 
 # The explicit import list.  A lane module is named here once; importing it is
@@ -131,12 +164,15 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_model_spec_lane",
     "dalton_core.mission_guidepoint_lane",
     "dalton_core.mission_model_forecast_lane",
+    "dalton_core.mission_claim_index_lane",
     "dalton_core.research_planner_launcher",
     "dalton_core.initial_screen_launcher",
     "dalton_core.mission_crowd_source_lane",
     "dalton_core.mission_feed_lane",
     "dalton_core.mission_research_task_lane",
     "dalton_core.mission_event_judgement_lane",
+    "dalton_core.mission_reflection_lane",
+    "dalton_core.mission_debate_map_lane",
 )
 
 # The keys the controller tick's summary already uses for things that are not
@@ -147,6 +183,10 @@ LANE_MODULES: tuple[str, ...] = (
 RESERVED_DRIVER_KEYS: frozenset[str] = frozenset({
     "status", "active_loop_count", "probes_executed", "executed", "skipped",
     "mission_sec_dispatch", "forecast_reconciliation",
+    # C2: whether this tick wrote itself into the tick ledger.  It is in the
+    # summary rather than only in a log because a tick whose own bookkeeping
+    # failed must not be indistinguishable from a tick that had nothing to do.
+    "tick_ledger",
 })
 
 _LANES: dict[str, LaneSpec] = {}

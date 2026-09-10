@@ -223,6 +223,8 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 晚 | **合并**：S2 Guidepoint、S1 投喂 + host-tool runner、P14e 专项研究、模型路由（目录退役不删除 + 三层 fallback 链）、S3 大众源、C1 事件日历、S4 cn-hk-findata、**P14a daily tracking**（ResearchEvent、cadence、能力地图、事件判断、ThesisReflection）。main `f6eec59`，3,437 项通过，已 push。每条线都经独立 review，共修掉 12 个 blocker | 完成 |
 | 09-09 晚 | 一次事故：S4 合并时 `connector_governance.py` 带冲突标记被提交并推上去（146 个模块加载失败），10 分钟内修复；此后合并只在全量绿时才 push | 完成 |
 | 09-09 晚 | Wave 2 派出：档案 P12a/P12f、DebateMap P12c、consensus P11b、预算池 C2；INT1 与 Q2 在修 review 意见 | 进行中 |
+| 09-09 夜 | 合并 INT1（cockpit 接线、journal op、install.sh 种子、claim-index lane 登记）与 Q2（周报 rubric、ResearchCycleReflection）。main `d509897`，3,620 项通过 | 完成 |
+| 09-09 夜 | 派出 Wave 3 首批：P14f 业绩季工作流、P14b + P14d 修订候选裁决与版本化重出、INT2 第二批接线；抽取吞吐诊断在跑 | 进行中 |
 
 ---
 

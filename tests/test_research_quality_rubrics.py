@@ -21,6 +21,8 @@ from dalton_core.research_quality_rubrics import (
     INITIAL_SCREEN,
     RUBRICS,
     SCALE,
+    WEEKLY_BRIEF,
+    WEEKLY_BRIEF_SECTIONS,
     UnknownRubric,
     rubric,
     rubric_hashes,
@@ -31,6 +33,9 @@ PINNED = {
     "rubric:initial-screen": "334c9aee0ffebfc3816ee8f367d9304c225f1a05d29cfb3dbf405247260e2d64",
     "rubric:ask-answer": "7fe91c6057b145c7d7f23e5697a6e097c487a9905dfce0c5fa1ae4e6e9146e37",
     "rubric:company-dossier": "0b1718d165bad133ce66fc5ca2cfb5ac3d5fb5d67dc61ff30d8bc54f8519ee51",
+    # Q2. The three above did not move when this one was added, and they must
+    # not: every score already written binds one of them.
+    "rubric:weekly-brief": "ca2c06585715903e456bf4b14d309f52f46380e52643741d71f0bc003046d740",
 }
 
 
@@ -53,13 +58,26 @@ class FrozenRubricTests(unittest.TestCase):
         self.assertIs(rubric("rubric:initial-screen"), INITIAL_SCREEN)
         self.assertIs(rubric("ask_answer"), ASK_ANSWER)
         self.assertIs(rubric("company_dossier"), COMPANY_DOSSIER)
+        self.assertIs(rubric("weekly-brief"), WEEKLY_BRIEF)
+        self.assertIs(rubric("rubric:weekly-brief"), WEEKLY_BRIEF)
         with self.assertRaises(UnknownRubric):
-            rubric("weekly_brief")
+            rubric("investment_memo")
 
-    def test_there_is_deliberately_no_weekly_brief_rubric(self):
-        # The owner deferred the weekly brief to the end of the roadmap. A
-        # rubric for an artefact nobody is building would be graded by nothing.
-        self.assertNotIn("rubric:weekly-brief", RUBRICS)
+    def test_the_weekly_brief_rubric_exists_because_evaluation_was_not_deferred(self):
+        # Q1 left it out, reading the owner's deferral as covering the whole
+        # weekly brief. D4 corrects that: what was deferred is delivery, and
+        # two issues have been published and delivered already, so there is
+        # something to grade.
+        self.assertIn("rubric:weekly-brief", RUBRICS)
+        self.assertEqual(WEEKLY_BRIEF.applies_to, "weekly_brief_issue_version")
+
+    def test_adding_a_fourth_rubric_did_not_move_the_first_three(self):
+        # The capability field is written into ``body()`` only when it is set,
+        # for exactly this reason: an always-present ``"capability": null``
+        # would have rewritten three frozen standards to say nothing new.
+        for ref in ("rubric:initial-screen", "rubric:ask-answer", "rubric:company-dossier"):
+            with self.subTest(rubric=ref):
+                self.assertNotIn("capability", RUBRICS[ref].criteria[0].body())
 
 
 class CriterionShapeTests(unittest.TestCase):

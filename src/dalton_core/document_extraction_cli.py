@@ -270,7 +270,7 @@ def run_extraction(
         # P10x: what past searches said about the documents they returned --
         # publisher and company list -- kept rather than dropped. Best effort:
         # a pruned artefact is one skipped envelope, never a failed run.
-        "provenance": None,
+        "provenance": [],
         # P10x: a review whose original cannot be read at all -- an encrypted
         # PDF, bytes that are not UTF-8, an acquisition whose ticket is gone.
         # Live, six of fourteen open reviews were of this kind and stayed open
@@ -342,13 +342,15 @@ def run_extraction(
             # of the same brokers' notes first.
             specs: dict[str, str] = {}
             rank: dict[str, int] = {}
-            summary["provenance"] = _record_provenance(host, mission)
+            summary["provenance"].append(
+                {"mission_version_ref": mission["id"], **_record_provenance(host)})
             try:
                 rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
                 specs = host.coverage_mission.document_spec_refs(mission["id"])
                 thin = _thinness_ranks(host, mission)
                 reviews = sorted(reviews, key=lambda review: evidence_review_sort_key(
-                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin))
+                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin,
+                    now=datetime.now(timezone.utc)))
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 thin = {}
                 try:
@@ -359,7 +361,8 @@ def run_extraction(
             lanes.append((actor, reviews, specs))
             try:
                 held = sorted(held, key=lambda review: evidence_review_sort_key(
-                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin))
+                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin,
+                    now=datetime.now(timezone.utc)))
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 pass
             held_lanes.append((actor, held, specs))
@@ -490,6 +493,11 @@ _PERMANENT_UNREADABLE = (
     "is encrypted and is not rendered",
     "no completed acquisition ticket",
     "no completed fetch ticket",
+    # S5: a rendering that came back empty.  Offset zero is the only offset a
+    # first read uses, and it is refused when the text has no characters at
+    # all, so this is "the document rendered to nothing", not "the caller
+    # asked for a silly window".
+    "source offset must be a valid bounded window",
 )
 
 
@@ -499,7 +507,7 @@ def _permanently_unreadable(reason: str) -> bool:
     return any(marker in reason for marker in _PERMANENT_UNREADABLE)
 
 
-def _record_provenance(host: ExtractionHost, mission: Mapping[str, Any]) -> dict[str, Any]:
+def _record_provenance(host: ExtractionHost) -> dict[str, Any]:
     """Keep what the searches said about the documents they returned.
 
     P10x: publisher and named companies were on the wire and were dropped, so a
@@ -510,13 +518,8 @@ def _record_provenance(host: ExtractionHost, mission: Mapping[str, Any]) -> dict
 
     from .extraction_backlog import backfill_provenance
 
-    subjects = {member["company_ref"]: member.get("ticker") or member["company_ref"]
-                for member in mission.get("universe") or ()}
-    industry = mission.get("industry_ref")
-    if isinstance(industry, str) and industry:
-        subjects[industry] = industry
     try:
-        return backfill_provenance(host.store.connection, host._transcript_spool, subjects=subjects)
+        return backfill_provenance(host.store.connection, host._transcript_spool)
     except Exception as exc:  # noqa: BLE001 - provenance is not a gate
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
 

@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .alphaengine_document_acquisition import validate_alphaengine_document_acquisition_manifest
+from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .contracts import WorkOrder, ResultEnvelope, ModelInvocation, InvocationGranularity
 from .connector_authority_port import ConnectorCompletionReceiptReader
 from .live_mcp_connector import alphaengine_document_page_from_raw_response
@@ -378,7 +379,12 @@ class HermeticExtractionAdapter:
         return self.saved[work.id]
 
 
-def reservation_micros(work, profile) -> int:
+# How much more than the largest cost path we know about to hold, so that a
+# reservation is not decided by whether telemetry happened to come back priced.
+RESERVATION_HEADROOM = 2
+
+
+def reservation_micros(work, route, profile) -> int:
     """What to hold against the day cap for one window of this model.
 
     P10x: the WorkOrder's flat ``max_cost_usd`` is the ceiling the *contract*
@@ -390,19 +396,36 @@ def reservation_micros(work, profile) -> int:
     $0.000294, so the lane holds a hundred and seventy times the money it
     spends and the ledger counts the hold, not the spend.
 
-    Never above the contract's ceiling, and never below one micro: a
-    reservation of nothing would let an unpriced profile spend without a hold.
+    **The rate card is a floor for the reservation, never the whole answer.**
+    Two costs can arrive for one window, and they are not the same arithmetic.
+    When the provider reports usage the charge is metered tokens at the card's
+    price, which is what ``window_reservation_micros`` bounds.  When it does
+    not, ``record_model_accounting`` falls back to the *route's own* per-request
+    estimate (``calculator:model-route-estimate:0.1``), and that estimate is a
+    whole-request price that owes nothing to this window's token bounds -- live
+    it ran a mean of 4,471 micros against a card-derived 3,080, up to 5,496.
+    A reservation below the charge is the worst of both worlds: the overrun
+    alert fires, ``settle()`` never runs, and the reservation stays open
+    against the day cap forever.  So the floor is the larger of the two, with
+    headroom, and the contract's ceiling is still the roof.
     """
 
     from .extraction_priority import window_reservation_micros
+    from .model_accounting import ModelAccountingError, _route_estimate_micros
 
     ceiling = int(Decimal(str(work.budget["max_cost_usd"])) * 1000000)
     try:
         derived = window_reservation_micros(profile["cost"], work.budget)
     except (KeyError, TypeError, ValueError):
         # An unpriced or oddly shaped profile is not a reason to under-reserve.
-        return ceiling
-    return max(1, min(ceiling, derived))
+        derived = ceiling
+    try:
+        estimated = _route_estimate_micros(route, profile)
+    except (ModelAccountingError, KeyError, TypeError):
+        # No exact estimate on this route: the card-derived floor stands.
+        estimated = 0
+    floor = max(derived, estimated) * RESERVATION_HEADROOM
+    return max(1, min(ceiling, floor))
 
 
 class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
@@ -448,7 +471,14 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                      "mission_version_hash": mission["content_hash"],
                      "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
                      "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1000000),
-                     "outer_budget": binding["outer_budget"]}
+                     "outer_budget": binding["outer_budget"],
+                     # C2: extraction is the coverage pool, and it is the
+                     # lane that spends most of the day. Until it declared
+                     # its pool the ledger reported its whole spend as
+                     # unpooled, which is honest but means the coverage cap
+                     # bound nothing.
+                     **mission_pool_scope(
+                         mission, operation="dispatch_document_extraction")}
             prior = self.budget_store.connection.execute(
                 "SELECT record_json FROM thesis_impact_day_admissions WHERE work_order_ref=? AND attempt_number=? AND phase='assessment'",
                 (work.id, route["attempt_number"]),
@@ -459,7 +489,16 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             self.admission = self.budget_store.admit(
                 policy_version_id=self.budget_policy_ref, day=day, work_order_ref=work.id,
                 attempt_number=route["attempt_number"], phase="assessment", route_decision_ref=route["id"],
-                reserved_micros=reservation_micros(work, profile), mission_binding=scope)
+                reserved_micros=reservation_micros(work, route, profile), mission_binding=scope)
+            if self.admission.get("status") == "rejected":
+                # The coverage pool is spent for today. Refused before the
+                # call, like every other budget refusal on this path, but
+                # named so the summary says which kind of no it was.
+                raise ResearchVerificationConflict(
+                    f"{POOL_EXHAUSTED_STATUS}: the {self.admission['pool']} pool "
+                    f"is spent for {self.admission['day']} "
+                    f"({self.admission['spent']} of {self.admission['cap']} micros)"
+                )
         except Exception as exc:
             raise OpenClawModelAdapterError("document extraction budget/source admission rejected") from exc
 
@@ -989,21 +1028,27 @@ class DocumentExtractionService:
             return None
         return specs.get(context["document_ref"])
 
-    def recorded_subjects(self, document_ref):
+    def recorded_subjects(self, document_ref, subjects):
         """Covered subjects the search wire's own company list named, if kept.
 
         P10x: the AlphaEngine search result carries ``companies`` -- one live
         Wells Fargo note names Accenture, Cognizant, EPAM and Infosys -- and
         the lane threw it away, so a five-vendor note produced Claims for
-        whichever query returned it and nothing for the other four.  Reading is
-        optional on purpose: an install without the table behaves exactly as it
-        did, because an empty list adds no subject.
+        whichever query returned it and nothing for the other four.
+
+        Which of those are *covered* is decided here, against the mission
+        universe as it stands now, rather than read out of the stored row: the
+        row is append-only and coverage is not, so a company admitted to the
+        universe yesterday must still be recognised in a note recorded last
+        week.  Reading is optional on purpose: an install without the table
+        behaves exactly as it did, because an empty list adds no subject.
         """
 
-        connection = self.writer.store.connection
+        from .document_provenance import covered_subjects
+
         try:
-            row = connection.execute(
-                "SELECT covered_subjects_json FROM document_provenance_records WHERE document_ref=?",
+            row = self.writer.store.connection.execute(
+                "SELECT named_companies_json FROM document_provenance_records WHERE document_ref=?",
                 (document_ref,),
             ).fetchone()
         except Exception:  # noqa: BLE001 - no table is "nothing recorded"
@@ -1011,10 +1056,12 @@ class DocumentExtractionService:
         if row is None:
             return []
         try:
-            value = json.loads(row["covered_subjects_json"])
+            named = json.loads(row["named_companies_json"])
         except (ValueError, TypeError):
             return []
-        return [item for item in value if isinstance(item, str) and item]
+        if not isinstance(named, list):
+            return []
+        return covered_subjects(named, subjects)
 
     def statement_subjects(self, context, spec_ref):
         """A resolver for who each drafted statement is about.
@@ -1028,11 +1075,12 @@ class DocumentExtractionService:
         company_ref = context["company_ref"]
         mission = self.writer.coverage_mission.mission(context["mission_version_ref"])
         members = {m["company_ref"]: m for m in mission["universe"]}
+        universe = {ref: member.get("ticker") for ref, member in members.items()
+                    if member.get("ticker")}
         extra: dict[str, str] = {}
-        for subject_ref in self.recorded_subjects(context["document_ref"]):
-            member = members.get(subject_ref) or {}
-            if subject_ref != company_ref and member.get("ticker"):
-                extra[subject_ref] = member["ticker"]
+        for subject_ref in self.recorded_subjects(context["document_ref"], universe):
+            if subject_ref != company_ref and universe.get(subject_ref):
+                extra[subject_ref] = universe[subject_ref]
         industry_document = isinstance(spec_ref, str) and spec_ref in INDUSTRY_SPEC_REFS
 
         def resolve(statement):

@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .budget_pools import POOL_EXHAUSTED_STATUS
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
@@ -409,6 +410,17 @@ def run_judgement(
                 # rather than reporting eight refusals nobody can act on.
                 if "model_family_not_independent" in str(checked.get("reason") or ""):
                     summary["judgement_status"] = "gated:same_family"
+                    break
+                # C2: the same reasoning for a spent pool. This lane keeps its
+                # own book of what it spent and gates on it above; the day
+                # ledger's event_response pool is the same money seen from the
+                # other side, and it can refuse first -- a hand-run or a
+                # replayed call moves one book and not the other. Whichever
+                # gate says stop, the word is the same one.
+                if POOL_EXHAUSTED_STATUS in {
+                    decided.get("lane_status"), checked.get("lane_status")
+                }:
+                    summary["judgement_status"] = POOL_EXHAUSTED_STATUS
                     break
                 continue
             effect = apply_effect(

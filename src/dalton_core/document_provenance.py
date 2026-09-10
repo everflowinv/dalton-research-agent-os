@@ -43,13 +43,18 @@ TIER_MANAGEMENT = "management"
 TIER_SELL_SIDE = "sell_side"
 TIER_EXPERT = "expert"
 TIER_SALES_NOTE = "sales_note"
+# P10x/S4: a market-sizing report is not a news page.  It sits below a broker
+# note about a named company -- it says nothing about any one of them -- and
+# above the press cycle, and it is the tier the industry subject's own Claims
+# come from, so folding it into ``news`` both mis-ranked it and hid it.
+TIER_INDUSTRY = "industry"
 TIER_NEWS = "news"
 TIER_CROWD = "crowd"
 TIER_OTHER = "other"
 
 TIERS: tuple[str, ...] = (
     TIER_FILING, TIER_MANAGEMENT, TIER_SELL_SIDE, TIER_EXPERT,
-    TIER_SALES_NOTE, TIER_NEWS, TIER_CROWD, TIER_OTHER,
+    TIER_SALES_NOTE, TIER_INDUSTRY, TIER_NEWS, TIER_CROWD, TIER_OTHER,
 )
 
 # How much a document of this tier is worth reading, best first.  The owner's
@@ -67,8 +72,8 @@ TIER_BY_SPEC: Mapping[str, str] = {
     "sell-side-reports": TIER_SELL_SIDE,
     "expert-network-transcripts": TIER_EXPERT,
     "sales-notes": TIER_SALES_NOTE,
-    "industry-demand": TIER_NEWS,
-    "competitive-landscape": TIER_NEWS,
+    "industry-demand": TIER_INDUSTRY,
+    "competitive-landscape": TIER_INDUSTRY,
     "management-changes": TIER_NEWS,
 }
 
@@ -202,11 +207,25 @@ def parse_search_metadata(raw: Any) -> dict[str, dict[str, Any]]:
             "title": item.get("title") if isinstance(item.get("title"), str) else None,
             "broker": broker,
             "broker_key": broker_key(broker) or None,
-            "sources": [s for s in (item.get("sources") or []) if isinstance(s, str)],
+            # Flattened as well as listed: P12c's frozen publisher table is
+            # matched against these as text, and it reads a column.
+            "sources": _joined(item.get("sources")),
+            "authors": _joined(item.get("authors")),
             "named_companies": companies,
             "published_at": item.get("publish_time") if isinstance(item.get("publish_time"), str) else None,
         }
     return out
+
+
+def _joined(value: Any) -> str | None:
+    """A wire list of names as one string, or None when the wire said nothing."""
+
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, Sequence):
+        return None
+    parts = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return "; ".join(parts) or None
 
 
 def covered_subjects(named_companies: Any, subjects: Mapping[str, str]) -> list[str]:
@@ -244,9 +263,15 @@ def provenance_record(
     source_ref: str,
     spec_ref: Any,
     metadata: Mapping[str, Any] | None = None,
-    subjects: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """One document's provenance, ready to persist.
+
+    **Coverage is not stored.**  Which of the named companies this mission
+    covers is the mission's answer, not the document's, and it changes when the
+    owner publishes a new universe; storing it would make the same document
+    hash differently before and after a company joined coverage, and the
+    append-only replay check would call that a conflict.  ``covered_subjects``
+    derives it at read time from ``named_companies`` instead.
 
     Deliberately tolerant of a document the search metadata never described:
     the tier still comes from the spec, and the record says honestly that no
@@ -256,19 +281,18 @@ def provenance_record(
     """
 
     metadata = dict(metadata or {})
-    tier = tier_for_spec(spec_ref)
-    named = list(metadata.get("named_companies") or ())
     return {
         "schema_version": SCHEMA_VERSION,
         "document_ref": document_ref,
         "source_ref": source_ref,
         "spec_ref": spec_ref if isinstance(spec_ref, str) else None,
-        "provenance_tier": tier,
+        "provenance_tier": tier_for_spec(spec_ref),
         "broker": metadata.get("broker"),
         "broker_key": metadata.get("broker_key"),
         "title": metadata.get("title"),
-        "named_companies": named,
-        "covered_subjects": covered_subjects(named, subjects or {}),
+        "authors": metadata.get("authors"),
+        "sources": metadata.get("sources"),
+        "named_companies": list(metadata.get("named_companies") or ()),
         "published_at": metadata.get("published_at"),
         "metadata_seen": bool(metadata),
     }
@@ -279,7 +303,8 @@ def provenance_record(
 # items of its own, counted from these same documents -- but the extraction
 # path never learned it, so a market-sizing report found by an Accenture query
 # minted Accenture Claims and the industry subject holds none at all.
-INDUSTRY_SPEC_REFS: frozenset[str] = frozenset({"industry-demand", "competitive-landscape"})
+INDUSTRY_SPEC_REFS: frozenset[str] = frozenset(
+    spec for spec, tier in TIER_BY_SPEC.items() if tier == TIER_INDUSTRY)
 
 
 def subjects_for_statement(
@@ -300,35 +325,51 @@ def subjects_for_statement(
     so statements about somebody else were already being drafted -- they were
     simply all filed under whichever company's search found the document.
 
+    **The review's company is never dropped.**  The statement was drafted with
+    that company named as the subject, so it is the one attribution the window
+    itself vouches for, and a rule that could take it away would be a silent
+    retraction rather than an addition.  An extra subject is therefore admitted
+    only when the sentence is *wholly* about somebody else -- it names another
+    covered vendor and does not name the review's own company.  A comparison
+    that names both ("prefers Cognizant to Accenture on valuation") stays with
+    the review company alone: it is a statement about how the analyst ranks
+    them, drafted for Cognizant, and minting it as an Accenture Claim would put
+    a sentence in Accenture's file that was never written about Accenture.
+
     Three outcomes, in order:
 
-    * the statement names covered subjects -> those subjects, the review's own
-      company first when it is among them;
-    * it names none, and this is an industry document that names the industry
-      -> the industry, which is where a fact about the market belongs;
-    * otherwise -> the review's own company, exactly as before.  The fallback
-      is what keeps this additive: every Claim minted today is still minted.
+    * the statement names the review's own company -> that company, alone;
+    * it does not, but names other covered vendors -> the review's company and
+      those vendors, so the window's own attribution is kept and the vendor the
+      sentence is actually about gains one too;
+    * it names nobody, and this is an industry document that names the industry
+      -> the review's company and the industry, which is where a fact about the
+      market belongs.
+
+    In every case ``company_ref`` is in the answer, which is what makes this
+    strictly additive: every Claim minted today is still minted, under the same
+    key, and a replay is still a duplicate.
     """
 
     from .document_subject import document_names_subject
 
     text = statement if isinstance(statement, str) else ""
-    named: list[str] = []
     verdict = document_names_subject(text, company_names_key)
     if verdict.get("checked") and verdict.get("names_subject"):
-        named.append(company_ref)
+        return {"subjects": [company_ref], "basis": "statement_names_review_company"}
+    others: list[str] = []
     for subject_ref, name_key in (extra_subjects or {}).items():
-        if subject_ref == company_ref or subject_ref in named:
+        if subject_ref == company_ref or subject_ref in others:
             continue
         other = document_names_subject(text, name_key)
         if other.get("checked") and other.get("names_subject"):
-            named.append(subject_ref)
-    if named:
-        return {"subjects": named, "basis": "statement_names_subject"}
+            others.append(subject_ref)
+    if others:
+        return {"subjects": [company_ref, *others], "basis": "statement_names_other_subject"}
     if industry_document and isinstance(industry_ref, str) and industry_ref:
         industry = document_names_subject(text, industry_ref)
         if industry.get("checked") and industry.get("names_subject"):
-            return {"subjects": [industry_ref], "basis": "statement_names_industry"}
+            return {"subjects": [company_ref, industry_ref], "basis": "statement_names_industry"}
     return {"subjects": [company_ref], "basis": "review_company"}
 
 
@@ -362,6 +403,7 @@ __all__ = [
     "TIER_CROWD",
     "TIER_EXPERT",
     "TIER_FILING",
+    "TIER_INDUSTRY",
     "TIER_MANAGEMENT",
     "TIER_NEWS",
     "TIER_OTHER",

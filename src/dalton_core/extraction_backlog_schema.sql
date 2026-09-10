@@ -5,12 +5,20 @@
 -- rewritten -- the bytes it describes are pinned by a content hash, so its
 -- publisher and its company list cannot honestly change afterwards.
 --
--- ``covered_subjects_json`` is the mission's own subjects the document names,
--- and it is the field the multi-company admission reads: a broker note naming
--- Accenture, Cognizant and EPAM produces a Claim for each of them instead of
--- for whichever query happened to return it.  An industry report naming no
--- covered company keeps an empty list, which is the owner's rule stored rather
--- than re-derived: it stays industry-level.
+-- **Only what the wire said is stored.**  Which of the named companies are
+-- *covered* is not: coverage is the mission's business and it changes when the
+-- owner publishes a new universe, so storing it would mean a document recorded
+-- before a company joined coverage disagrees with the same document read
+-- after, and the append-only replay check would call that a conflict.  The
+-- covered subjects are therefore derived at read time from
+-- ``named_companies_json`` and the mission's own universe.
+--
+-- Column names are the ones P12c's ``debate_map_draft._ATTRIBUTION_COLUMNS``
+-- already looks for -- ``broker``, ``authors``, ``sources``, ``title`` -- so
+-- the independence ladder can read this table with no rename and no change on
+-- its side.  It reads them off the discovered-document row today, which this
+-- lane may not alter; ``document_attribution_rows`` below returns the same
+-- shape so integration is one merge rather than a schema migration.
 CREATE TABLE IF NOT EXISTS document_provenance_records (
     document_ref TEXT PRIMARY KEY,
     source_ref TEXT NOT NULL,
@@ -21,8 +29,9 @@ CREATE TABLE IF NOT EXISTS document_provenance_records (
     broker TEXT,
     broker_key TEXT,
     title TEXT,
+    authors TEXT,
+    sources TEXT,
     named_companies_json TEXT NOT NULL,
-    covered_subjects_json TEXT NOT NULL,
     published_at TEXT,
     metadata_seen INTEGER NOT NULL,
     record_json TEXT NOT NULL,

@@ -34,6 +34,7 @@ from typing import Any
 from .document_provenance import (
     SCHEMA_VERSION as PROVENANCE_SCHEMA_VERSION,
     TIERS,
+    covered_subjects,
     independent_brokers,
     provenance_record,
     tier_for_spec,
@@ -97,8 +98,13 @@ class DocumentProvenanceStore:
             raise ExtractionBacklogError("provenance tier is not in the vocabulary")
         wire.setdefault("schema_version", PROVENANCE_SCHEMA_VERSION)
         wire["named_companies"] = list(wire.get("named_companies") or ())
-        wire["covered_subjects"] = list(wire.get("covered_subjects") or ())
         wire["metadata_seen"] = bool(wire.get("metadata_seen"))
+        # S2: coverage is derived at read time, never hashed. A caller that
+        # passes it anyway is refused rather than silently having it dropped
+        # into the hash, because that is the shape the bug would take.
+        if "covered_subjects" in wire:
+            raise ExtractionBacklogError(
+                "covered subjects are derived from the mission universe, not stored")
         digest = content_hash({k: v for k, v in wire.items() if k != "content_hash"})
         existing = self.get(wire["document_ref"])
         if existing is not None:
@@ -109,13 +115,13 @@ class DocumentProvenanceStore:
         self.connection.execute(
             "INSERT INTO document_provenance_records("
             "document_ref,source_ref,spec_ref,provenance_tier,broker,broker_key,title,"
-            "named_companies_json,covered_subjects_json,published_at,metadata_seen,"
-            "record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "authors,sources,named_companies_json,published_at,metadata_seen,"
+            "record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 wire["document_ref"], wire["source_ref"], wire.get("spec_ref"),
                 wire["provenance_tier"], wire.get("broker"), wire.get("broker_key"),
-                wire.get("title"), canonical_json(wire["named_companies"]),
-                canonical_json(wire["covered_subjects"]), wire.get("published_at"),
+                wire.get("title"), wire.get("authors"), wire.get("sources"),
+                canonical_json(wire["named_companies"]), wire.get("published_at"),
                 1 if wire["metadata_seen"] else 0, canonical_json(wire), digest,
                 self.clock(),
             ),
@@ -138,7 +144,6 @@ class DocumentProvenanceStore:
         raw: Any,
         source_ref: str,
         spec_by_document: Mapping[str, str],
-        subjects: Mapping[str, str],
     ) -> list[dict[str, Any]]:
         """Record every document one AlphaEngine search described.
 
@@ -154,16 +159,20 @@ class DocumentProvenanceStore:
             try:
                 results.append(self.record(provenance_record(
                     document_ref=document_ref, source_ref=source_ref,
-                    spec_ref=spec_by_document.get(document_ref),
-                    metadata=metadata, subjects=subjects,
+                    spec_ref=spec_by_document.get(document_ref), metadata=metadata,
                 )))
             except ExtractionBacklogError as exc:
                 results.append({"status": "refused", "document_ref": document_ref,
                                 "reason": str(exc)})
         return results
 
-    def subjects_for(self, document_ref: str) -> list[str]:
+    def subjects_for(self, document_ref: str, subjects: Mapping[str, str]) -> list[str]:
         """The covered subjects this document names, by its own company list.
+
+        Derived here rather than stored (S2): ``subjects`` is the mission's
+        universe as it stands now, so a company added to coverage yesterday is
+        recognised in a note recorded last week without the stored row having
+        to change -- which it may not, being append-only.
 
         Empty when nothing was recorded, which the admission path reads as "no
         extra subjects" -- so a missing row leaves today's behaviour exactly as
@@ -173,7 +182,7 @@ class DocumentProvenanceStore:
         record = self.get(document_ref)
         if record is None:
             return []
-        return list(record.get("covered_subjects") or ())
+        return covered_subjects(record.get("named_companies") or [], subjects)
 
 
 def spec_refs_by_document(connection: sqlite3.Connection) -> dict[str, str]:
@@ -198,7 +207,6 @@ def backfill_provenance(
     connection: sqlite3.Connection,
     spool: Any,
     *,
-    subjects: Mapping[str, str],
     source_ref: str = "source:alphaengine",
     limit: int = 200,
 ) -> dict[str, Any]:
@@ -234,7 +242,7 @@ def backfill_provenance(
             result["unreadable"] += 1
             continue
         for outcome in store.record_search(
-            raw=raw, source_ref=source_ref, spec_by_document=specs, subjects=subjects,
+            raw=raw, source_ref=source_ref, spec_by_document=specs,
         ):
             if outcome.get("status") == "fresh":
                 result["recorded"] += 1
@@ -265,6 +273,7 @@ def observed_yield(connection: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     # seen would have scored a sell-side note at one Claim per document when
     # the mission-wide count says three and a half.
     best: dict[str, tuple[str, int]] = {}
+    windows: dict[str, list[int]] = {}
     for row in rows:
         tier = tier_for_spec(row["spec_ref"])
         rationale = row["rationale"] or ""
@@ -273,6 +282,13 @@ def observed_yield(connection: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         previous = best.get(row["document_ref"])
         if previous is None or count > previous[1]:
             best[row["document_ref"]] = (tier, count)
+        # S3: only the dismissal sentence names how many windows were read.
+        # Measuring from the rows that carry the number and saying so is worth
+        # more than a constant wearing the word "observed": a tier whose
+        # documents were all admitted has no window evidence at all.
+        seen = _WINDOWS_RE.search(rationale)
+        if seen:
+            windows.setdefault(tier, []).append(int(seen.group(1)))
     claims: dict[str, int] = {}
     read: dict[str, int] = {}
     for tier, count in best.values():
@@ -281,15 +297,26 @@ def observed_yield(connection: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for tier in TIERS:
         documents = read.get(tier, 0)
+        measured = windows.get(tier) or []
+        if measured:
+            per_window = max(1, round(sum(measured) / len(measured)))
+            window_basis = "observed"
+        else:
+            per_window = DEFAULT_WINDOWS_PER_DOCUMENT
+            window_basis = "default"
         if documents:
             per_claim = (Decimal(claims.get(tier, 0)) / Decimal(documents)).quantize(Decimal("0.01"))
             result[tier] = {"basis": "observed", "documents_read": documents,
                             "claims_per_document": per_claim,
-                            "windows_per_document": DEFAULT_WINDOWS_PER_DOCUMENT}
+                            "windows_per_document": per_window,
+                            "windows_basis": window_basis,
+                            "windows_measured_on": len(measured)}
         else:
             result[tier] = {"basis": "default", "documents_read": 0,
                             "claims_per_document": DEFAULT_CLAIMS_PER_DOCUMENT,
-                            "windows_per_document": DEFAULT_WINDOWS_PER_DOCUMENT}
+                            "windows_per_document": per_window,
+                            "windows_basis": window_basis,
+                            "windows_measured_on": len(measured)}
     return result
 
 
@@ -368,7 +395,11 @@ def extraction_backlog(
         else:
             bucket["discovered"] += 1
 
-    per_window = Decimal(reservation_micros or 0) / Decimal(1_000_000)
+    # A caller that did not say what a window costs gets "unknown", not "free":
+    # a projection reading $0.000000 is a projection somebody will believe.
+    priced = isinstance(reservation_micros, int) and not isinstance(reservation_micros, bool) \
+        and reservation_micros > 0
+    per_window = Decimal(reservation_micros) / Decimal(1_000_000) if priced else Decimal(0)
     tiers: list[dict[str, Any]] = []
     total_docs = total_claims = 0
     total_cost = Decimal(0)
@@ -396,8 +427,9 @@ def extraction_backlog(
             "queued_documents": queued,
             "expected_windows": windows,
             "expected_claims": expected_claims,
-            "expected_cost_usd": str(cost),
+            "expected_cost_usd": str(cost) if priced else None,
             "yield_basis": measure.get("basis", "default"),
+            "windows_basis": measure.get("windows_basis", "default"),
         })
 
     provenance = connection.execute(
@@ -417,12 +449,50 @@ def extraction_backlog(
         "totals": {
             "queued_documents": total_docs,
             "expected_claims": total_claims,
-            "expected_cost_usd": str(total_cost.quantize(Decimal("0.000001"))),
-            "reservation_micros_per_window": int(reservation_micros or 0),
+            "expected_cost_usd": (str(total_cost.quantize(Decimal("0.000001")))
+                                  if priced else None),
+            "cost_basis": "rate_card_worst_case" if priced else "unknown",
+            "reservation_micros_per_window": reservation_micros if priced else None,
         },
         "independent_brokers": independent_brokers(records),
         "documents_with_provenance": len(records),
     }
+
+
+def document_attribution_rows(connection: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Publisher facts in the shape P12c's independence ladder already reads.
+
+    ``debate_map_draft.document_attribution`` looks for ``publisher`` /
+    ``broker`` / ``authors`` / ``sources`` / ``title`` columns *on the
+    discovered-document row*, which this lane may not alter -- that table is a
+    hashed contract.  So the columns here carry exactly those names and this
+    returns exactly that dict, and integration is one merge:
+
+        attribution = {**document_attribution(conn), **document_attribution_rows(conn)}
+
+    Ours wins on conflict because ours is what the upstream wire said rather
+    than what a title was guessed to mean.  A Core without the table gets an
+    empty dict, which is what the ladder already handles.
+    """
+
+    if not _has_provenance(connection):
+        return {}
+    try:
+        rows = connection.execute(
+            "SELECT document_ref, broker, authors, sources, title "
+            "FROM document_provenance_records"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        values = {field: row[column] for field, column in
+                  (("publisher", "broker"), ("authors", "authors"),
+                   ("sources", "sources"), ("title", "title"))
+                  if isinstance(row[column], str) and row[column].strip()}
+        if values:
+            found[row["document_ref"]] = values
+    return found
 
 
 def _has_provenance(connection: sqlite3.Connection) -> bool:
@@ -439,6 +509,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "apply_schema",
     "backfill_provenance",
+    "document_attribution_rows",
     "extraction_backlog",
     "observed_yield",
     "spec_refs_by_document",

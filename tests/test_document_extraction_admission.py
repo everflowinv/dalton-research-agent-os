@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from dalton_core.document_extraction import DocumentExtractionService, build_work, HermeticExtractionAdapter
+from dalton_core.document_extraction import DocumentExtractionService, RESERVATION_HEADROOM, build_work, HermeticExtractionAdapter
 from dalton_core.extraction_priority import window_reservation_micros
 from dalton_core.openclaw_model_adapter import OpenClawModelAdapter, BrokerConnectionError
 from dalton_core.research_verification import CandidateStagingStore, ResearchVerificationError, ResearchVerificationConflict
@@ -298,7 +298,7 @@ class BrokerAdmissionTests(unittest.TestCase):
         # this test is about is that a disconnect frees nothing; the amount is
         # asserted against the same derivation the worker used, so it moves
         # with the profile instead of being a second copy of the number.
-        expected=window_reservation_micros(self.pr['cost'],{'max_input_tokens':16000,'max_output_tokens':3000})
+        expected=RESERVATION_HEADROOM*window_reservation_micros(self.pr['cost'],{'max_input_tokens':16000,'max_output_tokens':3000})
         self.assertEqual(self.b.connection.execute('SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],expected)
         self.assertLess(expected,50000)
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],0)

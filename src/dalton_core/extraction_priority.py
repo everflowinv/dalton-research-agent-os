@@ -32,6 +32,7 @@ reserves today against an observed mean of three hundredths of a cent.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
@@ -53,12 +54,44 @@ DEFAULT_LANE_SHARE = Decimal("0.5")
 DEFAULT_TICKS_PER_DAY = 288
 
 
+# S4: how long a review may wait before it climbs a rung.  Strict priority
+# without aging is starvation with extra steps: a lane that always reads the
+# best available document reads the worst one never, and "never" here means the
+# whole news tier and -- because a market report is where an industry Claim
+# comes from -- the industry subject with it.  So every full period a review
+# has waited promotes it one rung, and the ladder is climbed rather than
+# jumped: seven days of waiting moves a news page one step, not to the front.
+STARVE_AFTER_DAYS = 7
+# A filing is never overtaken.  Aging exists so the bottom of the ladder gets
+# read eventually, not so an old news page outranks this morning's 10-K.
+BEST_AGED_VALUE = 1
+
+
+def _waited_periods(created_at: Any, now: datetime | None, period_days: int) -> int:
+    """How many whole starvation periods this review has been waiting."""
+
+    if now is None or not isinstance(created_at, str) or not created_at:
+        return 0
+    try:
+        moment = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    waited = (now - moment).total_seconds()
+    if waited <= 0:
+        return 0
+    return int(waited // (period_days * 86400))
+
+
 def review_sort_key(
     review: Mapping[str, Any],
     *,
     spec_by_document: Mapping[str, str],
     company_rank: Mapping[str, int],
     thinness_rank: Mapping[tuple[str, str], int] | None = None,
+    now: datetime | None = None,
+    starve_after_days: int = STARVE_AFTER_DAYS,
 ) -> tuple[int, int, int, str, str]:
     """Reading order: kind of evidence, then who needs it most, then age.
 
@@ -67,19 +100,28 @@ def review_sort_key(
     caller that cannot compute it (no index yet, unreadable ledger) must still
     get a defined order rather than an exception; without it the mission's own
     company priority breaks the tie, which is the old behaviour one level down.
+
+    ``now`` turns aging on.  Without it the order is pure priority, which is
+    the right thing for a caller reasoning about "what is worth most" and the
+    wrong thing for a queue that has to drain.
     """
 
     document_ref = review.get("document_ref") or ""
     company_ref = review.get("company_ref") or ""
+    created_at = str(review.get("created_at") or "")
     tier = tier_for_spec(spec_by_document.get(document_ref, ""))
+    value = evidence_value(tier)
+    if now is not None and starve_after_days > 0:
+        promoted = value - _waited_periods(created_at, now, starve_after_days)
+        value = max(BEST_AGED_VALUE, promoted) if value > BEST_AGED_VALUE else value
     thin = 0
     if thinness_rank:
         thin = thinness_rank.get((company_ref, tier), len(thinness_rank))
     return (
-        evidence_value(tier),
+        value,
         thin,
         company_rank.get(company_ref, len(company_rank)),
-        str(review.get("created_at") or ""),
+        created_at,
         str(review.get("review_id") or ""),
     )
 
@@ -215,11 +257,13 @@ def safe_windows_per_tick(
 
 
 __all__ = [
+    "BEST_AGED_VALUE",
     "DEFAULT_LANE_SHARE",
     "DEFAULT_TICKS_PER_DAY",
     "MAX_WINDOWS_PER_TICK",
     "MIN_WINDOWS_PER_TICK",
     "SCHEMA_VERSION",
+    "STARVE_AFTER_DAYS",
     "review_sort_key",
     "safe_windows_per_tick",
     "thinness_ranks",

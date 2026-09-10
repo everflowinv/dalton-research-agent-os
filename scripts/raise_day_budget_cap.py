@@ -31,6 +31,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:  # pragma: no cover - script bootstrap
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from dalton_core.budget_pools import (  # noqa: E402
+    DEFAULT_SHARES,
+    POOL_NAMES,
+    summarise_shares,
+)
+from dalton_core.lane_registry import load_lanes  # noqa: E402
 from dalton_core.model_configurations import model_config_names  # noqa: E402
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore  # noqa: E402
 
@@ -52,7 +58,13 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
     state_dir = Path(service["core_db"]).parent
     current_ref = thesis["budget_policy_version_id"]
     cap_micros = int(round(cap_usd * 1_000_000))
-    with ThesisImpactBudgetStore(str(budget_db)) as budget:
+    # A dry run opens the ledger read-only. Opening it for writing runs C2's
+    # additive pool migration, and a command whose whole promise is "without
+    # --apply this only describes the change" must not alter the schema of a
+    # live authority to keep it. (A read-only open of a WAL database needs its
+    # sidecars, so a dry run against a stopped service says so rather than
+    # provisioning them.)
+    with ThesisImpactBudgetStore(str(budget_db), read_only=not apply) as budget:
         row = budget.connection.execute(
             "SELECT policy_version_id, day_cap_micros FROM thesis_impact_budget_policies "
             "ORDER BY rowid DESC LIMIT 1"
@@ -70,6 +82,15 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
             "to": {"policy_version_id": new_ref, "day_cap_micros": cap_micros},
             "service_config": str(config_path),
             "model_configs": [],
+            # C2: the owner cap is one number and the mission spends it in
+            # four pools, so a cap raised without saying what each pool
+            # becomes is a raise nobody can check against a lane that says
+            # skipped:pool_exhausted. This is what the default split makes of
+            # the new cap; a mission that declares budget.pools overrides it.
+            "default_pool_caps_usd": summarise_shares({
+                name: int(round(cap_micros * float(DEFAULT_SHARES[name])))
+                for name in POOL_NAMES
+            }),
         }
         if not apply:
             return plan
@@ -81,6 +102,16 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
     _write_owner_only(config_path, service)
     # P14-0: the set of configurations is a registry a lane adds itself to,
     # not a tuple in this script that a lane module could never reach.
+    #
+    # INT1: a registration happens at import, so the registry only knows what
+    # has been imported. Loading the lane registry imports every tick lane;
+    # the claim-index tagger spends on its own configuration but is not a tick
+    # lane yet, so it is named here until it becomes one. Reading the registry
+    # without this is how a configuration gets left behind -- which has
+    # already happened once, to the deliverable-drafting configuration.
+    load_lanes()
+    import dalton_core.claim_index_tagging  # noqa: F401
+
     for name in model_config_names():
         target = state_dir / name
         if not target.is_file():

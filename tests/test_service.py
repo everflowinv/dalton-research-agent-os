@@ -65,6 +65,62 @@ class StaticDashboardTests(unittest.TestCase):
             TencentCosConfig.from_mapping(raw)
 
 
+class InstallerSeedTests(unittest.TestCase):
+    """INT1: what the installer puts in place for the merged Wave 1 lanes.
+
+    Read out of the script rather than run, like every other assertion about
+    it: running it installs a virtualenv and LaunchAgents. What is worth
+    pinning is that the two yfinance records are seeded the way every other
+    connector record is -- copied once, never overwritten, owner-only, and
+    left *proposed* so the approval stays the owner's -- and that the library
+    the lane refuses without is actually installed.
+    """
+
+    INSTALL = Path(__file__).resolve().parents[1] / "deploy" / "macos" / "install.sh"
+
+    def script(self) -> str:
+        return self.INSTALL.read_text(encoding="utf-8")
+
+    def test_both_yfinance_records_are_seeded_once_and_owner_only(self) -> None:
+        text = self.script()
+        for kind in ("yfinance-daily-prices", "yfinance-analyst-estimates"):
+            self.assertIn(kind, text)
+            record = (
+                self.INSTALL.parents[1] / "connector-governance" / f"{kind}-v1.json"
+            )
+            self.assertTrue(record.is_file(), f"{kind} record is not in the repo")
+            # Seeded as proposed: the installer never approves anything.
+            self.assertEqual(
+                json.loads(record.read_text(encoding="utf-8"))["status"], "proposed")
+        block = text.split("for yfinance_kind in", 1)[1].split("done", 1)[0]
+        self.assertIn('if [[ ! -f "$yfinance_file"', block)
+        self.assertIn('chmod 600 "$yfinance_file"', block)
+
+    def test_the_market_data_extra_is_installed(self) -> None:
+        # Without yfinance the price lane refuses with a reason rather than
+        # guessing, which is correct and also means the lane never runs.
+        self.assertIn(
+            '"${repo_root}[deploy,pdf,sec-financials,market-data]"', self.script())
+
+    def test_a_lane_is_seeded_all_or_nothing(self) -> None:
+        # Copying half of what a lane needs gives the owner an approval to make
+        # and a lane that starts and refuses every tick. The feed lanes want a
+        # feed plan and a workspace directory besides their records, and the
+        # Guidepoint lane wants a discovery plan this repo does not ship, so
+        # none of the three is seeded here even though their records exist.
+        # Comments are stripped first: the script explains by name which
+        # connectors it deliberately leaves alone, and that sentence is the
+        # point rather than a violation of it.
+        code = "\n".join(line for line in self.script().splitlines()
+                          if not line.lstrip().startswith("#"))
+        for absent in ("xueqiu", "x-xreach", "employee-reviews", "sales-notes",
+                       "company-wiki", "cn-hk-findata"):
+            self.assertNotIn(absent, code)
+        repo = self.INSTALL.parents[2]
+        self.assertFalse((repo / "deploy" / "discovery-plans").exists())
+        self.assertFalse((repo / "deploy" / "feed-plans").exists())
+
+
 class ServiceTests(unittest.TestCase):
     def test_one_cycle_sweeps_projects_and_renders_without_an_llm(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -422,6 +478,20 @@ class ServiceTests(unittest.TestCase):
             self.assertIn(
                 str((governance / "sec-financial-statements-v2.json").resolve()),
                 with_statements,
+            )
+            # INT1 / P11a: the price lane is switched on by the same thing --
+            # its own record being on disk -- and a Core without one renders
+            # the plist it always rendered.
+            self.assertNotIn("--market-price-governance", with_statements)
+            (governance / "yfinance-daily-prices-v1.json").write_text(
+                "{}", encoding="utf-8")
+            with_prices = plistlib.loads(Path(render(
+                root / "LaunchAgents", root / "venv" / "bin", root / "state",
+                config, root / "logs",
+            )["writer"]).read_bytes())["ProgramArguments"]
+            self.assertEqual(
+                with_prices[with_prices.index("--market-price-governance") + 1],
+                str((governance / "yfinance-daily-prices-v1.json").resolve()),
             )
             state_dir = root / "state"
             state_dir.mkdir(parents=True, exist_ok=True)

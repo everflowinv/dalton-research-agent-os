@@ -14,10 +14,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from dalton_core.document_provenance import (
     TIER_FILING,
+    TIER_INDUSTRY,
     TIER_MANAGEMENT,
     TIER_NEWS,
     TIER_SELL_SIDE,
@@ -38,7 +40,9 @@ from dalton_core.extraction_backlog import (
     observed_yield,
 )
 from dalton_core.extraction_priority import (
+    BEST_AGED_VALUE,
     MAX_WINDOWS_PER_TICK,
+    STARVE_AFTER_DAYS,
     review_sort_key,
     safe_windows_per_tick,
     thinness_ranks,
@@ -118,26 +122,35 @@ class SearchMetadataTests(unittest.TestCase):
     def test_a_document_the_search_never_described_still_gets_its_tier(self):
         record = provenance_record(
             document_ref="alphaengine-doc:1", source_ref="source:alphaengine",
-            spec_ref="sell-side-reports", metadata=None, subjects=UNIVERSE)
+            spec_ref="sell-side-reports", metadata=None)
         self.assertEqual(record["provenance_tier"], TIER_SELL_SIDE)
         self.assertIsNone(record["broker"])
         self.assertFalse(record["metadata_seen"])
-        self.assertEqual(record["covered_subjects"], [])
+        self.assertEqual(record["named_companies"], [])
+        # S2: coverage is the mission's answer, so it is never in the hash.
+        self.assertNotIn("covered_subjects", record)
 
 
 class TierLadderTests(unittest.TestCase):
     def test_the_owner_ladder_is_the_sort_order(self):
         ladder = [tier_for_spec(spec) for spec in (
             "annual-report-10k", "earnings-call-transcripts",
-            "sell-side-reports", "sales-notes", "industry-demand")]
+            "sell-side-reports", "sales-notes", "industry-demand",
+            "management-changes")]
         self.assertEqual(ladder, [TIER_FILING, TIER_MANAGEMENT, TIER_SELL_SIDE,
-                                  "sales_note", TIER_NEWS])
+                                  "sales_note", TIER_INDUSTRY, TIER_NEWS])
         self.assertEqual([evidence_value(t) for t in ladder],
                          sorted(evidence_value(t) for t in ladder))
 
     def test_an_unknown_kind_sorts_last_rather_than_being_promoted(self):
         self.assertEqual(tier_for_spec("something-new"), "other")
         self.assertGreater(evidence_value("other"), evidence_value(TIER_NEWS))
+
+    def test_a_market_report_outranks_a_news_page(self):
+        # S4: an industry report is where an industry Claim comes from, and
+        # folding it into ``news`` both mis-ranked it and hid it.
+        self.assertLess(evidence_value(TIER_INDUSTRY), evidence_value(TIER_NEWS))
+        self.assertGreater(evidence_value(TIER_INDUSTRY), evidence_value(TIER_SELL_SIDE))
 
     def test_broker_key_drops_legal_dressing_but_not_identity(self):
         self.assertEqual(broker_key("TD Cowen"), "td cowen")
@@ -200,6 +213,54 @@ class ReadingOrderTests(unittest.TestCase):
 
     def test_the_key_is_defined_without_a_thinness_map(self):
         self.assertEqual(self._key("r", "ACN", "doc:acn-broker")[1], 0)
+
+
+class AgingTests(unittest.TestCase):
+    """S4: strict priority alone reads the bottom of the ladder never."""
+
+    SPECS = {"doc:news": "management-changes", "doc:market": "industry-demand",
+             "doc:call": "earnings-call-transcripts", "doc:10k": "annual-report-10k"}
+    NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
+
+    def _key(self, document, age_days, *, now=None):
+        created = (self.NOW - timedelta(days=age_days)).isoformat()
+        return review_sort_key(
+            {"review_id": f"r:{document}", "company_ref": "ACN",
+             "document_ref": document, "created_at": created},
+            spec_by_document=self.SPECS, company_rank={"ACN": 0}, now=now)
+
+    def test_without_a_clock_the_order_is_pure_priority(self):
+        self.assertEqual(self._key("doc:news", 400)[0], evidence_value(TIER_NEWS))
+
+    def test_a_news_page_climbs_one_rung_per_waiting_period(self):
+        fresh = self._key("doc:news", 0, now=self.NOW)[0]
+        one = self._key("doc:news", STARVE_AFTER_DAYS, now=self.NOW)[0]
+        two = self._key("doc:news", 2 * STARVE_AFTER_DAYS, now=self.NOW)[0]
+        self.assertEqual(fresh, evidence_value(TIER_NEWS))
+        self.assertEqual(one, fresh - 1)
+        self.assertEqual(two, fresh - 2)
+
+    def test_it_climbs_rather_than_jumps_and_never_passes_a_filing(self):
+        ancient = self._key("doc:news", 3650, now=self.NOW)
+        filing = self._key("doc:10k", 0, now=self.NOW)
+        self.assertEqual(ancient[0], BEST_AGED_VALUE)
+        self.assertLess(filing, ancient)
+        self.assertEqual(filing[0], evidence_value(TIER_FILING))
+
+    def test_a_starving_market_report_eventually_outruns_a_fresh_transcript(self):
+        # The industry subject's Claims come from these, so starving them
+        # starves the industry subject.
+        market = self._key("doc:market", 6 * STARVE_AFTER_DAYS, now=self.NOW)
+        call = self._key("doc:call", 0, now=self.NOW)
+        self.assertLess(market, call)
+
+    def test_an_unreadable_or_future_timestamp_ages_nothing(self):
+        for created in ("", "not a date", (self.NOW + timedelta(days=9)).isoformat()):
+            key = review_sort_key(
+                {"review_id": "r", "company_ref": "ACN", "document_ref": "doc:news",
+                 "created_at": created},
+                spec_by_document=self.SPECS, company_rank={"ACN": 0}, now=self.NOW)
+            self.assertEqual(key[0], evidence_value(TIER_NEWS), created)
 
 
 class BatchBoundTests(unittest.TestCase):
@@ -273,6 +334,76 @@ class BatchBoundTests(unittest.TestCase):
                     "rate_card": self.RATE, "work_budget": self.WORK, **kwargs})
 
 
+class ReservationTests(unittest.TestCase):
+    """B1: two cost paths reach one reservation, and the smaller one is a leak.
+
+    Live, 41 extraction windows were charged on the route-estimate calculator
+    rather than metered tokens: mean 4,471 micros, max 5,496, against a
+    rate-card derivation of 3,080.  A reservation below the charge trips the
+    overrun alert, skips ``settle()``, and leaves the hold open against the day
+    cap for good.
+    """
+
+    RATE = {"input_per_million_usd": 0.14, "output_per_million_usd": 0.28}
+
+    class _Work:
+        budget = {"max_input_tokens": 16000, "max_output_tokens": 3000, "max_cost_usd": 0.05}
+
+    def _profile(self, ref="model-profile-version:extraction:1"):
+        return {"profile_version_ref": ref, "cost": dict(self.RATE)}
+
+    def _route(self, estimate, ref="model-profile-version:extraction:1"):
+        return {"candidate_snapshot": [
+            {"profile_version_ref": ref, "eligible": True, "estimated_cost_usd": estimate}]}
+
+    def test_the_route_estimate_wins_when_it_exceeds_the_rate_card(self):
+        from dalton_core.document_extraction import RESERVATION_HEADROOM, reservation_micros
+
+        # The live maximum on calculator:model-route-estimate:0.1.
+        held = reservation_micros(self._Work, self._route("0.005496"), self._profile())
+        self.assertEqual(held, 5496 * RESERVATION_HEADROOM)
+        self.assertGreater(held, 5496)
+        self.assertGreater(held, window_reservation_micros(self.RATE, self._Work.budget))
+
+    def test_the_live_mean_estimate_is_covered_with_headroom(self):
+        from dalton_core.document_extraction import reservation_micros
+
+        held = reservation_micros(self._Work, self._route("0.004471"), self._profile())
+        self.assertGreaterEqual(held, 4471 * 2)
+        self.assertLessEqual(held, int(Decimal("0.05") * 1_000_000))
+
+    def test_the_rate_card_is_the_floor_when_the_route_carries_no_estimate(self):
+        from dalton_core.document_extraction import RESERVATION_HEADROOM, reservation_micros
+
+        for route in ({}, {"candidate_snapshot": []},
+                      {"candidate_snapshot": [{"profile_version_ref": "other",
+                                               "eligible": True, "estimated_cost_usd": "9"}]},
+                      {"candidate_snapshot": [{"profile_version_ref": "model-profile-version:extraction:1",
+                                               "eligible": False, "estimated_cost_usd": "9"}]}):
+            with self.subTest(route=route):
+                self.assertEqual(reservation_micros(self._Work, route, self._profile()),
+                                 3080 * RESERVATION_HEADROOM)
+
+    def test_a_tiny_estimate_never_lowers_the_rate_card_floor(self):
+        from dalton_core.document_extraction import RESERVATION_HEADROOM, reservation_micros
+
+        self.assertEqual(reservation_micros(self._Work, self._route("0.000001"), self._profile()),
+                         3080 * RESERVATION_HEADROOM)
+
+    def test_the_contract_ceiling_is_still_the_roof(self):
+        from dalton_core.document_extraction import reservation_micros
+
+        ceiling = int(Decimal("0.05") * 1_000_000)
+        self.assertEqual(reservation_micros(self._Work, self._route("1.00"), self._profile()), ceiling)
+
+    def test_an_unpriced_profile_reserves_the_ceiling_rather_than_a_penny(self):
+        from dalton_core.document_extraction import reservation_micros
+
+        ceiling = int(Decimal("0.05") * 1_000_000)
+        self.assertEqual(reservation_micros(self._Work, {}, {"profile_version_ref": "p", "cost": {}}),
+                         ceiling)
+
+
 class StatementSubjectTests(unittest.TestCase):
     EXTRA = {"company:sec-cik:0001467373": "ACN", "company:sec-cik:0001352010": "EPAM"}
 
@@ -282,17 +413,37 @@ class StatementSubjectTests(unittest.TestCase):
             company_names_key="CTSH", industry_ref=INDUSTRY,
             extra_subjects=self.EXTRA, **kwargs)
 
-    def test_a_statement_about_a_named_competitor_becomes_that_company_s_claim(self):
+    def test_a_statement_wholly_about_a_competitor_also_becomes_that_company_s(self):
         plan = self._subjects(
             "Wells Fargo said Accenture's bookings momentum is the strongest in the group.")
-        self.assertEqual(plan["subjects"], ["company:sec-cik:0001467373"])
-        self.assertEqual(plan["basis"], "statement_names_subject")
-
-    def test_a_comparison_naming_both_is_admitted_against_both_owner_first(self):
-        plan = self._subjects(
-            "The analyst prefers Cognizant to Accenture on valuation grounds.")
         self.assertEqual(plan["subjects"],
                          ["company:sec-cik:0001058290", "company:sec-cik:0001467373"])
+        self.assertEqual(plan["basis"], "statement_names_other_subject")
+
+    def test_a_comparison_naming_both_stays_with_the_review_company_alone(self):
+        # B2, owner's decision: the sentence was drafted with Cognizant named
+        # as the subject, and "prefers Cognizant to Accenture" is a statement
+        # about how the analyst ranks them.  Minting it as an Accenture Claim
+        # would put a sentence in Accenture's file that was never written
+        # about Accenture.
+        plan = self._subjects(
+            "The analyst prefers Cognizant to Accenture on valuation grounds.")
+        self.assertEqual(plan["subjects"], ["company:sec-cik:0001058290"])
+        self.assertEqual(plan["basis"], "statement_names_review_company")
+
+    def test_the_review_company_is_never_dropped(self):
+        # B3: whatever else a statement is about, the window vouched for this
+        # company, so removing it would be a silent retraction.
+        for statement, industry in (
+            ("Accenture's bookings momentum is strongest.", False),
+            ("The analyst prefers Cognizant to Accenture.", False),
+            ("Management expects margin expansion next year.", False),
+            ("Buyers are shifting IT services spending.", True),
+            ("", False),
+        ):
+            with self.subTest(statement=statement):
+                plan = self._subjects(statement, industry_document=industry)
+                self.assertIn("company:sec-cik:0001058290", plan["subjects"])
 
     def test_a_statement_naming_nobody_still_belongs_to_the_review_s_company(self):
         # This is what keeps the change additive: every Claim minted today is
@@ -301,11 +452,11 @@ class StatementSubjectTests(unittest.TestCase):
         self.assertEqual(plan["subjects"], ["company:sec-cik:0001058290"])
         self.assertEqual(plan["basis"], "review_company")
 
-    def test_an_industry_document_s_market_fact_becomes_an_industry_claim(self):
+    def test_an_industry_document_s_market_fact_also_becomes_an_industry_claim(self):
         plan = self._subjects(
             "Buyers are shifting IT services spending toward outcome-based contracts.",
             industry_document=True)
-        self.assertEqual(plan["subjects"], [INDUSTRY])
+        self.assertEqual(plan["subjects"], ["company:sec-cik:0001058290", INDUSTRY])
         self.assertEqual(plan["basis"], "statement_names_industry")
 
     def test_the_same_sentence_in_a_transcript_stays_with_the_company(self):
@@ -319,6 +470,25 @@ class StatementSubjectTests(unittest.TestCase):
             "Cognizant is winning share as IT services demand recovers.",
             industry_document=True)
         self.assertEqual(plan["subjects"], ["company:sec-cik:0001058290"])
+
+    def test_the_old_claim_set_is_a_subset_of_the_new_one(self):
+        # B3 re-baselined: replay a fixture queue of statements, mint the
+        # subject each would have got before this change (always the review
+        # company) and the subjects it gets now, and assert nothing was lost.
+        queue = [
+            "Accenture's bookings momentum is strongest in the group.",
+            "The analyst prefers Cognizant to Accenture on valuation grounds.",
+            "Management expects margin expansion next year.",
+            "Buyers are shifting IT services spending toward outcome contracts.",
+            "EPAM's Ukraine exposure remains the key debate.",
+            "Cognizant is winning share as IT services demand recovers.",
+        ]
+        for industry in (False, True):
+            before = {(index, "company:sec-cik:0001058290") for index in range(len(queue))}
+            after = {(index, subject)
+                     for index, statement in enumerate(queue)
+                     for subject in self._subjects(statement, industry_document=industry)["subjects"]}
+            self.assertTrue(before <= after, sorted(before - after))
 
 
 def _ledger() -> sqlite3.Connection:
@@ -366,17 +536,56 @@ class ProvenanceStoreTests(unittest.TestCase):
         outcomes = self.store.record_search(
             raw=LIVE_SEARCH, source_ref="source:alphaengine",
             spec_by_document={"alphaengine-doc:320000610220657": "sell-side-reports",
-                              "alphaengine-doc:320000610154569": "sell-side-reports"},
-            subjects=UNIVERSE)
+                              "alphaengine-doc:320000610154569": "sell-side-reports"})
         self.assertEqual([o["status"] for o in outcomes], ["fresh", "fresh"])
         record = self.store.get("alphaengine-doc:320000610220657")
         self.assertEqual(record["broker"], "Wells Fargo Securities, LLC")
+        self.assertEqual(record["sources"], "Wells Fargo Securities, LLC")
         self.assertEqual(record["provenance_tier"], TIER_SELL_SIDE)
-        self.assertIn("company:sec-cik:0001467373", record["covered_subjects"])
+        self.assertIn("company:sec-cik:0001467373",
+                      self.store.subjects_for("alphaengine-doc:320000610220657", UNIVERSE))
+
+    def test_coverage_is_derived_at_read_time_not_frozen_into_the_hash(self):
+        # S2: a company admitted to the universe after the note was recorded is
+        # still recognised, and the stored row -- which is append-only -- did
+        # not have to change for that to be true.
+        self.store.record_search(raw=LIVE_SEARCH, source_ref="source:alphaengine",
+                                 spec_by_document={})
+        doc = "alphaengine-doc:320000610220657"
+        narrow = self.store.subjects_for(doc, {"company:sec-cik:0001058290": "CTSH"})
+        wide = self.store.subjects_for(doc, UNIVERSE)
+        self.assertEqual(narrow, ["company:sec-cik:0001058290"])
+        self.assertIn("company:sec-cik:0001467373", wide)
+        # Recording it again after coverage widened is still a duplicate.
+        again = self.store.record_search(raw=LIVE_SEARCH, source_ref="source:alphaengine",
+                                         spec_by_document={})
+        self.assertEqual([o["status"] for o in again], ["duplicate", "duplicate"])
+
+    def test_a_caller_that_tries_to_store_coverage_is_refused(self):
+        base = provenance_record(document_ref="alphaengine-doc:1",
+                                 source_ref="source:alphaengine",
+                                 spec_ref="sell-side-reports", metadata={})
+        with self.assertRaises(ExtractionBacklogError):
+            self.store.record({**base, "covered_subjects": ["company:sec-cik:0001467373"]})
+
+    def test_the_debate_map_reads_these_columns_under_the_names_it_looks_for(self):
+        from dalton_core.debate_map_draft import _ATTRIBUTION_COLUMNS
+        from dalton_core.extraction_backlog import document_attribution_rows
+
+        self.store.record_search(raw=LIVE_SEARCH, source_ref="source:alphaengine",
+                                 spec_by_document={})
+        rows = document_attribution_rows(self.connection)
+        entry = rows["alphaengine-doc:320000610220657"]
+        self.assertEqual(entry["publisher"], "Wells Fargo Securities, LLC")
+        self.assertTrue(set(entry) <= set(_ATTRIBUTION_COLUMNS))
+        # The column names themselves are ones the ladder already looks for.
+        stored = {row[1] for row in self.connection.execute(
+            "PRAGMA table_info(document_provenance_records)")}
+        for field in ("publisher", "authors", "sources", "title"):
+            self.assertTrue(set(_ATTRIBUTION_COLUMNS[field]) & stored, field)
 
     def test_recording_the_same_search_twice_writes_nothing_new(self):
-        args = dict(raw=LIVE_SEARCH, source_ref="source:alphaengine",
-                    spec_by_document={}, subjects=UNIVERSE)
+        args = dict(raw=LIVE_SEARCH, source_ref="source:alphaengine", spec_by_document={})
         self.store.record_search(**args)
         again = self.store.record_search(**args)
         self.assertEqual([o["status"] for o in again], ["duplicate", "duplicate"])
@@ -384,8 +593,7 @@ class ProvenanceStoreTests(unittest.TestCase):
     def test_a_second_reading_that_disagrees_is_a_conflict_not_an_overwrite(self):
         base = provenance_record(document_ref="alphaengine-doc:1",
                                  source_ref="source:alphaengine",
-                                 spec_ref="sell-side-reports", metadata={"broker": "TD Cowen"},
-                                 subjects=UNIVERSE)
+                                 spec_ref="sell-side-reports", metadata={"broker": "TD Cowen"})
         self.store.record(base)
         with self.assertRaises(ExtractionBacklogError):
             self.store.record({**base, "broker": "Wolfe Research"})
@@ -396,7 +604,7 @@ class ProvenanceStoreTests(unittest.TestCase):
                                "provenance_tier": "vibes"})
 
     def test_subjects_for_an_unrecorded_document_are_empty_not_guessed(self):
-        self.assertEqual(self.store.subjects_for("alphaengine-doc:missing"), [])
+        self.assertEqual(self.store.subjects_for("alphaengine-doc:missing", UNIVERSE), [])
 
 
 class BacklogProjectionTests(unittest.TestCase):
@@ -462,8 +670,7 @@ class BacklogProjectionTests(unittest.TestCase):
             store.record(provenance_record(
                 document_ref=doc, source_ref="source:alphaengine",
                 spec_ref="sell-side-reports", metadata={
-                    "broker": broker, "broker_key": broker_key(broker)},
-                subjects=UNIVERSE))
+                    "broker": broker, "broker_key": broker_key(broker)}))
         backlog = extraction_backlog(self.connection, self.acn, reservation_micros=3080)
         self.assertEqual(backlog["documents_with_provenance"], 3)
         self.assertEqual(backlog["independent_brokers"], ["TD Cowen", "Wolfe Research"])
@@ -477,6 +684,35 @@ class BacklogProjectionTests(unittest.TestCase):
         measured = observed_yield(self.connection)
         self.assertEqual(measured[TIER_SELL_SIDE]["documents_read"], 1)
         self.assertEqual(measured[TIER_SELL_SIDE]["claims_per_document"], Decimal("3.00"))
+
+    def test_windows_per_document_says_whether_it_was_measured(self):
+        # S3: only the dismissal sentence names a window count, so a tier
+        # whose documents were all admitted has no window evidence and must
+        # not wear the word "observed".
+        measured = observed_yield(self.connection)
+        self.assertEqual(measured[TIER_SELL_SIDE]["windows_basis"], "default")
+        self.assertEqual(measured[TIER_SELL_SIDE]["windows_measured_on"], 0)
+        record = _document(self.connection, doc="doc:acn-b9", spec="sell-side-reports",
+                           company=self.acn)
+        _review(self.connection, record=record, doc="doc:acn-b9", company=self.acn,
+                state="dismissed",
+                rationale="ADR-0005: mission automation found no admissible qualitative "
+                          "statement in 6 window(s); 0 suggestion(s) refused")
+        measured = observed_yield(self.connection)
+        self.assertEqual(measured[TIER_SELL_SIDE]["windows_basis"], "observed")
+        self.assertEqual(measured[TIER_SELL_SIDE]["windows_per_document"], 6)
+        self.assertEqual(measured[TIER_SELL_SIDE]["windows_measured_on"], 1)
+
+    def test_an_unpriced_backlog_reports_unknown_rather_than_free(self):
+        backlog = extraction_backlog(self.connection, self.acn)
+        self.assertEqual(backlog["totals"]["cost_basis"], "unknown")
+        self.assertIsNone(backlog["totals"]["expected_cost_usd"])
+        self.assertIsNone(backlog["totals"]["reservation_micros_per_window"])
+        for tier in backlog["tiers"]:
+            self.assertIsNone(tier["expected_cost_usd"])
+        priced = extraction_backlog(self.connection, self.acn, reservation_micros=3080)
+        self.assertEqual(priced["totals"]["cost_basis"], "rate_card_worst_case")
+        self.assertIsNotNone(priced["totals"]["expected_cost_usd"])
 
     def test_a_subject_ref_is_required(self):
         with self.assertRaises(ExtractionBacklogError):

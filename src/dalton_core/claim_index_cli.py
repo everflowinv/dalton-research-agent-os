@@ -58,7 +58,7 @@ from .claim_index_tagging import (
     prompt_tagger,
     rule_tags,
 )
-from .cockpit_model import CockpitModel, CockpitModelError
+from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .coverage_mission import CoverageMissionAuthority
 from .scheduler import SchedulerError
 from .store import DaltonStore, canonical_json
@@ -66,12 +66,13 @@ from .store import DaltonStore, canonical_json
 SUMMARY_SCHEMA_VERSION = "0.1"
 PURPOSE = "claim_index"
 
-# TODO(integrator): add ``claim_index`` to
-# ``coverage_mission.AUTOMATION_WRITE_SCOPES`` and grant it in the next mission
-# version; then this constant is the only word checked and the fallback below
-# can be deleted.
+# INT1: ``claim_index`` is in ``coverage_mission.AUTOMATION_WRITE_SCOPES`` as
+# of the P12b integration, so this is now the only word checked. The temporary
+# fallback to ``claim`` is gone: an index entry is strictly weaker than the
+# Claim it points at, but ADR-0004 says an automated write gets its own word,
+# and a run that writes under a word nobody granted for it is exactly what the
+# vocabulary exists to prevent.
 WRITE_SCOPE = "claim_index"
-FALLBACK_WRITE_SCOPES: tuple[str, ...] = ("claim",)
 
 DEFAULT_MAX_CLAIMS = 200
 
@@ -93,9 +94,6 @@ def granted_scope(mission: Any) -> str | None:
     may_write = set((mission.get("autonomy") or {}).get("may_write") or [])
     if WRITE_SCOPE in may_write:
         return WRITE_SCOPE
-    for word in FALLBACK_WRITE_SCOPES:
-        if word in may_write:
-            return word
     return None
 
 
@@ -193,8 +191,7 @@ def run_claim_index(
             summary.update({
                 "status": "held", "index_status": "not_authorized",
                 "failure_reason": (
-                    f"任务 {mission['id']} 还没有授予 {WRITE_SCOPE}（或 "
-                    f"{'/'.join(FALLBACK_WRITE_SCOPES)}）写入范围；"
+                    f"任务 {mission['id']} 还没有授予 {WRITE_SCOPE} 写入范围；"
                     "在授权前不打标签，免得白花模型调用"
                 ),
             })
@@ -269,8 +266,11 @@ def run_claim_index(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
-            summary.update({"status": "succeeded", "index_status": "model_unavailable",
-                            "failure_reason": f"{type(exc).__name__}: {exc}"})
+            summary.update({
+                "status": "succeeded",
+                # C2: a spent pool is a budget decision, not an outage.
+                "index_status": lane_status_for(exc, "model_unavailable"),
+                "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
@@ -432,7 +432,6 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 __all__ = [
     "DEFAULT_MAX_CLAIMS",
-    "FALLBACK_WRITE_SCOPES",
     "PURPOSE",
     "WRITE_SCOPE",
     "build_parser",

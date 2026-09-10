@@ -62,6 +62,7 @@ dalton-market-price = "dalton_core.market_price_cli:main"
 dalton-cn-hk-findata = "dalton_core.cn_hk_findata_cli:main"
 dalton-model-forecast = "dalton_core.company_model_forecast_cli:main"
 dalton-research-quality = "dalton_core.research_quality_cli:main"
+dalton-research-reflection = "dalton_core.research_cycle_reflection_cli:main"
 dalton-sales-notes = "dalton_core.sales_notes_cli:main"
 dalton-company-wiki = "dalton_core.company_wiki_cli:main"
 

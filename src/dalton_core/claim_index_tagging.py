@@ -51,6 +51,7 @@ from .claim_aspect_vocabulary import (
 )
 from .claim_index_authority import IMPORTANCE_RANK, IMPORTANCE_TIERS, current_entries
 from .cockpit_model import register_purpose
+from .model_configurations import register_model_config_name
 from .document_figure_grade import FILED, GRADE_BY_SPEC
 from .store import canonical_json, content_hash
 
@@ -61,6 +62,12 @@ TASK_REF = "task:claim-index-aspect-tagging:0.1"
 # rather than editing a set in cockpit_model. Registered at import because the
 # child imports this module before it builds a WorkOrder.
 PURPOSE = register_purpose("claim_index")
+
+# INT1: the same registry for the other half of a lane that spends money. The
+# tagger runs on its own configuration file, and a configuration the cap raise
+# does not know about keeps naming a superseded budget policy version -- whose
+# refusal reads like a budget message rather than the wiring mistake it is.
+MODEL_CONFIG_NAME = register_model_config_name("claim-index-model-config.json")
 
 # How many claims one model call is allowed to carry, and how much of each
 # statement it sees.  Both are bounds on spend, not on ambition: the router

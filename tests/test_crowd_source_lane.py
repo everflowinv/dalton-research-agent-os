@@ -505,17 +505,19 @@ class LaneRegistrationTests(unittest.TestCase):
     def test_the_lane_runs_after_every_evidence_lane(self):
         """The crowd is the least of the evidence, so it goes last of those.
 
-        Not last of everything: P14e's research-task lane sits below it and is
-        not an evidence source at all. What matters is that a tick which runs
+        Not last of everything: the lanes below it acquire no evidence at all.
+        P14e's research-task lane admits a loop, and Q2's reflection lane reads
+        the week the other lanes had. What matters is that a tick which runs
         out of time runs out of it here, rather than before a filing.
         """
 
         from dalton_core.mission_crowd_source_lane import LANE
 
         self.assertEqual(LANE.operation, "dispatch_mission_crowd_sources")
+        not_evidence = {"dispatch_research_task", "dispatch_mission_reflection"}
         evidence_lanes = [
             spec.operation for spec in self.registry.tick_lanes()
-            if spec.operation != "dispatch_research_task"
+            if spec.operation not in not_evidence
         ]
         self.assertEqual(evidence_lanes[-1], LANE.operation)
 

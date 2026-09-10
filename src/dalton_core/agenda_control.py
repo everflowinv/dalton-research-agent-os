@@ -26,7 +26,13 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qs, urlparse
 
-from .cockpit_plane import CockpitConfig, CockpitConflict, CockpitError, CockpitPlane
+from .cockpit_plane import (
+    MAX_CLAIMS_IN_VIEW,
+    CockpitConfig,
+    CockpitConflict,
+    CockpitError,
+    CockpitPlane,
+)
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .human_intent import (
     HumanIntentError,
@@ -779,6 +785,11 @@ class AgendaControlApplication:
             return plane.publish_draft(login, value)
         if action == "decide":
             return plane.decide(login, value)
+        # Q1: the five feedback buttons. The cockpit process has no Core write
+        # handle, so this goes back out through the writer as the owner's
+        # Tailscale-derived principal, like every other cockpit decision.
+        if action == "feedback":
+            return plane.record_feedback(login, value)
         raise CockpitError("unknown cockpit action")
 
     def cockpit_view(self, path: str, login: str, query: Mapping[str, str]) -> dict[str, Any]:
@@ -796,6 +807,22 @@ class AgendaControlApplication:
             return {**plane.job(login, query.get("id", "")), "enabled": True}
         if path == "/v1/cockpit/deliverable":
             return {**plane.document(query.get("ref", "")), "enabled": True}
+        # P12b: the Ledger's conclusions read through the Claim index, with
+        # the three filters the index makes answerable. "canonical" defaults
+        # to on, which is what the index is for.
+        if path == "/v1/cockpit/claims":
+            limit = query.get("limit", "")
+            return {**plane.claims(
+                company_ref=query.get("company") or None,
+                index_aspect=query.get("aspect") or None,
+                importance=query.get("importance") or None,
+                canonical_only=query.get("canonical", "1") not in {"0", "false", "no"},
+                limit=int(limit) if limit.isdigit() else MAX_CLAIMS_IN_VIEW,
+            ), "enabled": True}
+        # P13-M2: one company's forecast model, printed by the lane's own
+        # renderer rather than re-laid-out here.
+        if path == "/v1/cockpit/model":
+            return {**plane.company_model(query.get("company", "")), "enabled": True}
         if path == "/v1/cockpit/history":
             kind = query.get("kind", "ask")
             if kind not in {"ask", "goal", "steer"}:
