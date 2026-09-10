@@ -220,6 +220,8 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
    `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
 10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
 11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
+12. **自动化冲突解决只允许用于「两边各追加一行」的字典 / 列表 / 元组条目**，且解决后必须先 `python -c "import <module>"`
+    再提交（09-10 一次「两边都保留」把嵌套字面量的闭合括号吃掉，主线无法解析，被 P13-M3 agent 发现）。
 
 ## 5. 主 agent 的集成流程
 
