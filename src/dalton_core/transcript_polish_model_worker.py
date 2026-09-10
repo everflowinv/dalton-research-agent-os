@@ -110,9 +110,16 @@ class RoutedTranscriptPolishModelWorker:
                 "transcript routing policy is not registered"
             ) from exc
         allowed = policy.get("filters", {}).get("allowed_profile_ids")
-        if not isinstance(allowed, list) or len(allowed) != 1:
+        purposes = policy.get("purpose_overrides") or {}
+        purpose_selection = (
+            purposes.get(self.purpose) if self.purpose is not None else None
+        )
+        if (
+            (not isinstance(allowed, list) or not allowed)
+            and purpose_selection is None
+        ):
             raise TranscriptPolishModelWorkerRejected(
-                "transcript routing policy must pin exactly one model profile"
+                "transcript routing policy has no approved model candidates"
             )
         self.scheduler = scheduler
         self.router = router

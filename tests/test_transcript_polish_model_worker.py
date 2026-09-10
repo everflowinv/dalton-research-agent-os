@@ -179,6 +179,16 @@ class FakeAdapter:
         return invocation, result
 
 
+class RecordingAdapter(FakeAdapter):
+    def __init__(self, candidate_wire: dict) -> None:
+        super().__init__(candidate_wire)
+        self.selected_profile_ids: list[str] = []
+
+    def execute(self, work: WorkOrder, route: dict, selected: dict):
+        self.selected_profile_ids.append(selected["id"])
+        return super().execute(work, route, selected)
+
+
 class LateThenReplayAdapter(FakeAdapter):
     def __init__(self, candidate_wire: dict, advance_clock) -> None:
         super().__init__(candidate_wire)
@@ -348,6 +358,76 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
         self.assertEqual(self.authority.polished_text(artifact_ref), POLISHED)
         replay = self.coordinator.advance(self.probe, model_work)
         self.assertTrue(replay["replayed"])
+
+    def test_purpose_chain_selects_approved_profile_outside_legacy_pin(self) -> None:
+        unavailable = profile()
+        unavailable.update({
+            "profile_version_ref": "model-profile-version:test-transcript-busy:1",
+            "id": "profile:test-transcript-busy",
+            "model": "transcript-busy",
+            "family": "test-transcript-busy",
+            "credential_slot_ref": "credential-slot:openclaw:test-busy",
+            "availability": {
+                **unavailable["availability"],
+                "state": "unavailable",
+            },
+        })
+        second = profile()
+        second.update({
+            "profile_version_ref": "model-profile-version:test-transcript-backup:1",
+            "id": "profile:test-transcript-backup",
+            "model": "transcript-backup",
+            "family": "test-transcript-backup",
+            "credential_slot_ref": "credential-slot:openclaw:test-backup",
+        })
+        self.assertEqual(
+            self.router.register_profile(unavailable)["status"], "fresh"
+        )
+        self.assertEqual(self.router.register_profile(second)["status"], "fresh")
+        selected_policy = policy()
+        selected_policy.update({
+            "policy_version_ref": "model-routing-policy-version:test-transcript-chain:1",
+            "id": "model-routing-policy:test-transcript-chain",
+            "purpose_overrides": {
+                "document_extraction": {
+                    "mode": "explicit",
+                    "chain": [unavailable["id"], second["id"]],
+                }
+            },
+        })
+        self.assertEqual(
+            self.router.register_policy(selected_policy)["status"], "fresh"
+        )
+        adapter = RecordingAdapter(candidate())
+
+        class PurposeWorker(RoutedTranscriptPolishModelWorker):
+            purpose = "document_extraction"
+
+        model_work = self._prepare()
+        worker = PurposeWorker(
+            scheduler=self.scheduler,
+            router=self.router,
+            adapter=adapter,
+            store=self.store,
+            observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref=selected_policy["policy_version_ref"],
+            credential_slot_refs=(
+                "credential-slot:openclaw:test",
+                "credential-slot:openclaw:test-busy",
+                "credential-slot:openclaw:test-backup",
+            ),
+            clock=lambda: NOW,
+        )
+        routed = worker.run_once(model_work)
+        self.assertEqual(routed["status"], "succeeded")
+        self.assertEqual(
+            adapter.selected_profile_ids, ["profile:test-transcript-backup"]
+        )
+        self.assertEqual(
+            routed["route"]["selected_profile_version_ref"],
+            second["profile_version_ref"],
+        )
 
     def test_late_model_result_replays_without_second_execution(self) -> None:
         model_work = self._prepare()
