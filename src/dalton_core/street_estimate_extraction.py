@@ -23,12 +23,13 @@ about which documents may be read at all does.
 Hence the refusals, which are most of this module:
 
 ``multi_company_report``
-    The note names more than one company. Live, this is 177 of the 190
-    sell-side documents in the spool -- the Wolfe payments-and-IT-services
-    recaps, where a section per company each carries its own ``PT: $39-$44``.
-    Reading page one of one of those and filing the answer against Accenture is
-    exactly the Haier-transcript failure ``document_figure_grade`` records, and
-    it is refused wholesale rather than parsed cleverly.
+    The note names more than one company. Live, that is 18 of the 68 sell-side
+    documents naming a covered company -- the payments-and-IT-services
+    quarterly recaps, thirty issuers to a note, each with its own ``PT:`` line
+    a page apart. Reading page one of one of those and filing the answer
+    against Accenture is exactly the Haier-transcript failure
+    ``document_figure_grade`` records, and it is refused wholesale rather than
+    parsed cleverly.
 
 ``ambiguous_target``
     Page one yields two different live targets. Morgan Stanley's "What's

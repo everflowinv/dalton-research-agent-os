@@ -67,7 +67,7 @@ numeric candidate）、`source_grade`、`statement`（带 qualifier 的人可读
 
 - append-only，`UNIQUE(company_ref, document_ref)`：同一份研报读两次是一行。
 - 另有 `street_estimate_document_scans`：**哪些研报读过、读出了什么**。没有它，lane 分不清「还没读」和
-  「读过但里面没有目标价」，会每天重读同样的 177 份行业报告。被拒的扫描连理由一起记下来。
+  「读过但里面没有目标价」，会每天重读同样那几十份读不出东西的研报。被拒的扫描连理由一起记下来。
 
 **为什么不进 `coverage_mission_document_figures`。** 那张表的 `source_grade` 有 CHECK 约束，只列了
 `company-filed-document` 与 `earnings-call-transcript`；`coverage_mission_schema.sql` 在本片的禁改清单里，
@@ -175,7 +175,8 @@ RBC 研报里的 "Overweight" 是在说别人的评级，记下来就等于把�
 domesticReport / sellSideReport / researchReport`，首页窗口 4,000 字符，quote 按 1,200 字符切）：
 
 ```
-提到覆盖池内公司的研报：68 份
+spool 里的研报对象：227 份（名下 0 家公司 26、1 家 171、2 家 14、5 家以上 16）
+提到覆盖池内公司的研报：68 份（单一发行人 50、多公司 18）
 记录的 StreetEstimate：9 条
 拒绝：no_target_price 20、multi_company_report 18、subject_not_named 17、
       label_does_not_name_a_line 4
@@ -199,8 +200,10 @@ domesticReport / sellSideReport / researchReport`，首页窗口 4,000 字符，
 **召回是被刻意牺牲的。** 计划书 §2 的口径（首 6k 字符有目标价数字）数出 ACN 8 / EPAM 8 / CTSH 5 / DXC 4 /
 IBM 3 共 28 份；本片只记 9 条。差额几乎全在两条规则上：
 
-1. `multi_company_report`：全 spool 里 177/190 份研报名下不止一家公司（Wolfe 的支付与 IT 服务季度回顾，
-   一家公司一节、每节自己的 `PT: $39-$44`）。整份拒绝，不做分节解析。
+1. `multi_company_report`：live spool 里共 227 份研报，其中 30 份名下不止一家公司（16 份名下 5 家以上，
+   典型是支付与 IT 服务季度回顾，三十家一份、一家一节、每节自己的 `PT:` 行）。落到覆盖池内的 68 份里有
+   18 份是这种。整份拒绝，不做分节解析：分节解析要在没有页码的纯文本里判断「这一段属于哪家公司」，
+   而判错的代价正是把别人的目标价填给 Accenture。
 2. `label_does_not_name_a_line`：4 份实盘研报只写了 `$270 PT` / `$275 PT` / `$165 PT` / `PT to $97`。
    `document_numeric_claim._names_a_line` 要求标签命名一条线而不是复述金额，"PT" 两个字母不够。
    **这条不绕过**：绕过的唯一办法是把研报没印过的词（"price target"）递给核对器，而核对器存在的全部意义
