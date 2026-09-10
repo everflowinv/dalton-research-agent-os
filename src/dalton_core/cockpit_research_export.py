@@ -26,7 +26,8 @@ def export_download(core_db: str | Path, company_ref: str, format: str,
         else:
             from .fund_xlsx_export import export_company_workbook
 
-            manifest = export_company_workbook(core_db, company_ref, target)
+            manifest = export_company_workbook(
+                core_db, company_ref, target, mission_ref=mission_ref)
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         raw = target.read_bytes()
     return {
