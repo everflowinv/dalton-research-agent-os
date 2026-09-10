@@ -150,8 +150,38 @@ class RealInvestmentMemoDecisionTests(unittest.TestCase):
             gate=gate2, actor_ref=self.mission["autonomy"]["automation_principal"])
         second = WriterServer._op_decide_investment_memo(server, {
             "memo_version_ref": memo2["id"], "memo_version_hash": memo2["content_hash"],
-            "decision": "approve", "reason": "updated memo approved", "actor_ref": "human:owner"})
+            "decision": "reject", "reason": "updated memo rejected", "actor_ref": "human:owner"})
         self.assertIsNone(second["active_coverage_record_ref"])
+        self.assertEqual(self.missions.current_stage_state(
+            self.mission["mission_ref"], self.company)["stages"]["investment_memo"]["status"],
+            "gate_failed")
+
+        # A rejection settles only that exact memo. A changed v3 can be
+        # approved in the same entered cycle without inventing a reopen.
+        sections3 = [{**section, "body": section["body"] + " Revised again."}
+                     for section in sections2]
+        material3 = {**material, "summary": "Third supported memo", "sections": sections3}
+        digest3 = verified_body_hash(material3)
+        verifier_value3 = {"verdict": "pass", "verified_body_hash": digest3, "finding_codes": []}
+        verifier3 = self.chain._model(JsonAdapter(verifier_value3),
+            policy_version_ref=self.chain.verifier_policy, slots=self.chain.verifier_slots).call(
+                purpose="investment_memo_verifier", request_id="memo-real-verify-3",
+                prompt=json.dumps(verifier_value3), mission=self.mission,
+                producer_route_decision_refs=[row["route_decision_ref"] for row in producers])
+        gate3 = {**gate, "verified_body_hash": digest3,
+                 "verifier": {"verdict": "pass", "finding_codes": [],
+                    "producer_route_decision_refs": [row["route_decision_ref"] for row in producers],
+                    **{key: verifier3[key] for key in ("work_order_ref", "route_decision_ref",
+                                                       "result_envelope_ref", "invocation_ref")}}}
+        memo3 = MissionDeliverableAuthority(self.store).publish(kind="investment_memo",
+            subject_ref=self.company, mission=self.mission, playbook=self.playbook,
+            template_ref="investment_memo", sections=sections3, summary="Third supported memo", gaps=[],
+            model_invocation_refs=[row["work_order_ref"] for row in producers] + [verifier3["work_order_ref"]],
+            gate=gate3, actor_ref=self.mission["autonomy"]["automation_principal"])
+        third = WriterServer._op_decide_investment_memo(server, {
+            "memo_version_ref": memo3["id"], "memo_version_hash": memo3["content_hash"],
+            "decision": "approve", "reason": "third memo approved", "actor_ref": "human:owner"})
+        self.assertIsNone(third["active_coverage_record_ref"])
         self.assertEqual(self.missions.current_stage_state(
             self.mission["mission_ref"], self.company)["stages"]["investment_memo"]["status"],
             "gate_passed")

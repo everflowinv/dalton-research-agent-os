@@ -74,8 +74,9 @@ draft consumes.
   injects a crash after the real memo pass before active coverage, then proves
   an exact retry completes it. The same real authority test reopens the passed
   memo gate, publishes a changed head with a new formal verifier result, and
-  approves it without claiming the older active-coverage record as a new
-  cycle. Folded-state regressions cover
+  records a human rejection. It then publishes a third changed head and proves
+  that the older rejection does not poison its approval. Neither later cycle
+  claims the older active-coverage record as a new write. Folded-state regressions cover
   a reopened company-model gate and an unrelated old active-coverage entry.
 
 ## Remaining boundary
