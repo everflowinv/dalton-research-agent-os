@@ -44,3 +44,6 @@ seed/switch inventory.
 
 No model pair is enabled by this commit, and no live install, policy decision,
 signing, or deployment was performed.
+
+
+Root integration additionally executes the installer's real zsh preflight up to its first filesystem mutation. Half pairs, same effective pins, unknown tiers, and combined profile/tier input exit 2; a valid pair passes. Eight model-pair tests pass; this does not execute installation or touch owner state.

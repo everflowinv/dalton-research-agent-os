@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +105,33 @@ class DeploymentModelPairTests(unittest.TestCase):
                         script.index('mkdir -p "$config_dir"'))
         self.assertIn("unknown model tier", script)
         self.assertIn("must set a profile or tier per role, not both", script)
+
+    @unittest.skipUnless(Path("/bin/zsh").is_file(), "macOS installer requires zsh")
+    def test_actual_shell_preflight_refuses_invalid_pairs_before_side_effects(self) -> None:
+        script = (Path(__file__).parents[1] / "deploy/macos/install.sh").read_text("utf-8")
+        # Execute the installer's actual preflight, stopping before its first
+        # filesystem mutation; no service, venv or owner state is touched.
+        prefix = script.split('mkdir -p "$config_dir"', 1)[0] + '\nprint PRECHECK_OK\n'
+        cases = [
+            {"DALTON_DOSSIER_MODEL_TIER": "brain"},
+            {"DALTON_DOSSIER_MODEL_TIER": "brain", "DALTON_DOSSIER_VERIFIER_MODEL_TIER": "brain"},
+            {"DALTON_EARNINGS_MODEL_TIER": "unknown", "DALTON_EARNINGS_VERIFIER_MODEL_TIER": "verifier"},
+            {"DALTON_EVENT_JUDGEMENT_MODEL_PROFILE": "profile:one",
+             "DALTON_EVENT_JUDGEMENT_MODEL_TIER": "brain",
+             "DALTON_EVENT_VERIFIER_MODEL_TIER": "verifier"},
+        ]
+        for settings in cases:
+            with self.subTest(settings=settings):
+                result = subprocess.run(["/bin/zsh", "-s"], input=prefix, text=True,
+                                        capture_output=True, env={"PATH": "/usr/bin:/bin", **settings})
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertNotIn("PRECHECK_OK", result.stdout)
+        result = subprocess.run(["/bin/zsh", "-s"], input=prefix, text=True,
+                                capture_output=True, env={"PATH": "/usr/bin:/bin",
+                                    "DALTON_DOSSIER_MODEL_TIER": "brain",
+                                    "DALTON_DOSSIER_VERIFIER_MODEL_TIER": "verifier"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PRECHECK_OK", result.stdout)
 
     def test_legacy_dossier_paths_remain_a_fallback(self) -> None:
         (self.state / "initial-screen-model-config.json").write_text("{}")

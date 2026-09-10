@@ -59,3 +59,10 @@ Next step：收齐 crowd 与 market-proxy 审查修复后冻结一个可部署�
 ### 首个持续开发验收点
 
 `e7e06bb` 完整主线 6,114 项 / 495.678s 通过（1 skip）；当前 live 只读副本 12 步复演、67 schemas/35 lanes/38 entries/0 escaped；wheel 428 个 Python/SQL 文件匹配。详见 continuous-wave2-integration 报告。对应代码和文档本次 push，未部署。三个 Sol 槽继续做后续切片交叉修复，不能将本检查点标为全部开发完成。
+
+
+### 下一批继续集成
+
+已合入HK协调器持久失败账本及同日恢复修复、dossier/earnings成对安装与独立配置、W5成本槽位及规格到预测入口的版本绑定校验、SEC Item5独立计划事件。主线当前超出已推送的 `1df3a32`，这些新增尚待本批完整验证。真实 zsh 模型pair预检测试补齐。
+
+三条Sol继续：Item5跨公司/XBRL/context边界交叉审查；verifier调用前排除生产者家族（保留默认tier与事后独立性校验）；8-K discovery下一版提案生成（仅准备审批材料，不发布live）。Owner部署包在完整批次验证后发出，签署/部署仍未执行。

@@ -8,9 +8,9 @@ Owner 要求持续开发，不以单个里程碑完成为停点；写代码最�
 
 | 负责人 | 当前代码切片 | 工作分支 |
 | --- | --- | --- |
-| Sol / forecast_fixes | W5 market-proxy 审查修复，随后成本侧模板 | `w5-cost-templates` |
-| Sol / zero_base_fixes | Crowd source 的日期/输入/权限恢复 | `f14-crowd-repairs` |
-| Sol / insider_fixes | HK closed-week 判断与迟到证据增量归组 | `hk-weekly-judgement-incremental` |
+| Sol / forecast_fixes | SEC Item 5 解析与消费者链路交叉审查 | `item5-cross-review` |
+| Sol / zero_base_fixes | 独立 verifier 在调用前排除所有生产者模型家族 | `verifier-route-independence` |
+| Sol / insider_fixes | SEC 8-K discovery 的可审阅版本化提案 | `sec-8k-discovery-proposal` |
 | 主代理 | 交叉审查、真实子进程回归、签署部署材料、集成验收 | `main` |
 
 本轮首个持续开发验收点 `e7e06bb`：**完整 6,114 项 / 495.678s 通过（1 skip）**，当前 live 只读副本全部 12 步复演通过（67 schemas / 35 lanes / 38 entries / 0 escaped），wheel 428 个 Python/SQL 文件逐字匹配。详见 [验收记录](reports/continuous-wave2-integration-2026-09-10.md)。未部署。
