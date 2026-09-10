@@ -399,6 +399,23 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(budget["remaining_24h"], 20)
         self.assertEqual(budget["launchable"], 3)
 
+    def test_a_versioned_plan_can_raise_the_per_tick_cap_without_bypassing_daily_caps(self) -> None:
+        configured = small_plan(max_calls_per_tick=7)
+        coordinator = GuidepointLaneCoordinator(
+            missions=self.lane.missions,
+            connection=self.lane.h.core.connection,
+            launcher=self.launcher(),
+            plan=configured,
+            mission_version_ref=self.lane.mission["id"],
+            mission_version_hash=self.lane.mission["content_hash"],
+            requested_by=AUTOMATION,
+            clock=self.clock,
+        )
+        budget = coordinator.budget()
+        self.assertEqual(budget["max_calls_per_tick"], 7)
+        self.assertEqual(budget["launchable"], 7)
+        self.assertEqual(budget["remaining_24h"], 20)
+
     def test_a_spent_call_lowers_the_remaining_allowance(self) -> None:
         request = self.lane.h.search.build_request(
             build_guidepoint_parameters(

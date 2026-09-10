@@ -155,7 +155,7 @@ def validate_guidepoint_discovery_plan(value: Mapping[str, Any]) -> dict[str, An
         ),
         "max_calls_per_tick": _positive_int(
             raw_budget["max_calls_per_tick"], "budget.max_calls_per_tick",
-            maximum=SEARCHES_PER_TICK,
+            maximum=MAX_PLAN_CALLS_24H,
         ),
     }
     companies = wire["companies"]
@@ -470,7 +470,7 @@ class GuidepointLaneCoordinator:
         spent = count_recent_guidepoint_search_calls(self.connection, as_of=self.clock())
         ceiling = min(governed, planned)
         remaining = max(0, ceiling - spent)
-        per_tick = min(int(self.plan["budget"]["max_calls_per_tick"]), SEARCHES_PER_TICK)
+        per_tick = int(self.plan["budget"]["max_calls_per_tick"])
         return {
             "governed_daily_limit": governed,
             "plan_daily_limit": planned,
