@@ -64,6 +64,15 @@ _PURPOSES: set[str] = set(_SEED_PURPOSES)
 # adapter resolves these opaque allowlisted refs to packaged schemas; callers
 # can never supply a filesystem path or arbitrary JSON schema.
 _VERIFIER_PROVIDER_CONTRACTS = {
+    "dossier_verifier": (
+        "dossier-verifier-provider-output-0.1",
+        "dossier-verifier-provider-output-v0.1.schema.json"),
+    "industry_framework_verifier": (
+        "dossier-verifier-provider-output-0.1",
+        "dossier-verifier-provider-output-v0.1.schema.json"),
+    "deep_insight_gate_verifier": (
+        "deep-insight-gate-verifier-provider-output-0.1",
+        "deep-insight-gate-verifier-provider-output-v0.1.schema.json"),
     "event_judgement_verifier": (
         "event-judgement-verifier-provider-output-0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json"),

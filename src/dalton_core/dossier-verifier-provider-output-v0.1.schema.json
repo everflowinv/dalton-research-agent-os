@@ -1,0 +1,23 @@
+{
+  "$id": "https://dalton.local/schemas/dossier-verifier-provider-output-v0.1.schema.json",
+  "title": "DossierVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "findings"],
+  "properties": {
+    "verdict": {"enum": ["pass", "reject"]},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "code", "detail"],
+        "properties": {
+          "unit": {"type": "string", "minLength": 1},
+          "code": {"enum": ["unsupported_sentence", "number_not_in_source", "structure_deviation", "conclusion_beyond_evidence"]},
+          "detail": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    }
+  }
+}

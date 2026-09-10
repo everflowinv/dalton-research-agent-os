@@ -106,6 +106,8 @@ dalton_core = [
   "thesis-impact-verifier-provider-output-v0.2.schema.json",
   "thesis-impact-verifier-decision-provider-output-v0.1.schema.json",
   "event-judgement-verifier-provider-output-v0.1.schema.json",
+  "dossier-verifier-provider-output-v0.1.schema.json",
+  "deep-insight-gate-verifier-provider-output-v0.1.schema.json",
   "call_budget_defaults.json",
   "run_budget_defaults.json",
   "dashboard.html",

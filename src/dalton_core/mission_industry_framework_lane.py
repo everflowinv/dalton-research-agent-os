@@ -101,7 +101,9 @@ def ledger_signature(connection: Any) -> str:
     wrote a Claim -- and that is the ordinary case, not the exception.
     """
 
-    parts: list[str] = []
+    from .cockpit_model import verifier_provider_contract_fingerprint
+    parts: list[str] = [verifier_provider_contract_fingerprint(
+        "industry_framework_verifier")]
     row = connection.execute(
         "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM claim_versions"
     ).fetchone()

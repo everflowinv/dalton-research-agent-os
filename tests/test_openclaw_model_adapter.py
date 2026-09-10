@@ -44,6 +44,11 @@ def event_verifier_schema_hash() -> str:
     return canonical_hash(schema)
 
 
+def packaged_schema_hash(name: str) -> str:
+    schema = json.loads(resources.files("dalton_core").joinpath(name).read_text("utf-8"))
+    return canonical_hash(schema)
+
+
 def endpoint_profile() -> dict[str, Any]:
     return {
         "schema_version": "0.1",
@@ -550,6 +555,42 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                          {"verdict", "findings"})
         self.assertNotIn("assessment_ref", structured["jsonSchema"]["properties"])
         self.assertTrue(result.metadata["required_provider_controls"])
+
+    def test_dossier_family_verifiers_use_their_exact_provider_schemas(self) -> None:
+        cases = (
+            ("dossier_verifier", "dossier-verifier-provider-output-0.1",
+             "dossier-verifier-provider-output-v0.1.schema.json",
+             "dossier_verifier_provider_output_v0_1", "unit"),
+            ("industry_framework_verifier", "dossier-verifier-provider-output-0.1",
+             "dossier-verifier-provider-output-v0.1.schema.json",
+             "dossier_verifier_provider_output_v0_1", "unit"),
+            ("deep_insight_gate_verifier", "deep-insight-gate-verifier-provider-output-0.1",
+             "deep-insight-gate-verifier-provider-output-v0.1.schema.json",
+             "deep_insight_gate_verifier_provider_output_v0_1", "question_ref"),
+        )
+        for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
+            with self.subTest(purpose=purpose):
+                verifier = WorkOrder.from_dict({**self.work.to_dict(),
+                    "id": f"work:dossier-provider-{index}", "requested_capabilities": ["verify"],
+                    "idempotency_key": f"work-key:dossier-provider-{index}",
+                    "metadata": {"purpose": purpose, "verifier_output_schema_version": "0.1",
+                                 "verifier_provider_contract": contract,
+                                 "verifier_provider_schema_hash": packaged_schema_hash(resource)}})
+                routed = self.router.route(verifier, attempt_number=1, capability="verify",
+                    policy_version_ref="model-routing-policy-version:default:1",
+                    credential_slot_refs=["credential-slot:openai:dalton"],
+                    required_modalities=["text"], required_context_tokens=1_000,
+                    estimated_input_tokens=500, estimated_output_tokens=250,
+                    producer_family="anthropic-claude",
+                    idempotency_key=f"route-key:dossier-provider-{index}")["decision"]
+                (_, result), broker = self.run_with(success_response, work=verifier, route=routed)
+                broker.close()
+                structured = broker.requests[0]["requiredControls"]["structuredOutput"]
+                self.assertEqual(structured["schemaName"], schema_name)
+                item = structured["jsonSchema"]["properties"]["findings"]["items"]
+                self.assertIn(locator, item["required"])
+                self.assertEqual(structured["schemaHash"], packaged_schema_hash(resource))
+                self.assertTrue(result.metadata["required_provider_controls"])
 
     def test_unknown_verifier_provider_contract_fails_before_transport(self) -> None:
         verifier = WorkOrder.from_dict({

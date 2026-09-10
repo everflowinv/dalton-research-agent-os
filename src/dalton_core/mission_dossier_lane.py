@@ -88,10 +88,12 @@ def ledger_signature(connection: Any) -> str:
     "something moved", and only the child says what that means.
     """
 
+    from .cockpit_model import verifier_provider_contract_fingerprint
     row = connection.execute(
         "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM claim_versions"
     ).fetchone()
-    parts = [str(row["n"]), str(row["newest"] or "-")]
+    parts = [str(row["n"]), str(row["newest"] or "-"),
+             verifier_provider_contract_fingerprint("dossier_verifier")]
     try:
         heads = connection.execute(
             "SELECT dossier_ref, MAX(version_number) AS v "

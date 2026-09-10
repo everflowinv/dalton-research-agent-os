@@ -100,7 +100,9 @@ def ledger_signature(connection: Any) -> str:
     that means.
     """
 
-    parts: list[str] = []
+    from .cockpit_model import verifier_provider_contract_fingerprint
+    parts: list[str] = [verifier_provider_contract_fingerprint(
+        "deep_insight_gate_verifier")]
     for table, column in (("company_dossier_versions", "dossier_ref"),
                           ("debate_map_versions", "map_ref")):
         try:

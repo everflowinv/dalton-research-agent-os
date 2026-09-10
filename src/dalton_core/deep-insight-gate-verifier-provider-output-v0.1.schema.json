@@ -1,0 +1,50 @@
+{
+  "$id": "https://dalton.local/schemas/deep-insight-gate-verifier-provider-output-v0.1.schema.json",
+  "title": "DeepInsightGateVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question_ref",
+          "code",
+          "detail"
+        ],
+        "properties": {
+          "question_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "code": {
+            "enum": [
+              "unsupported_answer",
+              "number_not_in_source",
+              "wrong_question",
+              "conclusion_beyond_evidence",
+              "should_be_unknown"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      }
+    }
+  }
+}

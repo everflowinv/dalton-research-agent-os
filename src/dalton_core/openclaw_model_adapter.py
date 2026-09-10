@@ -60,6 +60,18 @@ ProviderControlMode = Literal[
     "calibration-posthoc-v1",
 ]
 _VERIFIER_PROVIDER_CONTRACTS = {
+    "dossier-verifier-provider-output-0.1": (
+        "0.1",
+        "dossier-verifier-provider-output-v0.1.schema.json",
+        "dossier_verifier_provider_output_v0_1",
+        frozenset({"dossier_verifier", "industry_framework_verifier"}),
+    ),
+    "deep-insight-gate-verifier-provider-output-0.1": (
+        "0.1",
+        "deep-insight-gate-verifier-provider-output-v0.1.schema.json",
+        "deep_insight_gate_verifier_provider_output_v0_1",
+        frozenset({"deep_insight_gate_verifier"}),
+    ),
     "event-judgement-verifier-provider-output-0.1": (
         "0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json",
