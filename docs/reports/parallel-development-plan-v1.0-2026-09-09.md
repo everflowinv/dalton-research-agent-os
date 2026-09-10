@@ -299,7 +299,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 
 | 切片 | 内容 | 状态 |
 | --- | --- | --- |
-| w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 派出 |
+| w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 交付（`c768473`，5,442 项）；未合；待审项 F9–F10，裁决 D3 |
 | w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 交付（5,451 项）；已合入本地 main 未 push；待修 F1–F3 |
 | w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
 | w4-insider-buyback-tracking（交付 `e529cf5`，5,475 项通过；未合；待审项 F5–F8）| owner 09-10：tracking 要含 filings，尤其管理层减持与回购。Form 4 派生上下文（占持股比、90 日聚合、10b5-1、是否已被预期）进判断层提示；新增 `buyback_disclosure` 事件（10-Q/10-K Item 2、8-K 授权）+ 派生上下文（均价 vs 现价、节奏、趋势、占市值 / FCF、是否只对冲稀释）；ownership 与 filings index 进常驻 daily tracking；capability map 写明美股回购只在 10-Q/10-K/8-K/电话会 | 派出 |
@@ -317,6 +317,10 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | F6 | w4-insider-buyback | `deploy/phase9/p14a-tracking-policy-v1.json` 内容变了（加 `sec-ownership` 86400s 固定节奏、改 `sec` 的 rationale）。该文件若由 install.sh 播种且被 policy 签名 / 哈希钉住，live 上会出现「已签策略 ≠ 包内策略」 | subagent：查 `install.sh` 与 `tracking_cadence` 如何播种该文件；若哈希被 pin，改为新版本文件 `p14a-tracking-policy-v2.json` 并保留 v1，`DELIBERATELY_UNSEEDED` / 播种逻辑指向 v2，加测试「v1 内容不变」；owner 最终清单加一条「重签 tracking policy v2」 | 已记录，未派 |
 | F7 | w4-insider-buyback 开放问题 5 | 一份 10-Q 产出三条 `buyback_disclosure`（逐月），恰好填满 `event_judgement_cli.MAX_EVENTS_PER_COMPANY = 3`，同日其他事件（价格异动、Form 4）会被挤出本轮 | subagent：不合并月份（哪个月停买是信号）；改为按 `kind` 配额：同一 kind 同一公司同一 accession 的多条事件在判断提示里合并渲染为一张表、只占一个名额；`per_company` 计数按「事件组」而不是行数；测试：3 条 Item 2 行 + 1 条 Form 4 都进同一轮 | 已记录，未派 |
 | F8 | w4-insider-buyback 开放问题 3 | `anticipated: false` 在 Claim 覆盖薄的公司上等于「没写过」 | subagent：当该公司 claim index 中 `management_and_capital_allocation` aspect 的 claim 数低于阈值（建议 5）时降级为 `unknown` 并写明「coverage_thin」；测试两侧 | 已记录，未派 |
+| F5b | w4-framework-by-classification | 同样改了 `event_judgement.py`（提示枚举五种证据种类、打印 proxy_gap）与 `model_forecast_driver.py`（`REF_KINDS` 加 `market_proxy`）；这两个文件现在有三条线各改一处（economic-invariants 已合入、insider-buyback、本条） | 合并顺序：先 insider-buyback，再本条；每次手工调和后 import 检查；F1 的修法最后在三方合并后的文件上做 | 已记录 |
+| F9 | w4-framework-by-classification 开放问题 1 | 档案按 `UNITS` 顺序起草，`industry_classification` 在 demand 之后才定，首版档案用 generic 模板，下一 tick 才换成真模板 | subagent：把 `industry_classification` 移到 `UNITS` 首位（在 `company_dossier_draft.py`），demand_drivers 起草时读同版已定的分类；测试：首版档案的 demand 段用的是分类模板而非 generic；确认阶段折叠 / 版本链不因 UNITS 顺序变化而重排已存档案 | 已记录，未派 |
+| F10 | w4-framework-by-classification 开放问题 3 | `claim_index` 行没有 `evidence_kind` 列，`market_proxy` 只有写法没有存放处，也没有生产者 | 拆成 W5 切片「market-proxy-claims」：(a) `claim_index_schema.sql` 加 `evidence_kind`（默认 `statement`，append-only 迁移 + rehearse MigrationSpec + bootstrap），标注规则把价差 / 挂牌价 / 期货连续等模式打成 `market_proxy`；(b) 第一个生产者用 yfinance 的商品或行业 ETF 序列作为 `market_proxy` 系列，`proxy_gap` 由 spec lane 在引用时写。不阻塞合并 | 待排期 |
+| D3 | w4-framework-by-classification 开放问题 2 | 模板只覆盖需求侧，`supply_and_cost` 段没有按分类的成本侧模板 | 主 agent 意见：要做，按分类给成本侧槽位（commodity_cycle：原料价差 / 能源 / 开工率；capital_cycle：折旧曲线 / 维护性 capex；compounder：交付成本 / 人均产出；structural_growth：单位成本曲线；turnaround：固定成本剥离进度），与 F10 同一 W5 切片 | 待 owner 点头 |
 | D1 | w4-insider-buyback 开放问题 2 | 8-K 正文不可取（`sec_earnings_release` 记录了原因），回购授权抽取只在 Core 已持有 8-K 文本时触发；要真正生效需要 `form: 8-K` 的 discovery spec = 新 plan 版本 + owner 发布 | 进 owner 最终裁决清单 | 待 owner |
 | D2 | w4-insider-buyback 开放问题 1 | 10-Q Item 5「Trading Arrangements」（10b5-1 计划的采用 / 终止，含人、日期、窗口、股数）比 Form 144 更强的「预期减持」信号，可解析 | 作为后续切片 W5 候选，不阻塞 | 待排期 |
 | F4 | 我给七个 agent 的恢复消息 | 消息里写的 `pgrep -fc` 在 macOS 不支持 `-c` | 无需修代码；agent 自行改用 `pgrep -f ... \| wc -l`。记录以免误判为环境故障 | 已记录 |
