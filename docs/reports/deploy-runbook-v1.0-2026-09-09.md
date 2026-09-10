@@ -1,16 +1,27 @@
-# Deploy runbook — main `ebd2ea8` onto the live Core — v1.0 — 2026-09-09
+# Deploy runbook — main `8717de0` onto the live Core — v1.0 — 2026-09-09
+
+> **Revised in place 2026-09-10 for main `8717de0`** (deploy rehearsal #2,
+> `docs/reports/ops-deploy-rehearsal-2-v1.0-2026-09-10.md`). The step *order*
+> is unchanged and still measured; what changed is step 2 (a new pre-install
+> check), step 6 (six more records), step 7 (eleven scopes and three
+> checkpoints, and a hand-edit the params script cannot do) and step 11's
+> expected table. The owner-facing companion is
+> `docs/reports/owner-steps-after-deploy-v2.0-2026-09-10.md`, which supersedes
+> v1.0 of that document; where the two disagree, the v2.0 checklist is the
+> one that was measured against this commit.
 
 Owner-facing. Every command below was run against a copy of the live state by
 `scripts/rehearse_deploy.py` on 2026-09-10 (see
-`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md`), except the four that
+`docs/reports/ops-deploy-rehearsal-2-v1.0-2026-09-10.md`), except the four that
 cannot be rehearsed at all — `launchctl`, `openclaw gateway restart`,
 `dalton-gov` and `dalton-connector-governance approve` — which are marked
 **not rehearsed**.
 
 Read the whole thing before starting step 1. Steps 6–10 are approvals and
 publications; the system runs correctly without them, it just runs *narrower*
-— eleven lanes will report `ungranted` or `unconfigured` every tick and spend
-nothing. That is a safe place to stop for a day if the deploy runs long.
+— on this commit **twelve** lanes report `ungranted` or `unconfigured` every
+tick and spend nothing. That is a safe place to stop for a day if the deploy
+runs long.
 
 Shell variables used throughout:
 
@@ -67,6 +78,19 @@ cp "$CONFIG" "$DALTON_ROOT/config/service.pre-ebd2ea8-$(date -u +%Y%m%d).json"
 ```
 
 Expected: a snapshot id on stdout; note it, step 12 needs it.
+
+**One pre-install check, added after rehearsal #2:**
+
+```sh
+ls "$STATE/tick-ledger.sqlite" 2>/dev/null && echo "STOP -- read below" || echo "ok"
+```
+
+Expected: `ok`. The tick ledger is C2's, and the *first real tick* is what
+should create it. Rehearsal #2's first run created one on the live Core with a
+single rehearsal row in it before the harness was fixed; that file has been
+moved to `/tmp/dalton-quarantine-20260910/tick-ledger.sqlite.rehearsal-stray`.
+If one is still here, move it aside before installing, or the first row of the
+real ledger is a rehearsal.
 
 Keep the `cp -R` of the governance directory. `sec-filings-index-v1.json` used
 to exist on the live Core and in no repository; INT3 recovered it into
@@ -174,8 +198,10 @@ Expected: `1`.
 nullable and nothing already written moves — no `content_hash` changes, and an
 admission recorded last week still verifies today. But every admission written
 before the migration has `pool IS NULL`, and `pool_status` reports those under
-`unpooled_micros` rather than guessing a pool for them. The rehearsal measured
-**5,036 of 5,037** existing admissions in that state. So for the first day the
+`unpooled_micros` rather than guessing a pool for them. Rehearsal #2 measured
+**5,042 of 5,046** existing admissions in that state (v1 measured 5,036 of
+5,037 — the ratio has not moved, the ledger has grown), and re-checked that
+none of the 10,035 content-hashed rows in that database moved a byte. So for the first day the
 pool figures will not add up to the day cap, and `unpooled` will be most of the
 spend. That is correct and it drains as those admissions settle.
 
@@ -195,7 +221,11 @@ code path to look at first.
 one).
 
 ```sh
-for record in yfinance-daily-prices-v1 yfinance-calendar-v1; do
+for record in yfinance-daily-prices-v1 yfinance-calendar-v1 yfinance-analyst-estimates-v1 \
+              guidepoint-search-library-v1 \
+              sec-form4-transactions-v1 sec-beneficial-ownership-v1 \
+              sec-form144-notices-v1 sec-form13f-holdings-v1 \
+              ir-page-watch-list-watches-v1 ir-page-watch-get-diff-v1; do
   "$VENV/bin/dalton-connector-governance" show --path "$STATE/connector-governance/$record.json"
   "$VENV/bin/dalton-connector-governance" approve \
     --path "$STATE/connector-governance/$record.json" \
@@ -206,8 +236,18 @@ done
 Expected: `show` prints `"status": "proposed"`, `approve` prints the record
 with `"status": "approved"` and your `approved_by`.
 
-`yfinance-analyst-estimates-v1.json` may stay `proposed` — nothing consumes it
-yet.
+**Revised 2026-09-10.** `yfinance-analyst-estimates-v1.json` is no longer
+deferrable: P11b landed and is its consumer, and without the approval only the
+vendor route stops — the broker-research route runs on the mission grant alone.
+The four SEC ownership records and the two IR-page records are new since v1 of
+this runbook (S5); the ownership four are per-*operation*, so approving three
+of four gives a lane that reads three kinds of filing and reports the fourth
+`unapproved` rather than refusing to start. The two IR records switch nothing
+on by themselves — the watcher's real switch is the declared-pages file, step
+10a.
+
+The full 26-record list, grouped by lane with what each one starts, is §7 of
+`docs/reports/owner-steps-after-deploy-v2.0-2026-09-10.md`.
 
 **Ordering that matters:** the market-price lane's plist argument is written
 only when the record file is *on disk*, and `install.sh` seeds it in step 3, so
@@ -307,25 +347,65 @@ thesis_revision_candidate, conviction_call
 
 and `prior_version_ref: coverage-mission-version:us-it-services:13`.
 
-**Then edit the params file by hand**, because `build_mission_v2_params.py` has
-no `--add-checkpoint`: add `"thesis_revision_candidate"` to
-`autonomy.human_checkpoints`, which then reads
+**Revised 2026-09-10: add `--add-scope forecast_revision_proposal` to the
+command above.** With it the list is the whole of `AUTOMATION_WRITE_SCOPES` —
+twenty-two words, nothing left to add in a later version. The rehearsal ran
+this exact command against a read-only copy of the live Core and the output
+matched.
+
+**Then edit the params file by hand, in two places**, because
+`build_mission_v2_params.py` can do neither.
+
+*(a)* `autonomy.human_checkpoints` — the script has no `--add-checkpoint`, and
+**three** words are missing rather than one. It then reads
 
 ```
 deep_insight_gate, investment_memo, thesis_admission, thesis_revision,
-forecast_overturn, scope_expansion, budget_expansion, thesis_revision_candidate
+forecast_overturn, scope_expansion, budget_expansion,
+thesis_revision_candidate, gate_reopen, conviction_call
 ```
 
 Without both the scope *and* the checkpoint, `revise_thesis` records `queued`
-and names ADR-0007 instead of proposing.
+and names ADR-0007 instead of proposing. `gate_reopen` has no `may_write` word
+and should not have one — a proposal nobody has agreed to decide is worth
+nothing, so the grant that matters is the checkpoint; without it the rehearsal
+measured `mission_reopen: ungranted` every tick. `conviction_call` needs both:
+scope only gives `no_checkpoint`, checkpoint only gives `not_authorized`.
 
-**Sources.** The `source_plan` carries over unchanged and should stay that way
-this deploy — five rows: `source:sec-edgar` connected, `source:alphaengine`
-connected, `source:web-search` connected, `source:company-ir` not_connected,
-`source:guidepoint` not_connected. Guidepoint stays `not_connected` because
-this repo ships no `us-it-services-guidepoint-v1.json` discovery plan, so the
-lane cannot run whatever the manifest says. If that plan ever lands, the flag is
-`--set-source-status source:guidepoint=connected` on the command above.
+*(b)* `source_plan` — see the corrected Sources note below.
+
+**Decide any open Deep Insight Gate drafts *before* publishing v14.** The stage
+ledger is per mission version and carry-forward only brings `entered` across,
+so a draft bound to v13 loses its button the moment v14 is active
+(`decidable: false`, with a reason). This is a known durable defect (P12d
+§5.5); today's mitigation is the ordering.
+
+**Sources — rewritten 2026-09-10.** The live plan has five rows:
+`source:sec-edgar`, `source:alphaengine` and `source:web-search` already
+`connected`; `source:company-ir` and `source:guidepoint` `not_connected`.
+
+Guidepoint should now be flipped: **the reason v1 of this runbook gave for
+leaving it alone is stale.** `deploy/phase9/p9-us-it-services-guidepoint-v1.json`
+ships and `install.sh` seeds it, so the lane does run — the rehearsal measured
+`guidepoint_discovery: idle / all_grants_refused`, which is a lane waiting for
+approvals, not a lane that cannot exist. Both flips work on the command above:
+
+```
+--set-source-status source:guidepoint=connected
+--set-source-status source:company-ir=connected
+```
+
+**The other five sources have no row at all, and `--set-source-status` refuses
+a source the plan does not list** — the rehearsal hit
+`ValueError: active mission source plan does not list source:sales-notes`.
+`source:sales-notes`, `source:company-wiki`, `source:xueqiu`, `source:x` and
+`source:blind` have to be appended to `source_plan` by hand, each as
+`{"source_ref": ..., "role": ..., "status": "connected"}`. The rehearsal put
+all five plus the three checkpoints through
+`validate_coverage_mission_version` and the record was accepted.
+
+Do **not** add `source:cn-hk-findata`: the six records are seeded and can be
+approved, but no lane in this wave reads them and the universe is US-listed.
 
 Publish:
 
@@ -414,6 +494,23 @@ If you skipped an environment variable at step 3 and want the lane after all,
 re-run `deploy/macos/install.sh` with it set — the script is idempotent and the
 plist is re-rendered from what is on disk.
 
+## 10a. The files `install.sh` does not write
+
+Added 2026-09-10. Four lanes read a file no environment variable produces, and
+each is `unconfigured` until somebody puts it there on purpose. Each one needs
+a re-run of `install.sh` afterwards, because the plist renders once.
+
+| file | lane | why install.sh will not do it |
+| --- | --- | --- |
+| `$STATE/ir-pages.json` ← `deploy/phase9/p9-us-it-services-ir-pages-v1.json` | S5 IR watcher | ten URLs a human has to confirm; one wrong entry files a company's news under another. IBM and DXC are the two most likely to be wrong |
+| `$STATE/research-task-lane.json` = `{"max_admissions_per_tick": 1, "retired_templates": []}` | P14e | it is the lane's own switch, and the lane also needs the ProbeTemplate published |
+| `$STATE/p12a-dossier-policy-v1.json` + `$STATE/dossier-verifier-model-config.json` | P12a dossier, and P12d behind it | the verifier must route to a *different* model family; one configuration used twice is not a verification |
+| `$STATE/earnings-season-model-config.json` + `$STATE/earnings-season-verifier-model-config.json` | P14f | no `DALTON_EARNINGS_*` variable exists yet |
+
+A 13F holder list (`deploy/phase9/p9-us-it-services-13f-holders-v1.json`) does
+not exist at all and is a research-scope decision, not an engineering one — see
+§16 of the owner checklist.
+
 ## 11. Start, and watch the first tick
 
 ```sh
@@ -449,8 +546,18 @@ later steps:
 | `mission_market_prices` | `ungranted` | `launched` once step 7 grants `market_price` |
 | `mission_catalyst_calendar` | `launched`, child refuses | `launched`, child succeeds once step 6 approves the calendar record |
 | `mission_tracking` | `launched`, child reports `ungranted` | `launched`, child records events once step 7 grants `market_event` |
-| `guidepoint_discovery` | `idle / all_grants_refused` | `idle`/`launched` once step 6 approves the two Guidepoint records |
+| `mission_ownership` | `ungranted` | `launched` once step 7 grants **both** `market_event` and `observation` and step 6 approves the four SEC ownership records |
+| `mission_consensus` | `ungranted` | vendor route once step 7 grants `consensus_estimate` *and* step 6 approves the estimates record; the broker-research route needs only the grant |
+| `mission_reopen` | `ungranted` | proposes once step 7 adds the `gate_reopen` **checkpoint** — it has no scope word |
+| `guidepoint_discovery` | `idle / all_grants_refused` | `idle`/`launched` once step 6 approves the Guidepoint record |
 | `claim_index`, `event_judgement` | `unconfigured` | installed only if you named their models at step 3 |
+| `earnings_season` | `unconfigured` | needs two hand-written model configs; there is no `DALTON_EARNINGS_*` variable |
+| `company_dossier`, `deep_insight_gate` | `unconfigured` | need `p12a-dossier-policy-v1.json` and a **differently-routed** `dossier-verifier-model-config.json` |
+| `research_task` | `unconfigured` | needs the grant, the ProbeTemplate publication and `research-task-lane.json` |
+| `conviction_call` | `idle` | stays quiet until P12c publishes a debate map on live; granting the two words is still correct |
+
+The rehearsal's full 34-row table for this commit against a copy of this exact
+state is §1 of `docs/reports/ops-deploy-rehearsal-2-v1.0-2026-09-10.md`.
 
 `launched` means a child was started, not that it did anything: the outcome
 arrives in the next tick's `settled`. A lane reading `launched` whose record is
