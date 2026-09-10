@@ -52,7 +52,7 @@ class ConfigurationRetryTests(unittest.TestCase):
             self.assertEqual(second["settled"]["refused"], 1)
             self.assertNotEqual(first["batch_ref"], second["batch_ref"])
             launcher.settle(second["ticket_ref"], {"judged": 0, "refused": 1})
-            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            self.assertEqual(coordinator.dispatch_once()["status"], "held")
             self.assertEqual(len(launcher.started), 2)
 
     def test_unreadable_configuration_preserves_the_tick_and_previous_ticket(self):

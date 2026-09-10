@@ -412,6 +412,7 @@ def run_judgement(
     policy_path: Path | None = None,
     scheduler_db: Path | None = None,
     company_ref: str | None = None,
+    event_ref: str | None = None,
     max_events: int | None = None,
     per_company: int | None = None,
     dry_run: bool = False,
@@ -488,10 +489,14 @@ def run_judgement(
         for ref in tracked:
             batch.extend(
                 unjudged_event_groups(
-                    events, judgements, company_ref=ref, limit=effective_per_company,
+                    events, judgements, company_ref=ref,
+                    limit=(1000000 if event_ref is not None else effective_per_company),
                     now=moment,
                 )
             )
+        if event_ref is not None:
+            batch = [group for group in batch
+                     if any(item["id"] == event_ref for item in group)]
         batch = batch[:effective_max_events]
         summary["candidates"] = len(batch)
         if not batch:
@@ -833,6 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-policy", type=Path)
     parser.add_argument("--scheduler", type=Path)
     parser.add_argument("--company-ref")
+    parser.add_argument("--event-ref")
     parser.add_argument("--max-events", type=int)
     parser.add_argument("--per-company", type=int)
     parser.add_argument("--dry-run", action="store_true", help="count and stop; no calls")
@@ -850,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
         policy_path=args.tracking_policy,
         scheduler_db=args.scheduler,
         company_ref=args.company_ref,
+        event_ref=args.event_ref,
         max_events=args.max_events,
         per_company=args.per_company,
         dry_run=args.dry_run,

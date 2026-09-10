@@ -19,6 +19,7 @@ from dalton_core.event_judgement_cli import (
     unjudged_events,
 )
 from dalton_core.lane_child_launcher import LaneChildRejected
+from dalton_core.event_judgement_launcher import EventJudgementLauncher
 from dalton_core.lane_registry import LaunchAgentContext, lane_for_operation
 from dalton_core.mission_event_judgement_lane import (
     JUDGE_MODEL_CONFIG,
@@ -53,11 +54,13 @@ class FakeLauncher:
         self.started: list[str] = []
         self.tickets: dict[str, dict] = {}
 
-    def start(self, *, batch_ref):
+    def start(self, *, batch_ref, company_ref=None, event_ref=None, group_key=None):
         if not self.configured:
             raise LaneChildRejected("needs a judge and a verifier configuration")
         ticket = {"id": f"event-judgement-run:{len(self.started):024d}",
-                  "batch_ref": batch_ref, "status": "running"}
+                  "batch_ref": batch_ref, "company_ref": company_ref,
+                  "event_ref": event_ref, "group_key": group_key,
+                  "status": "running"}
         self.started.append(batch_ref)
         self.tickets[ticket["id"]] = ticket
         return ticket
@@ -122,6 +125,24 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("event-judgement-model-config.json", names)
         self.assertIn("event-verifier-model-config.json", names)
 
+    def test_launcher_binds_the_selected_company_and_group_event(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            judge, verifier = state / "judge.json", state / "verifier.json"
+            judge.write_text("{}")
+            verifier.write_text("{}")
+            launcher = EventJudgementLauncher(
+                state_dir=state, judge_model_config=judge,
+                verifier_model_config=verifier,
+            )
+            self.addCleanup(launcher.close)
+            command = launcher._command(
+                ticket_dir=state, company_ref=ACN, event_ref="research-event:chosen")
+            self.assertEqual(command[command.index("--company-ref") + 1], ACN)
+            self.assertEqual(command[command.index("--event-ref") + 1],
+                             "research-event:chosen")
+
 
 class CoordinatorTests(unittest.TestCase):
     def setUp(self):
@@ -165,6 +186,67 @@ class CoordinatorTests(unittest.TestCase):
         self.launcher.configured = False
         self.assertEqual(self.coordinator.dispatch_once()["status"], "rejected")
 
+    def test_a_refused_newest_group_does_not_starve_the_next_company(self):
+        candidates = [
+            {"company_ref": ACN, "event_ref": "event:new", "group_key": "group:a"},
+            {"company_ref": CTSH, "event_ref": "event:older", "group_key": "group:b"},
+        ]
+        coordinator = MissionEventJudgementLaneCoordinator(
+            launcher=self.launcher, mission=lambda: self.mission,
+            pending=lambda mission: candidates,
+        )
+        first = coordinator.dispatch_once()
+        self.assertEqual(first["company_ref"], ACN)
+        self.launcher.settle(first["ticket_ref"], {
+            "judgement_status": "refused", "judged": 0, "refused": 1,
+            "failure_reason": "the verifier rejected the event content",
+        })
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["status"], "launched")
+        self.assertEqual(second["company_ref"], CTSH)
+        self.assertIn("group:a", second["held"])
+
+    def test_content_hold_survives_restart_and_prevents_a_paid_loop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as name:
+            candidate = [{"company_ref": ACN, "event_ref": "event:1",
+                          "group_key": "group:durable"}]
+            first = MissionEventJudgementLaneCoordinator(
+                launcher=self.launcher, mission=lambda: self.mission,
+                pending=lambda mission: candidate, failure_ledger_dir=name,
+            )
+            launched = first.dispatch_once()
+            self.launcher.settle(launched["ticket_ref"], {
+                "judgement_status": "refused", "judged": 0, "refused": 1,
+                "failure_reason": "the verifier rejected the event content",
+            })
+            self.assertEqual(first.dispatch_once()["status"], "held")
+            restarted = MissionEventJudgementLaneCoordinator(
+                launcher=self.launcher, mission=lambda: self.mission,
+                pending=lambda mission: candidate, failure_ledger_dir=name,
+            )
+            self.assertEqual(restarted.dispatch_once()["status"], "held")
+            self.assertEqual(len(self.launcher.started), 1)
+
+    def test_busy_outcome_gets_only_the_bounded_transient_retries(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as name:
+            candidate = [{"company_ref": ACN, "event_ref": "event:busy",
+                          "group_key": "group:busy"}]
+            coordinator = MissionEventJudgementLaneCoordinator(
+                launcher=self.launcher, mission=lambda: self.mission,
+                pending=lambda mission: candidate, failure_ledger_dir=name,
+            )
+            for _ in range(3):
+                launched = coordinator.dispatch_once()
+                self.assertEqual(launched["status"], "launched")
+                self.launcher.settle(launched["ticket_ref"], {
+                    "judgement_status": "busy", "judged": 0, "refused": 0,
+                    "failure_reason": "child_slot_busy",
+                })
+            self.assertEqual(coordinator.dispatch_once()["status"], "held")
+            self.assertEqual(len(self.launcher.started), 3)
+
 
 class SelectionTests(P14aHarness):
     def setUp(self):
@@ -192,6 +274,40 @@ class SelectionTests(P14aHarness):
                             occurred="2026-09-09T11:00:00+00:00")
         self.assertEqual(newest_unjudged(self.store, self.mission), second["id"])
 
+    def test_events_outside_the_current_mission_are_not_selected(self):
+        outside = self.event(company=CTSH, document="alphaengine-doc:outside",
+                             occurred="2026-09-09T12:00:00+00:00")
+        inside = self.event(document="alphaengine-doc:inside",
+                            occurred="2026-09-09T11:00:00+00:00")
+        mission = {**self.mission, "universe": [{"company_ref": ACN}]}
+        self.assertNotEqual(outside["id"], inside["id"])
+        self.assertEqual(newest_unjudged(self.store, mission), inside["id"])
+
+    def test_an_event_from_another_mission_is_not_selected(self):
+        other_params = dict(self.params)
+        other_params["idempotency_key"] = "mission-other"
+        other_params["version_id"] = "coverage-mission-version:other:1"
+        other_params["autonomy"] = {
+            **other_params["autonomy"],
+            "may_write": list(dict.fromkeys(
+                [*other_params["autonomy"]["may_write"], "market_event"])),
+        }
+        other = self.missions.create_mission(
+            "coverage-mission:other", **other_params)
+        foreign = record_event(
+            self.events, company_ref=ACN, kind="news",
+            occurred_at="2026-09-09T12:00:00+00:00",
+            source_refs=["source:alphaengine", "alphaengine-doc:foreign"],
+            payload={"document_ref": "alphaengine-doc:foreign",
+                     "source_ref": "source:alphaengine", "spec_ref": "sell-side-reports",
+                     "discovery_ref": "d", "title": None, "host": None},
+            mission=other, actor_ref=AUTOMATION,
+        )
+        inside = self.event(document="alphaengine-doc:inside",
+                            occurred="2026-09-09T11:00:00+00:00")
+        self.assertNotEqual(foreign["id"], inside["id"])
+        self.assertEqual(newest_unjudged(self.store, self.mission), inside["id"])
+
     def test_a_judged_event_is_never_selected_again(self):
         first = self.event()
         self.judgements.record(
@@ -213,6 +329,19 @@ class SelectionTests(P14aHarness):
             self.event(document=f"alphaengine-doc:{index}")
         batch = unjudged_events(self.events, self.judgements, company_ref=ACN, limit=2)
         self.assertEqual(len(batch), 2)
+
+    def test_child_selection_reads_only_the_group_named_by_the_ticket(self):
+        self.pass_screen(ACN)
+        first = self.event(document="alphaengine-doc:first",
+                           occurred="2026-09-09T10:00:00+00:00")
+        self.event(document="alphaengine-doc:second",
+                   occurred="2026-09-09T11:00:00+00:00")
+        summary = run_judgement(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "target-summary",
+            company_ref=ACN, event_ref=first["id"], dry_run=True, now=NOW,
+        )
+        self.assertEqual(summary["judgement_status"], "dry_run")
+        self.assertEqual(summary["candidates"], 1)
 
     def test_monthly_buyback_rows_share_one_slot_without_displacing_form_4(self):
         from tests.test_buyback_disclosure import buyback_event, table_payload

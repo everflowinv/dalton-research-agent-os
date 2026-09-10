@@ -68,12 +68,14 @@ class EventJudgementLauncher(LaneChildLauncher):
         ).encode("ascii"))
         return digest.hexdigest()
 
-    def _command(self, *, ticket_dir: Path) -> list[str]:
+    def _command(self, *, ticket_dir: Path, company_ref: str,
+                 event_ref: str) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--judge-model-config", str(self.judge_model_config),
             "--verifier-model-config", str(self.verifier_model_config),
+            "--company-ref", company_ref, "--event-ref", event_ref,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
         if self.policy_path is not None:
@@ -82,17 +84,26 @@ class EventJudgementLauncher(LaneChildLauncher):
             command += ["--scheduler", str(self.scheduler_db)]
         return command
 
-    def start(self, *, batch_ref: str) -> dict[str, Any]:
+    def start(self, *, batch_ref: str, company_ref: str,
+              event_ref: str, group_key: str) -> dict[str, Any]:
         if not isinstance(batch_ref, str) or not batch_ref.strip():
             raise LaneChildRejected("a judgement run needs a batch ref")
         if not self.configured:
             raise LaneChildRejected(
                 "the judgement lane needs a judge and a verifier configuration"
             )
+        if not all(isinstance(value, str) and value.strip()
+                   for value in (company_ref, event_ref, group_key)):
+            raise LaneChildRejected("a judgement run needs a company and event group")
         digest = hashlib.sha256(
             f"{self.TICKET_PREFIX}|{batch_ref.strip()}".encode("utf-8")
         ).hexdigest()[:24]
-        return self.spawn(digest=digest, record={"batch_ref": batch_ref.strip()})
+        return self.spawn(
+            digest=digest,
+            record={"batch_ref": batch_ref.strip(), "company_ref": company_ref,
+                    "event_ref": event_ref, "group_key": group_key},
+            company_ref=company_ref, event_ref=event_ref,
+        )
 
 
 __all__ = ["TICKET_PREFIX", "EventJudgementLauncher"]

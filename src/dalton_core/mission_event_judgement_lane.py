@@ -25,6 +25,8 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_permission_control import record_controlled_failure
 
 MAX_FAILURE_DETAIL_CHARS = 500
 LAUNCHER_KWARG = "event_judgement_launcher"
@@ -41,13 +43,14 @@ class MissionEventJudgementLaneCoordinator:
         *,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
-        pending: Callable[[Mapping[str, Any]], str | None],
+        pending: Callable[[Mapping[str, Any]], Any],
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.launcher = launcher
         self.mission = mission
         self.pending = pending
         self._open: str | None = None
-        self._last_batch: str | None = None
+        self.budget = lane_budget("mission_event_judgement", state_dir=failure_ledger_dir)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -63,6 +66,9 @@ class MissionEventJudgementLaneCoordinator:
             "status": ticket.get("status"),
             "ticket_ref": ticket_ref,
             "batch_ref": ticket.get("batch_ref"),
+            "group_key": ticket.get("group_key"),
+            "company_ref": ticket.get("company_ref"),
+            "event_ref": ticket.get("event_ref"),
             "judgement_status": summary.get("judgement_status"),
             "judged": summary.get("judged"),
             "refused": summary.get("refused"),
@@ -82,6 +88,22 @@ class MissionEventJudgementLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         self._open = None
+        group_key = settled.get("group_key")
+        status = str(settled.get("judgement_status") or settled.get("status") or "")
+        if int(settled.get("judged") or 0) == 0 and int(settled.get("refused") or 0) > 0:
+            status = "refused"
+        failed = (settled.get("status") != "succeeded"
+                  or (int(settled.get("judged") or 0) == 0
+                      and int(settled.get("refused") or 0) > 0)
+                  or status.startswith(("refused", "gated", "busy", "unavailable")))
+        if group_key and failed:
+            reason = settled.get("failure_reason") or f"last run: {status}"
+            settled["failure"] = record_controlled_failure(
+                self.budget, group_key, self.mission() or {}, self.launcher,
+                reason=reason, status=status,
+            ).as_wire()
+        elif group_key:
+            settled["resumed"] = self.budget.clear(group_key)
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -90,26 +112,41 @@ class MissionEventJudgementLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
         try:
-            newest = self.pending(mission)
+            candidates = self.pending(mission)
             signature = getattr(self.launcher, "configuration_signature", None)
             configuration = signature() if signature is not None else None
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
-        if newest is None:
+        if not candidates:
             return {"status": "idle", "settled": settled,
                     "reason": "every event this company has produced has been judged"}
-        batch = f"{mission['id']}:{newest}"
-        if configuration is not None:
-            batch += f":configuration:{configuration}"
+        if isinstance(candidates, str):
+            candidates = [{"company_ref": "legacy", "event_ref": candidates,
+                           "group_key": f"{mission['id']}|{candidates}"}]
         if self._open is not None:
             return {"status": "busy", "settled": settled,
                     "reason": "the previous judgement batch is still running"}
-        if batch == self._last_batch:
-            return {"status": "idle", "settled": settled, "batch_ref": batch,
-                    "reason": "this batch has already been dispatched"}
+        held = {}
+        chosen = None
+        for candidate in candidates:
+            candidate = dict(candidate)
+            candidate["failure_key"] = candidate["group_key"]
+            if configuration is not None:
+                candidate["failure_key"] += f"|configuration:{configuration}"
+            decision = self.budget.blocked(candidate["failure_key"])
+            if decision is None:
+                chosen = candidate
+                break
+            held[candidate["failure_key"]] = decision.classification.reason
+        if chosen is None:
+            return {"status": "held", "settled": settled, "held": held,
+                    "reason": "all pending event groups are durably held"}
+        batch = chosen["failure_key"]
         try:
-            ticket = self.launcher.start(batch_ref=batch)
+            ticket = self.launcher.start(
+                batch_ref=batch, company_ref=chosen["company_ref"],
+                event_ref=chosen["event_ref"], group_key=chosen["failure_key"])
         except LaneChildConflict as exc:
             return {"status": "busy", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -117,9 +154,10 @@ class MissionEventJudgementLaneCoordinator:
             return {"status": "rejected", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
-        self._last_batch = batch
         return {"status": "launched", "ticket_ref": ticket["id"],
-                "batch_ref": batch, "settled": settled}
+                "batch_ref": batch, "group_key": chosen["failure_key"],
+                "company_ref": chosen["company_ref"], "held": held,
+                "settled": settled}
 
 
 def newest_unjudged(store: Any, mission: Mapping[str, Any]) -> str | None:
@@ -130,12 +168,61 @@ def newest_unjudged(store: Any, mission: Mapping[str, Any]) -> str | None:
     the run.
     """
 
+    universe = sorted({str(item.get("company_ref")) for item in mission.get("universe", ())
+                       if isinstance(item, Mapping) and item.get("company_ref")})
+    if not universe:
+        return None
+    mission_ref = mission.get("mission_ref")
+    if not isinstance(mission_ref, str) or not mission_ref:
+        return None
+    placeholders = ",".join("?" for _ in universe)
     row = store.connection.execute(
         "SELECT e.event_id AS event_id FROM research_events e "
+        "JOIN coverage_mission_versions mv "
+        "ON mv.mission_version_id=e.mission_version_ref "
         "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
-        "WHERE j.event_ref IS NULL ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT 1"
+        f"WHERE j.event_ref IS NULL AND mv.mission_ref=? "
+        f"AND e.company_ref IN ({placeholders}) "
+        "ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT 1",
+        [mission_ref, *universe],
     ).fetchone()
     return None if row is None else row["event_id"]
+
+
+def pending_event_groups(store: Any, missions: Any,
+                         mission: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Mission-scoped eligible groups, newest first, with durable identities."""
+    from .event_judgement_cli import (
+        buyback_group_key, incremental_group_hash, unjudged_event_groups,
+    )
+    from .event_judgement import EventJudgementAuthority
+    from .research_event import ResearchEventAuthority
+    from .tracking_cadence import screen_passed_companies
+    events = ResearchEventAuthority(store)
+    judgements = EventJudgementAuthority(store)
+    allowed_versions = {
+        row["mission_version_id"] for row in store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_versions "
+            "WHERE mission_ref=?", (mission["mission_ref"],)
+        ).fetchall()
+    }
+    candidates = []
+    for company_ref in screen_passed_companies(missions, mission):
+        for group in unjudged_event_groups(
+                events, judgements, company_ref=company_ref, limit=1000000):
+            if any(item.get("mission_version_ref") not in allowed_versions
+                   for item in group):
+                continue
+            group_type = buyback_group_key(group[0]) or ("event", group[0]["id"])
+            identity = "|".join((mission["id"], company_ref, *group_type,
+                                  incremental_group_hash(group)))
+            candidates.append({
+                "company_ref": company_ref, "event_ref": group[0]["id"],
+                "group_key": identity, "occurred_at": max(
+                    str(item["occurred_at"]) for item in group),
+            })
+    return sorted(candidates, key=lambda item: (item["occurred_at"], item["group_key"]),
+                  reverse=True)
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -165,7 +252,9 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
 
         coordinator = MissionEventJudgementLaneCoordinator(
             launcher=launcher, mission=mission,
-            pending=lambda active: newest_unjudged(server.store, active),
+            pending=lambda active: pending_event_groups(
+                server.store, server.coverage_mission, active),
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -240,4 +329,5 @@ __all__ = [
     "build_launcher",
     "dispatch",
     "newest_unjudged",
+    "pending_event_groups",
 ]
