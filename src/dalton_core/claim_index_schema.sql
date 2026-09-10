@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS claim_index_entry_versions (
     as_of TEXT,
     as_of_basis TEXT NOT NULL,
     importance TEXT NOT NULL CHECK(importance IN (
-        'filing', 'management_statement', 'sell_side', 'news', 'other')),
+        'filing', 'management_statement', 'internal_prior', 'sell_side',
+        'news', 'other')),
     dedupe_group_ref TEXT NOT NULL,
     is_canonical INTEGER NOT NULL CHECK(is_canonical IN (0, 1)),
     tagger_ref TEXT NOT NULL,

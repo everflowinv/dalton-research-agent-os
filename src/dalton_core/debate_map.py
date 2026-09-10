@@ -41,6 +41,7 @@ over-counting would promote it to ``open`` on one broker's opinion twice.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -53,6 +54,8 @@ SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("debate_map_schema.sql")
 
 TABLE = "debate_map_versions"
+
+_AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # ADR-0008's closed vocabulary.  A version that cannot name why it exists is a
 # rewrite, and a rewrite of an unchanged world is noise wearing a version
@@ -264,15 +267,27 @@ def _refs(value: Any, name: str, *, nonempty: bool = False) -> list[str]:
     return result
 
 
-def _closed(value: Any, fields: set[str], name: str) -> dict[str, Any]:
+def _closed(
+    value: Any, fields: set[str], name: str, *, optional: set[str] | None = None
+) -> dict[str, Any]:
+    """A closed shape, and optionally a few keys that may simply be absent.
+
+    ``optional`` is not "may be null": the key is either there with a value or
+    it is not there at all. That distinction is load-bearing here -- a record
+    written before an optional field existed must still hash to what it hashed
+    to when it was written, and a decoder that helpfully inserts ``None`` is a
+    decoder that breaks every old row.
+    """
+
     if not isinstance(value, Mapping):
         raise DebateMapValidationError(f"{name} must be an object")
     wire = dict(value)
-    if set(wire) != fields:
+    allowed = fields | (optional or set())
+    if set(wire) - allowed or fields - set(wire):
         raise DebateMapValidationError(
             f"{name} has an invalid closed shape; "
             f"missing={sorted(fields - set(wire))}, "
-            f"unknown={sorted(set(wire) - fields)}"
+            f"unknown={sorted(set(wire) - allowed)}"
         )
     return wire
 
@@ -746,6 +761,16 @@ _DEBATE_FIELDS = {
     "our_position", "status", "last_shift_reason", "first_seen_at",
     "source_independence",
 }
+# W3: what *we* said about this question before, with the date we said it on.
+# Optional -- genuinely absent, not defaulted to null -- because the content
+# hash is recomputed on every read from the normalised debate, so a key
+# injected on decode would make every map published before this change fail to
+# read. A debate with no prior view simply has no such key.
+_DEBATE_OPTIONAL_FIELDS = {"prior_view"}
+# `as_of` is the date the prior document carries, never the date it was read;
+# `source_kind` is the manifest's word for what the document is.
+_PRIOR_VIEW_FIELDS = {"as_of", "source_kind", "statement", "refs"}
+PRIOR_VIEW_SOURCE_KINDS: tuple[str, ...] = ("initial_screen", "memo")
 _REJECTION_FIELDS = {
     "candidate_ref", "question", "driver_refs", "reasons", "observed_at",
 }
@@ -821,8 +846,35 @@ def _shift(value: Any, name: str) -> dict[str, Any] | None:
     return wire
 
 
+def _prior_view(value: Any, name: str) -> dict[str, Any]:
+    """What we thought about this question before, and when.
+
+    Beside the market's view and ours, not inside either: the street's
+    position and our own earlier position are different objects that happen to
+    disagree with the current one in the same way, and folding them together
+    would lose which of the two a reader is arguing with.
+    """
+
+    wire = _closed(value, set(_PRIOR_VIEW_FIELDS), name)
+    wire["as_of"] = _text(wire["as_of"], f"{name}.as_of")
+    if _AS_OF_RE.fullmatch(wire["as_of"]) is None:
+        raise DebateMapValidationError(
+            f"{name}.as_of must be a YYYY-MM-DD date; a prior view with no "
+            "date cannot be told apart from a current one"
+        )
+    wire["source_kind"] = _one_of(
+        wire["source_kind"], PRIOR_VIEW_SOURCE_KINDS, f"{name}.source_kind"
+    )
+    wire["statement"] = _text(wire["statement"], f"{name}.statement")
+    wire["refs"] = _refs(wire["refs"], f"{name}.refs", nonempty=True)
+    return wire
+
+
 def _debate(value: Any, name: str) -> dict[str, Any]:
-    wire = _closed(value, set(_DEBATE_FIELDS), name)
+    wire = _closed(value, set(_DEBATE_FIELDS), name,
+                   optional=set(_DEBATE_OPTIONAL_FIELDS))
+    if "prior_view" in wire:
+        wire["prior_view"] = _prior_view(wire["prior_view"], f"{name}.prior_view")
     wire["debate_ref"] = _text(wire["debate_ref"], f"{name}.debate_ref")
     wire["question"] = _text(wire["question"], f"{name}.question")
     wire["driver_refs"] = _refs(wire["driver_refs"], f"{name}.driver_refs", nonempty=True)
@@ -911,6 +963,9 @@ def cited_refs(version: Mapping[str, Any]) -> set[str]:
         shift = debate.get("last_shift_reason")
         if shift:
             refs.update(shift.get("refs") or [])
+        prior = debate.get("prior_view")
+        if prior:
+            refs.update(prior.get("refs") or [])
     return refs
 
 

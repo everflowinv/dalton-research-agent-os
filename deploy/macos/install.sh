@@ -26,7 +26,7 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
   "$python_source" -m venv "$venv_dir"
 fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials,market-data]"
+"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials,market-data,prior-models]"
 
 # P9d-11: stopping the writer terminates whatever lane child is in flight and
 # the next tick settles it as orphaned, parking that company/spec for a day.
@@ -345,12 +345,20 @@ feed_plan_dir="$state_dir/feed-plans"
 feeds_dir="$state_dir/feeds"
 digest_source="$openclaw_workspace/skills/market-digest/output"
 wiki_index_source="$openclaw_workspace/wiki-index.sqlite"
+# W3: the plan is versioned rather than re-copied. Seeding is copy-once by
+# design -- the state directory is the owner's, and a script that overwrites
+# what is there is a script that can undo a hand edit -- so a plan whose
+# *contents* changed has to arrive under a new name or it never lands on a
+# Core that already installed the old one. v2 is v1 plus `source:prior-research`;
+# the three feed lanes name v2 by constant, so a Core that has only v1 on disk
+# brings up no feed lane until install.sh is re-run, which is the one step the
+# deploy runbook already has.
 seed_feed_plan() {
   mkdir -p "$feed_plan_dir"
   chmod 700 "$feed_plan_dir"
-  feed_plan_file="$feed_plan_dir/p9-us-it-services-feeds-v1.json"
-  if [[ ! -f "$feed_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" ]]; then
-    cp "$repo_root/deploy/phase9/p9-us-it-services-feeds-v1.json" "$feed_plan_file"
+  feed_plan_file="$feed_plan_dir/p9-us-it-services-feeds-v2.json"
+  if [[ ! -f "$feed_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-feeds-v2.json" ]]; then
+    cp "$repo_root/deploy/phase9/p9-us-it-services-feeds-v2.json" "$feed_plan_file"
     chmod 600 "$feed_plan_file"
   fi
 }
@@ -395,6 +403,48 @@ if [[ -d "$openclaw_workspace" && -e "$wiki_index_source" ]]; then
   fi
 else
   print "note: no wiki index at $wiki_index_source; the company-wiki lane is not installed."
+fi
+# W3: the fund's own earlier work on a company -- old Initial Screens, memos,
+# notes, maintained Excel models. Unlike the two S1 feeds above there is no
+# workspace to discover: the owner declares where the material is, because
+# there is no safe default for "somewhere on this disk there are our old
+# files" and guessing at one would either find nothing or find something that
+# is not ours.
+#
+#   DALTON_PRIOR_RESEARCH_DIR=~/Documents/dalton-prior-research
+#
+# The directory holds one folder per company, each with a manifest.json naming
+# its documents and -- the one thing the feed will not guess -- each one's
+# date. All of it together or none of it: two records and the corpus link, or
+# nothing and a note saying which variable to set. A lane switched on with no
+# corpus refuses every tick, which reads like a fault rather than an absence.
+prior_research_dir=${DALTON_PRIOR_RESEARCH_DIR:-}
+if [[ -n "$prior_research_dir" && -d "$prior_research_dir" ]]; then
+  seed_feed_plan
+  for prior_research_kind in prior-research-list-documents prior-research-get-document; do
+    prior_research_file="$governance_dir/${prior_research_kind}-v1.json"
+    if [[ ! -f "$prior_research_file" && -f "$repo_root/deploy/connector-governance/${prior_research_kind}-v1.json" ]]; then
+      cp "$repo_root/deploy/connector-governance/${prior_research_kind}-v1.json" "$prior_research_file"
+      chmod 600 "$prior_research_file"
+    fi
+  done
+  mkdir -p "$feeds_dir"
+  chmod 700 "$feeds_dir"
+  # A link, not a copy: the owner keeps adding to this directory and a copy
+  # would be a second, stale truth. The manifest paths are relative to each
+  # company folder, so the link has to be the declared root itself.
+  # `-e` alone is false for a *dangling* symlink, so a link left over from a
+  # directory the owner has since moved would be silently re-created beside
+  # itself -- or rather not re-created, and the lane would come up pointing at
+  # nothing. `-L` catches the dangling case; `ln -sfn` replaces it.
+  if [[ ! -e "$feeds_dir/prior-research" && ! -L "$feeds_dir/prior-research" ]]; then
+    ln -s "$prior_research_dir" "$feeds_dir/prior-research"
+  elif [[ -L "$feeds_dir/prior-research" && ! -e "$feeds_dir/prior-research" ]]; then
+    print "note: $feeds_dir/prior-research is a dangling link; repointing it at $prior_research_dir."
+    ln -sfn "$prior_research_dir" "$feeds_dir/prior-research"
+  fi
+else
+  print "note: set DALTON_PRIOR_RESEARCH_DIR to an existing directory to install the prior-research lane."
 fi
 # S3 / INT2: the three crowd sources. Seven records, a per-company map of
 # handles and queries, and three host tools this Core does not know the
@@ -447,6 +497,18 @@ tracking_policy_file="$state_dir/tracking-policy.json"
 if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" ]]; then
   cp "$repo_root/deploy/phase9/p14a-tracking-policy-v1.json" "$tracking_policy_file"
   chmod 600 "$tracking_policy_file"
+fi
+# P12e: the industry-framework policy is that lane's whole switch -- it titles
+# the Constitution's causal-chain links, files each driver under a horizon, and
+# carries the gap checklist. One file, so all-or-nothing is automatic. No model
+# configuration is written here on purpose: this is the one drafting lane whose
+# product is half deterministic, so a Core with the policy alone still computes
+# and reports the five-company comparison table every week, and only the prose
+# waits for a model.
+framework_policy_file="$state_dir/p12e-industry-framework-policy-v1.json"
+if [[ ! -f "$framework_policy_file" && -f "$repo_root/deploy/phase9/p12e-industry-framework-policy-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p12e-industry-framework-policy-v1.json" "$framework_policy_file"
+  chmod 600 "$framework_policy_file"
 fi
 # P14e / INT2: the three ProbeTemplates the ad-hoc research lane may bind. The
 # manifest is publication material -- the owner publishes each template with a

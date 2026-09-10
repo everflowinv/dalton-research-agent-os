@@ -34,12 +34,20 @@ MANIFEST_SCHEMA_VERSION = "0.1"
 
 SALES_NOTES_SOURCE_REF = "source:sales-notes"
 COMPANY_WIKI_SOURCE_REF = "source:company-wiki"
-# The two mission source-plan keys this manifest may describe. Extraction
+# W3: the fund's own earlier work on a company, acquired the same way.
+PRIOR_RESEARCH_SOURCE_REF = "source:prior-research"
+# The mission source-plan keys this manifest may describe. Extraction
 # dispatches on exactly this set.
-FEED_SOURCE_REFS = frozenset({SALES_NOTES_SOURCE_REF, COMPANY_WIKI_SOURCE_REF})
+FEED_SOURCE_REFS = frozenset({
+    SALES_NOTES_SOURCE_REF, COMPANY_WIKI_SOURCE_REF, PRIOR_RESEARCH_SOURCE_REF,
+})
 
 EVIDENCE_TIERS = frozenset({
     "management_statement", "expert", "sell_side", "internal", "unclassified",
+    # W3: work this fund did itself, earlier. Distinct from ``internal``,
+    # which is the wiki's word for a note somebody took: this one carries an
+    # ``as_of`` the owner declared and is subject to a staleness downgrade.
+    "internal_prior",
 })
 
 _MANIFEST_FIELDS = frozenset({

@@ -104,7 +104,7 @@ class InstallerSeedTests(unittest.TestCase):
         # Without yfinance the price lane refuses with a reason rather than
         # guessing, which is correct and also means the lane never runs.
         self.assertIn(
-            '"${repo_root}[deploy,pdf,sec-financials,market-data]"', self.script())
+            '"${repo_root}[deploy,pdf,sec-financials,market-data,prior-models]"', self.script())
 
     # INT2: what each block below puts on disk, and what that switches on.
     # The value is the files the installer copies (relative to the state
@@ -122,16 +122,25 @@ class InstallerSeedTests(unittest.TestCase):
             "--guidepoint-discovery-plan",
         ),
         "sales_notes": (
-            ["feed-plans/p9-us-it-services-feeds-v1.json",
+            ["feed-plans/p9-us-it-services-feeds-v2.json",
              "connector-governance/sales-notes-list-notes-v1.json",
              "connector-governance/sales-notes-get-note-v1.json"],
             "--sales-notes-digest-dir",
         ),
         "company_wiki": (
-            ["feed-plans/p9-us-it-services-feeds-v1.json",
+            ["feed-plans/p9-us-it-services-feeds-v2.json",
              "connector-governance/company-wiki-list-documents-v1.json",
              "connector-governance/company-wiki-get-document-v1.json"],
             "--company-wiki-corpus-root",
+        ),
+        # W3: the fund's own earlier work, behind the directory the owner
+        # declares. Same three files as the two S1 feeds; the corpus link is
+        # made in the same block and is what the fragment checks for.
+        "prior_research": (
+            ["feed-plans/p9-us-it-services-feeds-v2.json",
+             "connector-governance/prior-research-list-documents-v1.json",
+             "connector-governance/prior-research-get-document-v1.json"],
+            "--prior-research-corpus-root",
         ),
         "tracking": (["tracking-policy.json"], "--tracking-policy"),
     }
@@ -165,8 +174,8 @@ class InstallerSeedTests(unittest.TestCase):
                 repo / "deploy/connector-governance/guidepoint-search-library-v1.json",
             "discovery-plans/us-it-services-guidepoint-v1.json":
                 repo / "deploy/phase9/p9-us-it-services-guidepoint-v1.json",
-            "feed-plans/p9-us-it-services-feeds-v1.json":
-                repo / "deploy/phase9/p9-us-it-services-feeds-v1.json",
+            "feed-plans/p9-us-it-services-feeds-v2.json":
+                repo / "deploy/phase9/p9-us-it-services-feeds-v2.json",
             "connector-governance/sales-notes-list-notes-v1.json":
                 repo / "deploy/connector-governance/sales-notes-list-notes-v1.json",
             "connector-governance/sales-notes-get-note-v1.json":
@@ -175,6 +184,10 @@ class InstallerSeedTests(unittest.TestCase):
                 repo / "deploy/connector-governance/company-wiki-list-documents-v1.json",
             "connector-governance/company-wiki-get-document-v1.json":
                 repo / "deploy/connector-governance/company-wiki-get-document-v1.json",
+            "connector-governance/prior-research-list-documents-v1.json":
+                repo / "deploy/connector-governance/prior-research-list-documents-v1.json",
+            "connector-governance/prior-research-get-document-v1.json":
+                repo / "deploy/connector-governance/prior-research-get-document-v1.json",
             "tracking-policy.json":
                 repo / "deploy/phase9/p14a-tracking-policy-v1.json",
         }
@@ -191,6 +204,8 @@ class InstallerSeedTests(unittest.TestCase):
                     corpus = state / "feeds" / "company-wiki"
                     corpus.mkdir(parents=True)
                     (corpus / "wiki-index.sqlite").write_bytes(b"")
+                if lane == "prior_research":
+                    (state / "feeds" / "prior-research").mkdir(parents=True)
                 self.assertIn(flag, self.lane_argv(state), f"{lane} did not switch on")
                 # And one file short is the whole lane absent.
                 (state / needs[-1]).unlink()

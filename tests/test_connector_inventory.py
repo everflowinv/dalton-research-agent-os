@@ -556,6 +556,9 @@ class ConnectorInventoryTests(unittest.TestCase):
                 "yfinance", "alphaengine", "x-xreach", "x-x-search",
                 "reddit-last30days", "guidepoint", "gemini-web-search",
                 "web-fetch", "xueqiu", "sales-notes", "company-wiki",
+                # W3: the fund's own earlier work on a company, read from a
+                # declared directory with a manifest per company folder.
+                "prior-research",
                 # S4: China and Hong Kong fundamentals through akshare.
                 "cn-hk-findata",
                 # S3: the crowd layer. Each is a new connector rather than a

@@ -1,0 +1,59 @@
+{
+  "conservative": {
+    "rev_conv_%": 20.0,
+    "ebitda_margin_%": 40.0,
+    "full_ramp_sales_$B": 1.62,
+    "full_ramp_ebitda_$B": 0.65,
+    "nopat_$B": 0.18,
+    "unlevered_fcf_$B": 0.51,
+    "steady_state_aftertax_roc_%": 2.3,
+    "unlevered_fcf_yield_%": 6.3,
+    "unlevered_irr_%": {
+      "15y": 0.0,
+      "20y": 2.3,
+      "25y": 3.8
+    },
+    "2027_inc_eps_from_2026_startups_$": 0.06,
+    "2027_inc_eps_pct_of_growth_%": 3.1,
+    "full_backlog_inc_eps_$": 0.4,
+    "full_backlog_pct_of_2026E_eps_%": 2.2
+  },
+  "base": {
+    "rev_conv_%": 30.0,
+    "ebitda_margin_%": 45.0,
+    "full_ramp_sales_$B": 2.43,
+    "full_ramp_ebitda_$B": 1.09,
+    "nopat_$B": 0.52,
+    "unlevered_fcf_$B": 0.85,
+    "steady_state_aftertax_roc_%": 6.5,
+    "unlevered_fcf_yield_%": 10.5,
+    "unlevered_irr_%": {
+      "15y": 6.3,
+      "20y": 8.4,
+      "25y": 9.3
+    },
+    "2027_inc_eps_from_2026_startups_$": 0.18,
+    "2027_inc_eps_pct_of_growth_%": 8.7,
+    "full_backlog_inc_eps_$": 1.13,
+    "full_backlog_pct_of_2026E_eps_%": 6.3
+  },
+  "bull": {
+    "rev_conv_%": 50.0,
+    "ebitda_margin_%": 50.0,
+    "full_ramp_sales_$B": 4.05,
+    "full_ramp_ebitda_$B": 2.02,
+    "nopat_$B": 1.23,
+    "unlevered_fcf_$B": 1.56,
+    "steady_state_aftertax_roc_%": 15.2,
+    "unlevered_fcf_yield_%": 19.2,
+    "unlevered_irr_%": {
+      "15y": 17.5,
+      "20y": 18.6,
+      "25y": 19.0
+    },
+    "2027_inc_eps_from_2026_startups_$": 0.43,
+    "2027_inc_eps_pct_of_growth_%": 20.4,
+    "full_backlog_inc_eps_$": 2.65,
+    "full_backlog_pct_of_2026E_eps_%": 14.9
+  }
+}

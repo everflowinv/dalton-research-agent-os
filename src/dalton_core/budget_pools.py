@@ -136,10 +136,14 @@ LANE_POOLS: dict[str, str] = {
     "dispatch_mission_market_prices": "coverage",
     "dispatch_company_model_spec": "coverage",
     "dispatch_company_model_forecast": "coverage",
+    "dispatch_forecast_sensitivity": "coverage",
     "dispatch_research_plan": "coverage",
     "dispatch_initial_screen": "coverage",
     "dispatch_sales_notes_feed": "coverage",
     "dispatch_company_wiki_feed": "coverage",
+    # W3: reading the fund's own earlier work on a covered company is covering
+    # it -- the cheapest coverage there is, since the bytes are already here.
+    "dispatch_prior_research": "coverage",
     "dispatch_mission_crowd_sources": "coverage",
     # P14a and C1: what happened today, and the calendar that says what is
     # about to.  The judgement lane keeps its own book of what it spent

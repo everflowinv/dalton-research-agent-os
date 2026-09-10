@@ -70,6 +70,12 @@ PURPOSE = register_purpose("event_judgement")
 # of the judgement's.
 REFLECTION_PURPOSE = register_purpose("thesis_reflection")
 
+#: W3: the three things that can have happened to a prior view. The same three
+#: words the Initial Screen drafter is told to sort prior questions into, so a
+#: reader moving between the two documents is reading one vocabulary.
+PRIOR_VIEW_VERDICTS: tuple[str, ...] = ("still_holds", "changed", "resolved")
+_PRIOR_AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # When a reflection is owed. Two triggers and no third: we changed our mind, or
 # the market kept disagreeing with us. A no_change on a divergence still owes
 # one -- "why we are holding" is the answer the weekly review most needs and
@@ -477,6 +483,23 @@ def build_reflection_prompt(
             "street view from the absence of one.)"
         )
     lines.append("")
+    lines.append("## What this fund itself said about this company before")
+    prior = list(context.get("prior_view") or ())
+    if prior:
+        for row in prior:
+            lines.append(
+                f"- {row['refs'][0] if row.get('refs') else '?'} "
+                f"({row.get('source_kind')}, as of {row.get('as_of')}): "
+                f"{row.get('statement')}"
+            )
+        lines.append(
+            "This is our own earlier view, not evidence. Say whether it still holds, "
+            "has changed, or has been answered, and cite the refs printed above for "
+            "whichever you say. Do not restate it as though it were today's view."
+        )
+    else:
+        lines.append("(nothing: this company has no earlier internal file on this Core.)")
+    lines.append("")
     lines.append("## The last decisions taken on this company")
     for row in context.get("recent_judgements") or ():
         lines.append(f"- {row.get('kind')} -> {row['decision']} / {row['action']}: {row['because']}")
@@ -500,6 +523,13 @@ def build_reflection_prompt(
         "market_view_vs_ours.available is false when this system holds nothing about the "
         "street's view; then summary says that, refs is empty, and you do not guess."
     )
+    if prior:
+        lines.append(
+            'Add one more key: "prior_view": {"as_of": "YYYY-MM-DD", "still_holds": '
+            '"still_holds|changed|resolved", "summary": "...", "refs": []}. as_of is the '
+            "date printed beside the prior view above, never today's date. Omit the key "
+            "entirely if you cannot cite the prior material."
+        )
     lines.append(
         "followup_tracking names a source_key from the table above and a proposed interval "
         "in seconds; followup_research names a question. Both are proposals a later step "
@@ -519,7 +549,14 @@ def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[s
         "missed_debates", "followup_tracking", "followup_research",
         "market_view_vs_ours", "convergence_pathway",
     }
-    extra = sorted(set(value) - expected)
+    # W3: what *we* said about this company before, with the date on it. Beside
+    # `market_view_vs_ours` and not inside it: the street's position and our
+    # own earlier position are two different things to disagree with, and
+    # folding them together loses which one is being argued with. Optional
+    # rather than required, because most companies have no prior file and a
+    # required key would force the model to write "none" for the majority.
+    optional = {"prior_view"}
+    extra = sorted(set(value) - expected - optional)
     if extra:
         raise EventJudgementValidationError(
             f"the reflection returned keys the contract does not have: {extra}"
@@ -529,6 +566,10 @@ def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[s
         raise EventJudgementValidationError(f"the reflection omitted required keys: {missing}")
     permitted = allowed_refs(context) | {
         row["ref"] for row in (context.get("market_view") or ())
+    } | {
+        ref
+        for row in (context.get("prior_view") or ())
+        for ref in (row.get("refs") or ())
     }
     known_theses = {thesis["ref"] for thesis in context.get("theses") or ()}
     thesis_refs = _ref_list(value["thesis_refs"], "thesis_refs")
@@ -662,6 +703,49 @@ def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[s
         },
         "convergence_pathway": _text(value["convergence_pathway"],
                                      "convergence_pathway", maximum=MAX_BECAUSE_CHARS),
+        **({} if "prior_view" not in value else {
+            "prior_view": _prior_view_answer(value["prior_view"], permitted)
+        }),
+    }
+
+
+def _prior_view_answer(value: Any, permitted: set[str]) -> dict[str, Any]:
+    """The model's reading of what we thought before, dated and cited.
+
+    ``as_of`` is required and is not defaulted to today. The one thing a prior
+    view has to carry is its age; a prior view stamped with the day it was read
+    is a prior view that will be argued with as though it were current.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "as_of", "still_holds", "summary", "refs"
+    }:
+        raise EventJudgementValidationError(
+            "prior_view must be exactly as_of, still_holds, summary and refs"
+        )
+    as_of = _text(value["as_of"], "prior_view.as_of", maximum=10)
+    if _PRIOR_AS_OF_RE.fullmatch(as_of) is None:
+        raise EventJudgementValidationError("prior_view.as_of must be YYYY-MM-DD")
+    if value["still_holds"] not in PRIOR_VIEW_VERDICTS:
+        raise EventJudgementValidationError(
+            f"prior_view.still_holds must be one of {list(PRIOR_VIEW_VERDICTS)}"
+        )
+    refs = _ref_list(value["refs"], "prior_view.refs")
+    stray = sorted(set(refs) - permitted)
+    if stray:
+        raise EventJudgementValidationError(
+            f"prior_view cites refs it was not shown: {stray}"
+        )
+    if not refs:
+        raise EventJudgementValidationError(
+            "a prior_view must cite the prior material it is reading"
+        )
+    return {
+        "as_of": as_of,
+        "still_holds": value["still_holds"],
+        "summary": _text(value["summary"], "prior_view.summary",
+                         maximum=MAX_BECAUSE_CHARS),
+        "refs": refs,
     }
 
 
@@ -1261,6 +1345,14 @@ class EventJudgementAuthority:
             "followup_tracking": [dict(row) for row in reflection["followup_tracking"]],
             "followup_research": [dict(row) for row in reflection["followup_research"]],
             "market_view_vs_ours": dict(reflection["market_view_vs_ours"]),
+            # W3, absent rather than null when there was no prior file. Read
+            # with ``.get`` because callers hand this function hand-written
+            # reflections and a required key would break them; written with a
+            # conditional because a stored ``None`` and an absent key are
+            # different sentences to a reader of the ledger.
+            **({} if reflection.get("prior_view") is None else {
+                "prior_view": dict(reflection["prior_view"])
+            }),
             "convergence_pathway": reflection["convergence_pathway"],
             "verifier": {
                 "status": verification.get("status"),
@@ -1625,6 +1717,7 @@ def build_context(
     source_table: str | None = None,
     recent_events: Sequence[Mapping[str, Any]] = (),
     source_keys: Sequence[str] = (),
+    prior_view: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Everything the one bounded call is allowed to see, and nothing else."""
 
@@ -1650,6 +1743,11 @@ def build_context(
         "claims": recent_claims(connection, company_ref),
         "source_table": source_table,
         "market_view": market_view_rows(recent_events),
+        # W3: our own earlier file on this company, if there is one. Supplied
+        # by the caller rather than read here, so this module keeps its one
+        # dependency direction and a Core with no prior corpus simply passes
+        # nothing.
+        "prior_view": list(prior_view or ()),
         "source_keys": list(source_keys),
     }
 

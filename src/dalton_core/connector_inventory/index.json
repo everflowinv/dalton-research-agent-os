@@ -1,5 +1,5 @@
 {
-  "content_hash": "3a78d3fc59148a74fd94ee45d29d6364cf338aa7f944df3008df4065b085caa7",
+  "content_hash": "59a689aa7590c76901062078770b6139abcde3d028e179e40b151713a579fd61",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -173,6 +173,15 @@
       "profile_template_ref": "connector-profile-template:company-wiki:0.1",
       "proposal_manifest_hash": "014439d2db59589c62f92061a98243ad231e19f9e12cefafb74d484ea72b669d",
       "proposal_manifest_ref": "connector-proposal-manifest:company-wiki:0.2"
+    },
+    {
+      "connector_ref": "connector:prior-research",
+      "fixture_manifest_hash": "ee44156d5678af7635a9d87a92db711cea6bf3650a16d354fd9f6c326a9e31e7",
+      "fixture_manifest_ref": "connector-fixture-manifest:prior-research:0.1",
+      "profile_template_hash": "c8b7a8fdc0e8ce3db0e6e56bb70986aca7b15f17fc30d64ec4290bff178e6144",
+      "profile_template_ref": "connector-profile-template:prior-research:0.1",
+      "proposal_manifest_hash": "22962739e752deb52e4ffe6009a781cc035378b0feb2cf71b4e9460445a1cd41",
+      "proposal_manifest_ref": "connector-proposal-manifest:prior-research:0.2"
     },
     {
       "connector_ref": "connector:ir-page-watch",

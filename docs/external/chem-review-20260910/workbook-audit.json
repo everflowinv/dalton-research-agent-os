@@ -1,0 +1,161 @@
+[
+  {
+    "file": "models/archive/wanhua-simple-model-final-pre-2026h1-20260824.xlsx",
+    "sheets": [
+      "Cover",
+      "Assumptions",
+      "Price Inputs",
+      "Volume-Price",
+      "Cost Bridge",
+      "Segment P&L",
+      "Consol P&L",
+      "Cash Flow",
+      "Spread Beta",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 1916,
+    "cached_errors": [],
+    "size": 110987
+  },
+  {
+    "file": "models/basf-model-v0.1-before-ms-update.xlsx",
+    "sheets": [
+      "Cover",
+      "Assumptions",
+      "Price Inputs",
+      "Volume-Price",
+      "Cost Bridge",
+      "Segment P&L",
+      "Consol P&L",
+      "Cash Flow",
+      "Spread Beta",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 1844,
+    "cached_errors": [],
+    "size": 57112
+  },
+  {
+    "file": "models/basf-model-v0.2-ms-2026-08-12.xlsx",
+    "sheets": [
+      "Cover",
+      "Segment Model",
+      "Consensus Bridge",
+      "Driver Audit",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 70,
+    "cached_errors": [],
+    "size": 23766
+  },
+  {
+    "file": "models/basf-model-v0.3-citi-2026-08-14.xlsx",
+    "sheets": [
+      "Cover",
+      "Segment Model",
+      "Consensus Bridge",
+      "Citi Bridge",
+      "Driver Audit",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 179,
+    "cached_errors": [],
+    "size": 36230
+  },
+  {
+    "file": "models/basf-model-v0.4-citi-eu-policy-2026-09-03.xlsx",
+    "sheets": [
+      "Cover",
+      "Segment Model",
+      "Consensus Bridge",
+      "Citi Bridge",
+      "EU Policy Scenario",
+      "Driver Audit",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 229,
+    "cached_errors": [],
+    "size": 43625
+  },
+  {
+    "file": "models/chem-model-template.xlsx",
+    "sheets": [
+      "Cover",
+      "Assumptions",
+      "Price Inputs",
+      "Volume-Price",
+      "Cost Bridge",
+      "Segment P&L",
+      "Consol P&L",
+      "Cash Flow",
+      "Spread Beta",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 1844,
+    "cached_errors": [],
+    "size": 57112
+  },
+  {
+    "file": "models/wanhua-simple-model-final.xlsx",
+    "sheets": [
+      "Cover",
+      "Assumptions",
+      "Price Inputs",
+      "Volume-Price",
+      "Cost Bridge",
+      "Segment P&L",
+      "Consol P&L",
+      "Cash Flow",
+      "Spread Beta",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 1908,
+    "cached_errors": [],
+    "size": 112919
+  },
+  {
+    "file": "models/wanhua-simple-model-historical.xlsx",
+    "sheets": [
+      "Cover",
+      "Assumptions",
+      "Price Inputs",
+      "Volume-Price",
+      "Cost Bridge",
+      "Segment P&L",
+      "Consol P&L",
+      "Cash Flow",
+      "Spread Beta",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 453,
+    "cached_errors": [],
+    "size": 54754
+  },
+  {
+    "file": "models/wanhua-simple-model.xlsx",
+    "sheets": [
+      "Cover",
+      "Assumptions",
+      "Price Inputs",
+      "Volume-Price",
+      "Cost Bridge",
+      "Segment P&L",
+      "Consol P&L",
+      "Cash Flow",
+      "Spread Beta",
+      "Sources",
+      "Checks"
+    ],
+    "formulas": 490,
+    "cached_errors": [],
+    "size": 61906
+  }
+]

@@ -877,10 +877,140 @@ CONVICTION_CALL = Rubric(
 )
 
 
+
+# --------------------------------------------------------------------------
+# industry_framework
+#
+# P12e.  The framework is the one deliverable whose structure is not its own:
+# its sections are the Constitution's causal chain, its drivers are the driver
+# pack's, and its central table is computed rather than written.  So the
+# rubric grades the two things a model can still get wrong -- whether the prose
+# around a computed table stays inside it, and whether the gap list is honest
+# -- and it grades the gap list hardest, because the blueprint makes that list
+# the input to the whole source-connection line.  A framework whose gaps read
+# "more data would help" has told the S line nothing.
+# --------------------------------------------------------------------------
+
+INDUSTRY_FRAMEWORK = Rubric(
+    rubric_ref="rubric:industry-framework",
+    version=1,
+    title="行业框架质量评分表",
+    applies_to="industry_framework_version",
+    intent=(
+        "行业框架的结构不是自己选的：分节是 Constitution 的因果链，driver 是 driver pack 的，"
+        "横向对比表由代码算出。所以这份评分表只问模型还能做错的两件事——围着一张算好的表写的"
+        "文字有没有走出表外，以及缺口清单是不是诚实到能拿去接数据源。蓝图把这份缺口清单定为"
+        "S 线（Guidepoint / IR / sales note）的输入，因此「缺口写得含糊」在这里比在别处更严重。"
+    ),
+    criteria=(
+        Criterion(
+            criterion_id="chain_structure_followed",
+            question="每一节是否对应因果链的一环，且没有多出或少掉的节？",
+            evidence_required="章节标题与 Constitution method.causal_chain 的逐环比对；每节要么有正文，要么写明它为什么是空的",
+            anchors=_anchors(
+                "章节与因果链对不上：有自创的小标题，或者少了一环而没有说明",
+                "环数对得上，但有两环以上只是把同一段话换个说法重讲",
+                "每一环都被单独回答；无法回答的环写明缺什么，而不是用别环的内容填满",
+            ),
+            layer="both",
+            checks=("required_sections_present",),
+        ),
+        Criterion(
+            criterion_id="numbers_stay_in_the_table",
+            question="正文里的每个数字，是否都逐字来自被引用的那一格（或那一条 Claim）？",
+            evidence_required="正文数字 token 与本节 numbers 列表逐字比对；对比表的格子只能被复述，不能被重算、换算或求平均",
+            anchors=_anchors(
+                "正文出现了表里没有的数字：把两格平均成第三个数，或者把 USD 换算成「亿」",
+                "数字都有出处，但存在四舍五入或单位改写，读者无法逐格核对",
+                "每个数字都能在被引用的那一格里逐字找到；表里标为 unavailable 的格子在正文里也是缺口而不是估计",
+            ),
+            layer="both",
+            checks=("numbers_without_refs",),
+        ),
+        Criterion(
+            criterion_id="comparison_is_read_not_ranked",
+            question="横向对比是否尊重了可比性注记，而不是直接给五家排名？",
+            evidence_required="正文中凡是跨公司比较毛利率的地方，是否提到了口径差异（含/不含折旧摊销）；凡是引用某家整行缺失的地方，是否说明了原因",
+            anchors=_anchors(
+                "直接按毛利率把五家排了序，没有提口径差异；或者把某家「未申报」读成了「为零」",
+                "提到了口径差异，但仍然在结论里用了那个排名",
+                "跨公司比较只发生在可比的口径上；不可比之处被点名，并说明要补什么才可比",
+            ),
+            layer="judge",
+        ),
+        Criterion(
+            criterion_id="drivers_bound_to_the_pack",
+            question="长短期驱动是否每一条都绑定到 driver pack 的 driver，并给出立场与依据？",
+            evidence_required="每个 driver 槽位要么有带引用的句子，要么 stance 为 unknown；没有 pack 之外自创的 driver",
+            anchors=_anchors(
+                "出现了 driver pack 里没有的 driver，或者取了立场却没有任何依据",
+                "每条 driver 都有立场，但依据是对 mechanism 的复述而不是对证据的解读",
+                "每条立场都指向具体证据；材料不支持的 driver 老实地记 unknown 并说明缺什么",
+            ),
+            layer="both",
+            checks=("every_section_cites",),
+        ),
+        Criterion(
+            criterion_id="gaps_are_actionable",
+            question="缺口清单是否具体到可以据此决定接哪个数据源？",
+            evidence_required="每条未闭合的缺口都写明：缺的是什么、哪一类来源能补、该来源当前是否接入、代价或配额",
+            anchors=_anchors(
+                "缺口写成「数据不足」「需要更多研究」这类无法执行的句子，或者干脆没有缺口",
+                "缺口具体，但没有说哪一类来源能补，S 线读了也不知道该接什么",
+                "每条缺口都指名 content kind 与候选来源，并说明它现在接没接、接了要花多少配额",
+            ),
+            # Judged only. The structural half of this standard is not in
+            # `research_quality_score.CHECKS` and should not be: whether a gap
+            # names a source that could fill it is checked by the
+            # Constitution's own `open_gaps_name_a_source` binding, which runs
+            # against the record rather than against the flattened artefact and
+            # can therefore read `candidate_sources`. Naming an unrelated check
+            # here would have made this criterion look enforced when it was not.
+            layer="judge",
+        ),
+        Criterion(
+            criterion_id="new_version_new_evidence",
+            question="新版本是否至少引用了一条上一版没有引用过的证据（含新落的财报口径）？",
+            evidence_required="本版 evidence scope 与上一版的差集；新落的 filing accession 也算新证据",
+            anchors=_anchors(
+                "新版本没有引用任何新证据，它只是把上一版重写了一遍",
+                "有新引用，但没有说明它把哪个判断往哪个方向推动了",
+                "新证据被指名，且说明它改变了因果链的哪一环、缺口清单的哪一条",
+            ),
+            layer="both",
+            checks=("new_version_cites_new_refs", "restatement_drift"),
+        ),
+        Criterion(
+            criterion_id="stays_a_framework",
+            question="文档是否始终在说「这个行业是怎么回事」，而没有变成一个 call？",
+            evidence_required="正文中不存在买入/卖出/目标价/低估/高估一类判断",
+            anchors=_anchors(
+                "写出了投资结论：某家被低估、给了目标价、或者建议加减仓",
+                "没有明说结论，但用「明显更有吸引力」这类措辞把排名写成了推荐",
+                "只陈述行业与公司的事实与机制；对「怎么办」的判断留给 Thesis 与人",
+            ),
+            layer="judge",
+        ),
+    ),
+    grading_notes=(
+        "分节结构与 driver 清单都不是模型选的：分节来自 Constitution 的因果链，driver 来自 "
+        "driver pack，横向对比表由代码算出。不要因为「它没有讨论我关心的那个主题」而扣分——"
+        "那是 Constitution 该改的事，不是这份文档该做的事。",
+        "对比表里标为 unavailable 的格子是事实而不是缺陷：IBM 的建模规格没有绑定任何 filed "
+        "revenue concept，五家都没有绑定 operating income，因此那些行整行为空。文档如实说出"
+        "这一点是满分行为；填上一个估计值是 0 分行为。",
+        "缺口清单越长不代表越差。这份交付物存在的理由之一就是把缺口列全，好让 S 线知道该接"
+        "什么；判分看的是每条缺口能不能据以行动，不是缺口有几条。",
+        "行业层 Claim 目前为空是系统状态而不是文档的错：把 Claim 归到行业主体的抽取路径还没"
+        "上线。文档说明这一点并靠对比表与公司档案节撑起论述，是合格行为。",
+    ),
+)
+
+
 RUBRICS: Mapping[str, Rubric] = MappingProxyType({
     rubric.rubric_ref: rubric
     for rubric in (INITIAL_SCREEN, ASK_ANSWER, COMPANY_DOSSIER, WEEKLY_BRIEF,
-                   CONVICTION_CALL)
+                   CONVICTION_CALL, INDUSTRY_FRAMEWORK)
 })
 # The short names the CLI and the golden set use, so nobody has to type
 # "rubric:initial-screen" twice.
@@ -890,6 +1020,7 @@ RUBRIC_ALIASES: Mapping[str, str] = MappingProxyType({
     "company_dossier": COMPANY_DOSSIER.rubric_ref,
     "weekly_brief": WEEKLY_BRIEF.rubric_ref,
     "conviction_call": CONVICTION_CALL.rubric_ref,
+    "industry_framework": INDUSTRY_FRAMEWORK.rubric_ref,
 })
 # Spellings that resolve but are not the name.  The refs are hyphenated and the
 # short names are not, so the hyphenated form of this one is the mistake a
@@ -932,6 +1063,7 @@ __all__ = [
     "CONVICTION_CALL",
     "Criterion",
     "DOSSIER_SECTIONS",
+    "INDUSTRY_FRAMEWORK",
     "INITIAL_SCREEN",
     "PASSING_SCORE",
     "RUBRICS",

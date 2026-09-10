@@ -132,6 +132,7 @@ CHANGE_REASON_LABELS = {
     "assumption_review": "复核了假设",
     "evidence_thicker": "证据变厚了",
     "human_revision": "人改的",
+    "imported_prior": "从以前的资料导入的",
 }
 ASSUMPTION_KIND_LABELS = {"estimate": "模型估的", "human": "人写的", "actual": "已报实际"}
 QUALITY_CHECK_LABELS = {
@@ -176,6 +177,7 @@ REGISTRY_LANE_LABELS = {
     "mission_consensus": "看街上预期什么",
     "company_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
+    "forecast_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
     "claim_index": "给结论建索引",
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",
@@ -187,6 +189,7 @@ REGISTRY_LANE_LABELS = {
     "claim_review": "复核已有结论",
     "sales_notes_feed": "读 sales note",
     "company_wiki_feed": "读公司维基与访谈纪要",
+    "prior_research": "读我们自己以前写过的东西",
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
@@ -195,6 +198,7 @@ REGISTRY_LANE_LABELS = {
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
     "catalog_sync": "跟住网关有哪些模型可用",
+    "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})

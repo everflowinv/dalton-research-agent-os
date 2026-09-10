@@ -166,6 +166,7 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_model_spec_lane",
     "dalton_core.mission_guidepoint_lane",
     "dalton_core.mission_model_forecast_lane",
+    "dalton_core.mission_sensitivity_lane",
     "dalton_core.mission_claim_index_lane",
     "dalton_core.research_planner_launcher",
     "dalton_core.initial_screen_launcher",
@@ -179,8 +180,10 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_debate_map_lane",
     "dalton_core.mission_dossier_lane",
     "dalton_core.mission_deep_insight_lane",
+    "dalton_core.mission_industry_framework_lane",
     "dalton_core.mission_conviction_lane",
     "dalton_core.mission_model_catalog_lane",
+    "dalton_core.mission_prior_research_lane",
 )
 
 # The keys the controller tick's summary already uses for things that are not
@@ -320,13 +323,39 @@ def lane_init_kwargs() -> frozenset[str]:
 
 
 def lane_argv(context: LaunchAgentContext) -> list[str]:
-    """Concatenate every lane's writer LaunchAgent arguments, in lane order."""
+    """Concatenate every lane's writer LaunchAgent arguments, in lane order.
+
+    An identical ``--flag value`` pair emitted by two lanes is written once.
+    Some arguments are genuinely shared -- three feed lanes read one discovery
+    plan -- and a fragment cannot know whether another lane already named it.
+    Before this, the lanes negotiated by hand: the company-wiki fragment sliced
+    its own first two entries off on the assumption that the sales-note lane
+    ran earlier. That assumption is invisible at the call site, breaks when a
+    lane is added ahead of the one doing the slicing, and leaves the *only*
+    installed lane with no plan on a Core that has just the one. Two identical
+    pairs are one argument; argparse would take the last of them anyway.
+    """
 
     argv: list[str] = []
+    seen: set[tuple[str, str]] = set()
     for spec in registered_lanes():
         if spec.argv_fragment is None:
             continue
-        argv.extend(spec.argv_fragment(context))
+        fragment = list(spec.argv_fragment(context))
+        index = 0
+        while index < len(fragment):
+            token = fragment[index]
+            value = fragment[index + 1] if index + 1 < len(fragment) else None
+            if value is not None and token.startswith("--") and not value.startswith("--"):
+                if (token, value) in seen:
+                    index += 2
+                    continue
+                seen.add((token, value))
+                argv += [token, value]
+                index += 2
+                continue
+            argv.append(token)
+            index += 1
     return argv
 
 

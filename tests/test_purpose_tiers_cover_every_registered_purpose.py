@@ -16,6 +16,7 @@ REGISTERING_MODULES = (
     "dalton_core.event_judgement",
     "dalton_core.company_dossier_draft",
     "dalton_core.debate_map_draft",
+    "dalton_core.industry_framework_draft",
 )
 
 

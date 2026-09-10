@@ -173,6 +173,27 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # W3: the fund's own prior work on a company. A local file
+                    # read like S1's, and smaller: onboarding reads every
+                    # prior document once and then only what the owner adds.
+                    "connector_slug": "prior-research",
+                    "operation": "get_document",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "prior-research",
+                    "operation": "list_documents",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     # S1: local file reads, so the ceiling is a loop bound
                     # rather than a courtesy to an upstream.
                     "connector_slug": "sales-notes",

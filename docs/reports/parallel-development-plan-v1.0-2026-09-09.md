@@ -193,6 +193,10 @@ owner：在 cockpit 上可以为各个调用环节选择用哪个模型；模型
    新模型自动登记为可用 profile（无 rate card 的标「未定价、只可作回退」）；消失的退役不删除；openclaw 有但 broker 插件未放行的
    在 cockpit 显示「可用但未放行」，owner 一键放行 = 带备份写 openclaw.json 的 broker 子树 + 提示重载 gateway。
 3. 不自动改 openclaw 的 provider 配置本身。
+4. **模型被 openclaw 移除时的退化路径（owner 09-10 追加）**：目录 lane 退役它；任何环节链里含它的那一环自动跳过（首选被移除即落到回退；
+   显式链全部退役则落回该环节的档位链；verifier 独立性规则在回退后仍须成立，否则拒绝并说明）；通知先只落在 cockpit（owner 09-10：Feishu / Discord 投递链尚未建）：
+   append-only `model_fallback_notices`（按 (模型, 环节) 去重），cockpit 模型页与待办列表显示到 owner 确认或重选为止；留一个
+   `notice_delivery` 接缝给以后的投递线，tick 摘要标 `notification_channel: cockpit`。绝不静默。
 
 ### 既有资料的入职处理（owner 2026-09-10 提问，主 agent 定案）
 
@@ -233,8 +237,12 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
    `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
 10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
 11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
+13. **演练必须 fail-closed，且不得以能解析到 live 根目录的配置起 driver**（09-10 第二次复演：前置步骤失败后脚本继续，
+    用未改写的 `service.json` 对 live Core 跑了一个 tick；写入被 writer 拒绝，唯一实际写入是 C2 tick 账本的一个文件，已隔离到
+    /tmp。修法：前置失败即中止；driver 配置里任何路径不在临时根下即拒绝；复演时 HOME 指向临时根）。
 12. **自动化冲突解决只允许用于「两边各追加一行」的字典 / 列表 / 元组条目**，且解决后必须先 `python -c "import <module>"`
     再提交（09-10 一次「两边都保留」把嵌套字面量的闭合括号吃掉，主线无法解析，被 P13-M3 agent 发现）。
+14. **每次 live 事故必须产出一条测试或一条 policy 检查**（Chem 复盘 §7.5 的做法，我们已在做，写成规则）。
 
 ## 5. 主 agent 的集成流程
 
@@ -280,8 +288,20 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 中午 | reopen-ledger 合入（4,835 项通过，已 push）。合入 planner 日账本（planner 调用进日账本与四池，四处可观测性修复）与 consensus（财年末从「从不交 10-Q 的季度」推导；页首抽取 15 个目标价；两家独立券商规则）。在审：P12e、P13-M3、prior-research；后续：authority 授权标志统一 | 进行中 |
 | 09-10 中午 | planner 日账本合入（4,876 项通过，已 push）；consensus 合入中。P13-M3 review 一 blocker（bridge 单券商可冒充共识）已发回；P12e、prior-research 在修 | 进行中 |
 | 09-10 下午 | consensus 合入（5,045 项通过，已 push）；合入 authority 授权标志统一（19 个 authority 共享按连接的标志；受保护表自动识别）。在修：P12e、prior-research、P13-M3 | 进行中 |
+| 09-10 下午 | authority 标志统一合入（5,055 项通过，已 push）。派出模型选择与自动登记（cockpit 按环节选模型 → 新 policy 版本；每小时目录 lane；一键放行写 broker 子树）。在修：P12e、prior-research、P13-M3 | 进行中 |
+| 09-10 下午 | P13-M3 敏感性合入（5,167 项通过，已 push；按历史峰谷摆幅排 driver，bridge 单券商不再能冒充共识）；合入 P12e 行业框架（deliverable 数字可引用有 accession / 模型版本支撑的计算格）。在修：prior-research；开发中：model-selection（含模型被移除时的自动回退与 cockpit 通知） | 进行中 |
+| 09-10 下午 | P12e 合入（5,313 项通过，已 push）；prior-research 与 P12e 在 `mission_deliverable.py` 冲突，作者调和后合入（既有资料作 `internal_prior` 来源；旧 screen 为 v0；`PriorModelVersion`）+ 集成：`DISCOVERY_SOURCES` 行、`[prior-models]` extra、撤 S1 针脚。复演 2 因脚本 fail-open 碰到 live 目录，唯一实际写入（tick 账本文件）已隔离，规则 13 已记；复演 agent 加固后重跑。model-selection 开发中 | 进行中 |
 
 ---
+
+### 6b. W4：Chem 复盘衍生切片（09-10 派出，见 `chem-retrospective-implications-v1.0-2026-09-10.md` §5）
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 派出 |
+| w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 派出 |
+| w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
+| w4-failure-classes | lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
 
 ## 附录 A：接线热点清单（Wave 0 要收掉的）
 

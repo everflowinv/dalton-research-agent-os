@@ -211,12 +211,27 @@ def _gate_company_wiki(env: Mapping[str, str]) -> tuple[bool, str]:
     return (workspace.is_dir() and index.exists()), f"no wiki index at {index}"
 
 
+def _gate_prior_research(env: Mapping[str, str]) -> tuple[bool, str]:
+    """W3: the owner names the directory, because there is no safe default.
+
+    Unlike the two S1 feeds there is nothing to discover: "our old files" has
+    no canonical location, and a guessed one would either find nothing or find
+    something that is not ours.
+    """
+
+    named = env.get("DALTON_PRIOR_RESEARCH_DIR", "")
+    if not named:
+        return False, "DALTON_PRIOR_RESEARCH_DIR is not set"
+    return Path(named).is_dir(), f"no directory at {named}"
+
+
 def _gate_any_feed(env: Mapping[str, str]) -> tuple[bool, str]:
-    """The feed plan is seeded by *either* feed lane, so its gate is the union."""
+    """The feed plan is seeded by *any* feed lane, so its gate is the union."""
 
     digest, _ = _gate_market_digest(env)
     wiki, _ = _gate_company_wiki(env)
-    return (digest or wiki), "neither feed lane is installed, so no feed plan is seeded"
+    prior, _ = _gate_prior_research(env)
+    return (digest or wiki or prior), "no feed lane is installed, so no feed plan is seeded"
 
 
 CROWD_TOOL_VARS: tuple[str, ...] = (
@@ -235,6 +250,7 @@ def _gate_crowd_tools(env: Mapping[str, str]) -> tuple[bool, str]:
 GATES: dict[str, Callable[[Mapping[str, str]], tuple[bool, str]]] = {
     "market-digest": _gate_market_digest,
     "company-wiki": _gate_company_wiki,
+    "prior-research": _gate_prior_research,
     "any-feed": _gate_any_feed,
     "crowd-tools": _gate_crowd_tools,
 }
@@ -448,6 +464,13 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/phase9/p14a-tracking-policy-v1.json",
         "tracking-policy.json",
     ),
+    # P12e: the industry-framework policy is that lane's whole switch. One
+    # file, so all-or-nothing is automatic, and no model configuration beside
+    # it: the comparison table needs none.
+    SeedSpec(
+        "deploy/phase9/p12e-industry-framework-policy-v1.json",
+        "p12e-industry-framework-policy-v1.json",
+    ),
     # P14e / INT2: publication material, put where the owner reads it and no
     # lane looks. It is not the ad-hoc lane's switch and does not turn it on.
     SeedSpec(
@@ -459,8 +482,8 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
     # notes and the company wiki are separate approvals and separate
     # directories, so one being absent must not take the other with it.
     SeedSpec(
-        "deploy/phase9/p9-us-it-services-feeds-v1.json",
-        "feed-plans/p9-us-it-services-feeds-v1.json", optional=True,
+        "deploy/phase9/p9-us-it-services-feeds-v2.json",
+        "feed-plans/p9-us-it-services-feeds-v2.json", optional=True,
         gate="any-feed",
     ),
     *(
@@ -478,6 +501,15 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
             gate="company-wiki",
         )
         for kind in ("company-wiki-list-documents", "company-wiki-get-document")
+    ),
+    # W3: the fund's own earlier work, behind the directory the owner declares.
+    *(
+        SeedSpec(
+            f"deploy/connector-governance/{kind}-v1.json",
+            f"connector-governance/{kind}-v1.json", optional=True,
+            gate="prior-research",
+        )
+        for kind in ("prior-research-list-documents", "prior-research-get-document")
     ),
     # S3: seven crowd-source records and the per-company map, all or nothing.
     # The map is the lane's switch, and a lane switched on with no host tool
@@ -730,6 +762,13 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
         "research_plan", "research-planner-model-config.json", None, False,
         "written only when DALTON_PLANNER_MODEL_PROFILE/TIER is set",
     ),
+    LaneSwitch(
+        "industry_framework (P12e)", "p12e-industry-framework-policy-v1.json",
+        "deploy/phase9/p12e-industry-framework-policy-v1.json", True,
+        "INT3 seed block; one file, so all-or-nothing is automatic. The lane is "
+        "on with the policy alone -- the comparison table needs no model, so "
+        "there is no second file to be half-installed with.",
+    ),
 )
 
 
@@ -758,6 +797,7 @@ REQUIRED_WRITE_SCOPES: tuple[tuple[str, str], ...] = (
     ("forecast_revision_proposal", "P14a: forecast revisions proposed by an event"),
     ("thesis_revision_candidate", "P14a / ADR-0007: also needs a human_checkpoint"),
     ("conviction_call", "W3: conviction calls"),
+    ("deliverable", "P12e: the industry framework publishes as a deliverable; without it the lane holds not_authorized and spends nothing"),
 )
 
 
@@ -804,6 +844,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("agenda_schema.sql", "dalton_core.agenda", "AgendaStore", "core"),
     MigrationSpec("model_input_schema.sql", "dalton_core.model_input", "ModelInputLedger", "core"),
     MigrationSpec("industry_research_schema.sql", "dalton_core.industry_research", "IndustryResearchAuthority", "core"),
+    MigrationSpec("industry_framework_schema.sql", "dalton_core.industry_framework", "IndustryFrameworkAuthority", "core"),
     MigrationSpec("analyst_journal_schema.sql", "dalton_core.analyst_journal", "AnalystJournalAuthority", "core"),
     MigrationSpec("bounded_planner_loop_schema.sql", "dalton_core.bounded_planner_loop", "BoundedPlannerAuthority", "core"),
     MigrationSpec("capability_schema.sql", "dalton_core.capability_registry", "CapabilityRegistry", "core"),
@@ -818,11 +859,13 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),
+    MigrationSpec("prior_model_schema.sql", "dalton_core.prior_model_import", "PriorModelAuthority", "core"),
     MigrationSpec("deep_insight_gate_schema.sql", "dalton_core.deep_insight_gate", "DeepInsightGateAuthority", "core"),
     MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
     MigrationSpec("event_judgement_schema.sql", "dalton_core.event_judgement", "EventJudgementAuthority", "core"),
     MigrationSpec("forecast_driver_schema.sql", "dalton_core.model_forecast_driver", "ForecastModelAuthority", "core"),
     MigrationSpec("forecast_reconciliation_schema.sql", "dalton_core.forecast_reconciliation", "ForecastReconciliationAuthority", "core"),
+    MigrationSpec("forecast_sensitivity_schema.sql", "dalton_core.forecast_sensitivity", "SensitivityProjectionAuthority", "core"),
     MigrationSpec("market_price_schema.sql", "dalton_core.market_price", "MarketPriceSeriesAuthority", "core"),
     MigrationSpec("mission_deliverable_schema.sql", "dalton_core.mission_deliverable", "MissionDeliverableAuthority", "core"),
     MigrationSpec("model_forecast_schema.sql", "dalton_core.model_forecast", "ModelForecastAuthority", "core"),
