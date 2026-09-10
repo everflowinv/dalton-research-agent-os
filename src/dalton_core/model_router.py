@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .contracts import WorkOrder
+from .store import authorization_flag, authorized_flag
 
 
 SCHEMA_VERSION = "0.1"
@@ -561,6 +562,8 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
 class ModelRouter:
     """SQLite model catalog and deterministic selection service."""
 
+    _authorized = authorized_flag()
+
     def __init__(
         self,
         path: str | Path = ":memory:",
@@ -574,7 +577,6 @@ class ModelRouter:
         self.path = str(path)
         self.read_only = read_only
         self.clock = clock or _utc_now
-        self._authorized = False
         from .readonly_sqlite import connect_read_only
         self.connection = (connect_read_only(path) if read_only else
                            connection or sqlite3.connect(self.path, isolation_level=None))
@@ -583,9 +585,8 @@ class ModelRouter:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
-        self.connection.create_function(
-            "dalton_model_router_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_model_router_authorized")
         if not read_only:
             self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 

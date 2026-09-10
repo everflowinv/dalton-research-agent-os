@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .document_extraction import statement_is_boilerplate
-from .store import DaltonStore, content_hash
+from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
 
 SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("claim_retirement_schema.sql")
@@ -162,6 +162,8 @@ def detect(
 class ClaimRetirementAuthority:
     """Append-only challenges and retirements over an untouched Ledger."""
 
+    _authorized = authorized_flag()
+
     def __init__(
         self,
         store: DaltonStore,
@@ -173,10 +175,8 @@ class ClaimRetirementAuthority:
         self.connection = store.connection
         self.source_text_resolver = source_text_resolver
         self.clock = clock or _now
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_claim_retirement_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_claim_retirement_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager

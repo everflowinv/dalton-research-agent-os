@@ -21,7 +21,9 @@ from typing import Any, Iterator
 from .contracts import ThesisVersion
 from .forecast_reconciliation import validate_forecast_reconciliation
 from .industry_research import IndustryResearchAuthority, IndustryResearchError
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 
 SCHEMA_VERSION = "0.1"
@@ -313,6 +315,8 @@ def _change_summary(
 class WeeklyBriefAuthority:
     """Publish, deliver and collect feedback on exact weekly research issues."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore, industry_research: IndustryResearchAuthority):
         if not isinstance(store, DaltonStore):
             raise TypeError("store must be DaltonStore")
@@ -323,10 +327,8 @@ class WeeklyBriefAuthority:
         self.store = store
         self.industry_research = industry_research
         self.connection = store.connection
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_weekly_brief_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_weekly_brief_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager

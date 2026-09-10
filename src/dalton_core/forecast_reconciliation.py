@@ -37,7 +37,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .model_forecast import validate_forecast_line
-from .store import DaltonStore, canonical_json, content_hash
+from .store import (
+    DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
+)
 
 
 SCHEMA_VERSION = "0.1"
@@ -395,13 +397,13 @@ def _band(percent: Decimal) -> str:
 class ForecastReconciliationAuthority:
     """Append-only forecast reconciliations and human overturn decisions."""
 
+    _authorized = authorized_flag()
+
     def __init__(self, store: DaltonStore):
         self.store = store
         self.connection = store.connection
-        self._authorized = False
-        self.connection.create_function(
-            "dalton_forecast_reconciliation_authorized", 0, lambda: int(self._authorized)
-        )
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_forecast_reconciliation_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @contextmanager
