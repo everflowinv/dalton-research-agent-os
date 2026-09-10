@@ -2049,6 +2049,8 @@ class Rehearsal:
             # deploy were at fault.
             self.step("governance seeds", self.run_seeds)
             self.step("model catalog sync (copy of model-router.sqlite)", self.run_catalog_sync)
+            for name, operation in self.post_catalog_sync_steps():
+                self.step(name, operation, fatal=True)
             self.step("render LaunchAgent plists and diff", self.render_plists)
             self.step("mission grants (autonomy.may_write)", self.check_mission)
             self.step("lane switches on disk", self.check_lane_switches)
@@ -2057,6 +2059,13 @@ class Rehearsal:
         finally:
             self.stop_writer()
         return 0 if all(step.ok for step in self.steps) else 1
+
+    def post_catalog_sync_steps(
+        self,
+    ) -> Sequence[tuple[str, Callable[[], tuple[str, list[str]]]]]:
+        """Opt-in extension point; the ordinary deploy rehearsal adds nothing."""
+
+        return ()
 
     def report(self) -> str:
         lines = ["", "=" * 72, "rehearsal summary", "=" * 72]
