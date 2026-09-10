@@ -3472,23 +3472,13 @@ class CockpitPlane:
                   else _load_json(self.config.openclaw_config_path))
         broker = broker if isinstance(broker, Mapping) else None
         from .model_fallback_chain import FallbackChainError, routing_overview
-        from .model_router import ModelRouter
+        from .model_router import ModelRouter, ModelRouterError
         from .openclaw_model_discovery import discover_models
 
         try:
             with closing(ModelRouter(path, read_only=True)) as router:
                 overview = routing_overview(
                     router, openclaw_config=broker, checked_at=self.clock())
-                policy_overviews = {}
-                policies = {}
-                for binding in bindings.values():
-                    ref = binding.get("policy_version_ref")
-                    if isinstance(ref, str) and ref not in policy_overviews:
-                        policies[ref] = router.get_policy(ref)
-                        policy_overviews[ref] = routing_overview(
-                            router, openclaw_config=broker,
-                            checked_at=self.clock(), policy_version_ref=ref,
-                        )
                 discovery = (
                     {} if broker is None
                     else discover_models(broker, router=router,
@@ -3502,20 +3492,41 @@ class CockpitPlane:
             return {"available": False, "reason": f"模型目录读不出来：{_reason(exc)}"}
         purposes = []
         default_rows = {row["purpose"]: row for row in overview["purposes"]}
+        bound_views: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any],
+                                                dict[str, dict[str, Any]]]] = {}
         for purpose in sorted(default_rows):
             binding = bindings.get(purpose, {
                 "status": "unconfigured", "source": "dynamic launch argument",
                 "policy_version_ref": None,
             })
             policy_ref = binding.get("policy_version_ref")
-            selected = policy_overviews.get(policy_ref)
+            bound_db = binding.get("model_router_db")
+            selected = pinned = bound_catalogue = None
+            binding_error = None
+            if isinstance(policy_ref, str) and isinstance(bound_db, str):
+                key = (str(Path(bound_db).expanduser().resolve()), policy_ref)
+                try:
+                    if key not in bound_views:
+                        with closing(ModelRouter(key[0], read_only=True)) as bound_router:
+                            bound_policy = bound_router.get_policy(policy_ref)
+                            bound_overview = routing_overview(
+                                bound_router, openclaw_config=broker,
+                                checked_at=self.clock(), policy_version_ref=policy_ref)
+                            bound_catalog = {
+                                profile["id"]: profile
+                                for profile in bound_router.latest_profiles()
+                            }
+                        bound_views[key] = (bound_overview, bound_policy, bound_catalog)
+                    selected, pinned, bound_catalogue = bound_views[key]
+                except (FallbackChainError, ModelRouterError, sqlite3.Error,
+                        OSError, ValueError) as exc:
+                    binding_error = _reason(exc)
             if selected is None:
                 row = {**default_rows[purpose], "mode": "unconfigured", "chain": [],
                        "superseded_chain": [], "last_served": None}
             else:
                 row = next(item for item in selected["purposes"]
                            if item["purpose"] == purpose)
-                pinned = policies[policy_ref]
                 override = (pinned.get("purpose_overrides") or {}).get(purpose)
                 tiers = (pinned.get("fallback_chains") or {}).get("tiers")
                 allowed = (pinned.get("filters") or {}).get("allowed_profile_ids") or []
@@ -3523,13 +3534,14 @@ class CockpitPlane:
                 # router without a tier chain.  Showing the global tier here
                 # would advertise models this policy will actually reject.
                 if not isinstance(override, Mapping) and not tiers and allowed:
-                    row = {**row, "mode": "pinned", "superseded_chain": None,
-                           "chain": [{
+                    row = {**row, "mode": ("pinned" if len(allowed) == 1
+                                            else "candidate_set"),
+                           "superseded_chain": None, "chain": [{
                                "position": position, "profile_id": profile_id,
-                               "registered": profile_id in catalogue,
-                               "status": (catalogue.get(profile_id) or {}).get("status", "live"),
-                               "family": (catalogue.get(profile_id) or {}).get("family"),
-                               "unpriced": bool((catalogue.get(profile_id) or {}).get("unpriced")),
+                               "registered": profile_id in bound_catalogue,
+                               "status": (bound_catalogue.get(profile_id) or {}).get("status", "live"),
+                               "family": (bound_catalogue.get(profile_id) or {}).get("family"),
+                               "unpriced": bool((bound_catalogue.get(profile_id) or {}).get("unpriced")),
                            } for position, profile_id in enumerate(allowed, 1)]}
             chain = [{
                 "position": link["position"], "model": link["profile_id"],
@@ -3550,13 +3562,16 @@ class CockpitPlane:
                 "tier_label": MODEL_TIER_LABELS.get(row["tier"], row["tier"]),
                 "mode": row["mode"],
                 "mode_label": MODEL_SELECTION_MODE_LABELS.get(
-                    row["mode"], ({"unconfigured": "未配置", "pinned": "固定策略"}
+                    row["mode"], ({"unconfigured": "未配置", "pinned": "固定模型",
+                                   "candidate_set": "策略候选集合"}
                                   .get(row["mode"], row["mode"]))
                 ),
-                "configuration_status": binding["status"],
+                "configuration_status": ("error" if binding_error else binding["status"]),
+                "configuration_error": binding_error,
                 "configuration_source": binding["source"],
                 "policy_version_ref": policy_ref,
                 "requires_restart": bool(binding.get("requires_restart")),
+                "editable": bool(binding.get("editable")),
                 "chain": chain,
                 "superseded_chain": row["superseded_chain"],
                 "superseded_note": (

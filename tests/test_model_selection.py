@@ -1664,8 +1664,8 @@ class CockpitModelPageTests(unittest.TestCase):
         service_path = self.root / "install" / "config" / "service.json"
         service_path.parent.mkdir()
         service_path.write_text(json.dumps({
-            "model_router_db": str(self.router_db),
             "bounded_planner": {"config": {
+                "planner_model_router_db": str(self.router_db),
                 "planner_routing_policy_ref": refs[1],
             }},
         }), encoding="utf-8")
@@ -1675,6 +1675,7 @@ class CockpitModelPageTests(unittest.TestCase):
         view = plane.models()
         rows = {row["purpose"]: row for row in view["purposes"]}
         self.assertEqual(rows["ask"]["policy_version_ref"], refs[0])
+        self.assertFalse(rows["ask"]["editable"])
         self.assertEqual(rows["plan"]["policy_version_ref"], refs[1])
         self.assertEqual(rows["dossier"]["policy_version_ref"], refs[2])
         self.assertEqual(rows["dossier_verifier"]["policy_version_ref"], refs[3])
@@ -1692,6 +1693,72 @@ class CockpitModelPageTests(unittest.TestCase):
         )
         self.assertEqual(rows["debate_map"]["configuration_status"],
                          "unconfigured")
+
+    def test_page_reads_a_binding_from_its_own_router_even_when_refs_match(self) -> None:
+        primary_profile = secondary_profile = None
+        with ModelRouter(self.router_db) as router:
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            primary_profile = router.latest_profiles()[0]["id"]
+            shared_ref = ensure_planner_policy(
+                router, profile_ids=[primary_profile], now=NOW,
+                policy_id="model-routing-policy:same-ref",
+            )["policy_version_ref"]
+        secondary_db = self.root / "secondary-router.sqlite"
+        with ModelRouter(secondary_db) as router:
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            secondary_profile = router.latest_profiles()[1]["id"]
+            self.assertEqual(ensure_planner_policy(
+                router, profile_ids=[secondary_profile], now=NOW,
+                policy_id="model-routing-policy:same-ref",
+            )["policy_version_ref"], shared_ref)
+        # The cockpit's own config selects the primary router; draft's actual
+        # consumer deliberately selects another database with the same ref.
+        cockpit = self.root / "research-planner-model-config.json"
+        cockpit.write_text(json.dumps({
+            "routing_policy_ref": shared_ref, "model_router_db": str(self.router_db),
+        }), encoding="utf-8")
+        (self.root / "initial-screen-model-config.json").write_text(json.dumps({
+            "routing_policy_ref": shared_ref, "model_router_db": str(secondary_db),
+        }), encoding="utf-8")
+        view = self.plane(with_model_config=True).models()
+        self.assertTrue(view["available"])
+        draft = next(row for row in view["purposes"] if row["purpose"] == "draft")
+        self.assertEqual([link["model"] for link in draft["chain"]],
+                         [secondary_profile])
+        self.assertNotEqual(secondary_profile, primary_profile)
+
+    def test_multi_pin_legacy_policy_is_an_unordered_candidate_set(self) -> None:
+        with ModelRouter(self.router_db) as router:
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            profiles = [item["id"] for item in router.latest_profiles()][:2]
+            ref = ensure_planner_policy(
+                router, profile_ids=profiles, now=NOW,
+                policy_id="model-routing-policy:candidate-set",
+            )["policy_version_ref"]
+        (self.root / "research-planner-model-config.json").write_text(json.dumps({
+            "routing_policy_ref": ref, "model_router_db": str(self.router_db),
+        }), encoding="utf-8")
+        row = next(item for item in self.plane(with_model_config=True).models()["purposes"]
+                   if item["purpose"] == "ask")
+        self.assertEqual(row["mode"], "candidate_set")
+        self.assertEqual({link["model"] for link in row["chain"]}, set(profiles))
+        page = (Path(__file__).resolve().parents[1]
+                / "src/dalton_core/cockpit_control.html").read_text("utf-8")
+        self.assertIn('pp.mode==="candidate_set"?"、":" → "', page)
+
+    def test_one_unresolved_binding_does_not_hide_the_other_stages(self) -> None:
+        self.install()
+        (self.root / "initial-screen-model-config.json").write_text(json.dumps({
+            "routing_policy_ref": "model-routing-policy-version:missing:9",
+            "model_router_db": str(self.router_db),
+        }), encoding="utf-8")
+        view = self.plane(with_model_config=True).models()
+        self.assertTrue(view["available"])
+        rows = {row["purpose"]: row for row in view["purposes"]}
+        self.assertEqual(rows["draft"]["configuration_status"], "error")
+        self.assertIn("missing:9", rows["draft"]["configuration_error"])
+        self.assertEqual(rows["draft"]["chain"], [])
+        self.assertEqual(rows["ask"]["configuration_status"], "configured")
 
     def test_the_page_reads_without_a_gateway_configuration(self) -> None:
         self.install()

@@ -81,10 +81,10 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "earnings_calibration_verifier": ("earnings-season-verifier-model-config.json",),
 }
 _SERVICE_PURPOSE_PINS = {
-    "plan": ("bounded_planner", "planner_routing_policy_ref"),
-    "agenda_planning": ("agenda", "routing_policy_ref"),
-    "thesis_impact_assessment": ("thesis_impact", "assessment_routing_policy_ref"),
-    "thesis_impact_verifier": ("thesis_impact", "verifier_routing_policy_ref"),
+    "plan": ("bounded_planner", "planner_routing_policy_ref", "planner_model_router_db"),
+    "agenda_planning": ("agenda", "routing_policy_ref", "model_router_db"),
+    "thesis_impact_assessment": ("thesis_impact", "assessment_routing_policy_ref", "model_router_db"),
+    "thesis_impact_verifier": ("thesis_impact", "verifier_routing_policy_ref", "model_router_db"),
 }
 # Each calling stage in the owner's words. One map, used both by the cockpit's
 # model page and by the text of a fallback notice, so the owner reads the same
@@ -175,7 +175,9 @@ def purpose_policy_bindings(
             raw = _read_model_binding(path)
             result[purpose] = {"status": "configured", "source": str(path),
                                "policy_version_ref": raw["routing_policy_ref"],
-                               "model_router_db": raw.get("model_router_db")}
+                               "model_router_db": raw.get("model_router_db"),
+                               "editable": (path.parent == directory and
+                                            path.name in model_config_names())}
             return
         result[purpose] = {"status": "unconfigured", "source": str(candidates[0]),
                            "policy_version_ref": None, "model_router_db": None}
@@ -193,7 +195,7 @@ def purpose_policy_bindings(
 
     service_path = directory.parents[1] / "config" / "service.json"
     service = _load_model_json(service_path) if service_path.is_file() else None
-    for purpose, (section, field) in _SERVICE_PURPOSE_PINS.items():
+    for purpose, (section, field, router_field) in _SERVICE_PURPOSE_PINS.items():
         block = service.get(section) if isinstance(service, Mapping) else None
         nested = block.get("config") if isinstance(block, Mapping) else None
         ref = nested.get(field) if isinstance(nested, Mapping) else None
@@ -201,10 +203,11 @@ def purpose_policy_bindings(
             "status": "configured" if isinstance(ref, str) else "unconfigured",
             "source": f"{service_path}#{section}.config.{field}",
             "policy_version_ref": ref if isinstance(ref, str) else None,
-            "model_router_db": ((nested.get("model_router_db") or service.get("model_router_db"))
+            "model_router_db": ((nested.get(router_field) or service.get("model_router_db"))
                                 if isinstance(nested, Mapping) and isinstance(service, Mapping)
                                 else None),
             "requires_restart": True,
+            "editable": True,
         }
     if result["plan"]["status"] == "unconfigured":
         file_binding("plan", (directory / "research-planner-model-config.json",))

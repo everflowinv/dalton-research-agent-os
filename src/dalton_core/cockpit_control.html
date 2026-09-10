@@ -639,8 +639,9 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
   const stages=node("section");stages.append(node("h3","环节"));
   r.purposes.forEach(pp=>{const d=node("div",null,"lane");d.append(node("span",null,"st on"));
     const c=node("div");c.append(node("b",`${pp.label} · ${pp.tier_label}`));
-    c.append(node("small",`现在：${pp.mode_label}${pp.chain.length?" — "+pp.chain.map(l=>`${l.position}. ${l.model}${l.note?"（"+l.note+"）":""}`).join(" → "):""}`));
-    c.append(node("small",`实际配置：${pp.configuration_source}${pp.policy_version_ref?" · "+pp.policy_version_ref:"（本进程未配置）"}${pp.requires_restart?" · 修改后需重启相关服务":""}`,"raw"));
+    const chainSep=pp.mode==="candidate_set"?"、":" → ";
+    c.append(node("small",`现在：${pp.mode_label}${pp.chain.length?" — "+pp.chain.map(l=>`${pp.mode==="candidate_set"?"":l.position+". "}${l.model}${l.note?"（"+l.note+"）":""}`).join(chainSep):""}`));
+    c.append(node("small",`实际配置：${pp.configuration_source}${pp.policy_version_ref?" · "+pp.policy_version_ref:"（本进程未配置）"}${pp.configuration_error?" · 无法读取："+pp.configuration_error:""}${pp.requires_restart?" · 修改后需重启相关服务":""}${pp.configuration_status==="configured"&&!pp.editable?" · 当前仅可查看":""}`,"raw"));
     c.append(node("small",pp.last_served?`上一次：${pp.last_served.model} · ${pp.last_served_note}`:pp.last_served_note,"raw"));
     if(pp.superseded_note)c.append(node("small",pp.superseded_note,"raw"));
     const row=node("div",null,"actions");
@@ -651,10 +652,10 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     picked.value=pp.mode==="explicit"?pp.chain.map(l=>l.model).join(", "):"";
     picked.style.minWidth="260px";
     picked.disabled=mode.value!=="explicit";
-    if(pp.configuration_status!=="configured"){mode.disabled=true;picked.disabled=true}
+    if(pp.configuration_status!=="configured"||!pp.editable){mode.disabled=true;picked.disabled=true}
     mode.onchange=()=>{picked.disabled=mode.value!=="explicit"};
     const save=node("button","保存","primary"),st=node("span","","status");
-    if(pp.configuration_status!=="configured")save.disabled=true;
+    if(pp.configuration_status!=="configured"||!pp.editable)save.disabled=true;
     save.onclick=async()=>{save.disabled=true;st.className="status";st.textContent="正在发布新的模型选择…";
       const chain=picked.value.split(",").map(x=>x.trim()).filter(Boolean);
       try{const out=await postJson("/v1/cockpit/model_select",{purpose:pp.purpose,mode:mode.value,chain});
