@@ -30,10 +30,13 @@ payload fields.
 
 ## Owner deployment checklist
 
-1. Review and sign `tracking-policy:p14a:v2` before replacing the live
-   `tracking-policy.json`; its content hash differs from v1 by design.
-2. Preserve the live v1 file until that signature is recorded. Fresh installs
-   seed v2, while reinstalling an existing Core leaves its policy untouched.
+1. Explicitly review `tracking-policy:p14a:v2`, then replace the live
+   `tracking-policy.json` when the new fixed `sec-ownership` cadence is accepted.
+   The repository has content-hash binding for cadence versions but no separate
+   tracking-policy signature or signing command.
+2. Preserve the live v1 file until that review is complete. Fresh installs seed
+   v2, while reinstalling an existing Core deliberately leaves its policy
+   untouched, so an existing deployment requires this explicit replacement.
 
 ## Verification
 
@@ -43,9 +46,15 @@ payload fields.
 - Import smoke check for `event_judgement`, `event_judgement_cli`, and
   `insider_context`: passed.
 - `git diff --check`: passed.
-- First full discovery run: 5,480 tests, two stale v1 expectation failures,
-  one skipped. Both expectations were updated to v2; a clean full rerun is
-  required before integration sign-off.
+- Group verification follow-up: 222 focused tests passed. Both producer and
+  verifier prompts contain all monthly rows; alias judgement rows attribute to
+  the primary event and carry zero producer/verifier cost. The regression case
+  records 80,000 micros for the two real judgement pairs and zero for both
+  monthly aliases.
+- Clean full discovery run after all fixes:
+  `PYTHONPATH=$PWD/src python3 -m unittest discover -s tests -t .` ran 5,480
+  tests in 389.182 seconds: OK, one skipped. Full output is retained locally at
+  `/tmp/dalton-resume-insider-full-tests-final.log`.
 
 ## Remaining boundaries
 
