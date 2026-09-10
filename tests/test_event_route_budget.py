@@ -9,10 +9,12 @@ from pathlib import Path
 
 from dalton_core.cockpit_model import build_work
 from dalton_core.event_judgement_cli import (
+    EventCockpitModel,
     MAX_COST_USD,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
     TIMEOUT_SECONDS,
+    event_model_contract_ref,
 )
 from dalton_core.model_fallback_chain import tier_chain
 from dalton_core.model_router import ModelRouter
@@ -68,7 +70,7 @@ class EventRouteBudgetTests(unittest.TestCase):
             purpose=purpose,
         )["decision"]
 
-    def test_current_priced_brain_route_fits_unchanged_owner_cap(self) -> None:
+    def test_current_priced_brain_route_fits_configured_default_cap(self) -> None:
         decision = self.route("brain", "event_judgement")
         self.assertEqual(decision["outcome"], "selected", decision)
         selected = next(row for row in decision["candidate_snapshot"] if row["eligible"])
@@ -83,6 +85,59 @@ class EventRouteBudgetTests(unittest.TestCase):
         self.assertEqual(decision["selected_endpoint"]["provider"], "zai")
         selected = next(row for row in decision["candidate_snapshot"] if row["eligible"])
         self.assertLessEqual(float(selected["estimated_cost_usd"]), MAX_COST_USD)
+
+    def test_contract_revision_does_not_reuse_the_old_small_prompt_work(self) -> None:
+        common = {
+            "purpose": "event_judgement",
+            "prompt": "small unchanged prompt",
+            "mission_version_ref": "coverage-mission-version:test:1",
+            "max_cost_usd": MAX_COST_USD,
+            "max_seconds": TIMEOUT_SECONDS,
+            "created_at": NOW.isoformat(timespec="microseconds"),
+        }
+        old = build_work(
+            request_id="same-event",
+            max_input_tokens=60_000,
+            max_output_tokens=1_500,
+            **common,
+        )
+        revised = build_work(
+            request_id=f"{event_model_contract_ref()}:same-event",
+            max_input_tokens=MAX_INPUT_TOKENS,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            **common,
+        )
+        self.assertNotEqual(old.id, revised.id)
+        self.assertNotEqual(old.idempotency_key, revised.idempotency_key)
+
+    def test_configured_limits_change_the_event_contract_identity(self) -> None:
+        root = Path(self.directory.name)
+        config = {
+            "routing_policy_ref": "model-routing-policy-version:test:1",
+            "credential_slot_refs": ["credential-slot:test"],
+            "model_router_db": str(root / "router.sqlite"),
+            "broker_socket": str(root / "broker.sock"),
+            "broker_auth_key": str(root / "broker.key"),
+            "broker_client_id": "client:event-test",
+            "expected_agent_id": "event-test",
+            "budget_db": str(root / "budget.sqlite"),
+            "budget_policy_ref": "budget-policy-version:test:1",
+            "call_budget": {"max_cost_usd": 0.75},
+            "purpose_call_budgets": {
+                "event_judgement": {"max_input_tokens": 42_000}
+            },
+        }
+        model = EventCockpitModel(
+            config, scheduler_db=root / "scheduler.sqlite",
+            max_input_tokens=MAX_INPUT_TOKENS,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            max_cost_usd=MAX_COST_USD,
+            timeout_seconds=TIMEOUT_SECONDS,
+        )
+        budget = model.budget_for("event_judgement")
+        self.assertEqual(budget["max_input_tokens"], 42_000)
+        self.assertEqual(budget["max_cost_usd"], 0.75)
+        self.assertNotEqual(event_model_contract_ref(budget), event_model_contract_ref())
 
 
 if __name__ == "__main__":

@@ -2,44 +2,43 @@
 
 ## Failure
 
-The first live post-authorization event batch considered eight events and
-refused all eight before any model invocation. The route snapshots rejected
-both brain profiles with `work_order_cost_budget_exceeded`: the lane declared a
-60,000-token input reservation and 1,500-token output reservation under an
-owner per-call cap of `$0.10`, although its prompt builder already limited the
-actual prompt to 24,000 characters.
+The first live post-authorization event batch was rejected before broker
+invocation because the lane's old `$0.10` code default could not admit its
+declared context at current catalog prices. The owner subsequently authorized
+a `$1.00` per-call default while retaining the `$100` daily budget.
 
 ## Repair
 
-The owner cap remains `$0.10`. Event prompts now have a 5,000-byte UTF-8 bound,
-which is the same input bound declared by the WorkOrder. When context exceeds
-the bound, the prompt retains complete context/evidence lines and the complete
-final output contract; it marks omitted rows explicitly. It never slices a
-UTF-8 character or evidence row. The closed event response is limited to 700
-output tokens. At the current checked-in catalog prices, the worst-case brain
-reservation is below the owner cap.
+Event calls now default to 60,000 UTF-8 input bytes, 1,500 output tokens,
+`$1.00`, and 180 seconds. Model configuration can override the general call
+budget and each of the four event purposes independently. Effective limits
+govern prompt admission, WorkOrders, pool reservation, and the event contract
+fingerprint.
 
-For the maximum 5,000-byte input and 700-token output declaration, the fixture
-rate cards produce these conservative reservations: GPT-6 Astra `$0.085000`,
-Claude Fable 5.1 `$0.085000`, ZAI GLM 5.3 `$0.010080`, and Gemini 3.5 Flash Lite
-`$0.003250`.
+Prompts retain the complete primary event and filing/month or HK/week group.
+Verifier prompts also retain the complete producer draft, full event group,
+canonical cited evidence records, and closed contract. Missing cited records
+and prompts over the configured byte bound are refused before a call. All four
+helpers turn prompt-construction failures into ordinary refused results, so a
+single event cannot abort its batch and already incurred producer spend can be
+settled.
 
-The same bounds apply to judge, verifier, reflection, and reflection-verifier
-calls. This keeps the sibling verifier feasible without weakening its family
-independence check.
+The request namespace hashes the effective input, output, cost, and timeout
+limits with the prompt-contract version, so a budget change produces distinct
+work identity even when prompt text is unchanged.
 
 ## Evidence
 
-`PYTHONPATH=src python3 -m unittest tests.test_event_route_budget tests.test_event_judgement`
-passed 87 tests in 4.373 seconds.
+`PYTHONPATH=src python3 -m unittest tests.test_call_budget tests.test_cockpit_plane tests.test_event_judgement tests.test_event_route_budget tests.test_mission_event_judgement_lane`
+passed 155 tests in 23.559 seconds, with one existing optional test skipped.
 
 The route test synchronizes the current catalog fixture into a real
 `ModelRouter`, publishes real brain and verifier policies, resolves their
 credential slots, and routes maximum-sized event WorkOrders without invoking a
 broker. It proves:
 
-- a current priced brain profile is admitted below `$0.10`;
-- a verifier is admitted below `$0.10`; and
+- a current priced brain profile is admitted below `$1.00`;
+- a verifier is admitted below `$1.00`;
 - when the producer family is Anthropic, the Anthropic verifier is skipped and
   the ZAI verifier is selected.
 

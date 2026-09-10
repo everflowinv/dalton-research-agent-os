@@ -13,11 +13,13 @@ from dalton_core.event_judgement import (
     PURPOSE,
     EventJudgementAuthority,
     EventJudgementValidationError,
+    _bounded_prompt,
     allowed_refs,
     apply_effect,
     build_context,
     build_judge_prompt,
     build_reflection_prompt,
+    build_reflection_verifier_prompt,
     build_verifier_prompt,
     company_theses,
     judge,
@@ -76,6 +78,12 @@ class FakeModel:
             "result_envelope_ref": f"result:{request_id}",
             "invocation_ref": f"invocation:{request_id}",
             "route_decision_ref": self.route,
+        }
+
+    def budget_for(self, purpose):
+        return {
+            "max_input_tokens": 60_000, "max_output_tokens": 1_500,
+            "max_cost_usd": 0.10, "timeout_seconds": 180,
         }
 
 
@@ -174,10 +182,19 @@ class ContextTests(JudgementHarness):
         for _ in range(40):
             self.claim(statement="需求仍有韧性，管理层维持全年指引。" * 30)
         prompt = build_judge_prompt(self.context())
-        self.assertLessEqual(len(prompt.encode("utf-8")), 5_000)
+        self.assertLessEqual(len(prompt.encode("utf-8")), 60_000)
         self.assertIn("Return raw JSON only", prompt)
         self.assertIn("Every citation must be a ref printed above", prompt)
-        self.assertIn("complete evidence rows omitted", prompt)
+        self.assertNotIn("evidence rows omitted", prompt)
+
+    def test_byte_bound_finds_the_contract_after_the_old_character_cap(self):
+        with self.assertRaisesRegex(EventJudgementValidationError, "complete event prompt"):
+            _bounded_prompt(
+                ("完整证据行\n" * 10_000)
+                + "Return raw JSON only, nothing else:\n"
+                + '{"verdict":"pass|reject","findings":[]}\n'
+                + "Every citation must be a ref printed above. Do not invent a ref."
+            )
 
     def test_drivers_come_from_the_model_version_with_their_nearest_assumptions(self):
         from tests.test_model_forecast_driver import model as forecast_body
@@ -299,11 +316,55 @@ class VerifierTests(JudgementHarness):
             validate_verifier_output({"verdict": "reject", "findings": [
                 {"code": "vibes", "detail": "x"}]})
 
-    def test_the_verifier_prompt_carries_the_decision_and_not_the_whole_context(self):
+    def test_the_verifier_prompt_carries_the_decision_and_cited_evidence(self):
+        claim = self.claim(statement="This exact cited claim must reach the verifier.")
         context = self.context()
-        prompt = build_verifier_prompt(context, {**decision(), "status": "judged"})
+        prompt = build_verifier_prompt(
+            context,
+            {**decision(citations=[claim]), "status": "judged",
+             "note": "Keep the complete conditional producer field."},
+        )
         self.assertIn("NO_CHANGE / no_change", prompt)
         self.assertIn("independent verifier", prompt)
+        self.assertIn("This exact cited claim must reach the verifier.", prompt)
+        self.assertIn("Keep the complete conditional producer field.", prompt)
+        self.assertIn("Return raw JSON only", prompt)
+
+    def test_verifier_refuses_if_mandatory_evidence_and_contract_do_not_fit(self):
+        refs = [f"claim-version:large-{index}" for index in range(12)]
+        context = self.context()
+        context["claims"] = [
+            {"ref": ref, "statement": f"claim {index} " + "evidence " * 1_000}
+            for index, ref in enumerate(refs)
+        ]
+        with self.assertRaisesRegex(
+            EventJudgementValidationError, "complete event prompt exceeds"
+        ):
+            build_verifier_prompt(
+                context,
+                {**decision(citations=refs), "status": "judged"},
+            )
+
+    def test_reflection_verifier_carries_the_cited_event_and_full_contract(self):
+        context = self.context()
+        prompt = build_reflection_verifier_prompt(
+            context,
+            {**REFLECTION, "citations": [self.event["id"]]},
+        )
+        self.assertIn(self.event["id"], prompt)
+        self.assertIn("return_percent", prompt)
+        self.assertIn("Expected:", prompt)
+        self.assertIn("Did a federal contract stop?", prompt)
+        self.assertIn("Return raw JSON only", prompt)
+
+    def test_missing_non_event_citation_is_refused_before_verifier_call(self):
+        with self.assertRaisesRegex(
+            EventJudgementValidationError, "absent from the canonical verifier context"
+        ):
+            build_verifier_prompt(
+                self.context(),
+                {**decision(citations=["claim-version:missing"]), "status": "judged"},
+            )
 
     def test_a_same_family_verifier_is_refused_rather_than_recorded_as_a_pass(self):
         context = self.context()

@@ -136,36 +136,84 @@ MAX_NOTE_SENTENCES = 4
 MAX_REFS = 12
 MAX_RECENT_JUDGEMENTS = 5
 MAX_CLAIMS_IN_PROMPT = 12
-MAX_PROMPT_CHARS = 24_000
-MAX_PROMPT_BYTES = 5_000
+MAX_PROMPT_CHARS = 60_000
+MAX_PROMPT_BYTES = 60_000
 
 
-def _bounded_prompt(value: str) -> str:
-    """Keep complete context lines and the complete output contract in-budget."""
-    value = value[:MAX_PROMPT_CHARS]
+def _bounded_prompt(
+    value: str,
+    *,
+    preserve_from: str = "Return raw JSON only",
+    max_bytes: int = MAX_PROMPT_BYTES,
+) -> str:
+    """Preserve the complete prompt or refuse it whole at the governed byte bound."""
     encoded = value.encode("utf-8")
-    if len(encoded) <= MAX_PROMPT_BYTES:
+    if len(encoded) <= max_bytes:
         return value
-    lines = value.splitlines()
-    contract = next(
-        (index for index, line in enumerate(lines)
-         if line.startswith("Return raw JSON only")),
-        max(0, len(lines) - 12),
+    raise EventJudgementValidationError(
+        "the complete event prompt exceeds the model input bound "
+        f"({len(encoded)}>{max_bytes} bytes)"
     )
-    tail = lines[contract:]
-    marker = "[additional complete evidence rows omitted at the governed byte bound]"
-    kept = []
-    for line in lines[:contract]:
-        candidate = "\n".join([*kept, line, marker, *tail])
-        if len(candidate.encode("utf-8")) > MAX_PROMPT_BYTES:
-            break
-        kept.append(line)
-    bounded = "\n".join([*kept, marker, *tail])
-    if len(bounded.encode("utf-8")) > MAX_PROMPT_BYTES:
-        raise EventJudgementValidationError(
-            "the closed event output contract exceeds the model input bound"
+
+
+def _cited_evidence_lines(context: Mapping[str, Any], citations: Sequence[str]) -> list[str]:
+    """Render complete context records named by a producer's citations."""
+    wanted = set(citations)
+    found: dict[str, Mapping[str, Any]] = {}
+    pending: list[Any] = [context]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            ref = value.get("ref") or value.get("id")
+            if isinstance(ref, str) and ref in wanted:
+                found.setdefault(ref, value)
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    lines = ["## Evidence cited by the producer"]
+    event = context["event"]
+    binding_refs = {event["id"], *(event.get("source_refs") or ())}
+    for ref in citations:
+        item = found.get(ref)
+        if item is None and ref not in binding_refs:
+            raise EventJudgementValidationError(
+                f"cited evidence {ref!r} is absent from the canonical verifier context"
+            )
+        lines.append(
+            f"- {ref}: "
+            + (json.dumps(item, ensure_ascii=False, sort_keys=True)
+               if item is not None
+               else json.dumps({
+                   "id": event["id"], "kind": event.get("kind"),
+                   "evidence_tier": event.get("evidence_tier"),
+                   "occurred_at": event.get("occurred_at"),
+                   "payload": {
+                       key: value for key, value in (event.get("payload") or {}).items()
+                       if value is not None and key not in {
+                           "artifact_hash", "excerpt_hash", "invocation_ref"
+                       }
+                   },
+                   "source_refs": event.get("source_refs") or [],
+               }, ensure_ascii=False, sort_keys=True))
         )
-    return bounded
+    return lines
+
+
+def _producer_draft_line(label: str, record: Mapping[str, Any]) -> str:
+    body = {key: value for key, value in record.items() if key not in {"model", "status"}}
+    return f"{label} (canonical JSON): {json.dumps(body, ensure_ascii=False, sort_keys=True)}"
+
+
+def _event_group_lines(context: Mapping[str, Any]) -> list[str]:
+    rows = [context["event"], *(context.get("grouped_events") or [])]
+    unique = {row["id"]: row for row in rows}
+    return [
+        "## Complete event evidence reviewed",
+        *(json.dumps(row, ensure_ascii=False, sort_keys=True)
+          for row in unique.values()),
+    ]
+
+
 # Payload fields that hold a ref, named rather than sniffed. Testing a string
 # for a colon would let "3.0:1" or a title with a time in it become a citable
 # ref, and the whole point of the permitted set is that a citation names
@@ -224,7 +272,9 @@ EVIDENCE_KIND_LINES: tuple[str, ...] = tuple(
 )
 
 
-def build_judge_prompt(context: Mapping[str, Any]) -> str:
+def build_judge_prompt(
+    context: Mapping[str, Any], *, max_prompt_bytes: int = MAX_PROMPT_BYTES
+) -> str:
     """The whole table the brain reads: event, theses, drivers, history, sources.
 
     A table rather than a narrative because every line of it has a ref the
@@ -363,7 +413,7 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
     )
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
     prompt = "\n".join(lines)
-    return _bounded_prompt(prompt)
+    return _bounded_prompt(prompt, max_bytes=max_prompt_bytes)
 
 
 def allowed_refs(context: Mapping[str, Any]) -> set[str]:
@@ -381,10 +431,6 @@ def allowed_refs(context: Mapping[str, Any]) -> set[str]:
         value = context["event"]["payload"].get(field)
         if isinstance(value, str) and value:
             refs.add(value)
-    # W4: the derived context prints refs of its own -- the prior Form 4s in
-    # the trailing window, the Form 144 that anticipated the sale, the price
-    # version behind the close it compared against -- and a citation is
-    # permitted exactly when the prompt printed it.
     refs.update(str(ref) for ref in (context.get("derived_refs") or ()) if ref)
     refs.update(thesis["ref"] for thesis in context.get("theses") or ())
     refs.update(driver["ref"] for driver in context.get("drivers") or ())
@@ -550,7 +596,8 @@ def market_view_rows(
 
 
 def build_reflection_prompt(
-    context: Mapping[str, Any], judgement: Mapping[str, Any]
+    context: Mapping[str, Any], judgement: Mapping[str, Any],
+    *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
 ) -> str:
     """The self-reflection call: what we expected, what happened, what we missed."""
 
@@ -644,7 +691,7 @@ def build_reflection_prompt(
         "decides on -- nothing you write here changes a cadence or opens a task."
     )
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
-    return _bounded_prompt("\n".join(lines))
+    return _bounded_prompt("\n".join(lines), max_bytes=max_prompt_bytes)
 
 
 def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[str, Any]:
@@ -867,7 +914,13 @@ def reflect(
 ) -> dict[str, Any]:
     """One bounded call, verified against the closed schema before it is believed."""
 
-    prompt = build_reflection_prompt(context, judgement)
+    try:
+        prompt = build_reflection_prompt(
+            context, judgement,
+            max_prompt_bytes=_model_prompt_bound(model, REFLECTION_PURPOSE),
+        )
+    except EventJudgementValidationError as exc:
+        return {"status": "refused", "reason": str(exc), "model": None}
     try:
         call = model.call(
             purpose=REFLECTION_PURPOSE, request_id=request_id, prompt=prompt,
@@ -886,7 +939,8 @@ def reflect(
 
 
 def build_reflection_verifier_prompt(
-    context: Mapping[str, Any], reflection: Mapping[str, Any]
+    context: Mapping[str, Any], reflection: Mapping[str, Any],
+    *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
 ) -> str:
     lines = [
         "You are an independent verifier. Another model wrote down what this analyst",
@@ -903,12 +957,19 @@ def build_reflection_verifier_prompt(
         f"Convergence pathway: {reflection['convergence_pathway']}",
         f"Cited: {', '.join(reflection['citations']) or '(nothing)'}",
         "",
+        _producer_draft_line("Producer reflection", reflection),
+        *_event_group_lines(context),
+        *_cited_evidence_lines(context, reflection["citations"]),
+        "",
         "Return raw JSON only, nothing else:",
         '{"verdict": "pass|reject", "findings": [{"code": "'
         + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict must have no findings; a reject verdict must have at least one.",
     ]
-    return _bounded_prompt("\n".join(lines))
+    return _bounded_prompt(
+        "\n".join(lines), preserve_from="Producer reflection (canonical JSON):",
+        max_bytes=max_prompt_bytes,
+    )
 
 
 def verify_reflection(
@@ -931,7 +992,13 @@ def verify_reflection(
                                  "predicate": "model_family_ne"},
                 "reason": "the model family behind the reflection could not be resolved; "
                           "an unverifiable independence claim is not independence"}
-    prompt = build_reflection_verifier_prompt(context, reflection)
+    try:
+        prompt = build_reflection_verifier_prompt(
+            context, reflection,
+            max_prompt_bytes=_model_prompt_bound(model, REFLECTION_VERIFIER_PURPOSE),
+        )
+    except EventJudgementValidationError as exc:
+        return {"status": "refused", "reason": str(exc), "model": None}
     try:
         call = independent_model_call(
             model,
@@ -967,7 +1034,10 @@ def verify_reflection(
             **validated}
 
 
-def build_verifier_prompt(context: Mapping[str, Any], judgement: Mapping[str, Any]) -> str:
+def build_verifier_prompt(
+    context: Mapping[str, Any], judgement: Mapping[str, Any],
+    *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
+) -> str:
     event = context["event"]
     lines = [
         "You are an independent verifier. Another model read one event and decided what,",
@@ -1005,12 +1075,19 @@ def build_verifier_prompt(context: Mapping[str, Any], judgement: Mapping[str, An
         f"Drivers named: {', '.join(judgement['driver_refs']) or '(none)'}",
         f"Theses named: {', '.join(judgement['thesis_refs']) or '(none)'}",
         "",
+        _producer_draft_line("Producer judgement", judgement),
+        *_event_group_lines(context),
+        *_cited_evidence_lines(context, judgement["citations"]),
+        "",
         "Return raw JSON only, nothing else:",
         '{"verdict": "pass|reject", "findings": [{"code": "'
         + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict must have no findings; a reject verdict must have at least one.",
     ])
-    return _bounded_prompt("\n".join(lines))
+    return _bounded_prompt(
+        "\n".join(lines), preserve_from="Producer judgement (canonical JSON):",
+        max_bytes=max_prompt_bytes,
+    )
 
 
 def validate_verifier_output(value: Any) -> dict[str, Any]:
@@ -1061,6 +1138,13 @@ def _provenance(call: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _model_prompt_bound(model: Any, purpose: str) -> int:
+    resolver = getattr(model, "budget_for", None)
+    if callable(resolver):
+        return int(resolver(purpose)["max_input_tokens"])
+    return MAX_PROMPT_BYTES
+
+
 def judge(
     context: Mapping[str, Any],
     *,
@@ -1070,7 +1154,13 @@ def judge(
 ) -> dict[str, Any]:
     """One bounded call, verified against the closed schema before it is believed."""
 
-    prompt = build_judge_prompt(context)
+    try:
+        prompt = build_judge_prompt(
+            context, max_prompt_bytes=_model_prompt_bound(model, PURPOSE)
+        )
+    except EventJudgementValidationError as exc:
+        return {"status": "refused", "reason": str(exc), "prompt_chars": 0,
+                "model": None}
     try:
         call = model.call(
             purpose=PURPOSE, request_id=request_id, prompt=prompt, mission=mission
@@ -1118,7 +1208,13 @@ def verify(
                                  "predicate": "model_family_ne"},
                 "reason": "the model family behind the judgement could not be resolved; "
                           "an unverifiable independence claim is not independence"}
-    prompt = build_verifier_prompt(context, judgement)
+    try:
+        prompt = build_verifier_prompt(
+            context, judgement,
+            max_prompt_bytes=_model_prompt_bound(model, VERIFIER_PURPOSE),
+        )
+    except EventJudgementValidationError as exc:
+        return {"status": "refused", "reason": str(exc), "model": None}
     try:
         call = independent_model_call(
             model,

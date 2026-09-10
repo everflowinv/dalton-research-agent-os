@@ -27,6 +27,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -36,6 +37,10 @@ from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
     MAX_PROMPT_BYTES,
+    PURPOSE,
+    REFLECTION_PURPOSE,
+    REFLECTION_VERIFIER_PURPOSE,
+    VERIFIER_PURPOSE,
     EventJudgementAuthority,
     EventJudgementError,
     apply_effect,
@@ -57,6 +62,7 @@ from .store import DaltonStore
 from .tracking_cadence import load_policy, screen_passed_companies
 
 SUMMARY_SCHEMA_VERSION = "0.1"
+EVENT_MODEL_CONTRACT_VERSION = "2"
 JUDGE_MODEL_CONFIG = register_model_config_name("event-judgement-model-config.json")
 VERIFIER_MODEL_CONFIG = register_model_config_name("event-verifier-model-config.json")
 
@@ -68,12 +74,43 @@ VERIFIER_MODEL_CONFIG = register_model_config_name("event-verifier-model-config.
 # advertising the old 60k reservation made every current brain route exceed
 # this lane's unchanged $0.10 per-call cap before a call could start.
 MAX_INPUT_TOKENS = MAX_PROMPT_BYTES
-MAX_OUTPUT_TOKENS = 700
-MAX_COST_USD = 0.10
+MAX_OUTPUT_TOKENS = 1_500
+MAX_COST_USD = 1.0
 TIMEOUT_SECONDS = 180
 MAX_EVENTS_PER_COMPANY = 3
 MAX_EVENTS_PER_RUN = 8
 HK_TIMEZONE = ZoneInfo("Asia/Hong_Kong")
+
+
+def event_model_contract_ref(budget: dict[str, Any] | None = None) -> str:
+    limits = budget or {
+        "max_input_tokens": MAX_INPUT_TOKENS,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_cost_usd": MAX_COST_USD,
+        "timeout_seconds": TIMEOUT_SECONDS,
+    }
+    fingerprint = content_hash({
+        "version": EVENT_MODEL_CONTRACT_VERSION,
+        "max_input_bytes": limits["max_input_tokens"],
+        "max_output_tokens": limits["max_output_tokens"],
+        "max_cost_usd": str(limits["max_cost_usd"]),
+        "timeout_seconds": limits["timeout_seconds"],
+    })
+    return f"event-model-contract:{fingerprint[:16]}"
+
+
+class EventCockpitModel(CockpitModel):
+    """Namespace scheduler identity to this lane's prompt and budget contract."""
+
+    def call(self, *, purpose: str, request_id: str, prompt: str,
+             mission: Any, producer_route_decision_refs=()):
+        return super().call(
+            purpose=purpose,
+            request_id=f"{event_model_contract_ref(self.budget_for(purpose))}:{request_id}",
+            prompt=prompt,
+            mission=mission,
+            producer_route_decision_refs=producer_route_decision_refs,
+        )
 
 
 def buyback_group_key(event: dict[str, Any]) -> tuple[str, ...] | None:
@@ -287,12 +324,24 @@ def same_routing_policy(judge: Path | None, verifier: Path | None) -> str | None
 def _model(config_path: Path | None, state_dir: Path, scheduler_db: Path | None) -> Any:
     if config_path is None:
         return None
-    return CockpitModel(
+    return EventCockpitModel(
         json.loads(Path(config_path).expanduser().read_text(encoding="utf-8")),
         scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
         max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
         max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
     )
+
+
+def _call_budget(model: Any, purpose: str) -> dict[str, Any]:
+    resolver = getattr(model, "budget_for", None)
+    if callable(resolver):
+        return resolver(purpose)
+    return {
+        "max_input_tokens": MAX_INPUT_TOKENS,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_cost_usd": MAX_COST_USD,
+        "timeout_seconds": TIMEOUT_SECONDS,
+    }
 
 
 def research_admitter_for(store: DaltonStore, mission: Any):
@@ -480,7 +529,15 @@ def run_judgement(
         # would admit an event whose reflection then has nothing left to spend,
         # which is the shape where a decision is recorded without the account
         # of what we may have missed -- exactly the half the owner asked for.
-        reservation = int(MAX_COST_USD * 4 * 1_000_000)
+        reservation = int(sum(
+            Decimal(str(_call_budget(model, purpose)["max_cost_usd"]))
+            for model, purpose in (
+                (judge_model, PURPOSE),
+                (verifier_model, VERIFIER_PURPOSE),
+                (judge_model, REFLECTION_PURPOSE),
+                (verifier_model, REFLECTION_VERIFIER_PURPOSE),
+            )
+        ) * 1_000_000)
         for event_group in batch:
             event = event_group[0]
             if state["remaining_micros"] - spent < reservation:
