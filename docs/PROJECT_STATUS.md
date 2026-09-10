@@ -88,8 +88,9 @@ stage-ladder（阶段状态跨 mission 版本折叠）、ask v2。
 
 **09-10 下午续**：P14f 业绩季、reopen-ledger（重开成为阶段账本记录）、planner 日账本（planner 调用进日账本与四池）、
 consensus P11b（财年末从「从不交 10-Q 的季度」推导；页首抽取 15 个目标价；两家独立券商规则）、authority 授权标志统一
-（19 个 authority 共享按连接的标志）都已合入；main 5,055 项通过。owner 新增：cockpit 按环节选模型 + 模型目录随 openclaw 自动
-登记（agent 开发中）。在修 review：P12e 行业框架、prior-research、P13-M3 敏感性。
+（19 个 authority 共享按连接的标志）都已合入；main 5,055 项通过。P13-M3 敏感性与 consensus bridge、P12e 行业框架也已合入；main 5,313 项通过，已 push。owner 新增：cockpit 按环节选模型 +
+模型目录随 openclaw 自动登记 + 模型被移除时自动回退并在 cockpit 通知（agent 开发中）。在修 review：prior-research。
+第二次部署复演（当前 main 对 live 副本）与最终版 owner 步骤清单 v2.0 进行中。
 
 **方法上的两次事故**：用量上限两次打断十余个 agent，全部从上下文恢复；一次误判「静默 = 死亡」造成同一 worktree 双写，
 已裁决归属并写成规则。
