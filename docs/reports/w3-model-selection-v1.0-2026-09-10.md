@@ -58,8 +58,19 @@ OpenClaw 上消失的模型，Dalton 必须自动回退、并且**绝不能悄�
 配套地，`_provider_models` 不再因为某个 provider model 少一个 `cost` 就把整份目录
 读崩——被藏起来的恰恰是最该看见的那一条。
 
-**已知的代价（open question，见第 8 节）**：unpriced profile 的 rate card 记为 0，
-所以它服务的那一次结算会记 0 美元。这是它只能当最后一环的另一半理由。
+**不写 0（review B2）**：0 不是「不知道多少钱」，是「免费」——按成本升序排的 policy
+会把它排第一，日账本会按 0 结算。所以未定价的 profile 登记时带一张**声明的上限
+rate card**：`UNPRICED_CEILING_INPUT_PER_MILLION_USD = 25.0` /
+`..._OUTPUT_... = 100.0`，比现有目录里最贵那个模型的分档上限（gpt-6-astra 超过 27.2 万
+token 后的 20/75）还高。预留会**多留**，这是「未知」该失败的方向；结算也用同一个数，
+所以未定价的调用至少会以「它可能花的钱」出现在当天的花费里。
+
+**curated rate card 不被覆盖（review B2）**：网关不再公布某个模型的价格，不等于
+Dalton 自己 curated 的那张卡失效。所以 curated 分支保留原卡，也**不**标 unpriced——
+我们仍然知道它多少钱，只是不再从 provider 条目上读。
+
+**「最后一环」按活着的环算**：一个未定价的环排在一个已退役的环前面，按声明顺序算会
+被判「不是最后一个」而拒绝，而它其实是**唯一剩下的**。
 
 ## 3. 每小时的目录同步 lane
 
@@ -75,8 +86,8 @@ OpenClaw 上消失的模型，Dalton 必须自动回退、并且**绝不能悄�
 排在第一个是有理由的：这一轮里任何一次模型调用，都该按**现在**的目录准入，而不是
 一小时前的目录。
 
-它**从不写 openclaw.json**，**从不调用模型**，**不上网**。同一小时内跑第二次是
-`idle`；跨小时但目录没变是 `current`，什么都不写。
+它**从不写网关配置**，**从不调用模型**，**不上网**。同一小时内跑第二次是 `idle`
+（连宿主文件都不读）；跨小时但目录没变是 `current`，什么都不写。
 
 开关是一个文件 `state/model-catalog-sync.json`，里面写着要跟哪份 openclaw.json、
 同步进哪个 router 库。两条路径都是被指定的，不是猜的——Dalton 的进程不该自己去
@@ -131,13 +142,24 @@ profile id 优先用 Dalton 自己 curated catalog 已有的那个（例如
      的家族，调用被**拒绝**，理由一句话（哪个家族、哪个模型退役了、去哪里改），而
      不是回退到一个注定会通过的「检查」。
 3. **通知**：一条 append-only 的 `model_fallback_notices`，主键就是 (模型, 环节)
-   这一对，所以每小时都看见同一个退役也只写一次。文案：
+   这一对，所以每小时都看见同一个退役也只写一次。
+
+   **提示集是从「现在有哪些是退役的」算出来的，不是从「这一轮退了哪些」（review
+   B1）。** 原因是顺序：install.sh 会先跑同一个目录同步，等这条 lane 第一次到整点时
+   delta 早就没了——第一次部署就会**静默地**退役 6 个模型；同步提交与写提示之间任何
+   一次异常也会丢掉剩下的。按当前状态扫描没有这个窗口：它在 (模型, 环节) 上幂等，所以
+   每小时跑一遍，每条只写一次，并且会补上上一轮丢掉的。owner 自己点名的链和它背后的
+   档位链都会被扫，因为选择没坏不代表它要回退到的那条链没坏。
+
+   文案：
    > 模型 profile:gpt-6-astra 已在 OpenClaw 消失；环节 决定下一步做什么（plan）
    > 已自动回退到 profile:claude-fable-5-1；如需更改请到 cockpit 模型页选择
 
    没有可用替代时改说「没有可用的替代模型，现在一次也调不了」。
 4. **可见**：同一条提示出现在 cockpit 「模型」页顶部**和** approvals/待办列表里，
-   直到 owner 点「知道了」（human-only 治理 op）或重新选。
+   直到 owner 点「知道了」（human-only 治理 op）或重新选。升级前的 router 库没有这
+   两张表，页面读成「没有提示」而不是报错（review S4）——owner 的页面不该是发现这件
+   事的地方。
 
 **投递（Discord / Feishu）没有接**——owner 已把投递推到最后。留下的是一个有文档的
 接缝：`model_selection.notice_delivery(notice) -> None`，默认空实现；tick 摘要写
@@ -168,9 +190,10 @@ profile id 优先用 Dalton 自己 curated catalog 已有的那个（例如
 ## 8. 没做 / 待定
 
 * **投递**：见第 6 节，只留接缝。
-* **unpriced 模型结算 0 美元**：它服务的那一次不会推高当日花费。这是它只能当最后
-  一环的另一半理由，但如果 owner 希望「未定价 = 干脆不可路由」，把
-  `unpriced_model_requires_chain` 扩到所有位置即可，是一行。
+* **未定价模型的上限价是我们自己定的**：25 / 100（每百万 token）是一个保守的声明值，
+  不是真实价格。它保证不会少算，但会让那次调用在当天花费里显得偏贵。owner 若希望
+  「未定价 = 干脆不可路由」，把 `unpriced_model_requires_chain` 扩到所有位置即可，
+  是一行。
 * **`allowed_without_broker_profile`**：网关放行了 `antigravity-cli-gateway/gemini-3.1-pro`
   与 `.../gemini-3.8-flash`，但 broker 的 `config.profiles` 里没有它们，所以 Dalton
   根本叫不出名字。页面上单独列出来了。要不要给它们建 profile 是一次「放行」就能做的
@@ -178,9 +201,16 @@ profile id 优先用 Dalton 自己 curated catalog 已有的那个（例如
 * **选择是全库统一的**：一次 `set_model_selection` 会给**每一个**已登记的 model
   config 所 pin 的 policy 各发一个新版本。理由是一个 purpose 是「工作的一个环节」，
   不是「某条 lane 的私产」；分开 pin 会让同一个环节因为是谁调的而跑不同模型。
-* **`openclaw_catalog_reconcile.py` 被改了两处**（rate card 可缺、`unpriced` 透传）。
-  它不在我这一支的所有权清单里，但改动是纯追加的，且是「无 rate card 的标未定价」
-  这条要求的唯一落点。集成时值得看一眼。
+* **`openclaw_catalog_reconcile.py` 被改了几处**（rate card 可缺、`unpriced` 透传、
+  上限价常量、curated 卡不被覆盖）。它不在我这一支的所有权清单里，但改动是纯追加的，
+  且是「无 rate card 的标未定价」这条要求的唯一落点。集成时值得看一眼。
+* **`ensure_*_policy` 现在把 `purpose_overrides` 往前带**（review S2）。不带的话，
+  重跑一次 install.sh 就会把 owner 做过的每一个模型选择悄悄抹掉。
+* **`purpose` 只在 pinned policy 真的为它带了选择时才进请求身份**（review S1）。
+  无条件加进去会改变**历史上每一次**路由请求的身份，重放一个选择功能出现之前的
+  work order 会得到 `conflict`，把一条什么都没做错的 lane 停掉。
+* **发布时会检查 pinned 是不是该谱系的最新版**：不是就拒绝（「has moved on」），
+  因为新版本是拿 pinned 的内容建的、接在 latest 后面，中间那一版改了什么会被无声丢掉。
 
 ## 9. 只读扫描（真实 `~/.openclaw/openclaw.json`，2026-09-10，只取名字）
 
@@ -211,28 +241,39 @@ policy，所以都是档位链。`live:` 是其中此刻真的能路由到的）
 
 ## 10. 测试
 
-全量（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）：
+全量（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`），
+**合入 main（`ba99ef9`，含 prior-research）之后**：
 
 ```
-Ran 5108 tests in 446.985s
+Ran 5445 tests in 559.863s
 
 OK (skipped=1)
 ```
 
+合 main 之前、review 修完时同一条命令是 `Ran 5108 tests in 446.985s / OK (skipped=1)`。
+
 新模块单独跑（`... -m unittest tests.test_model_selection`）：
 
 ```
-Ran 54 tests in 0.924s
+Ran 64 tests in 0.877s
 
 OK
 ```
 
-新文件 `tests/test_model_selection.py`：54 项，全部离线。覆盖：override 解析
+新文件 `tests/test_model_selection.py`：64 项，全部离线。覆盖：override 解析
 （跟随档位 / 自己点名 / 未定价只能垫底 / verifier 同家族被拒）、policy 版本追加与
 回滚（旧版本 hash 不动、重复发布不追加、三个版本的版本链）、fixture openclaw.json
 上的三个差集、临时副本上的补丁应用（备份、只动子树、读回校验、按两次不重复、
 不在 providers 里的拒绝）、lane 四处登记与开关文件、三个治理 op 的鉴权、Cores 有表
 和没表两种情况下的 cockpit 「模型」页，以及第 6 节的四条回退路径 + 去重 + 确认。
+
+review 之后补的十项（`ReviewFindingTests` 与三条散落的）：install 先退役再跑 lane 仍
+会通知；同步与写提示之间抛异常后下一轮补齐且不重写；owner 选中的模型退役后提示带
+`superseded_chain`；选择功能出现前的 work order 重放仍是 `duplicate`；有选择时同一份
+work 是不同请求；重跑 `ensure_planner_policy` 不会抹掉选择与 `actor_ref`；对着已经不是
+最新版的 pinned 发布被拒；未定价的环排在已退役的环前面仍可路由；未定价按上限价而不是 0
+登记、且高于目录里最贵的那个；网关撤价不会抹掉 curated 卡；放行读回失败时文件逐字节还原、
+备份仍在、临时文件不留；升级前的 router 库上「模型」页读成「没有提示」。
 
 ## 11. 集成时要接的线
 
