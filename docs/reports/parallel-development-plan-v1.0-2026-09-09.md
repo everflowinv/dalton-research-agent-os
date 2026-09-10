@@ -291,6 +291,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 下午 | authority 标志统一合入（5,055 项通过，已 push）。派出模型选择与自动登记（cockpit 按环节选模型 → 新 policy 版本；每小时目录 lane；一键放行写 broker 子树）。在修：P12e、prior-research、P13-M3 | 进行中 |
 | 09-10 下午 | P13-M3 敏感性合入（5,167 项通过，已 push；按历史峰谷摆幅排 driver，bridge 单券商不再能冒充共识）；合入 P12e 行业框架（deliverable 数字可引用有 accession / 模型版本支撑的计算格）。在修：prior-research；开发中：model-selection（含模型被移除时的自动回退与 cockpit 通知） | 进行中 |
 | 09-10 下午 | P12e 合入（5,313 项通过，已 push）；prior-research 与 P12e 在 `mission_deliverable.py` 冲突，作者调和后合入（既有资料作 `internal_prior` 来源；旧 screen 为 v0；`PriorModelVersion`）+ 集成：`DISCOVERY_SOURCES` 行、`[prior-models]` extra、撤 S1 针脚。复演 2 因脚本 fail-open 碰到 live 目录，唯一实际写入（tick 账本文件）已隔离，规则 13 已记；复演 agent 加固后重跑。model-selection 开发中 | 进行中 |
+| 09-11 凌晨 | owner：限额紧、agent 返回只记录不动手不派。七条交付全部到齐（经济不变量已合入本地 main 未 push；其余六条未合），审读结果记在 6c：待派 F1–F19、待裁决 D1–D9；复演 2 fail-closed 通过（对 `8717de0`） | 待 owner 恢复后按 6c 派 |
 | 09-10 晚 | prior-research 合入（5,381 项，已 push）；Chem 复盘对照分析 + 规则 14；model-selection 修 B1/B2/S1–S4 后合入（主线全量在跑）；W4 六条切片派出（见 6b）；owner 定：部署与授权随时可做，复演 2 通过即部署 | 进行中 |
 
 ---
@@ -335,6 +336,10 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | F17 | w4-zero-base-review 开放问题 1 | 复盘无独立 verifier，判断 lane 有 | 主 agent 决定：要。复用判断 lane 的 verifier 谓词（verifier 家族 ≠ 生产者家族），校验四问答案每条都引用了在档的 thesis / debate / claim ref、且「下一个验证点」有日期；不通过 = refused 不发布 | 已记录，未派 |
 | F5d | w4-zero-base-review | 改了 `thesis_revision.py`（加同形兄弟表读取）、`cockpit_plane.py`（判断结果面板）、`research_cycle_reflection`（第九个指标，版本 0.1→0.2）、`install.sh`、`bootstrap.py`、`rehearse_deploy.py` | 合并时与 failure-classes、model-selection 在 cockpit / bootstrap / rehearse 同文件；调和后 import 检查 | 已记录 |
 | D8 | w4-zero-base-review 开放问题 2、4 | (2) 复盘是否也发布进 `MissionDeliverableAuthority`（需 `DELIVERABLE_KINDS` 加一个词）；(4) 事后验证窗口沿用 price_divergence 的 10 个交易日 / 6%，季度窗口要改 tracking policy | 主 agent 建议：(2) 要，词 `zero_base_review`，这样 cockpit 的交付列表与验收 rubric 能看到它；(4) 加第二个窗口 60 个交易日 / 15% 作为「慢背离」，写进 tracking policy v2（与 F6 同一次重签） | 待 owner 点头 |
+| R2 | ops-rehearsal-2（交付 `84d9a14`，未合；5,345 项通过） | 加固后的复演对 main `8717de0`（model-selection 合入前）的 live 副本通过：61/61 schema、23 播种 / 10 按门拦下、目录同步幂等（5 登记 / 6 退役）、34 条 tick 零逃逸、156,420 行内容哈希逐字节一致；唯一 DDL 变化是 deliverable kinds 的 CHECK 加四个词。四项加固：前置失败即中止；`bounded_planner.config` 路径不在临时根即拒绝；HOME 指向临时根；`--source-root` 允许 `--live-root` 是副本 | 合并后用 `--source-root` 对当前 main 重跑一次（model-selection、以及待合的 W4 会改 schema / seed / lane 计数）；owner 清单 v2.0 在 `docs/reports/owner-steps-after-deploy-v2.0-2026-09-10.md` | 已记录，待合并 |
+| F18 | ops-rehearsal-2 caveat | `sales-notes`、`company-wiki`、`xueqiu`、`x`、`blind` 五个来源没有 `source_plan` 行，`--set-source-status` 报错；清单里给的是手工编辑 | subagent：让 `--set-source-status` 在缺行时按 connector inventory 创建 `source_plan` 行（append-only、写明 `created_by=set-source-status`），而不是要求手工编辑；测试五个来源 | 已记录，未派 |
+| F19 | ops-rehearsal-2 open question | ask-v2 policy 契约仍钉 `enabled: const false`，代码已允许开启 | subagent：契约改为 boolean，默认 false，playbook 里由 owner 显式置 true；测试两态 | 已记录，未派 |
+| D9 | ops-rehearsal-2 open question | AlphaEngine 日配额 live 为 130，W2 实测已用 133 / 130；CTSH / DXC / IBM 各只能清一家券商。抽取 30/10/10 的节奏折算 14,400 次 / 日，超 9,000 上限（推导的边界是 15，满额分配 31） | owner：提高 AlphaEngine 配额，或接受三家公司 consensus 只有一家券商；抽取节奏按推导值 15 下调 | 待 owner（已在最终裁决清单） |
 | D1 | w4-insider-buyback 开放问题 2 | 8-K 正文不可取（`sec_earnings_release` 记录了原因），回购授权抽取只在 Core 已持有 8-K 文本时触发；要真正生效需要 `form: 8-K` 的 discovery spec = 新 plan 版本 + owner 发布 | 进 owner 最终裁决清单 | 待 owner |
 | D2 | w4-insider-buyback 开放问题 1 | 10-Q Item 5「Trading Arrangements」（10b5-1 计划的采用 / 终止，含人、日期、窗口、股数）比 Form 144 更强的「预期减持」信号，可解析 | 作为后续切片 W5 候选，不阻塞 | 待排期 |
 | F4 | 我给七个 agent 的恢复消息 | 消息里写的 `pgrep -fc` 在 macOS 不支持 `-c` | 无需修代码；agent 自行改用 `pgrep -f ... \| wc -l`。记录以免误判为环境故障 | 已记录 |
