@@ -31,7 +31,8 @@ driver ──llm_planner_execute{context_pack_ref, …, pool*}──▶ writer
   writer: loop = bounded_planner.loop(context.loop_version_ref)
   writer: pool = pool_for_loop(loop)              *  ← 权威在 Core
   writer: 驱动声明的 pool 与之不符 → 拒绝           *
-  writer: binding = _planner_budget_binding(pool) *  ← mission 指针 + pool_caps
+  writer: binding = _planner_budget_binding(pool) *  ← mission 指针（有歧义则拒绝）
+  writer: ledger  = _planner_budget_ledger()      *  ← 进程级持有，见 §7.1
   worker: _pool_gate(work)  →  池空 → 返回 rejected  *  ← 在 claim 之前
   worker: scheduler.claim                            （拿租约、占一次 attempt）
   worker: router.select → route decision
@@ -121,55 +122,75 @@ def planner_budget_config(state_dir) -> dict[str, str]:
 
 `budget_db` 不传 → 完全是 P14e 的读数（只看预留）。planner 还没上账本的安装，不会被告知它花了一笔谁也找不到的钱。
 
-## 7. 两处发现，写下来而不是抹掉
+## 7. review 抓到的四件事：分支没有兑现自己的承诺
+
+前一版代码是对的，**能被看见**的部分不是。四条都不是风格问题，是「报告里写的那句话在部署里不成立」。
+
+1. **`settled_micros` 在真实部署里几乎恒为 0。** writer 原来在每次 op 里用 `ExitStack` 开一次日账本，于是 WAL 的 sidecar 只在一次调用进行中存在；而 C2 的只读打开拒绝没有 sidecar 的库，P14e 那条 lane 又恰恰是在**两次调用之间**读的——那就是它运行的全部时刻。所以第 6 节承诺的 cap − reserved − settled，实际上永远退化成 cap − reserved。现在 writer **持有**一个惰性打开的 `ThesisImpactBudgetStore` 直到进程结束（在 `_close_store` 里关）。测试同时钉住反面：writer 一撒手，读数就没了。
+2. **失败路径把 `budget` 丢了。** 只有成功才带 `budget`，于是一个**已经上账本**、但 broker 挂了的安装，报的是 `unbudgeted`——那个词的意思是「这次调用根本没进日账本」，而它偏偏出现在有人来问的那一刻。route-rejected / adapter-error / IDEMPOTENCY_MISS 三条路径现在都带；writer 的兜底也改成按**实际传给 worker 的 ledger** 判断，而不是假定 `unbudgeted`。
+3. **pre-lease 拒绝哪儿都没记。** `admit()` 会在自己的写事务里记下 rejection，但这道闸门是**故意在 admit 之前**拒绝的，所以整条 pre-lease 路径不可见：ad-hoc 池把当天所有规划调用都拒掉的那一天，`pool_status()["adhoc"]["exhausted"]` 读出来是 false。现在闸门把同一份 wire 写进 `model_budget_pool_rejections`（`INSERT OR IGNORE`，内容寻址的 id，所以同一天同一次 attempt 被拒多少个 tick 都只有一行；写失败吞掉——让可观测性把预算决定变成故障，正是这一片要防的那个反转）。
+4. **hold 和 unbudgeted 没有落到任何持久的地方。** tick 摘要新增 `planner_budget`（`pool_holds` / `held_pools` / `status`），并登记进 `RESERVED_DRIVER_KEYS`——它是驱动自己的活，不是 lane，被当成 lane 会污染 idle ratio。`TickLedger.append_tick` 把它记进新的可空列 `planner_budget_json`，配一个幂等 ALTER 迁移（`CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做，不迁移的话运行中的安装每次 append 都会失败）。老行为 NULL：**没有答案**和**答案是 0** 不是一回事。
+
+另外 review 点名的小项，都已改：`LOOP_ADMISSION_POOLS` 用 `INQUIRY_ADMISSION_SOURCE` 而不是重写一遍字符串；`_active_mission_version` 遇到两个活跃 mission **拒绝**而不是取第一行（和 `coverage_mission` 对同一种歧义的处理一致——取第一行等于悄悄拿一个 mission 的钱付另一个 mission 的研究）；`mission_research_task_lane` 从 writer 的配置里拿 `budget_db`；`adapter.execute` 抛出**这个 worker 没有建模的**异常时先结算再往上抛（原来预留会一直开着，而一笔开着的预留按**全额**占着池子直到当天结束）。
+
+> 最后这条改错过一次，值得写下来：第一版把 `except BaseException` 写在了 `except OpenClawModelAdapterError` **前面**，于是特化处理器成了死代码，broker 不可达时的重试路径被静默改成了向上抛。捕获顺序不是风格。
+
+## 8. 两处发现，写下来而不是抹掉
 
 1. **pre-lease 闸门的 attempt 号错了一位。** Scheduler 是向前编号的：`enqueue` 写的第一条事件就带着 attempt 1，requeue 写的那条带着「刚结束那次 +1」。所以**最新一条事件的号本身就是下一次 attempt 的号**，原来的 `max(...)+1` 让闸门按 N+1 预留、而真正的准入用 N，两边说的不是同一次尝试。测试抓到的，已修。
-2. **日账本是 WAL，C2 的只读打开会拒绝没有 sidecar 的库**——也就是没有任何进程持有它的时候。部署里 writer 一直持有它、这条 lane 在旁边读，所以正常；但 writer 停着的时候，`settled` 这一项会掉出去，读数退回「只看预留」。那是 P14e 的数，不是一个错的数，`day_settled_micros` 的 docstring 里把这件事说出来了。
+2. **日账本是 WAL，C2 的只读打开会拒绝没有 sidecar 的库**——也就是没有任何进程持有它的时候。第一版把这条写成了「部署里正常」，但当时 writer 并不持有它（§7.1），所以那句话是错的。现在 writer 持有了，这条 lane 在旁边读；writer 停着的时候 `settled` 仍会掉出去，读数退回「只看预留」——那是 P14e 的数，不是一个错的数，`day_settled_micros` 的 docstring 里写着。
 
 另外 `research_task_view` 在交接的代码里用了一个自己没有的 `budget_db`（有 mission 时必 NameError），已修。
 
-## 8. 文件
+## 9. 文件
 
 | 文件 | 变化 |
 | --- | --- |
 | `budget_pools.py` | `LOOP_ADMISSION_POOLS`、`pool_for_loop` |
-| `cockpit_model.py` | 加性抽出 `admit_day_ledger` / `settle_day_ledger` / `call_cost_micros` / `pool_refusal_message`，`call` 非链式分支改用 |
+| `cockpit_model.py` | 加性抽出 `admit_day_ledger` / `settle_day_ledger` / `call_cost_micros` / `pool_refusal_message`，`CockpitModel.call` 的非链式分支改用它们（`_chained` 未动）|
 | `llm_research_planner_worker.py` | 可选 `budget` / `budget_policy_ref` / `mission_binding`（三个一起或都不给）、pre-lease 闸门、准入、结算、返回式池拒绝、`budget` 报告 |
 | `writer_server.py` | `OPERATION_FIELDS["llm_planner_execute"]` 加可选 `pool`；`_op_llm_planner_execute` 推导权威池、核验声明、开账本、原样返回池拒绝；`_active_mission_version`、`_planner_budget_binding`、`planner_budget_config`；`main()` merge；active_loops 投影带 `pool` |
 | `bounded_planner_driver.py` | 传 `pool`；`pool_exhausted` → hold |
 | `research_task.py` | `day_settled_micros`；`pool_state`/`plan_admissions`/`research_task_view` 接 `budget_db` |
 | `research_task_cli.py` | 三个读点接上日账本 |
+| `mission_research_task_lane.py` | 协调器接 `budget_db`（由 writer 的 planner 配置给，不猜文件名）|
+| `tick_ledger.py` / `tick_ledger_schema.sql` | 新增可空列 `planner_budget_json` + 幂等 ALTER 迁移 |
+| `lane_registry.py` | `RESERVED_DRIVER_KEYS` 加 `planner_budget`（它不是 lane）|
 
-`coverage_mission.py`、`macos_launchagent.py`、`cockpit_*`、`PROJECT_STATUS`、`tests/test_lane_registry`、`deploy/macos/install.sh`、`tests/test_service.py`：**未改**。
+`coverage_mission.py`、`macos_launchagent.py`、`cockpit_plane` 等 `cockpit_*` lane、`PROJECT_STATUS`、`tests/test_lane_registry` 的字面量、`deploy/macos/install.sh`、`tests/test_service.py`：**未改**。（`cockpit_model.py` 改了，是抽取共享准入代码——它是 CockpitModel 本身，不是 cockpit lane 模块。）
 
-## 9. 测试
+## 10. 测试
 
-新增 19 个用例：worker 侧 6（准入/结算落到 `adhoc` 池且带 `pool_lane`、结算的是服务方 $0.001 而不是 $0.50 预留、池空在租约前返回且不掉 attempt、池满了同一个 WorkOrder 照跑、broker 没服务结算 0、`unbudgeted` 照说、半套账本构造即拒）、驱动侧 4（hold 不进兜底、池随调用走、旧投影不发 pool、非池失败仍走兜底）、writer 侧 5（投影带池、非四池之一被拒、驱动报了更便宜的池被指名拒绝、无预算配置绑定为 None、`pool_for_loop` 语义）、`pool_state` 4、`planner_budget_config` 5。
+新增 26 个用例。**worker 10**：准入/结算落到 `adhoc` 池且带 `pool_lane`、结算的是服务方 $0.001 而不是 $0.50 预留、池空在租约前返回且不掉 attempt、池满了同一个 WorkOrder 照跑、broker 没服务结算 0、`unbudgeted` 照说、半套账本构造即拒，以及 review 那四条里的三条（broker 挂了仍报 `settled`、未建模异常也把预留还回去、pre-lease 拒绝在 `pool_status` 里可见且三个 tick 只留一行）。**驱动 8**：hold 不进兜底、池随调用走、旧投影不发 pool、非池失败仍走兜底、hold 与 budget word 落进 `tick_ledger_ticks`、`unbudgeted` 是一个被记录的常态、`planner_budget` 不被当成 lane。**writer 6**：投影带池、非四池之一被拒、驱动报了更便宜的池被指名拒绝、无预算配置绑定为 None、`pool_for_loop` 语义，以及**持有账本才读得到 settled**（同时钉住反面：writer 一撒手读数就没了）。**`pool_state` 4**、**`planner_budget_config` 5**。
 
 ```
 $ .venv/bin/python -m unittest tests.test_llm_research_planner_worker
-Ran 10 tests in 0.421s
+Ran 14 tests in 0.601s
 OK
 
 $ .venv/bin/python -m unittest tests.test_bounded_planner_driver
-Ran 34 tests in 9.702s
+Ran 38 tests in 9.975s
 OK
 
 $ .venv/bin/python -m unittest tests.test_research_task
-Ran 41 tests in 5.352s
+Ran 41 tests in 3.566s
 OK
 
 $ .venv/bin/python -m unittest tests.test_research_planner_setup
-Ran 23 tests in 0.236s
+Ran 23 tests in 0.289s
 OK
 
-$ .venv/bin/python -m unittest tests.test_budget_pools tests.test_cockpit_model_fallback tests.test_mission_research_task_lane
-Ran 63 tests in 1.186s
+$ .venv/bin/python -m unittest tests.test_tick_ledger
+Ran 18 tests in 0.067s
+OK
+
+$ .venv/bin/python -m unittest tests.test_budget_pools tests.test_cockpit_model_fallback tests.test_mission_research_task_lane tests.test_lane_registry
+Ran 86 tests in 3.191s
 OK
 
 $ .venv/bin/python -m unittest discover -s tests -t .
-Ran 4427 tests in 529.037s
+Ran 4851 tests in 679.949s
 OK (skipped=1)
 ```
 
-全套在合入 main `eb8e5fb` 之后跑，`tests/test_rehearse_deploy.py` 那两个已知失败已由别处修好并合入，所以这次是**零失败**，不需要例外。（`PYTHONPATH=$PWD/src`，无模型调用。）
+全套在合入 main `e704a23`（P14f、S5 等多条 lane）之后跑，**零失败**。（`PYTHONPATH=$PWD/src`，无模型调用。）合入后按规则 12 先 import 过一遍再提交。
