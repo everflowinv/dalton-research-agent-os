@@ -133,6 +133,25 @@ def build_review_bundle(
     return {**base, "content_hash": content_hash(base)}
 
 
+def build_selector_proposal(candidate_plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Produce the exact dormant selector the owner may approve in place."""
+
+    candidate = validate_discovery_plan(candidate_plan)
+    if candidate["source_ref"] != SEC_SOURCE_REF:
+        raise ValueError("candidate plan is not for SEC filings")
+    version = candidate["id"].rsplit(":", 1)[-1]
+    body = {
+        "schema_version": "sec-discovery-plan-selection-0.1",
+        "id": f"sec-discovery-plan-selection:us-it-services:{version}",
+        "status": "proposed",
+        "source_ref": SEC_SOURCE_REF,
+        "plan_ref": candidate["id"],
+        "plan_hash": candidate["content_hash"],
+        "plan_path": f"us-it-services-sec-filings-v{version}.json",
+    }
+    return {**body, "content_hash": content_hash(body)}
+
+
 def verify_mission_authority_on_backup(source_core: Path, mission: Mapping[str, Any]) -> None:
     """Exercise the real authorization path on a temporary SQLite backup."""
 
@@ -168,11 +187,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--created-at", default=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
     parser.add_argument("--plan-output", type=Path, required=True)
     parser.add_argument("--bundle-output", type=Path, required=True)
+    parser.add_argument("--selector-output", type=Path)
     args = parser.parse_args(argv)
-    outputs = (args.plan_output.resolve(), args.bundle_output.resolve())
+    selector_output = args.selector_output or args.bundle_output.with_suffix(".selector.json")
+    outputs = (args.plan_output.resolve(), args.bundle_output.resolve(), selector_output.resolve())
     protected = {args.active_plan.resolve(), args.source_core.resolve(), args.governance.resolve()}
     state_root = args.source_core.resolve().parent
-    if outputs[0] == outputs[1] or any(
+    if len(set(outputs)) != len(outputs) or any(
             path in protected or path.is_relative_to(state_root) for path in outputs):
         raise ValueError("proposal outputs must be distinct and outside the source state directory")
     active = load_discovery_plan(args.active_plan)
@@ -184,7 +205,9 @@ def main(argv: list[str] | None = None) -> int:
         active_plan=active, candidate_plan=candidate, mission=mission,
         governance=governance, created_at=args.created_at,
     )
-    for path, value in ((args.plan_output, candidate), (args.bundle_output, bundle)):
+    selector = build_selector_proposal(candidate)
+    for path, value in ((args.plan_output, candidate), (args.bundle_output, bundle),
+                        (selector_output, selector)):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         path.chmod(0o600)

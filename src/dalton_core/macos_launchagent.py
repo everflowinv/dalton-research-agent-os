@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import plistlib
 import tempfile
@@ -11,6 +12,8 @@ from typing import Any, Iterable
 
 from .lane_registry import LaunchAgentContext, lane_argv
 from .service import ServiceConfig
+from .mission_source_discovery import SEC_SOURCE_REF, load_discovery_plan
+from .store import content_hash
 
 
 WRITER_LABEL = "space.lumos.dalton.writer"
@@ -20,6 +23,49 @@ SEC_LANE_USER_AGENT = "Dalton Research Agent OS SEC company-facts lane (owner: l
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"
 THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
+SEC_PLAN_SELECTOR = "sec-filings-plan-selection-v1.json"
+
+
+def _sec_discovery_plan(state: Path) -> Path:
+    """Resolve an explicitly approved, hash-bound SEC plan or fixed v1."""
+
+    plans = (state / "discovery-plans").resolve()
+    selector_path = plans / SEC_PLAN_SELECTOR
+    default = plans / "us-it-services-sec-filings-v1.json"
+    if not selector_path.exists():
+        return default
+    try:
+        selector = json.loads(selector_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("SEC plan selector is unreadable") from exc
+    expected_keys = {
+        "schema_version", "id", "status", "source_ref", "plan_ref",
+        "plan_hash", "plan_path", "content_hash",
+    }
+    if not isinstance(selector, dict) or set(selector) != expected_keys:
+        raise ValueError("SEC plan selector has an invalid schema")
+    body = {key: value for key, value in selector.items() if key != "content_hash"}
+    if selector["content_hash"] != content_hash(body):
+        raise ValueError("SEC plan selector content hash does not match")
+    if (selector["schema_version"] != "sec-discovery-plan-selection-0.1"
+            or selector["status"] != "approved"
+            or selector["source_ref"] != SEC_SOURCE_REF):
+        raise ValueError("SEC plan selector is not an approved SEC selection")
+    if not all(isinstance(selector[key], str) and selector[key] for key in (
+            "id", "plan_ref", "plan_hash", "plan_path")):
+        raise ValueError("SEC plan selector fields must be non-empty strings")
+    relative = Path(selector["plan_path"])
+    if relative.is_absolute() or len(relative.parts) != 1:
+        raise ValueError("SEC selected plan must be a file in discovery-plans")
+    selected = (plans / relative).resolve()
+    if selected.parent != plans:
+        raise ValueError("SEC selected plan escapes discovery-plans")
+    plan = load_discovery_plan(selected)
+    if (plan["source_ref"] != SEC_SOURCE_REF
+            or plan["id"] != selector["plan_ref"]
+            or plan["content_hash"] != selector["plan_hash"]):
+        raise ValueError("SEC selected plan does not match its ref, hash, and source")
+    return selected
 
 
 def _atomic_plist(path: Path, value: dict[str, Any]) -> None:
@@ -56,6 +102,7 @@ def render(
     state = Path(state_dir).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
     logs = Path(log_dir).expanduser().resolve()
+    sec_discovery_plan = _sec_discovery_plan(state)
     logs.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(logs, 0o700)
     service_config = ServiceConfig.from_file(config) if config.is_file() else None
@@ -157,7 +204,7 @@ def render(
             "--sec-filings-governance",
             str(state / "connector-governance" / "sec-filings-index-v1.json"),
             "--sec-filings-discovery-plan",
-            str(state / "discovery-plans" / "us-it-services-sec-filings-v1.json"),
+            str(sec_discovery_plan),
         ] + (
             # P9d-4d: the host-owned web search broker is an OpenClaw plugin
             # socket in the same state directory as the model broker, so its
