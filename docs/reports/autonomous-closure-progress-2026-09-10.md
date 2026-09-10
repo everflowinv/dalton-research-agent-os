@@ -20,3 +20,9 @@ Owner 已授权自主部署，沿用已签 mission v14；不自动进行 Deep In
 1. 恢复候选全量通过后执行已授权部署，核对实际安装与wheel、health、mission绑定；观察ClaimIndex、dossier、DebateMap、event产物，不能以child启动代替成功。
 2. 三个Sol继续：真实模型阶段端到端；DebateMap合同与错误可诊断性；合法inquiry-specific ResearchTask executor。root负责集成、回归、部署和进度更新。
 3. 功能闭环后重构浅色Cockpit整体视觉、信息架构与交互，真实浏览器检查，再冻结部署。
+
+## 18:11 UTC 集成验收更新
+
+`ab903d4` 全量6349项 /535.009s发现15个兼容错误（1 skip），未部署：11个来自初页/网页launcher不接受额外cursor关键字，4个来自纯cadence测试被新增不必要authority读取影响。修复只在真实续页传cursor，并先尊重cadence/open dispatch，再检查是否有短缺可续页。失败冻结树与日志保留，新恢复候选会包含该修复。
+
+Memo + 模型阶段 + registry 集成75项 /2.823s通过；真实company model authority测试捕获并修复sensitivity状态词和无关industry表依赖；DebateMap正式失败重放保留code，生成合同修复允许准确恢复，144项 /2.249s通过。未把失败候选或正常child退出写成部署/研究产物成功。

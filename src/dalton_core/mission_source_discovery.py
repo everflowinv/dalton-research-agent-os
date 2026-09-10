@@ -1304,11 +1304,11 @@ class MissionSourceDiscoveryCoordinator:
             satisfied = self._satisfied_block(mission, company_ref, spec_ref)
             if satisfied is not None:
                 return satisfied
-        continuation = self._continuation_page(mission["id"], company_ref, spec_ref)
         cadence = self._cadence_block(mission["id"], company_ref, spec)
-        if cadence == "previous discovery still open":
+        if not cadence or cadence == "previous discovery still open":
             return cadence
-        if self._checklist_shortfall(mission, company_ref, spec_ref) and continuation:
+        if (self._checklist_shortfall(mission, company_ref, spec_ref)
+                and self._continuation_page(mission["id"], company_ref, spec_ref)):
             return None
         return cadence
 
@@ -1586,10 +1586,13 @@ class MissionSourceDiscoveryCoordinator:
                     cursor=None if continuation is None else continuation["cursor"],
                 )
                 try:
+                    # Only AlphaEngine continuation adds a cursor. Initial
+                    # pages and other search launchers keep their contract.
+                    page_options = {"cursor": parameters["cursor"]} if parameters.get("cursor") else {}
                     ticket = self.search_launcher.start(
                         authorization=authorization, spec_ref=spec["spec_ref"],
                         as_of=request_date,
-                        cursor=parameters.get("cursor"),
+                        **page_options,
                     )
                 except DiscoveryLaunchConflict as exc:
                     return {"status": "busy", "reason": str(exc), "skipped": skipped}
