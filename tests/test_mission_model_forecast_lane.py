@@ -13,8 +13,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.company_model_forecast import model_digest
+from dalton_core.economic_invariants import FORECAST_INVARIANT_CONTRACT_HASH
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.lane_child_launcher import (
     LaneChildConflict,
@@ -96,14 +98,16 @@ class FakeLauncher:
         self.started: list[dict] = []
         self.raise_on_start: Exception | None = None
 
-    def start(self, *, company_ref, model_digest):
+    def start(self, *, company_ref, model_digest, validator_contract_hash):
         if self.raise_on_start is not None:
             raise self.raise_on_start
-        self.started.append({"company_ref": company_ref, "model_digest": model_digest})
+        self.started.append({"company_ref": company_ref, "model_digest": model_digest,
+                             "validator_contract_hash": validator_contract_hash})
         ticket_id = f"model-forecast-run:{len(self.started):024d}"
         self.tickets[ticket_id] = {
             "id": ticket_id, "status": "running", "summary": None,
             "company_ref": company_ref, "model_digest": model_digest,
+            "validator_contract_hash": validator_contract_hash,
         }
         return {"id": ticket_id}
 
@@ -140,7 +144,8 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(outcome["model_digest"], self.digest())
         self.assertIsNone(outcome["settled"])
         self.assertEqual(self.launcher.started,
-                         [{"company_ref": ACN, "model_digest": self.digest()}])
+                         [{"company_ref": ACN, "model_digest": self.digest(),
+                           "validator_contract_hash": FORECAST_INVARIANT_CONTRACT_HASH}])
 
     def test_the_previous_child_is_settled_before_another_starts(self):
         first = self.lane.dispatch_once()
@@ -156,7 +161,9 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(second["settled"]["forecast_status"], "published")
         self.assertEqual(second["settled"]["company_ref"], ACN)
         self.assertEqual(self.launcher.started, [{"company_ref": ACN,
-                                                  "model_digest": self.digest()}])
+                                                  "model_digest": self.digest(),
+                                                  "validator_contract_hash":
+                                                      FORECAST_INVARIANT_CONTRACT_HASH}])
 
     def test_a_child_still_running_is_reported_and_not_replaced(self):
         first = self.lane.dispatch_once()
@@ -193,6 +200,24 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(held["status"], "held")
         self.assertIn("outside the filed range", held["reason"])
         self.assertEqual(len(self.launcher.started), 1)
+
+    def test_a_new_validator_contract_releases_only_the_old_refusal_identity(self):
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "forecast_status": "unavailable:economic_invariants",
+            "failure_reason": "segment_sum: old lossy axis classification"})
+        self.assertEqual(self.lane.dispatch_once()["status"], "held")
+
+        replacement_hash = "b" * 64
+        with patch(
+            "dalton_core.mission_model_forecast_lane."
+            "FORECAST_INVARIANT_CONTRACT_HASH", replacement_hash,
+        ):
+            resumed = self.lane.dispatch_once()
+            self.assertEqual(resumed["status"], "launched")
+            self.assertEqual(resumed["model_digest"], first["model_digest"])
+            self.assertEqual(resumed["validator_contract_hash"], replacement_hash)
+            self.assertEqual(len(self.launcher.started), 2)
 
     def test_a_refused_old_spec_does_not_hold_a_new_spec_identity(self):
         first = self.lane.dispatch_once()
@@ -323,28 +348,43 @@ class LauncherTests(unittest.TestCase):
 
     def test_the_same_company_and_inputs_is_the_same_ticket(self):
         launcher = self.launcher()
-        first = launcher.start(company_ref=ACN, model_digest=DIGEST)
+        first = launcher.start(company_ref=ACN, model_digest=DIGEST,
+                               validator_contract_hash="c" * 64)
         launcher.wait(timeout=30)
-        again = launcher.start(company_ref=ACN, model_digest=DIGEST)
+        again = launcher.start(company_ref=ACN, model_digest=DIGEST,
+                               validator_contract_hash="c" * 64)
         launcher.wait(timeout=30)
         self.assertEqual(first["id"], again["id"])
-        moved = launcher.start(company_ref=ACN, model_digest="b" * 64)
+        moved = launcher.start(company_ref=ACN, model_digest="b" * 64,
+                               validator_contract_hash="c" * 64)
         launcher.wait(timeout=30)
         self.assertNotEqual(moved["id"], first["id"])
+        changed_contract = launcher.start(
+            company_ref=ACN, model_digest="b" * 64,
+            validator_contract_hash="d" * 64)
+        launcher.wait(timeout=30)
+        self.assertNotEqual(changed_contract["id"], moved["id"])
 
     def test_the_ticket_records_what_the_run_was_about(self):
         launcher = self.launcher()
-        ticket = launcher.start(company_ref=ACN, model_digest=DIGEST)
+        ticket = launcher.start(company_ref=ACN, model_digest=DIGEST,
+                                validator_contract_hash="c" * 64)
         launcher.wait(timeout=30)
         self.assertEqual(ticket["company_ref"], ACN)
         self.assertEqual(ticket["model_digest"], DIGEST)
+        self.assertEqual(ticket["validator_contract_hash"], "c" * 64)
         self.assertEqual(launcher.status(ticket["id"])["model_digest"], DIGEST)
 
     def test_a_request_that_names_nothing_is_refused_before_spawning(self):
         launcher = self.launcher()
-        for kwargs in ({"company_ref": "", "model_digest": DIGEST},
-                       {"company_ref": ACN, "model_digest": "short"},
-                       {"company_ref": ACN, "model_digest": None}):
+        for kwargs in ({"company_ref": "", "model_digest": DIGEST,
+                        "validator_contract_hash": "c" * 64},
+                       {"company_ref": ACN, "model_digest": "short",
+                        "validator_contract_hash": "c" * 64},
+                       {"company_ref": ACN, "model_digest": None,
+                        "validator_contract_hash": "c" * 64},
+                       {"company_ref": ACN, "model_digest": DIGEST,
+                        "validator_contract_hash": "short"}):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(LaneChildRejected):
                     launcher.start(**kwargs)

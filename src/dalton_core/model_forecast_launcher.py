@@ -44,18 +44,30 @@ class ModelForecastLauncher(LaneChildLauncher):
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
 
-    def start(self, *, company_ref: str, model_digest: str) -> dict[str, Any]:
+    def start(
+        self, *, company_ref: str, model_digest: str,
+        validator_contract_hash: str,
+    ) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a driver model run needs a company")
         if not isinstance(model_digest, str) or len(model_digest) != 64:
             raise LaneChildRejected("model_digest must be a sha256 digest")
+        if (not isinstance(validator_contract_hash, str)
+                or len(validator_contract_hash) != 64):
+            raise LaneChildRejected(
+                "validator_contract_hash must be a sha256 digest")
         company_ref = company_ref.strip()
         digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{company_ref}|{model_digest}".encode("utf-8")
+            f"{self.TICKET_PREFIX}|{company_ref}|{model_digest}|"
+            f"{validator_contract_hash}".encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,
-            record={"company_ref": company_ref, "model_digest": model_digest},
+            record={
+                "company_ref": company_ref,
+                "model_digest": model_digest,
+                "validator_contract_hash": validator_contract_hash,
+            },
             company_ref=company_ref,
         )
 

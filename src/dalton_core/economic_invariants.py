@@ -72,6 +72,30 @@ RULE_REF = "rule:economic-invariants:1"
 ACTOR_REF = "core:economic-invariant-gate"
 REFUSAL_PREFIX = "economic-invariant-refusal:"
 
+# Durable identity for the closed semantics used to admit a forecast.  This is
+# deliberately narrower than a source-code or release hash: only a change to
+# the validator contract may release a run held by a previous invariant
+# refusal.  Version 2 distinguishes proven one-dimensional additive segment
+# axes from lossy legacy/multi-dimensional XBRL projections.
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:2"
+FORECAST_INVARIANT_CONTRACT_HASH = content_hash({
+    "schema_version": "forecast-economic-invariant-contract-0.1",
+    "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
+    "segment_sum": {
+        "additive_axes": [
+            "srt:ProductOrServiceAxis",
+            "srt:SegmentAxis",
+            "srt:StatementBusinessSegmentsAxis",
+            "srt:StatementGeographicalAxis",
+            "us-gaap:ProductOrServiceAxis",
+            "us-gaap:StatementBusinessSegmentsAxis",
+            "us-gaap:StatementGeographicalAxis",
+        ],
+        "required_dimension_count": 1,
+        "members_must_be_unique": True,
+    },
+})
+
 _SCHEMA_PATH = Path(__file__).with_name("economic_invariant_schema.sql")
 # Wide enough that a company's revenue times a ratio carried to twelve places
 # never reaches it, matching the forecast engine's own context.
@@ -1367,6 +1391,8 @@ __all__ = [
     "DOMAIN",
     "FAIL",
     "FORECAST_MODEL",
+    "FORECAST_INVARIANT_CONTRACT_HASH",
+    "FORECAST_INVARIANT_CONTRACT_REF",
     "INVARIANTS",
     "INVARIANT_LABELS",
     "NOT_APPLICABLE",

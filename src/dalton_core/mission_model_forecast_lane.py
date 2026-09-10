@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from .company_model_forecast import model_digest
 from .company_model_forecast_cli import pending_companies
+from .economic_invariants import FORECAST_INVARIANT_CONTRACT_HASH
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -58,10 +59,12 @@ class MissionModelForecastLaneCoordinator:
         self.launcher = launcher
         self.mission = mission
         self._open: str | None = None
-        # Runs that failed, keyed by (company, digest), so a company whose
+        # Runs that failed, keyed by (company, model digest, validator contract),
+        # so a company whose
         # model cannot be built does not consume the slot every tick. Held for
-        # this process only: a restart is nearly always a deploy, which is the
-        # most likely thing to have fixed it.
+        # the exact failure remains held across restarts. A deliberately
+        # versioned validator correction gets one new identity; an unrelated
+        # deploy does not.
         self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
@@ -82,6 +85,7 @@ class MissionModelForecastLaneCoordinator:
             # spawned for, or it can never be held back from being retried.
             "company_ref": ticket.get("company_ref"),
             "model_digest": ticket.get("model_digest"),
+            "validator_contract_hash": ticket.get("validator_contract_hash"),
             "forecast_status": summary.get("forecast_status"),
             "model_version_ref": summary.get("model_version_ref"),
             "forecast_lines_written": summary.get("forecast_lines_written"),
@@ -108,8 +112,9 @@ class MissionModelForecastLaneCoordinator:
             ("refused:", "unavailable:"))
         company_ref = settled.get("company_ref")
         digest = settled.get("model_digest")
-        if failed and company_ref and digest:
-            key = f"{company_ref}|{digest}"
+        contract_hash = settled.get("validator_contract_hash")
+        if failed and company_ref and digest and contract_hash:
+            key = f"{company_ref}|{digest}|{contract_hash}"
             reason = settled.get("failure_reason") or f"last run: {status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
@@ -117,8 +122,9 @@ class MissionModelForecastLaneCoordinator:
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(status or settled.get("status")),
             ).as_wire()
-        elif company_ref and digest:
-            settled["resumed"] = self.budget.clear(f"{company_ref}|{digest}")
+        elif company_ref and digest and contract_hash:
+            settled["resumed"] = self.budget.clear(
+                f"{company_ref}|{digest}|{contract_hash}")
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -148,7 +154,10 @@ class MissionModelForecastLaneCoordinator:
         company_ref = spec = table = digest = None
         for candidate, candidate_spec, candidate_table in pending:
             candidate_digest = model_digest(candidate_spec, candidate_table)
-            business_key = f"{candidate}|{candidate_digest}"
+            business_key = (
+                f"{candidate}|{candidate_digest}|"
+                f"{FORECAST_INVARIANT_CONTRACT_HASH}"
+            )
             permission = current_permission(
                 self.budget, business_key, mission, self.launcher,
                 connection=authority_connection(
@@ -166,7 +175,9 @@ class MissionModelForecastLaneCoordinator:
             return {"status": "held", "settled": settled, "held": held,
                     "reason": "; ".join(f"{ref}: {why}" for ref, why in held.items())}
         try:
-            ticket = self.launcher.start(company_ref=company_ref, model_digest=digest)
+            ticket = self.launcher.start(
+                company_ref=company_ref, model_digest=digest,
+                validator_contract_hash=FORECAST_INVARIANT_CONTRACT_HASH)
         except LaneChildConflict as exc:
             return {"status": "busy", "company_ref": company_ref, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -177,6 +188,7 @@ class MissionModelForecastLaneCoordinator:
         return {
             "status": "launched", "company_ref": company_ref,
             "model_digest": digest, "ticket_ref": ticket["id"],
+            "validator_contract_hash": FORECAST_INVARIANT_CONTRACT_HASH,
             "held": held, "settled": settled,
         }
 
