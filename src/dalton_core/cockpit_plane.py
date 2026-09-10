@@ -3432,6 +3432,23 @@ class CockpitPlane:
                           for ref in members],
         }
 
+    def export_research(self, company_ref: str, format: str) -> dict[str, Any]:
+        """Download a read-only research artifact in the current mission scope."""
+        from .cockpit_research_export import export_download
+
+        ref = _text(company_ref, "company_ref", maximum=512)
+        if format not in {"html", "xlsx"}:
+            raise CockpitError("请选择 HTML 报告或 Excel 模型")
+        with self._core() as core:
+            mission = self._mission(core)
+            if ref not in {member["company_ref"] for member in mission["universe"]}:
+                raise CockpitError("公司不在当前研究任务范围内")
+        try:
+            return export_download(self.config.core_db, ref, format,
+                                   mission_ref=mission["mission_ref"])
+        except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+            raise CockpitError(f"无法导出：{exc}") from exc
+
     def research_library(self, company_ref: str) -> dict[str, Any]:
         from .cockpit_research_library import research_library
 

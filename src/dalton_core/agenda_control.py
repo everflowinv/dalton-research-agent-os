@@ -848,6 +848,8 @@ class AgendaControlApplication:
         # renderer rather than re-laid-out here.
         if path == "/v1/cockpit/model":
             return {**plane.company_model(query.get("company", "")), "enabled": True}
+        if path == "/v1/cockpit/export":
+            return {**plane.export_research(query.get("company", ""), query.get("format", "")), "enabled": True}
         if path == "/v1/cockpit/research":
             return {**plane.research_library(query.get("company", "")), "enabled": True}
         # INT2 / P14a: what every connector can actually hand over, at what
