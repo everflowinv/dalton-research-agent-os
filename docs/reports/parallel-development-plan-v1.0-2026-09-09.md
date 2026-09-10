@@ -306,6 +306,15 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | w4-hkex-filings | 港股 `hkex-filings` 连接器：翌日回购申报、月报表、权益披露（DI）、公告索引；发 `buyback_disclosure` / `insider_transaction` / `ownership_change`；`company:hk-secucode:*` 仅在连接器内引入，universe 扩展留给 owner | 派出 |
 | w4-failure-classes | lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
 
+### 6c. 待派修复清单（owner 09-10：agent 返回后只记录、不动手、不派；限额恢复后按此派）
+
+| # | 来源 | 问题 | 修法（给 subagent 的完整指令） | 状态 |
+| --- | --- | --- | --- | --- |
+| F1 | w4-economic-invariants（已合入 main 本地，未 push，主线全量未跑） | 带宽不变量要求超出历史带的假设带 `outside_band.reason`，但判断层 `event_judgement.py` 的 `forecast_change` 词表被钉死为 `driver_ref / period_end / value / because` 四键（第 384–387 行），`revise_assumptions` 调用（第 1904 行）不传 `outside_band`。结果：大脑任何超出已申报区间的 `revise_forecast`（variant view 恰恰常在带外）在发布时被拒为 `unavailable`，且大脑无从得知要写什么 | 在 `event_judgement.py`：(a) 提示第 273 行后加一句：值若超出该公司已申报区间，须在 `forecast_change` 内加 `outside_band_reason: <一句话说明已申报区间为何不再约束>`，否则发布时拒绝；(b) 校验允许四键或四键 + `outside_band_reason`，reason 用 `_text` 截到 `MAX_BECAUSE_CHARS`，少于 3 个词拒绝；(c) `revise_assumptions` 的 change 字典在存在时带 `"outside_band": {"reason": ...}`。测试：`tests/test_event_judgement.py` `ForecastEffectTests` 加「reason 落到已发布 assumption 的 `outside_band.reason`」（用 `a_driver_and_period()`、`judge(...)` 返回体直接读 `forecast_change`，不是 `judged["judgement"]`）；`OutputContractTests` 加「一个词的 reason 被拒」。注意 harness 夹具历史点数少于 `MIN_BAND_POINTS`，带宽不变量在该夹具上 `not_applicable`，不要在这里断言 `unavailable`，带宽本身由 `test_economic_invariants.py` 覆盖。同样检查 `earnings_calibration.py` 与 `thesis_revision` 候选路径是否也需要携带该字段 | 已记录，未派 |
+| F2 | w4-economic-invariants 报告开放问题 1 | `segment_sum` 因 `company_model_inputs` 过滤掉分部行而恒为 `not_applicable` | 在 `company_model_forecast_cli.py` 发布处把 `sec_financials_normalise` 的分部行经 `statement_rows=` 传入 `publish`；加一条端到端测试：分部之和 ≠ 合并时拒绝 | 已记录，未派 |
+| F3 | w4-economic-invariants 报告开放问题 3 | 不变量拒绝理由已在 `overview()` / `company_model()` wire 上，`cockpit_control.html` 未渲染 | 在公司卡与模型页把 refusal 与 findings 渲染到「本该出现数字的位置」，不做单独的 checks 面板 | 已记录，未派 |
+| F4 | 我给七个 agent 的恢复消息 | 消息里写的 `pgrep -fc` 在 macOS 不支持 `-c` | 无需修代码；agent 自行改用 `pgrep -f ... \| wc -l`。记录以免误判为环境故障 | 已记录 |
+
 ## 附录 A：接线热点清单（Wave 0 要收掉的）
 
 | 文件 | 区域 | 谁会碰 |
