@@ -119,7 +119,7 @@ class WorkbookReadArtifact(list[dict[str, Any]]):
         super().__init__(dict(item) for item in cells)
         self.metadata = dict(metadata)
 MAX_LABEL_CHARS = 200
-MAX_FORMULA_CHARS = 2_000
+MAX_FORMULA_CHARS = 8_192
 
 _CELL_RE = re.compile(r"^[A-Z]{1,3}[1-9][0-9]{0,6}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -262,13 +262,13 @@ def _cell_label(
     for back in range(column_index - 1, -1, -1):
         candidate = row[back]
         if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()[:MAX_LABEL_CHARS]
+            return candidate.strip()
     for up in range(row_index - 1, -1, -1):
         above = values[up]
         if column_index < len(above):
             candidate = above[column_index]
             if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()[:MAX_LABEL_CHARS]
+                return candidate.strip()
     return ""
 
 
@@ -326,6 +326,7 @@ def read_workbook(path: str | Path, *, budget: WorkbookReadBudget | Mapping[str,
                     values_only=True,
                 )
             ]
+            calendar_rows = _calendar_rows(grid)
             for row_index, row in enumerate(grid):
                 for column_index, value in enumerate(row):
                     # Decide first, materialise second. A model sheet is mostly
@@ -337,11 +338,11 @@ def read_workbook(path: str | Path, *, budget: WorkbookReadBudget | Mapping[str,
                         formula_grid[row_index]
                     ):
                         raw_formula = formula_grid[row_index][column_index]
-                    formula = (
-                        raw_formula[:MAX_FORMULA_CHARS]
-                        if isinstance(raw_formula, str) and raw_formula.startswith("=")
-                        else ""
-                    )
+                    formula = raw_formula if isinstance(raw_formula, str) and raw_formula.startswith("=") else ""
+                    if len(formula) > MAX_FORMULA_CHARS:
+                        raise PriorModelError(
+                            f"formula {sheet.title}!R{row_index + 1}C{column_index + 1} "
+                            f"exceeds {MAX_FORMULA_CHARS} characters")
                     numeric = isinstance(value, (int, float, Decimal)) and not isinstance(
                         value, bool
                     )
@@ -350,7 +351,17 @@ def read_workbook(path: str | Path, *, budget: WorkbookReadBudget | Mapping[str,
                     cell = sheet.cell(row=row_index + 1, column=column_index + 1)
                     formula_cell = formula_sheet.cell(row=row_index + 1, column=column_index + 1)
                     address = str(cell.coordinate)
-                    label = _cell_label(grid, row_index, column_index)
+                    raw_label = _cell_label(grid, row_index, column_index)
+                    label = raw_label[:MAX_LABEL_CHARS]
+                    if len(raw_label) > MAX_LABEL_CHARS:
+                        truncations.append({"scope": "cell_projection", "sheet": sheet.title,
+                                            "cell": address, "reason": "label_chars",
+                                            "original_chars": len(raw_label)})
+                    raw_number_format = str(cell.number_format)
+                    if len(raw_number_format) > 200:
+                        truncations.append({"scope": "cell_projection", "sheet": sheet.title,
+                                            "cell": address, "reason": "number_format_chars",
+                                            "original_chars": len(raw_number_format)})
                     unit, unit_basis = guess_unit(
                         label=label, number_format=cell.number_format
                     )
@@ -365,10 +376,12 @@ def read_workbook(path: str | Path, *, budget: WorkbookReadBudget | Mapping[str,
                         "cell_role": ("external_formula" if "_xll." in formula or "[" in formula
                                       else "cross_sheet_formula" if formula and "!" in formula
                                       else "formula" if formula else "hardcoded_input"),
-                        "number_format": str(cell.number_format)[:200],
+                        "number_format": raw_number_format[:200],
                         "font_color": _font_color(formula_cell),
-                        "period": _period_label(grid, row_index, column_index),
-                        "period_status": _period_status(_period_label(grid, row_index, column_index)),
+                        "period": _period_label(calendar_rows, row_index, column_index),
+                        "period_status": _period_status(_period_label(calendar_rows, row_index, column_index)),
+                        "period_basis": ("calendar_axis" if _period_label(
+                            calendar_rows, row_index, column_index) is not None else None),
                         "source_type": "prior_human_formula" if formula else "prior_human_hardcode",
                     }
                     assumptions.append(entry)
@@ -413,15 +426,27 @@ def _font_color(cell: Any) -> str | None:
     return None
 
 
-def _period_label(values: Sequence[Sequence[Any]], row_index: int, column_index: int) -> str | None:
-    for up in range(row_index - 1, -1, -1):
-        row = values[up]
-        if column_index < len(row):
-            value = row[column_index]
-            if isinstance(value, (str, int)) and str(value).strip():
-                text = str(value).strip()
-                if re.search(r"(?:FY|CY|[1-4]Q)?\d{2,4}E?$", text):
-                    return text[:40]
+_PERIOD_RE = re.compile(
+    r"(?:(?:FY|CY)?(?:19|20|21)\d{2}|[1-4]Q(?:\d{2}|(?:19|20|21)\d{2}))[AE]?"
+)
+
+
+def _calendar_rows(values: Sequence[Sequence[Any]]) -> list[tuple[int, dict[int, str]]]:
+    axes = []
+    for index, row in enumerate(values):
+        tokens = {column: str(value).strip() for column, value in enumerate(row)
+                  if isinstance(value, (str, int)) and
+                  _PERIOD_RE.fullmatch(str(value).strip()) is not None}
+        if len(tokens) >= 2:
+            axes.append((index, tokens))
+    return axes
+
+
+def _period_label(calendar_rows: Sequence[tuple[int, Mapping[int, str]]],
+                  row_index: int, column_index: int) -> str | None:
+    for header_row, tokens in reversed(calendar_rows):
+        if header_row < row_index and column_index in tokens:
+            return tokens[column_index]
     return None
 
 
@@ -443,7 +468,8 @@ _ASSUMPTION_FIELDS = frozenset({
     "kind", "as_of",
 })
 _ASSUMPTION_FIELDS_V2 = _ASSUMPTION_FIELDS | frozenset({
-    "cell_role", "number_format", "font_color", "period", "period_status", "source_type",
+    "cell_role", "number_format", "font_color", "period", "period_status",
+    "period_basis", "source_type",
 })
 CELL_ROLES = frozenset({"external_formula", "cross_sheet_formula", "formula", "hardcoded_input"})
 PERIOD_STATUSES = frozenset({"forecast", "unknown"})
@@ -544,7 +570,7 @@ def normalize_assumption(raw: Any, *, model_ref: str, as_of: str, index: int,
     }
     if extended:
         for field in ("cell_role", "number_format", "font_color", "period",
-                      "period_status", "source_type"):
+                      "period_status", "period_basis", "source_type"):
             value = raw.get(field)
             if value is not None and not isinstance(value, str):
                 raise PriorModelError(f"{name}.{field} must be text or null")
@@ -553,6 +579,8 @@ def normalize_assumption(raw: Any, *, model_ref: str, as_of: str, index: int,
             raise PriorModelError(f"{name}.cell_role is not recognized")
         if result["period_status"] not in PERIOD_STATUSES:
             raise PriorModelError(f"{name}.period_status is not recognized")
+        if result["period_basis"] not in {None, "calendar_axis"}:
+            raise PriorModelError(f"{name}.period_basis is not recognized")
         if result["source_type"] not in SOURCE_TYPES:
             raise PriorModelError(f"{name}.source_type is not recognized")
     return result

@@ -49,6 +49,8 @@ from .prior_research_core import (
     enumerate_documents,
     prior_research_identity,
     read_document,
+    read_document_archive,
+    read_document_artifact,
 )
 from .raw_spool import RawSpool
 from .store import canonical_json
@@ -120,6 +122,23 @@ def _spool_bytes(spool: RawSpool, payload: bytes) -> dict[str, Any]:
     return sink.finalize().to_dict()
 
 
+def _archive_bundle(*, corpus_root: str | Path, document_id: str,
+                    header: dict[str, Any], spool: RawSpool,
+                    output_dir: Path) -> dict[str, Any]:
+    reread_header, _text, structure = read_document_artifact(corpus_root, document_id)
+    if reread_header["file_sha256"] != header["file_sha256"]:
+        raise PriorResearchRunError("document changed before artifact archival")
+    source = _spool_bytes(spool, read_document_archive(
+        corpus_root, document_id, expected_sha256=header["file_sha256"]))
+    body = {"schema_version": "prior-import-artifact-bundle-0.1",
+            "document_ref": document_id, "source_file_sha256": header["file_sha256"],
+            "source_object": source, "structure": structure}
+    bundle = {**body, "content_hash": hashlib.sha256(
+        canonical_json(body).encode("utf-8")).hexdigest()}
+    _write_owner_only(output_dir / "artifact-manifest.json", bundle)
+    return bundle
+
+
 def _subject_tickers(company: str) -> list[str]:
     """The company folder as a ticker, when it is one.
 
@@ -157,6 +176,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "governance_ref": None,
         "governance_hash": None,
         "artifact": None,
+        "source_artifact": None,
+        "artifact_manifest_hash": None,
         "manifest_ref": None,
         "manifest_hash": None,
         "document_count": 0,
@@ -164,6 +185,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "refused": [],
         "observation": None,
     }
+    archive_header: dict[str, Any] | None = None
     try:
         governance = _load_governance(
             Path(args.governance).expanduser().resolve(), args.operation
@@ -204,6 +226,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             summary["refused"] = refused
         else:
             header, text = read_document(args.corpus_root, args.document_id)
+            archive_header = header
             artifact = _spool_bytes(
                 spool, canonical_json({"document": header}).encode("utf-8")
             )
@@ -247,6 +270,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         from .authority_resolver import _schema_matches
 
         _schema_matches(wire, _output_schema(args.operation), "output")
+        if archive_header is not None:
+            bundle = _archive_bundle(
+                corpus_root=args.corpus_root, document_id=args.document_id,
+                header=archive_header, spool=spool, output_dir=summary_dir)
+            summary["source_artifact"] = bundle["source_object"]
+            summary["artifact_manifest_hash"] = bundle["content_hash"]
         summary["status"] = "succeeded"
         summary["observation"] = wire
     except (PriorResearchRunError, PriorResearchError, ConnectorGovernanceError) as exc:
@@ -283,6 +312,14 @@ def import_screen(args: argparse.Namespace) -> dict[str, Any]:
             f"{args.document_id} is filed as {header['kind']!r}; only a document "
             "the manifest calls an initial_screen becomes version zero"
         )
+    artifact_dir = getattr(args, "artifact_dir", None)
+    bundle = None
+    if artifact_dir is not None:
+        output_dir = _secure_dir(Path(artifact_dir).expanduser().resolve())
+        bundle = _archive_bundle(corpus_root=args.corpus_root,
+                                 document_id=args.document_id, header=header,
+                                 spool=_spool(output_dir, output_dir),
+                                 output_dir=output_dir)
     store = DaltonStore(str(Path(args.db).expanduser().resolve()))
     try:
         missions = CoverageMissionAuthority(store)
@@ -309,6 +346,7 @@ def import_screen(args: argparse.Namespace) -> dict[str, Any]:
         "version_ref": record["id"], "version": record["version"],
         "company_ref": args.company_ref, "document_ref": header["document_id"],
         "as_of": header["as_of"],
+        "artifact_manifest_hash": None if bundle is None else bundle["content_hash"],
     }
 
 
@@ -329,6 +367,14 @@ def import_model(args: argparse.Namespace) -> dict[str, Any]:
             f"{args.document_id} is filed as {header['kind']!r}; only a document "
             "the manifest calls a model_excel becomes a PriorModelVersion"
         )
+    artifact_dir = getattr(args, "artifact_dir", None)
+    bundle = None
+    if artifact_dir is not None:
+        output_dir = _secure_dir(Path(artifact_dir).expanduser().resolve())
+        bundle = _archive_bundle(corpus_root=args.corpus_root,
+                                 document_id=args.document_id, header=header,
+                                 spool=_spool(output_dir, output_dir),
+                                 output_dir=output_dir)
     root = Path(args.corpus_root).expanduser().resolve()
     workbook = root / header["company"] / header["relative_path"]
     budget = None
@@ -357,6 +403,7 @@ def import_model(args: argparse.Namespace) -> dict[str, Any]:
         "version_ref": record["id"], "version": record["version"],
         "company_ref": args.company_ref, "document_ref": header["document_id"],
         "as_of": header["as_of"], "assumption_count": record["assumption_count"],
+        "artifact_manifest_hash": None if bundle is None else bundle["content_hash"],
     }
 
 
@@ -371,6 +418,8 @@ def build_import_parser() -> argparse.ArgumentParser:
     parser.add_argument("--company-ref", required=True)
     parser.add_argument("--model-import-budget", type=Path, default=None,
                         help="optional JSON limits; every applied truncation is recorded")
+    parser.add_argument("--artifact-dir", type=Path, default=None,
+                        help="owner-only source archive and structure manifest directory")
     parser.add_argument(
         "--actor-ref", default="human:coverage-owner",
         help="who is saying this is the fund's earlier view of this company",

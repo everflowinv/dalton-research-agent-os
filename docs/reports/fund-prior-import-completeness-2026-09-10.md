@@ -16,7 +16,7 @@ New imports publish PriorModelVersion schema 0.2 with:
 - workbook sheet order, visibility, dimensions, and imported extent;
 - exact formula-map hash and explicit completeness/truncation metadata;
 - formula text, number format, font color, cell role, period label, period
-  status, and source type per imported numeric/formula cell;
+  status, calendar-axis basis, and source type per imported numeric/formula cell;
 - the existing `prior_human` kind for every cell.
 
 Only an explicit `E` period suffix is classified as forecast. Other dates remain
@@ -46,6 +46,17 @@ Embedded objects are never opened or executed. External relationship targets are
 hashed and redacted. The projection states its losses: layout, styles, and text
 rendered inside chart images remain outside the text reader.
 
+Successful governed `get_document` runs also spool the original source archive
+into the existing owner-only content-addressed raw spool and write an
+`artifact-manifest.json` sidecar beside the acquisition manifest. Owner-run
+screen/model imports can request the same durable bundle with `--artifact-dir`.
+The bundle binds the original file hash, retrievable spool locator, and structure
+manifest hash. The connector's closed observation wire is unchanged.
+
+When the existing text ceiling is crossed, the searchable text becomes an
+explicitly marked excerpt. The artifact manifest reports the character boundary,
+while the complete original bytes remain retrievable from the owner-only spool.
+
 ## Private sample acceptance
 
 The Desktop workbook was read locally without refresh or link execution. The new
@@ -63,10 +74,13 @@ repository.
 
 `PYTHONPATH=src python3 -m unittest tests.test_prior_import_completeness tests.test_prior_research`
 
-Result: 75 tests passed. Coverage includes complete late-sheet import, explicit
+Result: 79 tests passed. Coverage includes complete late-sheet import, explicit
 budget truncation, style/period/source classification, v0.1 compatibility,
 v0.2 replay idempotency, unknown provenance, DOCX body/asset ordering, and the
-additive document artifact read path.
+additive document artifact read path. It also covers a governed DOCX acquisition
+through source archival and reload, redacted external relationships,
+calendar-axis disambiguation, and formulas longer than the former 2,000-character
+projection.
 
 ## Exporter contract
 

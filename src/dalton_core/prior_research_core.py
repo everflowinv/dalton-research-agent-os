@@ -125,6 +125,7 @@ MANIFEST_ENTRY_OPTIONAL: frozenset[str] = frozenset({"author", "source_note"})
 MAX_DOCUMENTS = 500
 MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 MAX_TEXT_CHARS = 600_000
+TEXT_TRUNCATION_MARKER = "\n… (document text truncated at configured ceiling)"
 MAX_PDF_PAGES = 400
 #: A prior model can be large; this bounds what is read as *text*, not what a
 #: workbook import reads cell by cell.
@@ -647,9 +648,8 @@ def read_body(path: Path, *, relative_path: str) -> tuple[str, str, str, bytes]:
     else:
         text, renderer = _xlsx_text(path)
     if len(text) > MAX_TEXT_CHARS:
-        raise PriorResearchRefusal(
-            f"this document renders to more than {MAX_TEXT_CHARS} characters"
-        )
+        keep = MAX_TEXT_CHARS - len(TEXT_TRUNCATION_MARKER)
+        text = text[:keep] + TEXT_TRUNCATION_MARKER
     return text, doc_format, renderer, raw
 
 
@@ -815,11 +815,14 @@ def read_document_artifact(
     header, text = read_document(corpus_root, document_id)
     root = Path(corpus_root).expanduser().resolve()
     path = _resolve(_company_dir(root, header["company"]), header["relative_path"])
+    text_complete = not text.endswith(TEXT_TRUNCATION_MARKER)
     if header["doc_format"] == "docx":
         from .prior_import_assets import docx_artifact_manifest
         artifact = docx_artifact_manifest(path.read_bytes())
         artifact["text_projection"] = {
-            "complete": True, "preserves": ["ordered_paragraph_and_table_text"],
+            "complete": text_complete,
+            "truncated_at_chars": None if text_complete else MAX_TEXT_CHARS,
+            "preserves": ["ordered_paragraph_and_table_text"],
             "omits": ["layout", "styles", "rendered_chart_text"],
         }
     elif header["doc_format"] == "xlsx":
@@ -830,9 +833,10 @@ def read_document_artifact(
             if sheet["max_row"] > MAX_SHEET_ROWS or sheet["max_column"] > MAX_SHEET_COLUMNS
         ]
         artifact["text_projection"] = {
-            "complete": not truncated_sheets,
+            "complete": not truncated_sheets and text_complete,
             "row_limit": MAX_SHEET_ROWS, "column_limit": MAX_SHEET_COLUMNS,
             "truncated_sheets": truncated_sheets,
+            "truncated_at_chars": None if text_complete else MAX_TEXT_CHARS,
             "preserves": ["cached_values", "sheet_order"],
             "omits": ["formulas", "styles", "charts", "external_link_targets"],
         }
@@ -842,6 +846,19 @@ def read_document_artifact(
                     "text_projection": {"complete": True, "omits": []}}
     artifact["file_sha256"] = header["file_sha256"]
     return header, text, artifact
+
+
+def read_document_archive(corpus_root: str | Path, document_id: str, *,
+                          expected_sha256: str | None = None) -> bytes:
+    """Original approved corpus bytes for owner-only content-addressed storage."""
+
+    header, _ = read_document(corpus_root, document_id)
+    root = Path(corpus_root).expanduser().resolve()
+    path = _resolve(_company_dir(root, header["company"]), header["relative_path"])
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != (expected_sha256 or header["file_sha256"]):
+        raise PriorResearchRefusal("document changed between read and archive")
+    return raw
 
 
 def age_in_months(as_of: str, *, now: date) -> int:
@@ -876,6 +893,7 @@ __all__ = [
     "LIST_OPERATION",
     "MANIFEST_NAME",
     "MAX_DOCUMENTS",
+    "TEXT_TRUNCATION_MARKER",
     "DOC_FORMATS",
     "FORMAT_BY_SUFFIX",
     "OPERATIONS",
@@ -907,4 +925,5 @@ __all__ = [
     "read_body",
     "read_document",
     "read_document_artifact",
+    "read_document_archive",
 ]

@@ -81,17 +81,28 @@ def xlsx_artifact_manifest(path: str | Path) -> dict[str, Any]:
                    "freeze_panes": None if sheet.freeze_panes is None else str(sheet.freeze_panes)}
                   for sheet in workbook.worksheets]
         cells = []
+        losses = []
         formula_identity = []
         for sheet in workbook.worksheets:
             values = list(sheet.iter_rows(values_only=True))
+            calendar_rows = _calendar_rows(values)
             for row_index, row in enumerate(values):
                 for column_index, value in enumerate(row):
                     formula = value if isinstance(value, str) and value.startswith("=") else ""
                     if not formula and not isinstance(value, (int, float)):
                         continue
                     cell = sheet.cell(row_index + 1, column_index + 1)
-                    label = _nearest_label(values, row_index, column_index)
-                    period = _period(values, row_index, column_index)
+                    raw_label = _nearest_label(values, row_index, column_index)
+                    label = raw_label[:200]
+                    raw_number_format = str(cell.number_format)
+                    if len(raw_label) > 200:
+                        losses.append({"sheet": sheet.title, "cell": cell.coordinate,
+                                       "reason": "label_chars", "original_chars": len(raw_label)})
+                    if len(raw_number_format) > 200:
+                        losses.append({"sheet": sheet.title, "cell": cell.coordinate,
+                                       "reason": "number_format_chars",
+                                       "original_chars": len(raw_number_format)})
+                    period = _period(calendar_rows, row_index, column_index)
                     role = ("external_formula" if "_xll." in formula or "[" in formula
                             else "cross_sheet_formula" if formula and "!" in formula
                             else "formula" if formula else "hardcoded_input")
@@ -99,18 +110,19 @@ def xlsx_artifact_manifest(path: str | Path) -> dict[str, Any]:
                     cells.append({"sheet": sheet.title, "cell": cell.coordinate,
                                   "label": label, "formula": formula, "unit": unit,
                                   "unit_basis": basis, "cell_role": role,
-                                  "number_format": str(cell.number_format)[:200],
+                                  "number_format": raw_number_format[:200],
                                   "font_color": _color(cell), "period": period,
                                   "period_status": "forecast" if period and period.endswith("E") else "unknown",
+                                  "period_basis": "calendar_axis" if period else None,
                                   "source_type": "prior_human_formula" if formula else "prior_human_hardcode"})
                     if formula:
                         formula_identity.append({"sheet": sheet.title, "cell": cell.coordinate,
                                                  "formula": formula})
         result = {"schema_version": "prior-office-artifact-0.1", "format": "xlsx",
                   "sheets": sheets, "external_link_count": len(workbook._external_links),
-                  "macro_present": bool(getattr(workbook, "vba_archive", None)),
+                  "macro_present": _macro_present(path),
                   "cells": cells,
-                  "import_metadata": {"complete": True, "truncations": [],
+                  "import_metadata": {"complete": not losses, "truncations": losses,
                                       "formula_map_hash": content_hash(formula_identity)}}
     finally:
         workbook.close()
@@ -122,20 +134,37 @@ def _nearest_label(values: list[tuple[Any, ...]], row: int, column: int) -> str:
     for back in range(column - 1, -1, -1):
         value = values[row][back]
         if isinstance(value, str) and value.strip() and not value.startswith("="):
-            return value.strip()[:200]
+            return value.strip()
     return ""
 
 
-def _period(values: list[tuple[Any, ...]], row: int, column: int) -> str | None:
-    for up in range(row - 1, -1, -1):
-        if column >= len(values[up]):
-            continue
-        value = values[up][column]
-        if isinstance(value, (str, int)):
-            text = str(value).strip()
-            if re.search(r"(?:FY|CY|[1-4]Q)?\d{2,4}E?$", text):
-                return text[:40]
+_PERIOD_RE = re.compile(
+    r"(?:(?:FY|CY)?(?:19|20|21)\d{2}|[1-4]Q(?:\d{2}|(?:19|20|21)\d{2}))[AE]?"
+)
+
+
+def _calendar_rows(values: list[tuple[Any, ...]]) -> list[tuple[int, dict[int, str]]]:
+    axes = []
+    for index, row in enumerate(values):
+        tokens = {column: str(value).strip() for column, value in enumerate(row)
+                  if isinstance(value, (str, int)) and
+                  _PERIOD_RE.fullmatch(str(value).strip()) is not None}
+        if len(tokens) >= 2:
+            axes.append((index, tokens))
+    return axes
+
+
+def _period(calendar_rows: list[tuple[int, dict[int, str]]], row: int,
+            column: int) -> str | None:
+    for header_row, tokens in reversed(calendar_rows):
+        if header_row < row and column in tokens:
+            return tokens[column]
     return None
+
+
+def _macro_present(path: str | Path) -> bool:
+    with zipfile.ZipFile(path) as archive:
+        return any(name.casefold().endswith("vbaproject.bin") for name in archive.namelist())
 
 
 def _unit(label: str, number_format: str) -> tuple[str | None, str]:
