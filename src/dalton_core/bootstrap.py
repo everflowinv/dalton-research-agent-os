@@ -62,6 +62,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("claim_retirement_schema.sql", None),
     ("company_dossier_schema.sql", None),
     ("connector_schema.sql", None),
+    ("conviction_call_schema.sql", None),
     ("coverage_mission_schema.sql", None),
     ("credential_authority_schema.sql", None),
     ("debate_map_schema.sql", None),
