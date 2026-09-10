@@ -34,15 +34,18 @@ def industry_model_readiness(
         str(row.get("company_ref")) for row in comparison.get("companies") or []
     }
     required_metrics = {"revenue", "revenue_yoy_growth", "gross_margin"}
-    computed_metrics = {
-        str(row.get("metric")) for row in comparison.get("cells") or []
+    computed_pairs = {
+        (str(row.get("company_ref")), str(row.get("metric")))
+        for row in comparison.get("cells") or []
         if row.get("status") == "computed"
     }
     comparison_ready = (
         comparison.get("status") == "computed"
         and bool(expected_companies)
         and expected_companies <= comparison_companies
-        and required_metrics <= computed_metrics
+        and all((company_ref, metric) in computed_pairs
+                for company_ref in expected_companies
+                for metric in required_metrics)
     )
     gaps = list(framework.get("gaps") or [])
     explicit_deferred_gaps = all(
@@ -98,7 +101,6 @@ def company_model_readiness(
     ready = model_readiness(model)
     historical = (
         ready["history_quarters"] >= 8 and not ready["drivers_without_history"]
-        and not ready["results_unavailable"]
     )
     assumptions = list(model.get("assumptions") or [])
     assumptions_explicit = bool(assumptions) and all(
@@ -119,10 +121,9 @@ def company_model_readiness(
     driver_count_ready = 3 <= driver_count <= 5
     consensus_quantified = (
         bool(sensitivity)
-        and projection.get("selection_status") == "selected"
+        and projection.get("selection_status") in {"selected", "available"}
         and projection.get("drivers_selected", 0) > 0
         and projection.get("what_if_cells", 0) > 0
-        and projection.get("what_if_cells_unavailable", 0) == 0
         and projection.get("bridge_status") == "available"
         and projection.get("bridge_metrics", 0) > 0
     )

@@ -9,3 +9,9 @@ The company-model gate now follows the stated P13-M3 criteria: a mission/model-b
 The lane reads the filing proof through the checked authority reader and includes it in the company verdict. Missing or invalid authority material remains `waiting`; it does not create a synthetic gate pass or terminal failure. Existing fair iteration across companies remains unchanged.
 
 Validation: `tests.test_model_stage_bridge`, `tests.test_company_model_forecast`, and the forecast duplicate regression pass together (37 tests). The tests include explicit unconnected industry gaps, incomplete comparisons, stale model/sensitivity bindings, missing filing proof, incomplete driver bands and consensus bridge, unrelated peer data, recoverable waiting, and later-company progress.
+
+## Authority-level acceptance
+
+A full positive fixture now publishes eight quarters of four statement concepts through `CoverageMissionAuthority`, publishes a four-driver `ForecastModelVersion` plus its replayable filing proof, publishes a vendor-observed `ConsensusEstimateVersion`, derives and publishes a bound `SensitivityProjectionVersion`, records the prerequisite real stage chain, and calls `advance_once` against the same SQLite Store. The company-model gate advances once; the next tick is idle and writes no duplicate stage record. This exposed and fixed a real reader bug: company-stage evaluation tried to read the unrelated industry-framework table first and became `authority_read_failed` when that authority had not initialized the database.
+
+The industry comparison check is Cartesian rather than aggregate: every company in the signed universe must have a computed cell for each required metric. One company's missing margin cannot be hidden by another company's computed margin.

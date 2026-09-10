@@ -205,7 +205,8 @@ class ModelStageReadinessTests(unittest.TestCase):
             "cross_company_comparison": {
                 "status": "computed", "comparability_notes": ["filed basis"],
                 "companies": [{"company_ref": "company:a"}],
-                "cells": [{"metric": metric, "status": "computed"} for metric in
+                "cells": [{"company_ref": "company:a", "metric": metric,
+                           "status": "computed"} for metric in
                           ("revenue", "revenue_yoy_growth", "gross_margin")]},
             "gaps": [{"gap_ref": "gap:high-frequency-demand", "status": "open",
                       "candidate_sources": [{"source_ref": "source:not-connected"}]},
@@ -214,6 +215,13 @@ class ModelStageReadinessTests(unittest.TestCase):
         }
         self.assertTrue(industry_model_readiness(
             framework, mission=mission())["passed"])
+        framework["cross_company_comparison"]["cells"] = [
+            row for row in framework["cross_company_comparison"]["cells"]
+            if row["metric"] != "gross_margin"]
+        refused = industry_model_readiness(framework, mission=mission())
+        self.assertFalse(refused["passed"])
+        self.assertIn("five_company_revenue_growth_margin_comparison",
+                      refused["reasons"])
 
     def test_waiting_readiness_recovers_without_terminal_gate_failure(self):
         stages = {"company:a": {"current_stage": "deep_insight_gate",

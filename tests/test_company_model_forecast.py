@@ -39,6 +39,8 @@ from dalton_core.company_model_forecast_cli import choose_company, run_model_for
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.company_model_spec import spec_from_response
 from dalton_core.company_model_state import build_company_model_state
+from dalton_core.consensus_bridge import build_bridge, read_consensus
+from dalton_core.consensus_estimate import ConsensusEstimateAuthority
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.forecast_reconciliation import ForecastReconciliationAuthority
 from dalton_core.model_forecast import (
@@ -54,6 +56,11 @@ from dalton_core.model_forecast_driver import (
     build_forecast_model,
 )
 from dalton_core.economic_invariants import EconomicInvariantRefused
+from dalton_core.forecast_sensitivity import (
+    SensitivityProjectionAuthority, build_projection,
+)
+from dalton_core.model_stage_readiness import company_model_readiness
+from dalton_core.mission_model_stage_lane import advance_once
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_forecast_reconciliation import (
@@ -477,6 +484,85 @@ class LaneStateTests(unittest.TestCase):
         stored = ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
         proof = ForecastModelAuthority(self.store).filing_proof(stored["id"])
         self.assertEqual(proof["invariant_report"]["status"], "available")
+
+    def test_real_model_proof_consensus_and_sensitivity_satisfy_stage_gate(self):
+        # Add the older four quarters so the model has the signed two-year window.
+        older = (("2024-06-01", "2024-08-31"),
+                 ("2024-09-01", "2024-11-30"),
+                 ("2024-12-01", "2025-02-28"),
+                 ("2025-03-01", "2025-05-31"))
+        self.file_quarters(older, {
+            REVENUE_CONCEPT: ["680000000", "750000000", "830000000", "910000000"],
+            COST_CONCEPT: ["530000000", "590000000", "640000000", "710000000"],
+            "us-gaap:SellingGeneralAndAdministrativeExpense":
+                ["70000000", "76000000", "82000000", "88000000"],
+            "us-gaap:IncomeTaxExpenseBenefit":
+                ["18000000", "20000000", "22000000", "24000000"],
+        })
+        current = self.missions.latest_company_model_spec(ACN)
+        state = build_company_model_state(self.missions, ACN, ticker="ACN")
+        body = {"schema_version": "0.1", **{key: current[key] for key in (
+            "assessment", "revenue_drivers", "expense_lines", "forecast_statements",
+            "operating_metrics", "horizon")}}
+        body["expense_lines"] = [*body["expense_lines"],
+            {"ref": "sga", "label": "SG&A",
+             "basis_concept": "us-gaap:SellingGeneralAndAdministrativeExpense",
+             "behaviour": "semi_variable", "driver_ref": None,
+             "because": "Selling expense follows scale."},
+            {"ref": "tax", "label": "Tax",
+             "basis_concept": "us-gaap:IncomeTaxExpenseBenefit",
+             "behaviour": "variable_with_revenue", "driver_ref": None,
+             "because": "Tax follows taxable income."}]
+        specification = self.missions.record_company_model_spec(
+            spec_from_response(state, body, decided_by="automation:coverage-mission"),
+            mission_version_ref=self.mission["id"])
+        outcome = run_company_forecast(
+            self.missions, specification, models=ForecastModelAuthority(self.store),
+            mission_version_ref=self.mission["id"])
+        model_record = outcome["record"]
+        proof = ForecastModelAuthority(self.store).filing_proof(model_record["id"])
+
+        from tests.test_consensus_estimate import (
+            ACN_CALENDAR, ARTIFACT, CAPTURED, GOVERNANCE, GOVERNANCE_HASH,
+            INVOCATION, wire,
+        )
+        ConsensusEstimateAuthority(self.store).publish_consensus(
+            company_ref=ACN, wire=wire(), **ACN_CALENDAR,
+            invocation_ref=INVOCATION, artifact_hash=ARTIFACT,
+            governance_ref=GOVERNANCE, governance_hash=GOVERNANCE_HASH,
+            captured_at=CAPTURED)
+        built = build_bridge(model_record, read_consensus(self.store, ACN))
+        projection = SensitivityProjectionAuthority(self.store).publish(
+            build_projection(model_record, bridge=built["bridge"],
+                             bridge_detail=built["detail"],
+                             mission_version_ref=self.mission["id"]))
+        verdict = company_model_readiness(
+            model_record, projection, mission=self.mission,
+            company_ref=ACN, filing_proof=proof)
+        self.assertTrue(verdict["passed"], verdict)
+        for stage_ref, status, actor in (
+            ("initial_screen", "entered", "automation:coverage-mission"),
+            ("initial_screen", "gate_passed", "automation:coverage-mission"),
+            ("deep_insight_gate", "entered", "automation:coverage-mission"),
+            ("deep_insight_gate", "gate_passed", OWNER),
+            ("industry_model", "entered", "automation:coverage-mission"),
+            ("industry_model", "gate_passed", "automation:coverage-mission"),
+        ):
+            self.missions.record_stage(
+                mission_version_ref=self.mission["id"],
+                mission_version_hash=self.mission["content_hash"],
+                company_ref=ACN, stage_ref=stage_ref, status=status,
+                evidence_refs=[model_record["id"]], rationale="real authority fixture",
+                actor_ref=actor,
+                idempotency_key=f"real-stage:{stage_ref}:{status}")
+        advanced = advance_once(self.missions, self.store.connection, self.mission)
+        self.assertEqual((advanced["status"], advanced["stage_ref"]),
+                         ("advanced", "company_model"), advanced)
+        count = len(self.missions.stage_records(self.mission["id"], company_ref=ACN))
+        self.assertEqual(advance_once(
+            self.missions, self.store.connection, self.mission)["status"], "idle")
+        self.assertEqual(len(self.missions.stage_records(
+            self.mission["id"], company_ref=ACN)), count)
 
     def test_filing_proof_hash_tamper_fails_closed(self):
         self.child()

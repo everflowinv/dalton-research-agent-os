@@ -27,9 +27,9 @@ def _evaluate(connection: Any, mission: Mapping[str, Any], company_ref: str,
     try:
         from .industry_framework import IndustryFrameworkAuthority
 
-        framework = _latest(connection, IndustryFrameworkAuthority,
-                            str(mission["industry_ref"]))
         if stage_ref == "industry_model":
+            framework = _latest(connection, IndustryFrameworkAuthority,
+                                str(mission["industry_ref"]))
             from .tracking_cadence import load_policy
 
             cadence_keys = frozenset(load_policy()["cadences"])
@@ -44,9 +44,7 @@ def _evaluate(connection: Any, mission: Mapping[str, Any], company_ref: str,
                  _reader(connection, ForecastModelAuthority).filing_proof(model["id"]))
         return company_model_readiness(model, sensitivity, mission=mission,
                                        company_ref=company_ref,
-                                       filing_proof=proof,
-                                       peer_comparison=(framework or {}).get(
-                                           "cross_company_comparison"))
+                                       filing_proof=proof)
     except Exception as exc:
         reason = f"authority_read_failed:{type(exc).__name__}:{exc}"
         return {"passed": False, "checks": [], "reasons": [reason],
