@@ -57,13 +57,22 @@ def default_call_budget(purpose: str, *,
                 or wire.get("schema_version") != "0.1"
                 or not isinstance(wire.get("purposes"), Mapping)):
             raise CallBudgetError("packaged call budget defaults have an invalid shape")
-        base = _checked(wire["defaults"], "packaged defaults")
+        packaged = _checked(wire["defaults"], "packaged defaults")
         for key, value in wire["purposes"].items():
             if not isinstance(key, str) or not _PURPOSE.fullmatch(key):
                 raise CallBudgetError("packaged purpose keys must be canonical tokens")
             _checked(value, f"packaged purposes.{key}")
-        base.update(_checked(wire["purposes"].get(purpose, {}),
-                             f"packaged purposes.{purpose}"))
+        if purpose in wire["purposes"]:
+            base = packaged
+            base.update(_checked(wire["purposes"][purpose],
+                                 f"packaged purposes.{purpose}"))
+        elif defaults is not None:
+            # An unlisted existing caller remains authoritative for its own
+            # legacy defaults. The catalog base is for read-only discovery,
+            # not a reason to silently change a runtime contract.
+            base = _checked(defaults, "defaults")
+        else:
+            base = packaged
     elif defaults is not None:
         base = _checked(defaults, "defaults")
     else:

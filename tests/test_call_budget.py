@@ -56,6 +56,16 @@ class CallBudgetTests(unittest.TestCase):
         self.assertEqual(validate_budget_overrides({"max_cost_usd": 0.2}),
                          {"max_cost_usd": 0.2})
 
+    def test_unlisted_purpose_keeps_its_callers_legacy_defaults(self):
+        self.assertEqual(default_call_budget("unlisted_runtime", defaults=DEFAULTS),
+                         DEFAULTS)
+
+    def test_catalogued_event_budget_replaces_caller_legacy_defaults(self):
+        self.assertEqual(default_call_budget("event_judgement", defaults=DEFAULTS), {
+            "max_input_tokens": 60_000, "max_output_tokens": 1_500,
+            "max_cost_usd": 1.0, "timeout_seconds": 180,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()
