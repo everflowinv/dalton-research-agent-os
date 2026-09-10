@@ -237,12 +237,12 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
    `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
 10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
 11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
-14. **每次 live 事故必须产出一条测试或一条 policy 检查**（Chem 复盘 §7.5 的做法，我们已在做，写成规则）。
 13. **演练必须 fail-closed，且不得以能解析到 live 根目录的配置起 driver**（09-10 第二次复演：前置步骤失败后脚本继续，
     用未改写的 `service.json` 对 live Core 跑了一个 tick；写入被 writer 拒绝，唯一实际写入是 C2 tick 账本的一个文件，已隔离到
     /tmp。修法：前置失败即中止；driver 配置里任何路径不在临时根下即拒绝；复演时 HOME 指向临时根）。
 12. **自动化冲突解决只允许用于「两边各追加一行」的字典 / 列表 / 元组条目**，且解决后必须先 `python -c "import <module>"`
     再提交（09-10 一次「两边都保留」把嵌套字面量的闭合括号吃掉，主线无法解析，被 P13-M3 agent 发现）。
+14. **每次 live 事故必须产出一条测试或一条 policy 检查**（Chem 复盘 §7.5 的做法，我们已在做，写成规则）。
 
 ## 5. 主 agent 的集成流程
 
@@ -293,6 +293,15 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 下午 | P12e 合入（5,313 项通过，已 push）；prior-research 与 P12e 在 `mission_deliverable.py` 冲突，作者调和后合入（既有资料作 `internal_prior` 来源；旧 screen 为 v0；`PriorModelVersion`）+ 集成：`DISCOVERY_SOURCES` 行、`[prior-models]` extra、撤 S1 针脚。复演 2 因脚本 fail-open 碰到 live 目录，唯一实际写入（tick 账本文件）已隔离，规则 13 已记；复演 agent 加固后重跑。model-selection 开发中 | 进行中 |
 
 ---
+
+### 6b. W4：Chem 复盘衍生切片（09-10 派出，见 `chem-retrospective-implications-v1.0-2026-09-10.md` §5）
+
+| 切片 | 内容 | 状态 |
+| --- | --- | --- |
+| w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 派出 |
+| w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 派出 |
+| w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
+| w4-failure-classes | lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
 
 ## 附录 A：接线热点清单（Wave 0 要收掉的）
 
