@@ -276,14 +276,15 @@ class FakeLauncher:
         self.tickets = {}
         self.conflict = False
 
-    def start(self, *, company_ref, claim_version_refs):
+    def start(self, *, company_ref, claim_version_refs, control_key=None):
         from dalton_core.lane_child_launcher import LaneChildConflict
 
         if self.conflict:
             raise LaneChildConflict("busy")
         digest = batch_digest(company_ref, claim_version_refs)
         ticket = {
-            "id": f"claim-index-run:{digest}", "company_ref": company_ref,
+            "id": f"claim-index-run:{digest}:{control_key}", "company_ref": company_ref,
+            "control_key": control_key,
             "batch_digest": digest, "status": "running",
         }
         self.started.append(ticket)
@@ -331,9 +332,8 @@ class LaneCoordinatorTests(unittest.TestCase):
         second = self.coordinator.dispatch_once()
         self.assertEqual(second["settled"], {"status": "running",
                                              "ticket_ref": first["ticket_ref"]})
-        self.assertEqual(len(self.launcher.started), 2)
-        # The launcher itself is the one-at-a-time guard; the coordinator's job
-        # is to settle, and a settled ticket is what lets the next batch move.
+        self.assertEqual(len(self.launcher.started), 1)
+        # Preserve the open ticket through a mission change; settle it before retrying.
         self.launcher.settle(first["ticket_ref"])
         third = self.coordinator.dispatch_once()
         self.assertEqual(third["settled"]["index_status"], "tagged")
@@ -355,9 +355,10 @@ class LaneCoordinatorTests(unittest.TestCase):
         self.harness.fixture.add_claim("acn-1", subject_ref=ACN)
         first = self.coordinator.dispatch_once()
         self.launcher.settle(first["ticket_ref"], index_status="busy")
-        self.coordinator.dispatch_once()
+        retry = self.coordinator.dispatch_once()
+        self.assertEqual(retry["status"], "launched")
         again = self.coordinator.dispatch_once()
-        self.assertEqual(again["status"], "launched")
+        self.assertEqual(again["status"], "running")
 
     def test_dependency_failure_retries_the_same_batch_as_a_probe(self):
         self.harness.fixture.add_claim("acn-dependency", subject_ref=ACN)
@@ -368,6 +369,23 @@ class LaneCoordinatorTests(unittest.TestCase):
         self.assertEqual(probe["batch_digest"], first["batch_digest"])
         self.assertEqual(probe["settled"]["failure"]["failure_class"],
                          "dependency_unavailable")
+
+    def test_old_permission_refusal_settles_under_launch_controls(self):
+        self.harness.fixture.add_claim("acn-old-permission", subject_ref=ACN)
+        first = self.coordinator.dispatch_once()
+        old_control = self.launcher.tickets[first["ticket_ref"]]["control_key"]
+        self.harness.mission = {**self.harness.mission,
+                                "id": "coverage-mission-version:test:new",
+                                "content_hash": "f" * 64}
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "running")
+        self.launcher.settle(first["ticket_ref"], index_status="not_authorized")
+        retry = self.coordinator.dispatch_once()
+        self.assertEqual(retry["status"], "launched")
+        self.assertNotEqual(retry["ticket_ref"], first["ticket_ref"])
+        self.assertNotEqual(self.launcher.tickets[retry["ticket_ref"]]["control_key"], old_control)
+        self.assertIsNone(self.coordinator.budget.blocked(old_control))
+        self.launcher.settle(retry["ticket_ref"], index_status="not_authorized")
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
 
     def test_a_mission_that_is_not_there_yet_is_unconfigured_not_a_crash(self):
         coordinator = MissionClaimIndexLaneCoordinator(
@@ -388,6 +406,18 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(one), 24)
         self.assertNotEqual(one, batch_digest(ACN, ["a", "b", "c"]))
         self.assertNotEqual(one, batch_digest(EPAM, ["a", "b"]))
+
+    def test_launch_control_change_bypasses_only_the_old_ticket_identity(self):
+        from unittest.mock import patch
+        launcher = ClaimIndexLauncher(state_dir=self.state_dir)
+        with patch.object(launcher, "spawn", side_effect=lambda **kw: kw):
+            old = launcher.start(company_ref=ACN, claim_version_refs=["a"], control_key="control:old")
+            same = launcher.start(company_ref=ACN, claim_version_refs=["a"], control_key="control:old")
+            new = launcher.start(company_ref=ACN, claim_version_refs=["a"], control_key="control:new")
+        self.assertEqual(old["digest"], same["digest"])
+        self.assertNotEqual(old["digest"], new["digest"])
+        self.assertEqual(old["record"]["batch_digest"], new["record"]["batch_digest"])
+        self.assertEqual(new["record"]["control_key"], "control:new")
 
     def test_the_command_carries_the_state_the_company_and_the_ticket_directory(self):
         launcher = ClaimIndexLauncher(

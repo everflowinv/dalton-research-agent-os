@@ -65,6 +65,7 @@ def clear_obsolete_permissions(budget: Any, current: str, *, scope_prefix: str) 
 def record_controlled_failure(
     budget: Any, business_key: str, mission: Mapping[str, Any], launcher: Any,
     *, reason: str, status: str, connection: Any | None = None,
+    control_key: str | None = None,
 ) -> Any:
     """Record a failure, projecting governance refusals onto mutable controls."""
 
@@ -92,7 +93,7 @@ def record_controlled_failure(
     if classification.failure_class == NOT_PERMITTED:
         budget.retire(business_key, reason="permission_control_changed")
         return budget.record(
-            permission_key(business_key, mission, launcher, connection=connection),
+            control_key or permission_key(business_key, mission, launcher, connection=connection),
             classification=classification,
         )
     return budget.record(business_key, classification=classification)

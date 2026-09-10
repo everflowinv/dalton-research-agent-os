@@ -89,7 +89,8 @@ class ClaimIndexLauncher(LaneChildLauncher):
         return command
 
     def start(
-        self, *, company_ref: str, claim_version_refs: Sequence[str]
+        self, *, company_ref: str, claim_version_refs: Sequence[str],
+        control_key: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a claim index run needs a company")
@@ -98,10 +99,12 @@ class ClaimIndexLauncher(LaneChildLauncher):
         company_ref = company_ref.strip()
         digest = batch_digest(company_ref, claim_version_refs)
         return self.spawn(
-            digest=digest,
+            digest=(hashlib.sha256(f"{digest}|{control_key}".encode()).hexdigest()[:24]
+                    if control_key else digest),
             record={
                 "company_ref": company_ref,
                 "batch_digest": digest,
+                "control_key": control_key,
                 "pending": len(claim_version_refs),
                 "model_configured": self.configured,
             },

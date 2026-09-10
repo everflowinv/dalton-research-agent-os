@@ -40,3 +40,15 @@ Thesis-impact consumer wiring and Guidepoint signed tick limits are now integrat
 The remaining AlphaEngine probe limit is being made an optional signed mission budget, preserving 30 for older missions rather than silently inheriting the wider total connector allowance. Its actual admitted loop and WorkOrder must carry the exact mission version/hash before the writer can consume that limit. No live mission or permission is being changed.
 
 The owner additionally requested a systematic Cockpit bug review and a renewed comparison against onboarding and vision documents after current work. The [gap refresh](owner-expectations-gap-refresh-2026-09-10.md) distinguishes existing implementation without product acceptance from real missing features. Investment Memo production is a concrete missing loop; Excel formula export remains later. Current release/product verification and Cockpit usability remain the immediate priority.
+
+## Post-deployment observed failures and next repairs (17:17 UTC)
+
+The frozen recovery release is now deployed and runtime/package acceptance passed (6,323 tests, 518 installed files exact). Real child results expose additional work:
+
+- ClaimIndex still holds a v13 governance refusal under current controls and reuses the old batch ticket. The next repair binds the actual launch controls into the ticket identity and preserves that binding through settlement, so an old refusal cannot be relabeled as current. Same controls continue to hold a real refusal; running children remain single-flight. 86 focused lane/control/failure tests passed. This repair is not in deployed `38721e4`.
+- Dossier returned `nothing_new` with zero cost while the claim index remains blocked. This is not a produced dossier.
+- EventJudgement processed eight candidates with seven successful producer calls but no accepted verifier; the run records $0.295510 and zero formal product writes. The seven verifier failures are classified as `contract_violation` on the selected Claude route. An independent Sol agent is tracing the exact adapter/broker failure read-only before changing behavior. No gate is weakened or model silently substituted.
+- DebateMap returned `model_unavailable`; its failed scheduler result and model path still need diagnosis.
+- ResearchTask is installed as an opt-in lane but absent from the current writer arguments, despite the mission write grant. This is an activation/wiring gap, not missing authorization vocabulary.
+
+The next-stage audit also found that industry/company model gate closure needs real evidence producers for update-calendar binding, filing reconciliation proof, and peer-relative sensitivity. A proposed bridge based only on presence/count proxies was rejected in review and remains unmerged. Work is now split around those actual missing proof paths rather than declaring model stages passed.

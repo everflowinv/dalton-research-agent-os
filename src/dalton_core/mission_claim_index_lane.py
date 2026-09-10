@@ -89,6 +89,7 @@ class MissionClaimIndexLaneCoordinator:
             # spawned for, or it can never be held back from being retried.
             "company_ref": ticket.get("company_ref"),
             "batch_digest": ticket.get("batch_digest"),
+            "control_key": ticket.get("control_key"),
             "index_status": summary.get("index_status"),
             "rule_tagged": summary.get("rule_tagged"),
             "model_tagged": summary.get("model_tagged"),
@@ -127,7 +128,8 @@ class MissionClaimIndexLaneCoordinator:
             reason = settled.get("failure_reason") or f"last run: {index_status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
-                reason=reason, connection=authority_connection(
+                reason=reason, control_key=settled.get("control_key"),
+                connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(index_status or settled.get("status")),
             ).as_wire()
@@ -155,6 +157,8 @@ class MissionClaimIndexLaneCoordinator:
 
     def dispatch_once(self) -> dict[str, Any]:
         settled = self._settle_open()
+        if self._open is not None:
+            return {"status": "running", "ticket_ref": self._open, "settled": settled}
         mission = self.mission()
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission",
@@ -174,7 +178,7 @@ class MissionClaimIndexLaneCoordinator:
 
         permission = current_permission(
 
-            self.budget, business_key, mission, self.launcher,
+            self.budget, business_key + "|launch:v2", mission, self.launcher,
                 connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)))
@@ -186,7 +190,7 @@ class MissionClaimIndexLaneCoordinator:
                     "failure": held.as_wire()}
         try:
             ticket = self.launcher.start(
-                company_ref=company_ref, claim_version_refs=refs
+                company_ref=company_ref, claim_version_refs=refs, control_key=permission,
             )
         except LaneChildConflict as exc:
             return {"status": "busy", "company_ref": company_ref, "settled": settled,
