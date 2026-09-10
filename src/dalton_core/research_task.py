@@ -49,6 +49,7 @@ from .bounded_planner_loop import (
     INQUIRY_ADMISSION_SOURCE,
     BoundedPlannerAuthority,
 )
+from .budget_pools import DEFAULT_SHARES, pool_caps
 from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -57,11 +58,13 @@ SCHEMA_VERSION = "0.1"
 # AUTOMATION_WRITE_SCOPES; no live mission grants it yet.
 GRANT_WORD = "research_task"
 
-# C2 will put ``budget_pool`` and ``pool_share`` on the LaneSpec and give the
-# mission four named pools.  This is the first one, named now so that the
-# generalisation renames nothing.
+# C2 generalised this pool into four, and the 25% now lives in one place for
+# everyone.  The name and the share are read from there rather than repeated
+# here: a mission that declares its own ``budget.pools`` moves this lane's cap
+# with it, and a deployment that changes the default share does not leave P14e
+# quietly enforcing the old one.
 POOL_NAME = "adhoc"
-POOL_SHARE = Decimal("0.25")
+POOL_SHARE = DEFAULT_SHARES[POOL_NAME]
 
 # What one round of a task is assumed to cost before it runs.  The loop's
 # planner call is the only paid model call a task makes, and the bounded
@@ -352,16 +355,29 @@ def bindable_templates(
 # -- the switch -------------------------------------------------------------
 
 def pool(mission: Mapping[str, Any]) -> dict[str, Any]:
-    """The mission's ad-hoc share of one day, in dollars and micros."""
+    """The mission's ad-hoc share of one day, in dollars and micros.
 
-    daily = Decimal(str(mission["budget"]["max_daily_cost_usd"]))
-    cap = (daily * POOL_SHARE).quantize(Decimal("0.000001"))
+    The cap is C2's, not this module's.  ``budget_pools.pool_caps`` reads the
+    mission's declared ``budget.pools`` when there is one and falls back to the
+    default shares when there is not, and it says which of the two it did.
+    What stays here is the *reservation* side of the same pool: this number
+    gates admission before any model call exists, while ``pool_status`` reports
+    what the day ledger actually settled against it.
+    """
+
+    caps = pool_caps(mission["budget"])
+    cap_micros = int(caps["caps_micros"][POOL_NAME])
     return {
         "name": POOL_NAME,
-        "share": str(POOL_SHARE),
-        "mission_max_daily_cost_usd": str(daily),
-        "cap_usd": str(cap),
-        "cap_micros": int(cap * 1_000_000),
+        "share": caps["shares"][POOL_NAME],
+        "caps_defaulted": caps["defaulted"],
+        "mission_max_daily_cost_usd": str(
+            Decimal(str(mission["budget"]["max_daily_cost_usd"]))
+        ),
+        "cap_usd": str(
+            (Decimal(cap_micros) / Decimal(1_000_000)).quantize(Decimal("0.000001"))
+        ),
+        "cap_micros": cap_micros,
     }
 
 

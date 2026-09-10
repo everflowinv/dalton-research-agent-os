@@ -1,7 +1,7 @@
 # P14e 专项研究派发：inquiry 变成有预算的 BoundedPlannerLoop
 
-日期：2026-09-09（v1.1：过 review，已合 main `e6c87b9`）
-分支：`p14e-adhoc-research`
+日期：2026-09-09（v1.2：2026-09-10 修池的日期口径、对接 C2 预算池；基线 main `7011104`）
+分支：`p14e-pool-test`（前身 `p14e-adhoc-research`）
 状态：代码完成，全量测试通过；**live 未启用**，需要 owner 三步（见 §4）
 
 ---
@@ -61,14 +61,24 @@ inquiry** 的 `BoundedPlannerLoop`。派发它的是已经存在的 `bounded_pla
 
 ## 3. 预算池 `adhoc`
 
-- **口径**：`cap = 0.25 × mission.budget.max_daily_cost_usd`。live 是 $100 → **$25/天**。
+- **口径**（v1.2：C2 合入后改为读 C2）：cap 由 `budget_pools.pool_caps(mission["budget"])`
+  的 `caps_micros["adhoc"]` 给出——mission 声明了 `budget.pools` 就用声明的，没声明就用
+  `DEFAULT_SHARES["adhoc"]`（25%），并如实标 `caps_defaulted`。`research_task.POOL_SHARE`
+  现在就是 `DEFAULT_SHARES["adhoc"]`，不再是本模块自己写的 `Decimal("0.25")`。
+  live 是 $100 → **$25/天**。lane 归池由 C2 的 `LANE_POOLS["dispatch_research_task"]`
+  决定，`LaneSpec` 上不再重复声明（C2 有一条测试钉「没有 lane 覆盖那张表」）。
 - **预留而非事后统计**：一条任务在准入时就按 `max_rounds × $0.50`（`bounded_planner_driver`
   的 `planner_max_cost_usd` 缺省值）预留。只统计已结算的池会在第一笔账单出来之前把一天的
   任务全放进来——这正是 `ThesisImpactBudgetStore.admit` 用 `reserved_micros` 预留、
   `settle` 再改成实际值的原因，此处沿用同一读法。
 - **账本在哪**：`day_reserved_micros()` 直接从 loop 表推导（`admission.source='inquiry'` 的
   loop，按 `created_at` 的日期 + 自己的 `budget.max_rounds`）。**没有第二本账**，所以池和
-  准入永远不可能各说各话。
+  准入永远不可能各说各话。这是**预留**那一半；**结算**那一半现在是 C2 的
+  `budget_pools.pool_status`（池随 admission 进日账本，settle 从 admission 行继承池）。
+  两者量的是不同的东西，都要有：准入时还没有任何花费可数，结算时预留已经不是事实。
+- **日期口径**：池的「今天」是**权威给 loop 盖的 `created_at` 的 UTC 日期**，不是别处的
+  本地日期。测试里写死过一个日期，结果第一次跨过 UTC 午夜（本地 20:00 EDT）之后，
+  池就按一个没有任何 loop 的日子去算，读出来永远是空的（见 §10）。
 - **超池**：lane 返回 `skipped:pool_exhausted`（C2 要推广的就是这个词），单条 inquiry 在
   `plan_admissions` 里返回 `reason: "pool_exhausted"`。不借用、不排队。
 - **写入范围**：任务的产出只经既有 scope——Claim 走 candidate staging、observation 走
@@ -132,12 +142,19 @@ owner 三条都需要——(a) 用一个执行器不接受的 `(operation, permi
 ## 6. 测试
 
 ```
-Ran 2674 tests in 367.366s
+Ran 3932 tests in 391.494s
 
 OK (skipped=1)
 ```
 
-（合 main `e6c87b9` 之后：基线 2,627 + 本切片 47。命令：
+`tests/test_mission_research_task_lane.py` 单跑（连跑三次）：
+
+```
+Ran 13 tests in 0.573s
+OK
+```
+
+（合 main `7011104` 之后全量 **3,932 通过、1 跳过**；本切片 48 项。命令：
 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）
 
 合并时 `tests/test_lane_registry.py` 取 main 那一侧：那四处字面量在 main 上已改成**包含**
@@ -196,7 +213,27 @@ mission 级绑定上，不是 `adhoc` 池；池今天是准入闸门，不是结
 tick 都要计费」这个具体故障已经关掉了：pending 的 loop 不再被问付费问题，而且它根本不会再
 卡住。
 
-## 9. 开放问题
+## 9. 池的日期与那条「顺序相关」的测试（2026-09-10 修）
+
+`test_an_exhausted_pool_is_a_skip_...` 在全量里一度失败（`'launched' != 'skipped:pool_exhausted'`）。
+排查结论与「模块顺序 / 全局状态泄漏」无关：
+
+- 全仓 grep 过 `DEFAULT_PLANNER_MAX_COST_USD`、`POOL_SHARE`、`DEFAULT_SHARES`、p9a fixture
+  清单，**没有任何测试改写它们**；`load_mission_manifest()` 每次重读文件，不共享 dict。
+  唯一的 `patch.object` 是 P14e 自己对 `ADHOC_PROBE_TEMPLATES` 的，带上下文管理器自动还原。
+- 真正的原因是**时钟**：测试写死 `DAY = "2026-09-09"`，而 loop 的 `created_at` 用的是
+  UTC。本地 2026-09-09 20:00 EDT 就是 UTC 2026-09-10 00:00，之后新建的 loop 全落在
+  10 号，`day_reserved_micros(day="2026-09-09")` 恒为 0，于是循环把 10 条全准入了也说
+  「池还满着」，lane 自然 `launched`。当天 20:00 之前跑（单跑或全量）都过，之后都不过——
+  与合并顺序同时发生，容易看成顺序问题。
+
+改法：`DAY` 改成 `datetime.now(timezone.utc).date().isoformat()`，lane 测试的时钟设成
+那一天的正午；耗尽用例先自证算术（$20 日额 → $5 池 ÷ 每条 $1.00 = 正好 5 条，余数 0），
+准入 5 条后**先断言 `pool_state(day=DAY)["remaining_micros"] == 0`** 再问 lane，
+这样万一日期再对不上，失败会指着日期说话，而不是丢出一句没头没脑的 `launched`。
+另加一条测试钉「lane 的 cap 就是 C2 发布的那个」。
+
+## 10. 开放问题
 
 1. **`answer_routing._route_budget` 的硬禁用没有解除。** 那里写着
    「ad-hoc research must remain disabled in S5 v0.2」，且
@@ -206,19 +243,19 @@ tick 都要计费」这个具体故障已经关掉了：pending 的 loop 不再�
    与「planner inquiry 变成研究任务」是两件事，动它要改两份 contract 与 policy schema 版本。
    建议随 P15（对话层）一起裁决：要么把 policy schema 升到 0.3 并允许 enabled，要么明确
    ad-hoc research 永远只从 planner 侧进入。
-2. **C2 的预算池应该推广什么。** 本切片证明了三件事可以先做：(a) 池名进
-   `LaneSpec(budget_pool=..., pool_share=...)`；(b) 池的日账**从各 lane 自己的权威推导**，
-   不建第二本账；(c) 超池的词统一为 `skipped:pool_exhausted`。真正缺的一块是
-   `ThesisImpactBudgetStore.admit` 目前只按 `mission_ref` 分组，没有 pool 维度——C2 应该给
-   `mission_binding` 加一个 `pool` 字段（或允许 pool 限定的 scope key），这样**实际结算**的
-   钱也能按池归集，而不只是准入时的预留。未用份额只允许 `coverage` 借用那条，需要在同一处实现。
+2. ~~**C2 的预算池应该推广什么。**~~ **已由 C2 落地**：`LaneSpec.budget_pool` /
+   `pool_share`、`LANE_POOLS`、`skipped:pool_exhausted` 作为常量、以及最关键的那块——
+   admission 带池进日账本、settle 从 admission 行继承池，所以**结算**也按池归集了。
+   P14e 这边只做了最小对接：cap 读 C2，`POOL_SHARE` 读 C2，lane 归池交给 `LANE_POOLS`。
+   还没做的是让 `pool_state` 把 C2 已结算的 adhoc 花费也减掉（需要把日账本的连接递到
+   lane / CLI 里）；今天两边量的是预留与结算两件事，各自都对，合并读数留给集成。
 3. **另外两个模板的执行器还没有。** web-search 与 AlphaEngine `search_library` 已入目录但不可绑。
    要让它们可用，需在 `bounded_probe_executor` 按 `metadata.operation` 分派，或在 writer 侧
    新增两个 `bounded_*_probe` 操作（`writer_server.py` 本切片仍禁止触碰）。B2 之后这是
    「功能缺」而不再是「掀 tick 的安全隐患」。
-4. **一条任务的模型开销现在计在 planner 账上。** loop 的模型提议走
-   `llm_planner_execute`（writer 操作），它用的是 mission 级绑定，不是 `adhoc` 池。所以池
-   目前是**准入时的预留闸门**，而不是结算口径；口径统一依赖开放问题 2。
+4. **一条任务的模型开销记在哪。** C2 的 `PURPOSE_POOLS` 已经把 `research_task` /
+   `adhoc_research` 指到 `adhoc` 池，`llm_planner_execute` 也按池显式携带；P14e 这边的
+   `pool_state` 仍只报预留。把两个数字合成一行给 cockpit 看，是集成时的小活。
 5. **cockpit 接线。** `AgendaControlPlane(research_task_grant=...)` 的解析器需要一个能读 Core
    的入口；`writer_server.py` 与 cockpit 两个文件本切片禁止触碰，建议集成时加一个只读操作
    （返回 `research_task.read_grant(store)` 的 `granted` 与 `reasons`）并注入。缺省仍是「否」。
