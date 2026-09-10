@@ -1,5 +1,5 @@
 {
-  "content_hash": "b4461bcc7d74ce957b2b604bb13776c9418cbe8a1263b6efdaba6dc7ba9e5014",
+  "content_hash": "0ec20149150e2289f2e721679f244ad6432c140cf7b07fce7849b4d9eda2a73d",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -25,9 +25,9 @@
       "connector_ref": "connector:sec-financial-statements",
       "fixture_manifest_hash": "91045327aba2b9bda50d9589efe48b1d1c65102c1b32594c427855c981394638",
       "fixture_manifest_ref": "connector-fixture-manifest:sec-financials:0.1",
-      "profile_template_hash": "1b5a4d9454d3781ead8955f72aa22b43078e580d302a54393572edac701d020c",
+      "profile_template_hash": "91d0ee8c122d0c8f11efa84441a624bc9fecdbbee95fa6e2b8fbf25444d8241a",
       "profile_template_ref": "connector-profile-template:sec-financials:0.1",
-      "proposal_manifest_hash": "3dd4c5c644c5e33ed8bf2a33dfcb6fd7a8971e0a73e0c28f64ec91a5cd790b1c",
+      "proposal_manifest_hash": "d21443685ef7f2b7dfa769c42ec44d093cdb5f8ae3feba7acaf1c30cb978023e",
       "proposal_manifest_ref": "connector-proposal-manifest:sec-financials:0.2"
     },
     {

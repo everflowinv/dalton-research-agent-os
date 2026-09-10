@@ -104,6 +104,20 @@ def _structure_key(row: Mapping[str, Any]) -> tuple[str | None, str | None, str 
     )
 
 
+def fact_dimension_count(row: Mapping[str, Any]) -> int | None:
+    """Count dimensions only when the parser supplied its complete axis set.
+
+    ``with_dimensions()`` emits one ``dim_*`` column per context axis.  The
+    older projected ``dimension``/``member`` pair names one axis but cannot
+    prove there was no second axis, so it deliberately remains unknown.
+    """
+
+    dimension_columns = [key for key in row if str(key).startswith("dim_")]
+    if not dimension_columns:
+        return None
+    return sum(_text(row.get(key)) is not None for key in dimension_columns)
+
+
 def _level(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -182,6 +196,7 @@ def normalise_statement(
                 "is_breakdown": bool(row.get("is_breakdown")) or axis is not None,
                 "dimension_axis": axis,
                 "dimension_member": canonical_ref(row.get("dimension_member")),
+                "dimension_count": fact_dimension_count(fact),
                 # A quarter and a year to date share an end date; only the
                 # start tells them apart, and a balance-sheet instant has none.
                 "period_start": period_start,

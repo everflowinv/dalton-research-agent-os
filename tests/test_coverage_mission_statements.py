@@ -30,6 +30,7 @@ def _line(**overrides):
         "statement": "income", "concept": "us-gaap:Revenues", "label": "Revenues",
         "level": 0, "parent_concept": None, "is_breakdown": False,
         "dimension_axis": None, "dimension_member": None,
+        "dimension_count": None,
         "period_start": "2026-04-01", "period_end": "2026-06-30",
         "value": "1414767000", "unit": "USD", "balance": "credit",
     }
@@ -146,7 +147,7 @@ class StatementIngestTests(unittest.TestCase):
                   balance="debit"),
             _line(concept="us-gaap:Revenues", label="Americas", is_breakdown=True,
                   dimension_axis="srt:StatementGeographicalAxis",
-                  dimension_member="acn:AmericasMember", value=None),
+                  dimension_member="acn:AmericasMember", dimension_count=1, value=None),
         ]
         result = self.authority.record_statement_observation(
             dispatch_id=dispatch["dispatch_id"],
@@ -161,6 +162,7 @@ class StatementIngestTests(unittest.TestCase):
         self.assertEqual(stored[1]["parent_concept"], "us-gaap:Revenues")
         self.assertTrue(stored[3]["is_breakdown"])
         self.assertEqual(stored[3]["dimension_member"], "acn:AmericasMember")
+        self.assertEqual(stored[3]["dimension_count"], 1)
         self.assertIsNone(stored[3]["value"])
         # A balance-sheet line is an instant: no start, and that is not a gap.
         balance = self.authority.statement_lines(held[0]["ingest_id"], statement="balance")
@@ -168,6 +170,39 @@ class StatementIngestTests(unittest.TestCase):
         self.assertIsNone(balance[0]["period_start"])
         # The quarter is told from the year to date by its start, not its end.
         self.assertEqual(stored[0]["period_start"], "2026-04-01")
+
+    def test_dimension_proof_survives_authority_and_controls_segment_groups(self):
+        from dalton_core.economic_invariants import segment_groups
+
+        dispatch = self.launched()
+        lines = [
+            _line(value="100"),
+            _line(label="Americas", is_breakdown=True,
+                  dimension_axis="srt:StatementGeographicalAxis",
+                  dimension_member="acn:AmericasMember", dimension_count=1,
+                  value="60"),
+            _line(label="Europe", is_breakdown=True,
+                  dimension_axis="srt:StatementGeographicalAxis",
+                  dimension_member="acn:EuropeMember", dimension_count=1,
+                  value="50"),
+            _line(label="Parent Americas", is_breakdown=True,
+                  dimension_axis="srt:StatementGeographicalAxis",
+                  dimension_member="acn:ParentAmericasMember", dimension_count=2,
+                  value="40"),
+        ]
+        self.authority.record_statement_observation(
+            dispatch_id=dispatch["dispatch_id"], observation=_observation(lines=lines),
+            governance_ref="g", governance_hash=GOVERNANCE_HASH)
+        filing = self.authority.statement_filings(ACN)[0]
+        stored = self.authority.statement_lines(filing["ingest_id"])
+        self.assertEqual([row["dimension_count"] for row in stored], [None, 1, 1, 2])
+        # The two-dimensional member is not flattened into the one-dimensional
+        # geographic group, so no false sum is asserted.
+        [group] = segment_groups(stored)
+        self.assertEqual(
+            [part["member"] for part in group["parts"]],
+            ["acn:AmericasMember", "acn:EuropeMember"],
+        )
 
     def test_the_same_filing_parsed_twice_is_one_filing(self):
         dispatch = self.launched()

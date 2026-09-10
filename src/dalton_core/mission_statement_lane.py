@@ -361,10 +361,10 @@ class MissionStatementLaneCoordinator:
 STATEMENT_LANE_USER_AGENT = (
     "Dalton Research Agent OS SEC financial-statements lane everflow@lumos.space"
 )
-# The approved record this lane runs under, named by version rather than
+# The proposed record this lane is pinned to, named by version rather than
 # discovered, so a future v3 is a deliberate edit here and not something the
 # writer picks up because a file appeared.
-STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v2.json"
+STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v3.json"
 LAUNCHER_KWARG = "statement_lane_launcher"
 
 

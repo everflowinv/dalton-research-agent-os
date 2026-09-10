@@ -446,6 +446,10 @@ def _non_negative_int(value: Any, name: str) -> int:
     return value
 
 
+def _optional_non_negative_int(value: Any, name: str) -> int | None:
+    return None if value is None else _non_negative_int(value, name)
+
+
 def _non_negative_number(value: Any, name: str) -> float:
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or not math.isfinite(float(value)) or value < 0):
@@ -853,6 +857,22 @@ class CoverageMissionAuthority:
         self._migrate_discovered_document_host()
         self._migrate_settlement_failure_reason()
         self._migrate_plan_sufficiency()
+        self._migrate_statement_dimension_count()
+
+    def _migrate_statement_dimension_count(self) -> None:
+        """Keep legacy projected contexts unknown; preserve proof on new rows."""
+
+        columns = {row[1] for row in self.connection.execute(
+            "PRAGMA table_info(coverage_mission_statement_lines)"
+        ).fetchall()}
+        if "dimension_count" in columns:
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("statement dimension count migration requires no open transaction")
+        self.connection.execute(
+            "ALTER TABLE coverage_mission_statement_lines ADD COLUMN dimension_count INTEGER "
+            "CHECK(dimension_count IS NULL OR dimension_count >= 0)"
+        )
 
     def _migrate_company_model_spec_contract(self) -> None:
         """Permit a new spec contract over unchanged filed state.
@@ -3748,6 +3768,7 @@ class CoverageMissionAuthority:
                 "report_date": _text(filing.get("report_date"), "report_date"),
                 "source_record_refs": source_refs,
                 "governance_ref": governance_ref, "governance_hash": governance_hash,
+                "statement_lines_hash": content_hash(lines),
             }
             line_hash = content_hash(body)
             with self._transaction() as cur:
@@ -3767,8 +3788,8 @@ class CoverageMissionAuthority:
                     cur.execute(
                         "INSERT INTO coverage_mission_statement_lines"
                         "(line_id,ingest_id,statement,ordinal,concept,label,level,parent_concept,"
-                        "is_breakdown,dimension_axis,dimension_member,period_start,period_end,"
-                        "value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "is_breakdown,dimension_axis,dimension_member,dimension_count,period_start,period_end,"
+                        "value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             f"{ingest_id}#{ordinal}", ingest_id,
                             _vocabulary(line.get("statement"),
@@ -3780,6 +3801,7 @@ class CoverageMissionAuthority:
                             line.get("parent_concept"),
                             1 if line.get("is_breakdown") else 0,
                             line.get("dimension_axis"), line.get("dimension_member"),
+                            _optional_non_negative_int(line.get("dimension_count"), "dimension_count"),
                             line.get("period_start"),
                             _text(line.get("period_end"), "period_end"),
                             None if line.get("value") is None else str(line["value"]),

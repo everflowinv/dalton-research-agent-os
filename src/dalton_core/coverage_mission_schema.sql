@@ -680,6 +680,7 @@ CREATE TABLE IF NOT EXISTS coverage_mission_statement_lines (
     is_breakdown INTEGER NOT NULL CHECK(is_breakdown IN (0,1)),
     dimension_axis TEXT,
     dimension_member TEXT,
+    dimension_count INTEGER CHECK(dimension_count IS NULL OR dimension_count >= 0),
     period_start TEXT,
     period_end TEXT NOT NULL,
     value TEXT,

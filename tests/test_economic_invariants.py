@@ -912,7 +912,35 @@ class CockpitVisibilityTests(unittest.TestCase):
         self.assertEqual([item["invariant"] for item in refusal["failed"]], [BAND])
         self.assertIn("outside_band", refusal["failed"][0]["label"])
 
-    def test_a_company_with_nothing_refused_reads_as_an_empty_dict(self):
+    def test_a_proven_model_exposes_checks_that_lacked_evidence(self):
+        from dalton_core.store import canonical_json, content_hash
+
+        model = self.authority.publish(forecast_body())
+        report = ei.evaluate_forecast_model(model).as_dict()
+        proof = {
+            "schema_version": "0.1", "model_version_ref": model["id"],
+            "model_content_hash": model["content_hash"], "company_ref": ACN,
+            "inputs_hash": model["inputs_hash"], "statement_rows_hash": "a" * 64,
+            "statement_line_refs": [], "statement_row_count": 0,
+            "solver_results": [], "invariant_report": report,
+            "created_at": model["created_at"],
+        }
+        proof["content_hash"] = content_hash(proof)
+        with self.authority._transaction() as cur:
+            cur.execute(
+                "INSERT INTO forecast_model_filing_proofs VALUES(?,?,?,?,?,?,?,?)",
+                (model["id"], ACN, model["content_hash"], model["inputs_hash"],
+                 proof["statement_rows_hash"], canonical_json(proof),
+                 proof["content_hash"], model["created_at"]),
+            )
+        card = next(item for item in self.plane.overview()["companies"]
+                    if item["company_ref"] == ACN)
+        visible = card["invariants"][ei.FORECAST_MODEL]
+        self.assertEqual(visible["status"], AVAILABLE)
+        self.assertTrue(visible["not_checked"])
+        self.assertIn("未执行", visible["note"])
+
+    def test_a_model_without_a_filing_proof_does_not_invent_check_results(self):
         self.authority.publish(forecast_body())
         card = next(item for item in self.plane.overview()["companies"]
                     if item["company_ref"] == ACN)

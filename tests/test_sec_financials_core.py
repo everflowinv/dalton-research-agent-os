@@ -42,7 +42,7 @@ from dalton_core.sec_financials_core import (
 REPO = Path(__file__).resolve().parents[1]
 # The record the current contract is covered by. v1 predates period_start and
 # is kept as history, exactly as the three sec-company-facts records are.
-RECORD = REPO / "deploy" / "connector-governance" / "sec-financial-statements-v2.json"
+RECORD = REPO / "deploy" / "connector-governance" / "sec-financial-statements-v3.json"
 
 
 class IdentityTests(unittest.TestCase):
@@ -105,6 +105,7 @@ class OutputContractTests(unittest.TestCase):
             "label": "Revenues", "level": 1, "parent_concept": None,
             "is_breakdown": False, "dimension_axis": None,
             "dimension_member": None, "period_start": "2026-04-01",
+            "dimension_count": None,
             "period_end": "2026-06-30",
             "value": "2814828000", "unit": "USD", "balance": "credit",
         }
@@ -149,7 +150,7 @@ class OutputContractTests(unittest.TestCase):
         )
         self.assertLessEqual(
             {"level", "parent_concept", "is_breakdown", "dimension_axis",
-             "period_start", "period_end"},
+             "dimension_count", "period_start", "period_end"},
             required,
         )
 

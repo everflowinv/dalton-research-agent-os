@@ -19,6 +19,7 @@ from dalton_core.sec_financials_normalise import (
     build_wire,
     canonical_ref,
     fact_period,
+    fact_dimension_count,
     normalise_filing,
     normalise_statement,
 )
@@ -88,6 +89,20 @@ class FactPeriodTests(unittest.TestCase):
     def test_a_period_nobody_stated_is_not_invented(self):
         self.assertEqual(fact_period({"period_key": "nonsense"}), (None, None))
         self.assertEqual(fact_period({}), (None, None))
+
+
+class DimensionEvidenceTests(unittest.TestCase):
+    def test_complete_parser_columns_count_every_nonempty_axis(self):
+        row = fact(
+            dimension="srt:StatementGeographicalAxis", member="srt:USMember",
+            **{"dim_srt_StatementGeographicalAxis": "srt:USMember",
+               "dim_us-gaap_ConsolidationItemsAxis": "us-gaap:ParentCompanyMember"},
+        )
+        self.assertEqual(fact_dimension_count(row), 2)
+
+    def test_projected_axis_alone_is_not_complete_context_proof(self):
+        self.assertIsNone(fact_dimension_count(fact(
+            dimension="srt:StatementGeographicalAxis", member="srt:USMember")))
 
 
 class NormaliseTests(unittest.TestCase):
@@ -164,7 +179,19 @@ class NormaliseTests(unittest.TestCase):
         [line] = result["lines"]
         self.assertTrue(line["is_breakdown"])
         self.assertEqual(line["dimension_member"], "srt:AmericasMember")
+        self.assertIsNone(line["dimension_count"])
         self.assertEqual(line["value"], "1498358000")
+
+    def test_single_complete_dimension_reaches_the_line(self):
+        result = self.lines(
+            structure=[structure(is_breakdown=True,
+                                 dimension_axis="srt:StatementGeographicalAxis",
+                                 dimension_member="srt:AmericasMember")],
+            facts=[fact(dimension="srt:StatementGeographicalAxis",
+                        member="srt:AmericasMember",
+                        **{"dim_srt_StatementGeographicalAxis": "srt:AmericasMember"})],
+        )
+        self.assertEqual(result["lines"][0]["dimension_count"], 1)
 
     def test_a_breakdown_does_not_take_the_consolidated_figure(self):
         # The undimensioned fact belongs to the undimensioned line.

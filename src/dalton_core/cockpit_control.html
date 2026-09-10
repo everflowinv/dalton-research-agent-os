@@ -568,9 +568,12 @@ function valuationBlock(v){const w=node("div");w.append(node("div",`估值 · ${
        fundamentals never moved is the price's own percentile. */
     const basis=m.percentile!=null?m.percentile_basis_label:m.percentile_reason;if(basis)li.append(node("span",basis,"basis"));ul.append(li)});
   w.append(ul);if(v.basis&&v.basis.shares_note)w.append(node("div",v.basis.shares_note,"hint"));return w}
-function invariantRefusal(x){if(!x||x.status!=="unavailable")return null;const d=node("div",null,"gap");
-  d.append(node("b",`${x.output_kind_label||"这项数字"}未发布`));
-  (x.reasons||[]).forEach(reason=>d.append(node("div",reason)));return d}
+function invariantRefusal(x){if(!x)return null;const missing=x.status==="unavailable",unchecked=x.not_checked||[];
+  if(!missing&&!unchecked.length)return null;const d=node("div",null,"gap");
+  d.append(node("b",missing?`${x.output_kind_label||"这项数字"}未发布`:`${x.output_kind_label||"这项数字"}有未检查项`));
+  if(missing)(x.reasons||[]).forEach(reason=>d.append(node("div",reason)));
+  else unchecked.forEach(item=>d.append(node("div",`${item.label||item.invariant}：${(item.findings||[]).join("；")||"证据不足，未执行"}`)));
+  return d}
 function modelBlock(c){const m=c.model,r=m.readiness||{},d=node("div",null,"mdl");
   d.append(node("b",`公司模型 · 第 ${m.version} 版`),node("div",m.note||""));
   const parts=[];if(r.results_computed&&r.results_computed.length)parts.push(`算出 ${r.results_computed.length} 条结果行`);

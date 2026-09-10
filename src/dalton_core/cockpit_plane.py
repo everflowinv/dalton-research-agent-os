@@ -1203,7 +1203,7 @@ class CockpitPlane:
         if not _table_exists(core, "economic_invariant_verdicts"):
             return {}
         from .economic_invariants import (
-            INVARIANT_LABELS, OUTPUT_KIND_LABELS, UNAVAILABLE,
+            INVARIANT_LABELS, NOT_APPLICABLE, OUTPUT_KIND_LABELS, UNAVAILABLE,
         )
 
         out: dict[str, dict[str, Any]] = {}
@@ -1232,8 +1232,49 @@ class CockpitPlane:
                     "findings": list(item.get("findings") or []),
                 } for item in (record.get("results") or [])
                     if item.get("status") == "fail"],
+                "not_checked": [],
                 "note": "这个产出没有发布：它没通过经济不变量检查，理由在下面逐条列出",
             }
+        # Successful model versions retain the exact report evaluated before
+        # publication. Surface its not-applicable checks without adding them
+        # to the refusal authority (whose chain deliberately records only
+        # refusals and their clearings).
+        if (_table_exists(core, "forecast_model_versions")
+                and _table_exists(core, "forecast_model_filing_proofs")):
+            for row in self._latest_by(
+                core, "forecast_model_versions", "model_ref", "version_number"
+            ):
+                model = json.loads(row["record_json"])
+                proof_row = core.execute(
+                    "SELECT record_json FROM forecast_model_filing_proofs "
+                    "WHERE model_version_id=?", (row["version_id"],)
+                ).fetchone()
+                if proof_row is None:
+                    continue
+                proof = json.loads(proof_row["record_json"])
+                report = proof.get("invariant_report") or {}
+                company_ref = str(model.get("company_ref"))
+                kind = str(report.get("output_kind"))
+                if not kind or kind in (out.get(company_ref) or {}):
+                    continue
+                not_checked = [{
+                    "invariant": item.get("invariant"),
+                    "label": INVARIANT_LABELS.get(
+                        str(item.get("invariant")), item.get("invariant")),
+                    "findings": ([str(item.get("reason"))]
+                                 if item.get("reason") else []),
+                } for item in (report.get("results") or [])
+                    if item.get("status") == NOT_APPLICABLE]
+                if not not_checked:
+                    continue
+                out.setdefault(company_ref, {})[kind] = {
+                    "output_kind": kind,
+                    "output_kind_label": OUTPUT_KIND_LABELS.get(kind, kind),
+                    "output_ref": report.get("output_ref"),
+                    "status": report.get("status"),
+                    "reasons": [], "failed": [], "not_checked": not_checked,
+                    "note": "这个产出没有经济不变量失败，但下列检查因证据不足而未执行",
+                }
         return out
 
     def _forecast(self, core: Any) -> dict[str, dict[str, Any]]:

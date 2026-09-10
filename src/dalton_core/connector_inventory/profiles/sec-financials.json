@@ -6,7 +6,7 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:sec-financial-statements",
-  "content_hash": "1b5a4d9454d3781ead8955f72aa22b43078e580d302a54393572edac701d020c",
+  "content_hash": "91d0ee8c122d0c8f11efa84441a624bc9fecdbbee95fa6e2b8fbf25444d8241a",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "91045327aba2b9bda50d9589efe48b1d1c65102c1b32594c427855c981394638",
   "fixture_manifest_ref": "connector-fixture-manifest:sec-financials:0.1",
@@ -17,7 +17,7 @@
       "input_schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
       "input_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1",
       "operation": "get_financial_statements",
-      "output_schema_hash": "1034c6d637396b17169415f4d2a97f471dcf67ca903734ee6566a7e2cccee37e",
+      "output_schema_hash": "a5d717321541e2df312faa4f8957775d236e6f2e80fa384459a3e21fd8fd64cd",
       "output_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1",
       "pagination": {
         "bounded_window_required": true,
@@ -133,6 +133,13 @@
                           "null"
                         ]
                       },
+                      "dimension_count": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
                       "dimension_member": {
                         "type": [
                           "string",
@@ -195,6 +202,7 @@
                       "is_breakdown",
                       "dimension_axis",
                       "dimension_member",
+                      "dimension_count",
                       "period_start",
                       "period_end",
                       "value",
@@ -257,7 +265,7 @@
         ],
         "type": "object"
       },
-      "schema_hash": "1034c6d637396b17169415f4d2a97f471dcf67ca903734ee6566a7e2cccee37e",
+      "schema_hash": "a5d717321541e2df312faa4f8957775d236e6f2e80fa384459a3e21fd8fd64cd",
       "schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1"
     }
   ],

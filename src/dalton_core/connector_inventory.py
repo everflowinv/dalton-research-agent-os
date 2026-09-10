@@ -1567,6 +1567,10 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "is_breakdown": {"type": "boolean"},
                 "dimension_axis": {"type": ["string", "null"]},
                 "dimension_member": {"type": ["string", "null"]},
+                # Complete context evidence from edgartools ``dim_*`` columns.
+                # Null means the parser did not expose the complete axis set;
+                # one projected axis is not proof that the context is 1-D.
+                "dimension_count": {"type": ["integer", "null"], "minimum": 0},
                 # P13ag: a 10-Q reports the quarter and the year to date with
                 # the same period_end -- EPAM's Q2 revenue and its H1 revenue
                 # both end 2026-06-30. Without the start they are one number
@@ -1586,7 +1590,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
             },
             (
                 "statement", "concept", "label", "level", "parent_concept",
-                "is_breakdown", "dimension_axis", "dimension_member",
+                "is_breakdown", "dimension_axis", "dimension_member", "dimension_count",
                 "period_start", "period_end", "value", "unit", "balance",
             ),
         )
