@@ -93,10 +93,17 @@ current.  Hashes of every temporary config remained unchanged on that failed
 attempt.  The live activation packet must first align that stale agenda pin
 with the current policy head; the setter does not silently skip it.
 
-After the final router chain was applied, the focused selection suite ran 69
-tests successfully.  The broader 188-test runtime set passed 187 tests and
-exposed one companion-chain failure in
-`test_reservation_covers_expensive_fallback_in_owner_selected_chain`: the
-served fallback cost exceeded its admitted reservation.  That budget defect
-is outside this runtime configuration slice and is reported as an unresolved
-integration blocker rather than described as green.
+The public semantic difference is limited to the allowed profile set. Version
+2 allows DeepSeek Flash, GPT-5.6 Sol/Terra/Luna, and Claude Fable/Opus. Version
+3 retains those entries and adds Claude Sonnet, five Gemini profiles, Qwen
+3.8 Max, three Qwen/GLM profiles, GPT-5.5, DeepSeek Pro, five Grok profiles,
+and OpenRouter OX Alpha. Adapter constraints, empty provider/family filters,
+text modality, verification independence capabilities, and ordering are
+unchanged. Neither version has a purpose override.
+
+After the final router chain was applied, 70 focused selection and verifier
+tests passed. The local review branch lacks the later budget-reservation fix,
+so its broad run cannot represent the frozen integration tree. Running the
+previously failing expensive-fallback regression against frozen integration
+source `61f56759c5e249be150623844df3ee4550a5ee65` passed (1 test). There is no
+remaining frozen-code blocker from that observation.
