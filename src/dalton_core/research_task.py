@@ -186,7 +186,7 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
         "parameter_contract": {
             "allowed_fields": ["source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"],
             "required_fields": ["source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"],
-            "constants": {"source_ref": "source:alphaengine", "discovery_plan_ref": "alphaengine-discovery-plan:5company:v1", "discovery_plan_hash": "c46327669fb2909c47fda784f1d09a027103a4538b0ec3eea0e01a68f8e64af2"},
+            "constants": {"source_ref": "source:alphaengine", "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1", "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92"},
         },
         "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
         "verifier_ref": "verifier:source-level-coverage:0.1",
