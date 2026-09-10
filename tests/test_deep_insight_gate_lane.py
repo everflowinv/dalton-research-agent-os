@@ -1069,8 +1069,7 @@ class LaneTests(unittest.TestCase):
 
         harness = Harness()
         self.addCleanup(harness.close)
-        for gate_status in ("no_eligible_company", "classification_conflict",
-                            "verification_failed", "rubric_refused"):
+        for gate_status in ("no_eligible_company",):
             with self.subTest(gate_status=gate_status):
                 launcher = Launcher()
                 launcher.gate_status = gate_status
@@ -1084,6 +1083,33 @@ class LaneTests(unittest.TestCase):
                 # the same evidence will be refused the same way, and relaunching
                 # would re-pay for four model calls to learn it again.
                 self.assertEqual(settled["status"], "idle")
+                self.assertEqual(launcher.started, 1)
+
+    def test_content_refusals_are_terminal_for_the_unchanged_signature(self):
+        class Launcher:
+            def __init__(self, gate_status):
+                self.gate_status = gate_status
+                self.started = 0
+
+            def start(self, *, signature, company_ref=None):
+                self.started += 1
+                self.signature = signature
+                return {"id": f"ticket-{self.started}", "signature": signature}
+
+            def status(self, ticket_ref):
+                return {"status": "succeeded", "signature": self.signature,
+                        "summary": {"gate_status": self.gate_status}}
+
+        harness = Harness()
+        self.addCleanup(harness.close)
+        for gate_status in ("classification_conflict", "verification_failed",
+                            "rubric_refused"):
+            with self.subTest(gate_status=gate_status):
+                launcher = Launcher(gate_status)
+                coordinator = MissionDeepInsightLaneCoordinator(
+                    connection=harness.store.connection, launcher=launcher)
+                coordinator.dispatch_once()
+                self.assertEqual(coordinator.dispatch_once()["status"], "terminal")
                 self.assertEqual(launcher.started, 1)
 
     def test_a_submission_is_the_one_reason_to_look_again(self):

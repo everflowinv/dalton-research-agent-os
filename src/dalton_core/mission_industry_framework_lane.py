@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .lane_child_launcher import (
@@ -38,6 +39,7 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
 
 MAX_FAILURE_DETAIL_CHARS = 500
 LAUNCHER_KWARG = "industry_framework_launcher"
@@ -48,9 +50,47 @@ MIN_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 # Statuses that mean "this run looked and found nothing to do". After one of
 # these, an unchanged signature is a reason to stay quiet.
 QUIET_STATUSES = frozenset({
-    "nothing_new", "no_mission", "not_authorized", "no_policy",
+    "nothing_new", "no_mission",
     "causal_chain_unmapped", "no_driver_pack",
 })
+CONTENT_TERMINAL_STATUSES = frozenset({
+    "rubric_refused", "constitution_refused", "not_independent",
+    "unverified", "no_new_evidence",
+})
+
+
+def permission_key(connection: Any, launcher: Any, signature: str) -> str:
+    parts = [signature]
+    try:
+        rows = connection.execute(
+            "SELECT mission_ref, mission_version_id FROM coverage_mission_pointer "
+            "ORDER BY mission_ref").fetchall()
+        parts += [f"{row['mission_ref']}:{row['mission_version_id']}" for row in rows]
+    except Exception:
+        parts.append("mission:none")
+    try:
+        rows = connection.execute(
+            "SELECT pointer_id, policy_version_id FROM governance_policy_pointer "
+            "ORDER BY pointer_id").fetchall()
+        parts += [f"policy:{row['pointer_id']}:{row['policy_version_id']}" for row in rows]
+    except Exception:
+        parts.append("policy:none")
+    for name, value in sorted(vars(launcher).items()):
+        if not any(word in name for word in ("config", "policy")) or value is None:
+            continue
+        path = Path(value)
+        try:
+            parts.append(f"{name}:{hashlib.sha256(path.read_bytes()).hexdigest()}")
+        except OSError:
+            parts.append(f"{name}:missing")
+    return f"{signature}|permission:{hashlib.sha256('|'.join(parts).encode()).hexdigest()[:16]}"
+
+
+def clear_obsolete_permissions(budget: Any, current: str, signature: str) -> None:
+    prefix = f"{signature}|permission:"
+    for row in budget.permission_items():
+        if row["item_key"].startswith(prefix) and row["item_key"] != current:
+            budget.clear(row["item_key"])
 
 
 def ledger_signature(connection: Any) -> str:
@@ -98,6 +138,8 @@ class MissionIndustryFrameworkLaneCoordinator:
         launcher: Any,
         min_interval_seconds: int = MIN_INTERVAL_SECONDS,
         clock: Callable[[], float] = time.time,
+        failure_ledger_dir: Any | None = None,
+        failure_clock: Any | None = None,
     ) -> None:
         self.connection = connection
         self.launcher = launcher
@@ -110,7 +152,8 @@ class MissionIndustryFrameworkLaneCoordinator:
         # is nearly always a deploy, which is the likeliest thing to have
         # fixed it.
         self._quiet_signature: str | None = None
-        self._failed: dict[str, str] = {}
+        self.budget = lane_budget("industry_framework", state_dir=failure_ledger_dir,
+                                  clock=failure_clock)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -149,12 +192,20 @@ class MissionIndustryFrameworkLaneCoordinator:
         self._open = None
         signature = settled.get("signature")
         status = str(settled.get("framework_status") or "")
-        if settled.get("status") not in ("succeeded", "orphaned"):
-            if signature:
-                self._failed[str(signature)] = (
-                    settled.get("failure_reason") or f"last run: {settled.get('status')}")
+        if status in {"not_authorized", "no_policy"} and signature:
+            self.budget.record(permission_key(self.connection, self.launcher, str(signature)),
+                               status="gated:not permitted",
+                               reason=f"gated:not permitted: {status}")
         elif status in QUIET_STATUSES and signature:
             self._quiet_signature = str(signature)
+        elif settled.get("status") not in ("succeeded", "orphaned"):
+            if signature:
+                self.budget.record_settled(str(signature), settled)
+        elif status in CONTENT_TERMINAL_STATUSES and signature:
+            self.budget.record(str(signature), status=f"content_refused:{status}",
+                               reason=settled.get("failure_reason") or status)
+        elif signature:
+            self.budget.clear(str(signature))
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -169,10 +220,14 @@ class MissionIndustryFrameworkLaneCoordinator:
         if signature == self._quiet_signature:
             return {"status": "idle", "settled": settled, "signature": signature,
                     "reason": "nothing has moved since the last run found nothing"}
-        held = self._failed.get(signature)
+        permission = permission_key(self.connection, self.launcher, signature)
+        clear_obsolete_permissions(self.budget, permission, signature)
+        held = (self.budget.blocked(permission)
+                or self.budget.blocked(signature))
         if held is not None:
-            return {"status": "held", "settled": settled, "signature": signature,
-                    "reason": held}
+            return {"status": held.action, "settled": settled, "signature": signature,
+                    "reason": held.classification.reason,
+                    "failure_budget": self.budget.summary()}
         now = self.clock()
         if self._last_launch is not None and (
             now - self._last_launch < self.min_interval_seconds
@@ -211,7 +266,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         coordinator = MissionIndustryFrameworkLaneCoordinator(
-            connection=server.store.connection, launcher=launcher)
+            connection=server.store.connection, launcher=launcher,
+            failure_ledger_dir=getattr(launcher, "state_dir", None))
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
 

@@ -876,13 +876,13 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(fourth["status"], "launched")
         self.assertEqual(len(launcher.started), 2)
 
-    def test_a_failed_run_is_held_rather_than_retried_every_tick(self):
+    def test_three_transient_failures_hold_that_signature(self):
         launcher = self.Launcher(ticket_status="failed",
                                  summary={"failure_reason": "boom"})
         coordinator = MissionDossierLaneCoordinator(
             connection=self.connection, launcher=launcher)
-        coordinator.dispatch_once()
-        coordinator.dispatch_once()
+        for _ in range(3):
+            coordinator.dispatch_once()
         held = coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["reason"], "boom")

@@ -202,13 +202,28 @@ class CoordinatorTests(unittest.TestCase):
                                 summary={"framework_status": status})
                 self.assertEqual(coordinator.dispatch_once()["status"], "idle")
 
-    def test_a_failed_run_holds_that_signature_with_its_reason(self):
+    def test_a_failed_child_with_a_declared_quiet_outcome_is_not_a_failure(self):
         launcher = FakeLauncher()
         coordinator = self.coordinator(launcher)
         launched = coordinator.dispatch_once()
         launcher.settle(launched["ticket_ref"], status="failed",
-                        summary={"failure_reason": "the policy could not be read"})
-        result = coordinator.dispatch_once()
+                        summary={"framework_status": "no_driver_pack"})
+        self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        self.assertEqual(coordinator.budget.summary()["terminal"], 0)
+        self.assertEqual(coordinator.budget.summary()["held"], 0)
+
+    def test_three_transient_failures_hold_that_signature_with_its_reason(self):
+        launcher = FakeLauncher()
+        coordinator = MissionIndustryFrameworkLaneCoordinator(
+            connection=self.connection(), launcher=launcher,
+            clock=lambda: 0.0, min_interval_seconds=0)
+        launched = coordinator.dispatch_once()
+        for _ in range(3):
+            launcher.settle(launched["ticket_ref"], status="failed",
+                            summary={"failure_reason": "the policy could not be read"})
+            result = coordinator.dispatch_once()
+            if result["status"] == "launched":
+                launched = result
         self.assertEqual(result["status"], "held")
         self.assertIn("policy could not be read", result["reason"])
 
