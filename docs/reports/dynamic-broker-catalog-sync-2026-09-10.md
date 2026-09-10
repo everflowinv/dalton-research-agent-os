@@ -22,6 +22,8 @@ Final cross-review of owner selection and reservation found one legacy regressio
 
 All review calls used fake adapters and temporary router/scheduler/budget databases. No broker, network, paid model, host budget ledger, host configuration, or live authority call was made.
 
+The selection reader now distinguishes a policy's `legacy_pin` from a bootstrap `tier_preview`. After an explicit B selection is rolled back to tier mode on an old single-pin policy, both the display and the real route return to A; tier mode does not invent an unavailable fallback chain. One remaining presentation limitation is explicit: `current_selection` starts from one model config as representative for all purposes. Deployments where different purpose groups intentionally pin different policy refs need a later per-config/per-purpose view; this slice does not collapse or rewrite those configurations.
+
 `catalog_sync_status` builds the same desired public profiles as the writer path and compares semantic content, so check-only detects route, price, capacity, capability, and family drift without writing. Sync handles add, update, retire, and revive as append-only transitions. A second sync with unchanged public catalog data writes no rows.
 
 Focused verification covers a populated real ModelRouter, a stable profile whose route, price, capacity, family, and capabilities all change, preservation of the prior row bytes, read-only drift detection, idempotent second sync, secret-free reporting, retirement/revival, and unclassified-family verifier refusal.

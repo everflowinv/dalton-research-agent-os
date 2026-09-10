@@ -363,9 +363,20 @@ def effective_chain(
         else resolve_chain(policy, tier=tier, purpose=purpose, profiles=profiles)
     )
     if resolved is None:
-        # The policy carries no chain for this tier: the single-shot path.
-        return {"mode": "tier", "tier": tier, "chain": list(tier_chain(tier)),
-                "declared": False, "superseded_chain": None}
+        # An existing policy with no chain uses its ordinary filters. Showing
+        # bootstrap tier defaults here would disagree with the actual
+        # single-shot router, especially after rolling an explicit choice back
+        # to a legacy one-profile pin.
+        pins = list((policy.get("filters") or {}).get("allowed_profile_ids") or [])
+        if pins:
+            return {"mode": "legacy_pin", "tier": tier, "chain": pins,
+                    "declared": True, "superseded_chain": None}
+        if policy:
+            return {"mode": "policy_filters", "tier": tier, "chain": [],
+                    "declared": True, "superseded_chain": None}
+        return {"mode": "tier_preview", "tier": tier,
+                "chain": list(tier_chain(tier)), "declared": False,
+                "superseded_chain": None}
     return {"mode": resolved["mode"], "tier": tier,
             "chain": list(resolved["chain"]), "declared": True,
             "superseded_chain": resolved.get("superseded_chain")}

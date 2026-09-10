@@ -1743,9 +1743,15 @@ class ModelRouter:
             if policy_row is None:
                 raise RoutingPolicyNotFound(str(policy_version_ref))
             policy = json.loads(policy_row["policy_json"])
-            purpose_override = purpose is not None and (
-                policy.get("purpose_overrides") or {}
-            ).get(purpose) is not None
+            purpose_entry = (
+                (policy.get("purpose_overrides") or {}).get(purpose)
+                if purpose is not None else None
+            )
+            purpose_override = purpose_entry is not None
+            purpose_explicit = (
+                isinstance(purpose_entry, Mapping)
+                and purpose_entry.get("mode") == "explicit"
+            )
             if purpose_override:
                 # P14-M2. The purpose joins the request identity only when this
                 # policy version actually carries a selection for it, and then
@@ -1804,7 +1810,7 @@ class ModelRouter:
             live_chain: list[str] = []
             latest_profiles = self._latest_profiles(cur)
             by_id = {profile["id"]: profile for profile in latest_profiles}
-            if tier is not None or purpose_override:
+            if tier is not None or purpose_explicit:
                 resolved = resolve_chain(
                     policy, tier=tier, purpose=purpose, profiles=by_id
                 )
@@ -1850,7 +1856,7 @@ class ModelRouter:
                 if (
                     filters["allowed_profile_ids"]
                     and profile["id"] not in filters["allowed_profile_ids"]
-                    and not (purpose_override and chain_positions is not None
+                    and not (purpose_explicit and chain_positions is not None
                              and profile["id"] in chain_positions)
                 ):
                     reasons.append("profile_not_allowed")

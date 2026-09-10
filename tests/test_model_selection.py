@@ -174,6 +174,34 @@ class RouterCase(unittest.TestCase):
 
 
 class SelectionResolutionTests(RouterCase):
+    def test_explicit_then_tier_on_legacy_pin_displays_the_actual_pin(self) -> None:
+        pinned = ensure_planner_policy(
+            self.router, profile_ids=["profile:gpt-6-astra"], now=NOW,
+            policy_id="model-routing-policy:legacy-display",
+        )["policy_version_ref"]
+        explicit = publish_selection(
+            self.router, policy_version_ref=pinned, purpose=BRAIN_PURPOSE,
+            mode="explicit", chain=["profile:claude-fable-5-1"], now=NOW,
+        )["policy_version_ref"]
+        rolled = publish_selection(
+            self.router, policy_version_ref=explicit, purpose=BRAIN_PURPOSE,
+            mode="tier", now=NOW,
+        )["policy_version_ref"]
+        shown = effective_chain(self.router.get_policy(rolled), BRAIN_PURPOSE)
+        self.assertEqual(shown["mode"], "legacy_pin")
+        self.assertEqual(shown["chain"], ["profile:gpt-6-astra"])
+        decision = self.router.route(
+            _work("work:legacy-display"), attempt_number=1, capability="research",
+            policy_version_ref=rolled,
+            credential_slot_refs=credential_slots_for(
+                self.router, ["profile:gpt-6-astra"]),
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="legacy-display:1", purpose=BRAIN_PURPOSE,
+        )["decision"]
+        self.assertEqual(decision["outcome"], "selected", decision)
+        self.assertEqual(decision["selected_endpoint"]["model"], "gpt-6-astra")
+
     def test_following_the_tier_resolves_to_the_tiers_own_chain(self) -> None:
         checked = validate_selection(
             self.router, purpose=BRAIN_PURPOSE, mode="tier", chain=[]
