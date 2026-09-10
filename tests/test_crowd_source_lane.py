@@ -603,7 +603,9 @@ class LaneRegistrationTests(unittest.TestCase):
         # judgement ledger the evidence lanes above it filled, and asks whether
         # we would write any of it the same way today.
         not_evidence = {"dispatch_research_task", "dispatch_mission_reflection",
-                        "dispatch_conviction_call", "dispatch_zero_base_review"}
+                        "dispatch_conviction_call", "dispatch_zero_base_review",
+                        # These consume existing evidence; neither acquires it.
+                        "dispatch_model_stage_bridge", "dispatch_investment_memo"}
         evidence_lanes = [
             spec.operation for spec in self.registry.tick_lanes()
             if spec.operation not in not_evidence

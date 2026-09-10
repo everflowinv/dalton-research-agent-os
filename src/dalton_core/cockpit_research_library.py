@@ -7,7 +7,7 @@ import sqlite3
 from typing import Any, Mapping
 
 from .company_dossier import CompanyDossierAuthority, CompanyDossierError, section_body
-from .coverage_mission import CoverageMissionAuthority
+from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
 from .debate_map import DebateMapAuthority, DebateMapError
 from .industry_framework import (IndustryFrameworkAuthority, IndustryFrameworkError,
                                  deliverable_sections)
@@ -108,7 +108,8 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
             else:
                 item["approval"] = {"status": "not_applicable"}
         except (ValueError, KeyError, TypeError, sqlite3.Error,
-                CompanyDossierError, DebateMapError, IndustryFrameworkError) as exc:
+                CompanyDossierError, DebateMapError, IndustryFrameworkError,
+                CoverageMissionError) as exc:
             item.update(status="invalid", reason=str(exc), sections=[], gaps=[])
     return {"company_ref": company_ref, "industry_ref": mission["industry_ref"],
             "mission_version_ref": mission["id"], "products": products}
