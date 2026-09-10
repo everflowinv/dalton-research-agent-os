@@ -82,6 +82,13 @@ EVENT_KINDS: tuple[str, ...] = (
     "sales_note",
     "crowd_post",
     "expert_excerpt",
+    # P14f: one occurrence has been calibrated.  Distinct from
+    # ``reconciliation``, which is one row per metric and says how a single
+    # number graded; this is the quarter's whole account, and the one thing
+    # the judgement lane needs from it is that the *forward* periods were left
+    # alone.  Whether the print moves next year is a decision, and P14f does
+    # not make decisions.
+    "calibration",
 )
 
 # How much a reader should believe one event before reading it.  Ordered best
@@ -135,6 +142,11 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     "claim": frozenset({
         "claim_version_ref", "claim_ref", "metric_ref", "period", "statement", "source_ref",
     }),
+    "calibration": frozenset({
+        "occurrence_ref", "period_end", "model_version_ref", "reconciliation_count",
+        "overturn_candidates", "notable", "within_tolerance", "decision",
+        "forward_estimates_revised",
+    }),
 })
 
 # The tier a kind carries when nothing more specific is known.  ``news`` has
@@ -153,6 +165,9 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     "crowd_post": "crowd",
     "expert_excerpt": "expert_network",
     "news": "news_media",
+    # Computed from what was filed and what we had held: derived, like the
+    # reconciliation rows it summarises.
+    "calibration": "derived",
 })
 
 MAX_PAYLOAD_TEXT = 600

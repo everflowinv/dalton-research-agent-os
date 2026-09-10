@@ -166,6 +166,7 @@ REGISTRY_LANE_LABELS = {
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",
     "event_judgement": "判断新发生的事要不要动",
+    "earnings_season": "业绩前写前瞻、业绩后对账",
     "debate_map": "整理市场在吵什么、我们站哪边",
     "mission_crowd_sources": "看散户与员工在说什么",
     "mission_stage": "记录研究阶段",
