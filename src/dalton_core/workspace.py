@@ -18,12 +18,16 @@ from .store import content_hash
 SCHEMA_VERSION = "dalton-workspace-0.1"
 _SLUG = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+_REF = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*:[^\s]+$")
 _FIELDS = {
     "schema_version", "workspace_id", "slug", "workspace_root", "state_dir",
     "config_path", "log_dir", "spool_dir", "writer_socket", "cockpit_port",
     "release_ref", "release_path", "shared_readonly_paths", "content_hash",
 }
-_OPTIONAL_FIELDS = {"shared_capacity", "shared_connector_capacity"}
+_OPTIONAL_FIELDS = {
+    "shared_capacity", "shared_connector_capacity",
+    "shared_model_capacity_bindings",
+}
 
 
 class WorkspaceError(RuntimeError):
@@ -64,6 +68,7 @@ class WorkspacePaths:
     release_path: Path
     shared_readonly_paths: tuple[Path, ...]
     shared_capacity: Mapping[str, str] | None
+    shared_model_capacity_bindings: tuple[Mapping[str, str], ...]
     shared_connector_capacity: tuple[Mapping[str, str], ...]
     content_hash: str
     manifest_path: Path | None = None
@@ -149,6 +154,40 @@ class WorkspacePaths:
                     or _SHA.fullmatch(capacity["policy_hash"]) is None):
                 raise WorkspaceError("shared_capacity.policy_hash must be lowercase SHA-256")
             capacity = dict(capacity)
+        model_capacity = value.get("shared_model_capacity_bindings", [])
+        if not isinstance(model_capacity, list):
+            raise WorkspaceError("shared_model_capacity_bindings must be an array")
+        if capacity is not None and model_capacity:
+            raise WorkspaceError(
+                "legacy shared_capacity and shared_model_capacity_bindings are mutually exclusive")
+        model_bindings: list[Mapping[str, str]] = []
+        seen_model_accounts: set[tuple[str, str]] = set()
+        for item in model_capacity:
+            fields = {"database", "policy_ref", "policy_hash", "provider",
+                      "credential_slot_ref", "scope_ref", "account_ref"}
+            if not isinstance(item, Mapping) or set(item) != fields:
+                raise WorkspaceError(
+                    "shared model capacity binding has an invalid closed shape")
+            database = _absolute(item["database"],
+                                 "shared_model_capacity_bindings.database")
+            if database.parent != (host_root / "fleet-capacity").resolve():
+                raise WorkspaceError(
+                    "shared model capacity database must be directly under host fleet-capacity")
+            for key in fields - {"database", "policy_hash", "provider"}:
+                if not isinstance(item[key], str) or _REF.fullmatch(item[key]) is None:
+                    raise WorkspaceError(f"shared model capacity {key} is invalid")
+            if (not isinstance(item["policy_hash"], str)
+                    or _SHA.fullmatch(item["policy_hash"]) is None):
+                raise WorkspaceError("shared model capacity policy hash is invalid")
+            if (not isinstance(item["provider"], str) or not item["provider"]
+                    or any(char.isspace() for char in item["provider"])):
+                raise WorkspaceError("shared model capacity provider is invalid")
+            identity = (item["provider"], item["credential_slot_ref"])
+            if identity in seen_model_accounts:
+                raise WorkspaceError(
+                    "shared model capacity provider accounts must be unique")
+            seen_model_accounts.add(identity)
+            model_bindings.append(dict(item))
         connector_capacity = value.get("shared_connector_capacity", [])
         if not isinstance(connector_capacity, list):
             raise WorkspaceError("shared_connector_capacity must be an array")
@@ -178,6 +217,7 @@ class WorkspacePaths:
                 raise WorkspaceError("manifest_path is not workspace_root/workspace.json")
         return cls(workspace_id, slug, root, state, config, logs, spool, socket,
                    port, release_ref, release, shared_paths, capacity,
+                   tuple(model_bindings),
                    tuple(connector_bindings),
                    value["content_hash"], manifest)
 
@@ -244,6 +284,7 @@ def workspace_manifest(
     release_path: str | Path, *, workspace_id: str | None = None,
     shared_readonly_paths: Sequence[str | Path] = (),
     shared_capacity: Mapping[str, str] | None = None,
+    shared_model_capacity_bindings: Sequence[Mapping[str, str]] = (),
     shared_connector_capacity: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     if not isinstance(slug, str) or _SLUG.fullmatch(slug) is None:
@@ -266,6 +307,9 @@ def workspace_manifest(
     }
     if shared_capacity is not None:
         body["shared_capacity"] = dict(shared_capacity)
+    if shared_model_capacity_bindings:
+        body["shared_model_capacity_bindings"] = [
+            dict(item) for item in shared_model_capacity_bindings]
     if shared_connector_capacity:
         body["shared_connector_capacity"] = [dict(item) for item in shared_connector_capacity]
     wire = {**body, "content_hash": content_hash(body)}
@@ -302,6 +346,7 @@ def create_workspace_manifest(
     release_path: str | Path, *, workspace_id: str | None = None,
     shared_readonly_paths: Sequence[str | Path] = (),
     shared_capacity: Mapping[str, str] | None = None,
+    shared_model_capacity_bindings: Sequence[Mapping[str, str]] = (),
     shared_connector_capacity: Sequence[Mapping[str, str]] = (),
 ) -> WorkspacePaths:
     host = Path(host_root).expanduser().resolve()
@@ -309,6 +354,7 @@ def create_workspace_manifest(
                               workspace_id=workspace_id,
                               shared_readonly_paths=shared_readonly_paths,
                               shared_capacity=shared_capacity,
+                              shared_model_capacity_bindings=shared_model_capacity_bindings,
                               shared_connector_capacity=shared_connector_capacity)
     host.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(host, 0o700)
@@ -373,6 +419,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     create.add_argument("--shared-capacity-database", type=Path)
     create.add_argument("--shared-capacity-policy-ref")
     create.add_argument("--shared-capacity-policy-hash")
+    create.add_argument(
+        "--shared-model-capacity-binding", type=Path, action="append", default=[],
+        help="JSON file containing one exact provider/account capacity binding",
+    )
     show = sub.add_parser("show")
     show.add_argument("--manifest", type=Path, required=True)
     validate = sub.add_parser("validate")
@@ -398,11 +448,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "policy_ref": args.shared_capacity_policy_ref,
             "policy_hash": args.shared_capacity_policy_hash,
         }
+        model_bindings = []
+        for path in args.shared_model_capacity_binding:
+            try:
+                binding = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                parser.error(f"invalid shared model capacity binding file: {exc}")
+            model_bindings.append(binding)
         result = create_workspace_manifest(args.host_root, args.slug,
                                            args.cockpit_port, args.release_ref,
                                            args.release_path,
                                            shared_readonly_paths=args.shared_readonly_path,
-                                           shared_capacity=shared_capacity)
+                                           shared_capacity=shared_capacity,
+                                           shared_model_capacity_bindings=model_bindings)
         wire: Any = {"manifest": str(result.manifest_path),
                      "workspace_id": result.workspace_id,
                      "content_hash": result.content_hash}

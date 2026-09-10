@@ -63,17 +63,35 @@ def validate_policy(value: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("max_daily_calls", "max_daily_cost_micros", "max_concurrency"):
         if isinstance(wire[key], bool) or not isinstance(wire[key], int) or wire[key] < 1:
             raise SharedCapacityError(f"shared capacity policy {key} must be positive")
-    return {**wire, "content_hash": asserted}
+    # Version 0.1 used the credential slot as its explicit account identity.
+    # Keep those signed bytes valid while deriving one stable aggregation key
+    # that does not change when the owner publishes a new policy ref.
+    account_ref = wire["credential_slot_ref"]
+    scope_ref = "shared-model-capacity-scope:" + content_hash({
+        "provider": wire["provider"], "account_ref": account_ref,
+    })[:32]
+    return {**wire, "content_hash": asserted,
+            "account_ref": account_ref, "scope_ref": scope_ref}
+
+
+def _signed_policy_record(policy: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in policy.items()
+            if key not in {"account_ref", "scope_ref"}}
 
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS shared_capacity_policies(
  policy_ref TEXT PRIMARY KEY, policy_hash TEXT NOT NULL UNIQUE,
- record_json TEXT NOT NULL);
+ scope_ref TEXT NOT NULL, account_ref TEXT NOT NULL, record_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS shared_capacity_policy_heads(
+ scope_ref TEXT PRIMARY KEY, account_ref TEXT NOT NULL,
+ policy_ref TEXT NOT NULL UNIQUE, policy_hash TEXT NOT NULL UNIQUE,
+ activated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS shared_capacity_reservations(
  reservation_ref TEXT PRIMARY KEY, identity_hash TEXT NOT NULL UNIQUE,
  workspace_id TEXT NOT NULL, invocation_ref TEXT NOT NULL,
- policy_ref TEXT NOT NULL, policy_hash TEXT NOT NULL, day TEXT NOT NULL,
+ policy_ref TEXT NOT NULL, policy_hash TEXT NOT NULL,
+ scope_ref TEXT NOT NULL, account_ref TEXT NOT NULL, day TEXT NOT NULL,
  reserved_micros INTEGER NOT NULL, status TEXT NOT NULL,
  expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
  dispatched_at TEXT, settled_at TEXT, charged_micros INTEGER, outcome TEXT,
@@ -87,6 +105,7 @@ CREATE TABLE IF NOT EXISTS shared_capacity_events(
 class SharedCapacityAuthority:
     def __init__(
         self, database: str | Path, *, policy_ref: str, policy_hash: str,
+        scope_ref: str | None = None, account_ref: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         path = Path(database).expanduser().resolve()
@@ -107,7 +126,8 @@ class SharedCapacityAuthority:
         self.connection.execute("PRAGMA busy_timeout=10000")
         try:
             row = self.connection.execute(
-                "SELECT record_json,policy_hash FROM shared_capacity_policies WHERE policy_ref=?",
+                "SELECT record_json,policy_hash,scope_ref,account_ref "
+                "FROM shared_capacity_policies WHERE policy_ref=?",
                 (policy_ref,),
             ).fetchone()
         except sqlite3.Error as exc:
@@ -120,6 +140,20 @@ class SharedCapacityAuthority:
         if policy["id"] != policy_ref or policy["content_hash"] != policy_hash:
             self.connection.close()
             raise SharedCapacityUnavailable("declared shared capacity policy binding differs")
+        if ((scope_ref is not None and scope_ref != policy["scope_ref"])
+                or (account_ref is not None and account_ref != policy["account_ref"])):
+            self.connection.close()
+            raise SharedCapacityUnavailable(
+                "declared shared capacity scope/account binding differs")
+        head = self.connection.execute(
+            "SELECT policy_ref,policy_hash,account_ref FROM shared_capacity_policy_heads "
+            "WHERE scope_ref=?", (policy["scope_ref"],)).fetchone()
+        if head is None or head["policy_ref"] != policy_ref \
+                or head["policy_hash"] != policy_hash \
+                or head["account_ref"] != policy["account_ref"]:
+            self.connection.close()
+            raise SharedCapacityUnavailable(
+                "declared shared capacity policy is not the active scope head")
         self.policy = policy
 
     @classmethod
@@ -139,12 +173,70 @@ class SharedCapacityAuthority:
             if existing is not None and existing[0] != wire["content_hash"]:
                 raise SharedCapacityConflict("policy ref already binds different bytes")
             connection.execute(
-                "INSERT OR IGNORE INTO shared_capacity_policies VALUES(?,?,?)",
-                (wire["id"], wire["content_hash"],
-                 json.dumps(wire, ensure_ascii=False, sort_keys=True, separators=(",", ":"))),
+                "INSERT OR IGNORE INTO shared_capacity_policies VALUES(?,?,?,?,?)",
+                (wire["id"], wire["content_hash"], wire["scope_ref"],
+                 wire["account_ref"],
+                 json.dumps(_signed_policy_record(wire), ensure_ascii=False,
+                            sort_keys=True, separators=(",", ":"))),
+            )
+            head = connection.execute(
+                "SELECT policy_ref,policy_hash FROM shared_capacity_policy_heads "
+                "WHERE scope_ref=?", (wire["scope_ref"],)).fetchone()
+            if head is None:
+                connection.execute(
+                    "INSERT INTO shared_capacity_policy_heads VALUES(?,?,?,?,?)",
+                    (wire["scope_ref"], wire["account_ref"], wire["id"],
+                     wire["content_hash"], wire["created_at"]),
+                )
+            elif tuple(head) != (wire["id"], wire["content_hash"]):
+                raise SharedCapacityConflict(
+                    "scope already has an active policy; activate replacement explicitly")
+            connection.commit()
+            os.chmod(path, 0o600)
+        finally:
+            connection.close()
+
+    @classmethod
+    def activate(
+        cls, database: str | Path, policy: Mapping[str, Any], *,
+        expected_policy_ref: str, expected_policy_hash: str,
+    ) -> None:
+        """Publish and CAS-activate one replacement without resetting usage."""
+        wire = validate_policy(policy)
+        path = Path(database).expanduser().resolve()
+        connection = sqlite3.connect(path, isolation_level=None)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            head = connection.execute(
+                "SELECT policy_ref,policy_hash,account_ref FROM shared_capacity_policy_heads "
+                "WHERE scope_ref=?", (wire["scope_ref"],)).fetchone()
+            if head is None or head[0] != expected_policy_ref \
+                    or head[1] != expected_policy_hash:
+                raise SharedCapacityConflict("active shared capacity policy moved")
+            if head[2] != wire["account_ref"]:
+                raise SharedCapacityConflict("replacement changes the governed account")
+            existing = connection.execute(
+                "SELECT policy_hash FROM shared_capacity_policies WHERE policy_ref=?",
+                (wire["id"],)).fetchone()
+            if existing is not None and existing[0] != wire["content_hash"]:
+                raise SharedCapacityConflict("policy ref already binds different bytes")
+            connection.execute(
+                "INSERT OR IGNORE INTO shared_capacity_policies VALUES(?,?,?,?,?)",
+                (wire["id"], wire["content_hash"], wire["scope_ref"],
+                 wire["account_ref"], json.dumps(
+                     _signed_policy_record(wire), ensure_ascii=False,
+                     sort_keys=True, separators=(",", ":"))),
+            )
+            connection.execute(
+                "UPDATE shared_capacity_policy_heads SET policy_ref=?,policy_hash=?,"
+                "activated_at=? WHERE scope_ref=?",
+                (wire["id"], wire["content_hash"], wire["created_at"], wire["scope_ref"]),
             )
             connection.commit()
             os.chmod(path, 0o600)
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -184,6 +276,7 @@ class SharedCapacityAuthority:
             raise SharedCapacityError("shared reservation expiry must be in the future")
         identity = {"workspace_id": workspace_id, "invocation_ref": invocation_ref,
                     "policy_ref": self.policy["id"], "policy_hash": self.policy["content_hash"],
+                    "scope_ref": self.policy["scope_ref"],
                     "maximum_cost_micros": maximum_cost_micros}
         identity_hash = content_hash(identity)
         ref = "shared-capacity-reservation:" + identity_hash[:32]
@@ -211,12 +304,12 @@ class SharedCapacityAuthority:
                 self._event(row[0], "expired", now, {"reason": "undispatched_expired"})
             totals = self.connection.execute(
                 "SELECT COUNT(*) calls,COALESCE(SUM(CASE WHEN status='settled' THEN charged_micros ELSE reserved_micros END),0) cost "
-                "FROM shared_capacity_reservations WHERE policy_ref=? AND day=? AND status IN ('reserved','dispatched','settled')",
-                (self.policy["id"], day),
+                "FROM shared_capacity_reservations WHERE scope_ref=? AND day=? AND status IN ('reserved','dispatched','settled')",
+                (self.policy["scope_ref"], day),
             ).fetchone()
             open_count = self.connection.execute(
-                "SELECT COUNT(*) FROM shared_capacity_reservations WHERE policy_ref=? AND status IN ('reserved','dispatched')",
-                (self.policy["id"],),
+                "SELECT COUNT(*) FROM shared_capacity_reservations WHERE scope_ref=? AND status IN ('reserved','dispatched')",
+                (self.policy["scope_ref"],),
             ).fetchone()[0]
             if totals["calls"] + 1 > self.policy["max_daily_calls"]:
                 raise SharedCapacityExceeded("shared daily call capacity is exhausted")
@@ -225,9 +318,10 @@ class SharedCapacityAuthority:
             if open_count + 1 > self.policy["max_concurrency"]:
                 raise SharedCapacityExceeded("shared concurrent model capacity is exhausted")
             self.connection.execute(
-                "INSERT INTO shared_capacity_reservations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO shared_capacity_reservations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ref, identity_hash, workspace_id, invocation_ref, self.policy["id"],
-                 self.policy["content_hash"], day, maximum_cost_micros, "reserved",
+                 self.policy["content_hash"], self.policy["scope_ref"],
+                 self.policy["account_ref"], day, maximum_cost_micros, "reserved",
                  expiry.isoformat(timespec="microseconds"), now, None, None, None, None))
             self._event(ref, "reserved", now, identity)
             self.connection.commit()

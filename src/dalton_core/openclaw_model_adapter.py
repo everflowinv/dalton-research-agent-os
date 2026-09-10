@@ -1230,13 +1230,40 @@ class OpenClawModelAdapter:
             raise AssertionError("internal authenticated broker request shape drift")
         started_at = _timestamp(now_dt)
         capacity = reservation = None
-        if workspace is not None and workspace.shared_capacity is not None:
+        capacity_binding = None
+        if workspace is not None:
+            bindings = getattr(workspace, "shared_model_capacity_bindings", None)
+            legacy = getattr(workspace, "shared_capacity", None)
+            if bindings:
+                candidates = bindings
+            elif legacy is not None:
+                # The v0.1 manifest did not repeat scope fields; its exact
+                # signed policy remains the authority for the match.
+                candidates = (legacy,)
+            else:
+                candidates = ()
+            matches = [binding for binding in candidates
+                       if binding.get("provider") == profile["provider"]
+                       and binding.get("credential_slot_ref")
+                       == profile["credential_slot_ref"]]
+            if legacy is not None and not bindings:
+                matches = [legacy]
+            if len(matches) > 1:
+                raise ModelAdmissionError(
+                    "workspace has duplicate shared model capacity bindings")
+            if candidates and not matches:
+                raise ModelAdmissionError(
+                    "selected model has no shared capacity binding for its provider account")
+            capacity_binding = matches[0] if matches else None
+        if capacity_binding is not None:
             from .shared_capacity import SharedCapacityAuthority, SharedCapacityError
-            binding = workspace.shared_capacity
+            binding = capacity_binding
             try:
                 capacity = SharedCapacityAuthority(
                     binding["database"], policy_ref=binding["policy_ref"],
-                    policy_hash=binding["policy_hash"], clock=self._clock)
+                    policy_hash=binding["policy_hash"],
+                    scope_ref=binding.get("scope_ref"),
+                    account_ref=binding.get("account_ref"), clock=self._clock)
                 maximum_cost_micros = int(
                     (Decimal(str(work.budget["max_cost_usd"])) * Decimal(1_000_000))
                     .to_integral_value(rounding=ROUND_CEILING)
