@@ -285,6 +285,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 中午 | planner 日账本合入（4,876 项通过，已 push）；consensus 合入中。P13-M3 review 一 blocker（bridge 单券商可冒充共识）已发回；P12e、prior-research 在修 | 进行中 |
 | 09-10 下午 | consensus 合入（5,045 项通过，已 push）；合入 authority 授权标志统一（19 个 authority 共享按连接的标志；受保护表自动识别）。在修：P12e、prior-research、P13-M3 | 进行中 |
 | 09-10 下午 | authority 标志统一合入（5,055 项通过，已 push）。派出模型选择与自动登记（cockpit 按环节选模型 → 新 policy 版本；每小时目录 lane；一键放行写 broker 子树）。在修：P12e、prior-research、P13-M3 | 进行中 |
+| 09-10 下午 | P13-M3 敏感性合入（5,167 项通过，已 push；按历史峰谷摆幅排 driver，bridge 单券商不再能冒充共识）；合入 P12e 行业框架（deliverable 数字可引用有 accession / 模型版本支撑的计算格）。在修：prior-research；开发中：model-selection（含模型被移除时的自动回退与 cockpit 通知） | 进行中 |
 
 ---
 
