@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 分支：`s5-sec-insider-13f`（worktree `~/Projects/dalton-s5-sec-insider-13f-worktree`）
-分叉基线：main `ebd2ea8`（3,932 项测试）；已 `git merge main` 至 `88a9325`（含 C1 事件桥、P14d reopen lane）
+分叉基线：main `ebd2ea8`（3,932 项测试）；已 `git merge main` 至 `eb8e5fb`（含 C1 事件桥、P14d reopen lane、P15d ConvictionCall）
 审阅：主 agent 一轮，两个静默丢数据缺陷 + 六项，全部处理，见第 6 节
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 S 线「之后」一行、[OpenClaw 数据源盘点 v1.0](openclaw-data-source-survey-v1.0-2026-09-09.md) 第 19/20/34 行与 B.9 / C.7 / C.9、[P14a 日常跟踪](p14a-daily-tracking-v1.0-2026-09-09.md)、[C1 事件日历](c1-catalyst-calendar-v1.0-2026-09-09.md)、[P11a 市场层](p11a-market-layer-v1.0-2026-09-09.md)、`docs/CONNECTOR_PROTOCOL.md`
 全量测试：见第 9 节，原文粘贴
@@ -158,7 +158,9 @@ IR 页是另一档：`ir_page_change` 默认 `management_direct`。**没有向�
 
 零碎：`MAX_FILINGS_PER_FORM` 改成**按 form 计**（一家公司每一份 13D 要配一百份 Form 4，单一上限意味着那份唯一值得看的 13D 掉在一串例行行权后面永远选不到）；13F 配额注释写明三次调用；`MAX_HOLDINGS` 从 4,000 提到 12,000（BlackRock 量级约七千行），**超出仍然是带理由的拒绝而不是截断**——截断一本账再拿去和一份按不同边界截断的上季度比对，会凭空造出 `new` 与 `exit`，一个能读的拒绝可以恢复，一次编造的清仓不能；`_ir_watched_on` 挪到写完所有事件之后（原来写在前面，写一半抛异常就把当天剩下的变化丢到明天，而 sweep 本来就是幂等的）。
 
-合并：`git merge main`（`88a9325`，含 C1 事件桥与 P14d reopen lane）。冲突两处，都是同一行邻居：`cockpit_plane.REGISTRY_LANE_LABELS` 里我的 `mission_ownership` 与 main 的 `mission_reopen`（两条都留），以及 `tests/test_openclaw_web_search_broker_client.py`——**我那版 `future()` 整块丢弃，取 main 的**。
+合并：`git merge main` 两轮，末端 `eb8e5fb`（含 C1 事件桥、P14d reopen lane、P15d ConvictionCall）。冲突每轮一到两处，全是同一行邻居——`cockpit_plane.REGISTRY_LANE_LABELS` 里我的 `mission_ownership` 挨着 main 的 `mission_reopen` 与 `conviction_call`（都留），以及 `tests/test_openclaw_web_search_broker_client.py`：**我那版 `future()` 整块丢弃，取 main 的**（同一个 bug 两边独立发现，main 的先落地）。`index.json` 没有冲突；真冲突了也只需重跑 `scripts/build_connector_inventory.py`，那个脚本的存在就是为了这件事。
+
+合进来的 main 还带来一条硬断言：INT2 的 `test_every_committed_record_now_has_a_seed_path` 要求仓库里每一份治理记录都有 install 路径。六份新记录因此进了 `install.sh` 与 `INSTALL_SEEDS`，见 §7.3。
 
 ---
 
@@ -182,6 +184,7 @@ C1 那条注意语原样适用：这些行**在字节里但不在那次 invocati
 
 - `research_plan.SEC_TEMPLATE_REGISTRY` append 一条 `v4`。这不是选择：`sec_template_registry()` 在包内模板不是注册头时**直接 fail closed**，错误信息本身就写着「append a SEC_TEMPLATE_REGISTRY entry」。改动是纯 append，两份输出契约逐字节不变。
 - `cockpit_plane.REGISTRY_LANE_LABELS` 加一行 `"mission_ownership": "看谁在买卖这家公司"`。计划把 `cockpit_*` 列为禁改，但 `test_cockpit_wave1.LaneVocabularyTests` 会在任何未命名的新 lane 上失败，而 S1 的 `sales_notes_feed`、S3 的 `mission_crowd_sources` 都已在这张表里。**如果集成时希望由主 agent 统一做，这一行可以从本分支撤掉再补**——它与其余改动无耦合。
+- `deploy/macos/install.sh` 与 `scripts/rehearse_deploy.py:INSTALL_SEEDS` 各加六条。这条也不是选择：INT2 把「仓库里有、install 从不投放的治理记录」变成了硬断言（`test_rehearse_deploy::test_every_committed_record_now_has_a_seed_path`），而那条测试自己的 docstring 写着修法就是「加 install.sh 的 seed 块**并**加 `INSTALL_SEEDS` 条目，或者删掉记录」。删记录与交付物冲突，所以加。两块都是纯 append，沿用既有的 `for ... done` 惯用法，四条 SEC 记录按 INT1 的「一条 lane 要么全投要么不投」一起下，IR 两条单独一块并写清它们**开不了任何东西**（watcher 的开关是声明文件，install 故意不放）。
 
 四份共享测试文件里的字面量按需更新：`test_research_plan`（registry 多一个 tag）、`test_connector_inventory`（profile 集合多 `ir-page-watch`）、`test_connector_quota_policy`（配额表从模块重新生成）、`test_research_plan_executor`（`template-v3` → `template-v4`，7 处）。
 
@@ -227,14 +230,14 @@ PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
 ```
 
 ```
-Ran 4050 tests in 619.833s
+Ran 4528 tests in 736.417s
 
 OK (skipped=1)
 ```
 
-基线 main `ebd2ea8` 是 3,932 项，本切片新增 118 项（68 + 26 + 24）。
+在合入 main `eb8e5fb` 之后跑的。分叉基线 `ebd2ea8` 是 3,932 项；本切片新增 134 项（82 + 26 + 26），其余是这两轮 main 带进来的。
 
-**顺手修掉的一个定时炸弹。** `tests/test_openclaw_web_search_broker_client.py` 里 `FUTURE` 是模块常量，在 `unittest discover` **导入**该文件时算成「此刻 + 5 分钟」，而它真正跑到是几分钟以后。全量套件长到跨过五分钟之后，那八个 socket 测试开始整齐地报 `web search deadline has already passed`——这不是新 bug，是超时检查对着一个测试自己放陈的 deadline 正确工作。改成每次调用现算（`future()`）。同一个文件里 `test_python_client_and_node_broker_agree_on_the_wire` 的注释里已经记着同一课的另一半（timeout 钳位），这次是补齐它。这不在 S5 的所有权范围内，但套件跨过那个时长的第一个人就得修，而那个人是我。
+**审阅之前跑过的那一版曾经修了一个定时炸弹，现在丢弃了。** `tests/test_openclaw_web_search_broker_client.py` 的 `FUTURE` 是模块常量，在 `unittest discover` **导入**该文件时算成「此刻 + 5 分钟」，而它真正跑到是几分钟以后；套件长过五分钟之后那八个 socket 测试就整齐地报 `web search deadline has already passed`。同一个 bug main 上也独立发现并修了，落地更早，所以合并时**整块取 main 的 `future()`**。记在这里是因为它解释了本报告上一版里那段现在已经不存在的改动。
 
 `scripts/build_connector_inventory.py --check`：
 
@@ -245,21 +248,24 @@ packaged connector inventory matches the frozen definitions
 本切片新增的三个文件：
 
 ```
-tests/test_s5_sec_ownership.py     Ran 68 tests   契约 / grade 排除 / 数字逐字 / 四种 form 解析 / 子进程 / spool 读取器
+tests/test_s5_sec_ownership.py     Ran 82 tests   契约 / grade 排除 / 数字逐字 / 四种 form 解析 / 子进程 /
+                                                  spool 读取器 / 审阅那八项（B1 的信息表解析与零持仓拒绝、
+                                                  B2 的联名申报、拆行仓位、比值决定性、上季 accession）
 tests/test_s5_ir_page_watch.py     Ran 26 tests   身份与治理 / 声明加载 / 两个操作的 wire / diff 幂等 / loopback 约束
-tests/test_s5_ownership_lane.py    Ran 24 tests   LaneSpec 注册 / 两个 grant / 协调器决策 / 事件幂等 / P14a 真权威收下 payload
+tests/test_s5_ownership_lane.py    Ran 26 tests   LaneSpec 注册 / 两个 grant / 协调器决策 / 事件幂等 /
+                                                  sweep 不被积压饿死 / P14a 真权威收下 payload
 ```
 
 ---
 
 ## 10. 装机接线（给 INT）
 
-1. **治理记录**：把 `deploy/connector-governance/` 里六份新记录复制到 live 状态的 `connector-governance/`。文件名就是 lane 找它们的名字（`sec-form4-transactions-v1.json` 等）。owner 批准前它们是 `proposed`，lane 会把对应操作报成未批准而不是失败。
-2. **IR 页声明**：`deploy/phase9/p9-us-it-services-ir-pages-v1.json` → live 状态根下的 `ir-pages.json`。**不在就等于关掉 IR 监视**，`argv_fragment` 不会加那个参数。
+1. **治理记录：`install.sh` 已经会投放**（本分支加的两块，见 §7.3）。四份 SEC 记录一起下，两份 watcher 记录一起下，都是 seed-once、`chmod 600`、不覆盖既有文件。owner 批准前它们是 `proposed`，lane 会把对应操作报成未批准而不是失败。文件名就是 launcher 找它们的名字（`sec-form4-transactions-v1.json` 等）。
+2. **IR 页声明**：`deploy/phase9/p9-us-it-services-ir-pages-v1.json` → live 状态根下的 `ir-pages.json`。**install.sh 故意不做这一步**：那十个 URL 要人确认过才算数，写错一个的后果是把另一家公司的新闻归到这家公司名下。**不放就等于关掉 IR 监视**，`argv_fragment` 不会加那个参数，lane 把 watcher 报成 `unconfigured`。
 3. **LaunchAgent 参数**由 lane 注册表自动拼：`--sec-ownership-governance-dir <state>/connector-governance`，以及（当 `ir-pages.json` 存在时）`--ir-page-declaration <state>/ir-pages.json`。`macos_launchagent.py` 一行没改。
 4. **mission 版本**：live mission 的 `autonomy.may_write` 需要同时含 `observation`（已有）与 `market_event`（P14a 加的词，live 尚未授予）。两者齐了 lane 才动。
 5. **changedetection.io**：需要在 `127.0.0.1:5055` 上、且已经为声明里的 10 个 URL 建好 watch。没建就是 `undeclared_count` 为 0、`changes` 为空，没有报错。
-6. `pyproject.toml` **没改**：这四个操作不需要任何新依赖，解析是标准库 `xml.etree`。
+6. `pyproject.toml` **没改**：这四个操作不需要任何新依赖，解析是标准库 `xml.etree`。**没有新的 `*_schema.sql`**，所以 `bootstrap.py` 的 schema 表与 `rehearse_deploy.py` 的 `MigrationSpec` 表都不需要本切片的条目——S5 的产出全部落在连接器层与 P14a 已有的事件账本上。
 
 ---
 
