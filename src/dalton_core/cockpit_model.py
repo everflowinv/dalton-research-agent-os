@@ -504,6 +504,7 @@ class CockpitModel:
             canonical = re.search(
                 re.escape(policy_suffix)
                 + r"(?::route-admission:[0-9a-f]{64})?"
+                + r"(?::operator-recovery:[0-9a-f]{16})?"
                 + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
                 base_request_id,
             )
@@ -592,7 +593,8 @@ class CockpitModel:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
-            if formal is not None and ":operator-recovery:" not in base_request_id:
+            if (formal is not None and formal.get("terminal_state") == "failed"
+                    and ":operator-recovery:" not in base_request_id):
                 from .controlled_failure_redrive import approved_request
 
                 recovery_suffix = approved_request(

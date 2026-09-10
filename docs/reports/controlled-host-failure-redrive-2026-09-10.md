@@ -29,7 +29,7 @@ Validation:
 PYTHONPATH=src python3 -m unittest tests.test_controlled_failure_redrive tests.test_cockpit_model_fallback tests.test_scheduler tests.test_thesis_impact_budget
 ```
 
-Result: 67 tests passed. Candidate reads use the shared strict read-only SQLite
+Result: 69 tests passed. Candidate reads use the shared strict read-only SQLite
 opener; tests compare Scheduler and budget bytes and sidecars and reject an
 unprovisioned WAL without creating sidecars. Concurrent applies converge to
 one fresh and one duplicate result. Host drift, missing correction evidence,

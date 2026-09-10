@@ -248,6 +248,24 @@ class CockpitChainTests(unittest.TestCase):
             ":capacity-policy:" + content_hash(expected_retry)[:16],
             stored["metadata"]["request_id"],
         )
+        operator_request = (
+            "operator-capacity"
+            + ":capacity-policy:" + content_hash(expected_retry)[:16]
+            + ":operator-recovery:" + "a" * 16
+        )
+        before = len(explicit_adapter.served)
+        recovered = explicit.call(**{**kwargs, "request_id": operator_request})
+        replay = explicit.call(**{**kwargs, "request_id": operator_request})
+        self.assertFalse(recovered["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(explicit_adapter.served), before + 1)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            recovered_work = scheduler.work_order_authority(
+                recovered["work_order_ref"])["work_order"]
+        self.assertEqual(
+            recovered_work["metadata"]["request_id"].count(":capacity-policy:"),
+            1,
+        )
 
     def test_a_legacy_terminal_busy_failure_gets_one_versioned_recovery_identity(self) -> None:
         adapter = BusyThenAvailableAdapter({})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -97,7 +98,7 @@ def _eligible_code(envelope: Mapping[str, Any]) -> str | None:
 
 def prepare(*, scheduler_db: str | Path, budget_db: str | Path,
             old_work_order_ref: str, openclaw_root: str | Path) -> dict[str, Any]:
-    with connect_read_only(scheduler_db) as connection:
+    with closing(connect_read_only(scheduler_db)) as connection:
         connection.row_factory = sqlite3.Row
         formal = connection.execute(
             "SELECT attempt_number,result_envelope_id,result_envelope_hash,"
@@ -122,7 +123,7 @@ def prepare(*, scheduler_db: str | Path, budget_db: str | Path,
     if (canonical_json(work_wire) != work["work_order_json"]
             or content_hash(work_wire) != work["work_order_hash"]):
         raise ControlledFailureRedriveError("old WorkOrder authority is invalid")
-    with connect_read_only(budget_db) as budget_connection:
+    with closing(connect_read_only(budget_db)) as budget_connection:
         budget_connection.row_factory = sqlite3.Row
         rows = budget_connection.execute(
             "SELECT a.admission_id,a.content_hash AS admission_hash,a.reserved_micros,"
@@ -268,7 +269,7 @@ def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_wor
             or not repair_current):
         return None
     try:
-        with connect_read_only(budget_db) as budget_connection:
+        with closing(connect_read_only(budget_db)) as budget_connection:
             budget_connection.row_factory = sqlite3.Row
             correction = budget_connection.execute(
                 "SELECT record_json,content_hash FROM thesis_impact_settlement_corrections "

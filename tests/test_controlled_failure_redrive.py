@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import shutil
 import threading
+from unittest.mock import patch
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,6 +131,25 @@ class ControlledFailureRedriveTests(unittest.TestCase):
                              formal=formal, mission=self.mission),
             ":operator-recovery:" + saved["content_hash"][:16],
         )
+
+    def test_prepare_closes_strict_read_only_connections(self):
+        from dalton_core.readonly_sqlite import connect_read_only as real_connect
+
+        opened = []
+
+        def tracked(path):
+            connection = real_connect(path)
+            opened.append(connection)
+            return connection
+
+        with patch("dalton_core.controlled_failure_redrive.connect_read_only",
+                   side_effect=tracked):
+            prepare(scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+                    old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root)
+        self.assertEqual(len(opened), 2)
+        for connection in opened:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
 
     def test_tampered_review_or_changed_mission_is_refused(self):
         candidate = prepare(
