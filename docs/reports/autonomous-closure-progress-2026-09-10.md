@@ -59,3 +59,11 @@ Next step：接受完整运行候选后备份部署、health与逐字核对、�
 方向：共享版本化程序和运行依赖；独立workspace根目录、数据库、source spool、模型配置、任务/进度、预算、日志、socket、锁和端口；每个Cockpit固定绑定workspace，另可提供只读fleet总览。共享外部模型/数据源的实际账户额度需要全局reservation/并发协调，不能把独立本地预算当成额外供应商配额。
 
 验收至少两个不同行业workspace并行运行：同名任务/相同公司ID不串数据，停止/重启/升级其中一个不影响另一个；Cockpit请求无法跨workspace，单实例锁只阻止本workspace重复controller；全局共享源限额与各workspace任务预算都被实际执行。先审计现有单实例路径假设，再分片实现，不能复制仓库冒充隔离。
+
+## 18:51 UTC 运行部署成功
+
+`299227b82009f7f7bf105a37f3adb58d4516597d` 全量6418项/548.500s通过（1 skip）；67/67 schema、40 tick entries、0 escaped；535文件（377py/67sql/3html/88json）与wheel逐字一致，SHA `8ec8790399ccd040d31bf7edd2ace3c17882821433ab4f1e8ebd9d4b2aaf95d4`。
+
+已按owner授权备份并部署。Backup `deploy-backup-20260910T184938Z`，保留源码 `.release-source.otXCB3`；controller63222，health全部通过；部署后535安装文件与源码/wheel一致。Mission v14真实签署hash不变。首次产品仍0/15，不把启动成功当研究验收。私有packet authoritative release-manifest.json已标deployment complete_runtime_verified，保存postdeploy与health证据。
+
+新增导入79项、HTML权威16项、XLSX+下载+控制面20项集成通过；独立审查继续改跨主体claim图表、来源manifest、财年日历/mission绑定。以上新增代码进入下一次发布，不混入本次6418项验收结论。
