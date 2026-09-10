@@ -230,10 +230,6 @@
  "case_ref": "empty-link-without-a-reason",
  "expected": {
   "deterministic": {
-   "claim_refs_resolve": {
-    "count": 0,
-    "status": "skipped"
-   },
    "every_section_cites": {
     "count": 0,
     "status": "pass"

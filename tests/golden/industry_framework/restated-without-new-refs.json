@@ -437,10 +437,6 @@
  "case_ref": "restated-without-new-refs",
  "expected": {
   "deterministic": {
-   "claim_refs_resolve": {
-    "count": 0,
-    "status": "skipped"
-   },
    "every_section_cites": {
     "count": 0,
     "status": "pass"

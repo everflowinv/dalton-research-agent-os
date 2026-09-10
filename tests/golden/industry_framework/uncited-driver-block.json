@@ -214,10 +214,6 @@
  "case_ref": "uncited-driver-block",
  "expected": {
   "deterministic": {
-   "claim_refs_resolve": {
-    "count": 0,
-    "status": "skipped"
-   },
    "every_section_cites": {
     "count": 1,
     "status": "fail"

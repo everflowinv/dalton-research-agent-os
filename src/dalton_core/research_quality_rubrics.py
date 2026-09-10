@@ -959,8 +959,14 @@ INDUSTRY_FRAMEWORK = Rubric(
                 "缺口具体，但没有说哪一类来源能补，S 线读了也不知道该接什么",
                 "每条缺口都指名 content kind 与候选来源，并说明它现在接没接、接了要花多少配额",
             ),
-            layer="both",
-            checks=("claim_refs_resolve",),
+            # Judged only. The structural half of this standard is not in
+            # `research_quality_score.CHECKS` and should not be: whether a gap
+            # names a source that could fill it is checked by the
+            # Constitution's own `open_gaps_name_a_source` binding, which runs
+            # against the record rather than against the flattened artefact and
+            # can therefore read `candidate_sources`. Naming an unrelated check
+            # here would have made this criterion look enforced when it was not.
+            layer="judge",
         ),
         Criterion(
             criterion_id="new_version_new_evidence",

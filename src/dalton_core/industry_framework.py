@@ -164,6 +164,9 @@ UNAVAILABLE_REASONS: tuple[str, ...] = (
 # different authorities and a reader has to know which door to open.
 REF_KINDS: tuple[str, ...] = (
     "claim", "figure", "comparison_cell", "dossier_section", "debate",
+    # Not a document: the state of the world the gap list describes, as one
+    # digest.  See ``gap_state_ref``.
+    "gap_state",
 )
 
 # Bounds.  Per slot and per unit, both enforced.
@@ -654,12 +657,21 @@ def _decimal(value: Any) -> Decimal | None:
 def _pick_concept(
     table: Mapping[str, Any], preferred: Sequence[str]
 ) -> dict[str, Any] | None:
-    """The first filed line of this table that plays a role, in preference order."""
+    """The first filed line of this table that plays a role, in preference order.
+
+    Durations only.  Revenue, cost of revenue and operating income are flows,
+    and ``build_model_inputs`` marks a line that resolved to point-in-time
+    values as ``period_basis == "instant"``.  "18.7 billion in the quarter" and
+    "18.7 billion on that day" are different claims that a column header cannot
+    tell apart, so a line filed as an instant is not eligible to play a flow's
+    role here -- it is skipped, and the next preference is tried.
+    """
 
     by_concept = {
         str(line["concept"]): line
         for line in table.get("filed_lines") or []
         if line.get("status") == "filed" and (line.get("cells") or {})
+        and line.get("period_basis") in (None, "duration")
     }
     for concept in preferred:
         line = by_concept.get(concept)
@@ -1020,13 +1032,26 @@ def comparison_material(
     Only cells with a value: a cell that says "not filed" is a fact about the
     filings and belongs in the gap list, not in a sentence citing a number that
     is not there.
+
+    **The budget is allocated per company, not taken off the end.**  Cells are
+    generated company by company, so a tail slice keeps whichever companies
+    happen to sort last and silently drops the rest -- with five fully filed
+    peers and a bound of forty, Accenture disappeared entirely while the prompt
+    still showed it in the rendered table.  A model shown a number in the table
+    and given no tag for it is a model being invited to write the figure and
+    cite something else, which is the exact failure the tagging exists to
+    prevent.  So every company gets ``limit // n`` of its most recent cells,
+    and a company with fewer contributes fewer rather than borrowing.
     """
 
-    rows = []
+    order = [str(row["company_ref"]) for row in comparison.get("companies") or []]
+    if not order:
+        return []
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for cell in comparison.get("cells") or []:
         if cell["status"] != "computed":
             continue
-        rows.append({
+        grouped.setdefault(str(cell["company_ref"]), []).append({
             "kind": "comparison_cell",
             "ref": cell["ref"],
             "text": (f"{cell['ticker']} {cell['quarter']}"
@@ -1034,7 +1059,13 @@ def comparison_material(
             "period": cell["quarter"],
             "importance": cell["basis"],
         })
-    return rows[-limit:]
+    per = max(1, int(limit) // len(order))
+    rows: list[dict[str, Any]] = []
+    for company_ref in order:
+        # Newest last in the cell order, so the tail of one company's own list
+        # is its most recent quarters.
+        rows.extend(grouped.get(company_ref, [])[-per:])
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -1892,13 +1923,51 @@ def body_hash(record: Mapping[str, Any]) -> str:
     })
 
 
+def gap_state_ref(gaps: Sequence[Mapping[str, Any]]) -> str:
+    """The gap list's state of the world, as one citable ref.
+
+    Two things can move this deliverable without a word of prose changing and
+    without a filing landing, and the second one is the whole point of the gap
+    list: a source gets connected, or a governed quota changes.  "Guidepoint is
+    now connected" is evidence -- of a different kind from a Claim, but it is
+    the fact the S line was waiting for, and a framework that could not record
+    the day it arrived would be a framework whose gap list silently went stale.
+
+    So the digest covers each gap's identity and status and, for every
+    candidate source, its slug, its connection status and its daily quota.  It
+    deliberately does not cover the prose of ``what_is_missing`` or
+    ``cost_note``: those come from the policy, and a policy edit is already a
+    new ``policy_hash`` on the record.
+    """
+
+    payload = [
+        {
+            "gap_ref": str(gap.get("gap_ref") or ""),
+            "status": str(gap.get("status") or ""),
+            "sources": [
+                {
+                    "slug": str(row.get("slug") or ""),
+                    "connection_status": str(row.get("connection_status") or ""),
+                    "daily_quota": [dict(entry) for entry in row.get("daily_quota") or ()],
+                }
+                for row in gap.get("candidate_sources") or ()
+            ],
+        }
+        for gap in gaps or ()
+    ]
+    return f"gap-state:{content_hash(payload)[:32]}"
+
+
 def evidence_scope(record: Mapping[str, Any]) -> list[str]:
     """Every ref this version rests on, sorted.  ADR-0008 reads this.
 
-    The comparison table's filed accessions are in here, and that is the one
-    place this differs from the dossier: a newly filed quarter moves the table
-    and no prose, and a system that called that a duplicate would stop
-    versioning the industry the moment the drafting stalled.
+    Two entries here are not documents, and both are why this differs from the
+    dossier.  The comparison table's filed accessions: a newly filed quarter
+    moves the table and no prose, and a system that called that a duplicate
+    would stop versioning the industry the moment the drafting stalled.  And
+    the gap list's state: connecting a source is the event this deliverable
+    exists to provoke, so it has to be able to occasion the version that
+    records it.
     """
 
     refs: set[str] = set()
@@ -1908,6 +1977,8 @@ def evidence_scope(record: Mapping[str, Any]) -> list[str]:
         for row in (record.get(key) or {}).get("sources") or []:
             refs.add(row["ref"])
     refs.update(comparison_accessions(record.get("cross_company_comparison") or {}))
+    if record.get("gaps"):
+        refs.add(gap_state_ref(record["gaps"]))
     return sorted(refs)
 
 
@@ -2013,39 +2084,100 @@ def framework_artefact(
     }
 
 
+def cell_accessions(comparison: Mapping[str, Any]) -> dict[str, str]:
+    """Each computed cell's ref mapped to one filed accession behind it."""
+
+    out: dict[str, str] = {}
+    for cell in comparison.get("cells") or []:
+        if cell["status"] != "computed":
+            continue
+        accessions = sorted(cell.get("source_accessions") or ())
+        if accessions:
+            out[cell["ref"]] = accessions[0]
+    return out
+
+
 def deliverable_sections(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The framework as ``mission_deliverable`` sections.
 
     ``industry_framework`` has been a ``DELIVERABLE_KIND`` since Phase 9 with
-    nothing behind it.  This is the projection that lets the published version
-    also be a document a person reads in the Cockpit, without the record and
-    the document being two separately drafted things.
+    nothing behind it.  This is the projection that puts the published version
+    into the document chain a person reads, without the record and the document
+    being two separately drafted things.
 
-    Only claim-kind refs travel in ``claim_refs`` and ``numbers``, because the
-    deliverable authority resolves them against live claim versions; the
-    comparison table's figures are carried in a section of their own whose
-    numbers list is empty and whose body is the rendered table, so that the
-    figure discipline reads the table's own rows rather than reporting every
-    cell as an unsourced number.
+    Every figure carries a source, and after P12e two kinds of source are
+    admissible.  A sentence citing a Claim carries the Claim; a sentence citing
+    a computed comparison cell carries that cell, bound to one of the filed
+    accessions the arithmetic used, which the deliverable authority resolves at
+    publish.  Before the cell kind existed this projection had to drop the
+    comparison figures and then the table section would have been refused as a
+    wall of unsourced numbers -- which is the shape of the problem P14f has for
+    its forecast figures too.
     """
 
-    sections = []
-    for part in _artefact_parts(record):
-        if not part["body"]:
-            continue
-        sections.append({
-            "title": part["title"],
-            "body": part["body"],
-            "claim_refs": part["claim_refs"],
-            "numbers": [row for row in part["numbers"] if row["claim_version_ref"]],
-            "gaps": part["gaps"],
-        })
     comparison = record.get("cross_company_comparison") or {}
+    accessions = cell_accessions(comparison)
+
+    def number_entries(sources: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        entries = []
+        for row in sources:
+            if row["kind"] == "claim":
+                entries.append({"text": row["text"],
+                                "claim_version_ref": row["ref"],
+                                "period": row.get("period")})
+            elif row["kind"] == "comparison_cell" and row["ref"] in accessions:
+                entries.append({
+                    "text": row["text"],
+                    "cell": {"kind": "statement_accession", "ref": row["ref"],
+                             "accession": accessions[row["ref"]]},
+                    "period": row.get("period"),
+                })
+        return entries
+
+    def block(title: str, part: Mapping[str, Any]) -> dict[str, Any] | None:
+        body = unit_body(part)
+        if not body:
+            return None
+        sources = part.get("sources") or []
+        return {
+            "title": title,
+            "body": body,
+            "claim_refs": [row["ref"] for row in sources if row["kind"] == "claim"],
+            "numbers": number_entries(sources),
+            "gaps": list(part.get("gaps") or []),
+        }
+
+    sections = []
+    for section in record.get("sections") or []:
+        row = block(f"causal_chain:{section['link_index']}", section)
+        if row is not None:
+            sections.append(row)
+    for title in ("industry_characteristics", "long_term_drivers", "short_term_drivers"):
+        part = record.get(title)
+        if part:
+            row = block(title, part)
+            if row is not None:
+                sections.append(row)
+
+    # The table itself, with one number entry per computed cell. The body is
+    # the rendered table, so every figure in it is a figure a reader can see,
+    # and each one names the filing it came out of.
+    table_numbers = []
+    for cell in comparison.get("cells") or []:
+        if cell["status"] != "computed" or cell["ref"] not in accessions:
+            continue
+        table_numbers.append({
+            "text": (f"{cell['ticker']} {cell['quarter']}"
+                     f"（期末 {cell['period_end']}）{cell['metric']} {cell['display']}"),
+            "cell": {"kind": "statement_accession", "ref": cell["ref"],
+                     "accession": accessions[cell["ref"]]},
+            "period": cell["quarter"],
+        })
     sections.append({
         "title": "cross_company_comparison",
-        "body": render_comparison(comparison),
+        "body": render_comparison(comparison, limit=len(comparison.get("quarters") or ()) or 6),
         "claim_refs": [],
-        "numbers": [],
+        "numbers": table_numbers[:60],
         "gaps": list(comparison.get("comparability_notes") or []),
     })
     sections.append({
@@ -2395,6 +2527,7 @@ __all__ = [
     "calendar_quarter",
     "candidate_sources",
     "causal_chain_hash",
+    "cell_accessions",
     "cell_ref",
     "chain_titles",
     "comparability_notes",
@@ -2407,6 +2540,7 @@ __all__ = [
     "evidence_scope",
     "framework_artefact",
     "framework_ref_for",
+    "gap_state_ref",
     "industry_slug",
     "load_policy",
     "new_refs",

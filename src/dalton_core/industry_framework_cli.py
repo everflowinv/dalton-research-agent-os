@@ -50,6 +50,7 @@ from .industry_framework import (
     IndustryFrameworkError,
     assess_gaps,
     build_comparison,
+    deliverable_sections,
     chain_titles,
     comparison_hash,
     comparison_material,
@@ -279,7 +280,7 @@ def plan_units(
     cells = comparison_material(comparison)
     chain = list((constitution.get("method") or {}).get("causal_chain") or [])
     titles = chain_titles(constitution, policy)
-    prior_units = _prior_units(prior)
+    prior_units = _prior_units(prior, chain_hash=causal_chain_hash(chain))
 
     plan: dict[str, Any] = {}
     for unit in units_for(constitution, policy):
@@ -291,10 +292,11 @@ def plan_units(
                           "detail": str(exc), "structure": (), "material": [],
                           "new_refs": 0, "stale": False}
             continue
-        if unit in STATIC_UNITS:
-            material = list(claims) + list(dossier_rows) + list(cells)
-        else:
-            material = list(claims) + list(dossier_rows) + list(cells)
+        # Every unit is shown the same three tables. Which of them a unit can
+        # actually use is the unit's own question, and the slot structure is
+        # what asks it; splitting the material by unit here would be this
+        # module deciding what a causal-chain link is allowed to be about.
+        material = list(claims) + list(dossier_rows) + list(cells)
         if not material:
             plan[unit] = {"status": "unavailable", "reason": "no_industry_claims",
                           "detail": "no Claim, dossier section or comparison cell "
@@ -315,12 +317,35 @@ def plan_units(
     return plan
 
 
-def _prior_units(prior: Mapping[str, Any] | None) -> dict[str, Any]:
+def _prior_units(
+    prior: Mapping[str, Any] | None, *, chain_hash: str | None = None
+) -> dict[str, Any]:
+    """The current version's parts, by unit -- minus any the chain invalidated.
+
+    ``assemble`` stamps every section with the link text and title the
+    Constitution and the policy give it *now*, including sections carried
+    forward untouched. That is right while the chain is the same chain: it
+    stops a version quoting a methodology nobody published. It is wrong the
+    moment the chain is re-mapped, because then a carried-forward section would
+    keep last version's prose under this version's heading -- the same words
+    silently re-labelled as being about a different link.
+
+    So when the prior version was written against a different causal chain, its
+    ``causal_chain:*`` parts are not available to carry forward. They stay in
+    their own version, readable by ``replay_link``; the new version drafts them
+    again or records them as ``not_drafted_this_run``. The three blocks are not
+    chain-shaped and carry forward as before.
+    """
+
     if not prior:
         return {}
+    held = ((prior.get("bindings") or {}).get("causal_chain_hash"))
+    chain_changed = (
+        chain_hash is not None and held is not None and held != chain_hash)
     out: dict[str, Any] = {}
-    for section in prior.get("sections") or []:
-        out[f"causal_chain:{section['link_index']}"] = section
+    if not chain_changed:
+        for section in prior.get("sections") or []:
+            out[f"causal_chain:{section['link_index']}"] = section
     for unit, key in (("characteristics", "industry_characteristics"),
                       ("long_term_drivers", "long_term_drivers"),
                       ("short_term_drivers", "short_term_drivers")):
@@ -358,24 +383,19 @@ def assemble(
     change_reason: str,
     drafted_at: str,
     evidence_refs: Sequence[Mapping[str, Any]],
-    drop_units: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any]:
     """Freshly drafted parts, carried-forward parts, the table and the gaps."""
 
     from .industry_framework import SOURCE_VERSION_KEY
     from .research_quality_rubrics import rubric as get_rubric
 
-    prior_units = _prior_units(prior)
     chain = list((constitution.get("method") or {}).get("causal_chain") or [])
     titles = chain_titles(constitution, policy)
+    prior_units = _prior_units(prior, chain_hash=causal_chain_hash(chain))
 
     def resolve(unit: str) -> dict[str, Any]:
-        if unit in blocks and unit not in drop_units:
+        if unit in blocks:
             return dict(blocks[unit])
-        if unit in drop_units:
-            return unavailable_unit(
-                unit, "refused_by_verification",
-                [slot["slot_id"] for slot in (plan.get(unit) or {}).get("structure") or ()])
         held = prior_units.get(unit)
         if held is not None:
             return dict(held)
@@ -410,8 +430,8 @@ def assemble(
         "short_term_drivers": short_block,
         "cross_company_comparison": dict(comparison),
         "debates_summary": dict(debates),
-        "gaps": assess_gaps(policy, long_term=long_block, short_term=short_block,
-                            mission=mission),
+        "gaps": framework_gaps(policy, mission=mission, long_term=long_block,
+                               short_term=short_block),
         "bindings": {
             "constitution_version": {"ref": constitution["id"],
                                      "hash": constitution["content_hash"]},
@@ -433,6 +453,79 @@ def assemble(
         "change_reason": change_reason,
         "evidence_refs": [dict(row) for row in evidence_refs],
     }
+
+
+def publish_deliverable(
+    store: Any,
+    record: Mapping[str, Any],
+    *,
+    mission: Mapping[str, Any],
+    actor_ref: str,
+) -> dict[str, Any]:
+    """Put the published version into the document chain a person reads.
+
+    Every cognition-layer output enters the deliverable version chain; this is
+    where P12e's does.  It is a *projection* of the record rather than a second
+    drafting, so the two can never say different things, and it is deliberately
+    not fatal: a framework version that was published and whose document
+    rendering was refused is still a framework version, and the summary says
+    which happened rather than losing the run.
+    """
+
+    from .mission_deliverable import (
+        DELIVERABLE_KINDS,
+        MissionDeliverableAuthority,
+        MissionDeliverableError,
+    )
+    from .research_playbook import ResearchPlaybookAuthority
+
+    if DELIVERABLE_KIND not in DELIVERABLE_KINDS:  # pragma: no cover - frozen
+        return {"status": "unsupported", "reason": "industry_framework is not a kind"}
+    try:
+        playbook = ResearchPlaybookAuthority(store).playbook(
+            mission["bindings"]["playbook_version"]["ref"])
+    except Exception as exc:  # noqa: BLE001 - an unreadable playbook is not the run
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+    try:
+        result = MissionDeliverableAuthority(store).publish(
+            kind=DELIVERABLE_KIND,
+            subject_ref=str(record["industry_ref"]),
+            mission=mission,
+            playbook=playbook,
+            template_ref=str(record["bindings"]["policy_ref"]),
+            sections=deliverable_sections(record),
+            summary=(f"行业框架 v{record['version']}：因果链 "
+                     f"{len(record['sections'])} 环、横向对比 "
+                     f"{len(record['cross_company_comparison'].get('quarters') or ())} 季、"
+                     f"未闭合缺口 "
+                     f"{sum(1 for gap in record['gaps'] if gap['status'] != 'covered')} 条"),
+            gaps=[f"{gap['gap_ref']}: {gap['what_is_missing']}"
+                  for gap in record["gaps"] if gap["status"] != "covered"],
+            actor_ref=actor_ref,
+        )
+    except MissionDeliverableError as exc:
+        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}"}
+    return {"status": "published", "deliverable_ref": result.get("deliverable_ref"),
+            "version_ref": result.get("id"), "version": result.get("version")}
+
+
+def framework_gaps(
+    policy: Mapping[str, Any],
+    *,
+    mission: Mapping[str, Any],
+    long_term: Mapping[str, Any] | None = None,
+    short_term: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The gap list, built the same way for the record and for its occasion.
+
+    One function rather than two calls, because ``_fresh_evidence`` hashes this
+    list to decide whether the world moved and ``assemble`` stores it: if the
+    two ever built it differently, a version could be occasioned by a digest it
+    does not carry.
+    """
+
+    return assess_gaps(policy, long_term=long_term, short_term=short_term,
+                       mission=mission)
 
 
 def rubric_gate(
@@ -516,6 +609,7 @@ def run_framework(
         "output_rubric_findings": [],
         "dropped_units": [],
         "open_gaps": [],
+        "deliverable": None,
         "version_ref": None,
         "version_status": None,
         "new_refs": 0,
@@ -653,7 +747,8 @@ def run_framework(
             "tickers": [str(member.get("ticker")) for member in mission["universe"]],
         }
         table_text = render_comparison(comparison)
-        prior_units = _prior_units(prior)
+        prior_units = _prior_units(prior, chain_hash=causal_chain_hash(
+            list((constitution.get("method") or {}).get("causal_chain") or [])))
 
         blocks: dict[str, Any] = {}
         draft_routes: list[str | None] = []
@@ -730,12 +825,21 @@ def run_framework(
             return summary
 
         stamped = _now()
-        evidence = _fresh_evidence(blocks, comparison, prior)
+        # The gap list the record will carry, built before the occasion is
+        # decided: connecting a source moves this list and nothing else, and a
+        # run that computed it after deciding "nothing occasioned this" would
+        # have thrown away the one thing that did.
+        planned_gaps = framework_gaps(
+            policy, mission=mission,
+            long_term=blocks.get("long_term_drivers") or (prior or {}).get("long_term_drivers"),
+            short_term=blocks.get("short_term_drivers") or (prior or {}).get("short_term_drivers"),
+        )
+        evidence = _fresh_evidence(blocks, comparison, prior, planned_gaps)
         if not evidence:
             summary.update({"status": "succeeded", "framework_status": "no_new_evidence",
                             "failure_reason": "this draft cites nothing the current "
-                                              "version does not, and the table has "
-                                              "not moved"})
+                                              "version does not; the table has not "
+                                              "moved and no source changed status"})
             return summary
         record = assemble(
             mission=mission, blocks=blocks, plan=plan, prior=prior,
@@ -765,6 +869,9 @@ def run_framework(
         published = authority.publish(record)
         summary["open_gaps"] = [gap["gap_ref"] for gap in published.get("gaps") or []
                                 if gap["status"] != "covered"]
+        if published["status"] == "fresh":
+            summary["deliverable"] = publish_deliverable(
+                store, published, mission=mission, actor_ref=actor_ref)
         summary.update({
             "status": "succeeded",
             "framework_status": ("published" if published["status"] == "fresh"
@@ -801,15 +908,18 @@ def _fresh_evidence(
     blocks: Mapping[str, Any],
     comparison: Mapping[str, Any],
     prior: Mapping[str, Any] | None,
+    gaps: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
-    """The refs that occasioned this version: what the prior one did not cite.
+    """The refs that occasioned this version: what the prior one did not rest on.
 
-    Comparison cells count.  A quarter landing is the commonest reason this
-    deliverable moves, and a version that could not name it as its occasion
-    would have to claim it was occasioned by prose that did not change.
+    Three kinds, and only the first is prose.  Comparison cells count because a
+    quarter landing is the commonest reason this deliverable moves, and a
+    version that could not name it as its occasion would have to claim it was
+    occasioned by prose that did not change.  The gap state counts because
+    connecting a source is the event this whole deliverable exists to provoke.
     """
 
-    from .industry_framework import evidence_scope
+    from .industry_framework import evidence_scope, gap_state_ref
 
     held = set() if prior is None else set(evidence_scope(prior))
     fresh: dict[str, dict[str, Any]] = {}
@@ -825,6 +935,20 @@ def _fresh_evidence(
                 "kind": "comparison_cell", "ref": str(accession),
                 "text": f"newly filed accession behind {cell['ref']}",
                 "period": cell["quarter"],
+            }
+    if gaps:
+        digest = gap_state_ref(gaps)
+        if digest not in held:
+            connected = sorted({
+                row["slug"] for gap in gaps
+                for row in gap.get("candidate_sources") or ()
+                if row.get("connection_status") == "connected"
+            })
+            fresh[digest] = {
+                "kind": "gap_state", "ref": digest,
+                "text": ("the gap list's sources and their connection status changed; "
+                         "connected today: " + (", ".join(connected) or "none")),
+                "period": None,
             }
     return list(fresh.values())
 
@@ -885,8 +1009,10 @@ __all__ = [
     "granted_scope",
     "industry_claims",
     "main",
+    "framework_gaps",
     "model_input_tables",
     "plan_units",
+    "publish_deliverable",
     "rubric_gate",
     "run_framework",
     "stale_units",

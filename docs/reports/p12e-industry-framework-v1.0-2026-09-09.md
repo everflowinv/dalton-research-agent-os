@@ -72,14 +72,23 @@ live 链的哈希是 `b1781893…c307f454`，与 P12a policy 里的同一个值�
 `SourceCapabilityMap.CONTENT_KINDS`；状态由「本版有没有对这些 driver 写出带引用的句子」读出；候选来源
 由 `sources_for(content_kind)` 加上任务自己的连接状态与受治理的日配额读出。
 
-`gap:tam-and-share` 的 `driver_refs` 是空的，因此**按构造永远 open**——driver pack 里没有任何 metric
-衡量 TAM，账本里没有任何 Claim 承载它。这是诚实的答案，也正是让 S 线去接东西的那句话。
+`gap:tam-and-share` 与 `gap:competitive-wins` 的 `driver_refs` 都是空的，因此**按构造永远 open**——
+driver pack 里没有任何 metric 衡量 TAM，universe 之外的印度系厂商也不可能有 Claim。这是诚实的答案，
+也正是让 S 线去接东西的那句话。
 
 ### 2.4 ADR-0008，比档案多一道
 
-一版必须引用上一版没引用过的 ref，带 `change_reason`，被取代的内容不删不改。这份产出多一个褶皱：
-**一份新财报落地会让表动而一个字的正文都不动**，而那确实是新证据。所以对比表的 accession 在
-`evidence_scope` 里面，表自己的哈希存在 `body_hash` 旁边。否则起草一停，这个行业就永远不再出新版本。
+一版必须引用上一版没引用过的 ref，带 `change_reason`，被取代的内容不删不改。这份产出有两个褶皱，都
+不是文字：
+
+- **一份新财报落地会让表动而一个字的正文都不动**，而那确实是新证据。所以对比表的 accession 在
+  `evidence_scope` 里面，表自己的哈希存在 `body_hash` 旁边。否则起草一停，这个行业就永远不再出新
+  版本。
+- **接上一个数据源同样会让缺口清单动而正文不动。**「Guidepoint 接上了」是这份交付物存在的全部目的所
+  指的那件事，一个记不下它到达那天的系统，是一个缺口清单会悄悄过期的系统。所以 `gap_state_ref()` 把
+  每条缺口的状态、每个候选来源的 slug / 连接状态 / 日配额摘成一个 `gap-state:` ref，也进
+  `evidence_scope`。它刻意不摘 `what_is_missing` 与 `cost_note` 的文字：那两项来自 policy，而 policy
+  一改，记录上的 `policy_hash` 本来就变了。
 
 ---
 
@@ -150,6 +159,8 @@ DXC	operating_margin	-	-	-	-	-	-
    不是可以靠更努力检索补上的。
 2. **`gap:cash-conversion` 的来源已经接了。** SEC 是 connected。缺的不是数据源而是建模规格没把现金
    流量表的科目绑上去，属于 P13-M2 的工作，不该被当成一条要接的源。
+   `gap:tam-and-share` 与 `gap:competitive-wins` 则相反：它们的 `driver_refs` 是空的，按构造永远
+   open，接源是唯一出路。
 3. **四条指向 Guidepoint**（TAM、供给产能、定价、以及部分劳动力）。这就是蓝图说的「P12e 缺口清单驱动
    S 线」的具体样子：要接的第一个源是 Guidepoint，第二个是 sales note 的人工投喂入口。
 
@@ -228,15 +239,62 @@ Q1 这条检查只读 Claim ref。本交付物的新证据**通常只能是**新
 - `bootstrap.SCHEMA_DATABASES` 加 `industry_framework_schema.sql`。
 - `tests/test_rehearse_deploy.py` 里 seed 字面量集合同步。
 
-### 5.5 尚未做的接线
+### 5.5 复核后新增：`mission_deliverable` 的 `numbers[]` 扩项（对 P14f 也解锁）
 
-- **发布成 mission deliverable。** `deliverable_sections(record)` 已经给出 `mission_deliverable` 形状
-  的投影（正文各节 + 渲染好的对比表一节 + 缺口一节），但 CLI 目前只写 `IndustryFrameworkVersion`，
-  没有同时 publish 一份 `kind="industry_framework"` 的 deliverable。做这一步之前要先决定：两条链
-  （framework 版本链与 deliverable 版本链）是并行维护还是 deliverable 只做只读渲染。我倾向后者。
+复核裁定的一条决定，已实现。原来的规则是「每个时效性数字都追溯到一条定量 Claim」——它对要防的失败
+判断是对的，对它假设的世界判断是错的：那个世界里，研究产出说出的每个数字都是抽取器从来源里读出来的。
+现在有两层产出**算出来**的数字，而且都能被 Core 重新推导：P12e 的横向对比格（filed statement line 的
+算术）与 P14f 的预测格（对某个存储的模型版本跑冻结公式）。两者背后都没有 Claim，也永远不会有——为一
+次计算捏一条引文，才是真正的造假。
+
+所以 `numbers[]` 加法扩展：一条数字条目引用一条 Claim **或**一个格子，不能都有也不能都没有。
+
+```
+{"text": ..., "claim_version_ref": ...}                       ← 原样，字节不变
+{"text": ..., "cell": {"kind": "statement_accession",
+                       "ref": "<cell_ref>", "accession": "<accession>"}}
+{"text": ..., "cell": {"kind": "forecast_cell",
+                       "ref": "<result@period:kind>", "version_ref": "<model version>"}}
+```
+
+发布时 `MissionDeliverableAuthority.cell_resolver()` 逐个解析：statement accession 要在
+`coverage_mission_statement_filings` 里还在，forecast cell 要在那个模型版本的记录里找得到那个格子。
+解析不了就拒绝——「这个 Core 造不出来的数字」这条纪律一点没松。Claim 路径的存储字典与既有测试**逐字
+未变**。
+
+**这对 P14f 的意义**：earnings preview / calibration 的预测数字现在可以从 summary 那一行搬进正文，
+用 `forecast_cell` 引用，不必再为一个算出来的数造一条 Claim。
+
+CLI 现在在 `IndustryFrameworkVersion` 发布成功后，同时 publish 一份 `kind="industry_framework"` 的
+deliverable（`publish_deliverable()`）：认知层的产出都进版本化文档链。它是记录的**投影**而不是第二次
+起草，所以两者不可能说出不同的话；它也刻意不致命——文档渲染被拒不会让已发布的 framework 版本消失，
+summary 里的 `deliverable` 字段说明发生了哪一种。
+
+### 5.6 尚未做的接线
+
 - **Cockpit 页面。** 目前只有 lane 那一行。对比表与缺口清单值得一张自己的卡片。
 - **verifier 模型配置。** 复用了档案的 `dossier-verifier-model-config.json` 文件名。如果两条 lane 要
   分别限流，各自需要一份。
+
+---
+
+## 5.7 复核修复（code-review，2026-09-10）
+
+| # | findings | 处理 |
+| --- | --- | --- |
+| 1 | **BLOCKER** `comparison_material` 尾切 40 行，把排在前面的公司整家丢掉（五家全填时 ACN 消失），而 prompt 仍然展示整张表——模型看得见却引不了的数字 | 改成按公司分配额度（`limit // n`，各取自己最近的几格）；测试用五家全填的 filer 断言每家都至少有一行可引 |
+| 2 | 因果链被重新映射后，沿用上一版的正文会被贴上新标题 | `_prior_units` 拿到当前链哈希，与上一版 bindings 里的不一致时不再沿用 `causal_chain:*`（三个 block 不是链形状，照常沿用）；测试 |
+| 3 | deliverable 数字契约 | 见 §5.5，已实现并接线 |
+| 4 | 缺口清单变动无法触发新版本 | 新增 `gap_state_ref()` 进 `evidence_scope` 与 `_fresh_evidence`；测试「接上一个源就能出新版本」 |
+| nit | 两个相同的 `STATIC_UNITS` 分支 | 合并，并写明为什么每个 unit 看到同样三张表 |
+| nit | 死代码 `drop_units` | 删除 |
+| nit | parity 测试只比顶层键 | 同时比 section 行与 number 行的键 |
+| nit | `gaps_are_actionable` 绑了一个不相干的 check | 改为 `layer="judge"`，并说明结构性的一半由 Constitution 的 `open_gaps_name_a_source` 承担（它读得到 `candidate_sources`，展平后的 artefact 读不到） |
+| nit | `_pick_concept` 不看 `period_basis` | 只取 duration；instant 的行不能扮演流量角色 |
+| nit | §3.2 漏了 `gap:competitive-wins` 也是按构造 open | 已补 |
+
+rubric 因为 `gaps_are_actionable` 的改动重新冻结为
+`79e410374685daca3363cefb0e76e5f2bfb0b72fd9db01877e3b96463dad4267`；其余五份仍未移动。
 
 ---
 

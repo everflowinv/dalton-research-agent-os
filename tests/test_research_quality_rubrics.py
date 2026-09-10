@@ -45,7 +45,7 @@ PINNED = {
     # a standard that changed under a score already written against it is
     # the failure this test exists to catch, and it is invisible in a diff
     # that only adds a line.
-    "rubric:industry-framework": "2574df8999249a7705f15521b7a5c60800b76665440eb5c818f1352329dd2d96",
+    "rubric:industry-framework": "79e410374685daca3363cefb0e76e5f2bfb0b72fd9db01877e3b96463dad4267",
 }
 
 

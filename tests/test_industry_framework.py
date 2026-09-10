@@ -828,9 +828,20 @@ class ArtefactAndRubricTests(unittest.TestCase):
         # itself. This is the test that stops the two drifting.
         from dalton_core.research_quality_score import artefact
 
-        theirs = artefact(artefact_kind="company_dossier", ref="r", hash="h",
-                          sections=[])
-        self.assertEqual(set(framework_artefact(self.published())), set(theirs))
+        theirs = artefact(
+            artefact_kind="company_dossier", ref="r", hash="h",
+            sections=[{"title": "t", "body": "b", "claim_refs": ["c"],
+                       "numbers": [{"text": "x", "claim_version_ref": "c",
+                                    "period": None}],
+                       "gaps": ["g"]}])
+        ours = framework_artefact(self.published())
+        self.assertEqual(set(ours), set(theirs))
+        # The section rows too: every check reads these five keys, and a
+        # shape that matched only at the top level would fail inside a check
+        # rather than here.
+        self.assertEqual(set(ours["sections"][0]), set(theirs["sections"][0]))
+        self.assertEqual(set(ours["sections"][0]["numbers"][0]),
+                         set(theirs["sections"][0]["numbers"][0]))
 
     def test_the_deterministic_layer_runs_over_it(self):
         from dalton_core.research_quality_rubrics import rubric as get_rubric
@@ -912,13 +923,178 @@ class ArtefactAndRubricTests(unittest.TestCase):
     def test_the_deliverable_projection_carries_the_table_and_the_gaps(self):
         from dalton_core.industry_framework import deliverable_sections
 
-        titles = [row["title"] for row in deliverable_sections(self.published())]
+        sections = deliverable_sections(self.published())
+        titles = [row["title"] for row in sections]
         self.assertIn("cross_company_comparison", titles)
         self.assertIn("gaps", titles)
-        table_section = next(row for row in deliverable_sections(self.published())
+        table_section = next(row for row in sections
                              if row["title"] == "cross_company_comparison")
         self.assertIn("revenue", table_section["body"])
-        self.assertEqual(table_section["numbers"], [])
+        # Every figure in the rendered table names the filing it came out of.
+        self.assertTrue(table_section["numbers"])
+        for entry in table_section["numbers"]:
+            self.assertEqual(entry["cell"]["kind"], "statement_accession")
+            self.assertTrue(entry["cell"]["accession"])
+            self.assertNotIn("claim_version_ref", entry)
+
+    def test_every_figure_in_the_projection_is_sourced(self):
+        # The check the deliverable authority will run, run here against the
+        # projection so a shape change is caught without a Core.
+        from dalton_core.industry_framework import deliverable_sections
+        from dalton_core.mission_deliverable import unsourced_numbers
+
+        for section in deliverable_sections(self.published()):
+            with self.subTest(section=section["title"]):
+                self.assertEqual(
+                    unsourced_numbers(section["body"], section["numbers"]), [])
+
+    def test_a_prose_sentence_citing_a_cell_carries_that_cell(self):
+        from dalton_core.industry_framework import deliverable_sections
+
+        record = self.published()
+        cited = {entry["cell"]["ref"]
+                 for section in deliverable_sections(record)
+                 if section["title"] != "cross_company_comparison"
+                 for entry in section["numbers"] if "cell" in entry}
+        # This fixture's prose cites Claims only, so the set is empty; what is
+        # under test is that a comparison-cell source would travel as a cell
+        # rather than being silently dropped the way it used to be.
+        self.assertEqual(cited, set())
+
+
+class ReviewFixTests(unittest.TestCase):
+    """The four findings from the w2-industry-framework review."""
+
+    def five_filers(self):
+        # Five fully populated peers: enough cells that a tail slice of forty
+        # would drop the companies that sort first.
+        universe = [{"company_ref": f"company:{n}", "ticker": f"T{n}"} for n in range(5)]
+        quarters = [f"202{4 + n // 4}-{3 * (n % 4) + 3:02d}-31" for n in range(8)]
+        tables = []
+        for n in range(5):
+            revenue = {end: money(str(1000 + index), f"acc:{n}-{index}")
+                       for index, end in enumerate(quarters)}
+            cost = {end: money(str(600 + index), f"acc:{n}-{index}")
+                    for index, end in enumerate(quarters)}
+            tables.append(table(f"company:{n}", revenue=revenue, cost=cost))
+        return build_comparison(tables, universe=universe), universe
+
+    def test_the_material_budget_is_allocated_per_company(self):
+        # The blocker: cells are generated company by company, so a tail slice
+        # kept whichever sorted last and dropped the rest -- while the prompt
+        # went on showing the whole table.
+        comparison, universe = self.five_filers()
+        rows = comparison_material(comparison, limit=40)
+        cited = {row["ref"].split(":")[1] for row in rows}
+        self.assertEqual(len(cited), 5)
+        for member in universe:
+            slug = member["company_ref"].replace(":", "-")
+            with self.subTest(company=member["ticker"]):
+                self.assertTrue(any(row["ref"].startswith(f"comparison-cell:{slug}:")
+                                    for row in rows))
+
+    def test_the_budget_is_still_a_budget(self):
+        comparison, _ = self.five_filers()
+        self.assertLessEqual(len(comparison_material(comparison, limit=40)), 40)
+
+    def test_a_company_with_fewer_cells_does_not_borrow(self):
+        comparison = build_comparison(
+            [table("company:a",
+                   revenue={"2026-03-31": money("100", "acc:a")}),
+             table("company:b",
+                   revenue={f"202{4 + n // 4}-{3 * (n % 4) + 3:02d}-31":
+                            money(str(100 + n), f"acc:b-{n}") for n in range(8)})],
+            universe=[{"company_ref": "company:a", "ticker": "AAA"},
+                      {"company_ref": "company:b", "ticker": "BBB"}],
+        )
+        rows = comparison_material(comparison, limit=40)
+        by_company = {}
+        for row in rows:
+            by_company.setdefault(row["ref"].split(":")[1], []).append(row)
+        self.assertEqual(len(by_company["company-a"]), 1)
+        self.assertLessEqual(len(by_company["company-b"]), 20)
+
+    def test_a_line_filed_as_an_instant_does_not_play_a_flow_role(self):
+        # "18.7 billion in the quarter" and "18.7 billion on that day" are
+        # different claims and a column header cannot tell them apart.
+        instant = table("company:a", revenue={"2026-03-31": money("100", "acc:a")})
+        instant["filed_lines"][0]["period_basis"] = "instant"
+        # A second filer whose revenue is a duration, so the table has a column
+        # at all and the instant filer's row can be seen to be empty.
+        flow = table("company:b", revenue={"2026-03-31": money("200", "acc:b")})
+        flow["filed_lines"][0]["period_basis"] = "duration"
+        comparison = build_comparison([instant, flow], universe=UNIVERSE)
+        self.assertEqual(comparison["quarters"], ["2026Q1"])
+        cell = next(item for item in comparison["cells"]
+                    if item["company_ref"] == "company:a" and item["metric"] == "revenue")
+        self.assertEqual(cell["status"], "unavailable")
+        self.assertIn("no revenue line is filed", cell["reason"])
+        other = next(item for item in comparison["cells"]
+                     if item["company_ref"] == "company:b" and item["metric"] == "revenue")
+        self.assertEqual(other["value"], "200")
+
+    def test_a_remapped_chain_does_not_relabel_carried_forward_prose(self):
+        from dalton_core.industry_framework_cli import _prior_units
+
+        prior = {
+            "sections": [section(0), section(1)],
+            "industry_characteristics": characteristics(),
+            "long_term_drivers": {"status": "drafted"},
+            "short_term_drivers": {"status": "drafted"},
+            "bindings": {"causal_chain_hash": causal_chain_hash(CHAIN)},
+        }
+        same = _prior_units(prior, chain_hash=causal_chain_hash(CHAIN))
+        self.assertIn("causal_chain:0", same)
+        self.assertIn("characteristics", same)
+
+        moved = _prior_units(prior, chain_hash=causal_chain_hash(CHAIN[1:]))
+        self.assertNotIn("causal_chain:0", moved)
+        self.assertNotIn("causal_chain:1", moved)
+        # The three blocks are not chain-shaped and still carry forward.
+        self.assertIn("characteristics", moved)
+        self.assertIn("long_term_drivers", moved)
+
+    def test_connecting_a_source_moves_the_gap_state_and_occasions_a_version(self):
+        from dalton_core.industry_framework import gap_state_ref
+        from dalton_core.industry_framework_cli import _fresh_evidence
+
+        unconnected = assess_gaps(policy(), mission={"source_plan": [
+            {"source_ref": "source:guidepoint", "status": "not_connected"}]})
+        connected = assess_gaps(policy(), mission={"source_plan": [
+            {"source_ref": "source:guidepoint", "status": "connected"}]})
+        self.assertNotEqual(gap_state_ref(unconnected), gap_state_ref(connected))
+
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        authority = IndustryFrameworkAuthority(store)
+        body = record(comparison=simple_comparison())
+        body["gaps"] = unconnected
+        first = authority.publish(body)
+        self.assertEqual(first["status"], "fresh")
+
+        # Nothing else changed: same prose, same table, same filings. The only
+        # thing that moved is that Guidepoint is connected now -- which is the
+        # event this whole deliverable exists to provoke.
+        second_body = record(comparison=simple_comparison())
+        second_body["gaps"] = connected
+        occasion = _fresh_evidence({}, simple_comparison(), first, connected)
+        self.assertTrue(any(row["kind"] == "gap_state" for row in occasion))
+        second_body["evidence_refs"] = occasion
+        second = authority.publish(second_body)
+        self.assertEqual(second["status"], "fresh")
+        self.assertEqual(second["version"], 2)
+        self.assertIn(gap_state_ref(connected), new_refs(second, first))
+
+    def test_an_unchanged_gap_state_does_not_occasion_anything(self):
+        from dalton_core.industry_framework_cli import _fresh_evidence
+
+        gaps = assess_gaps(policy())
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        body = record(comparison=simple_comparison())
+        body["gaps"] = gaps
+        first = IndustryFrameworkAuthority(store).publish(body)
+        self.assertEqual(_fresh_evidence({}, simple_comparison(), first, gaps), [])
 
 
 if __name__ == "__main__":
