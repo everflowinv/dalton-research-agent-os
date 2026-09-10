@@ -46,6 +46,23 @@ CREATE TABLE IF NOT EXISTS thesis_impact_day_settlements (
     created_at TEXT NOT NULL
 );
 
+-- A historical zero/under-settlement may only be corrected upward. The
+-- original settlement remains byte-for-byte immutable and authoritative.
+CREATE TABLE IF NOT EXISTS thesis_impact_settlement_corrections (
+    correction_id TEXT PRIMARY KEY,
+    admission_id TEXT NOT NULL UNIQUE REFERENCES thesis_impact_day_admissions(admission_id),
+    settlement_id TEXT NOT NULL UNIQUE REFERENCES thesis_impact_day_settlements(settlement_id),
+    corrected_micros INTEGER NOT NULL CHECK(corrected_micros > 0),
+    reason TEXT NOT NULL CHECK(reason = 'historical_completion_unknown'),
+    evidence_ref TEXT NOT NULL,
+    evidence_hash TEXT NOT NULL CHECK(length(evidence_hash) = 64),
+    actor_ref TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- Durable fail-closed admission decision: the day cap would be exceeded.
 CREATE TABLE IF NOT EXISTS thesis_impact_day_rejections (
     rejection_id TEXT PRIMARY KEY,
@@ -105,6 +122,12 @@ BEFORE UPDATE ON thesis_impact_day_settlements BEGIN
 CREATE TRIGGER IF NOT EXISTS thesis_impact_day_settlements_no_delete
 BEFORE DELETE ON thesis_impact_day_settlements BEGIN
     SELECT RAISE(ABORT, 'thesis impact day settlements are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_impact_settlement_corrections_no_update
+BEFORE UPDATE ON thesis_impact_settlement_corrections BEGIN
+    SELECT RAISE(ABORT, 'thesis impact settlement corrections are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_impact_settlement_corrections_no_delete
+BEFORE DELETE ON thesis_impact_settlement_corrections BEGIN
+    SELECT RAISE(ABORT, 'thesis impact settlement corrections are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS thesis_impact_day_rejections_no_update
 BEFORE UPDATE ON thesis_impact_day_rejections BEGIN
     SELECT RAISE(ABORT, 'thesis impact day rejections are append-only'); END;

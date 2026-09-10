@@ -542,9 +542,10 @@ def day_pool_spend(
         return totals
     rows = connection.execute(
         "SELECT a.pool AS pool, a.reserved_micros AS reserved, "
-        " s.actual_micros AS actual, b.mission_ref AS mission_ref "
+        " COALESCE(c.corrected_micros,s.actual_micros) AS actual, b.mission_ref AS mission_ref "
         "FROM thesis_impact_day_admissions a "
         "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+        "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
         "LEFT JOIN model_mission_budget_bindings b ON b.admission_id=a.admission_id "
         "WHERE a.day=?", (day,),
     ).fetchall()

@@ -163,6 +163,25 @@ class CockpitChainTests(unittest.TestCase):
                 purpose="plan", request_id="host-failed", prompt="draft",
                 mission=self.mission)
         self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions").fetchone()[0])
+            settlement = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements").fetchone()[0])
+        self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
+
+    def test_single_pin_ambiguous_adapter_failure_keeps_reservation(self) -> None:
+        adapter = ChainAdapter({"profile:gpt-6-astra": BrokerTimeout("recv timed out")})
+        with self.assertRaises(CockpitModelError):
+            self._model(adapter, policy_version_ref=self.pinned_policy).call(
+                purpose="plan", request_id="pinned-unknown", prompt="draft",
+                mission=self.mission)
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = ledger.connection.execute(
+                "SELECT reserved_micros FROM thesis_impact_day_admissions").fetchone()[0]
+            settlement = ledger.connection.execute(
+                "SELECT actual_micros FROM thesis_impact_day_settlements").fetchone()[0]
+        self.assertEqual(settlement, admission)
 
     def test_capacity_retry_policy_is_closed_and_install_preserved(self) -> None:
         retry = {"cooldown_seconds": 90, "max_recovery_epochs": 2,

@@ -270,9 +270,10 @@ class ThesisImpactBudgetStore:
         policy_ids = tuple(row["policy_version_id"] for row in chain_rows)
         placeholders = ",".join("?" for _ in policy_ids)
         settled = cur.execute(
-            "SELECT COALESCE(SUM(s.actual_micros),0) AS total "
+            "SELECT COALESCE(SUM(COALESCE(c.corrected_micros,s.actual_micros)),0) AS total "
             "FROM thesis_impact_day_settlements s "
             "JOIN thesis_impact_day_admissions a ON a.admission_id=s.admission_id "
+            "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
             f"WHERE a.policy_version_id IN ({placeholders}) AND a.day=?",
             (*policy_ids, day),
         ).fetchone()["total"]
@@ -508,9 +509,10 @@ class ThesisImpactBudgetStore:
                     # Same immutable paid-call ledger, atomic with the owner cap.
                     # Open reservations from older days remain charged after rollover.
                     rows = cur.execute(
-                        "SELECT a.reserved_micros,s.actual_micros FROM thesis_impact_day_admissions a "
+                        "SELECT a.reserved_micros,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros FROM thesis_impact_day_admissions a "
                         "LEFT JOIN model_mission_budget_bindings b ON a.admission_id=b.admission_id "
                         "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                        "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
                         "WHERE (b.mission_ref=? OR b.admission_id IS NULL) AND (a.day=? OR s.admission_id IS NULL)",
                         (mission_binding["mission_ref"], day),
                     ).fetchall()
@@ -524,8 +526,9 @@ class ThesisImpactBudgetStore:
                     # including unbound legacy entries and open prior-day calls.
                     # This cannot reset on mission/mandate/governance version changes.
                     outer_rows = cur.execute(
-                        "SELECT a.reserved_micros,s.actual_micros FROM thesis_impact_day_admissions a "
+                        "SELECT a.reserved_micros,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros FROM thesis_impact_day_admissions a "
                         "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                        "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
                         "WHERE a.day=? OR s.admission_id IS NULL", (day,),
                     ).fetchall()
                     outer_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in outer_rows)
@@ -688,6 +691,64 @@ class ThesisImpactBudgetStore:
         if admission["pool"] is None:
             return {**wire, "status": "fresh"}
         return {**wire, "status": "fresh", "pool": admission["pool"]}
+
+    def correct_uncertain_settlement(
+        self, admission_id: str, *, settlement_id: str, corrected_micros: int,
+        evidence_ref: str, evidence_hash: str, actor_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Append one bounded correction for a historically uncertain call."""
+        values = {
+            "admission_id": _text(admission_id, "admission_id"),
+            "settlement_id": _text(settlement_id, "settlement_id"),
+            "evidence_ref": _text(evidence_ref, "evidence_ref"),
+            "actor_ref": _text(actor_ref, "actor_ref"),
+            "idempotency_key": _text(idempotency_key, "idempotency_key"),
+        }
+        corrected_micros = _micros(corrected_micros, "corrected_micros")
+        if corrected_micros == 0 or not isinstance(evidence_hash, str) or len(evidence_hash) != 64:
+            raise ThesisImpactBudgetConflict("correction evidence or amount is invalid")
+        identity = {**values, "evidence_hash": evidence_hash}
+        wire = {
+            "schema_version": SCHEMA_VERSION,
+            "correction_id": "thesis-impact-correction:" + content_hash(identity)[:32],
+            **identity,
+            "corrected_micros": corrected_micros,
+            "reason": "historical_completion_unknown",
+            "created_at": _utc(self.clock()),
+        }
+        wire["content_hash"] = content_hash(wire)
+        with self._transaction() as cur:
+            prior = cur.execute(
+                "SELECT a.reserved_micros,s.actual_micros,s.settlement_id "
+                "FROM thesis_impact_day_admissions a JOIN thesis_impact_day_settlements s "
+                "ON s.admission_id=a.admission_id WHERE a.admission_id=?",
+                (values["admission_id"],),
+            ).fetchone()
+            if prior is None or prior["settlement_id"] != values["settlement_id"]:
+                raise ThesisImpactBudgetConflict("correction does not bind the exact settlement")
+            if corrected_micros <= prior["actual_micros"] or corrected_micros > prior["reserved_micros"]:
+                raise ThesisImpactBudgetConflict("correction must increase cost within the reservation")
+            existing = cur.execute(
+                "SELECT record_json FROM thesis_impact_settlement_corrections "
+                "WHERE idempotency_key=? OR admission_id=?",
+                (values["idempotency_key"], values["admission_id"]),
+            ).fetchone()
+            if existing is not None:
+                persisted = json.loads(existing["record_json"])
+                if any(persisted.get(key) != wire.get(key) for key in (
+                    "admission_id", "settlement_id", "corrected_micros", "evidence_ref",
+                    "evidence_hash", "actor_ref", "idempotency_key", "reason")):
+                    raise ThesisImpactBudgetConflict("settlement correction conflicts")
+                return {**persisted, "status": "duplicate"}
+            cur.execute(
+                "INSERT INTO thesis_impact_settlement_corrections VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (wire["correction_id"], wire["admission_id"], wire["settlement_id"],
+                 wire["corrected_micros"], wire["reason"], wire["evidence_ref"],
+                 wire["evidence_hash"], wire["actor_ref"], wire["idempotency_key"],
+                 canonical_json(wire), wire["content_hash"], wire["created_at"]),
+            )
+        return {**wire, "status": "fresh"}
 
     def record_alert(
         self,

@@ -167,6 +167,31 @@ class DayAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ThesisImpactBudgetConflict, "reservation"):
             self.authority.settle(opened["admission_id"], actual_micros=10_001)
 
+    def test_uncertain_historical_settlement_is_corrected_append_only(self) -> None:
+        opened = admit(self.authority, work="work:unknown", reserved=100_000)
+        settled = self.authority.settle(opened["admission_id"], actual_micros=0)
+        args = dict(
+            settlement_id=settled["settlement_id"], corrected_micros=100_000,
+            evidence_ref="result:host-completion-failed",
+            evidence_hash="a" * 64, actor_ref="operator:owner",
+            idempotency_key="correction:work-unknown",
+        )
+        correction = self.authority.correct_uncertain_settlement(
+            opened["admission_id"], **args)
+        self.assertEqual(correction["status"], "fresh")
+        self.assertEqual(self.authority.correct_uncertain_settlement(
+            opened["admission_id"], **args)["status"], "duplicate")
+        self.assertEqual(self.authority.day_summary(
+            policy_version_id="budget-policy:day:1", day="2026-08-22"
+        )["committed_micros"], 100_000)
+        persisted = self.authority.connection.execute(
+            "SELECT actual_micros FROM thesis_impact_day_settlements"
+        ).fetchone()[0]
+        self.assertEqual(persisted, 0)
+        with self.assertRaisesRegex(ThesisImpactBudgetConflict, "within the reservation"):
+            self.authority.correct_uncertain_settlement(
+                opened["admission_id"], **{**args, "corrected_micros": 100_001})
+
     def test_policy_advance_keeps_same_day_spend_and_closes_old_version(self) -> None:
         first = admit(self.authority, work="work:v1", reserved=400_000)
         self.authority.register_policy(

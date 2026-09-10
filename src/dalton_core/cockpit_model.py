@@ -749,7 +749,10 @@ class CockpitModel:
                                 failure = None
                             except OpenClawModelAdapterError as exc:
                                 result = _failure(work, "MODEL_ADAPTER_REJECTED_OR_FAILED", route["id"])
-                                cost_micros, cost_status = 0, "failed"
+                                if isinstance(exc, BrokerDefinitelyNotSent):
+                                    cost_micros, cost_status = 0, "not_sent"
+                                else:
+                                    cost_micros, cost_status = reserved, "reserved"
                                 failure = f"the model call failed: {exc}"
                             settle_day_ledger(budget, admission, actual_micros=cost_micros)
                     completion = scheduler.complete(work.id, attempt, WORKER_REF, lease["lease_token"], result,
@@ -911,15 +914,24 @@ class CockpitModel:
                 # The broker answered and the answer is a failure. Its error
                 # code, not a guess, decides whether another model may be asked.
                 failure_class = classify_model_failure(envelope.error or {})
-                may_have_reached_provider = failure_class in {
-                    "transport_failure", "provider_failure", "model_unavailable",
+                # Only broker-local admission responses are known to precede
+                # a provider call. Every other failed host envelope may have
+                # consumed the full bounded call before validation failed.
+                code = str((envelope.error or {}).get("code", "")).upper()
+                may_have_reached_provider = code not in {
+                    "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
                 }
                 spend[route["id"]] = ((ceiling, "reserved")
                                       if may_have_reached_provider else (0, "failed"))
                 uncertain_spend = uncertain_spend or may_have_reached_provider
                 return {"outcome": "failed",
-                        "failure_class": ("unclassified_failure" if may_have_reached_provider
-                                          else failure_class),
+                        "failure_class": (
+                            "unclassified_failure"
+                            if may_have_reached_provider and failure_class in {
+                                "transport_failure", "provider_failure", "model_unavailable"
+                            }
+                            else failure_class
+                        ),
                         "error_code": (envelope.error or {}).get("code"),
                         "reason": (envelope.error or {}).get("message", "the model call failed"),
                         "value": envelope}

@@ -33,6 +33,7 @@ from dalton_core.cockpit_model import (
     CockpitModelPoolExhausted,
     lane_status_for,
 )
+from dalton_core.openclaw_model_adapter import BrokerDefinitelyNotSent
 from dalton_core.lane_registry import (
     LaneRegistryError,
     LaneSpec,
@@ -436,7 +437,7 @@ class CockpitPoolTests(unittest.TestCase):
 
     def test_the_served_links_cost_is_settled_into_the_admissions_pool(self) -> None:
         adapter = ChainAdapter({
-            "profile:deepseek-v4-flash": {"code": "UPSTREAM_TIMEOUT", "message": "gone"}
+            "profile:deepseek-v4-flash": BrokerDefinitelyNotSent("connect failed")
         })
         answer = self._model(adapter).call(
             purpose="claim_index", request_id="one", prompt="tag these",
