@@ -8,10 +8,10 @@ Owner 要求持续开发，不以单个里程碑完成为停点；写代码最�
 
 | 负责人 | 当前代码切片 | 工作分支 |
 | --- | --- | --- |
-| Sol / forecast_fixes | F14 六个 company/subject fingerprint 协调器 | `f14-fingerprint` |
-| Sol / zero_base_fixes | F14 dossier / deep insight / industry framework 三个协调器 | `f14-ledger` |
-| Sol / insider_fixes | F14 reflection / ZeroBase / research task / crowd 四个协调器 | `f14-cadence` |
-| 主代理 | 共享接口协调、HK 全市场 acquisition/view 设计与缓存、签署部署材料、集成验收 | `main` |
+| Sol / forecast_fixes | W5 market-proxy 审查修复，随后成本侧模板 | `w5-cost-templates` |
+| Sol / zero_base_fixes | Crowd source 的日期/输入/权限恢复 | `f14-crowd-repairs` |
+| Sol / insider_fixes | HK closed-week 判断与迟到证据增量归组 | `hk-weekly-judgement-incremental` |
+| 主代理 | 交叉审查、真实子进程回归、签署部署材料、集成验收 | `main` |
 
 本轮基线 `4c28816`（已推送、完整 6,055 项通过）。各切片完成即接后续 HK 周调度、W5 market-proxy / 成本模板及 Item 5 交易计划；共享文件先协调归属，聚焦绿分批 commit，集成完整验证后 push。授权材料完成后及时发给 owner，签署不阻塞独立开发。
 
@@ -26,10 +26,11 @@ W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，最终验
 ## 下一步（本节覆盖此前暂停安排）
 
 1. **运行激活与产品验收优先**：按 [更新后的 owner runbook](reports/owner-steps-after-deploy-v2.0-2026-09-10.md)，当前 live 新快照复演已通过，下一步核对并激活 11 个 may_write / 3 个 checkpoint 缺项、模型开关、retired verifier pin 与 tracking policy v2。部署后验收五家公司首版 dossier、DebateMap 与一轮判断，演练通过不能代替产物验收。
-2. **F14 失败账本覆盖**：按 [当前代码盘点](reports/resume-failure-ledger-next-2026-09-10.md) 将剩余 13 个协调器的真实依赖失败分三组接入公共账本（旧清单估计 16 条），保留正常“输入未变”的等待语义，每条都测恢复路径。
-3. **F13 日缓存与 HK 周调度**：先定全市场 acquisition / 公司 derived view 的治理身份，再做一次 invocation/artifact 的共享缓存；HK 日期标识尚未变成周级推理调度，需连同增量归组另做。见 [缓存可行性报告](reports/resume-hk-cache-feasibility-2026-09-10.md)。
-4. **W5 / D1–D9**：market-proxy producer 与成本侧模板后续排期；HK universe、数字权威、慢背离窗口等原待裁决保持显式，不因本轮开发授权而隐式改变。周报投递和 Excel 导出继续后排。
+2. **F14 失败账本覆盖**：13 个初版协调器已合入，A/B 九条交叉修复完成（299 focused）；Reflection / ZeroBase / research task 再审修复完成（124 focused），Crowd source 正补日期/输入和权限边界。共享 replay 无写入、同刻顺序和单项 superseded 已完成。完整集成回归待最后切片冻结。
+3. **F13 日缓存与 HK 周调度**：独立 `daily_buyback_tape` 治理提案、跨公司共享 invocation/artifact 的日缓存与重放校验已合入（118 focused + 6 hardening）；新能力默认未批准、未启用。HK closed-week 推理和迟到证据全组重判正在独立开发。
+4. **W5 / D1–D9**：market-proxy 生产→索引→模型规格初版已合入（364 focused），正在补映射版本、权限、故障隔离及部署参数边界；随后接成本侧模板和 Item 5。HK universe、数字权威、慢背离窗口等原待裁决保持显式。周报投递和 Excel 导出继续后排。
 
+本轮详细提交与 next step 见 [持续开发记录](reports/continuous-development-wave2-2026-09-10.md)。当前新增代码尚未完成主线全量、尚未 push / 部署；前一轮 6,055 项通过是历史基线，不代表本轮新增全部验收。
 ## 2026-09-10 恢复开发背景
 
 已详细审读 PROJECT_STATUS、并行计划 §6b/6c、经济不变量、Chem 复盘、模型选择、既有资料及六份待合分支报告。原工作区干净，`main=694471c`，fetch 后领先 origin/main 11 个提交。以新隔离 worktree 承接 GPT-5.6 Sol 并行工作，避免接管旧 agent 目录；本节与 §6d 覆盖下方历史“只记录不动手”的暂停安排。

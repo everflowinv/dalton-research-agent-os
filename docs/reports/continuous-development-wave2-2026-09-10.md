@@ -38,3 +38,15 @@ F14 的真实范围是 13 个协调器，按 `resume-failure-ledger-next-2026-09
 ### 失败条目替换语义
 
 新增 `LaneFailureBudget.retire` 和可回放的 `superseded` 事件：输入或权限版本替换时，只撤销对应旧条目，不将共享外部依赖误报为恢复，也不会释放其他公司的等待队列。覆盖重启回放、权限与内容拒绝撤销、同依赖多公司隔离；68 个 focused tests 通过（7.007s）。后续由协调器按实体范围接入。
+
+
+### 第二批集成与滚动并行
+
+- F14 A/B/C 初版：`0c53299` / `3081606` / `a31433e`；A/B 交叉修复 `309637f`（299 focused）。共享 superseded API `94259c9`。
+- HK acquisition/cache：`17a97cf` + `e6b7eda`；118 focused 与 6 cache hardening。新增治理提案 deliberately unseeded，原四 operation 不变。详见 F13 报告。
+- ZeroBase / Reflection / research-task 交叉修复：`a2d0178`；124 focused，包括真实 Core/CLI 每公司内容拒绝与重启恢复。内容拒绝不再被成功退出码吞掉，company subset 真正传到 child。
+- W5 market-proxy 初版：`250e428`；364 focused。审查发现 mapping identity/同刻最新版本、派生权限、逐 mapping 故障隔离和 argv 部署入口仍需补，已交原作者先修再做成本侧模板。不能把定向通过视为最终完成。
+- 另两条 Sol 线持续进行 Crowd source 日期/权限恢复和 HK closed-week 判断。保留 3 个并行槽滚动运行。
+- mission v14 本地签署包已从 live v13 只读生成并在临时副本真实发布验证。包含 11 may_write / 3 checkpoints，原 universe、预算、source_plan、bindings 保持；尚未签署，待完整验证部署批次与 pinned 版本确认后交 owner。
+
+Next step：收齐 crowd 与 market-proxy 审查修复后冻结一个可部署版本，主线全量、当前 live 只读副本复演、wheel/安装参数验收，随后 commit/push 并提交具体 owner 部署/签署步骤；后续独立开发继续在 worktree 推进。
