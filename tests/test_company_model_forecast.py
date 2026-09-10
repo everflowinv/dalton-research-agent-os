@@ -346,6 +346,31 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(
             len(ForecastModelAuthority(self.store).versions(ACN)), 1)
 
+    def test_unchanged_legacy_model_backfills_proof_without_new_version(self):
+        self.child()
+        authority = ForecastModelAuthority(self.store)
+        current = authority.latest(ACN)
+        original_json = self.store.connection.execute(
+            "SELECT record_json FROM forecast_model_versions WHERE version_id=?",
+            (current["id"],),
+        ).fetchone()["record_json"]
+        self.store.connection.execute(
+            "DROP TRIGGER forecast_model_filing_proof_no_delete")
+        self.store.connection.execute(
+            "DELETE FROM forecast_model_filing_proofs WHERE model_version_id=?",
+            (current["id"],),
+        )
+        summary = run_company_forecast(
+            self.missions, self.missions.latest_company_model_spec(ACN),
+            models=authority, mission_version_ref=self.mission["id"])
+        self.assertEqual(summary["status"], "proof_backfilled")
+        self.assertEqual(len(authority.versions(ACN)), 1)
+        self.assertIsNotNone(authority.filing_proof(current["id"]))
+        self.assertEqual(self.store.connection.execute(
+            "SELECT record_json FROM forecast_model_versions WHERE version_id=?",
+            (current["id"],),
+        ).fetchone()["record_json"], original_json)
+
     def test_filing_proof_rejects_unknown_ingest_and_wrong_accession(self):
         filing = self.missions.statement_filings(ACN)[0]
         rows = self.missions.statement_lines(filing["ingest_id"])
@@ -418,6 +443,40 @@ class LaneStateTests(unittest.TestCase):
                              "value": "0.2", "lower_bound": "0", "upper_bound": "1"}])
         proof = ForecastModelAuthority(self.store).filing_proof(stored["id"])
         self.assertEqual(proof["solver_results"][0]["ref"], "solver:1")
+
+    def test_cumulative_filings_replay_derived_quarters_and_reject_wrong_delta(self):
+        self.store.connection.execute(
+            "DROP TRIGGER coverage_mission_statement_lines_no_delete")
+        self.store.connection.execute(
+            "DROP TRIGGER coverage_mission_statement_filings_no_delete")
+        self.store.connection.execute("DELETE FROM coverage_mission_statement_lines")
+        self.store.connection.execute("DELETE FROM coverage_mission_statement_filings")
+        periods = [
+            ("2026-01-01", "2026-03-31"),
+            ("2026-01-01", "2026-06-30"),
+            ("2026-01-01", "2026-09-30"),
+            ("2026-01-01", "2026-12-31"),
+        ]
+        self.file_quarters(periods, {
+            REVENUE_CONCEPT: ["100", "250", "450", "700"],
+            COST_CONCEPT: ["60", "140", "250", "390"],
+        })
+        specification = self.missions.latest_company_model_spec(ACN)
+        table = build_model_inputs(self.missions, specification)
+        body = build_forecast_model(
+            specification, table, mission_version_ref=self.mission["id"])
+        filing = self.missions.statement_filings(ACN)[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        wrong = json.loads(json.dumps(body))
+        derived = next(cell for cell in wrong["drivers"][0]["history"]
+                       if cell["basis"] == "derived_from_cumulative")
+        derived["value"] = str(Decimal(derived["value"]) + 1)
+        with self.assertRaises(ForecastModelValidationError) as caught:
+            ForecastModelAuthority(self.store).publish(wrong, statement_rows=rows)
+        self.assertIn("filing reconciliation mismatch", str(caught.exception))
+        stored = ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
+        proof = ForecastModelAuthority(self.store).filing_proof(stored["id"])
+        self.assertEqual(proof["invariant_report"]["status"], "available")
 
     def test_filing_proof_hash_tamper_fails_closed(self):
         self.child()

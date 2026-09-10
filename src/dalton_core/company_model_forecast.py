@@ -249,11 +249,18 @@ def run_company_forecast(
     table = build_model_inputs(missions, spec)
     prior = models.latest(company_ref)
     action = pending_action(prior, spec, table)
-    if action is None:
+    backfill_proof = (
+        action is None and prior is not None
+        and models.filing_proof(prior["id"]) is None
+    )
+    if action is None and not backfill_proof:
         return {"company_ref": company_ref, "status": "nothing_to_do",
                 "action": None, "lines": [], "lines_refused": None,
                 "record": prior}
-    if action == "first":
+    if backfill_proof:
+        body = prior
+        action = "filing_proof_backfill"
+    elif action == "first":
         body = build_forecast_model(
             spec, table, actor_ref=actor_ref,
             mission_version_ref=mission_version_ref)
@@ -277,6 +284,10 @@ def run_company_forecast(
                 chosen[key] = (filed, rows)
     statement_rows = [line for _filed, rows in chosen.values() for line in rows]
     stored = models.publish(body, statement_rows=statement_rows)
+    if backfill_proof:
+        return {"company_ref": company_ref, "status": "proof_backfilled",
+                "action": action, "lines": [], "lines_refused": None,
+                "record": stored}
     published: list[dict[str, Any]] = []
     refused: str | None = None
     if lines is not None:
