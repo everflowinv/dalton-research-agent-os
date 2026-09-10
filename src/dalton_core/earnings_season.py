@@ -404,7 +404,7 @@ def open_occurrences(
         event_refs = connection.execute(
             "SELECT event_id FROM research_events WHERE company_ref=? AND kind='calendar' "
             "ORDER BY occurred_at DESC,event_id DESC", (company_ref,),
-        ).fetchall()
+        )
         for ref in event_refs:
             event = events.event(ref["event_id"])
             if event is None:
