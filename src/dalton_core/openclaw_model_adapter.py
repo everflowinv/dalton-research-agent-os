@@ -97,6 +97,18 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "event_judgement_verifier_provider_output_v0_1",
         frozenset({"event_judgement_verifier", "thesis_reflection_verifier"}),
     ),
+    "debate-map-verifier-provider-output-0.1": (
+        "0.1",
+        "debate-map-verifier-provider-output-v0.1.schema.json",
+        "debate_map_verifier_provider_output_v0_1",
+        frozenset({"debate_map_verifier"}),
+    ),
+    "conviction-call-verifier-provider-output-0.1": (
+        "0.1",
+        "conviction-call-verifier-provider-output-v0.1.schema.json",
+        "conviction_call_verifier_provider_output_v0_1",
+        frozenset({"conviction_call_verifier"}),
+    ),
 }
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BROKER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")

@@ -1,0 +1,53 @@
+{
+  "$id": "https://dalton.local/schemas/debate-map-verifier-provider-output-v0.1.schema.json",
+  "title": "DebateMapVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "debate_ref",
+          "code",
+          "detail"
+        ],
+        "properties": {
+          "debate_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "code": {
+            "enum": [
+              "position_not_supported_by_cited_claims",
+              "sides_are_not_actually_opposed",
+              "market_position_misstated",
+              "our_position_not_in_the_thesis",
+              "question_not_on_the_named_causal_link",
+              "shift_not_supported_by_refs"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600
+          }
+        }
+      }
+    }
+  }
+}

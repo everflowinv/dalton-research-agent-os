@@ -357,6 +357,46 @@ class CockpitChainTests(unittest.TestCase):
         )
         self.assertNotEqual(verifier["work_order_ref"], legacy.id)
 
+    def test_debate_and_conviction_work_orders_bind_their_provider_contracts(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="plan", request_id="argument-contract-producer",
+               prompt="draft", mission=self.mission)
+        cases = (
+            ("debate_map_verifier", "debate-map-verifier-provider-output-0.1"),
+            ("conviction_call_verifier", "conviction-call-verifier-provider-output-0.1"),
+        )
+        for purpose, contract in cases:
+            with self.subTest(purpose=purpose):
+                result = self._model(
+                    ChainAdapter({}), policy_version_ref=self.verifier_policy,
+                    slots=self.verifier_slots,
+                ).call(
+                    purpose=purpose, request_id=f"{purpose}-contract",
+                    prompt='{"verdict":"pass","findings":[]}',
+                    mission=self.mission,
+                    producer_route_decision_refs=[producer["route_decision_ref"]],
+                )
+                with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+                    stored = scheduler.work_order_authority(result["work_order_ref"])
+                metadata = stored["work_order"]["metadata"]
+                self.assertEqual(metadata["verifier_provider_contract"], contract)
+                self.assertRegex(
+                    metadata["verifier_provider_schema_hash"], r"^[0-9a-f]{64}$"
+                )
+                legacy = build_work(
+                    purpose=purpose,
+                    request_id=f"{purpose}-contract:producer:legacy",
+                    prompt='{"verdict":"pass","findings":[]}',
+                    mission_version_ref=self.mission["id"],
+                    max_input_tokens=120_000,
+                    max_output_tokens=500,
+                    max_cost_usd=0.5,
+                    max_seconds=120,
+                    created_at=self.mission["created_at"],
+                )
+                self.assertNotEqual(result["work_order_ref"], legacy.id)
+
     def test_required_controls_failure_halts_without_trying_another_provider(self) -> None:
         producer = self._model(
             ChainAdapter({}), policy_version_ref=self.chain_policy

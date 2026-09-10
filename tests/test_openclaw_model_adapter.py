@@ -582,6 +582,12 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             ("investment_memo_verifier", "investment-memo-verifier-provider-output-0.1",
              "investment-memo-verifier-provider-output-v0.1.schema.json",
              "investment_memo_verifier_provider_output_v0_1", None),
+            ("debate_map_verifier", "debate-map-verifier-provider-output-0.1",
+             "debate-map-verifier-provider-output-v0.1.schema.json",
+             "debate_map_verifier_provider_output_v0_1", "debate_ref"),
+            ("conviction_call_verifier", "conviction-call-verifier-provider-output-0.1",
+             "conviction-call-verifier-provider-output-v0.1.schema.json",
+             "conviction_call_verifier_provider_output_v0_1", "code"),
         )
         for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
             with self.subTest(purpose=purpose):

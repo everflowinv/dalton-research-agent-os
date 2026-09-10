@@ -1,0 +1,49 @@
+{
+  "$id": "https://dalton.local/schemas/conviction-call-verifier-provider-output-v0.1.schema.json",
+  "title": "ConvictionCallVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "detail"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "our_view_not_in_the_thesis",
+              "market_view_not_supported_by_cited_rows",
+              "this_is_not_a_disagreement",
+              "where_market_is_wrong_is_a_mood_not_a_fact",
+              "pathway_step_is_not_observable",
+              "risk_reward_not_supported_by_cited_rows",
+              "falsifier_does_not_falsify",
+              "direction_contradicts_the_stated_view"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600
+          }
+        }
+      }
+    }
+  }
+}

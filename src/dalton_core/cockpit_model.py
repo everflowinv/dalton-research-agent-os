@@ -94,6 +94,12 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "thesis_reflection_verifier": (
         "event-judgement-verifier-provider-output-0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json"),
+    "debate_map_verifier": (
+        "debate-map-verifier-provider-output-0.1",
+        "debate-map-verifier-provider-output-v0.1.schema.json"),
+    "conviction_call_verifier": (
+        "conviction-call-verifier-provider-output-0.1",
+        "conviction-call-verifier-provider-output-v0.1.schema.json"),
 }
 
 
