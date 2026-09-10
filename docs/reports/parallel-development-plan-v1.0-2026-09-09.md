@@ -254,6 +254,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 早 | 合并 C1 事件桥接（日历事件真正入 ResearchEvent 账本，payload 合同两侧共享测试）与 INT3（35 条记录 = 32 播种 ∪ 3 明确不播；`sec-filings-index-v1.json` 从合同推导找回；bootstrap 一次开 55 个 schema；演练 27 条 lane 零逃逸）。main 4,213+ 项通过，已 push | 完成 |
 | 09-10 早 | 合并 P15d ConvictionCall（自动化只提案、人裁决；与市场同向不提案；inf/nan 拒绝；提案版本链与 `supersedes_ref`）。在修：P12d、S5、ask v2；在做：stage-ladder、P12e、consensus、P14f、planner 日账本 | 进行中 |
 | 09-10 早 | 第二次用量上限打断 8 个 agent，全部从上下文恢复。规则：每个新 `*_schema.sql` 须同时登记 `bootstrap.py` 与演练迁移清单（测试强制）。P12d 修完合入（在跑全量）；stage-ladder 完成（阶段状态跨 mission 版本折叠；CTSH 折叠为 v9 `gate_failed`）待合；派出既有资料入职（`prior-research`）与重开账本续篇（reopen 后可再次 `gate_passed`） | 进行中 |
+| 09-10 早 | 合并 P12d（4,486 项通过，已 push）；合入 stage-ladder、S5（SEC 所有权 op：13F 读真正的信息表、联名 Form 4 不丢人）、ask v2（补搜只取本次 discovery 的文档；policy 投影复用 authority；adhoc 路由的旧禁令按 owner 解禁去掉）。P14f 在审 | 进行中 |
 
 ---
 
