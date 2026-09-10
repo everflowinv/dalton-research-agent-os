@@ -210,7 +210,7 @@ done
 # the year to date under the same period_end -- EPAM's Q2 and H1 revenue both
 # end 2026-06-30. Without the start they are one number twice, and half-years
 # would have been ingested as quarters. Caught before any data was taken.
-for sec_financials_version in v1 v2; do
+for sec_financials_version in v1 v2 v3; do
   sec_financials_file="$governance_dir/sec-financial-statements-${sec_financials_version}.json"
   repo_record="$repo_root/deploy/connector-governance/sec-financial-statements-${sec_financials_version}.json"
   if [[ ! -f "$sec_financials_file" && -f "$repo_record" ]]; then

@@ -361,10 +361,13 @@ class MissionStatementLaneCoordinator:
 STATEMENT_LANE_USER_AGENT = (
     "Dalton Research Agent OS SEC financial-statements lane everflow@lumos.space"
 )
-# The proposed record this lane is pinned to, named by version rather than
-# discovered, so a future v3 is a deliberate edit here and not something the
-# writer picks up because a file appeared.
-STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v3.json"
+# Contracts coexist.  An already-approved v2 remains usable and emits its old
+# projection; an approved v3 wins only after its exact record is selected.
+STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v2.json"
+STATEMENT_LANE_GOVERNANCE_CANDIDATES = (
+    "sec-financial-statements-v3.json",
+    STATEMENT_LANE_GOVERNANCE,
+)
 LAUNCHER_KWARG = "statement_lane_launcher"
 
 
@@ -424,8 +427,26 @@ def argv_fragment(context: Any) -> list[str]:
     # Independent of the Cockpit staging file -- this lane writes into the
     # mission ledger, not the Cockpit inbox -- so it is enabled by its own
     # approved record being present, and stays off on a Core without one.
-    governance = context.state / "connector-governance" / STATEMENT_LANE_GOVERNANCE
-    if not governance.is_file():
+    from .connector_governance import ConnectorGovernance, ConnectorGovernanceError
+    from .sec_financials_core import sec_financials_identity
+
+    governance = None
+    for version, filename in ((3, STATEMENT_LANE_GOVERNANCE_CANDIDATES[0]),
+                              (2, STATEMENT_LANE_GOVERNANCE_CANDIDATES[1])):
+        candidate = context.state / "connector-governance" / filename
+        if not candidate.is_file():
+            continue
+        try:
+            record = ConnectorGovernance.load(candidate)
+        except ConnectorGovernanceError:
+            continue
+        identity = sec_financials_identity(version=version)
+        if (record.approved and record.capability_id == identity["capability_id"]
+                and record.wire["expected_source_hash"] == identity["source_hash"]
+                and record.wire["expected_schema_hash"] == identity["schema_hash"]):
+            governance = candidate
+            break
+    if governance is None:
         return []
     return [
         "--statement-lane-governance", str(governance),
@@ -457,6 +478,7 @@ __all__ = [
     "MAX_FAILURES_PER_COMPANY",
     "MAX_QUEUED_PER_RUN",
     "STATEMENT_LANE_GOVERNANCE",
+    "STATEMENT_LANE_GOVERNANCE_CANDIDATES",
     "STATEMENT_LANE_USER_AGENT",
     "MissionStatementLaneCoordinator",
     "add_arguments",

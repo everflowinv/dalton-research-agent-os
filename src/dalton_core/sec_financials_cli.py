@@ -28,9 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from .connector_governance import ConnectorGovernance, ConnectorGovernanceError
-from .connector_inventory import load_packaged_connector_inventory
 from .raw_spool import RawSpool
-from .sec_financials_core import OPERATION, sec_financials_identity
+from .sec_financials_core import OPERATION, sec_financials_identity, sec_financials_output_schema
 from .sec_financials_normalise import (
     STATEMENT_BY_TYPE,
     build_wire,
@@ -58,7 +57,14 @@ def _write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
-def _load_governance(path: Path) -> ConnectorGovernance:
+def _contract_version(governance: ConnectorGovernance) -> int:
+    suffix = governance.id.rsplit(":v", 1)
+    if len(suffix) != 2 or suffix[1] not in {"2", "3"}:
+        raise SecFinancialsRunError("unsupported SEC financial-statements governance version")
+    return int(suffix[1])
+
+
+def _load_governance(path: Path) -> tuple[ConnectorGovernance, int]:
     """The approved record, checked against the identity it claims to cover.
 
     A record that is merely present is not authority: it must be approved, and
@@ -71,7 +77,8 @@ def _load_governance(path: Path) -> ConnectorGovernance:
         raise SecFinancialsRunError(
             "SEC financial-statements governance record is not approved"
         )
-    identity = sec_financials_identity()
+    version = _contract_version(governance)
+    identity = sec_financials_identity(version=version)
     if governance.capability_id != identity["capability_id"]:
         raise SecFinancialsRunError("governance record covers a different capability")
     # The constructor checks these are well-formed hashes, not that they still
@@ -84,16 +91,11 @@ def _load_governance(path: Path) -> ConnectorGovernance:
             "governance schema hash differs from the packaged contract; "
             "the approval does not cover this output contract"
         )
-    return governance
+    return governance, version
 
 
-def _output_schema() -> dict[str, Any]:
-    template = load_packaged_connector_inventory()["templates"]["sec-financials"]
-    ref = f"schema:connector-inventory:sec-financials:{OPERATION}:output:0.1"
-    for document in template["schema_documents"]:
-        if document["schema_ref"] == ref:
-            return document["document"]
-    raise SecFinancialsRunError("packaged template has no statements output contract")
+def _output_schema(version: int = 3) -> dict[str, Any]:
+    return sec_financials_output_schema(version=version)
 
 
 def parse_live(ticker: str | None, cik: str | None, *, form: str, limit: int,
@@ -219,7 +221,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "observation": None,
     }
     try:
-        governance = _load_governance(Path(args.governance).expanduser().resolve())
+        governance, contract_version = _load_governance(
+            Path(args.governance).expanduser().resolve())
         summary["governance_ref"] = governance.id
         summary["governance_hash"] = governance.content_hash
 
@@ -257,11 +260,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             cik=raw["cik"], entity_name=raw["entity_name"], filings=filings,
             source_record_refs=[f"raw-sink:{artifact.content_hash}"],
         )
+        if contract_version == 2:
+            for filing in wire["filings"]:
+                for line in filing["lines"]:
+                    line.pop("dimension_count", None)
         # Validate before recording: an observation the frozen contract cannot
         # describe is refused, not stored and explained later.
         from .authority_resolver import _schema_matches
 
-        _schema_matches(wire, _output_schema(), "output")
+        _schema_matches(wire, _output_schema(contract_version), "output")
 
         summary.update({
             "status": "succeeded",

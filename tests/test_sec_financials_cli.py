@@ -92,10 +92,10 @@ class ChildTests(unittest.TestCase):
         self.out = self.root / "out"
         self.out.mkdir()
 
-    def governance(self, *, status="approved", **overrides):
+    def governance(self, *, status="approved", version=2, **overrides):
         record = build_governance_record(
             KIND, approved_by=OWNER, status=status,
-            effective_from="2026-09-09T00:00:00+00:00", version=2)
+            effective_from="2026-09-09T00:00:00+00:00", version=version)
         record.update(overrides)
         if overrides:
             from dalton_core.store import content_hash
@@ -128,6 +128,42 @@ class ChildTests(unittest.TestCase):
         summary = self.run_child(governance=self.governance(status="proposed"))
         self.assertEqual(summary["status"], "failed")
         self.assertIn("not approved", summary["failure_reason"])
+
+    def test_v2_keeps_the_legacy_wire_projection_byte_shape(self):
+        summary = self.run_child()
+        self.assertTrue(all("dimension_count" not in line
+                            for line in summary["observation"]["filings"][0]["lines"]))
+
+    def test_approved_v3_carries_complete_dimension_proof(self):
+        raw = fixture_parse()
+        income = raw["filings"][0]["statements"]["income"]
+        income["structure"][0].update({
+            "dimension_axis": "srt:StatementGeographicalAxis",
+            "dimension_member": "srt:AmericasMember", "is_breakdown": True,
+        })
+        income["facts"][0].update({
+            "dimension": "srt:StatementGeographicalAxis", "member": "srt:AmericasMember"})
+        income["facts"][0][
+            "dim_srt_StatementGeographicalAxis"] = "srt:AmericasMember"
+        summary = self.run_child(
+            governance=self.governance(version=3), fixture=self.fixture(raw))
+        line = next(line for line in summary["observation"]["filings"][0]["lines"]
+                    if line["dimension_axis"] is not None)
+        self.assertEqual(line["dimension_count"], 1)
+
+    def test_unapproved_v3_refuses_before_live_parser_transport(self):
+        from unittest.mock import patch
+
+        args = build_parser().parse_args([
+            "--state-dir", str(self.state), "--governance",
+            str(self.governance(status="proposed", version=3)),
+            "--ticker", "EPAM", "--allow-network", "--summary-dir", str(self.out),
+            "--quiet",
+        ])
+        with patch("dalton_core.sec_financials_cli.parse_live") as transport:
+            summary = run(args)
+        transport.assert_not_called()
+        self.assertEqual(summary["status"], "failed")
 
     def test_a_record_whose_contract_moved_is_refused_before_anything_runs(self):
         # The P13z failure: an approval that no longer covers the contract.

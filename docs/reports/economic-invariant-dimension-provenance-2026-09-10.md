@@ -15,10 +15,12 @@ the projection.  A two-axis context remains two-axis after storage and cannot
 be flattened into a geographic or product sum.
 
 The connector output contract now requires nullable `dimension_count`, so its
-schema hash changed.  A proposed v3 governance record is included and the lane
-names it explicitly.  It is not approved by this change.  Until an owner
-approves that exact record, new network runs correctly remain governance
-blocked; no prior approval is treated as covering the wider output.
+schema hash changed. A proposed v3 governance record is included. It is not
+approved by this change. Contracts coexist: an installed approved v2 remains
+selected and emits the exact legacy projection without `dimension_count`; an
+approved v3 wins only after that exact record is approved. Fresh installs with
+only proposed records do not advertise the lane as connected. No prior
+approval is treated as covering the wider output.
 
 ## Reader behavior
 
@@ -43,4 +45,3 @@ Focused tests cover complete one- and two-axis parser contexts, projected-only
 legacy contexts, authority round-trip, multi-axis exclusion from segment sums,
 the changed connector contract/governance binding, and Cockpit failure versus
 not-checked display.  The final affected run passed 254 tests.
-

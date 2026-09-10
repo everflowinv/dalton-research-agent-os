@@ -73,16 +73,33 @@ def sec_financials_source_hash() -> str:
     return content_hash(dict(template["source_identity"]))
 
 
-def sec_financials_schema_hash() -> str:
+def sec_financials_output_schema(*, version: int = 3) -> dict[str, Any]:
+    """Closed output schema for v2 or v3; v2 remains byte-compatible."""
+
+    if version not in {2, 3}:
+        raise SecFinancialsError("financial statements contract version must be 2 or 3")
+    template, contract = sec_financials_contract()
+    document = next(item["document"] for item in template["schema_documents"]
+                    if item["schema_ref"] == contract["output_schema_ref"])
+    result = copy.deepcopy(document)
+    if version == 2:
+        line = result["properties"]["filings"]["items"]["properties"]["lines"]["items"]
+        line["properties"].pop("dimension_count")
+        line["required"].remove("dimension_count")
+    return result
+
+
+def sec_financials_schema_hash(*, version: int = 3) -> str:
     """Bound to this operation alone, so the approval cannot widen."""
 
     _, contract = sec_financials_contract()
+    output_hash = content_hash(sec_financials_output_schema(version=version))
     return content_hash({
         "allowed_operations": [OPERATION],
         "input_schema_refs": {OPERATION: contract["input_schema_ref"]},
         "input_schema_hashes": {OPERATION: contract["input_schema_hash"]},
         "output_schema_refs": {OPERATION: contract["output_schema_ref"]},
-        "output_schema_hashes": {OPERATION: contract["output_schema_hash"]},
+        "output_schema_hashes": {OPERATION: output_hash},
     })
 
 
@@ -96,7 +113,7 @@ def sec_financials_adapter_hash() -> str:
     })
 
 
-def sec_financials_identity() -> dict[str, Any]:
+def sec_financials_identity(*, version: int = 3) -> dict[str, Any]:
     """Source and schema identity of the statements operation."""
 
     template, contract = sec_financials_contract()
@@ -104,7 +121,7 @@ def sec_financials_identity() -> dict[str, Any]:
         "capability_id": CAPABILITY_ID,
         "source_identity": dict(template["source_identity"]),
         "source_hash": sec_financials_source_hash(),
-        "schema_hash": sec_financials_schema_hash(),
+        "schema_hash": sec_financials_schema_hash(version=version),
         "adapter_ref": template["transport"]["target_ref"],
         "adapter_hash": sec_financials_adapter_hash(),
         "operation": OPERATION,
@@ -112,11 +129,11 @@ def sec_financials_identity() -> dict[str, Any]:
         "input_schema_ref": contract["input_schema_ref"],
         "input_schema_hash": contract["input_schema_hash"],
         "output_schema_ref": contract["output_schema_ref"],
-        "output_schema_hash": contract["output_schema_hash"],
+        "output_schema_hash": content_hash(sec_financials_output_schema(version=version)),
         "input_schema_refs": {OPERATION: contract["input_schema_ref"]},
         "input_schema_hashes": {OPERATION: contract["input_schema_hash"]},
         "output_schema_refs": {OPERATION: contract["output_schema_ref"]},
-        "output_schema_hashes": {OPERATION: contract["output_schema_hash"]},
+        "output_schema_hashes": {OPERATION: content_hash(sec_financials_output_schema(version=version))},
     }
 
 
@@ -153,7 +170,7 @@ def build_sec_financials_governance_record(
     status: str = "proposed",
     effective_from: str = "2026-09-09T00:00:00+00:00",
     max_lease_seconds: int = 120,
-    version: int = 1,
+    version: int = 3,
 ) -> dict[str, Any]:
     """Closed, hash-bound governance record for the statements capability."""
 
@@ -178,7 +195,7 @@ def build_sec_financials_governance_record(
         "max_lease_seconds": max_lease_seconds,
         "allowed_permissions": copy.deepcopy(sec_financials_permissions()),
         "expected_source_hash": sec_financials_source_hash(),
-        "expected_schema_hash": sec_financials_schema_hash(),
+        "expected_schema_hash": sec_financials_schema_hash(version=version),
     }
     base["content_hash"] = content_hash(base)
     return base
@@ -196,6 +213,7 @@ __all__ = [
     "sec_financials_fixture_hash",
     "sec_financials_identity",
     "sec_financials_permissions",
+    "sec_financials_output_schema",
     "sec_financials_schema_hash",
     "sec_financials_source_hash",
 ]

@@ -1058,8 +1058,11 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("--statement-lane-governance", writer_args)
             governance = root / "state" / "connector-governance"
             governance.mkdir(parents=True, exist_ok=True)
-            (governance / "sec-financial-statements-v2.json").write_text(
-                "{}", encoding="utf-8")
+            from dalton_core.sec_financials_core import build_sec_financials_governance_record
+            (governance / "sec-financial-statements-v2.json").write_text(json.dumps(
+                build_sec_financials_governance_record(
+                    approved_by="human:test", status="approved", version=2)),
+                encoding="utf-8")
             with_statements = plistlib.loads(Path(render(
                 root / "LaunchAgents", root / "venv" / "bin", root / "state",
                 config, root / "logs",

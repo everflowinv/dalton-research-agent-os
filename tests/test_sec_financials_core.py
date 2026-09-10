@@ -216,6 +216,12 @@ class GovernanceTests(unittest.TestCase):
         self.assertEqual(record["expected_schema_hash"], sec_financials_schema_hash())
         self.assertEqual(record["expected_source_hash"], sec_financials_source_hash())
 
+    def test_v2_schema_identity_remains_byte_compatible(self):
+        self.assertEqual(
+            sec_financials_schema_hash(version=2),
+            "086316a8feb82c20b8a8a54fc71fb055631edc31ada2ec44bffdd1cb90dc7330",
+        )
+
     def test_the_shipped_record_loads_and_is_not_yet_usable(self):
         import tempfile
 
