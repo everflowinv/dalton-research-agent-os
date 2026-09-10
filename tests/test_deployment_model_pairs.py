@@ -33,20 +33,20 @@ class DeploymentModelPairTests(unittest.TestCase):
 
     def test_dossier_pair_becomes_the_real_lane_argv(self) -> None:
         self.install_pair(
-            "model-routing-policy:dalton-openclaw-deliverable-drafting",
-            "initial-screen-model-config.json",
+            "model-routing-policy:dalton-openclaw-company-dossier",
+            "dossier-model-config.json",
             "model-routing-policy:dalton-openclaw-dossier-verifier",
-            "dossier-verifier-model-config.json",
+            "company-dossier-verifier-model-config.json",
         )
         policy = self.state / "p12a-dossier-policy-v1.json"
         policy.write_bytes((Path(__file__).parents[1] / "deploy/phase9" /
                             policy.name).read_bytes())
         self.assertEqual(dossier_argv(self.context), [
             "--company-dossier-model-config",
-            str(self.state / "initial-screen-model-config.json"),
+            str(self.state / "dossier-model-config.json"),
             "--company-dossier-policy", str(policy),
             "--company-dossier-verifier-model-config",
-            str(self.state / "dossier-verifier-model-config.json"),
+            str(self.state / "company-dossier-verifier-model-config.json"),
         ])
 
     def test_earnings_pair_becomes_the_real_lane_argv(self) -> None:
@@ -78,7 +78,7 @@ class DeploymentModelPairTests(unittest.TestCase):
                          ["verify", "adjudicate"])
 
     def test_one_file_alone_keeps_each_lane_disabled(self) -> None:
-        (self.state / "initial-screen-model-config.json").write_text("{}")
+        (self.state / "dossier-model-config.json").write_text("{}")
         (self.state / "p12a-dossier-policy-v1.json").write_text("{}")
         self.assertNotIn("--company-dossier-verifier-model-config",
                          dossier_argv(self.context))
@@ -92,6 +92,18 @@ class DeploymentModelPairTests(unittest.TestCase):
             self.assertIn(f'DALTON_{prefix}_VERIFIER_MODEL_PROFILE', script)
             self.assertIn(f"set both DALTON_{prefix}_MODEL_*", script)
         self.assertIn('if [[ ! -f "$dossier_policy_file"', script)
+        self.assertLess(script.index('validate_model_pair "DALTON_EVENT"'),
+                        script.index('mkdir -p "$config_dir"'))
+        self.assertIn("unknown model tier", script)
+
+    def test_legacy_dossier_paths_remain_a_fallback(self) -> None:
+        (self.state / "initial-screen-model-config.json").write_text("{}")
+        (self.state / "dossier-verifier-model-config.json").write_text("{}")
+        policy = self.state / "p12a-dossier-policy-v1.json"
+        policy.write_text("{}")
+        argv = dossier_argv(self.context)
+        self.assertIn(str(self.state / "initial-screen-model-config.json"), argv)
+        self.assertIn(str(self.state / "dossier-verifier-model-config.json"), argv)
 
 
 if __name__ == "__main__":

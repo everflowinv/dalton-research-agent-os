@@ -14,10 +14,18 @@ error. Runtime model routing continues to enforce producer/verifier family
 independence; verifier-tier policies carry the `verify` and `adjudicate`
 independence capabilities.
 
-The dossier producer retains the existing Initial Screen drafting policy and
-configuration path, as required by the dossier lane contract. Its verifier has
-its own routing policy. Earnings preview/calibration and its verifier each have
-their own policy and the two existing earnings configuration paths.
+The dossier now prefers independent `dossier-model-config.json` and
+`company-dossier-verifier-model-config.json` routes, so configuring it cannot
+change Initial Screen, debate, framework, or conviction routing. Existing
+installations remain compatible: when the new files are absent the lane falls
+back to the prior `initial-screen-model-config.json` and
+`dossier-verifier-model-config.json` paths. Earnings preview/calibration and
+its verifier each have their own policy and the two existing earnings paths.
+
+All four producer/verifier groups (event judgement, zero-base, dossier, and
+earnings) are preflighted before the installer creates directories, updates the
+venv, or stops services. The preflight rejects half pairs, identical pins, and
+unknown tier names, so an invalid pair cannot write its first configuration.
 
 The installer now seeds `p12a-dossier-policy-v1.json` into the runtime state
 only when absent. It never overwrites the owner's installed dossier policy.

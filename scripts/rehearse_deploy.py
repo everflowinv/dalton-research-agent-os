@@ -840,7 +840,11 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
     ),
     LaneSwitch(
         "initial_screen", "initial-screen-model-config.json", None, False,
-        "written only when DALTON_DELIVERABLE or paired DALTON_DOSSIER model vars are set",
+        "written only when DALTON_DELIVERABLE_MODEL_PROFILE/TIER is set",
+    ),
+    LaneSwitch(
+        "company_dossier", "dossier-model-config.json", None, False,
+        "written only together with the company-dossier verifier configuration",
     ),
     LaneSwitch(
         "company_dossier policy", "p12a-dossier-policy-v1.json",
@@ -848,7 +852,7 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
         "seeded once and never overwrites the owner's runtime policy",
     ),
     LaneSwitch(
-        "company_dossier verifier", "dossier-verifier-model-config.json", None, False,
+        "company_dossier verifier", "company-dossier-verifier-model-config.json", None, False,
         "written only together with the dossier producer model configuration",
     ),
     LaneSwitch(

@@ -673,7 +673,8 @@ class MissionAndSwitchTests(unittest.TestCase):
             ("event-judgement-model-config.json", "DALTON_EVENT_JUDGEMENT_MODEL_TIER"),
             ("event-verifier-model-config.json", "DALTON_EVENT_VERIFIER_MODEL_TIER"),
             ("claim-index-model-config.json", "DALTON_CLAIM_INDEX_MODEL_TIER"),
-            ("dossier-verifier-model-config.json", "DALTON_DOSSIER_VERIFIER_MODEL_TIER"),
+            ("dossier-model-config.json", "DALTON_DOSSIER_MODEL_TIER"),
+            ("company-dossier-verifier-model-config.json", "DALTON_DOSSIER_VERIFIER_MODEL_TIER"),
             ("earnings-season-model-config.json", "DALTON_EARNINGS_MODEL_TIER"),
             ("earnings-season-verifier-model-config.json", "DALTON_EARNINGS_VERIFIER_MODEL_TIER"),
         ):

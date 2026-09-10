@@ -271,8 +271,10 @@ def build_launcher(args: Any) -> Any | None:
 # same broker, same day ledger), the policy that maps the constitution's causal
 # chain to two of the sections, and the verifier's own configuration, without
 # which nothing can be published.
-DOSSIER_MODEL_CONFIG = "initial-screen-model-config.json"
-DOSSIER_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
+DOSSIER_MODEL_CONFIG = "dossier-model-config.json"
+DOSSIER_VERIFIER_MODEL_CONFIG = "company-dossier-verifier-model-config.json"
+LEGACY_DOSSIER_MODEL_CONFIG = "initial-screen-model-config.json"
+LEGACY_DOSSIER_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
 DOSSIER_POLICY = "p12a-dossier-policy-v1.json"
 
 
@@ -283,12 +285,16 @@ def argv_fragment(context: Any) -> list[str]:
     # tick. Both files must be present, and the policy path is passed through:
     # its default only resolves inside a source checkout.
     config = context.state / DOSSIER_MODEL_CONFIG
+    if not config.is_file():
+        config = context.state / LEGACY_DOSSIER_MODEL_CONFIG
     policy = context.state / DOSSIER_POLICY
     if not config.is_file() or not policy.is_file():
         return []
     argv = ["--company-dossier-model-config", str(config),
             "--company-dossier-policy", str(policy)]
     verifier = context.state / DOSSIER_VERIFIER_MODEL_CONFIG
+    if not verifier.is_file():
+        verifier = context.state / LEGACY_DOSSIER_VERIFIER_MODEL_CONFIG
     if verifier.is_file():
         argv += ["--company-dossier-verifier-model-config", str(verifier)]
     return argv
@@ -313,6 +319,8 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "DOSSIER_MODEL_CONFIG",
+    "LEGACY_DOSSIER_MODEL_CONFIG",
+    "LEGACY_DOSSIER_VERIFIER_MODEL_CONFIG",
     "DOSSIER_POLICY",
     "DOSSIER_VERIFIER_MODEL_CONFIG",
     "LANE",

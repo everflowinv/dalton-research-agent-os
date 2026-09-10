@@ -14,6 +14,42 @@ launch_agents_dir="$HOME/Library/LaunchAgents"
 python_source=${PYTHON_SOURCE:-/opt/homebrew/bin/python3}
 domain="gui/$(id -u)"
 
+# Validate every independently verified model pair before install changes the
+# filesystem, Python environment, or running services.
+validate_model_pair() {
+  # $1 name, $2 producer profile, $3 producer tier, $4 verifier profile,
+  # $5 verifier tier.
+  local name="$1" producer="${2}${3}" verifier="${4}${5}"
+  if [[ -n "$producer" || -n "$verifier" ]]; then
+    if [[ -z "$producer" || -z "$verifier" ]]; then
+      print -u2 "error: set both $name producer and verifier model variables or neither"
+      exit 2
+    fi
+    if [[ "$producer" == "$verifier" ]]; then
+      print -u2 "error: $name producer and verifier are pinned to the same model ($producer)"
+      exit 2
+    fi
+  fi
+  for tier in "$3" "$5"; do
+    if [[ -n "$tier" && "$tier" != cheap && "$tier" != brain && "$tier" != verifier ]]; then
+      print -u2 "error: $name names unknown model tier $tier"
+      exit 2
+    fi
+  done
+}
+validate_model_pair "DALTON_EVENT" \
+  "${DALTON_EVENT_JUDGEMENT_MODEL_PROFILE:-}" "${DALTON_EVENT_JUDGEMENT_MODEL_TIER:-}" \
+  "${DALTON_EVENT_VERIFIER_MODEL_PROFILE:-}" "${DALTON_EVENT_VERIFIER_MODEL_TIER:-}"
+validate_model_pair "DALTON_ZERO_BASE_REVIEW" \
+  "${DALTON_ZERO_BASE_REVIEW_MODEL_PROFILE:-}" "${DALTON_ZERO_BASE_REVIEW_MODEL_TIER:-}" \
+  "${DALTON_ZERO_BASE_REVIEW_VERIFIER_MODEL_PROFILE:-}" "${DALTON_ZERO_BASE_REVIEW_VERIFIER_MODEL_TIER:-}"
+validate_model_pair "DALTON_DOSSIER" \
+  "${DALTON_DOSSIER_MODEL_PROFILE:-}" "${DALTON_DOSSIER_MODEL_TIER:-}" \
+  "${DALTON_DOSSIER_VERIFIER_MODEL_PROFILE:-}" "${DALTON_DOSSIER_VERIFIER_MODEL_TIER:-}"
+validate_model_pair "DALTON_EARNINGS" \
+  "${DALTON_EARNINGS_MODEL_PROFILE:-}" "${DALTON_EARNINGS_MODEL_TIER:-}" \
+  "${DALTON_EARNINGS_VERIFIER_MODEL_PROFILE:-}" "${DALTON_EARNINGS_VERIFIER_MODEL_TIER:-}"
+
 mkdir -p "$config_dir" "$runtime_dir" "$log_dir" "$launch_agents_dir"
 chmod 700 "$dalton_root" "$config_dir" "$runtime_dir" "$log_dir"
 
@@ -768,12 +804,12 @@ if [[ -n "$dossier_pin" && -n "$dossier_verifier_pin" ]]; then
     exit 2
   fi
   install_role_model_config \
-    "model-routing-policy:dalton-openclaw-deliverable-drafting" \
-    "initial-screen-model-config.json" \
+    "model-routing-policy:dalton-openclaw-company-dossier" \
+    "dossier-model-config.json" \
     "${DALTON_DOSSIER_MODEL_PROFILE:-}" "${DALTON_DOSSIER_MODEL_TIER:-}"
   install_role_model_config \
     "model-routing-policy:dalton-openclaw-dossier-verifier" \
-    "dossier-verifier-model-config.json" \
+    "company-dossier-verifier-model-config.json" \
     "${DALTON_DOSSIER_VERIFIER_MODEL_PROFILE:-}" "${DALTON_DOSSIER_VERIFIER_MODEL_TIER:-}"
 elif [[ -n "$dossier_pin" || -n "$dossier_verifier_pin" ]]; then
   print -u2 "error: set both DALTON_DOSSIER_MODEL_* and DALTON_DOSSIER_VERIFIER_MODEL_* or neither"
