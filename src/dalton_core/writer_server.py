@@ -3993,6 +3993,13 @@ class WriterServer:
                 or binding["template_version_hash"] != metadata.get("probe_template_version_hash") \
                 or binding["parameters"] != metadata.get("parameters"):
             raise WriterServerError("bounded discovery template binding drifted")
+        from .research_task import bindable_templates
+        current_templates = bindable_templates(self.bounded_planner)
+        current = next((row for row in current_templates.values()
+                        if row["id"] == binding["template_version_ref"]), None)
+        if current is None or current["content_hash"] != binding["template_version_hash"]:
+            raise WriterServerError(
+                "bounded discovery template is no longer current and executable")
         mission = self.coverage_mission.mission(metadata.get("mission_version_ref"))
         if mission["content_hash"] != metadata.get("mission_version_hash"):
             raise WriterServerError("bounded discovery mission binding drifted")
@@ -4005,18 +4012,18 @@ class WriterServer:
         if parameters["inquiry_hash"] != loop["admission"]["content_hash"]:
             raise WriterServerError("bounded discovery inquiry binding drifted")
         authorization = self.coverage_mission.authorize_source_discovery(
-            company_ref=loop["subject_ref"], source_ref=parameters["source_ref"],
-            requested_by="automation:bounded-planner",
+            company_ref=parameters["company_ref"], source_ref=parameters["source_ref"],
+            requested_by=mission["autonomy"]["automation_principal"],
             mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"])
         compiled = build_discovery_parameters(
-            coordinator.plan, spec_ref=parameters["spec_ref"], company_ref=loop["subject_ref"],
+            coordinator.plan, spec_ref=parameters["spec_ref"], company_ref=parameters["company_ref"],
             as_of=datetime.now(timezone.utc).date())
         query_hash = discovery_query_hash(coordinator.plan, compiled)
         # The writer request may time out while the governed child continues.
         # Reuse the exact mission/company/spec/query dispatch so retrying the
         # same admitted WorkOrder never starts or accounts for a second call.
         prior = next((row for row in self.coverage_mission.discovery_dispatches(
-            mission["id"], company_ref=loop["subject_ref"],
+            mission["id"], company_ref=parameters["company_ref"],
             spec_ref=parameters["spec_ref"], limit=100)
             if row["query_hash"] == query_hash
             and row["discovery_plan_ref"] == coordinator.plan["id"]

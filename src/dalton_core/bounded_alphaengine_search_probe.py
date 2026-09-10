@@ -30,9 +30,9 @@ def execute_alphaengine_search_probe(work_order: Mapping[str, Any], *, client: A
     if metadata.get("permission_scope") != PROBE_PERMISSION_SCOPE:
         raise BoundedAlphaEngineSearchProbeError("probe is outside AlphaEngine read scope")
     parameters = metadata.get("parameters")
-    if not isinstance(parameters, Mapping) or set(parameters) != {"source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"}:
+    if not isinstance(parameters, Mapping) or set(parameters) != {"source_ref", "spec_ref", "inquiry_hash", "company_ref", "discovery_plan_ref", "discovery_plan_hash"}:
         raise BoundedAlphaEngineSearchProbeError("search probe parameters have an invalid closed shape")
-    if parameters["source_ref"] != "source:alphaengine" or parameters["spec_ref"] not in {
+    if parameters["source_ref"] != "source:alphaengine" or parameters["company_ref"] != "company:sec-cik:0001467373" or parameters["spec_ref"] not in {
         "earnings-call-transcripts", "sell-side-reports"}:
         raise BoundedAlphaEngineSearchProbeError("search probe is outside the approved discovery specs")
     for field in ("mission_version_ref", "mission_version_hash"):

@@ -19,7 +19,8 @@ A retry after a caller deadline reuses the existing mission/company/spec/query d
 ## Validation
 
 - `PYTHONPATH=src python3 -m unittest tests.test_bounded_alphaengine_search_probe tests.test_research_task tests.test_bounded_planner_driver`
-- 85 tests passed.
+- 90 focused tests passed after adding the real Store/Scheduler/WriterServer authority fixture.
+- The integration fixture proves one launch/dispatch/WorkOrder on exact replay and rejects scheduler, template-head, discovery-plan, mission, company, ref, and hash drift before launch.
 - `python3 -m py_compile` passed for all four changed Python modules.
 - `git diff --check` passed.
 

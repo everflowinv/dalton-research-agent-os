@@ -21,6 +21,7 @@ def work(parameters=None):
                 "source_ref": "source:alphaengine",
                 "spec_ref": "earnings-call-transcripts",
                 "inquiry_hash": "b" * 64,
+                "company_ref": "company:sec-cik:0001467373",
                 "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1",
                 "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92",
             },

@@ -184,8 +184,8 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
         "operation": "alphaengine_discovery_refresh",
         "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
         "parameter_contract": {
-            "allowed_fields": ["source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"],
-            "required_fields": ["source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"],
+            "allowed_fields": ["source_ref", "spec_ref", "inquiry_hash", "company_ref", "discovery_plan_ref", "discovery_plan_hash"],
+            "required_fields": ["source_ref", "spec_ref", "inquiry_hash", "company_ref", "discovery_plan_ref", "discovery_plan_hash"],
             "constants": {"source_ref": "source:alphaengine", "discovery_plan_ref": "discovery-plan:us-it-services:alphaengine:1", "discovery_plan_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92"},
         },
         "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
@@ -832,7 +832,7 @@ def _parameters_for(
         if company_ref != "company:sec-cik:0001467373":
             return None
         return {"source_ref": "source:alphaengine", "spec_ref": spec_ref,
-                "inquiry_hash": inquiry_hash,
+                "inquiry_hash": inquiry_hash, "company_ref": company_ref,
                 "discovery_plan_ref": template["parameter_contract"]["constants"]["discovery_plan_ref"],
                 "discovery_plan_hash": template["parameter_contract"]["constants"]["discovery_plan_hash"]}
     # Every other operation in the catalogue is retired for exactly this
