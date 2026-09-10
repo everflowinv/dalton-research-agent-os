@@ -2332,12 +2332,12 @@ class ForecastModelAuthority:
         # every other line too.
         from .economic_invariants import evaluate_forecast_model, gate
 
-        invariant_report = evaluate_forecast_model(
+        candidate_report = evaluate_forecast_model(
             wire, statement_rows=statement_rows, solver_results=solver_results)
-        gate(self.store, invariant_report,
-            mission_version_ref=wire.get("mission_version_ref"))
+        gate(self.store, candidate_report,
+             mission_version_ref=wire.get("mission_version_ref"))
         statement_wire = sorted(
-            [dict(row) for row in statement_rows],
+            [_statement_line_proof_row(row) for row in statement_rows],
             key=lambda row: (str(row.get("ingest_id") or ""),
                              int(row.get("ordinal") or 0),
                              str(row.get("concept") or "")),
@@ -2345,6 +2345,24 @@ class ForecastModelAuthority:
         proof_rows_are_typed = bool(statement_wire) and all(
             row.get("ingest_id") is not None for row in statement_wire)
         if proof_rows_are_typed:
+            line_refs = [str(row.get("line_id") or "") for row in statement_wire]
+            if not all(line_refs) or len(set(line_refs)) != len(line_refs):
+                raise ForecastModelValidationError(
+                    "filing proof statement rows need unique line_id values")
+            line_placeholders = ",".join("?" for _ in line_refs)
+            stored_lines = self.connection.execute(
+                "SELECT * FROM coverage_mission_statement_lines "
+                f"WHERE line_id IN ({line_placeholders})", line_refs).fetchall()
+            authoritative = sorted(
+                [_statement_line_proof_row(row) for row in stored_lines],
+                key=lambda row: (str(row.get("ingest_id") or ""),
+                                 int(row.get("ordinal") or 0),
+                                 str(row.get("concept") or "")),
+            )
+            if len(authoritative) != len(statement_wire) or authoritative != statement_wire:
+                raise ForecastModelValidationError(
+                    "filing proof statement rows differ from immutable statement authority")
+            statement_wire = authoritative
             ingest_ids = sorted({str(row["ingest_id"]) for row in statement_wire})
             placeholders = ",".join("?" for _ in ingest_ids)
             filing_rows = self.connection.execute(
@@ -2374,21 +2392,31 @@ class ForecastModelAuthority:
                 raise ForecastModelValidationError(
                     "filing proof model history cites accessions outside its exact "
                     f"statement rows: {unknown_accessions}")
-            filed_values = {
-                (str(row.get("concept")), row.get("period_start"),
-                 row.get("period_end"), str(row.get("value")))
-                for row in statement_wire
-            }
             for driver in wire.get("drivers") or []:
                 for cell in driver.get("history") or []:
-                    key = (str(cell.get("concept")), cell.get("period_start"),
-                           cell.get("period_end"), str(cell.get("value")))
-                    if key not in filed_values:
+                    cell_accessions = set(map(str, cell.get("accessions") or []))
+                    matches = [row for row in statement_wire
+                               if str(found[str(row["ingest_id"])]["accession"])
+                               in cell_accessions]
+                    exact = any(
+                        str(row.get("concept")) == str(cell.get("concept"))
+                        and row.get("period_start") == cell.get("period_start")
+                        and row.get("period_end") == cell.get("period_end")
+                        and str(row.get("value")) == str(cell.get("value"))
+                        and str(row.get("unit")) == str(driver.get("unit"))
+                        and row.get("dimension_axis") is None
+                        and row.get("dimension_member") is None
+                        for row in matches)
+                    if not exact:
                         raise ForecastModelValidationError(
                             "filing reconciliation mismatch "
                             f"company={company_ref} metric={driver.get('ref')} "
                             f"period={cell.get('period_end')} value={cell.get('value')} "
-                            f"accessions={cell.get('accessions')}" )
+                            f"accessions={cell.get('accessions')}")
+        invariant_report = evaluate_forecast_model(
+            wire, statement_rows=statement_wire, solver_results=solver_results)
+        gate(self.store, invariant_report,
+             mission_version_ref=wire.get("mission_version_ref"))
         statement_rows_hash = content_hash({"statement_rows": statement_wire})
         filing_proof = None if not proof_rows_are_typed else {
             "schema_version": "0.1", "model_version_ref": wire["id"],
@@ -2397,6 +2425,7 @@ class ForecastModelAuthority:
             "statement_rows_hash": statement_rows_hash,
             "statement_line_refs": [str(row["line_id"]) for row in statement_wire],
             "statement_row_count": len(statement_wire),
+            "solver_results": [dict(row) for row in solver_results],
             "invariant_report": invariant_report.as_dict(),
             "created_at": wire["created_at"],
         }
@@ -2485,7 +2514,9 @@ class ForecastModelAuthority:
                 != wire["statement_rows_hash"]):
             raise ForecastModelConflict("forecast model filing proof source rows drifted")
         from .economic_invariants import evaluate_forecast_model
-        replay = evaluate_forecast_model(model, statement_rows=statement_wire)
+        replay = evaluate_forecast_model(
+            model, statement_rows=statement_wire,
+            solver_results=wire.get("solver_results") or [])
         if replay.as_dict() != wire["invariant_report"]:
             raise ForecastModelConflict("forecast model filing proof does not replay")
         return wire

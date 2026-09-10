@@ -325,10 +325,11 @@ class LaneStateTests(unittest.TestCase):
              row["statement"] == kwargs["statement"]]
             if ingest_id in {filing["ingest_id"], older["ingest_id"]}
             else original(ingest_id, **kwargs))
-        outcome = run_company_forecast(
-            self.missions, self.missions.latest_company_model_spec(ACN),
-            models=ForecastModelAuthority(self.store))
-        self.assertEqual(outcome["status"], "fresh")
+        with self.assertRaises(ForecastModelValidationError) as caught:
+            run_company_forecast(
+                self.missions, self.missions.latest_company_model_spec(ACN),
+                models=ForecastModelAuthority(self.store))
+        self.assertIn("statement rows", str(caught.exception))
 
     def test_a_second_run_with_nothing_new_does_nothing(self):
         self.child()
@@ -387,6 +388,36 @@ class LaneStateTests(unittest.TestCase):
         with self.assertRaises(ForecastModelValidationError) as caught:
             ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
         self.assertIn("belong to another company", str(caught.exception))
+
+    def test_filing_proof_rejects_forged_authority_fields(self):
+        filing = self.missions.statement_filings(ACN)[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        specification = self.missions.latest_company_model_spec(ACN)
+        for change in ({"value": "1"}, {"unit": "EUR"},
+                       {"dimension_axis": "fake:Axis",
+                        "dimension_member": "fake:Member"}):
+            with self.subTest(change=change):
+                body = build_forecast_model(
+                    specification, build_model_inputs(self.missions, specification),
+                    mission_version_ref=self.mission["id"])
+                with self.assertRaises(ForecastModelValidationError) as caught:
+                    ForecastModelAuthority(self.store).publish(
+                        body, statement_rows=[{**rows[0], **change}, *rows[1:]])
+                self.assertIn("differ from immutable statement authority",
+                              str(caught.exception))
+
+    def test_filing_proof_replays_solver_evidence(self):
+        filing = self.missions.statement_filings(ACN)[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        specification = self.missions.latest_company_model_spec(ACN)
+        body = build_forecast_model(
+            specification, build_model_inputs(self.missions, specification),
+            mission_version_ref=self.mission["id"])
+        stored = ForecastModelAuthority(self.store).publish(body, statement_rows=rows,
+            solver_results=[{"ref": "solver:1", "label": "IRR", "status": "solved",
+                             "value": "0.2", "lower_bound": "0", "upper_bound": "1"}])
+        proof = ForecastModelAuthority(self.store).filing_proof(stored["id"])
+        self.assertEqual(proof["solver_results"][0]["ref"], "solver:1")
 
     def test_filing_proof_hash_tamper_fails_closed(self):
         self.child()
