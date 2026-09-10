@@ -43,6 +43,15 @@ ALLOWED_UNITS: tuple[str, ...] = (
 )
 ALLOWED_BASES: tuple[str, ...] = (
     "management-reported", "gaap-reported", "non-gaap-reported", "calculated",
+    # P11b: the figure is a broker's own estimate of the company -- a price
+    # target, a forward EPS or revenue number out of a research note.  It needs
+    # its own basis because the four above all describe a figure the *company*
+    # arrived at, and filing a broker's target under "management-reported"
+    # would be a false statement about who said it.  Nothing in this module
+    # treats it differently; the separation that matters is enforced by the
+    # grade (``document_figure_grade.BROKER_RESEARCH``), which is not
+    # admissible as a quantitative Claim.
+    "broker-estimate",
 )
 MAX_METRIC_CHARS = 200
 MAX_PERIOD_CHARS = 200
