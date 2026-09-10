@@ -31,3 +31,9 @@ The first frozen run (`61f5675`) completed **6,242 tests / 529.886s with 3 error
 Final frozen activation rehearsal passed all 13 steps, 67 schemas and 38 tick entries / zero escaped. Read-only copied-state selection passed planner and both thesis-impact roles. The old Agenda pin remains v2 against v3; selection explicitly refuses it with no file changes. It requires a deliberate pin migration if that retired workflow is reactivated.
 
 A remaining Cockpit read-side issue is being closed before final acceptance: a single representative model config cannot describe every role's actual policy. Per-purpose consumer bindings and visible provider/model routes are being wired so the page shows the same model the worker will use. After that change, freeze again and repeat the complete suite and artifacts. Private deployment remains locked pending that acceptance.
+
+## Final acceptance checkpoint
+
+Per-purpose actual consumer bindings are integrated at `f1d61b8ad7c0d9a94830cead535570d6b0a5e7a5`. Cockpit displays each installed role's policy and current provider/model route; dynamically supplied paths remain explicitly unconfigured instead of borrowing extraction's policy. Integrated deployment/model-selection/Cockpit checks passed **139 tests / 24.792s, 1 skip**.
+
+A new, unchanged detached checkout is running full discovery. Parallel Sol acceptance covers the new wheel, JavaScript syntax, current-live-copy activation, and independent policy-binding review. The first frozen test failure remains historical evidence; it has not been relabeled as a pass. Owner deployment manifest remains pending.
