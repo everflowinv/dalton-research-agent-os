@@ -65,13 +65,16 @@ and sensitivity versions could be combined despite a stale model binding.
 The bridge now reads records through each authority's checked public reader
 and requires the current mission, company, model ref, and model hash to agree.
 It reports each unmet playbook criterion and remains `entered`/`waiting`.
-There is intentionally no positive gate-pass fixture today: the current
-IndustryFramework authority does not record per-input as-of dates or an update
-calendar binding, while the model/sensitivity authorities do not record a
-completed two-year filing reconciliation or peer-relative sensitivity bands.
-Inventing proxy fields for those outputs would recreate the false pass. A
-later producer/schema change can supply these facts without changing the
-recoverable stage behavior.
+The final correction derives proof from existing records. Framework source
+`period` values supply input as-of dates, and a connected high-frequency source
+must also appear in the governed tracking-cadence policy. Comparison notes
+carry the stated peer-gap basis. Company history requires eight quarters and
+filed accessions on every history cell; the published model's existing
+economic-invariant gate supplies the arithmetic refusal boundary. Peer proof
+requires the same company in a multi-company computed framework comparison and
+three or more selected sensitivity drivers with complete historical bands.
+Missing data stays a named waiting reason. A complete positive fixture now
+passes every industry-stage criterion without an attestation-only field.
 
 Cross-review validation:
 
@@ -80,6 +83,7 @@ PYTHONPATH=src python3 -m unittest \
   tests.test_model_stage_bridge tests.test_lane_registry tests.test_service
 ```
 
-Result: 73 tests passed. Regressions cover the formerly accepted framework
+Result: 75 tests passed. Regressions cover the formerly accepted framework
 without as-of/calendar proof and a sensitivity projection bound to an older
-forecast model.
+forecast model. They also cover a complete evidence path and show that a
+waiting first company does not starve a later ready company.

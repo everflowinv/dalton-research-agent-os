@@ -13,6 +13,7 @@ def industry_model_readiness(
     framework: Mapping[str, Any] | None,
     *,
     mission: Mapping[str, Any] | None = None,
+    cadence_source_keys: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     if not framework:
@@ -47,8 +48,17 @@ def industry_model_readiness(
     # source was placed on an update calendar. Candidate sources are plans,
     # not completed playbook outputs. Keep the gate entered until those
     # authority contracts exist.
-    input_as_of_dates_bound = False
-    update_calendar_bound = False
+    input_as_of_dates_bound = bool(blocks) and all(
+        all(source.get("period") for source in block.get("sources") or [])
+        for block in blocks if block.get("status") == "drafted"
+    )
+    high_frequency_sources = {
+        str(source.get("slug"))
+        for gap in gaps if gap.get("gap_ref") == "gap:high-frequency-demand"
+        for source in gap.get("candidate_sources") or []
+        if source.get("connection_status") == "connected"
+    }
+    update_calendar_bound = bool(high_frequency_sources & cadence_source_keys)
     comparison_explained = bool(comparison.get("comparability_notes"))
     checks.extend([
         {"criterion": "active_mission_binding", "passed": mission_bound},
@@ -72,6 +82,7 @@ def company_model_readiness(
     *,
     mission: Mapping[str, Any] | None = None,
     company_ref: str | None = None,
+    peer_comparison: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not model:
         return {"passed": False, "checks": [], "reasons": ["no_forecast_model"],
@@ -111,8 +122,33 @@ def company_model_readiness(
     # reconciliation result nor peer-relative sensitivity bands. Publication
     # validates arithmetic, but it is not an attestation of these playbook
     # readings and outputs.
-    historical_reconciliation_proved = False
-    peer_sensitivity_proved = False
+    historical_reconciliation_proved = (
+        ready["history_quarters"] >= 8
+        and not ready["drivers_without_history"]
+        and not ready["results_partial"]
+        and not ready["results_unavailable"]
+        and all(
+            cell.get("accessions")
+            for driver in model.get("drivers") or []
+            for cell in driver.get("history") or []
+        )
+    )
+    peer_companies = {
+        str(row.get("company_ref"))
+        for row in (peer_comparison or {}).get("companies") or []
+    }
+    peer_sensitivity_proved = bool(
+        sensitivity
+        and projection.get("drivers_selected", 0) >= 3
+        and projection.get("drivers_without_bands") == []
+        and (peer_comparison or {}).get("status") == "computed"
+        and expected_company in peer_companies
+        and len(peer_companies) >= 2
+        and any(
+            row.get("status") == "computed" and row.get("company_ref") == expected_company
+            for row in (peer_comparison or {}).get("cells") or []
+        )
+    )
     checks = [
         {"criterion": "active_mission_model_sensitivity_binding", "passed": authority_binding},
         {"criterion": "three_to_five_key_drivers", "passed": driver_count_ready},

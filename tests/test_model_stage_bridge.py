@@ -111,6 +111,48 @@ class ModelStageReadinessTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("active_mission_model_sensitivity_binding", result["reasons"])
 
+    def test_complete_bound_playbook_evidence_passes(self):
+        source = {"ref": "claim:1", "period": "2026-09-10"}
+        block = {"status": "drafted", "sources": [source]}
+        framework = {
+            "id": "framework:v1", "industry_ref": "industry:it",
+            "evidence_refs": ["claim:1"], "sections": [block],
+            "industry_characteristics": block, "long_term_drivers": block,
+            "short_term_drivers": block,
+            "bindings": {"mission_version_ref": "mission:v14"},
+            "cross_company_comparison": {
+                "status": "computed", "comparability_notes": ["gap basis is filed"],
+                "companies": [{"company_ref": "company:a"},
+                              {"company_ref": "company:b"}],
+                "cells": [{"company_ref": "company:a", "status": "computed"}]},
+            "gaps": [{"gap_ref": "gap:high-frequency-demand", "status": "covered",
+                      "candidate_sources": [{"slug": "market_price",
+                                             "connection_status": "connected"}]}],
+        }
+        result = industry_model_readiness(
+            framework, mission=mission(), cadence_source_keys=frozenset({"market_price"}))
+        self.assertTrue(result["passed"], result)
+
+    def test_waiting_company_does_not_starve_later_ready_company(self):
+        stages = {
+            "company:a": {"current_stage": "industry_model",
+                          "current_status": "entered", "next_stage": "industry_model"},
+            "company:b": {"current_stage": "industry_model",
+                          "current_status": "entered", "next_stage": "industry_model"},
+        }
+        authority = FakeMissions(stages)
+        value = mission()
+        value["universe"].append({"company_ref": "company:b"})
+        held = {"passed": False, "checks": [], "reasons": ["missing"],
+                "evidence_refs": []}
+        passed = {"passed": True, "checks": [], "reasons": [],
+                  "evidence_refs": ["framework:v1"]}
+        with patch("dalton_core.mission_model_stage_lane._evaluate",
+                   side_effect=[held, passed]):
+            result = advance_once(authority, object(), value)
+        self.assertEqual(result["status"], "advanced")
+        self.assertEqual(result["company_ref"], "company:b")
+
     def test_waiting_readiness_recovers_without_terminal_gate_failure(self):
         stages = {"company:a": {"current_stage": "deep_insight_gate",
                                 "current_status": "gate_passed",

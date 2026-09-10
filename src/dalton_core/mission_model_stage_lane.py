@@ -19,27 +19,35 @@ def _reader(connection: Any, authority_type: type[Any]) -> Any:
 
 def _latest(connection: Any, authority_type: type[Any], subject_ref: str) -> dict[str, Any] | None:
     """Read through an authority's checked public reader, without running DDL."""
-    try:
-        return _reader(connection, authority_type).latest(subject_ref)
-    except Exception:  # absent or corrupt authority is an honest, fail-closed wait
-        return None
+    return _reader(connection, authority_type).latest(subject_ref)
 
 
 def _evaluate(connection: Any, mission: Mapping[str, Any], company_ref: str,
               stage_ref: str) -> dict[str, Any]:
-    if stage_ref == "industry_model":
+    try:
         from .industry_framework import IndustryFrameworkAuthority
 
         framework = _latest(connection, IndustryFrameworkAuthority,
                             str(mission["industry_ref"]))
-        return industry_model_readiness(framework, mission=mission)
-    from .forecast_sensitivity import SensitivityProjectionAuthority
-    from .model_forecast_driver import ForecastModelAuthority
+        if stage_ref == "industry_model":
+            from .tracking_cadence import load_policy
 
-    model = _latest(connection, ForecastModelAuthority, company_ref)
-    sensitivity = _latest(connection, SensitivityProjectionAuthority, company_ref)
-    return company_model_readiness(model, sensitivity, mission=mission,
-                                   company_ref=company_ref)
+            cadence_keys = frozenset(load_policy()["cadences"])
+            return industry_model_readiness(
+                framework, mission=mission, cadence_source_keys=cadence_keys)
+        from .forecast_sensitivity import SensitivityProjectionAuthority
+        from .model_forecast_driver import ForecastModelAuthority
+
+        model = _latest(connection, ForecastModelAuthority, company_ref)
+        sensitivity = _latest(connection, SensitivityProjectionAuthority, company_ref)
+        return company_model_readiness(model, sensitivity, mission=mission,
+                                       company_ref=company_ref,
+                                       peer_comparison=(framework or {}).get(
+                                           "cross_company_comparison"))
+    except Exception as exc:
+        reason = f"authority_read_failed:{type(exc).__name__}:{exc}"
+        return {"passed": False, "checks": [], "reasons": [reason],
+                "evidence_refs": []}
 
 
 def advance_once(missions: Any, connection: Any,
@@ -48,6 +56,7 @@ def advance_once(missions: Any, connection: Any,
     if "stage_record" not in mission["autonomy"]["may_write"]:
         return {"status": "not_permitted", "reason": "mission lacks stage_record"}
     actor = mission["autonomy"]["automation_principal"]
+    waiting: list[dict[str, Any]] = []
     for member in mission["universe"]:
         company_ref = member["company_ref"]
         state = missions.current_stage_state(mission["mission_ref"], company_ref)
@@ -66,8 +75,9 @@ def advance_once(missions: Any, connection: Any,
                 idempotency_key=f"model-stage:{mission['mission_ref']}:{company_ref}:{stage_ref}:entered",
             )
         if not verdict["passed"]:
-            return {"status": "waiting", "company_ref": company_ref,
-                    "stage_ref": stage_ref, "readiness": verdict}
+            waiting.append({"company_ref": company_ref, "stage_ref": stage_ref,
+                            "readiness": verdict})
+            continue
         record = missions.record_stage(
             mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
             company_ref=company_ref, stage_ref=stage_ref, status="gate_passed",
@@ -79,6 +89,8 @@ def advance_once(missions: Any, connection: Any,
         return {"status": "advanced", "company_ref": company_ref,
                 "stage_ref": stage_ref, "stage_record_ref": record["id"],
                 "readiness": verdict}
+    if waiting:
+        return {"status": "waiting", **waiting[0], "waiting": waiting}
     return {"status": "idle", "reason": "no deterministic model stage is due"}
 
 
