@@ -2,13 +2,13 @@ import json
 import unittest
 from pathlib import Path
 
-from dalton_core.company_model_inputs import build_model_inputs
+from dalton_core.company_model_inputs import ModelInputError, build_model_inputs
 from dalton_core.company_model_spec import CompanyModelSpecError, build_prompt, spec_from_response
 from dalton_core.driver_template import (
     COST_DRIVER_TEMPLATES, COST_REGISTRY_HASH, cost_prompt_block,
     cost_slot_ids, cost_template_gaps,
 )
-from dalton_core.model_forecast_driver import build_drivers
+from dalton_core.model_forecast_driver import ForecastModelValidationError, build_drivers
 from dalton_core.store import canonical_json
 from tests.test_company_model_inputs import FakeMissions, _line
 from tests.test_company_model_spec import DECIDED_BY, STATE, _spec
@@ -87,6 +87,35 @@ class CostSpecToForecastTests(unittest.TestCase):
                       if item.get("concept") == "us-gaap:CostOfRevenue")
         self.assertEqual(driver["cost_driver_slots"], ["delivery_cost"])
         self.assertEqual(driver["history"][0]["value"], "70")
+
+    def test_new_cost_spec_binds_the_registry_and_classification(self):
+        body = _spec()
+        body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
+        spec = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
+        self.assertEqual(spec["cost_driver_template"], {
+            "registry_ref": COST_DRIVER_TEMPLATES["registry_ref"],
+            "registry_hash": COST_REGISTRY_HASH,
+            "classification": "contract_compounder",
+        })
+
+    def test_published_spec_metadata_is_rechecked_before_reading_actuals(self):
+        body = _spec()
+        body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
+        spec = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
+        spec["cost_driver_template"] = {
+            **spec["cost_driver_template"], "classification": "commodity_cycle"}
+        with self.assertRaisesRegex(ModelInputError, "outside its cost template"):
+            build_model_inputs(FakeMissions([]), spec)
+
+    def test_input_metadata_is_rechecked_at_the_forecast_boundary(self):
+        body = _spec()
+        body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
+        spec = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
+        table = build_model_inputs(FakeMissions([]), spec)
+        table["cost_driver_template"] = {
+            **table["cost_driver_template"], "registry_hash": "0" * 64}
+        with self.assertRaisesRegex(ForecastModelValidationError, "stale"):
+            build_drivers(table)
 
 
 if __name__ == "__main__":

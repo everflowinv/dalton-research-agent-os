@@ -38,6 +38,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from .company_model_series import quarterly_series, series_gaps
+from .driver_template import COST_REGISTRY_HASH, COST_REGISTRY_REF, cost_slot_ids
 
 FILED = "filed"
 SHARED = "share_of_filed"
@@ -179,6 +180,26 @@ def build_model_inputs(
     limit = max(1, min(int(wanted), int(max_periods)))
 
     rows = _rows_of(spec)
+    cost_rows = [row for row in rows if "cost_driver_slot" in row]
+    cost_template = spec.get("cost_driver_template")
+    if cost_rows:
+        if not isinstance(cost_template, Mapping):
+            raise ModelInputError("cost-bound specification carries no cost template metadata")
+        if (cost_template.get("registry_ref") != COST_REGISTRY_REF
+                or cost_template.get("registry_hash") != COST_REGISTRY_HASH):
+            raise ModelInputError("cost-bound specification carries stale cost template metadata")
+        classification = cost_template.get("classification")
+        allowed = set(cost_slot_ids(classification))
+        for row in cost_rows:
+            slot = row.get("cost_driver_slot")
+            if slot is not None and slot not in allowed:
+                raise ModelInputError(
+                    f"expense row {row['ref']} binds {slot!r} outside its cost template")
+            if slot is None and not row.get("cost_driver_unbound_reason"):
+                raise ModelInputError(
+                    f"expense row {row['ref']} is unbound without a reason")
+    elif cost_template is not None:
+        raise ModelInputError("cost template metadata has no classified expense rows")
     concepts: dict[str, list[str]] = {}
     for row in rows:
         concept = row.get("basis_concept")
@@ -270,7 +291,7 @@ def build_model_inputs(
             row["status"] = FILED
         row["statement"] = entry["statement"]
 
-    return {
+    result = {
         "schema_version": "0.1",
         "company_ref": company_ref,
         "spec_ref": spec.get("spec_id"),
@@ -298,6 +319,9 @@ def build_model_inputs(
                 missions, company_ref, set(concepts)),
         },
     }
+    if cost_template is not None:
+        result["cost_driver_template"] = dict(cost_template)
+    return result
 
 
 def readiness(

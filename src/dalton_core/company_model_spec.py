@@ -610,6 +610,13 @@ def spec_from_response(
         "decided_by": decided_by,
         "task_hash": TASK_HASH,
     }
+    if any("cost_driver_slot" in item for item in expenses):
+        selected = template_for(state.get("industry_classification"))["classification"]
+        spec["cost_driver_template"] = {
+            "registry_ref": COST_REGISTRY_REF,
+            "registry_hash": COST_REGISTRY_HASH,
+            "classification": selected,
+        }
     spec["content_hash"] = content_hash(spec)
     return spec
 

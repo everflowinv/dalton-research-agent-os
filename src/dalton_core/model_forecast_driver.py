@@ -435,6 +435,32 @@ def build_drivers(table: Mapping[str, Any]) -> list[dict[str, Any]]:
     split stays unfilled -- which is exactly what the input table said.
     """
 
+    from .driver_template import COST_REGISTRY_HASH, COST_REGISTRY_REF, cost_slot_ids
+
+    cost_rows = [row for row in (table.get("rows") or ())
+                 if "cost_driver_slot" in row]
+    metadata = table.get("cost_driver_template")
+    if cost_rows:
+        if not isinstance(metadata, Mapping):
+            raise ForecastModelValidationError(
+                "cost-bound inputs carry no cost template metadata")
+        if (metadata.get("registry_ref") != COST_REGISTRY_REF
+                or metadata.get("registry_hash") != COST_REGISTRY_HASH):
+            raise ForecastModelValidationError(
+                "cost-bound inputs carry stale cost template metadata")
+        allowed = set(cost_slot_ids(metadata.get("classification")))
+        for row in cost_rows:
+            slot = row.get("cost_driver_slot")
+            if slot is not None and slot not in allowed:
+                raise ForecastModelValidationError(
+                    f"expense row {row.get('ref')} binds {slot!r} outside its cost template")
+            if slot is None and not row.get("cost_driver_unbound_reason"):
+                raise ForecastModelValidationError(
+                    f"expense row {row.get('ref')} is unbound without a reason")
+    elif metadata is not None:
+        raise ForecastModelValidationError(
+            "cost template metadata has no classified expense rows")
+
     filed = {str(item["concept"]): item for item in (table.get("filed_lines") or [])}
     drivers: dict[str, dict[str, Any]] = {}
     order: list[str] = []
