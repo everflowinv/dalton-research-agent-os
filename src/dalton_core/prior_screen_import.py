@@ -310,14 +310,129 @@ def build_delta_vs_prior(
     }
 
 
+# -- what we thought before, for the map and the reflection ---------------
+
+
+def prior_view_material(
+    store: Any, company_ref: str, *, limit: int = 8
+) -> list[dict[str, Any]]:
+    """This fund's own earlier views on a company, newest first.
+
+    Two sources, and they are the two the ``prior_view`` vocabulary names.
+    ``initial_screen`` is the imported v0 of the company's chain: one document,
+    one date, one summary. ``memo`` is every live Claim the claim index tagged
+    ``internal_prior`` -- a note, an old memo, anything else the owner filed --
+    carrying the ``as_of`` the manifest declared.
+
+    Every row is dated. A prior view with no date is not returned at all,
+    because the whole reason to keep one is to be able to say how old it is,
+    and an undated one is indistinguishable from a current one.
+    """
+
+    rows: list[dict[str, Any]] = []
+    rows.extend(_imported_screen_view(store, company_ref))
+    rows.extend(_internal_prior_claim_views(store, company_ref, limit=limit))
+    rows.sort(key=lambda item: item["as_of"], reverse=True)
+    return rows[:limit]
+
+
+def _imported_screen_view(store: Any, company_ref: str) -> list[dict[str, Any]]:
+    try:
+        from .mission_deliverable import MissionDeliverableAuthority
+
+        authority = MissionDeliverableAuthority(store)
+        slug = company_ref.rsplit(":", 1)[-1]
+        chain = authority.versions(f"mission-deliverable:{KIND}:{slug}")
+    except Exception:  # noqa: BLE001 - an absent chain is an absent view
+        return []
+    for version in chain:
+        if version.get("version") != 0:
+            continue
+        as_of = _version_as_of(version)
+        if not as_of:
+            continue
+        return [{
+            "as_of": as_of,
+            "source_kind": "initial_screen",
+            "statement": str(version.get("summary") or "")[:2000],
+            "refs": [version["id"]],
+        }]
+    return []
+
+
+def _internal_prior_claim_views(
+    store: Any, company_ref: str, *, limit: int
+) -> list[dict[str, Any]]:
+    try:
+        rows = store.connection.execute(
+            "SELECT c.version_id AS version_id, c.normalized_statement AS statement, "
+            "e.as_of AS as_of "
+            "FROM claim_index_entry_versions e "
+            "JOIN claim_versions c ON c.version_id = e.claim_version_ref "
+            "WHERE e.subject_ref=? AND e.importance='internal_prior' "
+            "AND e.as_of IS NOT NULL "
+            "ORDER BY e.as_of DESC, e.version_id DESC LIMIT ?",
+            (company_ref, int(limit) * 4),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - no index on this Core is no prior view
+        return []
+    seen: set[str] = set()
+    views: list[dict[str, Any]] = []
+    for row in rows:
+        statement = str(row["statement"] or "").strip()
+        if not statement or statement in seen:
+            continue
+        seen.add(statement)
+        views.append({
+            "as_of": str(row["as_of"])[:10],
+            "source_kind": "memo",
+            "statement": statement[:2000],
+            "refs": [str(row["version_id"])],
+        })
+        if len(views) >= limit:
+            break
+    return views
+
+
+def attach_prior_views(
+    debates: Sequence[Mapping[str, Any]], material: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Put the most recent prior view on every debate, or on none of them.
+
+    The same view on every debate, and deliberately so. "What we thought about
+    this company as of 2024-03" is one fact about the company; deciding which
+    of six debates that old screen was addressing would be a match nobody
+    verified, and the debate map's whole discipline is that a position on the
+    record was put there by somebody who can be asked why.
+
+    No prior material means no ``prior_view`` key at all -- absent, not null,
+    because the stored record's hash is recomputed from the normalised debate
+    on every read and a helpfully-inserted null would break every map written
+    before this field existed.
+    """
+
+    latest = max(material, key=lambda item: item["as_of"], default=None)
+    if latest is None:
+        return [dict(debate) for debate in debates]
+    view = {
+        "as_of": latest["as_of"],
+        "source_kind": latest["source_kind"],
+        "statement": latest["statement"],
+        "refs": list(latest["refs"]),
+    }
+    return [{**dict(debate), "prior_view": dict(view)} for debate in debates]
+
+
 __all__ = [
     "DEFAULT_SECTION_TITLE",
     "KIND",
     "MAX_SECTION_BODY_CHARS",
     "TEMPLATE_REF",
+    "attach_prior_views",
     "build_delta_vs_prior",
     "import_prior_screen",
     "imported_gate",
     "prior_reference",
+    "prior_view_material",
     "split_sections",
 ]
