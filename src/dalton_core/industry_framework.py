@@ -1946,6 +1946,14 @@ def _artefact_parts(record: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     def one(title: str, block: Mapping[str, Any]) -> dict[str, Any]:
         sources = block.get("sources") or []
+        gaps = list(block.get("gaps") or [])
+        # An unavailable part carries its reason into the gap list, because
+        # Q1's ``required_sections_present`` calls a part with no body and no
+        # gap an empty shell -- and an unavailable part that never says why it
+        # is empty is exactly that. The reason is already on the record; this
+        # is where the check can see it.
+        if block.get("status") == "unavailable" and block.get("reason"):
+            gaps.append(f"unavailable: {block['reason']}")
         return {
             "title": title,
             "body": unit_body(block),
@@ -1956,7 +1964,7 @@ def _artefact_parts(record: Mapping[str, Any]) -> list[dict[str, Any]]:
                  "period": row.get("period")}
                 for row in sources
             ],
-            "gaps": block.get("gaps") or [],
+            "gaps": gaps,
         }
 
     out = [one(f"causal_chain:{section['link_index']}", section)

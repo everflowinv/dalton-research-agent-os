@@ -1,0 +1,501 @@
+{
+ "artefact": {
+  "artefact_kind": "industry_framework",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "causal_chain:0",
+   "causal_chain:1",
+   "causal_chain:2",
+   "causal_chain:3",
+   "causal_chain:4",
+   "causal_chain:5",
+   "industry_characteristics",
+   "long_term_drivers",
+   "short_term_drivers"
+  ],
+  "gaps": [
+   "gap:tam-and-share: 整体 IT 服务支出的规模、分部拆分与五家之外的份额分布；候选来源 guidepoint，未接入",
+   "gap:high-frequency-demand: 季报之间没有任何高频需求指标；能力表里只有两个 generic 源",
+   "gap:cash-conversion: 五家的 FCF 都没有被规格绑定；SEC 已接入，缺的是规格绑定"
+  ],
+  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "prior": {
+   "sections": [
+    {
+     "body": "",
+     "claim_refs": [],
+     "gaps": [
+      "unavailable: no_industry_claims",
+      "缺企业 IT 支出的高频第三方序列；候选来源只有两个 generic 的网页源"
+     ],
+     "numbers": [],
+     "title": "causal_chain:0"
+    },
+    {
+     "body": "订单领先收入这一环目前只能从收入的分化上间接观察：EPAM 的同比增速从一年前的 19.4% 降到 4.5%，ACN 从 8.3% 降到 5.6%，两家的减速幅度差了一个量级，而订单结构本身不进财报表。",
+     "claim_refs": [
+      "claim-version:2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c"
+     ],
+     "gaps": [
+      "缺订单的咨询/managed services 拆分与转化周期，只能靠电话会纪要"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": "2025Q3",
+       "text": "EPAM 2025Q3（期末 2025-09-30）revenue_yoy_growth 19.4%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "EPAM 2026Q2（期末 2026-06-30）revenue_yoy_growth 4.5%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q1",
+       "text": "ACN 2026Q1（期末 2026-02-28）revenue_yoy_growth 8.3%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "ACN 2026Q2（期末 2026-05-31）revenue_yoy_growth 5.6%"
+      }
+     ],
+     "title": "causal_chain:1"
+    },
+    {
+     "body": "AI 预算池这一环在公司档案层有材料，在行业层没有：ACN 的档案把 AI 与 reinvention 需求写成长期驱动，同时把技术替代写成同向的反作用力，但没有任何一家披露可比口径的 genAI 收入。",
+     "claim_refs": [
+      "claim-version:3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d"
+     ],
+     "gaps": [
+      "缺 genAI 收入的可比披露口径，无法判断这个池子是新增还是挪用"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": null,
+       "text": "ACN 的档案 demand_drivers 节：AI 与 reinvention 需求是长期驱动，技术替代是同时成立的反向力量。"
+      }
+     ],
+     "title": "causal_chain:2"
+    },
+    {
+     "body": "年金化这一环的可观测后果是波动被抑制。DXC 的同比增速为 -5.1%，是五家里唯一的负值，而它的收入结构里 managed services 占比最高——这与「年金化抑制波动」的说法方向相反，说明这一环在本行业里还没有被证据支持。",
+     "claim_refs": [
+      "claim-version:4d5e6f7a8b9c0d1e4d5e6f7a8b9c0d1e4d5e6f7a8b9c0d1e4d5e6f7a8b9c0d1e"
+     ],
+     "gaps": [
+      "缺按合同类型拆分的收入口径，无法把年金化占比与波动直接对上"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "DXC 2026Q2（期末 2026-06-30）revenue_yoy_growth -5.1%"
+      }
+     ],
+     "title": "causal_chain:3"
+    },
+    {
+     "body": "交付经济学这一环是四家里唯一能用算好的表读的：ACN 的毛利率为 32.8%，CTSH 为 33.4%，EPAM 为 30.4%，DXC 从 23.8% 降到 20.4%。CTSH 与 DXC 的成本口径不含折旧摊销，因此这四个数不能直接排序，只有 DXC 自己前后两个季度的下降是可比的。",
+     "claim_refs": [
+      "claim-version:5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f"
+     ],
+     "gaps": [
+      "缺实际 bill rate 与利用率，毛利率的变动无法归因到量还是价"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "ACN 2026Q2（期末 2026-05-31）gross_margin 32.8%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "CTSH 2026Q2（期末 2026-06-30）gross_margin 33.4%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "EPAM 2026Q2（期末 2026-06-30）gross_margin 30.4%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2025Q4",
+       "text": "DXC 2025Q4（期末 2025-12-31）gross_margin 23.8%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "DXC 2026Q2（期末 2026-06-30）gross_margin 20.4%"
+      }
+     ],
+     "title": "causal_chain:4"
+    },
+    {
+     "body": "",
+     "claim_refs": [],
+     "gaps": [
+      "unavailable: no_model_inputs",
+      "缺 free cash flow 与 FCF 转换率的规格绑定；SEC 已接入，需要的是 P13-M2 的工作"
+     ],
+     "numbers": [],
+     "title": "causal_chain:5"
+    },
+    {
+     "body": "这个行业是结构成长而不是商品周期：需求由企业的技术重构支出驱动，而不是由某个无差别产出的价格驱动。它对自由裁量支出高度敏感，因此按周期性归到 moderately_cyclical；收入以订单为先导，归到 backlog_led；产能是人而不是资产，归到 asset_light；五家之外还有印度系厂商，归到 fragmented。",
+     "claim_refs": [
+      "claim-version:1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b",
+      "claim-version:6f7a8b9c0d1e2f3a6f7a8b9c0d1e2f3a6f7a8b9c0d1e2f3a6f7a8b9c0d1e2f3a"
+     ],
+     "gaps": [
+      "缺 TAM 与份额分布，fragmented 这一条只有定性依据"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": null,
+       "text": "ACN 的档案 demand_drivers 节：AI 与 reinvention 需求是长期驱动，技术替代是同时成立的反向力量。"
+      },
+      {
+       "claim_version_ref": "",
+       "period": null,
+       "text": "EPAM 的档案 supply_and_cost 节：交付产能集中在中东欧与印度，人员成本随离岸比例变化。"
+      }
+     ],
+     "title": "industry_characteristics"
+    },
+    {
+     "body": "AI 与 reinvention 需求：立场为 mixed。公司档案层把它写成新增预算池，但同一份档案也把技术替代写成反向力量，而行业层没有任何证据能给这场赛跑记分。交付经济学：立场为 negative，DXC 的毛利率从 23.8% 降到 20.4% 是唯一一条跨季度可比的证据。现金转换：立场为 unknown。",
+     "claim_refs": [
+      "claim-version:3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d",
+      "claim-version:5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f"
+     ],
+     "gaps": [
+      "现金转换驱动无任何证据，记 unknown"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": null,
+       "text": "ACN 的档案 demand_drivers 节：AI 与 reinvention 需求是长期驱动，技术替代是同时成立的反向力量。"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2025Q4",
+       "text": "DXC 2025Q4（期末 2025-12-31）gross_margin 23.8%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "DXC 2026Q2（期末 2026-06-30）gross_margin 20.4%"
+      }
+     ],
+     "title": "long_term_drivers"
+    },
+    {
+     "body": "报告收入增速：立场为 negative，四家里三家在减速，EPAM 从 19.4% 降到 4.5% 幅度最大。订单结构与转化：立场为 unknown，订单明细不进财报表。交付经济学的短期一侧：立场为 unknown，利用率与离职率都是只能靠管理层原话的 semantic 指标。",
+     "claim_refs": [
+      "claim-version:2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c"
+     ],
+     "gaps": [
+      "订单与利用率两条都无法从财报观察，两条 driver 记 unknown"
+     ],
+     "numbers": [
+      {
+       "claim_version_ref": "",
+       "period": "2025Q3",
+       "text": "EPAM 2025Q3（期末 2025-09-30）revenue_yoy_growth 19.4%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "EPAM 2026Q2（期末 2026-06-30）revenue_yoy_growth 4.5%"
+      },
+      {
+       "claim_version_ref": "",
+       "period": "2026Q2",
+       "text": "DXC 2026Q2（期末 2026-06-30）revenue_yoy_growth -5.1%"
+      }
+     ],
+     "title": "short_term_drivers"
+    }
+   ]
+  },
+  "question": null,
+  "ref": "industry-framework-version:golden-v3",
+  "sections": [
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "unavailable: no_industry_claims",
+     "缺企业 IT 支出的高频第三方序列；候选来源只有两个 generic 的网页源"
+    ],
+    "numbers": [],
+    "title": "causal_chain:0"
+   },
+   {
+    "body": "订单领先收入这一环目前只能从收入的分化上间接观察：EPAM 的同比增速从一年前的 19.4% 降到 4.5%，ACN 从 8.3% 降到 5.6%，两家的减速幅度差了一个量级，而订单结构本身不进财报表。",
+    "claim_refs": [
+     "claim-version:2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c"
+    ],
+    "gaps": [
+     "缺订单的咨询/managed services 拆分与转化周期，只能靠电话会纪要"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": "2025Q3",
+      "text": "EPAM 2025Q3（期末 2025-09-30）revenue_yoy_growth 19.4%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "EPAM 2026Q2（期末 2026-06-30）revenue_yoy_growth 4.5%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q1",
+      "text": "ACN 2026Q1（期末 2026-02-28）revenue_yoy_growth 8.3%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "ACN 2026Q2（期末 2026-05-31）revenue_yoy_growth 5.6%"
+     }
+    ],
+    "title": "causal_chain:1"
+   },
+   {
+    "body": "AI 预算池这一环在公司档案层有材料，在行业层没有：ACN 的档案把 AI 与 reinvention 需求写成长期驱动，同时把技术替代写成同向的反作用力，但没有任何一家披露可比口径的 genAI 收入。",
+    "claim_refs": [
+     "claim-version:3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d"
+    ],
+    "gaps": [
+     "缺 genAI 收入的可比披露口径，无法判断这个池子是新增还是挪用"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": null,
+      "text": "ACN 的档案 demand_drivers 节：AI 与 reinvention 需求是长期驱动，技术替代是同时成立的反向力量。"
+     }
+    ],
+    "title": "causal_chain:2"
+   },
+   {
+    "body": "年金化这一环的可观测后果是波动被抑制。DXC 的同比增速为 -5.1%，是五家里唯一的负值，而它的收入结构里 managed services 占比最高——这与「年金化抑制波动」的说法方向相反，说明这一环在本行业里还没有被证据支持。",
+    "claim_refs": [
+     "claim-version:4d5e6f7a8b9c0d1e4d5e6f7a8b9c0d1e4d5e6f7a8b9c0d1e4d5e6f7a8b9c0d1e"
+    ],
+    "gaps": [
+     "缺按合同类型拆分的收入口径，无法把年金化占比与波动直接对上"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "DXC 2026Q2（期末 2026-06-30）revenue_yoy_growth -5.1%"
+     }
+    ],
+    "title": "causal_chain:3"
+   },
+   {
+    "body": "交付经济学这一环是四家里唯一能用算好的表读的：ACN 的毛利率为 32.8%，CTSH 为 33.4%，EPAM 为 30.4%，DXC 从 23.8% 降到 20.4%。CTSH 与 DXC 的成本口径不含折旧摊销，因此这四个数不能直接排序，只有 DXC 自己前后两个季度的下降是可比的。",
+    "claim_refs": [
+     "claim-version:5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f"
+    ],
+    "gaps": [
+     "缺实际 bill rate 与利用率，毛利率的变动无法归因到量还是价"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "ACN 2026Q2（期末 2026-05-31）gross_margin 32.8%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "CTSH 2026Q2（期末 2026-06-30）gross_margin 33.4%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "EPAM 2026Q2（期末 2026-06-30）gross_margin 30.4%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2025Q4",
+      "text": "DXC 2025Q4（期末 2025-12-31）gross_margin 23.8%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "DXC 2026Q2（期末 2026-06-30）gross_margin 20.4%"
+     }
+    ],
+    "title": "causal_chain:4"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "unavailable: no_model_inputs",
+     "缺 free cash flow 与 FCF 转换率的规格绑定；SEC 已接入，需要的是 P13-M2 的工作"
+    ],
+    "numbers": [],
+    "title": "causal_chain:5"
+   },
+   {
+    "body": "这个行业是结构成长而不是商品周期：需求由企业的技术重构支出驱动，而不是由某个无差别产出的价格驱动。它对自由裁量支出高度敏感，因此按周期性归到 moderately_cyclical；收入以订单为先导，归到 backlog_led；产能是人而不是资产，归到 asset_light；五家之外还有印度系厂商，归到 fragmented。",
+    "claim_refs": [
+     "claim-version:1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b",
+     "claim-version:6f7a8b9c0d1e2f3a6f7a8b9c0d1e2f3a6f7a8b9c0d1e2f3a6f7a8b9c0d1e2f3a"
+    ],
+    "gaps": [
+     "缺 TAM 与份额分布，fragmented 这一条只有定性依据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": null,
+      "text": "ACN 的档案 demand_drivers 节：AI 与 reinvention 需求是长期驱动，技术替代是同时成立的反向力量。"
+     },
+     {
+      "claim_version_ref": "",
+      "period": null,
+      "text": "EPAM 的档案 supply_and_cost 节：交付产能集中在中东欧与印度，人员成本随离岸比例变化。"
+     }
+    ],
+    "title": "industry_characteristics"
+   },
+   {
+    "body": "AI 与 reinvention 需求：立场为 mixed。公司档案层把它写成新增预算池，但同一份档案也把技术替代写成反向力量，而行业层没有任何证据能给这场赛跑记分。交付经济学：立场为 negative，DXC 的毛利率从 23.8% 降到 20.4% 是唯一一条跨季度可比的证据。现金转换：立场为 unknown。",
+    "claim_refs": [
+     "claim-version:3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d3c4d5e6f7a8b9c0d",
+     "claim-version:5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f5e6f7a8b9c0d1e2f"
+    ],
+    "gaps": [
+     "现金转换驱动无任何证据，记 unknown"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": null,
+      "text": "ACN 的档案 demand_drivers 节：AI 与 reinvention 需求是长期驱动，技术替代是同时成立的反向力量。"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2025Q4",
+      "text": "DXC 2025Q4（期末 2025-12-31）gross_margin 23.8%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "DXC 2026Q2（期末 2026-06-30）gross_margin 20.4%"
+     }
+    ],
+    "title": "long_term_drivers"
+   },
+   {
+    "body": "报告收入增速：立场为 negative，四家里三家在减速，EPAM 从 19.4% 降到 4.5% 幅度最大。订单结构与转化：立场为 unknown，订单明细不进财报表。交付经济学的短期一侧：立场为 unknown，利用率与离职率都是只能靠管理层原话的 semantic 指标。",
+    "claim_refs": [
+     "claim-version:2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c2b3c4d5e6f7a8b9c"
+    ],
+    "gaps": [
+     "订单与利用率两条都无法从财报观察，两条 driver 记 unknown"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "period": "2025Q3",
+      "text": "EPAM 2025Q3（期末 2025-09-30）revenue_yoy_growth 19.4%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "EPAM 2026Q2（期末 2026-06-30）revenue_yoy_growth 4.5%"
+     },
+     {
+      "claim_version_ref": "",
+      "period": "2026Q2",
+      "text": "DXC 2026Q2（期末 2026-06-30）revenue_yoy_growth -5.1%"
+     }
+    ],
+    "title": "short_term_drivers"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "industry:us-it-services",
+  "title": "industry-framework:industry-us-it-services"
+ },
+ "case_ref": "restated-without-new-refs",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "every_section_cites": {
+    "count": 0,
+    "status": "pass"
+   },
+   "new_version_cites_new_refs": {
+    "count": 1,
+    "status": "fail"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "restatement_drift": {
+    "count": 7,
+    "status": "fail"
+   }
+  },
+  "rationale": "new_version_new_evidence 给 1（下限不为 0 是因为它仍然是一份结构完整的文档）；其余各维与第一版相同。",
+  "score_ranges": {
+   "chain_structure_followed": [
+    3,
+    4
+   ],
+   "comparison_is_read_not_ranked": [
+    3,
+    4
+   ],
+   "drivers_bound_to_the_pack": [
+    3,
+    4
+   ],
+   "gaps_are_actionable": [
+    3,
+    4
+   ],
+   "new_version_new_evidence": [
+    1,
+    1
+   ],
+   "numbers_stay_in_the_table": [
+    3,
+    4
+   ],
+   "stays_a_framework": [
+    3,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "反例：与上一版引用完全相同，文字也几乎不动。ADR-0008 的整条规则就是为这种版本写的——new_version_cites_new_refs 与 restatement_drift 两条都应该报失败。",
+ "rubric": "industry_framework",
+ "source": "手写；good-first-version 的逐字副本，只在两处换了措辞"
+}
