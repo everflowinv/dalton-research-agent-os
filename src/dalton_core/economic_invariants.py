@@ -117,7 +117,8 @@ ADDITIVE_SEGMENT_AXES = frozenset({
 # refusal. Version 2 distinguishes proven one-dimensional additive segment
 # axes from lossy legacy/multi-dimensional XBRL projections. Derive the wire
 # list from the evaluator's actual allowlist so the declaration cannot drift.
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:2"
+# Version 3 also admits the strictly validated cost-slot driver wire.
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:3"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,

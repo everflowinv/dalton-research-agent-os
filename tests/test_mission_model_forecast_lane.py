@@ -220,6 +220,7 @@ class LaneTests(unittest.TestCase):
     def test_a_new_validator_contract_releases_only_the_old_refusal_identity(self):
         old_contract = dict(FORECAST_INVARIANT_CONTRACT)
         old_contract.pop("driver_wire")
+        old_contract["contract_ref"] = "forecast-economic-invariants:2"
         old_contract_hash = content_hash(old_contract)
         self.assertNotEqual(old_contract_hash, FORECAST_INVARIANT_CONTRACT_HASH)
         with patch(
