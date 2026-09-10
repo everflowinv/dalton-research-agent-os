@@ -275,6 +275,55 @@ class SharedCapacityTests(unittest.TestCase):
                     expires_at=NOW + timedelta(minutes=1))
                 self.assertEqual(row["scope_ref"], validate_policy(record)["scope_ref"])
 
+    def test_one_account_cannot_dispatch_or_settle_another_accounts_reservation(self):
+        openai = self.init(calls=2)
+        google = policy(
+            policy_id="shared-capacity-policy:model-google-main",
+            provider="google", slot="credential-slot:google:dalton",
+            account="provider-account:google:dalton", calls=2)
+        SharedCapacityAuthority.initialize(self.db, google)
+        with self.open(openai) as authority:
+            reservation = authority.reserve(
+                workspace_id=str(uuid.uuid4()), invocation_ref="invocation:openai",
+                provider="openai",
+                credential_slot_ref="credential-slot:openai:dalton",
+                maximum_cost_micros=100,
+                expires_at=NOW + timedelta(minutes=1))
+
+        def database_state():
+            connection = sqlite3.connect(self.db)
+            try:
+                reservation_rows = connection.execute(
+                    "SELECT reservation_ref,status,dispatched_at,settled_at,"
+                    "charged_micros,outcome FROM shared_capacity_reservations "
+                    "ORDER BY reservation_ref").fetchall()
+                event_rows = connection.execute(
+                    "SELECT reservation_ref,event_kind,created_at,record_json "
+                    "FROM shared_capacity_events ORDER BY event_id").fetchall()
+                return reservation_rows, event_rows
+            finally:
+                connection.close()
+
+        with self.open(google) as wrong:
+            before = database_state()
+            with self.assertRaisesRegex(SharedCapacityConflict, "another capacity policy"):
+                wrong.mark_dispatched(reservation["reservation_ref"])
+            self.assertEqual(database_state(), before)
+
+        with self.open(openai) as authority:
+            authority.mark_dispatched(reservation["reservation_ref"])
+        with self.open(google) as wrong:
+            before = database_state()
+            with self.assertRaisesRegex(SharedCapacityConflict, "another capacity policy"):
+                wrong.settle(
+                    reservation["reservation_ref"], actual_cost_micros=0,
+                    outcome="broker_succeeded")
+            self.assertEqual(database_state(), before)
+        with self.open(openai) as authority:
+            settled = authority.settle(
+                reservation["reservation_ref"], actual_cost_micros=50,
+                outcome="broker_succeeded")
+        self.assertEqual(settled["charged_micros"], 50)
     def test_idempotence_expiry_and_dispatched_conservatism(self):
         record = self.init(calls=2, concurrency=1)
         current = [NOW]

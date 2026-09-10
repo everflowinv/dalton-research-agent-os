@@ -286,6 +286,17 @@ class SharedCapacityAuthority:
             raise SharedCapacityUnavailable(
                 "declared shared capacity policy is not the active scope head")
 
+    def _require_owned_reservation(self, row: sqlite3.Row | None) -> sqlite3.Row:
+        if row is None:
+            raise SharedCapacityConflict("shared reservation is missing")
+        if (row["policy_ref"] != self.policy["id"]
+                or row["policy_hash"] != self.policy["content_hash"]
+                or row["scope_ref"] != self.policy["scope_ref"]
+                or row["account_ref"] != self.policy["account_ref"]):
+            raise SharedCapacityConflict(
+                "shared reservation belongs to another capacity policy")
+        return row
+
     def reserve(
         self, *, workspace_id: str, invocation_ref: str, provider: str,
         credential_slot_ref: str, maximum_cost_micros: int, expires_at: datetime,
@@ -363,8 +374,7 @@ class SharedCapacityAuthority:
         try:
             row = self.connection.execute(
                 "SELECT * FROM shared_capacity_reservations WHERE reservation_ref=?", (reservation_ref,)).fetchone()
-            if row is None:
-                raise SharedCapacityConflict("shared reservation is missing")
+            row = self._require_owned_reservation(row)
             if row["status"] == "reserved":
                 self._require_active()
                 if row["expires_at"] <= now:
@@ -391,7 +401,8 @@ class SharedCapacityAuthority:
         try:
             row = self.connection.execute(
                 "SELECT * FROM shared_capacity_reservations WHERE reservation_ref=?", (reservation_ref,)).fetchone()
-            if row is None or row["status"] not in {"dispatched", "settled"}:
+            row = self._require_owned_reservation(row)
+            if row["status"] not in {"dispatched", "settled"}:
                 raise SharedCapacityConflict("only a dispatched reservation can settle")
             charged = row["reserved_micros"] if actual_cost_micros is None else actual_cost_micros
             if isinstance(charged, bool) or not isinstance(charged, int) or charged < 0:
