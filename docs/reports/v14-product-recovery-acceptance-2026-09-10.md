@@ -69,3 +69,13 @@ installer command set and interpreter paths. Full detail is preserved in
 
 This is packaging and isolated deployment-rehearsal evidence. It does not
 claim live deployment or product-output acceptance.
+
+## Full suite and live deployment
+
+The same frozen `38721e4` source passed **6,323 tests in 530.413 seconds, OK (1 skipped)**. The log is retained in the private owner packet as `v14-recovery-full-tests.log`.
+
+With the owner's authorization to deploy after acceptance, this exact release was deployed on 2026-09-10 at 17:10 UTC. The wrapper verified the already-signed mission v14 receipt, stopped the managed controller, checked singleton ownership, drained children, and verified a database backup before installation. Backup: `deploy-backup-20260910T171013Z`; retained exact archive: `.release-source.gNlX8m`, both under the owner activation packet. No mission was signed or republished.
+
+The installer completed; writer/control/controller health checks are all true. Post-deployment verification compared **518 installed Python/SQL/HTML/JSON files** byte-for-byte with the retained archive and reviewed wheel, including both budget catalogs. The signed mission semantic/hash check remains valid. The first read-only product check at 17:11:53 UTC still shows 0/15 target products; service/package acceptance is complete, product acceptance remains ongoing.
+
+Cockpit approval and question-continuity fixes are committed separately after this freeze. Visual changes are explicitly deferred to the owner's requested final Apple-inspired light redesign. The next Memo/stage implementation is also separate and under cross-review.
