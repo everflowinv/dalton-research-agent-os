@@ -318,6 +318,72 @@ def open_occurrences(
     return out
 
 
+def occurrences_from_calendar(
+    connection: sqlite3.Connection,
+    calendar: Any,
+    *,
+    company_refs: Sequence[str],
+    now: datetime | date | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """The same list, derived from C1's calendar instead of the event ledger.
+
+    Two reasons this exists beside :func:`open_occurrences`.  The first is that
+    the wiring between C1 and the event ledger is not finished: the lane looks
+    for a ``record_research_event`` the writer does not have, and C1's payload
+    is wider than the ledger's declared ``calendar`` contract, so today no
+    calendar event reaches the ledger at all.  The second is that it is the
+    honest read for a *read-only* smoke: it answers "what would fire today"
+    without writing an event to find out.
+
+    It calls C1's own emitter with a collector in place of the writer, so the
+    window rules are C1's and not a second copy of them here.  Nothing is
+    written.
+    """
+
+    from .catalyst_calendar import emit_calendar_events
+
+    out: list[dict[str, Any]] = []
+    for company_ref in company_refs:
+        try:
+            entries = calendar.entries(company_ref)
+        except Exception:  # noqa: BLE001 - a company with no calendar has no windows
+            continue
+        if not entries:
+            continue
+        collected: list[dict[str, Any]] = []
+
+        def collect(**kwargs: Any) -> None:
+            collected.append(dict(kwargs))
+
+        emit_calendar_events(
+            company_ref=company_ref, entries=entries, record_event=collect, now=now,
+        )
+        for call in collected:
+            event = {
+                "id": "calendar-window:" + content_hash({
+                    "company_ref": company_ref,
+                    "payload": dict(call.get("payload") or {}),
+                })[:32],
+                "company_ref": company_ref,
+                "content_hash": None,
+                "kind": "calendar",
+                "occurred_at": call.get("occurred_at"),
+                "source_refs": list(call.get("source_refs") or ()),
+                "payload": dict(call.get("payload") or {}),
+            }
+            occurrence = occurrence_of(event, now=now)
+            if occurrence is None:
+                continue
+            occurrence["derived_from"] = "catalyst_calendar"
+            if already_written(connection, occurrence["window"], occurrence):
+                continue
+            out.append(occurrence)
+            if len(out) >= limit:
+                return out
+    return out
+
+
 # ---------------------------------------------------------------------------
 # which period, and what we say about it
 # ---------------------------------------------------------------------------
@@ -558,17 +624,20 @@ def watch_list(
     if rows:
         return {"source": "open_debates", "rows": rows[:limit]}
     for thesis in theses:
-        for falsifier in thesis.get("falsifiers") or []:
-            text = str(
-                falsifier.get("statement") if isinstance(falsifier, Mapping) else falsifier
-            ).strip()
-            if not text:
-                continue
-            rows.append({
-                "source": "thesis_falsifier",
-                "question": text[:400],
-                "refs": [str(thesis.get("thesis_version_ref") or thesis.get("id") or "")],
-            })
+        # A ThesisVersion carries its falsifiers as refs rather than as
+        # sentences, so the question this asks is the thesis's own mechanism:
+        # "what on this call tests the thing we say is driving it".  The
+        # falsifier refs travel with the row so a reader can open them.
+        mechanism = str(thesis.get("mechanism") or thesis.get("statement") or "").strip()
+        if not mechanism:
+            continue
+        refs = [str(thesis.get("ref") or thesis.get("id") or "")]
+        refs += [str(ref) for ref in (thesis.get("falsifier_refs") or ())]
+        rows.append({
+            "source": "thesis_falsifier",
+            "question": f"这次业绩里有什么会检验：{mechanism[:300]}",
+            "refs": [ref for ref in refs if ref][:6],
+        })
     for driver in drivers:
         label = str(driver.get("label") or driver.get("ref") or "").strip()
         if not label:
@@ -658,6 +727,7 @@ __all__ = [
     "idempotency_key_for",
     "occurrence_of",
     "occurrence_ref",
+    "occurrences_from_calendar",
     "open_occurrences",
     "render_rows",
     "reported_period",
