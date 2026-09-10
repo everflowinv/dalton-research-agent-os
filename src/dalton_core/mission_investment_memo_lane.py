@@ -114,11 +114,11 @@ class MissionInvestmentMemoLaneCoordinator:
             else:
                 self.budget.record_settled(
                     signature, _settled_for_failure_classification(settled))
+        skipped = {}
         if self.companies is None or self.frozen_input is None:
             candidates = [(None, ledger_signature(self.connection, self.launcher), None)]
         else:
             candidates = []
-            skipped = {}
             for company_ref in self.companies():
                 frozen = self.frozen_input(company_ref)
                 if not isinstance(frozen, Mapping):
@@ -137,30 +137,12 @@ class MissionInvestmentMemoLaneCoordinator:
                         self.budget.retire(item["item_key"])
             if signature in self.quiet_signatures:
                 continue
-            parked = next((item for item in self.budget.parked_items()
-                           if item["item_key"] == signature), None)
             held = self.budget.blocked(signature)
             if held:
                 held_companies[str(company_ref or "-")] = held.classification.reason
                 continue
             try:
-                recovery_ref = None
-                attempts = self.budget.attempts(signature)
-                if attempts or parked is not None:
-                    from .store import content_hash
-                    probe_epoch = None
-                    if parked is not None:
-                        seconds = max(1, int(self.budget.probe_interval_seconds))
-                        probe_epoch = int(self.budget.clock().timestamp()) // seconds
-                    recovery_ref = content_hash({
-                        "signature": signature, "attempt": attempts,
-                        "dependency": None if parked is None else parked["dependency"],
-                        "probe_epoch": probe_epoch,
-                    })[:16]
-                launch = {"signature": signature, "company_ref": company_ref}
-                if recovery_ref is not None:
-                    launch["recovery_ref"] = recovery_ref
-                ticket = self.launcher.start(**launch)
+                ticket = self.launcher.start(signature=signature, company_ref=company_ref)
             except LaneChildConflict as exc:
                 return {"status": "busy", "reason": str(exc), "settled": settled}
             except LaneChildRejected as exc:

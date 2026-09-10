@@ -49,16 +49,9 @@ class MemoFairnessTests(unittest.TestCase):
             self.failure_summary = None
             self.started = []
 
-        def start(self, *, signature, company_ref=None, recovery_ref=None):
-            cached = next((item for item in self.started
-                           if item["signature"] == signature
-                           and item["company_ref"] == company_ref
-                           and item["recovery_ref"] == recovery_ref), None)
-            if cached is not None:
-                return cached
+        def start(self, *, signature, company_ref=None):
             ticket = {"id": "memo-run:" + str(len(self.started)),
-                      "signature": signature, "company_ref": company_ref,
-                      "recovery_ref": recovery_ref}
+                      "signature": signature, "company_ref": company_ref}
             self.started.append(ticket)
             return ticket
 
@@ -104,7 +97,7 @@ class MemoFairnessTests(unittest.TestCase):
         self.assertEqual(second["company_ref"], "company:B")
         self.assertIn("company:A", second["held"])
 
-    def test_persisted_content_hold_survives_restart_without_repeated_work(self):
+    def test_restart_skips_held_company_and_replays_next_company_child(self):
         coordinator = self.coordinator()
         coordinator.dispatch_once()
         coordinator.dispatch_once()
@@ -112,7 +105,7 @@ class MemoFairnessTests(unittest.TestCase):
         result = restarted.dispatch_once()
         self.assertEqual(result["company_ref"], "company:B")
         self.assertEqual([item["company_ref"] for item in self.launcher.started],
-                         ["company:A", "company:B"])
+                         ["company:A", "company:B", "company:B"])
 
     def test_input_change_moves_only_its_company_signature(self):
         a_before = company_signature(self.inputs["company:A"], self.launcher)
@@ -163,6 +156,18 @@ class MemoFairnessTests(unittest.TestCase):
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["skipped"], {"company:A": "frozen input unavailable"})
         self.assertEqual(self.launcher.started, [])
+
+    def test_legacy_fallback_with_companies_but_no_frozen_reader_has_defined_skips(self):
+        from dalton_core.mission_investment_memo_lane import ledger_signature
+
+        coordinator = MissionInvestmentMemoLaneCoordinator(
+            connection=None, launcher=self.launcher,
+            companies=lambda: ["company:A"], frozen_input=None,
+        )
+        coordinator.quiet_signatures.add(ledger_signature(None, self.launcher))
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["skipped"], {})
 
     def test_broker_capacity_failure_is_recoverable_not_content_terminal(self):
         self.launcher.failure_summary = {
