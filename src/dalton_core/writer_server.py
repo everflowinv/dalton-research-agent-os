@@ -2612,6 +2612,7 @@ class WriterServer:
                 purpose=str(values["purpose"]),
                 mode=str(mode),
                 chain=chain,
+                actor_ref=str(values["actor_ref"]),
             )
         except (ModelSelectionError, KeyError, ValueError) as exc:
             raise WriterServerError(str(exc)) from exc

@@ -151,15 +151,18 @@ class ModelCatalogSyncCoordinator:
             # have happened by itself: saying which stage lost what, and what
             # it runs instead, once per (model, stage) rather than every hour.
             #
+            # This reads *current state*, not this run's delta. The installer
+            # runs the same catalog sync before this lane has ever had an hour,
+            # so a delta-driven notice set would miss everything the first
+            # deploy retired and would lose the rest to any error between the
+            # sync committing and the notice being written.
+            #
             # The state directory is the router database's own, which is where
             # the installer puts every model configuration; deriving it beats
             # a third path in the switch file that could disagree with the
             # second.
             notices = record_retirement_notices(
-                router,
-                state_dir=router_db.parent,
-                retired_profile_ids=sync["retired_profile_ids_this_run"],
-                delivery=self.delivery,
+                router, state_dir=router_db.parent, delivery=self.delivery
             )
             open_notices = router.fallback_notices(open_only=True)
             discovery = discover_models(config, router=router, checked_at=checked_at)

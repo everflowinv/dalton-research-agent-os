@@ -26,6 +26,18 @@ from .model_router import (
 
 
 _BROKER_PLUGIN_ID = "dalton-openclaw-model-broker"
+# P14-M2: what a model with no published rate card is charged at.
+#
+# Not zero, and not a guess at the real price either -- a *declared ceiling*,
+# chosen to sit above every price the live catalog publishes, including the
+# tiered top of the dearest model (gpt-6-astra above 272k tokens: 20 in / 75
+# out). A reservation made at this number over-reserves, which is the direction
+# an unknown has to fail in: the day budget refuses a little early rather than
+# spending a lot without noticing. Settlement uses the same number, so an
+# unpriced call shows up in the day's spend as at least what it could have
+# cost, and the model still may only be a chain's last link.
+UNPRICED_CEILING_INPUT_PER_MILLION_USD = 25.0
+UNPRICED_CEILING_OUTPUT_PER_MILLION_USD = 100.0
 _PROFILE_ID_RE = re.compile(r"^profile:[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
 
@@ -121,12 +133,17 @@ def _provider_models(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
                 "context_window": context_window,
                 "max_output_tokens": max_tokens,
                 "unpriced": unpriced,
+                # ``None``, never zero. A zero rate card is not "we do not know
+                # what this costs" -- it is "this is free", which the router
+                # would sort first and the day ledger would settle at nothing.
+                # The caller decides what to do with not-knowing; it must not
+                # be able to mistake it for knowing.
                 "input_cost": (
-                    0.0 if unpriced
+                    None if unpriced
                     else _nonnegative_number(cost.get("input"), f"{model_ref}.cost.input")
                 ),
                 "output_cost": (
-                    0.0 if unpriced
+                    None if unpriced
                     else _nonnegative_number(cost.get("output"), f"{model_ref}.cost.output")
                 ),
             }
@@ -291,11 +308,12 @@ def openclaw_broker_profiles_from_config(
                 "max_context_tokens": context_window,
                 "max_output_tokens": max_output,
             }
-            profile["cost"] = {
-                "currency": "USD",
-                "input_per_million_usd": provider_model["input_cost"],
-                "output_per_million_usd": provider_model["output_cost"],
-            }
+            if not provider_model["unpriced"]:
+                profile["cost"] = {
+                    "currency": "USD",
+                    "input_per_million_usd": provider_model["input_cost"],
+                    "output_per_million_usd": provider_model["output_cost"],
+                }
             profile["limits"] = {
                 "max_input_tokens": max(1, context_window - max_output),
                 "max_output_tokens": max_output,
@@ -308,10 +326,12 @@ def openclaw_broker_profiles_from_config(
                 "checked_at": created,
                 "valid_until": valid_until,
             }
-            if provider_model["unpriced"]:
-                profile["unpriced"] = True
-            else:
-                profile.pop("unpriced", None)
+            # A curated profile carries a rate card of Dalton's own, and the
+            # gateway dropping its published price does not make that card
+            # unknown. So the curated card stands and the profile is *not*
+            # marked unpriced: we do know what this costs, we simply are no
+            # longer reading it off the provider entry.
+            profile.pop("unpriced", None)
             output.append(profile)
             continue
 
@@ -357,8 +377,16 @@ def openclaw_broker_profiles_from_config(
             },
             "cost": {
                 "currency": "USD",
-                "input_per_million_usd": provider_model["input_cost"],
-                "output_per_million_usd": provider_model["output_cost"],
+                "input_per_million_usd": (
+                    UNPRICED_CEILING_INPUT_PER_MILLION_USD
+                    if provider_model["unpriced"]
+                    else provider_model["input_cost"]
+                ),
+                "output_per_million_usd": (
+                    UNPRICED_CEILING_OUTPUT_PER_MILLION_USD
+                    if provider_model["unpriced"]
+                    else provider_model["output_cost"]
+                ),
             },
             "limits": {
                 "max_input_tokens": max_input,
@@ -575,6 +603,8 @@ def sync_openclaw_model_catalog(
 
 __all__ = [
     "OpenClawCatalogError",
+    "UNPRICED_CEILING_INPUT_PER_MILLION_USD",
+    "UNPRICED_CEILING_OUTPUT_PER_MILLION_USD",
     "broker_catalog_hash",
     "catalog_sync_status",
     "load_openclaw_config",

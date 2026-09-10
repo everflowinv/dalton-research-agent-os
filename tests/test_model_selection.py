@@ -117,6 +117,32 @@ def _unprice(config: dict, model_ref: str) -> dict:
     return config
 
 
+UNPRICED_MODEL_REF = "zai/glm-6-preview"
+UNPRICED_PROFILE_ID = "profile:glm-6-preview"
+
+
+def _with_unpriced_model(config: dict) -> dict:
+    """Add a model the gateway offers with no rate card and Dalton never curated.
+
+    It has to be a model with no curated profile: a curated one carries a rate
+    card of Dalton's own, and the gateway dropping its published price does not
+    make that card unknown.
+    """
+
+    provider, _, model = UNPRICED_MODEL_REF.partition("/")
+    config["models"]["providers"][provider]["models"].append({
+        "id": model, "contextWindow": 1_000_000, "maxTokens": 131_072,
+    })
+    entry = config["plugins"]["entries"]["dalton-openclaw-model-broker"]
+    entry["config"]["profiles"].append({
+        "id": UNPRICED_PROFILE_ID, "model": UNPRICED_MODEL_REF, "maxTokens": 131_072,
+    })
+    entry["llm"]["allowedModels"] = sorted(
+        set(entry["llm"]["allowedModels"]) | {UNPRICED_MODEL_REF}
+    )
+    return config
+
+
 class RouterCase(unittest.TestCase):
     """One router with the fixture catalog and one policy per tier."""
 
@@ -206,21 +232,64 @@ class SelectionResolutionTests(RouterCase):
 
 
 class UnpricedModelTests(RouterCase):
-    unpriced = "profile:gemini-3-5-flash-lite"
+    unpriced = UNPRICED_PROFILE_ID
 
     def catalog_config(self) -> dict:
-        # The gateway offers gemini-3.5-flash-lite with no rate card. It is the
-        # cheap tier's last link already, which is exactly where an unpriced
-        # model is allowed to be.
-        return _unprice(_allowing_config(), "google/gemini-3.5-flash-lite")
+        # A model the gateway offers, publishes no price for, and Dalton has
+        # never curated -- the only shape that is genuinely unpriced.
+        return _with_unpriced_model(_allowing_config())
 
-    def test_an_unpriced_model_registers_and_says_so(self) -> None:
+    def test_an_unpriced_model_registers_at_a_declared_ceiling_not_at_zero(
+        self,
+    ) -> None:
+        from dalton_core.openclaw_catalog_reconcile import (
+            UNPRICED_CEILING_INPUT_PER_MILLION_USD,
+            UNPRICED_CEILING_OUTPUT_PER_MILLION_USD,
+        )
+
         profile = next(
             item for item in self.router.latest_profiles()
             if item["id"] == self.unpriced
         )
         self.assertTrue(profile["unpriced"])
-        self.assertEqual(profile["cost"]["input_per_million_usd"], 0.0)
+        # Zero would mean free: sorted first by a cost-ascending policy and
+        # settled at nothing by the day ledger. The ceiling over-reserves,
+        # which is the direction an unknown has to fail in.
+        self.assertEqual(
+            profile["cost"]["input_per_million_usd"],
+            UNPRICED_CEILING_INPUT_PER_MILLION_USD,
+        )
+        self.assertEqual(
+            profile["cost"]["output_per_million_usd"],
+            UNPRICED_CEILING_OUTPUT_PER_MILLION_USD,
+        )
+        dearest = max(
+            item["cost"]["input_per_million_usd"]
+            for item in self.router.latest_profiles()
+            if not item.get("unpriced")
+        )
+        self.assertGreater(profile["cost"]["input_per_million_usd"], dearest)
+
+    def test_the_gateway_dropping_a_price_does_not_erase_a_curated_card(
+        self,
+    ) -> None:
+        # gemini-3.5-flash-lite is curated here and is the cheap chain's last
+        # link. The gateway going quiet about its price must not turn Dalton's
+        # own rate card into a zero, or into an "unknown" that can then only be
+        # a last link.
+        before = next(
+            item for item in self.router.latest_profiles()
+            if item["id"] == "profile:gemini-3-5-flash-lite"
+        )
+        config = _unprice(self.catalog_config(), "google/gemini-3.5-flash-lite")
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        after = next(
+            item for item in self.router.latest_profiles()
+            if item["id"] == "profile:gemini-3-5-flash-lite"
+        )
+        self.assertEqual(after["cost"], before["cost"])
+        self.assertGreater(after["cost"]["input_per_million_usd"], 0)
+        self.assertNotIn("unpriced", after)
 
     def test_an_unpriced_model_may_be_last_and_may_not_be_first(self) -> None:
         checked = validate_selection(
@@ -645,6 +714,43 @@ class AllowPatchTests(unittest.TestCase):
             "dalton-openclaw-model-broker"]["llm"]["allowedModels"]
         self.assertEqual(allowed.count(self.held_back), 1)
 
+    def test_a_verification_failure_puts_the_file_back_byte_for_byte(self) -> None:
+        # The read-back is the point of the whole sequence, so what it does
+        # when it fails is the thing worth pinning: the host's file goes back
+        # exactly as it was, and the backup stays -- a restore that deletes its
+        # own evidence is not a restore.
+        import dalton_core.openclaw_allow_patch as patch_module
+
+        def refuse(path):
+            raise patch_module.AllowPatchError("the written config did not read back")
+
+        original = patch_module.load_openclaw_config
+        patch_module.load_openclaw_config = lambda path: (
+            original(path) if not getattr(refuse, "armed", False) else refuse(path)
+        )
+        try:
+            refuse.armed = False
+
+            def arm_after_first(path):
+                value = original(path)
+                if getattr(arm_after_first, "seen", 0):
+                    raise patch_module.AllowPatchError(
+                        "the written configuration did not read back the same"
+                    )
+                arm_after_first.seen = 1
+                return value
+
+            patch_module.load_openclaw_config = arm_after_first
+            with self.assertRaises(AllowPatchError):
+                apply_allow_patch(self.path, self.held_back, now=NOW)
+        finally:
+            patch_module.load_openclaw_config = original
+        self.assertEqual(self.path.read_text(encoding="utf-8"), self.original)
+        backups = sorted(self.root.glob("openclaw.json.bak-dalton-allow-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), self.original)
+        self.assertEqual(sorted(self.root.glob(".*.tmp")), [])
+
     def test_a_model_the_gateway_does_not_have_is_refused(self) -> None:
         with self.assertRaisesRegex(AllowPatchError, "not in models.providers"):
             apply_allow_patch(self.path, "openai/not-a-model", now=NOW)
@@ -795,12 +901,10 @@ class RetirementNoticeTests(StateDirectoryCase):
         )
 
     def test_the_owner_is_told_once_per_model_and_stage(self) -> None:
-        sync = self._drop("profile:gpt-6-astra")
+        self._drop("profile:gpt-6-astra")
         delivered: list[dict] = []
         first = record_retirement_notices(
-            self.router, state_dir=self.root,
-            retired_profile_ids=sync["retired_profile_ids_this_run"],
-            delivery=delivered.append,
+            self.router, state_dir=self.root, delivery=delivered.append,
         )
         self.assertEqual(first["notification_channel"], NOTIFICATION_CHANNEL)
         self.assertIn(BRAIN_PURPOSE, first["affected_purposes"])
@@ -814,9 +918,7 @@ class RetirementNoticeTests(StateDirectoryCase):
         # The lane runs every hour and the model stays gone; it must not
         # become an hourly alarm.
         again = record_retirement_notices(
-            self.router, state_dir=self.root,
-            retired_profile_ids=sync["retired_profile_ids_this_run"],
-            delivery=delivered.append,
+            self.router, state_dir=self.root, delivery=delivered.append,
         )
         self.assertEqual(again["notices_written"], [])
         self.assertEqual(len(delivered), len(first["notices_written"]))
@@ -826,20 +928,14 @@ class RetirementNoticeTests(StateDirectoryCase):
         self,
     ) -> None:
         self._drop(*tier_chain("brain"))
-        affected = retirement_fallbacks(
-            self.router, policy=self.policy("brain"),
-            retired_profile_ids=list(tier_chain("brain")),
-        )
+        affected = retirement_fallbacks(self.router, policy=self.policy("brain"))
         row = next(item for item in affected if item["purpose"] == BRAIN_PURPOSE)
         self.assertIsNone(row["replacement_profile_id"])
         self.assertIn("没有可用的替代模型", row["message"])
 
     def test_acknowledging_closes_it_and_a_second_press_is_a_no_op(self) -> None:
-        sync = self._drop("profile:gpt-6-astra")
-        record_retirement_notices(
-            self.router, state_dir=self.root,
-            retired_profile_ids=sync["retired_profile_ids_this_run"],
-        )
+        self._drop("profile:gpt-6-astra")
+        record_retirement_notices(self.router, state_dir=self.root)
         # One retirement touches every stage that was pointed at the model, so
         # there is a notice per stage and acknowledging one closes one.
         notices = self.router.fallback_notices(open_only=True)
@@ -865,17 +961,231 @@ class RetirementNoticeTests(StateDirectoryCase):
         )
 
     def test_a_notice_cannot_be_edited_or_deleted(self) -> None:
-        sync = self._drop("profile:gpt-6-astra")
-        record_retirement_notices(
-            self.router, state_dir=self.root,
-            retired_profile_ids=sync["retired_profile_ids_this_run"],
-        )
+        self._drop("profile:gpt-6-astra")
+        record_retirement_notices(self.router, state_dir=self.root)
         with self.assertRaises(Exception):
             self.router.connection.execute(
                 "UPDATE model_fallback_notices SET purpose='ask'"
             )
         with self.assertRaises(Exception):
             self.router.connection.execute("DELETE FROM model_fallback_notices")
+
+
+class ReviewFindingTests(StateDirectoryCase):
+    """The four orderings and two invariants the first review found missing."""
+
+    def _drop(self, *profile_ids: str) -> dict:
+        config = _allowing_config()
+        for profile_id in profile_ids:
+            _drop_broker_profile(config, profile_id)
+        return sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+
+    def test_the_installers_sync_retires_and_the_lane_still_tells_the_owner(
+        self,
+    ) -> None:
+        # The install order: install.sh runs the same catalog sync before this
+        # lane has ever had an hour, so by the time the lane first runs there is
+        # no delta left to read. Every stage pointed at the retired model still
+        # has to be told.
+        self._drop("profile:gpt-6-astra")
+        self.assertEqual(self.router.fallback_notices(), [])
+        result = record_retirement_notices(self.router, state_dir=self.root)
+        self.assertTrue(result["notices_written"])
+        self.assertIn(BRAIN_PURPOSE, result["affected_purposes"])
+        self.assertIn(
+            "profile:gpt-6-astra",
+            [notice["profile_id"] for notice in self.router.fallback_notices()],
+        )
+
+    def test_an_error_between_the_sync_and_the_notice_loses_nothing(self) -> None:
+        # The transient order: the sync commits, the notice write blows up, and
+        # the next run has to heal it. It does, because the notice set is read
+        # from what is retired now rather than from what this run retired.
+        self._drop("profile:gpt-6-astra")
+
+        def explode(notice):
+            raise RuntimeError("the delivery seam threw")
+
+        with self.assertRaises(RuntimeError):
+            record_retirement_notices(
+                self.router, state_dir=self.root, delivery=explode
+            )
+        healed = record_retirement_notices(self.router, state_dir=self.root)
+        self.assertIn(
+            BRAIN_PURPOSE,
+            [notice["purpose"] for notice in self.router.fallback_notices()],
+        )
+        # Whatever the first attempt managed to write is not written twice.
+        again = record_retirement_notices(self.router, state_dir=self.root)
+        self.assertEqual(again["notices_written"], [])
+        self.assertEqual(
+            len(self.router.fallback_notices()),
+            len(healed["notices_written"]) + len(healed["notices_repeated"]),
+        )
+
+    def test_a_selection_pointed_at_a_retired_model_is_told_about_too(self) -> None:
+        published = publish_selection(
+            self.router, policy_version_ref=self.policies["brain"],
+            purpose=BRAIN_PURPOSE, mode="explicit",
+            chain=["profile:gpt-6-astra"], now=NOW,
+        )
+        self.config_path.write_text(json.dumps({
+            **self.model_config,
+            "routing_policy_ref": published["policy_version_ref"],
+        }), encoding="utf-8")
+        self._drop("profile:gpt-6-astra")
+        record_retirement_notices(self.router, state_dir=self.root)
+        notice = next(
+            item for item in self.router.fallback_notices()
+            if item["purpose"] == BRAIN_PURPOSE
+        )
+        self.assertEqual(notice["profile_id"], "profile:gpt-6-astra")
+        self.assertEqual(
+            notice["detail"]["superseded_chain"], ["profile:gpt-6-astra"]
+        )
+
+    def test_replaying_a_work_order_from_before_selection_still_replays(
+        self,
+    ) -> None:
+        # The purpose joins the request identity only when the pinned policy
+        # carries an override for it. Otherwise a route request made before
+        # selection existed would hash differently on replay, come back
+        # ``conflict``, and stop a lane that had done nothing wrong.
+        arguments = dict(
+            attempt_number=1, capability="research",
+            policy_version_ref=self.policies["brain"],
+            credential_slot_refs=credential_slots_for(
+                self.router, list(tier_chain("brain"))
+            ),
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="p14m2-replay:1", tier="brain",
+        )
+        work = _work("work:p14m2-replay")
+        first = self.router.route(work, **arguments)
+        self.assertEqual(first["status"], "fresh")
+        # The same request, now naming its purpose, against a policy with no
+        # override for it: still the same request.
+        replay = self.router.route(work, purpose=BRAIN_PURPOSE, **arguments)
+        self.assertEqual(replay["status"], "duplicate")
+        self.assertEqual(replay["decision"]["id"], first["decision"]["id"])
+
+    def test_a_selection_makes_the_same_work_a_different_request(self) -> None:
+        published = publish_selection(
+            self.router, policy_version_ref=self.policies["brain"],
+            purpose=BRAIN_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW,
+        )
+        arguments = dict(
+            attempt_number=1, capability="research",
+            policy_version_ref=published["policy_version_ref"],
+            credential_slot_refs=credential_slots_for(
+                self.router, list(tier_chain("brain"))
+            ),
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="p14m2-selected:1", tier="brain",
+        )
+        work = _work("work:p14m2-selected")
+        self.router.route(work, purpose=BRAIN_PURPOSE, **arguments)
+        # Same key, same work, but no purpose supplied: the identity differs
+        # because the policy has a selection for it, so this is a conflict
+        # rather than a replay of somebody else's answer.
+        without = self.router.route(work, **arguments)
+        self.assertEqual(without["status"], "conflict")
+
+    def test_re_running_the_installer_does_not_undo_a_selection(self) -> None:
+        published = publish_selection(
+            self.router, policy_version_ref=self.policies["brain"],
+            purpose=BRAIN_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1"], actor_ref=OWNER, now=NOW,
+        )
+        chosen = self.router.get_policy(published["policy_version_ref"])
+        self.assertEqual(
+            chosen["purpose_overrides"][BRAIN_PURPOSE]["actor_ref"], OWNER
+        )
+        # The installer runs ensure_*_policy again with a different tier, which
+        # is a real content change and appends a version. The owner's choice
+        # has to ride forward on it.
+        again = ensure_planner_policy(
+            self.router, tier="cheap", now=NOW,
+            policy_id="model-routing-policy:p14m2-brain",
+        )
+        self.assertEqual(again["status"], "fresh")
+        carried = self.router.get_policy(again["policy_version_ref"])
+        self.assertEqual(
+            carried["purpose_overrides"][BRAIN_PURPOSE]["chain"],
+            ["profile:claude-fable-5-1"],
+        )
+        self.assertEqual(
+            carried["purpose_overrides"][BRAIN_PURPOSE]["actor_ref"], OWNER
+        )
+
+    def test_publishing_against_a_version_that_has_moved_on_is_refused(self) -> None:
+        stale = self.policies["brain"]
+        publish_selection(
+            self.router, policy_version_ref=stale, purpose=BRAIN_PURPOSE,
+            mode="explicit", chain=["profile:claude-fable-5-1"], now=NOW,
+        )
+        # Somebody read the old version and is now publishing against it. The
+        # new version would be built from content that is no longer current,
+        # so whatever changed in between would be discarded without a word.
+        with self.assertRaisesRegex(ModelSelectionError, "has moved on"):
+            publish_selection(
+                self.router, policy_version_ref=stale, purpose=CHEAP_PURPOSE,
+                mode="tier", now=NOW,
+            )
+
+    def test_an_unpriced_model_in_front_of_a_retired_one_is_still_reachable(
+        self,
+    ) -> None:
+        # "Last" has to mean last of what can still be reached. Measured over
+        # the declared chain, an unpriced link in front of a retired one would
+        # be refused for not being last while being the only thing left.
+        config = _with_unpriced_model(_allowing_config())
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        # A chain that was legal when it was written -- the unpriced link is
+        # not last, so publishing it through the selection path is refused --
+        # and then the link behind it goes away. Registered directly because
+        # the rule under test is the router's, not the selection validator's.
+        pinned = self.router.get_policy(self.policies["cheap"])
+        wire = {
+            key: value for key, value in pinned.items()
+            if key not in {"content_hash", "policy_version_ref", "version",
+                           "created_at", "prior_version_ref"}
+        }
+        chain = [UNPRICED_PROFILE_ID, "profile:gemini-3-5-flash-lite"]
+        wire.update({
+            "policy_version_ref": "model-routing-policy-version:p14m2-cheap:2",
+            "version": 2,
+            "prior_version_ref": pinned["policy_version_ref"],
+            "created_at": NOW.isoformat(timespec="microseconds"),
+            "filters": {**pinned["filters"], "allowed_profile_ids": chain},
+            "purpose_overrides": {
+                CHEAP_PURPOSE: {"mode": "explicit", "chain": chain}
+            },
+        })
+        self.router.register_policy(wire)
+        _drop_broker_profile(config, "profile:gemini-3-5-flash-lite")
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        decision = self.router.route(
+            # ``verify`` because a profile the catalog lane built for a model
+            # Dalton never curated is conservatively verify-only until somebody
+            # calibrates it; the rule under test is about position, not capability.
+            _work("work:p14m2-unpriced-live", capability="verify"),
+            attempt_number=1, capability="verify",
+            policy_version_ref=wire["policy_version_ref"],
+            credential_slot_refs=credential_slots_for(
+                self.router, [UNPRICED_PROFILE_ID]
+            ),
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="p14m2-unpriced-live:1", tier="cheap",
+            purpose=CHEAP_PURPOSE,
+        )["decision"]
+        self.assertEqual(decision["outcome"], "selected")
+        profile = self.router.get_profile(decision["selected_profile_version_ref"])
+        self.assertEqual(profile["id"], UNPRICED_PROFILE_ID)
 
 
 class GovernanceOperationTests(unittest.TestCase):
@@ -1034,6 +1344,25 @@ class CockpitModelPageTests(unittest.TestCase):
                 "purpose": BRAIN_PURPOSE, "mode": "explicit", "chain": [],
             })
         self.assertEqual(self.calls, [])
+
+    def test_a_router_from_before_the_notice_tables_reads_as_no_notices(
+        self,
+    ) -> None:
+        # A read-only open never runs the schema script, so a router written
+        # before these tables existed does not have them. The owner's page must
+        # not be the thing that discovers that.
+        self.install()
+        with ModelRouter(self.router_db) as router:
+            router.connection.execute("PRAGMA writable_schema = ON")
+            for table in ("model_fallback_notice_acks", "model_fallback_notices",
+                          "model_openclaw_allow_decisions"):
+                router.connection.execute(f"DROP TABLE IF EXISTS {table}")
+        plane = self.plane(with_model_config=True)
+        view = plane.models()
+        self.assertTrue(view["available"])
+        self.assertEqual(view["notices"], [])
+        self.assertEqual(plane._model_fallback_items(), [])
+        self.assertTrue(view["purposes"])
 
     def test_an_open_notice_is_waiting_on_the_approvals_page(self) -> None:
         self.install()

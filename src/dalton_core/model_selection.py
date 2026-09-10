@@ -185,26 +185,44 @@ def publish_selection(
     purpose: str,
     mode: str,
     chain: Sequence[str] = (),
+    actor_ref: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Append the routing-policy version that carries this selection.
 
     Built from the *pinned* version's content rather than from scratch, so a
     selection changes one purpose and leaves every filter, preference and chain
-    exactly as the lane pinned them; appended after the *latest* version,
-    because a version chain is a chain.  Republishing the selection that is
+    exactly as the lane pinned them.  Republishing the selection that is
     already current is a no-op and says so -- pressing 「保存」 twice must not
     grow the chain by a version that changed nothing.
+
+    Refuses when the pinned version is not the latest of its own lineage.  The
+    new version is built from the pinned content and appended after the latest,
+    so if something else has appended in between -- an installer run, another
+    selection -- publishing would silently discard whatever it changed.  A
+    refusal costs one re-read; the alternative costs a change nobody can see
+    was undone.
     """
 
     pinned = router.get_policy(policy_version_ref)
     checked = validate_selection(router, purpose=purpose, mode=mode, chain=chain)
+    latest = _latest_policy(router, pinned["id"])
+    if latest["policy_version_ref"] != pinned["policy_version_ref"]:
+        raise ModelSelectionError(
+            f"{pinned['id']} has moved on since this was read "
+            f"({latest['policy_version_ref']} is current); read it again and "
+            "choose against that"
+        )
     overrides = dict(pinned.get("purpose_overrides") or {})
     entry: dict[str, Any] = {"mode": checked["mode"]}
     if checked["mode"] == "explicit":
         entry["chain"] = list(checked["chain"])
+    if actor_ref:
+        # Who chose it, in the content, so a route decision's policy hash
+        # carries the answer to "who had selected this model when this Claim
+        # was produced".
+        entry["actor_ref"] = actor_ref
     overrides[purpose] = entry
-    latest = _latest_policy(router, pinned["id"])
     wire = {
         key: value for key, value in pinned.items() if key not in _VERSION_KEYS
     }
@@ -247,6 +265,7 @@ def set_model_selection(
     purpose: str,
     mode: str,
     chain: Sequence[str] = (),
+    actor_ref: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Publish one stage's selection and repoint every lane that pins a policy.
@@ -289,7 +308,8 @@ def set_model_selection(
                     published[key] = publish_selection(
                         router,
                         policy_version_ref=config["routing_policy_ref"],
-                        purpose=purpose, mode=mode, chain=chain, now=now,
+                        purpose=purpose, mode=mode, chain=chain,
+                        actor_ref=actor_ref, now=now,
                     )
                 except FallbackChainError as exc:
                     raise ModelSelectionError(str(exc)) from exc
@@ -312,6 +332,7 @@ def set_model_selection(
         "purpose": purpose,
         "tier": tier_for(purpose),
         "mode": mode,
+        "actor_ref": actor_ref,
         "chain": list(chain) if mode == "explicit" else [],
         "policy_versions": [
             {"policy_id": policy_id, "policy_version_ref": ref, "publication": status}
@@ -335,26 +356,43 @@ def retirement_fallbacks(
     router: ModelRouter,
     *,
     policy: Mapping[str, Any],
-    retired_profile_ids: Sequence[str],
 ) -> list[dict[str, Any]]:
-    """Which stages just lost a model, and what each one runs instead.
+    """Which stages are pointed at a retired model, and what each runs instead.
 
-    Compared against the chain the policy *names*, not against the chain that
-    is live now: the question is "was this stage pointed at the model that has
-    gone", and by the time this runs the answer to "can it still route to it"
-    is already no for every stage.
+    Read from **current state** rather than from "what this run happened to
+    retire", and that is the whole point of it.  The installer's own catalog
+    sync retires models before this lane has ever had an hour, so a notice set
+    built from one run's delta would miss every model the first deploy dropped
+    -- six of them, on the machine this shipped against -- and would lose the
+    rest to any error between the sync committing and the notice being written.
+    A pass over what is retired *now* has no such window: it is idempotent on
+    (model, stage), so running it hourly forever writes each notice once.
+
+    Both chains are looked at, not just the one in force: a stage whose owner
+    selection is intact still wants to know that the tier chain behind it has
+    lost a link, because that is the chain it falls back to.
     """
 
-    retired = [profile_id for profile_id in retired_profile_ids]
+    held = {profile["id"]: profile for profile in router.latest_profiles()}
+    retired = {
+        profile_id for profile_id, profile in held.items()
+        if profile.get("status") == "retired"
+    }
     if not retired:
         return []
-    held = {profile["id"]: profile for profile in router.latest_profiles()}
+    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
+    overrides = policy.get("purpose_overrides") or {}
     affected: list[dict[str, Any]] = []
     for purpose, tier in sorted(purpose_tiers().items()):
-        named = policy_chain(policy, tier=tier, purpose=purpose)
-        if named is None:
+        named: list[str] = []
+        override = overrides.get(purpose)
+        if isinstance(override, Mapping) and override.get("mode") == "explicit":
+            named.extend(override.get("chain") or [])
+        named.extend(declared.get(tier) or [])
+        named = list(dict.fromkeys(named))
+        if not named:
             continue
-        lost = [profile_id for profile_id in retired if profile_id in named["chain"]]
+        lost = [profile_id for profile_id in named if profile_id in retired]
         if not lost:
             continue
         now = resolve_chain(policy, tier=tier, purpose=purpose, profiles=held)
@@ -390,15 +428,17 @@ def record_retirement_notices(
     router: ModelRouter,
     *,
     state_dir: str | Path,
-    retired_profile_ids: Sequence[str],
     delivery: Any = None,
 ) -> dict[str, Any]:
-    """Write one notice per (model, stage) the retirement moved, and deliver it.
+    """Write one notice per (model, stage) pointed at a retired model.
 
     Deduplicated by the ledger rather than by this function: the lane runs
     every hour and will see the same retirement every hour, and a notice keyed
     on the moment would be an hourly alarm nobody reads.  Delivery is attempted
     only for a notice that is *new*, for the same reason.
+
+    Takes no list of what was just retired, deliberately -- see
+    :func:`retirement_fallbacks`.  The state is the question.
     """
 
     deliver = delivery if delivery is not None else notice_delivery
@@ -415,11 +455,7 @@ def record_retirement_notices(
             policy = router.get_policy(policy_ref)
         except Exception:  # noqa: BLE001 - a pin this router cannot read is not ours
             continue
-        affected.extend(
-            retirement_fallbacks(
-                router, policy=policy, retired_profile_ids=retired_profile_ids
-            )
-        )
+        affected.extend(retirement_fallbacks(router, policy=policy))
     for item in affected:
         for profile_id in item["retired_profile_ids"]:
             result = router.record_fallback_notice(
