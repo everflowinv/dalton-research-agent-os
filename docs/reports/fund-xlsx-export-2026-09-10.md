@@ -1,0 +1,17 @@
+# Fund XLSX export — 2026-09-10
+
+The new read-only exporter renders a current governed company model into five sheets: Driver, Financials, Valuation, Sources, and Formula Map. It follows the reviewed fund sample's dark-blue section bars, Arial typography, blue editable assumptions, green linked formulas, dash zero format, annual/quarter axes, and frozen labels.
+
+The exporter validates the exact ForecastModel content, bound CompanyModelSpec ref/hash, regenerated ModelInput hash, company, internal formula ref/hash, and optional ValuationSnapshot. The CLI copies the requested Core through SQLite `mode=ro` backup and opens only the temporary copy. `export_company_workbook(core_db, company_ref, output, valuation_scenario=None, calendar_binding=None)` is the direct API for the Cockpit download layer. The output is created atomically with owner-only permissions; an existing output, source database, or input JSON is never overwritten.
+
+Forecast cells are formulas only where an exact, explicitly registered internal equation and its ordered dependency refs provide a translation. Each translated result is also checked against the authority's computed value before export. Actual history is linked from Driver into Financials, and historical subtotals use the same frozen arithmetic identities as forecasts. Unsupported and unavailable results remain blank and are listed in Formula Map; no cached result is substituted.
+
+Annual columns require a closed, hash-bound fiscal-calendar input with `calendar_ref`, `as_of`, and `fiscal_year_end_month`. The ACN fixture uses an August year-end derived from its reported quarters, so FY2026 correctly combines three historical quarters and one forecast quarter. Without that binding, no annual column is emitted. Partial years remain blank with an explicit gap, and ratios are never summed. An AMZN December calendar can be supplied as an explicit scenario input; this exporter does not claim that configuration is current authority.
+
+A separately hashed, closed `ValuationScenario` may supply owner assumptions for an EV/revenue or P/E bridge. Its blue multiple, net cash, diluted shares, required return, and year fraction feed formula-driven equity value and target price. With no scenario, or no complete supported annual forecast, valuation remains explicitly unavailable. The current ForecastModel authority does not itself contain SOTP or target-price assumptions, so the exporter does not invent them.
+
+## Verification
+
+`PYTHONPATH=src python3 -m unittest tests.test_fund_xlsx_export -v` passed 9 tests. The broader forecast/input regression command passed 81 tests. Coverage includes exact binding refusal, tampered scenario and calendar refusal, refusal to overwrite an existing file or the Core database, forecast and annual formulas, incomplete annual blanks, no-calendar behavior, source/formula-map hashes, and LibreOffice recalculation. Changing the first revenue growth assumption from 10% to 20% changed the first forecast quarter to 1,597,200,000, flowed through operating income and the correctly aligned forecast fiscal year, and changed the discounted target to 149.161194909091 without changing historical actuals.
+
+The stable QA workbook is `/tmp/dalton-fund-export-final-v2/fund-model.xlsx`. LibreOffice opened and exported all sheets to PDF. Formula inspection found 102 executable workbook formulas, with matching literal audit entries in Formula Map. The XLSX has mode `0600`; the QA data is synthetic and remains outside the repository.
