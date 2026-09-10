@@ -2,7 +2,7 @@
 
 The new `python -m dalton_core.research_html_export` command reads the active mission and current research-library records through a SQLite read-only connection. It writes a self-contained HTML report and a deterministic JSON manifest containing the exact mission and product version/hash bindings.
 
-The report begins with the mission and conclusion-bearing products, includes a table of contents, section prose, evidence refs, gaps, human memo approval state, quantitative tables, and inline SVG only when at least two cited number rows expose one compatible explicit unit. Missing data and unavailable charts remain visible. Publication is never presented as human approval.
+The report begins with the mission and conclusion-bearing products, includes a table of contents, section prose, evidence refs, gaps, human memo approval state, quantitative tables, and inline SVG only when at least two hash-verified quantitative Claim versions expose finite values with the same typed metric, unit, scale, and currency. Missing data and unavailable charts remain visible. Publication is never presented as human approval.
 
 Optional figures use a closed manifest with a local PNG/JPEG path, SHA-256, caption, and source refs. The exporter verifies the digest and file signature, embeds bytes as a data URI, and performs no external fetch. All authority prose and labels are HTML-escaped; the output contains no script or raw source HTML.
 
@@ -15,4 +15,6 @@ PYTHONPATH=src python3 -m dalton_core.research_html_export \
   --output /tmp/acn-research.html
 ```
 
-Validation: `PYTHONPATH=src python3 -m unittest tests.test_research_html_export` passed 4 tests, including a real read-only Core fixture, stable bytes, partial-data rendering, escaping, chart unit refusal, and asset hash refusal. Playwright rendered the representative report at 1440×1000 and 390×844 with document width equal to viewport width; the quantitative table scrolls within its container on mobile. Chromium PDF generation completed. No live state, network source, signature, or model call was used.
+Validation: `PYTHONPATH=src python3 -m unittest tests.test_research_html_export` passed 5 tests, including a real read-only Core fixture, stable bytes, partial-data rendering, escaping, typed Claim resolution, incompatible-series refusal, and asset hash refusal. Playwright rendered the representative report at 1440×1000 and 390×844 with document width equal to viewport width; the quantitative table scrolls within its container on mobile. Chromium PDF generation completed. No live state, network source, signature, or model call was used.
+
+The follow-up review removed all numeric parsing from prose. The exporter now holds `PRAGMA query_only=ON` and one explicit read transaction across mission, product, approval, and Claim resolution. Signed values use a real zero axis. Structured dossier sources and gaps are rendered through known textual fields rather than Python representations; product reasons/gaps and exact human decision ref/actor/time are visible.
