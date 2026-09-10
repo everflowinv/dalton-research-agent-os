@@ -634,18 +634,20 @@ class MissionAndSwitchTests(unittest.TestCase):
                 self.assertTrue((REPO_ROOT / switch.repo_source).is_file())
 
     def test_the_switch_install_sh_does_write_is_the_one_it_names(self) -> None:
-        # Two now: extraction's model config, and P14a's tracking policy,
-        # which INT2 gave a seed block. Each has to be traceable to the line
-        # in install.sh that writes it.
+        # Three now: extraction's model config, P14a's tracking policy, and
+        # P14-M2's catalog-sync switch. Each has to be traceable to the line in
+        # install.sh that writes it.
         seeded = {switch.state_file for switch in LANE_SWITCHES
                   if switch.seeded_by_install}
         code = _install_script_code()
         self.assertEqual(
             seeded,
-            {"document-extraction-model-config.json", "tracking-policy.json"},
+            {"document-extraction-model-config.json", "tracking-policy.json",
+             "model-catalog-sync.json"},
         )
         self.assertIn("document_extraction_setup", code)
         self.assertIn("p14a-tracking-policy-v1.json", code)
+        self.assertIn("model-catalog-sync.json", code)
         self.assertIn("tracking-policy.json", [spec.state for spec in INSTALL_SEEDS])
 
     def test_the_three_model_config_switches_are_written_when_named(self) -> None:
