@@ -57,6 +57,7 @@ from .sec_ownership_adapter import (
 from .sec_ownership_core import (
     BENEFICIAL_OWNERSHIP_OPERATION,
     FILING_INDEX_DOCUMENT,
+    PRIMARY_DOCUMENT,
     FORM13F_OPERATION,
     FORM144_OPERATION,
     FORM4_OPERATION,
@@ -85,7 +86,6 @@ MAX_RAW_BYTES = 32 * 1024 * 1024
 # named in the summary rather than silently dropped.
 MAX_EVENTS_PER_RUN = 40
 DEFAULT_USER_AGENT = "Dalton Research Agent OS SEC ownership lane (owner: lumos)"
-PRIMARY_DOCUMENT_LABEL = "primary_doc.xml"
 
 KIND_BY_OPERATION = {
     FORM4_OPERATION: "insider_transaction",
@@ -206,7 +206,7 @@ def form13f_documents(
     )
     cover_object = _spool(spool, cover_raw)
     companions.append({
-        "document": PRIMARY_DOCUMENT_LABEL, **cover_object.to_dict(),
+        "document": PRIMARY_DOCUMENT, **cover_object.to_dict(),
     })
     index_raw = fetch_document(
         filing_index_url(args.holder_cik, args.accession), user_agent=args.user_agent

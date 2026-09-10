@@ -2,9 +2,10 @@
 
 日期：2026-09-09
 分支：`s5-sec-insider-13f`（worktree `~/Projects/dalton-s5-sec-insider-13f-worktree`）
-分叉基线：main `ebd2ea8`（3,932 项测试）
+分叉基线：main `ebd2ea8`（3,932 项测试）；已 `git merge main` 至 `88a9325`（含 C1 事件桥、P14d reopen lane）
+审阅：主 agent 一轮，两个静默丢数据缺陷 + 六项，全部处理，见第 6 节
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 S 线「之后」一行、[OpenClaw 数据源盘点 v1.0](openclaw-data-source-survey-v1.0-2026-09-09.md) 第 19/20/34 行与 B.9 / C.7 / C.9、[P14a 日常跟踪](p14a-daily-tracking-v1.0-2026-09-09.md)、[C1 事件日历](c1-catalyst-calendar-v1.0-2026-09-09.md)、[P11a 市场层](p11a-market-layer-v1.0-2026-09-09.md)、`docs/CONNECTOR_PROTOCOL.md`
-全量测试：见第 8 节，原文粘贴
+全量测试：见第 9 节，原文粘贴
 
 ---
 
@@ -12,7 +13,7 @@
 
 Dalton 以前能读公司**赚了多少**，读不到**谁在买卖它**。现在 `sec` 连接器多了四个各自治理的操作——Form 4 内幕交易、SC 13D/G 举牌、Form 144 拟售通知、13F-HR 机构持仓——外加一个本地 changedetection.io 的 `ir-page-watch` host_tool 连接器盯着申报之外的 IR 页面；两者都只产出 ResearchEvent，**一个数字都进不了报表行、进不了预测模型**。这条排除不是文档里的一句话：`OWNERSHIP_GRADE = "regulatory-ownership-filing"` 不在 `FIGURE_ADMISSIBLE_GRADES` 里、不在 `document_figure_grade.GRADE_BY_SPEC` 里，四类 form 与 `statement_snapshot._FORMS` 的交集为空，四条断言各有一个测试。
 
-选下一份要读什么**零网络调用**：沿用 C1 的发现，已落盘的 `list_filings` 原始产物里本来就有发行人整块 `filings.recent`。只读核验（第 7 节）：五家公司近十年共有 **3,541 份 Form 3/4/5、105 份 SC 13D/G、178 份 Form 144、7 份 13F-HR** 躺在本机 spool 里，一次 SEC 调用都没发过。
+选下一份要读什么**零网络调用**：沿用 C1 的发现，已落盘的 `list_filings` 原始产物里本来就有发行人整块 `filings.recent`。只读核验（第 8 节）：五家公司近十年共有 **3,541 份 Form 3/4/5、105 份 SC 13D/G、178 份 Form 144、7 份 13F-HR** 躺在本机 spool 里，一次 SEC 调用都没发过。
 
 ---
 
@@ -30,8 +31,8 @@ Dalton 以前能读公司**赚了多少**，读不到**谁在买卖它**。现�
 | `deploy/phase9/p9-us-it-services-ir-pages-v1.json` | 五家公司各两个 IR 页的**声明**——这个连接器的全部作用域 |
 | `deploy/connector-governance/sec-{form4-transactions,beneficial-ownership,form144-notices,form13f-holdings}-v1.json` | 四条 `sec` 操作治理记录，`status: proposed` |
 | `deploy/connector-governance/ir-page-watch-{list-watches,get-diff}-v1.json` | 两条 `ir-page-watch` 治理记录，`status: proposed` |
-| 共享增量 | `connector_inventory`（`sec` 加四个操作、新 profile `ir-page-watch`、六份输出契约、四个入参字段）、`connector_governance`（六个 kind）、`connector_quota_policy`（六条配额）、`research_event`（四个 kind + payload + tier）、`lane_registry.LANE_MODULES`（一行）、`research_plan.SEC_TEMPLATE_REGISTRY`（append `v4`）、`cockpit_plane.REGISTRY_LANE_LABELS`（一行，见 §6.3） |
-| 测试 | `tests/test_s5_sec_ownership.py`、`test_s5_ir_page_watch.py`、`test_s5_ownership_lane.py`；fixture `tests/fixtures/sec-ownership/`（7 份合成 filing）与 `tests/fixtures/ir-page-watch/`（3 份合成响应） |
+| 共享增量 | `connector_inventory`（`sec` 加四个操作、新 profile `ir-page-watch`、六份输出契约、四个入参字段）、`connector_governance`（六个 kind）、`connector_quota_policy`（六条配额）、`research_event`（四个 kind + payload + tier）、`lane_registry.LANE_MODULES`（一行）、`research_plan.SEC_TEMPLATE_REGISTRY`（append `v4`）、`cockpit_plane.REGISTRY_LANE_LABELS`（一行，见 §7.3） |
+| 测试 | `tests/test_s5_sec_ownership.py`、`test_s5_ir_page_watch.py`、`test_s5_ownership_lane.py`；fixture `tests/fixtures/sec-ownership/`（10 份合成 filing，含联名 Form 4、拆行的 13F、一份 filing index）与 `tests/fixtures/ir-page-watch/`（3 份合成响应） |
 
 `writer_server.py`、`coverage_mission.py`、`bounded_planner_driver.py`、`macos_launchagent.py`、`install.sh`、`PROJECT_STATUS.md`、`tests/test_service*`、`tests/test_lane_registry.py` **一行都没动**。
 
@@ -54,7 +55,9 @@ Dalton 以前能读公司**赚了多少**，读不到**谁在买卖它**。现�
 
 **字段叫 `filing_accession` 不叫 `accession`。** `list_official_attachments` / `get_official_attachment` / `read_item` 三个冻结操作已经拿 `accession` 当自由文本，在 `_field_schema` 里收窄这个名字会**同时挪动这三份已批准的入参哈希**。S4 为 `statement` / `date_from` 写下过同一条教训。有测试钉住五个旧操作的入参与输出哈希（`ContractTests::test_the_input_contracts_before_s5_did_not_move`），值取自 `git show ebd2ea8:.../profiles/sec.json`。
 
-**动的哈希只有 profile 自己那一层**：`connector:sec-edgar` 的 `profile_template_hash` / `fixture_manifest_hash` / `proposal_manifest_hash` 与 index 顶层 `content_hash`。`scripts/build_connector_inventory.py --check` 归零（第 8 节）。`research_plan.SEC_TEMPLATE_REGISTRY` 因此 append 了一条 `v4`——**两份输出契约与 v3 逐字节相同**，所以已绑 v3 的 plan 仍然按 v3 复验，没有 live 记录被扰动；`sec_connector_identity` 的 schema 哈希仍只由 `list_filings` + `get_company_facts` 推导，没变。
+**动的哈希只有 profile 自己那一层**：`connector:sec-edgar` 的 `profile_template_hash` / `fixture_manifest_hash` / `proposal_manifest_hash` 与 index 顶层 `content_hash`。`scripts/build_connector_inventory.py --check` 归零（第 9 节）。`research_plan.SEC_TEMPLATE_REGISTRY` 因此 append 了一条 `v4`——**两份输出契约与 v3 逐字节相同**，所以已绑 v3 的 plan 仍然按 v3 复验，没有 live 记录被扰动；`sec_connector_identity` 的 schema 哈希仍只由 `list_filings` + `get_company_facts` 推导，没变。
+
+**一条给部署时预期的注意语。** `sec_template_registry_tag()` 现在返回 `v4`，而 `_template_suffix` 对非 `v1` 的 tag 会加后缀，所以**升级后第一个新建的 SEC plan 会注册一份新的 `connector-profile:sec-public:...:template-v4` profile 版本**（以及配套的 `runner-binding` / `rate-policy` 兄弟 ref）。这是这套机制设计好的样子——版本链 append-only，`v3` 的记录一条不动，旧 plan 继续按 `v3` 复验——但 live 状态里会多出一组以 `template-v4` 结尾的记录，看到时不必当作异常。
 
 ---
 
@@ -92,12 +95,17 @@ IR 页是另一档：`ir_page_change` 默认 `management_direct`。**没有向�
 
 | 情况 | `value_unit` | `value_unit_basis` |
 | --- | --- | --- |
-| 期末 ≥ 2023-01-01，比值也像股价 | `usd` | `post_2023_rule` |
-| 期末 ≤ 2022-12-31，比值也像千分之一股价 | `thousands` | `pre_2023_rule` |
-| 两者矛盾 | 比值胜 | `ratio_heuristic` |
-| 表里没有可用比值 | 周期规则 | 对应的 rule 名 |
+| 比值 > 20（只能是整美元），与周期规则一致 | 规则的答案 | `post_2023_rule` / `pre_2023_rule` |
+| 比值 < 0.05（只能是千美元），与周期规则一致 | 规则的答案 | 同上 |
+| 比值决定性且与规则矛盾 | **比值胜** | `ratio_heuristic` |
+| 比值落在 0.05–20 之间 | 规则的答案 | **`ambiguous`** |
+| 表里没有 `SH` 行可算比值 | 规则的答案 | 对应的 rule 名 |
 
-比值判据取自 `13f-tracker` 的 `_normalize_value_unit`：`median(value / shares) < 1` 即千美元。差一千倍是这个解析器能犯的最坏的错，所以两条判据都留，且**都报出来**。`value_as_filed` 与 `value_usd` 两列并存，想复核缩放的人能复核。
+**「决定性」这三个字是审阅改出来的。** `13f-tracker` 原判据是 `median < 1 即千美元`，而这对任何低价股都是错的：一只真正 0.4 美元的股票按整美元报，比值就是 0.4，那条规则会把它乘一千。所以比值只在两种读法不可能重叠的区间外说话——比值 < 0.05 意味着按整美元读的话中位持仓不到五分钱，比值 > 20 意味着按千美元读的话中位持仓超过两万美元一股——区间之内 basis 是 `ambiguous`：**数字仍由周期规则给出，而 wire 明说这次校验没有确认它**，而不是假装确认了。
+
+中位数**只对 `SH` 行**取。`PRN` 行报的是债券面值而不是股数，它的 value/面值比是面值上的折价、对每一份文件里的每一只债券都接近 1，混进中位数会把一本普通股票账拖进模糊区间。
+
+`value_as_filed` 与 `value_usd` 两列并存，想复核缩放的人能复核。
 
 **4.3 没有出处的行是传闻。** 每一行带 `record_hash = content_hash({accession, artifact_hash, row})`。同一份 filing 读两次哈希相同；换一份字节哈希就变。这个哈希同时充当事件的 `event_key`，所以「事件说的」与「wire 说的」不可能各说各话。
 
@@ -119,9 +127,44 @@ IR 页是另一档：`ir_page_change` 默认 `management_direct`。**没有向�
 
 ---
 
-## 6. lane：每天，每公司，一个孩子
+## 6. 审阅改了什么
 
-### 6.1 选谁
+主 agent 一轮审阅：契约完整性通过（五个 S5 之前的操作逐字节未动、已批准记录未动、绑 v3 的 plan 仍解析到 v3、`OWNERSHIP_GRADE` 结构上不可达），合并卡在两个**静默丢数据**缺陷上。两个都是同一类：不报错、不留痕、下游看到的是一个说得通的假事实。
+
+### B1 — 13F 的网络路径读的是封面，然后报「成功读到 0 条持仓」
+
+一份 13F 不是一份文档。`primary_doc.xml` 是封面页（管理人名、期末、合计），持仓在第二份文件里，**文件名由 filer 自己取**，只有这份 filing 自己的 `index.json` 知道它叫什么。原来的网络路径只取了封面、拿封面去解析持仓、解析出零条、然后 `status: succeeded`——这是这里能出的最坏形状的 bug：**一份说「什么都没变」的成功读取**。上季度还有仓、这季度报 0 条，比对层就会为一整本账生成 `exit` 事件。
+
+改法：
+- `form13f_documents()` 走三次 GET——封面、`index.json`、信息表。三份**在解析任何东西之前**全部落盘；信息表是持仓绑定的那份产物，另外两份进 `companion_artifacts`。配额的 `max_physical_calls_per_unit` 从 2 改成 3，注释写清为什么是三。
+- `information_table_name()` 从 filing 自己的索引里认那份文档：排掉 `primary_doc.xml`、排掉 EDGAR 的 `xsl*` 渲染副本，剩一个就是它；剩多个先按 `infotable` 之类的词收窄；**还是不唯一就拒绝并列出候选**。读错文档会产出一份能通过校验、内容是别人持仓、而且任何地方都发现不了的 wire——猜不如拒。
+- 文件名是这个连接器里**唯一一个来自外部的名字**，所以进路径之前按 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xml$` 校验，`../` 与 `a/b.xml` 都过不去（有测试）。
+- **13F-HR 解析出零条持仓一律是 `failed`**，理由里带 form 与 accession，原始字节仍在 spool 里。`13F-NT` 是诚实的空情形——它本来就是「这些持仓由另一位管理人申报」的通知——`succeeded` 且 `holdings_status: notice_only`，零事件。
+
+### B2 — 联名 Form 4 丢掉第二个申报人
+
+`event_key` 原来就是那一行的 `record_hash`。一份联名申报（夫妻、基金与其 GP）对**同一批交易行**列出多个 reporting owner，于是第二个人往后的每一条事件都是重复键，事件账本按设计回 `duplicate` 并**一声不响地丢掉**。改成 `content_hash({"row": row["record_hash"], "owner": owner_cik or owner_name})`。测试：两个申报人 × 三行 = 6 条事件、6 个不同的键。
+
+### 其余六项
+
+| # | 事项 | 改了什么 |
+| --- | --- | --- |
+| 3 | `compare_holdings` 折叠重复的 `(cusip, put_call)` 行 | 新增 `aggregate_holdings()`：同一 key 的行**求和**而不是后者覆盖前者。一位管理人按子顾问 / 按基金分行申报很常见，原来只留最后一行，于是 200 万 + 100 万的仓位被拿 100 万去比 250 万，凭空生出一条 150 万的 `trim`。每一条被求和的 filed 行的 `record_hashes` 全部保留，`record_hash` 是它们的函数。first reading 一路也走同一个聚合。 |
+| 4 | 比值判据 | 见 §4.2：只对 `SH` 行取中位数；只在 < 0.05 或 > 20 时推翻周期规则；区间内 basis 为 `ambiguous` |
+| 5 | `--prior-file` 的出处 | 给了 `--prior-file` 就**必须**给 `--prior-accession`（argparse 与 `run()` 双重拒绝）。原来缺省回落到当期 accession，于是每条 `exit` 事件都在引用一份**不含那个数字**的文件 |
+| 6 | 配额测试的理由注释 | 我上一版是从模块重新生成整张表，把 S1/S2/S3/S4/P10p/P11a/C1 的理由注释全洗掉了。已从 `ebd2ea8` 取回原文，六条新条目**插入**进去（`git diff` 现在是纯 79 行新增、0 删除） |
+| 7 | IR sweep 被 filing 积压饿死 | sweep 原来只在 `idle` 分支跑，于是有未读 filing 的 Core——第一天的每个 Core、休假一周后的任何 Core——根本走不到它，监视看起来像坏了而不是被饿着。改到 grant 检查之后、launch 决定之前，每条返回路径都带 `ir_pages`；一天一次的护栏本来就在 |
+| 8 | `13F-NT/A` | 加进 `FORMS_BY_OPERATION` |
+
+零碎：`MAX_FILINGS_PER_FORM` 改成**按 form 计**（一家公司每一份 13D 要配一百份 Form 4，单一上限意味着那份唯一值得看的 13D 掉在一串例行行权后面永远选不到）；13F 配额注释写明三次调用；`MAX_HOLDINGS` 从 4,000 提到 12,000（BlackRock 量级约七千行），**超出仍然是带理由的拒绝而不是截断**——截断一本账再拿去和一份按不同边界截断的上季度比对，会凭空造出 `new` 与 `exit`，一个能读的拒绝可以恢复，一次编造的清仓不能；`_ir_watched_on` 挪到写完所有事件之后（原来写在前面，写一半抛异常就把当天剩下的变化丢到明天，而 sweep 本来就是幂等的）。
+
+合并：`git merge main`（`88a9325`，含 C1 事件桥与 P14d reopen lane）。冲突两处，都是同一行邻居：`cockpit_plane.REGISTRY_LANE_LABELS` 里我的 `mission_ownership` 与 main 的 `mission_reopen`（两条都留），以及 `tests/test_openclaw_web_search_broker_client.py`——**我那版 `future()` 整块丢弃，取 main 的**。
+
+---
+
+## 7. lane：每天，每公司，一个孩子
+
+### 7.1 选谁
 
 无队列。每个 tick 从**本机已落盘的字节**推导「还有什么没读」：C1 证过 `list_filings` 返回发行人整块 `filings.recent` 且原始 body 被 spool 且哈希过，所以挑候选是本地读，零 SEC 调用。只有真去取选中那份 filing 的 primary document 才花一次调用，而那次调用就是四个受治操作之一。
 
@@ -129,13 +172,13 @@ IR 页是另一档：`ir_page_change` 默认 `management_direct`。**没有向�
 
 C1 那条注意语原样适用：这些行**在字节里但不在那次 invocation 的 `source_record_refs` 里**，所以从这里能拿的是「一个 accession 和一个日期」，不是「一份可以顺手去抓的文档」。抓 primary document 是另一件受治的事，这正是那四个操作存在的理由。
 
-### 6.2 两个 grant，不是一个
+### 7.2 两个 grant，不是一个
 
 `observation`（学到关于覆盖公司的带日期事实）与 `market_event`（写进 P14a 的事件账本）。缺任何一个 → `ungranted`、不起孩子、理由里**点名缺的那个**。测试 `GrantTests::test_both_grants_are_required_and_named_when_missing` 四种组合都钉。
 
 四个操作**逐个批准**：`SecOwnershipLauncher.approved_operations()` 只返回治理目录里真有 approved 记录的那些，只批了 Form 4 的 Core 就只读 Form 4，其余在 tick 摘要里记 `unapproved` 计数，而不是拒绝启动。
 
-### 6.3 共享文件的两处越界，说明白
+### 7.3 共享文件的两处越界，说明白
 
 - `research_plan.SEC_TEMPLATE_REGISTRY` append 一条 `v4`。这不是选择：`sec_template_registry()` 在包内模板不是注册头时**直接 fail closed**，错误信息本身就写着「append a SEC_TEMPLATE_REGISTRY entry」。改动是纯 append，两份输出契约逐字节不变。
 - `cockpit_plane.REGISTRY_LANE_LABELS` 加一行 `"mission_ownership": "看谁在买卖这家公司"`。计划把 `cockpit_*` 列为禁改，但 `test_cockpit_wave1.LaneVocabularyTests` 会在任何未命名的新 lane 上失败，而 S1 的 `sales_notes_feed`、S3 的 `mission_crowd_sources` 都已在这张表里。**如果集成时希望由主 agent 统一做，这一行可以从本分支撤掉再补**——它与其余改动无耦合。
@@ -144,7 +187,7 @@ C1 那条注意语原样适用：这些行**在字节里但不在那次 invocati
 
 ---
 
-## 7. 只读冒烟：本机 spool 里已有多少
+## 8. 只读冒烟：本机 spool 里已有多少
 
 `/private/tmp/dalton-ro/core.sqlite` 复制到 `/tmp/s5-smoke`，三个 spool root 以只读符号链接指向 live 目录。**零 SEC 网络调用**；live 状态未被写过。`today=2026-09-09`。
 
@@ -177,7 +220,7 @@ C1 那条注意语原样适用：这些行**在字节里但不在那次 invocati
 
 ---
 
-## 8. 全量测试
+## 9. 全量测试
 
 ```
 PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .
@@ -209,7 +252,7 @@ tests/test_s5_ownership_lane.py    Ran 24 tests   LaneSpec 注册 / 两个 grant
 
 ---
 
-## 9. 装机接线（给 INT）
+## 10. 装机接线（给 INT）
 
 1. **治理记录**：把 `deploy/connector-governance/` 里六份新记录复制到 live 状态的 `connector-governance/`。文件名就是 lane 找它们的名字（`sec-form4-transactions-v1.json` 等）。owner 批准前它们是 `proposed`，lane 会把对应操作报成未批准而不是失败。
 2. **IR 页声明**：`deploy/phase9/p9-us-it-services-ir-pages-v1.json` → live 状态根下的 `ir-pages.json`。**不在就等于关掉 IR 监视**，`argv_fragment` 不会加那个参数。
@@ -220,7 +263,7 @@ tests/test_s5_ownership_lane.py    Ran 24 tests   LaneSpec 注册 / 两个 grant
 
 ---
 
-## 10. 要 owner 批的
+## 11. 要 owner 批的
 
 | 事项 | 说明 |
 | --- | --- |
@@ -231,11 +274,13 @@ tests/test_s5_ownership_lane.py    Ran 24 tests   LaneSpec 注册 / 两个 grant
 
 ---
 
-## 11. 留给人裁决的问题
+## 12. 留给人裁决的问题
 
 1. **「哪些机构持有这五家公司」需要一份声明。** 13F 是机构报的，不在发行人的索引里，所以「谁在加仓 ACN」这个问题需要一张「要跟踪哪些管理人 CIK」的表——跟 IR 页声明同样性质的东西，同样不可推导（是跟前十大股东？跟几家有观点的长线基金？跟激进投资者？这是研究口径的选择，不是工程选择）。本切片把机制建好并测好（`compare_holdings`、上季缺失的 `prior_absent`），但没有替 owner 决定跟谁。建议形式：`deploy/phase9/p9-us-it-services-13f-holders-v1.json`，每家公司一组管理人 CIK 与理由。
-2. **13F 事件的 CUSIP 过滤需要 company_ref → CUSIP 映射。** 子进程支持 `--company-cusips` 并已测（只有被跟踪的名字出事件），但 lane 目前不传——没有那张映射表。不传时事件数由 `MAX_EVENTS_PER_RUN = 40` 兜住，不会淹没账本，但一本大机构的账会有 40 条不相干的持仓变化。与上一条一起解决。
+2. **13F 事件的 CUSIP 过滤需要 company_ref → CUSIP 映射。** 子进程支持 `--company-cusips` 并已测（只有被跟踪的名字出事件），但 lane 目前不传——没有那张映射表。不传时事件数由 `MAX_EVENTS_PER_RUN = 40` 兜住，不会淹没账本，但一本大机构的账会有 40 条不相干的持仓变化。与上一条一起解决。CUSIP 本身在 SC 13D/G 的封面上就有（本切片已经在解析它），所以这张表大概率是**从已读的 filing 里长出来**而不是手写的。
 3. **SC 13D 的 Item 4 目前只有哈希，没有正文。** `purpose_text_hash` 能回答「这次修订里目的变了没有」，回答不了「变成了什么」。要读正文需要抓 filing 的**文本**，那是一次新的 fetch 与一条新的 spec，跟 C1 报告里「公司自己announce 未来日期的 8-K」是同一个缺口，建议一并解决。
-4. **回填多深。** lane 默认窗口 90 天。第 7 节显示近十年有 3,541 份 Form 4 与 105 份 13D/G 可读；一次性回填十年在 20 份/日的配额下要半年。是回填 12 个月（约 400 份 Form 4，两周）、还是只回填 13D/G（105 份，一周），还是不回填，是 owner 的取舍。
-5. **`cockpit_plane` 那一行**（见 §6.3）：留在本分支，还是撤掉由集成时统一做。
-6. **Form 3 与 Form 5 也被 `form4_transactions` 读。** 它们是「就任时的初始持仓」与「年终补报」，形状同源、批准同一份。如果 owner 认为初始持仓不值得占事件账本的位置，收窄成只读 4 是 `FORMS_BY_OPERATION` 里删两个字符串加一条测试。
+4. **回填多深。** lane 默认窗口 90 天。第 8 节显示近十年有 3,541 份 Form 4 与 105 份 13D/G 可读；一次性回填十年在 20 份/日的配额下要半年。是回填 12 个月（约 400 份 Form 4，两周）、还是只回填 13D/G（105 份，一周），还是不回填，是 owner 的取舍。
+5. **`cockpit_plane` 那一行**（见 §7.3）：留在本分支，还是撤掉由集成时统一做。
+6. **13F 的上季度还没有接线。** `--prior-file` / `--prior-accession` 已经实现并测到位（含 `exit` 事件绑到上季度那份 filing），但 lane 不传——要传就得记住上一季那份 filing 的 spool 产物在哪，而那是「跟哪些管理人」定下来之后才有意义的簿记。在此之前每次 13F 读取都是 `prior_absent` 的第一次读取，这是正确的默认而不是缺陷。
+
+7. **Form 3 与 Form 5 也被 `form4_transactions` 读。** 它们是「就任时的初始持仓」与「年终补报」，形状同源、批准同一份。如果 owner 认为初始持仓不值得占事件账本的位置，收窄成只读 4 是 `FORMS_BY_OPERATION` 里删两个字符串加一条测试。
