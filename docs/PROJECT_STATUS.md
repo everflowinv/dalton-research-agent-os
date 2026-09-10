@@ -8,10 +8,12 @@ Owner 要求持续开发，不以单个里程碑完成为停点；写代码最�
 
 | 负责人 | 当前代码切片 | 工作分支 |
 | --- | --- | --- |
-| Sol / forecast_fixes | 授权配置副本演练交叉审查 | `activation-simulation-cross-review` |
-| Sol / zero_base_fixes | SEC plan 持久选择完成，审读剩余 D1–D9 缺口 | `sec-plan-selection` |
-| Sol / insider_fixes | verifier 调用前独立性边界交叉审查 | `verifier-route-cross-review` |
-| 主代理 | 就绪审计修复、独立分支集成与验收、具体部署材料 | `continuous-integration-wave3` |
+| Sol / forecast_fixes | SEC 8-K owner 批准脚本边界修复 | `sec8k-owner-packet` |
+| Sol / zero_base_fixes | DebateMap mission 绑定与零模型重绑定 | `debate-map-mission-binding` |
+| Sol / insider_fixes | 档案逐章节实际输入、只读重建与部分更新验收 | `dossier-input-fingerprint` |
+| 主代理 | wave 3 验收 push，wave 4 集成与交叉审查 | `continuous-integration-wave4` |
+
+**最新验收点 `d21de7d`：6,184 项 / 499.999s 全量通过（1 skip）**；wheel 430 文件匹配。当前 live 副本 67 schemas 通过，但 DeepSeek 不可变 profile route 冲突令 catalog sync 失败，激活/启动按预期跳过，不能称部署通过。详见 [wave 3 验收](reports/continuous-wave3-integration-2026-09-10.md)。原 main 外部改动保留，开发结果推独立分支。
 
 本轮首个持续开发验收点 `e7e06bb`：**完整 6,114 项 / 495.678s 通过（1 skip）**，当前 live 只读副本全部 12 步复演通过（67 schemas / 35 lanes / 38 entries / 0 escaped），wheel 428 个 Python/SQL 文件逐字匹配。详见 [验收记录](reports/continuous-wave2-integration-2026-09-10.md)。未部署。
 
