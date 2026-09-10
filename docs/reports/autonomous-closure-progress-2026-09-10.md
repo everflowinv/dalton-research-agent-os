@@ -77,3 +77,13 @@ Next step：接受完整运行候选后备份部署、health与逐字核对、�
 - Original main worktree and other-session DeepSeek changes remain untouched. Current live code and mission are unchanged from the verified 18:50 deployment.
 
 Next: finish final-deliverable acceptance and publish; then controls repair and complete isolated workspace runtime acceptance. Shared connector/vendor capacity is still an explicit remaining implementation gap.
+
+## 19:20 UTC — fund deliverables deployed and verified
+
+- Accepted/deployed code `7bdccd8b6aad82afe48b275fd10320df0f0f5adc`: 6,456 tests / 565.218s, OK (1 skip). Wheel SHA `6afe6f5044f6075b01e5bbd98e98f3390472aece21802c4d54204307c038be01`, 539 files exact between wheel, retained source and live Python3.14 install.
+- Fresh live-copy rehearsal: 67 schemas, 40 tick entries, zero escaped. Backup `deploy-backup-20260910T191851Z`; source `.release-source.i8H79O`. Controller 84381 started 19:19:25.739604 UTC; health all true after startup. Mission verification passes with the original owner signature.
+- First product snapshot remains incomplete. Missing products/models still refuse export truthfully; installing an exporter does not fabricate a current model.
+- Workspace integrated tests: 116 / 13.066s OK (1 skip); real browser empty-to-active transition passed with zero POSTs. Two-process-set end-to-end fixture demonstrates distinct identities and independent stop/restart. Root fixed unknown transport concurrency retention; independent audit identified remaining multi-provider and policy-version quota-scope fixes, now in Sol development.
+- Provider-controls classification and selection admission are integrated but not yet deployed. A reversible operator-only config packet is prepared; it refuses until catalog capability sync. No human research approval is impersonated.
+
+Next: complete scope-stable model/connector capacity and controls validation; full frozen acceptance then deploy and observe genuine research results.
