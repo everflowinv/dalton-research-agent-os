@@ -52,7 +52,8 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
-from .lane_permission_control import record_controlled_failure
+from .lane_permission_control import (
+    clear_obsolete_permissions, permission_key, record_controlled_failure)
 from .store import content_hash
 
 WRITE_SCOPES: tuple[str, ...] = ("observation", "market_event")
@@ -164,6 +165,7 @@ class MissionHkexLaneCoordinator:
             "hkex_filings", state_dir=failure_ledger_dir or state_dir,
             clock=self.clock, max_transient_failures=MAX_FAILURES_PER_COMPANY)
         self._emitted: set[str] = set()
+        self._mission_snapshot: Mapping[str, Any] = {}
         # (company_ref, operation) -> the rows already read, newest last. This
         # is what makes the derived context possible at all: the pace of a
         # buy-back and the trailing ninety days of a director's dealing are
@@ -173,7 +175,8 @@ class MissionHkexLaneCoordinator:
 
     # -- what is due -------------------------------------------------------
 
-    def due(self, company: Mapping[str, str], today: str) -> dict[str, Any] | None:
+    def due(self, company: Mapping[str, str], today: str, *,
+            excluded: frozenset[str] = frozenset()) -> dict[str, Any] | None:
         """The next read for one company, or None when it is current for today.
 
         Order is fixed rather than round-robin. The buy-back tape is the only
@@ -205,7 +208,7 @@ class MissionHkexLaneCoordinator:
             }),
         )
         for operation, parameters in plans:
-            if operation not in approved:
+            if operation not in approved or operation in excluded:
                 continue
             key = (company["company_ref"], operation, today)
             if key in self._done:
@@ -281,7 +284,12 @@ class MissionHkexLaneCoordinator:
             return settled
         if settled.get("status") != "succeeded":
             item_key = item_key or self._settled_key(settled)
-            settled["failure"] = self.failure_budget.record_settled(item_key, settled).as_wire()
+            reason = settled.get("failure_reason") or f"last run: {settled.get('status')}"
+            failure_status = ("not_authorized" if "not approved" in str(reason).lower()
+                              else str(settled.get("status") or "failed"))
+            settled["failure"] = record_controlled_failure(
+                self.failure_budget, item_key, self._mission_snapshot, self.launcher,
+                reason=str(reason), status=failure_status).as_wire()
             # Not marked done: a failed run learned nothing, and marking it
             # would lose the day permanently on a transient error.
             return settled
@@ -297,11 +305,19 @@ class MissionHkexLaneCoordinator:
         if resolver is None:
             return content_hash({"operation": operation,
                                  "approved": list(self.launcher.approved_operations())})
-        path = resolver(operation)
+        paths = [resolver(operation)]
+        if operation == "next_day_disclosure_returns":
+            daily = getattr(self.launcher, "daily_acquisition_governance_path", None)
+            if daily is not None:
+                paths.append(daily())
         try:
-            return content_hash({"path": str(path), "bytes": path.read_text("utf-8")})
+            return content_hash([
+                {"path": str(path), "bytes": path.read_text("utf-8")}
+                for path in paths if path is not None
+            ])
         except Exception:  # noqa: BLE001
-            return content_hash({"path": str(path), "state": "unreadable"})
+            return content_hash({"paths": [str(path) for path in paths],
+                                 "state": "unreadable"})
 
     def _item_key(self, company_ref: str, operation: str,
                   parameters: Mapping[str, Any]) -> str:
@@ -385,8 +401,16 @@ class MissionHkexLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission",
                     "settled": settled}
+        self._mission_snapshot = mission
         withheld = missing_scopes(mission)
         if withheld:
+            business = "permission|top|hkex_filings"
+            current = permission_key(business, mission, self.launcher)
+            clear_obsolete_permissions(
+                self.failure_budget, current, scope_prefix="permission|top|")
+            decision = self.failure_budget.blocked(current) or record_controlled_failure(
+                self.failure_budget, business, mission, self.launcher,
+                reason="mission does not grant " + ",".join(withheld), status="gated")
             return {
                 "status": "ungranted", "settled": settled,
                 "reason": (
@@ -394,8 +418,11 @@ class MissionHkexLaneCoordinator:
                     "autonomy.may_write; reading Hong Kong disclosure into the "
                     "event ledger without both grants is not something to work "
                     "around"
-                ),
+                ), "failure": decision.as_wire(),
             }
+        for row in self.failure_budget.permission_items():
+            if row["item_key"].startswith("permission|top|"):
+                self.failure_budget.clear(row["item_key"])
         if not self.launcher.approved_operations():
             return {
                 "status": "unconfigured", "settled": settled,
@@ -420,7 +447,8 @@ class MissionHkexLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in universe:
             company_ref = company["company_ref"]
-            plan = self.due(company, today)
+            excluded: frozenset[str] = frozenset()
+            plan = self.due(company, today, excluded=excluded)
             while plan is not None:
                 item_key = self._item_key(
                     company_ref, plan["operation"], plan["parameters"])
@@ -436,8 +464,8 @@ class MissionHkexLaneCoordinator:
                 if blocked.action != "terminal":
                     plan = None
                     break
-                self._remember(plan["key"])
-                plan = self.due(company, today)
+                excluded = excluded | {plan["operation"]}
+                plan = self.due(company, today, excluded=excluded)
             if plan is None:
                 if not any(row.get("company_ref") == company_ref for row in skipped):
                     skipped.append({"company_ref": company_ref, "reason": "current_today"})

@@ -668,6 +668,26 @@ class LaneTests(unittest.TestCase):
             new = coordinator._item_key(
                 COMPANY, NEXT_DAY_DISCLOSURE_OPERATION, parameters)
             self.assertNotEqual(old, new)
+            daily_path = governance / GOVERNANCE_FILENAME_BY_OPERATION[
+                DAILY_BUYBACK_TAPE_OPERATION]
+            daily_path.write_text(json.dumps(build_hkex_filings_governance_record(
+                operation=DAILY_BUYBACK_TAPE_OPERATION,
+                approved_by="human:lumos", status="approved")), encoding="utf-8")
+            with_daily = coordinator._item_key(
+                COMPANY, NEXT_DAY_DISCLOSURE_OPERATION, parameters)
+            self.assertNotEqual(new, with_daily)
+
+    def test_real_not_approved_summary_is_a_permission_hold(self) -> None:
+        coordinator, launcher = self.coordinator(
+            operations=(NEXT_DAY_DISCLOSURE_OPERATION,))
+        launched = coordinator.dispatch_once()
+        launcher.tickets[launched["ticket_ref"]].update({
+            "status": "failed", "summary": {
+                "failure_reason": "HkexFilingsRunError: governance record is not approved"},
+        })
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["settled"]["failure"]["failure_class"],
+                         "not_permitted")
 
     def test_what_was_read_becomes_the_history_the_context_is_computed_from(self) -> None:
         coordinator, launcher = self.coordinator(
