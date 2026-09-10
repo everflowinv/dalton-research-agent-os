@@ -76,9 +76,10 @@
         ]
       },
       "permission_scope": "alphaengine_read",
+      "retired_reason": "no executor: bounded_alphaengine_probe runs alphaengine_get_document only",
       "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
       "source_ref": "source:alphaengine",
-      "status": "active",
+      "status": "retired",
       "template_ref": "probe-template:adhoc-alphaengine-search-library:v1",
       "verifier_ref": "verifier:source-level-coverage:0.1"
     },
@@ -115,9 +116,10 @@
         ]
       },
       "permission_scope": "public_web_read",
+      "retired_reason": "no executor: no bounded probe executor runs public_web_search",
       "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
       "source_ref": "source:public-web",
-      "status": "active",
+      "status": "retired",
       "template_ref": "probe-template:adhoc-web-search:v1",
       "verifier_ref": "verifier:source-level-coverage:0.1"
     }

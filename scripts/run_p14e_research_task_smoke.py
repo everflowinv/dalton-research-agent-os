@@ -74,6 +74,11 @@ def run(source_core: Path, *, simulate: bool, day: str | None) -> dict:
             }
             if simulate:
                 for spec in ADHOC_PROBE_TEMPLATES:
+                    if spec.get("status") != "active":
+                        # Retired in the catalogue: no executor runs it, so
+                        # publishing it here would only misreport the owner's
+                        # step.
+                        continue
                     authority.publish_probe_template(
                         spec["template_ref"], actor_ref=SIMULATED_OWNER,
                         **{
