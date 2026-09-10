@@ -214,7 +214,7 @@ def pending_event_groups(store: Any, missions: Any,
     candidates = []
     for company_ref in screen_passed_companies(missions, mission):
         for group in unjudged_event_groups(
-                events, judgements, company_ref=company_ref, limit=1,
+                events, judgements, company_ref=company_ref, limit=None,
                 mission_version_refs=tuple(sorted(allowed_versions)),
                 newest_first=True):
             group_type = buyback_group_key(group[0]) or ("event", group[0]["id"])

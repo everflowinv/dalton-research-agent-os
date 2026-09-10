@@ -244,6 +244,24 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(second["company_ref"], CTSH)
         self.assertIn("group:a", second["held"])
 
+    def test_a_refused_newest_group_does_not_starve_older_same_company(self):
+        candidates = [
+            {"company_ref": ACN, "event_ref": "event:new", "group_key": "group:new"},
+            {"company_ref": ACN, "event_ref": "event:old", "group_key": "group:old"},
+        ]
+        coordinator = MissionEventJudgementLaneCoordinator(
+            launcher=self.launcher, mission=lambda: self.mission,
+            pending=lambda mission: candidates,
+        )
+        first = coordinator.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], {
+            "judgement_status": "refused", "judged": 0, "refused": 1,
+            "failure_reason": "the verifier rejected the event content",
+        })
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["status"], "launched")
+        self.assertEqual(second["group_key"], "group:old")
+
     def test_content_hold_survives_restart_and_prevents_a_paid_loop(self):
         import tempfile
         with tempfile.TemporaryDirectory() as name:
@@ -376,8 +394,8 @@ class SelectionTests(P14aHarness):
                             occurred="2026-09-09T11:00:00+00:00")
         summary = run_judgement(
             state_dir=self.state_dir, summary_dir=self.state_dir / "target-summary",
-            company_ref=ACN, event_refs=(second["id"],),
-            event_group_hash=incremental_group_hash([second]),
+            company_ref=ACN, event_refs=(first["id"],),
+            event_group_hash=incremental_group_hash([first]),
             dry_run=True, now=NOW,
         )
         self.assertEqual(summary["judgement_status"], "dry_run")

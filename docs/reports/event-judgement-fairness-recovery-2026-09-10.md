@@ -21,11 +21,14 @@ company and event to the child, which filters to the exact group containing
 that event before any model call.
 Mission-family filtering happens in SQL before rows are grouped, so a foreign
 mission's event cannot contaminate or suppress a valid current group. The
-coordinator reads one newest group per eligible company; it does not introduce
-an unconfigured sentinel scan cap. The child receives the complete selected
-member refs and group hash and revalidates them against the newest current
-group. A late member therefore produces a quiet zero-cost stale-ticket result,
-then a new group identity on the next tick.
+coordinator enumerates the finite unjudged ledger by group without an invented
+numeric scan cap; the existing configured run and per-company limits continue
+to bound paid work. It can therefore skip a held newest group and reach an
+older group in the same company. The child receives the complete selected
+member refs and group hash and revalidates that exact group wherever it occurs.
+A late member of the same group produces a quiet zero-cost stale-ticket result,
+then a new group identity on the next tick. A newer unrelated event does not
+invalidate the selected group.
 
 Failures use the persistent `LaneFailureBudget` per group. Content refusals are
 terminal for that exact evidence/configuration identity. Dependency and
@@ -45,10 +48,11 @@ semantics.
 
 `PYTHONPATH=src python3 -m unittest tests.test_mission_event_judgement_lane tests.test_event_judgement_config_retry tests.test_event_judgement`
 
-Result: 148 tests passed. Added coverage proves mission and universe exclusion,
+Result: 149 tests passed. Added coverage proves mission and universe exclusion,
 newest-refusal fairness across companies, persistent restart holds, bounded
 busy retries, exact child group selection with zero model calls, configuration
 recovery, launcher argv binding, foreign-row filtering before grouping,
-membership-drift refusal, and finished-ticket adoption across restart.
+membership-drift refusal, same-company progress past a held newest group,
+unrelated-newer-event stability, and finished-ticket adoption across restart.
 
 No live state was changed and no model or network call was made.

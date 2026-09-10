@@ -206,7 +206,7 @@ def unjudged_events(
     judgements: EventJudgementAuthority,
     *,
     company_ref: str,
-    limit: int,
+    limit: int | None,
 ) -> list[dict[str, Any]]:
     """This company's oldest events with no judgement.
 
@@ -275,7 +275,7 @@ def unjudged_event_groups(
         if key in positions:
             groups[positions[key]].append(event)
             continue
-        if len(groups) >= max(1, int(limit)):
+        if limit is not None and len(groups) >= max(1, int(limit)):
             continue
         positions[key] = len(groups)
         groups.append([event])
@@ -504,11 +504,13 @@ def run_judgement(
             ).fetchall())
         batch: list[list[dict[str, Any]]] = []
         if event_refs is not None:
+            expected_refs = set(event_refs)
             current = unjudged_event_groups(
-                events, judgements, company_ref=company_ref or "", limit=1,
-                mission_version_refs=allowed_versions, newest_first=True, now=moment,
-            )
-            target = current[0] if current else []
+                events, judgements, company_ref=company_ref or "", limit=None,
+                mission_version_refs=allowed_versions, newest_first=True, now=moment)
+            matching = [group for group in current
+                        if expected_refs.intersection(item["id"] for item in group)]
+            target = matching[0] if len(matching) == 1 else []
             if target:
                 key = buyback_group_key(target[0]) or ("event", target[0]["id"])
                 judged_refs = {
@@ -518,7 +520,7 @@ def run_judgement(
                 }
                 valid = (
                     len({item["id"] for item in target}) == len(target)
-                    and {item["id"] for item in target} == set(event_refs)
+                    and {item["id"] for item in target} == expected_refs
                     and company_ref in tracked
                     and all(item["company_ref"] == company_ref for item in target)
                     and all(item.get("mission_version_ref") in allowed_versions
