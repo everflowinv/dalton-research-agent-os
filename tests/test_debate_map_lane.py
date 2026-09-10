@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.cockpit_model import CockpitModelError
 from dalton_core.debate_map import DebateMapAuthority, evidence_fingerprint
 from dalton_core.debate_map_cli import (
     WRITE_SCOPE, build_parser, can_rebind, granted, run_debate_map, subject_kind_for,
@@ -278,6 +279,8 @@ class ChildRunTests(unittest.TestCase):
                       lambda _c, _r: "family-a"):
             summary = self.harness.run(dry_run=False, model_config_path=config)
         self.assertEqual(summary["map_status"], "not_independent")
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["failure_reason"])
         self.assertIsNone(DebateMapAuthority(self.harness.store).current(ACN))
 
     def test_an_unresolvable_family_publishes_nothing(self):
@@ -287,7 +290,26 @@ class ChildRunTests(unittest.TestCase):
         with patch("dalton_core.debate_map_cli.CockpitModel", model):
             summary = self.harness.run(dry_run=False, model_config_path=config)
         self.assertEqual(summary["map_status"], "not_independent")
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["failure_reason"])
         self.assertIsNone(DebateMapAuthority(self.harness.store).current(ACN))
+
+    def test_a_verifier_that_does_not_run_is_a_failed_summary(self):
+        self.harness.add_claims()
+        config = self.harness.with_model()
+        model = FakeModel([draft_reply(), PASS])
+        original_call = model.call
+        def fail_verifier(**kwargs):
+            if len(model.prompts) == 1:
+                raise CockpitModelError("provider contract refused")
+            return original_call(**kwargs)
+        model.call = fail_verifier
+        with patch("dalton_core.debate_map_cli.CockpitModel", model), \
+                patch("dalton_core.debate_map_cli.route_family", fake_family):
+            summary = self.harness.run(dry_run=False, model_config_path=config)
+        self.assertEqual((summary["status"], summary["map_status"]),
+                         ("failed", "unverified"))
+        self.assertIn("provider contract refused", summary["failure_reason"])
 
     def test_the_cheap_reader_agrees_with_the_expensive_one(self):
         # The lane asks every subject every tick; it must get the same answer

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 import dalton_core
+from dalton_core.cockpit_model import CockpitModelError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -439,6 +440,8 @@ class ProposalRunTests(ConvictionHarness):
         summary, _ = self.draft([draft_reply(
             our_view={"statement": "x", "refs": ["T9"]})])
         self.assertEqual(summary["call_status"], "refused")
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["failure_reason"])
         self.assertEqual(ConvictionCallAuthority(self.store).counts()["proposals"], 0)
 
     def test_a_configuration_with_no_router_publishes_nothing(self):
@@ -451,6 +454,8 @@ class ProposalRunTests(ConvictionHarness):
         with patch("dalton_core.conviction_call_cli.CockpitModel", model):
             summary = self.run_child(dry_run=False, model_config_path=config)
         self.assertEqual(summary["call_status"], "not_independent")
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["failure_reason"])
         self.assertEqual(ConvictionCallAuthority(self.store).counts()["proposals"], 0)
 
     def test_a_verifier_on_the_producers_family_publishes_nothing(self):
@@ -461,6 +466,8 @@ class ProposalRunTests(ConvictionHarness):
                       lambda _c, _r: "family-a"):
             summary = self.run_child(dry_run=False, model_config_path=config)
         self.assertEqual(summary["call_status"], "not_independent")
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["failure_reason"])
         self.assertEqual(ConvictionCallAuthority(self.store).counts()["proposals"], 0)
 
     def test_an_unsourced_market_view_is_no_call_rather_than_a_weak_one(self):
@@ -469,6 +476,22 @@ class ProposalRunTests(ConvictionHarness):
             "statement": None, "refs": [], "sources": []})])
         self.assertEqual(summary["call_status"], "no_variant_view")
         self.assertEqual(len(model.prompts), 1)
+
+    def test_a_verifier_that_does_not_run_is_a_failed_summary(self):
+        config = self.with_model()
+        model = FakeModel([draft_reply(), PASS])
+        original_call = model.call
+        def fail_verifier(**kwargs):
+            if len(model.prompts) == 1:
+                raise CockpitModelError("provider contract refused")
+            return original_call(**kwargs)
+        model.call = fail_verifier
+        with patch("dalton_core.conviction_call_cli.CockpitModel", model), \
+                patch("dalton_core.conviction_call_cli.route_family", fake_family):
+            summary = self.run_child(dry_run=False, model_config_path=config)
+        self.assertEqual((summary["status"], summary["call_status"]),
+                         ("failed", "unverified"))
+        self.assertIn("provider contract refused", summary["failure_reason"])
 
 
 class FakeLauncher:

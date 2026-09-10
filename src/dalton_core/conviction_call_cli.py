@@ -391,13 +391,18 @@ def run_conviction_call(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
-            summary.update({"status": "succeeded", "call_status": "model_unavailable",
+            summary.update({"status": "failed", "call_status": "model_unavailable",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         summary["cost_micros"] = int(drafted.get("cost_micros") or 0)
         summary["rubric_findings"] = list(drafted["rubric"]["findings"])
         if drafted["status"] != "verified":
-            summary.update({"status": "succeeded", "call_status": drafted["status"],
+            run_status = (
+                "succeeded"
+                if drafted["status"] == "no_variant_view"
+                else "failed"
+            )
+            summary.update({"status": run_status, "call_status": drafted["status"],
                             "failure_reason": drafted.get("reason")})
             return summary
         call = drafted["call"]

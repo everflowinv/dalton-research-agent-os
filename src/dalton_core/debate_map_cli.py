@@ -220,13 +220,18 @@ def run_debate_map(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
-            summary.update({"status": "succeeded", "map_status": "model_unavailable",
+            summary.update({"status": "failed", "map_status": "model_unavailable",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         summary["cost_micros"] = int(drafted.get("cost_micros") or 0)
         summary["rejected"] = len(drafted.get("rejected") or [])
         if drafted["status"] != "verified":
-            summary.update({"status": "succeeded", "map_status": drafted["status"],
+            run_status = (
+                "succeeded"
+                if drafted["status"] == "no_admitted_debates"
+                else "failed"
+            )
+            summary.update({"status": run_status, "map_status": drafted["status"],
                             "failure_reason": drafted.get("reason")})
             return summary
         debates = drafted["debates"]
