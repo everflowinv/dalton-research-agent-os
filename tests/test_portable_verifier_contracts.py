@@ -100,3 +100,42 @@ process.exit(validated ? 0 : 3);'''
             self.assertIsNone(conviction.blocked(new))
             self.assertNotEqual(conviction_run_digest("company:ACN", "evidence", "1" * 64),
                                 conviction_run_digest("company:ACN", "evidence", "2" * 64))
+
+class SemanticFallbackTests(unittest.TestCase):
+    def test_dossier_rejects_empty_unit_after_provider_constraint_projection(self) -> None:
+        from dalton_core.company_dossier_draft import (
+            DossierDraftRefused, VERIFIER_FINDING_CODES, validate_verifier_output,
+        )
+        with self.assertRaises(DossierDraftRefused):
+            validate_verifier_output({"verdict": "reject", "findings": [{
+                "unit": "", "code": VERIFIER_FINDING_CODES[0], "detail": "specific",
+            }]})
+
+    def test_deep_insight_rejects_empty_question_ref_after_projection(self) -> None:
+        from dalton_core.deep_insight_gate_draft import (
+            GateDraftRefused, VERIFIER_FINDING_CODES, validate_verifier_output,
+        )
+        with self.assertRaises(GateDraftRefused):
+            validate_verifier_output({"verdict": "reject", "findings": [{
+                "question_ref": "", "code": VERIFIER_FINDING_CODES[0],
+                "detail": "specific",
+            }]})
+
+    def test_memo_rejects_invalid_hash_and_duplicate_codes_after_projection(self) -> None:
+        from dalton_core.investment_memo_draft import FINDING_CODES, verify_memo
+
+        class Model:
+            def __init__(self, payload):
+                self.payload = payload
+            def call(self, **_kwargs):
+                return {"text": json.dumps(self.payload), "cost_micros": 0}
+
+        args = dict(sections=[], questions=[], material=[], material_hash="a" * 64,
+                    mission={"id": "mission:1", "content_hash": "b" * 64},
+                    producer_route_decision_refs=["route-decision:producer"])
+        invalid_hash = verify_memo(Model({"verdict": "reject", "verified_body_hash": "bad",
+                            "finding_codes": [FINDING_CODES[0]]}), **args)
+        self.assertEqual(invalid_hash["status"], "refused")
+        duplicate = verify_memo(Model({"verdict": "reject", "verified_body_hash": "a" * 64,
+                            "finding_codes": [FINDING_CODES[0], FINDING_CODES[0]]}), **args)
+        self.assertEqual(duplicate["status"], "refused")

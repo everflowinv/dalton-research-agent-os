@@ -185,6 +185,7 @@ def verify_memo(model: Any, *, sections: Sequence[Mapping[str, Any]], questions:
     codes = value["finding_codes"]
     if value["verified_body_hash"] != material_hash or value["verdict"] not in ("pass", "reject") \
             or not isinstance(codes, list) or any(code not in FINDING_CODES for code in codes) \
+            or len(codes) != len(set(codes)) \
             or (value["verdict"] == "pass") != (codes == []):
         return {"status": "refused", "reason": "verifier verdict is inconsistent or unbound",
                 "cost_micros": int(call.get("cost_micros") or 0)}

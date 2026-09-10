@@ -571,12 +571,15 @@ def validate_verifier_output(value: Any) -> dict[str, Any]:
     for row in rows:
         if not isinstance(row, Mapping) or set(row) != {"unit", "code", "detail"}:
             raise DossierDraftRefused("each finding must be exactly unit, code and detail")
+        unit = str(row["unit"] or "").strip()
+        if not unit:
+            raise DossierDraftRefused("a finding's unit must be non-empty")
         if row["code"] not in VERIFIER_FINDING_CODES:
             raise DossierDraftRefused(f"unknown finding code: {row['code']!r}")
         detail = str(row["detail"] or "").strip()
         if not detail or len(detail) > 300 or "\n" in detail:
             raise DossierDraftRefused("a finding's detail is one short sentence")
-        findings.append({"unit": str(row["unit"]), "code": str(row["code"]),
+        findings.append({"unit": unit, "code": str(row["code"]),
                          "detail": detail})
     if verdict == "pass" and findings:
         raise DossierDraftRefused("a pass verdict must have no findings")

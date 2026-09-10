@@ -668,12 +668,15 @@ def validate_verifier_output(value: Any) -> dict[str, Any]:
         if not isinstance(row, Mapping) or set(row) != {"question_ref", "code", "detail"}:
             raise GateDraftRefused(
                 "each finding must be exactly question_ref, code and detail")
+        question_ref = str(row["question_ref"] or "").strip()
+        if not question_ref:
+            raise GateDraftRefused("a finding's question_ref must be non-empty")
         if row["code"] not in VERIFIER_FINDING_CODES:
             raise GateDraftRefused(f"unknown finding code: {row['code']!r}")
         detail = str(row["detail"] or "").strip()
         if not detail or len(detail) > 300 or "\n" in detail:
             raise GateDraftRefused("a finding's detail is one short sentence")
-        findings.append({"question_ref": str(row["question_ref"]),
+        findings.append({"question_ref": question_ref,
                          "code": str(row["code"]), "detail": detail})
     if verdict == "pass" and findings:
         raise GateDraftRefused("a pass verdict must have no findings")

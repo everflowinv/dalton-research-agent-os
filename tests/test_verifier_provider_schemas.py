@@ -44,4 +44,4 @@ class VerifierProviderSchemaTests(unittest.TestCase):
         memo = self.schema("investment-memo-verifier-provider-output-v0.1.schema.json")
         self.assertEqual(set(memo["properties"]["finding_codes"]["items"]["enum"]), set(MEMO_CODES))
         zero = self.schema("zero-base-review-verifier-provider-output-v0.1.schema.json")
-        self.assertEqual(zero["properties"]["findings"]["items"]["maxLength"], 500)
+        self.assertEqual(zero["properties"]["findings"]["items"], {"type": "string"})
