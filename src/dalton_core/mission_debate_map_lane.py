@@ -55,10 +55,14 @@ DEBATE_MAP_MODEL_CONFIG = "initial-screen-model-config.json"
 def _business_key(subject_ref: str, fingerprint: str,
                   mission: dict[str, Any]) -> str:
     from .debate_map_draft import DRAFT_CONTRACT_HASH
+    from .cockpit_model import verifier_provider_contract_fingerprint
 
+    verifier_contract = verifier_provider_contract_fingerprint(
+        "debate_map_verifier")
     return (
         f"{subject_ref}|{fingerprint}|{mission['id']}|"
-        f"{mission['content_hash']}|contract:{DRAFT_CONTRACT_HASH}"
+        f"{mission['content_hash']}|contract:{DRAFT_CONTRACT_HASH}|"
+        f"verifier_contract:{verifier_contract}"
     )
 
 

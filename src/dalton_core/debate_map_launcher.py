@@ -19,10 +19,15 @@ from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
 TICKET_PREFIX = "debate-map-run"
 
 
-def run_digest(subject_ref: str, fingerprint: str) -> str:
+def run_digest(
+    subject_ref: str, fingerprint: str, contract_fingerprint: str | None = None,
+) -> str:
     """The 24-hex name of one debate-map run."""
 
-    payload = "|".join([TICKET_PREFIX, subject_ref, fingerprint])
+    parts = [TICKET_PREFIX, subject_ref, fingerprint]
+    if contract_fingerprint is not None:
+        parts.append(contract_fingerprint)
+    payload = "|".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
@@ -83,13 +88,17 @@ class DebateMapLauncher(LaneChildLauncher):
             raise LaneChildRejected("a debate map run needs an evidence fingerprint")
         subject_ref = subject_ref.strip()
         fingerprint = fingerprint.strip()
-        digest = run_digest(subject_ref, fingerprint)
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        contract_fingerprint = verifier_provider_contract_fingerprint(
+            "debate_map_verifier")
+        digest = run_digest(subject_ref, fingerprint, contract_fingerprint)
         return self.spawn(
             digest=digest,
             record={
                 "subject_ref": subject_ref,
                 "evidence_fingerprint": fingerprint,
                 "run_digest": digest,
+                "verifier_provider_contract": contract_fingerprint,
                 "model_configured": self.configured,
             },
             subject_ref=subject_ref,

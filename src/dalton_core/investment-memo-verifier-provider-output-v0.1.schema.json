@@ -16,12 +16,10 @@
       ]
     },
     "verified_body_hash": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
+      "type": "string"
     },
     "finding_codes": {
       "type": "array",
-      "uniqueItems": true,
       "items": {
         "enum": [
           "unsupported_statement",

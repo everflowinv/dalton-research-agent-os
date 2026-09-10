@@ -13,9 +13,9 @@
         "additionalProperties": false,
         "required": ["unit", "code", "detail"],
         "properties": {
-          "unit": {"type": "string", "minLength": 1},
+          "unit": {"type": "string"},
           "code": {"enum": ["unsupported_sentence", "number_not_in_source", "structure_deviation", "conclusion_beyond_evidence"]},
-          "detail": {"type": "string", "minLength": 1, "maxLength": 300}
+          "detail": {"type": "string"}
         }
       }
     }

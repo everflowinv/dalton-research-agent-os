@@ -56,6 +56,14 @@ DRIVER_KEY = "mission_conviction"
 PUBLISHED_STATUS = "fresh"
 
 
+def _business_key(company_ref: str, fingerprint: str) -> str:
+    from .cockpit_model import verifier_provider_contract_fingerprint
+
+    contract = verifier_provider_contract_fingerprint(
+        "conviction_call_verifier")
+    return f"{company_ref}|{fingerprint}|verifier_contract:{contract}"
+
+
 class MissionConvictionLaneCoordinator:
     """Launch and settle the conviction-call lane."""
 
@@ -126,7 +134,7 @@ class MissionConvictionLaneCoordinator:
         company_ref = settled.get("company_ref")
         fingerprint = settled.get("evidence_fingerprint")
         if hold and company_ref and fingerprint:
-            key = f"{company_ref}|{fingerprint}"
+            key = _business_key(str(company_ref), str(fingerprint))
             reason = settled.get("failure_reason") or f"last run: {call_status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
@@ -135,7 +143,8 @@ class MissionConvictionLaneCoordinator:
                     getattr(self, "models", None)), status=str(call_status or settled.get("status")),
             ).as_wire()
         elif company_ref and fingerprint:
-            settled["resumed"] = self.budget.clear(f"{company_ref}|{fingerprint}")
+            settled["resumed"] = self.budget.clear(
+                _business_key(str(company_ref), str(fingerprint)))
         return settled
 
     # -- the tick ---------------------------------------------------------
@@ -202,7 +211,7 @@ class MissionConvictionLaneCoordinator:
                         company_ref, fingerprint,
                         f"{company_ref} already has a call in {week_key(now)}")
                     continue
-            business_key = f"{company_ref}|{fingerprint}"
+            business_key = _business_key(str(company_ref), str(fingerprint))
 
             permission = current_permission(
 

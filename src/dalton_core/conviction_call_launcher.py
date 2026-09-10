@@ -20,10 +20,15 @@ from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
 TICKET_PREFIX = "conviction-call-run"
 
 
-def run_digest(company_ref: str, fingerprint: str) -> str:
+def run_digest(
+    company_ref: str, fingerprint: str, contract_fingerprint: str | None = None,
+) -> str:
     """The 24-hex name of one conviction-call run."""
 
-    payload = "|".join([TICKET_PREFIX, company_ref, fingerprint])
+    parts = [TICKET_PREFIX, company_ref, fingerprint]
+    if contract_fingerprint is not None:
+        parts.append(contract_fingerprint)
+    payload = "|".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
@@ -83,13 +88,17 @@ class ConvictionCallLauncher(LaneChildLauncher):
             raise LaneChildRejected("a conviction call run needs an evidence fingerprint")
         company_ref = company_ref.strip()
         fingerprint = fingerprint.strip()
-        digest = run_digest(company_ref, fingerprint)
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        contract_fingerprint = verifier_provider_contract_fingerprint(
+            "conviction_call_verifier")
+        digest = run_digest(company_ref, fingerprint, contract_fingerprint)
         return self.spawn(
             digest=digest,
             record={
                 "company_ref": company_ref,
                 "evidence_fingerprint": fingerprint,
                 "run_digest": digest,
+                "verifier_provider_contract": contract_fingerprint,
                 "model_configured": self.configured,
             },
             company_ref=company_ref,

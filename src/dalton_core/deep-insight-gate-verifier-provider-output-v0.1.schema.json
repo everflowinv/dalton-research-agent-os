@@ -26,8 +26,7 @@
         ],
         "properties": {
           "question_ref": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "code": {
             "enum": [
@@ -39,9 +38,7 @@
             ]
           },
           "detail": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 300
+            "type": "string"
           }
         }
       }
