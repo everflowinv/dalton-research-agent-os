@@ -121,3 +121,13 @@ Owner reasserted implementation order: finish foundational capabilities and thei
 - Old thesis-impact verification remains bound to policy-3 while current governance is policy-11. This is a separate human policy-redrive decision; the stopped service will not be silently enabled by this release or profile repair.
 
 Next: accept final full-suite receipt, deploy and verify installed bytes/mission/health, then run the exact stopped-window verifier selection and observe real scheduled output. Advanced investment methods remain queued behind this foundation work.
+
+## 20:22 UTC — foundation deployed; actual research failures drive the next work
+
+- Accepted/deployed `2dadff58115f0254525695b6d69870d3426de8fc`: 6,555 tests / 543.139s, OK (1 skip), receipt binds clean start/end commit and log SHA. Wheel SHA `c9f39399a26d17e28484da51f6c7cac3c594a07806513f837d0f2d578ecb4a54`; all 548 installed files match. Fresh rehearsal passed 67 schemas/40 tick entries/zero escape.
+- Backup `deploy-backup-20260910T201125Z`, retained source `.release-source.vvJHy2`. Eleven explicit verifier-purpose selections applied at 20:14 UTC with zero broker calls during selection, no mission change. Controller 94409 and health verified. Private release-manifest historical path fields were reconciled to the current receipt; prior manifest retained.
+- First real artifact acceptance remains 0/15. A dossier reported top-level success despite verification_failed, and an event run reported success despite all eight effects being refused. BUSY broker capacity was classified unclassified_failure. Separate Sol fixes are in progress; no paid canaries or relaxed acceptance.
+- DebateMap/ConvictionCall independent routes exposed a missing real provider-output contract. `e59deff` adds closed packaged schemas and actual adapter/socket requiredControls tests; 209 focused tests pass. This fix and connector binding CLI `d479e89` are integrated but not yet deployed.
+- Old thesis-impact policy supersession remains a separate human decision. Advanced investment/narrative/Bayesian capability remains design-only until foundational research works end to end.
+
+Next: complete BUSY recovery, truthful task summaries and extraction retry diagnosis, then accept a new frozen release and observe genuine scheduled products. Preserve original main worktree's unrelated DeepSeek edits. Completed temporary rehearsal state was removed to free disk; reports and live backups retained.
