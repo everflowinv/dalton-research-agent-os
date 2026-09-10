@@ -828,6 +828,7 @@ def research_task_view(
     day: str | None = None,
     mission: Mapping[str, Any] | None = None,
     retired: Sequence[str] = (),
+    budget_db: str | Path | None = None,
 ) -> dict[str, Any]:
     """"正在专项研究 X / 预算用了多少 / 结论或缺口", per company.
 
