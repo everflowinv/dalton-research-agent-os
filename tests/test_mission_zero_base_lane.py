@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from dalton_core.mission_zero_base_lane import (
     MissionZeroBaseLaneCoordinator,
@@ -109,6 +111,33 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(lane.dispatch_once()["status"], "held")
         lane.lane_state = lambda _m, _n: {"due": [], "checks_digest": "digest-2"}
         self.assertEqual(lane.dispatch_once()["status"], "launched")
+
+    def test_dependency_park_replays_and_same_batch_gets_a_probe(self) -> None:
+        with TemporaryDirectory() as directory:
+            launcher = FakeLauncher()
+            def build():
+                return MissionZeroBaseLaneCoordinator(
+                    launcher=launcher, mission=lambda: MISSION,
+                    lane_state=lambda _m, _n: {
+                        "due": [], "checks_digest": "digest-1"},
+                    clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc),
+                    failure_ledger_dir=Path(directory),
+                )
+            lane = build()
+            first = lane.dispatch_once()
+            launcher.tickets[first["ticket_ref"]] = {
+                "status": "failed", "mode": "checks", "batch_ref": "digest-1",
+                "summary": {"failure_reason": "model_unavailable"},
+            }
+            probe = lane.dispatch_once()
+            self.assertEqual(probe["status"], "launched")
+            launcher.tickets[probe["ticket_ref"]] = {
+                "status": "failed", "mode": "checks", "batch_ref": "digest-1",
+                "summary": {"failure_reason": "model_unavailable"},
+            }
+            restarted = build()
+            self.assertEqual(len(restarted.budget.parked_items()), 1)
+            self.assertEqual(restarted.dispatch_once()["status"], "launched")
 
     def test_a_running_child_keeps_the_slot(self) -> None:
         launcher = FakeLauncher()

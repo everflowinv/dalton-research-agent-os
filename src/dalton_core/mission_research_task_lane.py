@@ -41,6 +41,8 @@ from .lane_child_launcher import (
     write_owner_only,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .store import canonical_json
 
 # The lane exists where its own configuration does.  A research task spends the
 # mission's money on questions nobody wrote down in advance, so it is opt-in at
@@ -51,6 +53,8 @@ IDLE_HOLD = timedelta(hours=1)
 # A failed or orphaned child is held the same hour rather than respawned every
 # five minutes: whatever refused it will still refuse it in one minute.
 FAILURE_HOLD = timedelta(hours=1)
+DRIVER_KEY = "research_task"
+MAX_TRANSIENT_FAILURES = 3
 
 
 class ResearchTaskCoordinator:
@@ -63,6 +67,7 @@ class ResearchTaskCoordinator:
         launcher: Any | None,
         budget_db: Any | None = None,
         clock: Callable[[], datetime] | None = None,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
@@ -74,6 +79,12 @@ class ResearchTaskCoordinator:
         # guesses it wrong reports a full pool with no way to tell.
         self.budget_db = budget_db
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.failure_budget = lane_budget(
+            DRIVER_KEY,
+            state_dir=(failure_ledger_dir if failure_ledger_dir is not None
+                       else getattr(launcher, "state_dir", None)),
+            clock=self.clock, max_transient_failures=MAX_TRANSIENT_FAILURES,
+        )
 
     # -- reading the world -------------------------------------------------
 
@@ -166,8 +177,14 @@ class ResearchTaskCoordinator:
         if not decision["granted"]:
             # The switch, stated rather than hidden: the reasons are the two
             # owner acts that are missing.
+            permission = self.failure_budget.record(
+                f"permission|{mission.get('id')}",
+                status="gated:not permitted " + ",".join(decision["reasons"]),
+            )
             return {"status": "not_granted", "reasons": decision["reasons"],
-                    **settled}
+                    "failure": permission.as_wire(), **settled}
+        for row in self.failure_budget.permission_items():
+            self.failure_budget.clear(row["item_key"])
         day = self.clock().astimezone(timezone.utc).date().isoformat()
         state = pool_state(
             authority, mission, day=day, budget_db=self.budget_db)
@@ -195,16 +212,21 @@ class ResearchTaskCoordinator:
                     # fail would otherwise be retried ten minutes later, and a
                     # run that failed instantly would be held for an hour from
                     # a timestamp that meant something else.
-                    failed_at = latest.get("failed_at")
-                    if failed_at is None:
-                        failed_at = wire_time(self.clock())
+                    failed_item = canonical_json(latest.get("idle_signature") or {})
+                    if latest.get("failure_ticket_ref") != ticket["id"]:
+                        failure = self.failure_budget.record_settled(
+                            failed_item, {**result["last"],
+                                          "failure_reason": summary.get("failure_reason")},
+                        )
                         write_owner_only(self._latest_path(), {
-                            **latest, "failed_at": failed_at,
+                            **latest, "failure_ticket_ref": ticket["id"],
                         })
-                    if self._within(failed_at, FAILURE_HOLD):
-                        return {**result, "status": "held",
-                                "reason": "上一轮准入失败了，等一轮再重试",
-                                "failed_at": failed_at}
+                        result["last"]["failure"] = failure.as_wire()
+                else:
+                    succeeded_item = canonical_json(latest.get("idle_signature") or {})
+                    resumed = self.failure_budget.clear(succeeded_item)
+                    if resumed:
+                        result["last"]["resumed"] = resumed
         from .coverage_mission import CoverageMissionAuthority
 
         plan = CoverageMissionAuthority(self.store).latest_research_plan(mission["id"])
@@ -216,10 +238,21 @@ class ResearchTaskCoordinator:
             return {**result, "status": "skipped:pool_exhausted",
                     "reason": "今天的专项研究预算已经用完"}
         signature = self._signature(plan["plan_id"])
+        failure_item = canonical_json(signature)
+        dependency_probe = any(
+            row["item_key"] == failure_item
+            for row in self.failure_budget.parked_items()
+        )
+        blocked = self.failure_budget.blocked(failure_item)
+        if blocked is not None:
+            return {**result, "status": blocked.action, "signature": signature,
+                    "reason": self.failure_budget.failure_reason(failure_item),
+                    "failure": blocked.as_wire()}
         if (
             latest is not None
             and latest.get("idle_signature") == signature
             and self._within(latest.get("idle_at"), IDLE_HOLD)
+            and not dependency_probe
         ):
             return {**result, "status": "held", "signature": signature,
                     "reason": "计划和已派发的专项研究都没有变化"}
@@ -261,6 +294,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         coordinator = ResearchTaskCoordinator(
             store=server.store, launcher=launcher,
             budget_db=(server._planner_model_config or {}).get("budget_db"),
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

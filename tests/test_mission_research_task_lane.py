@@ -119,6 +119,28 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(held["last"]["status"], "failed")
         self.assertEqual(len(self.launcher.started), 1)
 
+    def test_dependency_failure_replays_and_same_signature_can_probe(self) -> None:
+        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        lane = ResearchTaskCoordinator(
+            store=self.store, launcher=self.launcher, clock=lambda: self.now,
+            failure_ledger_dir=self.state_dir,
+        )
+        first = lane.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], status="failed", summary={
+            "status": "failed", "failure_reason": "model_unavailable",
+        })
+        probe = lane.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.launcher.settle(probe["ticket_ref"], status="failed", summary={
+            "status": "failed", "failure_reason": "model_unavailable",
+        })
+        restarted = ResearchTaskCoordinator(
+            store=self.store, launcher=self.launcher, clock=lambda: self.now,
+            failure_ledger_dir=self.state_dir,
+        )
+        self.assertEqual(len(restarted.failure_budget.parked_items()), 1)
+        self.assertEqual(restarted.dispatch_once()["status"], "launched")
+
     def test_an_exhausted_pool_is_a_skip_with_the_name_c2_named_after_it(self) -> None:
         # The arithmetic is the test's own, and it divides exactly: this
         # fixture's mission allows $20 a day, the ad-hoc pool is a quarter of

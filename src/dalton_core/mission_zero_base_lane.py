@@ -39,6 +39,7 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
 from .zero_base_review import WRITE_SCOPE
 
 LAUNCHER_KWARG = "zero_base_review_launcher"
@@ -46,6 +47,8 @@ REVIEW_MODEL_CONFIG = "zero-base-review-model-config.json"
 VERIFIER_MODEL_CONFIG = "zero-base-review-verifier-model-config.json"
 TRACKING_POLICY = "tracking-policy.json"
 MAX_FAILURE_DETAIL_CHARS = 500
+DRIVER_KEY = "zero_base_review"
+MAX_TRANSIENT_FAILURES = 1
 
 
 def may_write_review(mission: Mapping[str, Any] | None) -> bool:
@@ -72,6 +75,7 @@ class MissionZeroBaseLaneCoordinator:
         mission: Callable[[], dict[str, Any] | None],
         lane_state: Callable[[Mapping[str, Any], datetime], dict[str, Any]],
         clock: Callable[[], datetime] | None = None,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.launcher = launcher
         self.mission = mission
@@ -87,7 +91,10 @@ class MissionZeroBaseLaneCoordinator:
         # tried again, because that is a different attempt.  Process-local: a
         # restart is nearly always a deploy, which is the likeliest thing to
         # have fixed it.
-        self._failed: dict[tuple[str, str], str] = {}
+        self.budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir, clock=self.clock,
+            max_transient_failures=MAX_TRANSIENT_FAILURES,
+        )
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -135,10 +142,14 @@ class MissionZeroBaseLaneCoordinator:
             digest = settled.get("checks_digest")
             if digest:
                 self._checked = str(digest)
-        elif mode and batch:
-            self._failed[(mode, batch)] = (
-                settled.get("failure_reason") or f"last run: {settled.get('status')}"
-            )
+        if mode and batch:
+            item = f"{mode}|{batch}"
+            if settled.get("status") == "succeeded":
+                resumed = self.budget.clear(item)
+                if resumed:
+                    settled["resumed"] = resumed
+            else:
+                settled["failure"] = self.budget.record_settled(item, settled).as_wire()
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -149,14 +160,21 @@ class MissionZeroBaseLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
         if not may_write_review(mission):
+            permission = self.budget.record(
+                f"permission|{mission.get('id') or mission.get('mission_ref')}",
+                status="gated:mission does not grant deliverable",
+            )
             return {
                 "status": "ungranted", "settled": settled,
+                "failure": permission.as_wire(),
                 "reason": (
                     f"this mission does not grant {WRITE_SCOPE} in autonomy.may_write; "
                     "a zero-base review is a deliverable-class artefact and is not "
                     "published without the grant"
                 ),
             }
+        for row in self.budget.permission_items():
+            self.budget.clear(row["item_key"])
         now = self.clock()
         try:
             state = self.lane_state(mission, now)
@@ -179,9 +197,12 @@ class MissionZeroBaseLaneCoordinator:
         else:
             return {"status": "idle", "settled": settled, "checks_digest": digest,
                     "reason": "每家公司这个月都已经从零重问过，判断结果台账也没有变动"}
-        held = self._failed.get((mode, batch))
-        if held is not None:
-            return {"status": "held", "mode": mode, "settled": settled, "reason": held}
+        item = f"{mode}|{batch}"
+        blocked = self.budget.blocked(item)
+        if blocked is not None:
+            return {"status": blocked.action, "mode": mode, "settled": settled,
+                    "reason": self.budget.failure_reason(item),
+                    "failure": blocked.as_wire()}
         try:
             ticket = self.launcher.start(
                 mode=mode, batch_ref=batch, company_refs=companies
@@ -256,6 +277,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
 
         coordinator = MissionZeroBaseLaneCoordinator(
             launcher=launcher, mission=mission, lane_state=lane_state,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

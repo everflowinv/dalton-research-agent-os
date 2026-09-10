@@ -42,6 +42,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .lane_registry import LaneSpec, register_lane
 from .lane_child_launcher import LaneChildRejected
+from .lane_failure_ledger import lane_budget
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -100,6 +101,7 @@ LEDGER_FILENAME = "crowd-observations.jsonl"
 # a source which is down is not asked once a minute, short enough that a
 # credential bound at lunchtime is picked up in the afternoon.
 FAILURE_COOL_OFF_TICKS = 12
+DRIVER_KEY = "crowd_source"
 
 
 class CrowdSourceLaneError(RuntimeError):
@@ -343,7 +345,9 @@ class CrowdSourceExecution:
             return {"status": "failed", "failure_reason": f"{type(exc).__name__}: {exc}"}
         if not getattr(governance, "approved", False):
             return {"status": "failed",
-                    "failure_reason": f"the {operation} governance record is not approved"}
+                    "failure_reason": (
+                        f"gated:governance the {operation} record is not approved"
+                    )}
         try:
             cleaned = self.launcher._validate(operation, parameters)
         except LaneChildRejected as exc:
@@ -418,6 +422,7 @@ class MissionCrowdSourceLaneCoordinator:
         actor_ref: str = "automation:coverage-mission",
         since: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.mission = mission
         self.runners = dict(runners)
@@ -426,6 +431,10 @@ class MissionCrowdSourceLaneCoordinator:
         self.actor_ref = actor_ref
         self.since = since
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.failure_budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir, clock=self.clock,
+            max_transient_failures=FAILURE_COOL_OFF_TICKS,
+        )
         self._cursor: dict[str, int] = {}
         # (source|company) -> (reason, ticks remaining before it is retried).
         self._failed: dict[str, tuple[str, int]] = {}
@@ -451,8 +460,15 @@ class MissionCrowdSourceLaneCoordinator:
         may_write = set((mission.get("autonomy") or {}).get("may_write") or ())
         missing = sorted(self.GRANTS - may_write)
         if missing:
+            permission = self.failure_budget.record(
+                f"permission|{mission.get('id') or mission.get('mission_ref')}",
+                status="gated:mission does not grant " + ",".join(missing),
+            )
             return {"status": "gated",
-                    "reason": f"mission does not grant {missing}"}
+                    "reason": f"mission does not grant {missing}",
+                    "failure": permission.as_wire()}
+        for row in self.failure_budget.permission_items():
+            self.failure_budget.clear(row["item_key"])
         return None
 
     def _connected_sources(self) -> set[str]:
@@ -482,6 +498,8 @@ class MissionCrowdSourceLaneCoordinator:
                 continue
             key = f"{source}|{company['company_ref']}"
             if key in self._failed:
+                continue
+            if self.failure_budget.blocked(key) is not None:
                 continue
             self._cursor[source] = index + 1
             return {"company_ref": company["company_ref"], **job}
@@ -537,17 +555,18 @@ class MissionCrowdSourceLaneCoordinator:
             )
         except Exception as exc:  # noqa: BLE001 - one read, reported not raised
             reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
-            self._hold(source, company_ref, reason)
+            failure = self._hold(source, company_ref, reason)
             return {"source": source, "status": "failed",
                     "company_ref": company_ref, "operation": operation,
-                    "reason": reason}
+                    "reason": reason, "failure": failure}
         if outcome.get("status") != "succeeded":
             reason = str(outcome.get("failure_reason")
                          or "the read failed without a reason")[:MAX_FAILURE_DETAIL_CHARS]
-            self._hold(source, company_ref, reason)
+            failure = self._hold(source, company_ref, reason)
             return {"source": source, "status": "failed",
                     "company_ref": company_ref, "operation": operation,
-                    "reason": reason, "ticket_ref": outcome.get("ticket_ref")}
+                    "reason": reason, "ticket_ref": outcome.get("ticket_ref"),
+                    "failure": failure}
         try:
             entries = observation_entries(
                 source_ref=execution.SOURCE_REF, company_ref=company_ref,
@@ -558,24 +577,30 @@ class MissionCrowdSourceLaneCoordinator:
             recorded = self.ledger.record(entries)
         except (CrowdSourceLaneError, OSError, KeyError) as exc:
             reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
-            self._hold(source, company_ref, reason)
+            failure = self._hold(source, company_ref, reason)
             return {"source": source, "status": "failed",
                     "company_ref": company_ref, "operation": operation,
-                    "reason": reason}
+                    "reason": reason, "failure": failure}
+        resumed = self.failure_budget.clear(f"{source}|{company_ref}")
         return {
             "source": source, "status": "recorded", "company_ref": company_ref,
             "operation": operation, "ticket_ref": outcome.get("ticket_ref"),
             "recorded": len(recorded["recorded"]),
             "duplicates": len(recorded["duplicates"]),
             "grade": CROWD_GRADE,
+            "resumed": resumed,
         }
 
     # -- the tick ----------------------------------------------------------
 
-    def _hold(self, source: str, company_ref: str, reason: str) -> None:
+    def _hold(self, source: str, company_ref: str, reason: str) -> dict[str, Any]:
         """Sit this pair out for a while, rather than for ever."""
 
-        self._failed[f"{source}|{company_ref}"] = (reason, FAILURE_COOL_OFF_TICKS)
+        key = f"{source}|{company_ref}"
+        decision = self.failure_budget.record(key, reason=reason, status="failed")
+        if decision.action == "retry":
+            self._failed[key] = (reason, FAILURE_COOL_OFF_TICKS)
+        return decision.as_wire()
 
     def _age_holds(self) -> None:
         """One tick off every hold; a configuration change clears them all.
@@ -589,6 +614,8 @@ class MissionCrowdSourceLaneCoordinator:
         if configuration != self._configuration:
             self._configuration = configuration
             self._failed.clear()
+            for row in self.failure_budget.permission_items():
+                self.failure_budget.clear(row["item_key"])
             return
         self._failed = {
             key: (reason, remaining - 1)
@@ -615,7 +642,14 @@ class MissionCrowdSourceLaneCoordinator:
     def held(self) -> dict[str, str]:
         """Which pairs are sitting out, and why. For the tick summary."""
 
-        return {key: reason for key, (reason, _ticks) in self._failed.items()}
+        rows = {key: reason for key, (reason, _ticks) in self._failed.items()}
+        for item in (
+            self.failure_budget.parked_items()
+            + self.failure_budget.terminal_items()
+            + self.failure_budget.permission_items()
+        ):
+            rows[item["item_key"]] = item["reason"]
+        return rows
 
     def dispatch_once(self) -> dict[str, Any]:
         """One bounded read per source, recorded before the tick returns."""
@@ -780,6 +814,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             source_map=load_crowd_source_map(launchers.source_map_path),
             ledger=CrowdObservationLedger(
                 Path(launchers.state_dir) / LEDGER_FILENAME),
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

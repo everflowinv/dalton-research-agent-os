@@ -52,6 +52,7 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
 from .research_cycle_reflection import (
     WRITE_SCOPE,
     build_reflection,
@@ -64,6 +65,8 @@ LAUNCHER_KWARG = "reflection_launcher"
 TICKET_PREFIX = "research-cycle-reflection"
 TICKETS_DIRNAME = "research-cycle-reflections"
 MAX_FAILURE_DETAIL_CHARS = 500
+DRIVER_KEY = "reflection"
+MAX_TRANSIENT_FAILURES = 1
 
 
 def may_write_reflection(mission: Mapping[str, Any] | None) -> bool:
@@ -166,6 +169,7 @@ class MissionReflectionLaneCoordinator:
         mission: Callable[[], dict[str, Any] | None],
         week_state: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]],
         clock: Callable[[], datetime] | None = None,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.launcher = launcher
         self.mission = mission
@@ -180,7 +184,10 @@ class MissionReflectionLaneCoordinator:
         # whose numbers then move is tried again, because that is a different
         # attempt rather than the same one.  Process-local: a restart is nearly
         # always a deploy, which is the likeliest thing to have fixed it.
-        self._failed: dict[tuple[str, str], str] = {}
+        self.budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir, clock=self.clock,
+            max_transient_failures=MAX_TRANSIENT_FAILURES,
+        )
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -218,10 +225,14 @@ class MissionReflectionLaneCoordinator:
         self._open = None
         week = settled.get("iso_week")
         digest = settled.get("inputs_hash")
-        if week and digest and settled.get("status") != "succeeded":
-            self._failed[(str(week), str(digest))] = (
-                settled.get("failure_reason") or f"last run: {settled.get('status')}"
-            )
+        if week and digest:
+            item = f"{week}|{digest}"
+            if settled.get("status") != "succeeded":
+                settled["failure"] = self.budget.record_settled(item, settled).as_wire()
+            else:
+                resumed = self.budget.clear(item)
+                if resumed:
+                    settled["resumed"] = resumed
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -235,14 +246,21 @@ class MissionReflectionLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
         if not may_write_reflection(mission):
+            permission = self.budget.record(
+                f"permission|{mission.get('id') or mission.get('mission_ref')}",
+                status="gated:mission does not grant deliverable",
+            )
             return {
                 "status": "ungranted", "settled": settled,
+                "failure": permission.as_wire(),
                 "reason": (
                     f"this mission does not grant {WRITE_SCOPE} in autonomy.may_write; "
                     "a weekly reflection is a deliverable-class artefact and is not "
                     "published without the grant"
                 ),
             }
+        for row in self.budget.permission_items():
+            self.budget.clear(row["item_key"])
         week = closed_week(self.clock())
         iso_week = week["iso_week"]
         try:
@@ -262,10 +280,13 @@ class MissionReflectionLaneCoordinator:
                 "reflection_ref": reflection_ref, "inputs_hash": digest,
                 "reason": f"{iso_week} 已经有一条 reflection，且它的输入没有变",
             }
-        held = self._failed.get((iso_week, digest))
-        if held is not None:
-            return {"status": "held", "iso_week": iso_week, "inputs_hash": digest,
-                    "settled": settled, "reason": held}
+        item = f"{iso_week}|{digest}"
+        blocked = self.budget.blocked(item)
+        if blocked is not None:
+            return {"status": blocked.action, "iso_week": iso_week,
+                    "inputs_hash": digest, "settled": settled,
+                    "reason": self.budget.failure_reason(item),
+                    "failure": blocked.as_wire()}
         try:
             ticket = self.launcher.start(iso_week=iso_week, inputs_hash=digest)
         except LaneChildConflict as exc:
@@ -339,6 +360,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
 
         coordinator = MissionReflectionLaneCoordinator(
             launcher=launcher, mission=mission, week_state=week_state,
+            failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

@@ -223,6 +223,31 @@ class SettlementTests(unittest.TestCase):
         self.assertEqual(held["reason"], "boom")
         self.assertEqual(launcher.started, [("2026-W36", "hash-a")])
 
+    def test_dependency_park_survives_restart_and_same_signature_gets_a_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = FakeLauncher()
+            state = {"digest": "hash-a"}
+            def week_state(_mission, _week):
+                return {"inputs_hash": state["digest"], "already_recorded": False}
+            def build():
+                return MissionReflectionLaneCoordinator(
+                    launcher=launcher, mission=lambda: GRANTED,
+                    week_state=week_state, clock=lambda: MONDAY,
+                    failure_ledger_dir=Path(directory),
+                )
+            lane = build()
+            first = lane.dispatch_once()
+            launcher.settle(first["ticket_ref"], status="failed", summary={
+                "reason": "model_unavailable", "recorded": {},
+            })
+            probe = lane.dispatch_once()
+            self.assertEqual(probe["status"], "launched")
+            launcher.settle(probe["ticket_ref"], status="failed", summary={
+                "reason": "model_unavailable", "recorded": {},
+            })
+            restarted = build()
+            self.assertEqual(len(restarted.budget.parked_items()), 1)
+            self.assertEqual(restarted.dispatch_once()["status"], "launched")
     def test_a_held_week_is_tried_again_once_its_numbers_move(self):
         # The hold is keyed by week *and* reading. A week held on one reading
         # would otherwise be dead until the process restarted, even though the
