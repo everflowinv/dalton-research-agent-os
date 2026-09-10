@@ -1760,10 +1760,16 @@ class CockpitPlane:
     def _stage_rows(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
         """P10a:每家公司的阶段与资料底座清单，全部从任务自己的表里数出来。"""
 
+        # P14-S: every version of this mission_ref, in time order. Scoped to
+        # the active version, the whole page reset itself on every publish --
+        # live, v7..v13 each hold their own copy of the same five ``entered``
+        # rows, and only v13 holds the four ``gate_passed``.
         state: dict[str, dict[str, list[str]]] = {}
         for row in self._rows(core,
             "SELECT company_ref, stage_ref, status FROM coverage_mission_stage_records "
-            "WHERE mission_version_ref=? ORDER BY created_at", (mission["id"],),
+            "WHERE mission_version_ref IN (SELECT mission_version_id FROM "
+            "coverage_mission_versions WHERE mission_ref=?) ORDER BY created_at, record_id",
+            (mission["mission_ref"],),
         ):
             state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(row["status"])
         specs = planned_spec_refs_from_directory(self.config.state_dir / "discovery-plans")
@@ -1811,14 +1817,23 @@ class CockpitPlane:
             # record, not in a column. Selecting it as one made this whole page
             # raise "no such column: rationale" the first time a deliverable
             # existed to open -- which is why nothing had noticed.
+            # P14-S: the history of this company's screen across every
+            # version of the mission, with the version each entry was written
+            # under carried as provenance -- that is what makes the list
+            # readable as a history rather than as a fragment of one.
             stage = [
                 {"status": row["status"],
                  "rationale": json.loads(row["record_json"]).get("rationale"),
-                 "at": row["created_at"]}
+                 "at": row["created_at"],
+                 "mission_version_ref": row["mission_version_ref"]}
                 for row in self._rows(core,
-                    "SELECT status, record_json, created_at FROM coverage_mission_stage_records "
-                    "WHERE mission_version_ref=? AND company_ref=? AND stage_ref='initial_screen' "
-                    "ORDER BY created_at", (record["mission_version_ref"], record["subject_ref"]))
+                    "SELECT status, record_json, created_at, mission_version_ref "
+                    "FROM coverage_mission_stage_records WHERE mission_version_ref IN "
+                    "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref="
+                    "(SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?)) "
+                    "AND company_ref=? AND stage_ref='initial_screen' "
+                    "ORDER BY created_at, record_id",
+                    (record["mission_version_ref"], record["subject_ref"]))
             ]
             claims = {claim["ref"]: claim for claim in self._claims(core)}
             quality = self._quality(core).get(ref)

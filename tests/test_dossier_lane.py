@@ -248,6 +248,23 @@ class GrantTests(unittest.TestCase):
         summary = harness.run()
         self.assertEqual(summary["dossier_status"], "no_screened_company")
 
+    def test_a_screen_that_passed_under_an_earlier_mission_version_still_counts(self):
+        # P14-S: the gate is a fact about the mission, not about the version
+        # it was recorded under. Read per-version, publishing v14 would stop
+        # every dossier in the mission until somebody re-screened.
+        harness = Harness()
+        self.addCleanup(harness.close)
+        self.assertEqual(screened_companies(harness.missions, harness.mission), [ACN])
+        params = dict(mission_params(bootstrap_method_authorities(harness.store)))
+        params["autonomy"] = dict(harness.mission["autonomy"])
+        params.update({"version_id": "coverage-mission-version:us-it-services:2",
+                       "prior_version_ref": harness.mission["id"],
+                       "idempotency_key": "coverage-mission:us-it-services:2",
+                       "title": "v2"})
+        rolled = harness.missions.create_mission(params.pop("mission_ref"), **params)
+        self.assertEqual(harness.missions.stage_records(rolled["id"]), [])
+        self.assertEqual(screened_companies(harness.missions, rolled), [ACN])
+
 
 class PlanTests(unittest.TestCase):
     def setUp(self):
