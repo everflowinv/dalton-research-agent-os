@@ -503,6 +503,7 @@ class CockpitModel:
             policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
             canonical = re.search(
                 re.escape(policy_suffix)
+                + r"(?::route-admission:[0-9a-f]{64})?"
                 + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
                 base_request_id,
             )

@@ -59,6 +59,33 @@ class RouteRecoveryTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(count, 2)
 
+    def test_verifier_recovery_preserves_producer_and_explicit_capacity_identity(self):
+        producer = self._model(fixture.ChainAdapter({}),
+                               policy_version_ref=self.chain_policy).call(
+            purpose="debate_map", request_id="producer", prompt="draft",
+            mission=self.mission)
+        adapter = fixture.ChainAdapter({})
+        retry = {"cooldown_seconds": 60, "max_recovery_epochs": 1,
+                 "scheduler_max_attempts": 3}
+        args = dict(purpose="debate_map_verifier", request_id="independent-recovery",
+                    prompt="verify", mission=self.mission,
+                    producer_route_decision_refs=[producer["route_decision_ref"]])
+        broken = self._model(adapter, policy_version_ref=self.verifier_policy,
+                             slots=["credential-slot:unrelated"], capacity_retry=retry)
+        with self.assertRaises(CockpitModelError):
+            broken.call(**args)
+        fixed = self._model(adapter, policy_version_ref=self.verifier_policy,
+                            slots=self.verifier_slots, capacity_retry=retry)
+        result = fixed.call(**args)
+        self.assertTrue(fixed.call(**args)["replayed"])
+        self.assertEqual(len(adapter.served), 1)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            work = scheduler.work_order_authority(result["work_order_ref"])["work_order"]
+        identity = work["metadata"]["request_id"]
+        self.assertEqual(identity.count(":capacity-policy:"), 1)
+        self.assertEqual(identity.count(":route-admission:"), 1)
+        self.assertEqual(identity.count(":producer:"), 1)
+
     def test_fixed_credentials_run_once_and_keep_original_failure_immutable(self):
         for policy in (self.pinned_policy, self.chain_policy):
             with self.subTest(policy=policy):
