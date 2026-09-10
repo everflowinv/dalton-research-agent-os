@@ -675,6 +675,22 @@ class GateTests(unittest.TestCase):
         self.assertIn(live["claim_version_id"], refs)
         self.assertNotIn(retired["claim_version_id"], refs)
 
+    def test_retired_rows_cannot_crowd_a_live_row_out_of_the_query_bound(self):
+        live = self.harness.tag(
+            "z-live", "competitive_position",
+            statement="The live row sorts after the retired rows.")
+        for number in range(4):
+            claim = self.harness.tag(
+                f"a-retired-{number}", "competitive_position",
+                statement=f"Retired canonical row {number}.")
+            self.retire(claim["claim_version_id"])
+
+        rows = claim_material(
+            self.harness.store, ACN, "competitive_position", limit=1)
+
+        self.assertEqual([row["ref"] for row in rows],
+                         [live["claim_version_id"]])
+
     def test_all_retired_canonical_claims_are_idle_without_a_model_call(self):
         refs = [row[0] for row in self.harness.store.connection.execute(
             "SELECT claim_version_id FROM claim_versions"

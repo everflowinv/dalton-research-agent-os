@@ -509,6 +509,7 @@ def query_company_research(
     as_of_to: str | None = None,
     importance: str | None = None,
     canonical_only: bool = True,
+    exclude_retired: bool = False,
 ) -> list[dict[str, Any]]:
     """Structured query over claim rows; returns immutable refs and hashes.
 
@@ -523,6 +524,9 @@ def query_company_research(
     that the index has positively marked as a duplicate of another; a claim
     with no index entry, and every claim in a Core with no index at all, is
     returned exactly as before.
+
+    ``exclude_retired`` is opt-in so existing projections retain their exact
+    historical behavior. When enabled, retirement is applied before ``limit``.
     """
 
     if company_ref is not None:
@@ -550,13 +554,28 @@ def query_company_research(
         filtered.append({
             key: value for key, value in row.items() if key != "period_key"
         })
+    from .claim_index_authority import table_exists
+
     joined = annotate_with_index(
         store.connection, filtered, index_aspect=index_aspect,
         as_of_from=as_of_from, as_of_to=as_of_to, importance=importance,
         canonical_only=canonical_only,
     )
-    from .claim_index_authority import table_exists
-
+    retirement_table = None
+    if exclude_retired:
+        retirement_table = store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            ("claim_retirement_decisions",),
+        ).fetchone()
+    if retirement_table is not None:
+        retired = {
+            str(row[0]) for row in store.connection.execute(
+                "SELECT claim_version_ref FROM claim_retirement_decisions "
+                "WHERE decision='retired'"
+            ).fetchall()
+        }
+        joined = [row for row in joined
+                  if str(row["claim_version_ref"]) not in retired]
     # A Core that has never opened the index answers byte-identically to the
     # way it did before P12b -- not with seven null columns bolted on.  A Core
     # that has one always carries them, including on a claim the index has not

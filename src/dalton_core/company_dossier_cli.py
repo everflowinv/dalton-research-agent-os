@@ -163,20 +163,8 @@ def claim_material(
 
     rows = query_company_research(
         store, company_ref=company_ref, index_aspect=aspect,
-        canonical_only=True, limit=min(limit * 3, 1000),
+        canonical_only=True, exclude_retired=True, limit=min(limit * 3, 1000),
     )
-    # A retirement is an append-only correction to a Claim, not a deletion.
-    # Keep it resolvable for historical dossiers, but never offer it to a new
-    # model call.  This read-side guard deliberately precedes sorting/slicing:
-    # retired high-priority rows must not consume the bounded prompt quota.
-    if table_exists(store.connection, "claim_retirement_decisions"):
-        retired = {
-            str(row[0]) for row in store.connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions "
-                "WHERE decision='retired'"
-            ).fetchall()
-        }
-        rows = [row for row in rows if str(row["claim_version_ref"]) not in retired]
     from .claim_index_authority import IMPORTANCE_RANK
 
     rows.sort(key=lambda row: (
