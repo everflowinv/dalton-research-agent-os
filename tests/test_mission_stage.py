@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
 from dalton_core.mission_stage import (
@@ -31,6 +32,9 @@ class StageHarness(unittest.TestCase):
     def setUp(self) -> None:
         self.store = DaltonStore(":memory:")
         self.addCleanup(self.store.close)
+        self.store.connection.executescript(
+            Path(__file__).parents[1].joinpath(
+                "src/dalton_core/extraction_backlog_schema.sql").read_text())
         self.state = bootstrap_method_authorities(self.store)
         self.missions = CoverageMissionAuthority(self.store)
         params = mission_params(self.state)
@@ -64,7 +68,8 @@ class StageHarness(unittest.TestCase):
         return record_id
 
     def document(self, company_ref: str, spec_ref: str, status: str, *, read: bool = False,
-                 source_ref: str = "source:alphaengine", created_at: str | None = None) -> str:
+                 source_ref: str = "source:alphaengine", created_at: str | None = None,
+                 title: str | None = None) -> str:
         discovery_ref = self.discovery(company_ref, spec_ref, source_ref=source_ref)
         self._seq += 1
         record_id = f"mission-discovered-document:{self._seq:032d}"
@@ -76,6 +81,16 @@ class StageHarness(unittest.TestCase):
                 "source_ref,document_ref,discovery_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (record_id, self.mission["id"], company_ref, source_ref, document_ref, discovery_ref, status, at, at),
             )
+            if spec_ref == TRANSCRIPTS:
+                if title is None:
+                    title = f"Issuer Q{((self._seq // 2 - 1) % 4) + 1} 2026 Earnings Call"
+                cur.execute(
+                    "INSERT INTO document_provenance_records(document_ref,source_ref,spec_ref,"
+                    "provenance_tier,title,named_companies_json,metadata_seen,record_json,content_hash,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (document_ref, source_ref, spec_ref, "management_direct", title,
+                     "[]", 1, "{}", "4" * 64, at),
+                )
             if read:
                 cur.execute(
                     "INSERT INTO coverage_mission_document_reviews(review_id,mission_version_ref,company_ref,"
@@ -98,6 +113,19 @@ class StageHarness(unittest.TestCase):
 
 
 class SourceBaseTests(StageHarness):
+    def test_earnings_calls_require_distinct_explicit_fiscal_periods(self) -> None:
+        self.document(ACN, TRANSCRIPTS, "acquired", title="Issuer Q2 2026")
+        self.document(ACN, TRANSCRIPTS, "acquired",
+                      title="Issuer Q2 2026 Earnings Conference Call")
+        self.document(ACN, TRANSCRIPTS, "acquired",
+                      title="Issuer Q3 2026 Citi Global TMT Conference")
+        self.document(ACN, TRANSCRIPTS, "acquired", title="Issuer fireside chat")
+        self.document(ACN, TRANSCRIPTS, "acquired", title="Issuer 2026 Q1 Earnings Call")
+        calls = self.item(self.evaluate(), ACN, "earnings_calls")
+        self.assertEqual(calls["have"], 2)
+        self.assertEqual(calls["classified_periods"], ["FY2026-Q1", "FY2026-Q2"])
+        self.assertEqual(calls["unclassified"], 2)
+
     def test_shared_document_attribution_is_per_company_and_dismissal_wins(self) -> None:
         document_ref = self.document(ACN, TRANSCRIPTS, "acquired", read=True)
         params = dict(self.params)

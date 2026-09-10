@@ -103,9 +103,11 @@ class AutomationDraftingTests(unittest.TestCase):
     def test_child_drafts_under_the_mission_grant_and_a_human_may_still(self) -> None:
         # Under v1 nothing grants automation; the child says so per review and drafts nothing.
         run = self._run_child()
-        self.assertEqual(run["code"], 0, run["stderr"])
+        self.assertEqual(run["code"], 1, run["stderr"])
         summary = run["summary"]
-        self.assertEqual((summary["status"], summary["stop_reason"], summary["drafted"]), ("succeeded", "nothing_to_draft", []))
+        self.assertEqual((summary["status"], summary["stop_reason"], summary["drafted"]),
+                         ("failed", "all_document_views_failed", []))
+        self.assertEqual(summary["blocked"]["review_count"], 1)
         self.assertEqual(len(summary["skipped"]), 1)
         self.assertIn("CoverageMissionConflict", summary["skipped"][0]["reason"])
         self.assertEqual(summary["formal_authority_writes"], 0)
@@ -144,6 +146,7 @@ class AutomationDraftingTests(unittest.TestCase):
                          ("nothing_to_draft", [], 1))
         # An actor that is neither human nor the mission principal is refused before any grant.
         refused = self._run_child("--requested-by", "automation:someone-else")
+        self.assertEqual(refused["summary"]["status"], "failed")
         self.assertEqual(refused["summary"]["drafted"], [])
         self.assertIn("CoverageMissionConflict", refused["summary"]["skipped"][0]["reason"])
 

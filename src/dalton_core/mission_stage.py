@@ -32,6 +32,7 @@ tables, and the only write is the stage record the mission already grants.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -239,11 +240,12 @@ def _document_counts(
     v9, whether or not v9 has any work left to do on it.
     """
 
-    counts: dict[tuple[str, str], dict[str, int]] = {}
+    counts: dict[tuple[str, str], dict[str, Any]] = {}
 
     def bucket(company: str, spec: str) -> dict[str, int]:
         return counts.setdefault(
-            (company, spec), {"acquired": 0, "pending": 0, "failed": 0, "read": 0}
+            (company, spec), {"acquired": 0, "pending": 0, "failed": 0,
+                              "read": 0, "periods": [], "unclassified": 0}
         )
 
     row = connection.execute(
@@ -299,10 +301,33 @@ def _document_counts(
         current = best.get(key)
         if current is None or rank > _STATUS_RANK.get(current, 0):
             best[key] = status
-    for (company_ref, spec_ref, _document_ref), status in best.items():
+    try:
+        provenance_rows = connection.execute(
+            "SELECT document_ref,title FROM document_provenance_records"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        provenance_rows = []
+    provenance = {row["document_ref"]: row["title"] for row in provenance_rows}
+    earnings_periods: dict[tuple[str, str], set[str]] = {}
+    document_period: dict[tuple[str, str], str] = {}
+    for (company_ref, spec_ref, document_ref), status in best.items():
         entry_counts = bucket(company_ref, spec_ref)
         if status in ACQUIRED_STATUSES:
-            entry_counts["acquired"] += 1
+            if spec_ref == "earnings-call-transcripts":
+                period = _earnings_call_period(provenance.get(document_ref))
+                if period is None:
+                    entry_counts["unclassified"] += 1
+                    continue
+                document_period[(company_ref, document_ref)] = period
+                periods = earnings_periods.setdefault((company_ref, spec_ref), set())
+                if period not in periods:
+                    periods.add(period)
+                    entry_counts["acquired"] += 1
+                    entry_counts["periods"] = sorted(periods)
+            else:
+                entry_counts["acquired"] += 1
         elif status in ("discovered", "acquisition_launched"):
             entry_counts["pending"] += 1
         elif status == "acquisition_failed":
@@ -320,9 +345,46 @@ def _document_counts(
         key = (entry["company_ref"], entry["document_ref"])
         if latest_reviews.get(key, (None, None))[0] == READ_REVIEW_STATE:
             read_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
+    read_periods: dict[tuple[str, str], set[str]] = {}
     for company_ref, spec_ref, _document_ref in read_docs:
+        if spec_ref == "earnings-call-transcripts":
+            period = document_period.get((company_ref, _document_ref))
+            if period is None:
+                continue
+            periods = read_periods.setdefault((company_ref, spec_ref), set())
+            if period in periods:
+                continue
+            periods.add(period)
         bucket(company_ref, spec_ref)["read"] += 1
     return counts
+
+
+_QUARTER_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9])Q([1-4])\s*['’/-]?\s*(20\d{2})(?!\d)", re.I),
+    re.compile(r"(?<!\d)(20\d{2})\s*['’/-]?\s*Q([1-4])(?![A-Za-z0-9])", re.I),
+    re.compile(r"(?<![A-Za-z0-9])([1-4])Q\s*['’/-]?\s*(20\d{2})(?!\d)", re.I),
+)
+
+
+def _earnings_call_period(title: Any) -> str | None:
+    """Fiscal quarter explicitly asserted by trusted source metadata."""
+    if not isinstance(title, str) or not title.strip():
+        return None
+    lowered = title.casefold()
+    if "fireside" in lowered:
+        return None
+    if "conference" in lowered and not (
+            "earnings conference call" in lowered or "earnings call" in lowered):
+        return None
+    for index, pattern in enumerate(_QUARTER_PATTERNS):
+        match = pattern.search(title)
+        if match:
+            if index == 1:
+                year, quarter = match.group(1), match.group(2)
+            else:
+                quarter, year = match.group(1), match.group(2)
+            return f"FY{year}-Q{quarter}"
+    return None
 
 
 def retired_claim_refs(connection: sqlite3.Connection) -> set[str]:
@@ -409,7 +471,8 @@ def evaluate_mission(
                 read = have
                 pending = failed = 0
             else:
-                have = read = pending = failed = 0
+                have = read = pending = failed = unclassified = 0
+                classified_periods: set[str] = set()
                 for spec in item["spec_refs"]:
                     entry = counts.get((company_ref, spec))
                     if entry is None:
@@ -418,6 +481,8 @@ def evaluate_mission(
                     read += entry["read"]
                     pending += entry["pending"]
                     failed += entry["failed"]
+                    unclassified += int(entry.get("unclassified") or 0)
+                    classified_periods.update(entry.get("periods") or ())
             item_status, note = _item_status(
                 item,
                 have,
@@ -431,6 +496,9 @@ def evaluate_mission(
                 "required": int(item["required"]), "have": have, "read": read, "pending": pending,
                 "failed": failed, "status": item_status, "note": note,
                 "source_ref": item["source_ref"], "spec_refs": list(item["spec_refs"]),
+                **({"classified_periods": sorted(classified_periods),
+                    "unclassified": unclassified}
+                   if item["item_ref"] == "earnings_calls" else {}),
             })
         blocking = [i for i in items if i["status"] in {"partial", "missing"}]
         result.append({

@@ -472,6 +472,22 @@ def run_extraction(
         # duplicates and writes nothing new.
         if candidate_staging is not None:
             _admit_complete_reviews(host, service, complete_reviews, summary)
+        if (summary["reviews_scanned"] > 0 and summary["reviews_complete"] == 0
+                and drafted == 0 and len(summary["skipped"]) == summary["reviews_scanned"]):
+            reasons: dict[str, int] = {}
+            for skipped in summary["skipped"]:
+                reason = str(skipped.get("reason") or "unknown view failure")
+                reasons[reason] = reasons.get(reason, 0) + 1
+            summary["blocked"] = {
+                "code": "all_document_views_failed",
+                "review_count": summary["reviews_scanned"],
+                "reasons": [{"reason": reason, "count": count}
+                            for reason, count in sorted(reasons.items())],
+            }
+            summary["stop_reason"] = "all_document_views_failed"
+            summary["failure_reason"] = "all queued document views failed before drafting"
+            summary["status"] = "failed"
+            return summary
         summary["stop_reason"] = stop_reason or ("nothing_to_draft" if drafted == 0 else "drained")
         summary["status"] = "succeeded"
         return summary
