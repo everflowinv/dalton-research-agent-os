@@ -19,3 +19,7 @@ PYTHONPATH=src python3 -m unittest tests.test_activation_scenario_rehearsal test
 ```
 
 Result: 103 tests passed in 0.773 seconds. `git diff --check` passed.
+
+## Integration hardening
+
+Shared CLI path validation now rejects report paths into any live/source root or exact source input, including symlink aliases, and rejects temporary roots overlapping those sources. Both ordinary and activation rehearsals apply it before their run starts. Hash-bound JSON is decoded from the same bytes that were hashed. SEC selection now rejects a dangling selector symlink instead of silently reverting to v1. **121 focused tests / 0.800s passed** across ordinary/activation rehearsal and SEC proposal/selection tests.

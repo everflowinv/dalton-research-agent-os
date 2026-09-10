@@ -11,17 +11,17 @@ rehearsal. A small empty hook in `Rehearsal` inserts the opt-in activation step
 after bootstrap, all migrations, seeds, and catalog sync, and before plist
 rendering. The ordinary rehearsal executes no extra step.
 
-Inputs are explicit and hash bound. This run used owner mission candidate v14
+Inputs are explicit and hash bound. The initial implementation run used owner mission candidate v14
 at SHA-256 `dd09fcdea9a0329b594efade2bd6ea3479788df992222beb62563b7fab353ebb`
-and the committed simulation model manifest at SHA-256
-`c4875b79c80cc05f7a238483200280c28cac2902aafcff5a9cd38e1acf8c8bec`.
+and the initial simulation model manifest. Cross-review subsequently added an explicit governance allowlist; the revised manifest SHA-256 is
+`c4875b79c80cc05f7a238483200280c28cac2902aafcff5a9cd38e1acf8c8bec` and requires a new run.
 The manifest installs four independent brain/verifier pairs, claim-index cheap,
 planner brain, and deliverable brain through the production setup functions.
 An optional repeatable governance filename list can simulate approval only when the exact
 filename is included in the hash-bound manifest allowlist, inside the temporary governance directory only;
 no records were selected for this run.
 
-## Result on a current live read-only copy
+## Historical result before cross-review (not final acceptance)
 
 - 830 MB copied with SQLite backup readers opened in read-only mode.
 - 67/67 schemas applied to the copy.

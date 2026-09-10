@@ -72,6 +72,30 @@ class ActivationScenarioTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "successful model catalog sync"):
             rehearsal.apply_activation()
 
+    def test_report_and_temp_aliases_cannot_overwrite_sources(self):
+        from scripts.rehearse_deploy import validate_cli_paths
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "live"
+            live.mkdir()
+            original = root / "original"
+            original.mkdir()
+            source = root / "owner.json"
+            source.write_text("{}")
+            alias = root / "alias"
+            alias.symlink_to(live, target_is_directory=True)
+            for report in (live / "core.sqlite", original / "config", source, alias / "config"):
+                with self.subTest(report=report), self.assertRaisesRegex(ValueError, "overwrite"):
+                    validate_cli_paths(live_root=live, source_root=original,
+                                       temp_root=root / "rehearsal", report=report,
+                                       input_files=(source,))
+            for temp in (root, live / "rehearsal", alias / "rehearsal"):
+                with self.subTest(temp=temp), self.assertRaisesRegex(ValueError, "overlap"):
+                    validate_cli_paths(live_root=live, source_root=original,
+                                       temp_root=temp, report=None)
+            validate_cli_paths(live_root=live, source_root=original,
+                               temp_root=root / "rehearsal", report=root / "report.md")
+
 
 if __name__ == "__main__":
     unittest.main()

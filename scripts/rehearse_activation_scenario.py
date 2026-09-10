@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from rehearse_deploy import Rehearsal  # noqa: E402
+from rehearse_deploy import Rehearsal, validate_cli_paths  # noqa: E402
 
 
 ROLE_CONFIGS = {
@@ -37,10 +37,11 @@ PRESERVED_MISSION_FIELDS = (
 
 
 def checked_json(path: Path, expected_sha256: str) -> dict[str, Any]:
-    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    data = path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
     if actual != expected_sha256:
         raise ValueError(f"hash mismatch for {path}: expected {expected_sha256}, got {actual}")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(data)
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return value
@@ -184,12 +185,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approve-governance", action="append", default=[])
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
-    resolved_temp = args.temp_root.expanduser().resolve()
-    if not any(resolved_temp.is_relative_to(Path(root))
-               for root in ("/tmp", "/private/tmp", "/var/folders")):
-        raise SystemExit("--temp-root must live under a temporary directory")
-    if resolved_temp == args.live_root.expanduser().resolve():
-        raise SystemExit("--temp-root must differ from --live-root")
+    try:
+        validate_cli_paths(live_root=args.live_root, source_root=args.source_root,
+                           temp_root=args.temp_root, report=args.report,
+                           input_files=(args.openclaw_config, args.mission_params, args.model_manifest))
+        if args.report and args.governance_source and args.report.resolve().is_relative_to(args.governance_source.resolve()):
+            raise ValueError("--report must not overwrite source governance")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     rehearsal = ActivationScenarioRehearsal(
         args.live_root, args.temp_root, source_root=args.source_root,
         openclaw_config=args.openclaw_config, mission_params=args.mission_params,

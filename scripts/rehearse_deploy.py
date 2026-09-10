@@ -2361,6 +2361,26 @@ class StubBroker:
 # ---------------------------------------------------------------------------
 
 
+def validate_cli_paths(*, live_root: Path, source_root: Path | None,
+                       temp_root: Path, report: Path | None,
+                       input_files: tuple[Path, ...] = ()) -> None:
+    """Reject output aliases into sources before copying or opening a writer."""
+    temp = temp_root.expanduser().resolve()
+    if not any(temp.is_relative_to(Path(root).resolve()) and temp != Path(root).resolve()
+               for root in ("/tmp", "/private/tmp", "/var/folders")):
+        raise ValueError("--temp-root must live under /tmp or another temporary directory")
+    sources = {live_root.expanduser().resolve()}
+    if source_root is not None:
+        sources.add(source_root.expanduser().resolve())
+    if any(temp.is_relative_to(root) or root.is_relative_to(temp) for root in sources):
+        raise ValueError("--temp-root must not be the live root or overlap a source root")
+    if report is not None:
+        output = report.expanduser().resolve()
+        if any(output.is_relative_to(root) for root in sources) or output in {
+                path.expanduser().resolve() for path in input_files}:
+            raise ValueError("--report must not overwrite a source input")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -2390,10 +2410,12 @@ def main(argv: list[str] | None = None) -> int:
     temp_root = args.temp_root or Path("/tmp") / (
         "dalton-rehearsal-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     )
-    if not str(temp_root).startswith(("/tmp/", "/private/tmp/", "/var/folders/")):
-        raise SystemExit("--temp-root must live under /tmp; this script writes there only")
-    if temp_root.resolve() == args.live_root.expanduser().resolve():
-        raise SystemExit("--temp-root must not be the live root")
+    try:
+        validate_cli_paths(live_root=args.live_root, source_root=args.source_root,
+                           temp_root=temp_root, report=args.report,
+                           input_files=(args.openclaw_config,))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     rehearsal = Rehearsal(
         args.live_root, temp_root,
         openclaw_config=args.openclaw_config,

@@ -54,6 +54,11 @@ class SecPlanSelectionTests(unittest.TestCase):
         _plan, _selector, path = self.write_plan_and_selector()
         self.assertEqual(self.selected(), str(path.resolve()))
 
+    def test_dangling_selector_is_invalid_instead_of_defaulting_to_v1(self):
+        (self.plans / SEC_PLAN_SELECTOR).symlink_to(self.plans / "missing-selector")
+        with self.assertRaisesRegex(ValueError, "unreadable"):
+            self.argv()
+
     def test_tampered_plan_is_refused(self):
         _plan, _selector, path = self.write_plan_and_selector()
         value = json.loads(path.read_text())

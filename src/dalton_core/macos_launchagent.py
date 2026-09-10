@@ -32,7 +32,7 @@ def _sec_discovery_plan(state: Path) -> Path:
     plans = (state / "discovery-plans").resolve()
     selector_path = plans / SEC_PLAN_SELECTOR
     default = plans / "us-it-services-sec-filings-v1.json"
-    if not selector_path.exists():
+    if not selector_path.exists() and not selector_path.is_symlink():
         return default
     try:
         selector = json.loads(selector_path.read_text(encoding="utf-8"))
