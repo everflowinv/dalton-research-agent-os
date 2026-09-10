@@ -614,6 +614,61 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(final["status"], "idle")
         self.assertEqual(final["skipped"][0]["reason"], "held")
 
+    def test_content_refusal_is_terminal_for_only_that_company_operation_day(self) -> None:
+        coordinator, launcher = self.coordinator(
+            operations=(NEXT_DAY_DISCLOSURE_OPERATION, ANNOUNCEMENTS_INDEX_OPERATION))
+        launched = coordinator.dispatch_once()
+        launcher.tickets[launched["ticket_ref"]].update({
+            "status": "failed",
+            "summary": {"failure_reason": "HkexFilingsParseError: content_refused"},
+        })
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["settled"]["failure"]["failure_class"],
+                         "content_refused")
+        self.assertEqual(result["operation"], ANNOUNCEMENTS_INDEX_OPERATION)
+
+    def test_dependency_failure_survives_restart_and_admits_a_real_probe(self) -> None:
+        coordinator, launcher = self.coordinator(
+            operations=(NEXT_DAY_DISCLOSURE_OPERATION,))
+        launched = coordinator.dispatch_once()
+        launcher.tickets[launched["ticket_ref"]].update({
+            "status": "failed",
+            "summary": {"failure_reason": "ConnectionError: transport_unavailable"},
+        })
+        coordinator.dispatch_once()
+        restarted = MissionHkexLaneCoordinator(
+            state_dir=launcher.state_dir, launcher=launcher,
+            mission=lambda: self.MISSION, clock=self.clock)
+        probe = restarted.dispatch_once()
+        self.assertEqual(probe["status"], "launched")
+        self.assertEqual(probe["company_ref"], COMPANY)
+
+    def test_real_governance_file_change_creates_a_recoverable_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            governance = root / "governance"
+            governance.mkdir()
+            path = governance / GOVERNANCE_FILENAME_BY_OPERATION[
+                NEXT_DAY_DISCLOSURE_OPERATION]
+            proposed = build_hkex_filings_governance_record(
+                operation=NEXT_DAY_DISCLOSURE_OPERATION,
+                approved_by="human:lumos", status="proposed")
+            path.write_text(json.dumps(proposed), encoding="utf-8")
+            launcher = HkexFilingsLauncher(state_dir=root, governance_dir=governance)
+            coordinator = MissionHkexLaneCoordinator(
+                state_dir=root, launcher=launcher, mission=lambda: self.MISSION,
+                clock=self.clock)
+            parameters = {"as_of": "2026-09-10"}
+            old = coordinator._item_key(
+                COMPANY, NEXT_DAY_DISCLOSURE_OPERATION, parameters)
+            approved = build_hkex_filings_governance_record(
+                operation=NEXT_DAY_DISCLOSURE_OPERATION,
+                approved_by="human:lumos", status="approved")
+            path.write_text(json.dumps(approved), encoding="utf-8")
+            new = coordinator._item_key(
+                COMPANY, NEXT_DAY_DISCLOSURE_OPERATION, parameters)
+            self.assertNotEqual(old, new)
+
     def test_what_was_read_becomes_the_history_the_context_is_computed_from(self) -> None:
         coordinator, launcher = self.coordinator(
             operations=(NEXT_DAY_DISCLOSURE_OPERATION,)

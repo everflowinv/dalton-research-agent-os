@@ -51,6 +51,9 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
+from .lane_failure_ledger import lane_budget
+from .lane_permission_control import record_controlled_failure
+from .store import content_hash
 
 WRITE_SCOPES: tuple[str, ...] = ("observation", "market_event")
 MAX_FAILURE_DETAIL_CHARS = 500
@@ -142,6 +145,7 @@ class MissionHkexLaneCoordinator:
         clock: Callable[[], datetime] | None = None,
         di_lookback_days: int = DEFAULT_DI_LOOKBACK_DAYS,
         index_lookback_days: int = DEFAULT_INDEX_LOOKBACK_DAYS,
+        failure_ledger_dir: Any | None = None,
     ) -> None:
         self.state_dir = state_dir
         self.launcher = launcher
@@ -154,9 +158,11 @@ class MissionHkexLaneCoordinator:
         self.di_lookback_days = int(di_lookback_days)
         self.index_lookback_days = int(index_lookback_days)
         self._open: str | None = None
+        self._open_item: str | None = None
         self._done: dict[tuple[str, str, str], None] = {}
-        self._failures: dict[str, int] = {}
-        self._failure_reason: dict[str, str] = {}
+        self.failure_budget = lane_budget(
+            "hkex_filings", state_dir=failure_ledger_dir or state_dir,
+            clock=self.clock, max_transient_failures=MAX_FAILURES_PER_COMPANY)
         self._emitted: set[str] = set()
         # (company_ref, operation) -> the rows already read, newest last. This
         # is what makes the derived context possible at all: the pace of a
@@ -268,24 +274,57 @@ class MissionHkexLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         self._open = None
+        item_key, self._open_item = self._open_item, None
         company_ref = settled.get("company_ref")
         operation = settled.get("operation")
         if not company_ref or not operation:
             return settled
         if settled.get("status") != "succeeded":
-            self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-            self._failure_reason[company_ref] = (
-                settled.get("failure_reason") or f"last run: {settled.get('status')}"
-            )
+            item_key = item_key or self._settled_key(settled)
+            settled["failure"] = self.failure_budget.record_settled(item_key, settled).as_wire()
             # Not marked done: a failed run learned nothing, and marking it
             # would lose the day permanently on a transient error.
             return settled
-        self._failures.pop(company_ref, None)
-        self._failure_reason.pop(company_ref, None)
+        if item_key:
+            settled["resumed"] = self.failure_budget.clear(item_key)
         self._remember((company_ref, operation, today))
         self._extend_history(company_ref, operation, settled["rows"])
         settled["emission"] = self._emit(company_ref, settled["events"])
         return settled
+
+    def _governance_digest(self, operation: str) -> str:
+        resolver = getattr(self.launcher, "governance_path", None)
+        if resolver is None:
+            return content_hash({"operation": operation,
+                                 "approved": list(self.launcher.approved_operations())})
+        path = resolver(operation)
+        try:
+            return content_hash({"path": str(path), "bytes": path.read_text("utf-8")})
+        except Exception:  # noqa: BLE001
+            return content_hash({"path": str(path), "state": "unreadable"})
+
+    def _item_key(self, company_ref: str, operation: str,
+                  parameters: Mapping[str, Any]) -> str:
+        day = parameters.get("as_of") or parameters.get("until") or _today(self.clock)
+        return f"{company_ref}|{operation}|input:" + content_hash({
+            "company_ref": company_ref, "operation": operation, "day": day,
+            "parameters": dict(parameters),
+            "governance": self._governance_digest(operation),
+        })[:24]
+
+    def _settled_key(self, settled: Mapping[str, Any]) -> str:
+        parameters = {key: settled.get(key) for key in
+                      ("as_of", "since", "until") if settled.get(key)}
+        return self._item_key(str(settled["company_ref"]),
+                              str(settled["operation"]), parameters)
+
+    def _retire_old_inputs(self, company_ref: str, operation: str, current: str) -> None:
+        prefix = f"{company_ref}|{operation}|input:"
+        for row in (self.failure_budget.parked_items()
+                    + self.failure_budget.terminal_items()
+                    + self.failure_budget.permission_items()):
+            if row["item_key"].startswith(prefix) and not row["item_key"].startswith(current):
+                self.failure_budget.retire(row["item_key"])
 
     # -- events ------------------------------------------------------------
 
@@ -381,15 +420,27 @@ class MissionHkexLaneCoordinator:
         skipped: list[dict[str, Any]] = []
         for company in universe:
             company_ref = company["company_ref"]
-            if self._failures.get(company_ref, 0) >= MAX_FAILURES_PER_COMPANY:
-                skipped.append({
-                    "company_ref": company_ref, "reason": "held",
-                    "detail": self._failure_reason.get(company_ref, "repeated failures"),
-                })
-                continue
             plan = self.due(company, today)
+            while plan is not None:
+                item_key = self._item_key(
+                    company_ref, plan["operation"], plan["parameters"])
+                self._retire_old_inputs(company_ref, plan["operation"], item_key)
+                blocked = self.failure_budget.blocked(item_key)
+                if blocked is None:
+                    break
+                skipped.append({
+                    "company_ref": company_ref, "reason": blocked.action,
+                    "operation": plan["operation"],
+                    "detail": blocked.classification.reason,
+                })
+                if blocked.action != "terminal":
+                    plan = None
+                    break
+                self._remember(plan["key"])
+                plan = self.due(company, today)
             if plan is None:
-                skipped.append({"company_ref": company_ref, "reason": "current_today"})
+                if not any(row.get("company_ref") == company_ref for row in skipped):
+                    skipped.append({"company_ref": company_ref, "reason": "current_today"})
                 continue
             try:
                 ticket = self.launcher.start(
@@ -404,11 +455,14 @@ class MissionHkexLaneCoordinator:
                         "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
-                self._failure_reason[company_ref] = reason
+                decision = record_controlled_failure(
+                    self.failure_budget, item_key, mission, self.launcher,
+                    reason=reason, status="rejected")
                 return {"status": "rejected", "company_ref": company_ref,
-                        "settled": settled, "skipped": skipped, "reason": reason}
+                        "settled": settled, "skipped": skipped, "reason": reason,
+                        "failure": decision.as_wire()}
             self._open = ticket["id"]
+            self._open_item = item_key
             return {
                 "status": "launched", "company_ref": company_ref,
                 "operation": plan["operation"], "hk_ticker": company["hk_ticker"],
