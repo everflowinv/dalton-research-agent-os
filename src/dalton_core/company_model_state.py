@@ -16,6 +16,7 @@ once a fourth arrives with a line nobody had seen before.
 from __future__ import annotations
 
 from typing import Any, Mapping
+import json
 
 from .store import content_hash
 
@@ -106,6 +107,25 @@ def build_company_model_state(
     }
     if industry_classification:
         body["industry_classification"] = str(industry_classification)
+    # F10: proxy evidence is a separate authority and never enters statement
+    # rows. Carry its current, explicitly mapped records into the hashed model
+    # state so a new source-series version causes a fresh specification.
+    connection = getattr(missions, "connection", None)
+    if connection is not None and connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND "
+            "name='market_proxy_claim_versions'").fetchone() is not None:
+        rows = connection.execute(
+            "SELECT p.record_json FROM market_proxy_claim_versions p JOIN "
+            "claim_index_entry_versions i ON i.claim_version_ref=p.claim_version_ref "
+            "WHERE i.evidence_kind='market_proxy' AND i.version_number=(SELECT "
+            "MAX(ix.version_number) FROM claim_index_entry_versions ix WHERE "
+            "ix.entry_ref=i.entry_ref) AND "
+            "p.target_subject_ref=? AND p.created_at=(SELECT MAX(x.created_at) "
+            "FROM market_proxy_claim_versions x WHERE x.mapping_ref=p.mapping_ref) "
+            "ORDER BY p.mapping_ref", (company_ref,)).fetchall()
+        proxies = [json.loads(row["record_json"]) for row in rows]
+        if proxies:
+            body["market_proxies"] = proxies
     return {**body, "state_hash": content_hash(body)}
 
 

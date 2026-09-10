@@ -148,8 +148,9 @@ _ENTRY_FIELDS = frozenset({
     "claim_kind", "aspect", "aspect_source", "as_of", "as_of_basis",
     "importance", "importance_basis", "dedupe_group_ref", "dedupe_group_key",
     "is_canonical", "revision_reason", "tagger_ref", "tagger_hash",
-    "actor_ref", "content_hash",
+    "actor_ref", "evidence_kind", "content_hash",
 })
+_LEGACY_ENTRY_FIELDS = _ENTRY_FIELDS - {"evidence_kind"}
 
 # The part of an entry that decides whether re-recording it is a new version or
 # a duplicate.  Identity, ordering and the clock are excluded on purpose: the
@@ -162,7 +163,7 @@ _BINDING_FIELDS = (
     "subject_ref", "metric_or_aspect", "period_key", "claim_kind", "aspect",
     "aspect_source", "as_of", "as_of_basis", "importance", "importance_basis",
     "dedupe_group_ref", "dedupe_group_key", "tagger_ref", "tagger_hash",
-    "actor_ref",
+    "actor_ref", "evidence_kind",
 )
 
 TABLE = "claim_index_entry_versions"
@@ -248,7 +249,8 @@ def validate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ClaimIndexValidationError("ClaimIndexEntryVersion must be an object")
     wire = dict(value)
-    if set(wire) != _ENTRY_FIELDS:
+    legacy = set(wire) == _LEGACY_ENTRY_FIELDS
+    if not legacy and set(wire) != _ENTRY_FIELDS:
         raise ClaimIndexValidationError(
             "ClaimIndexEntryVersion has invalid closed shape; "
             f"missing={sorted(_ENTRY_FIELDS - set(wire))}, "
@@ -296,10 +298,15 @@ def validate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["revision_reason"] = _one_of(
         wire["revision_reason"], REVISION_REASONS, "revision_reason"
     )
+    if not legacy:
+        wire["evidence_kind"] = _one_of(
+            wire["evidence_kind"], ("statement", *EVIDENCE_KINDS), "evidence_kind")
     body = {key: item for key, item in wire.items() if key != "content_hash"}
     expected = content_hash(body)
     if wire["content_hash"] != expected:
         raise ClaimIndexConflict("ClaimIndexEntryVersion content hash drifted")
+    if legacy:
+        wire["evidence_kind"] = "statement"
     return wire
 
 
@@ -327,6 +334,7 @@ def _decode(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
         "is_canonical": int(entry["is_canonical"]),
         "actor_ref": entry["actor_ref"],
         "created_at": entry["created_at"],
+        "evidence_kind": entry["evidence_kind"],
     }
     keys = set(row.keys())
     for column, expected in columns.items():
@@ -423,6 +431,15 @@ class ClaimIndexAuthority:
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._widen_importance_check()
+        self._add_evidence_kind_column()
+
+    def _add_evidence_kind_column(self) -> None:
+        columns = {row["name"] for row in self.connection.execute(
+            f"PRAGMA table_info({TABLE})").fetchall()}
+        if "evidence_kind" not in columns:
+            self.connection.execute(
+                f"ALTER TABLE {TABLE} ADD COLUMN evidence_kind TEXT NOT NULL "
+                "DEFAULT 'statement'")
 
     def _widen_importance_check(self) -> None:
         """W3: admit ``internal_prior`` on a Core built before that tier existed.
@@ -599,6 +616,7 @@ class ClaimIndexAuthority:
         tagger_hash: str,
         actor_ref: str,
         created_at: str,
+        evidence_kind: str = "statement",
     ) -> dict[str, Any]:
         """Record one tag, then settle its dedupe group.
 
@@ -631,6 +649,8 @@ class ClaimIndexAuthority:
             "tagger_ref": _text(tagger_ref, "tagger_ref"),
             "tagger_hash": _hash(tagger_hash, "tagger_hash"),
             "actor_ref": _text(actor_ref, "actor_ref"),
+            "evidence_kind": _one_of(
+                evidence_kind, ("statement", *EVIDENCE_KINDS), "evidence_kind"),
         }
         created_at = _text(created_at, "created_at")
 
@@ -717,6 +737,7 @@ class ClaimIndexAuthority:
         revision_reason: str,
         created_at: str,
     ) -> dict[str, Any]:
+        body = {"evidence_kind": "statement", **dict(body)}
         entry_ref = entry_ref_for(body["claim_version_ref"])
         identity = {
             "entry_ref": entry_ref, "version": version,
@@ -742,14 +763,14 @@ class ClaimIndexAuthority:
             f"INSERT INTO {TABLE}(version_id,entry_ref,version_number,prior_version_id,"
             "claim_version_ref,claim_version_hash,claim_ref,subject_ref,aspect,as_of,"
             "as_of_basis,importance,dedupe_group_ref,is_canonical,tagger_ref,"
-            "record_json,content_hash,actor_ref,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "evidence_kind,record_json,content_hash,actor_ref,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 wire["id"], wire["entry_ref"], wire["version"], wire["prior_version_ref"],
                 wire["claim_version_ref"], wire["claim_version_hash"], wire["claim_ref"],
                 wire["subject_ref"], wire["aspect"], wire["as_of"], wire["as_of_basis"],
                 wire["importance"], wire["dedupe_group_ref"], int(wire["is_canonical"]),
-                wire["tagger_ref"], canonical_json(wire), wire["content_hash"],
+                wire["tagger_ref"], wire["evidence_kind"], canonical_json(wire), wire["content_hash"],
                 wire["actor_ref"], wire["created_at"],
             ),
         )

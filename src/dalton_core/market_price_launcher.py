@@ -32,6 +32,7 @@ class MarketPriceLauncher(LaneChildLauncher):
         *,
         state_dir: str | Path,
         governance_path: str | Path | None = None,
+        proxy_config_path: str | Path | None = None,
         actor_ref: str = "automation:coverage-mission",
         **kwargs: Any,
     ) -> None:
@@ -41,6 +42,8 @@ class MarketPriceLauncher(LaneChildLauncher):
             else Path(governance_path).expanduser().resolve()
         )
         self.actor_ref = actor_ref
+        self.proxy_config_path = (None if proxy_config_path is None else
+                                  Path(proxy_config_path).expanduser().resolve())
 
     @property
     def configured(self) -> bool:

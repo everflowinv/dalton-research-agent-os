@@ -342,6 +342,9 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         f"{template}\n\n"
         f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"
         f"COMPANY:\n{json.dumps(company, ensure_ascii=False, sort_keys=True)}\n\n"
+        "MARKET PROXIES (never company actuals; preserve each proxy_gap when "
+        "citing one):\n"
+        f"{json.dumps(state.get('market_proxies') or [], ensure_ascii=False, sort_keys=True)}\n\n"
         f"STATEMENTS:\n{_statement_table(state)}\n"
     )
 

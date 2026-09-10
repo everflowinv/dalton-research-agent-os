@@ -979,6 +979,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("forecast_sensitivity_schema.sql", "dalton_core.forecast_sensitivity", "SensitivityProjectionAuthority", "core"),
     MigrationSpec("judgement_outcome_schema.sql", "dalton_core.judgement_outcome", "JudgementOutcomeAuthority", "core"),
     MigrationSpec("market_price_schema.sql", "dalton_core.market_price", "MarketPriceSeriesAuthority", "core"),
+    MigrationSpec("market_proxy_claim_schema.sql", "dalton_core.market_proxy_claim", "MarketProxyClaimAuthority", "core"),
     MigrationSpec("mission_deliverable_schema.sql", "dalton_core.mission_deliverable", "MissionDeliverableAuthority", "core"),
     MigrationSpec("model_forecast_schema.sql", "dalton_core.model_forecast", "ModelForecastAuthority", "core"),
     MigrationSpec("research_constitution_schema.sql", "dalton_core.research_constitution", "ResearchConstitutionAuthority", "core"),

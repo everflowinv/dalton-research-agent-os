@@ -119,12 +119,16 @@ class MissionMarketPriceLaneCoordinator:
         clock: Callable[[], datetime] | None = None,
         backfill_years: int = BACKFILL_YEARS,
         failure_ledger_dir: Any | None = None,
+        proxy_mappings: Sequence[Mapping[str, Any]] = (),
+        proxy_authority: Any | None = None,
     ) -> None:
         self.authority = authority
         self.launcher = launcher
         self.mission = mission
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.backfill_years = int(backfill_years)
+        self.proxy_mappings = [dict(item) for item in proxy_mappings]
+        self.proxy_authority = proxy_authority
         # The fetch in flight, so the next tick can settle it. A launcher
         # cannot be asked "what did you last run" -- it holds one process, not
         # a history -- and the ticket ref is the only handle on the summary.
@@ -314,6 +318,29 @@ class MissionMarketPriceLaneCoordinator:
         if self._open is not None:
             return {"status": "busy", "settled": settled,
                     "reason": "a price child is still running"}
+        proxy_results = None
+        if self.proxy_mappings:
+            mission = dict(mission)
+            universe = [dict(item) for item in mission.get("universe") or ()]
+            known = {item.get("company_ref") for item in universe}
+            unknown_targets = sorted({
+                mapping["target_subject_ref"] for mapping in self.proxy_mappings
+                if mapping["target_subject_ref"] not in known})
+            if unknown_targets:
+                return {"status": "misconfigured", "settled": settled,
+                        "reason": "market proxy targets are outside the mission: "
+                                  + ", ".join(unknown_targets)}
+            for mapping in self.proxy_mappings:
+                source_ref = mapping["source_series_company_ref"]
+                if source_ref not in known:
+                    universe.append({
+                        "company_ref": source_ref, "ticker": mapping["source_ticker"],
+                        "bootstrap_priority": "P8",
+                    })
+                    known.add(source_ref)
+            mission["universe"] = universe
+        if self.proxy_authority is not None:
+            proxy_results = self.proxy_authority.refresh_all(self.proxy_mappings)
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
@@ -367,9 +394,11 @@ class MissionMarketPriceLaneCoordinator:
                 "requested_end": end, "window_kind": kind,
                 "ticket_ref": ticket["id"],
                 "settled": settled, "skipped": skipped,
+                "market_proxies": proxy_results,
             }
         return {
             "status": "idle", "settled": settled, "skipped": skipped,
+            "market_proxies": proxy_results,
             "failures": self.budget.summary(),
             "reason": "every covered company's price history is current",
         }
@@ -411,6 +440,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         from .market_price import MarketPriceSeriesAuthority
+        from .market_proxy_claim import MarketProxyClaimAuthority, load_mappings
 
         def mission() -> Any:
             pointer = server.store.connection.execute(
@@ -420,6 +450,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
+        mappings = load_mappings(getattr(launcher, "proxy_config_path", None))
         coordinator = MissionMarketPriceLaneCoordinator(
             authority=MarketPriceSeriesAuthority(server.store),
             launcher=launcher,
@@ -428,6 +459,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             # state directory, and a lane that refuses to run without a
             # ledger would be a lane that fails closed on its bookkeeping.
             failure_ledger_dir=getattr(server, "state_dir", None),
+            proxy_mappings=mappings,
+            proxy_authority=MarketProxyClaimAuthority(server.store),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -441,6 +474,8 @@ def add_arguments(parser: Any) -> None:
         "--market-price-governance",
         help="approved yfinance-daily-prices governance record",
     )
+    parser.add_argument("--market-proxy-config",
+                        help="explicit source-series to research-subject proxy mappings")
 
 
 def build_launcher(args: Any) -> Any | None:
@@ -453,6 +488,7 @@ def build_launcher(args: Any) -> Any | None:
     return MarketPriceLauncher(
         state_dir=_Path(args.db).expanduser().resolve().parent,
         governance_path=args.market_price_governance,
+        proxy_config_path=getattr(args, "market_proxy_config", None),
     )
 
 

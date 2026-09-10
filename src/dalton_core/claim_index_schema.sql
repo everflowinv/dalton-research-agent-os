@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS claim_index_entry_versions (
     dedupe_group_ref TEXT NOT NULL,
     is_canonical INTEGER NOT NULL CHECK(is_canonical IN (0, 1)),
     tagger_ref TEXT NOT NULL,
+    evidence_kind TEXT NOT NULL DEFAULT 'statement',
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     actor_ref TEXT NOT NULL,
