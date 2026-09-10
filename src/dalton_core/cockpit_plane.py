@@ -2882,6 +2882,56 @@ class CockpitPlane:
                     **({} if verdict["decidable"]
                        else {"note": "暂时不能裁决：" + verdict["reason"]}),
                 })
+            # Investment Memo reuses MissionDeliverable and the mission stage
+            # ledger. Only the active mission's current head is offered; an old
+            # version remains readable under documents but cannot receive a
+            # verdict meant for different bytes.
+            try:
+                memo_rows = self._rows(core,
+                    "SELECT v.* FROM mission_deliverable_pointer p "
+                    "JOIN mission_deliverable_versions v ON v.version_id=p.version_id "
+                    "WHERE v.kind='investment_memo' AND v.mission_version_ref=? "
+                    "ORDER BY v.created_at", (mission["id"],))
+            except sqlite3.OperationalError:
+                memo_rows = []
+            for row in memo_rows:
+                record = json.loads(row["record_json"])
+                histories = self._rows(core,
+                    "SELECT stage_ref,status FROM coverage_mission_stage_records r "
+                    "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+                    "WHERE v.mission_ref=? AND r.company_ref=? ORDER BY r.created_at,r.record_id",
+                    (mission["mission_ref"], record["subject_ref"]))
+                decided = any(item["stage_ref"] == "investment_memo"
+                              and item["status"] in {"gate_passed", "gate_failed"}
+                              for item in histories)
+                if decided:
+                    continue
+                note = None
+                actions = [{"decision": "approve", "label": "批准并进入持续覆盖"},
+                           {"decision": "reject", "label": "拒绝"}]
+                try:
+                    from .investment_memo_contract import validate_memo_gate, verified_body_hash
+                    validate_memo_gate(record.get("gate") or {},
+                                       material_hash=verified_body_hash(record))
+                except (ValueError, KeyError, TypeError) as exc:
+                    actions = []
+                    note = f"暂时不能裁决：memo verification contract failed: {exc}"
+                gate = record.get("gate") or {}
+                details = {section["title"]: section.get("body") or "（本节为空）"
+                           for section in record.get("sections") or []}
+                details.update({q["question_ref"]: q.get("answer") or "（未回答）"
+                                for q in gate.get("key_questions") or []})
+                details["独立核验"] = (gate.get("verifier") or {}).get("verdict") or "缺失"
+                items.append({
+                    "kind": "investment_memo", "ref": record["id"],
+                    "hash": row["content_hash"], "at": row["created_at"],
+                    "title": "Investment Memo：是否批准并进入持续覆盖",
+                    "who": self._label(members, record["subject_ref"]),
+                    "summary": record.get("summary") or "",
+                    "details": details, "actions": actions,
+                    "needs_rationale": bool(actions),
+                    **({} if note is None else {"note": note}),
+                })
         with self._core() as core:
             # P10b: a Claim the detectors flagged, waiting for you to retire or keep it.
             for row in self._rows(core,
@@ -3193,6 +3243,16 @@ class CockpitPlane:
                 "decision": decision, "reason": rationale.strip()}
             title = {"approve": "通过了深度认知门", "return_for_more_work": "把深度认知门退回补充",
                      "reject": "否决了深度认知门"}[decision] + f"：{ref.split(':', 1)[-1]}"
+        elif kind == "investment_memo":
+            if decision not in {"approve", "reject"}:
+                raise CockpitError("decision must be approve or reject")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_investment_memo", {
+                "memo_version_ref": ref, "memo_version_hash": digest,
+                "decision": decision, "reason": rationale.strip()}
+            title = ("批准了 Investment Memo" if decision == "approve"
+                     else "拒绝了 Investment Memo") + f"：{ref.split(':', 1)[-1]}"
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")

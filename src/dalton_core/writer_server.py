@@ -440,6 +440,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # anything.  ``actor_ref`` is replaced by the authenticated principal here
     # and the authority refuses a non-``human:`` actor a second time.
     "decide_deep_insight_gate",
+    "decide_investment_memo",
     "deep_insight_gate_draft", "deep_insight_gate_submissions",
     # P15d: the owner answers one conviction call. Automation may write the
     # proposal and may never write the decision, which is the whole of the
@@ -750,6 +751,9 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "decide_deep_insight_gate": frozenset({
         "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
     }),
+    "decide_investment_memo": frozenset({
+        "memo_version_ref", "memo_version_hash", "decision", "reason", "actor_ref",
+    }),
     "deep_insight_gate_draft": frozenset({"version_ref"}),
     "deep_insight_gate_submissions": frozenset(),
     # P15d. ``proposal_hash`` is required rather than optional: a decision is
@@ -1029,6 +1033,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "declare_model_profile_metadata": "actor_ref",
     "acknowledge_model_fallback_notice": "actor_ref",
     "decide_deep_insight_gate": "actor_ref",
+    "decide_investment_memo": "actor_ref",
     "decide_conviction_call": "actor_ref",
     "decide_thesis_revision_candidate": "actor_ref",
     "decide_gate_reopen": "actor_ref",
@@ -2928,6 +2933,112 @@ class WriterServer:
             "company_ref": company_ref,
             "stage_status": status,
         }
+
+    def _op_decide_investment_memo(self, p: Mapping[str, Any]) -> Any:
+        """Apply one human verdict to the exact current verified memo head."""
+        from .investment_memo_contract import (
+            model_work_order_refs, validate_memo_gate, verified_body_hash,
+        )
+        from .model_fallback_chain import served_family
+        from .model_router import ModelRouter
+
+        values = dict(p)
+        actor = str(values["actor_ref"])
+        if not actor.startswith("human:"):
+            raise WriterServerError("Investment Memo decisions require a human principal")
+        decision = str(values["decision"])
+        if decision not in {"approve", "reject"}:
+            raise WriterServerError("decision must be approve or reject")
+        reason = str(values["reason"] or "").strip()
+        if not reason:
+            raise WriterServerError("an Investment Memo decision needs a reason")
+
+        ref = str(values["memo_version_ref"])
+        row = self.store.connection.execute(
+            "SELECT record_json, content_hash FROM mission_deliverable_versions WHERE version_id=?",
+            (ref,),
+        ).fetchone()
+        if row is None:
+            raise WriterServerError("the Investment Memo version does not exist")
+        memo = json.loads(row["record_json"])
+        if memo.get("content_hash") != row["content_hash"] or row["content_hash"] != values["memo_version_hash"]:
+            raise WriterServerError("Investment Memo hash binding failed")
+        if memo.get("kind") != "investment_memo":
+            raise WriterServerError("the requested deliverable is not an Investment Memo")
+        current = self.mission_deliverables.latest(str(memo["deliverable_ref"]))
+        if current is None or current.get("id") != ref or current.get("content_hash") != row["content_hash"]:
+            raise WriterServerError("only the current Investment Memo head can be decided")
+
+        pointer = self.store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=("
+            "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?)",
+            (memo["mission_version_ref"],),
+        ).fetchone()
+        if pointer is None or pointer["mission_version_id"] != memo["mission_version_ref"]:
+            raise WriterServerError("the Investment Memo is not bound to the active mission version")
+        mission = self.coverage_mission.mission(pointer["mission_version_id"])
+        if mission["content_hash"] != memo["mission_version_hash"]:
+            raise WriterServerError("Investment Memo mission hash binding failed")
+
+        gate = validate_memo_gate(memo.get("gate") or {}, material_hash=verified_body_hash(memo))
+        if list(memo.get("model_invocation_refs") or []) != model_work_order_refs(gate):
+            raise WriterServerError("Investment Memo model work-order provenance drifted")
+        producers = list(gate["producer_calls"])
+        verifier = gate["verifier"]
+        with ModelRouter(self._model_router_db()) as router:
+            producer_families = set()
+            for call in producers:
+                route = router.get_decision(str(call["route_decision_ref"]))
+                if route.get("outcome") != "selected" or route.get("work_order_id") != call["work_order_ref"]:
+                    raise WriterServerError("Investment Memo producer route/work-order binding failed")
+                family = served_family(router, str(call["route_decision_ref"]))
+                if not family:
+                    raise WriterServerError("Investment Memo producer family is unresolved")
+                producer_families.add(family)
+            route = router.get_decision(str(verifier["route_decision_ref"]))
+            if route.get("outcome") != "selected" or route.get("work_order_id") != verifier["work_order_ref"]:
+                raise WriterServerError("Investment Memo verifier route/work-order binding failed")
+            verifier_family = served_family(router, str(verifier["route_decision_ref"]))
+            if not verifier_family or verifier_family in producer_families:
+                raise WriterServerError("Investment Memo verifier is not independent")
+
+        company_ref = str(memo["subject_ref"])
+        records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
+        states = {(item["stage_ref"], item["status"]): item for item in records}
+        if ("company_model", "gate_passed") not in states:
+            raise WriterServerError("company_model has not passed")
+        requested_status = "gate_passed" if decision == "approve" else "gate_failed"
+        opposite_status = "gate_failed" if decision == "approve" else "gate_passed"
+        if ("investment_memo", opposite_status) in states:
+            raise WriterServerError("the Investment Memo already has the opposite human decision")
+        if ("investment_memo", "entered") not in states:
+            self.coverage_mission.record_stage(
+                mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+                company_ref=company_ref, stage_ref="investment_memo", status="entered",
+                evidence_refs=[ref], rationale="Investment Memo submitted for human review.",
+                actor_ref=actor, idempotency_key=f"investment-memo:{ref}:entered")
+            records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
+            states = {(item["stage_ref"], item["status"]): item for item in records}
+        status = requested_status
+        if ("investment_memo", status) not in states:
+            memo_stage = self.coverage_mission.record_stage(
+                mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+                company_ref=company_ref, stage_ref="investment_memo", status=status,
+                evidence_refs=[ref], rationale=reason, actor_ref=actor,
+                idempotency_key=f"investment-memo:{ref}:{decision}")
+        else:
+            memo_stage = states[("investment_memo", status)]
+        active_stage = states.get(("active_coverage", "entered"))
+        if decision == "approve" and active_stage is None:
+            active_stage = self.coverage_mission.record_stage(
+                mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+                company_ref=company_ref, stage_ref="active_coverage", status="entered",
+                evidence_refs=[ref, memo_stage["id"]],
+                rationale="Owner-approved Investment Memo entered active coverage.",
+                actor_ref=actor, idempotency_key=f"investment-memo:{ref}:active-coverage")
+        return {"status": "decided", "decision": decision, "memo_version_ref": ref,
+                "memo_stage_record_ref": memo_stage["id"],
+                "active_coverage_record_ref": None if active_stage is None else active_stage["id"]}
 
     def _op_deep_insight_gate_draft(self, p: Mapping[str, Any]) -> Any:
         """One gate draft in full, so the owner can read what they are deciding."""
