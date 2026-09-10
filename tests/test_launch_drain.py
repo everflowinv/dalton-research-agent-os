@@ -92,6 +92,26 @@ class LaunchDrainTests(unittest.TestCase):
         finally:
             child.wait()
 
+    def test_new_lane_directories_are_drained_without_a_hardcoded_allowlist(self) -> None:
+        for lane in ("zero-base-review-runs", "hkex-filings-runs", "future-lane-runs"):
+            _ticket(self.root, lane, "x" * 24)
+        found = running_tickets(self.root)
+        self.assertEqual({item["lane"] for item in found}, {
+            "zero-base-review-runs", "hkex-filings-runs", "future-lane-runs"})
+        self.assertFalse(drain(self.root, timeout_seconds=0)["drained"])
+        _ticket(self.root / "backups" / "old-state", "ignored", "x" * 24)
+        self.assertEqual(len(running_tickets(self.root)), 3)
+
+    def test_installer_stops_and_drains_before_upgrading_runtime(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "deploy/macos/install.sh").read_text()
+        drain_at = script.index('"$repo_root/src/dalton_core/launch_drain.py"')
+        writer_at = script.index("stop_job space.lumos.dalton.writer")
+        pip_at = script.index("-m pip install")
+        self.assertLess(script.index('stop_job "$label"'), drain_at)
+        self.assertLess(drain_at, writer_at)
+        self.assertLess(writer_at, pip_at)
+        self.assertIn("exit 1", script[drain_at:writer_at])
+
     def test_cli_exit_code_follows_drain_result(self) -> None:
         self.assertEqual(main(["--state-dir", str(self.root), "--timeout", "0"]), 0)
         _ticket(self.root, "fetches", "a" * 24)

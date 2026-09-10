@@ -22,30 +22,37 @@ if [[ ! -x "$python_source" ]]; then
   exit 2
 fi
 
+# Quiesce the old runtime before replacing any installed code. The drain is
+# stdlib-only and runs from this checkout, including newly added lane types.
+stop_job() {
+  local job_label="$1"
+  if launchctl print "$domain/$job_label" >/dev/null 2>&1; then
+    launchctl bootout "$domain/$job_label"
+    for attempt in {1..100}; do
+      if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 0.1
+    done
+    print -u2 "Service did not stop: $job_label; runtime has not been upgraded."
+    return 1
+  fi
+}
+for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller; do
+  stop_job "$label"
+done
+if ! "$python_source" "$repo_root/src/dalton_core/launch_drain.py" \
+    --state-dir "$state_dir" --timeout "${DRAIN_TIMEOUT:-600}"; then
+  print -u2 "Lane drain incomplete; writer and runtime left intact. Retry after children finish."
+  exit 1
+fi
+stop_job space.lumos.dalton.writer
+
 if [[ ! -x "$venv_dir/bin/python" ]]; then
   "$python_source" -m venv "$venv_dir"
 fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials,market-data,prior-models]"
-
-# P9d-11: stopping the writer terminates whatever lane child is in flight and
-# the next tick settles it as orphaned, parking that company/spec for a day.
-# The controller is what launches a child every tick, so it goes down first;
-# then wait (bounded) for running children; then stop the writer.  On timeout
-# say so and proceed.  The drain is read-only: it never signals a child or
-# touches Core.  (First deploy with the drain after the controller waited the
-# full timeout because the controller kept launching children behind it.)
-for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller; do
-  if launchctl print "$domain/$label" >/dev/null 2>&1; then
-    launchctl bootout "$domain/$label"
-  fi
-done
-if ! "$venv_dir/bin/python" -m dalton_core.launch_drain --state-dir "$state_dir" --timeout "${DRAIN_TIMEOUT:-600}"; then
-  print -u2 "warning: lane children still running after drain timeout; proceeding with bootout"
-fi
-if launchctl print "$domain/space.lumos.dalton.writer" >/dev/null 2>&1; then
-  launchctl bootout "$domain/space.lumos.dalton.writer"
-fi
+"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials,market-data,prior-models,hk-filings]"
 
 "$venv_dir/bin/dalton-bootstrap" --state-dir "$state_dir" --config "$config_path"
 

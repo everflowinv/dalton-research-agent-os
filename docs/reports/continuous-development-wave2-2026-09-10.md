@@ -50,3 +50,7 @@ F14 的真实范围是 13 个协调器，按 `resume-failure-ledger-next-2026-09
 - mission v14 本地签署包已从 live v13 只读生成并在临时副本真实发布验证。包含 11 may_write / 3 checkpoints，原 universe、预算、source_plan、bindings 保持；尚未签署，待完整验证部署批次与 pinned 版本确认后交 owner。
 
 Next step：收齐 crowd 与 market-proxy 审查修复后冻结一个可部署版本，主线全量、当前 live 只读副本复演、wheel/安装参数验收，随后 commit/push 并提交具体 owner 部署/签署步骤；后续独立开发继续在 worktree 推进。
+
+### 部署前生命周期修复
+
+安装脚本原先先升级 live venv 再停止服务，且 drain 只读最早五类 ticket。现改为控制器停止并确认 → 当前源码的纯标准库 drain（发现所有两层 lane ticket）→ writer 停止并确认 → 升级运行时；drain 超时中止，不继续打断在飞任务。安装 extras 同时补已有 HK XLS 读取依赖 `hk-filings`。51 项 service/drain 测试通过（1.542s），zsh 语法通过；未运行安装脚本，live 未变。

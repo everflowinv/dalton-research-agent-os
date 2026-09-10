@@ -12,7 +12,7 @@ So the fix is to not stop the writer while a child is running.  ``install.sh``
 stops the controller (which launches a child every tick), calls this module,
 and only then stops the writer; it polls the ticket directories and returns
 once no ticket is both ``running`` and backed by a live pid, or once the
-timeout passes, in which case it says so and the deploy proceeds.  A child
+timeout passes, in which case deployment stops before replacing the runtime.  A child
 that has exited but not yet been reaped by the writer (a zombie) counts as
 exited: the writer reaps only on its next tick, and ``kill(pid, 0)`` succeeds
 on a zombie, which is what made the first three drains wait their full
@@ -83,10 +83,12 @@ def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
 
     root = Path(state_dir)
     found: list[dict[str, Any]] = []
-    for name in TICKET_DIRECTORIES:
-        directory = root / name
-        if not directory.is_dir():
-            continue
+    # All launchers use state/<lane>/<ticket>/ticket.json. Discover that
+    # bounded shape so a new lane cannot silently escape the deploy drain.
+    # No recursive scan into raw spool, archives or backups is needed.
+    directories = sorted({path.parent.parent for path in root.glob("*/*/ticket.json")})
+    for directory in directories:
+        name = directory.name
         for ticket_path in sorted(directory.glob("*/ticket.json")):
             try:
                 record = json.loads(ticket_path.read_text(encoding="utf-8"))

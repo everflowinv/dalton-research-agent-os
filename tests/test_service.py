@@ -104,7 +104,7 @@ class InstallerSeedTests(unittest.TestCase):
         # Without yfinance the price lane refuses with a reason rather than
         # guessing, which is correct and also means the lane never runs.
         self.assertIn(
-            '"${repo_root}[deploy,pdf,sec-financials,market-data,prior-models]"', self.script())
+            '"${repo_root}[deploy,pdf,sec-financials,market-data,prior-models,hk-filings]"', self.script())
 
     # INT2: what each block below puts on disk, and what that switches on.
     # The value is the files the installer copies (relative to the state

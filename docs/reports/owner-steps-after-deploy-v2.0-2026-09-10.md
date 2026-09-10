@@ -43,16 +43,15 @@ export OWNER=human:lumos      # 换成你自己的主体
 for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller; do
   launchctl print "$DOMAIN/$label" >/dev/null 2>&1 && launchctl bootout "$DOMAIN/$label"
 done
-"$VENV/bin/python" -m dalton_core.launch_drain --state-dir "$STATE" --timeout 600
-launchctl bootout "$DOMAIN/space.lumos.dalton.writer"
+"$VENV/bin/python" "$REPO/src/dalton_core/launch_drain.py" --state-dir "$STATE" --timeout 600 && \
+  launchctl bootout "$DOMAIN/space.lumos.dalton.writer"
 launchctl list | grep space.lumos.dalton      # 期望：没有输出
 ```
 
-期望：drain 打出一行 JSON，以 `"status": "drained"` 结尾（`"status": "timeout"` 带一串还没退出的
-子进程也不致命，继续）。**controller 先走，writer 最后走**：反过来 controller 会在 drain 背后
+期望：drain 打出一行 JSON，包含 `"drained": true`。若退出非零或 `"drained": false`，停止后续部署，待列出的子进程完成再重试；不要继续停止 writer。**controller 先走，writer 最后走**：反过来 controller 会在 drain 背后
 继续起子进程，drain 白等十分钟。
 
-跳过：`install.sh` 自己会停，但那样备份是在一个正在写的 Core 上取的。
+`install.sh` 现在会先停止控制器、读取所有 lane ticket 等待子进程、等待 writer 完全停止，再升级 pip/运行时代码；drain 超时直接中止。这里提前停服务，是为了让后面的完整备份与部署对应同一静止状态。
 
 ---
 
