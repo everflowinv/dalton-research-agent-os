@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.event_judgement_launcher import EventJudgementLauncher
 from dalton_core.mission_event_judgement_lane import MissionEventJudgementLaneCoordinator
@@ -9,6 +10,22 @@ from tests.test_mission_event_judgement_lane import FakeLauncher
 
 
 class ConfigurationRetryTests(unittest.TestCase):
+    def test_packaged_provider_contract_change_rekeys_same_configuration(self):
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            judge, verifier = state / "judge.json", state / "verifier.json"
+            judge.write_text('{"routing_policy_ref":"judge:1"}')
+            verifier.write_text('{"routing_policy_ref":"verifier:1"}')
+            launcher = EventJudgementLauncher(
+                state_dir=state, judge_model_config=judge, verifier_model_config=verifier)
+            with patch("dalton_core.cockpit_model.verifier_provider_contract_fingerprint",
+                       return_value="a" * 64):
+                before = launcher.configuration_signature()
+            with patch("dalton_core.cockpit_model.verifier_provider_contract_fingerprint",
+                       return_value="b" * 64):
+                after = launcher.configuration_signature()
+            self.assertNotEqual(before, after)
+
     def test_changed_verifier_retries_same_event_after_old_child_settles(self):
         with tempfile.TemporaryDirectory() as name:
             state = Path(name)

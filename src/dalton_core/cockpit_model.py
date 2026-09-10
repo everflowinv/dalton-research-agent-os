@@ -21,6 +21,7 @@ import hashlib
 import inspect
 import json
 import re
+from importlib import resources
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -63,9 +64,28 @@ _PURPOSES: set[str] = set(_SEED_PURPOSES)
 # adapter resolves these opaque allowlisted refs to packaged schemas; callers
 # can never supply a filesystem path or arbitrary JSON schema.
 _VERIFIER_PROVIDER_CONTRACTS = {
-    "event_judgement_verifier": "event-judgement-verifier-provider-output-0.1",
-    "thesis_reflection_verifier": "event-judgement-verifier-provider-output-0.1",
+    "event_judgement_verifier": (
+        "event-judgement-verifier-provider-output-0.1",
+        "event-judgement-verifier-provider-output-v0.1.schema.json"),
+    "thesis_reflection_verifier": (
+        "event-judgement-verifier-provider-output-0.1",
+        "event-judgement-verifier-provider-output-v0.1.schema.json"),
 }
+
+
+def _verifier_provider_contract(purpose: str) -> tuple[str, str] | None:
+    selected = _VERIFIER_PROVIDER_CONTRACTS.get(purpose)
+    if selected is None:
+        return None
+    ref, resource = selected
+    schema = json.loads(resources.files("dalton_core").joinpath(resource).read_text("utf-8"))
+    return ref, content_hash(schema)
+
+
+def verifier_provider_contract_fingerprint(*purposes: str) -> str:
+    """Hash the packaged verifier contracts that make a failed batch retryable."""
+    return content_hash({purpose: _verifier_provider_contract(purpose)
+                         for purpose in purposes})
 
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
@@ -257,7 +277,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                max_input_tokens: int, max_output_tokens: int, max_cost_usd: float, max_seconds: int,
                budget_identity: str | None = None,
                created_at: str | None = None,
-               verifier_provider_contract: str | None = None) -> WorkOrder:
+               verifier_provider_contract: str | None = None,
+               verifier_provider_schema_hash: str | None = None) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if len(prompt.encode("utf-8")) > max_input_tokens:
@@ -270,6 +291,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         identity["budget_fingerprint"] = budget_identity
     if verifier_provider_contract is not None:
         identity["verifier_provider_contract"] = verifier_provider_contract
+        identity["verifier_provider_schema_hash"] = verifier_provider_schema_hash
     digest = content_hash(identity)
     at = created_at or _now()
     return WorkOrder(
@@ -285,6 +307,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                  **({} if verifier_provider_contract is None else {
                                      "verifier_output_schema_version": "0.1",
                                      "verifier_provider_contract": verifier_provider_contract,
+                                     "verifier_provider_schema_hash": verifier_provider_schema_hash,
                                  })},
     )
 
@@ -398,14 +421,16 @@ class CockpitModel:
         # the identity now agrees with the identity. (The SEC lane froze its
         # perception snapshot's generated_at for exactly this reason.)
         created_at = mission.get("created_at") or self.clock().isoformat(timespec="microseconds")
+        provider_contract = _verifier_provider_contract(purpose) if producer_refs else None
         work = build_work(purpose=purpose, request_id=request_id, prompt=prompt, mission_version_ref=mission["id"],
                           max_input_tokens=effective["max_input_tokens"], max_output_tokens=effective["max_output_tokens"],
                           max_cost_usd=effective["max_cost_usd"], max_seconds=effective["timeout_seconds"],
                           budget_identity=(budget_fingerprint(effective) if explicit_budget else None),
                           created_at=created_at,
                           verifier_provider_contract=(
-                              _VERIFIER_PROVIDER_CONTRACTS.get(purpose) if producer_refs else None
-                          ))
+                              provider_contract[0] if provider_contract else None),
+                          verifier_provider_schema_hash=(
+                              provider_contract[1] if provider_contract else None))
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),

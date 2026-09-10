@@ -276,6 +276,7 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(metadata["verifier_output_schema_version"], "0.1")
         self.assertEqual(metadata["verifier_provider_contract"],
                          "event-judgement-verifier-provider-output-0.1")
+        self.assertRegex(metadata["verifier_provider_schema_hash"], r"^[0-9a-f]{64}$")
         legacy = build_work(
             purpose="event_judgement_verifier", request_id="event-provider-contract",
             prompt='{"verdict":"pass","findings":[]}',

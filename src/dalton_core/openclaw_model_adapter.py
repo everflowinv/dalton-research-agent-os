@@ -664,6 +664,12 @@ def _required_provider_controls(
         ) from exc
     if not isinstance(schema, Mapping):
         raise ModelAdmissionError("independent verifier output schema is invalid")
+    if contract_ref is not None and work.metadata.get(
+        "verifier_provider_schema_hash"
+    ) != _dalton_hash(schema):
+        raise ModelAdmissionError(
+            "independent verifier provider schema hash does not match its contract"
+        )
     max_input_tokens = _positive_int(
         work.budget["max_input_tokens"], "WorkOrder budget max_input_tokens"
     )

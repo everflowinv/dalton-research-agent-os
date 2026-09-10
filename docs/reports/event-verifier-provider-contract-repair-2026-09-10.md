@@ -1,9 +1,11 @@
 # Event verifier provider-contract repair — 2026-09-10
 
 The Event Judgement and thesis-reflection verifier paths now bind their real
-closed output contract into each immutable Cockpit WorkOrder. Producer calls
+closed output contract and packaged schema content hash into each immutable Cockpit WorkOrder. Producer calls
 remain unchanged. The contract reference participates in the WorkOrder
-identity, so repaired verifier calls cannot collide with the seven persisted
+identity. The lane configuration signature also includes both Event verifier
+contract fingerprints, so a settled all-refused batch is dispatched again
+after this code/schema repair. Repaired verifier calls cannot collide with the seven persisted
 pre-repair failures.
 
 The adapter maps the opaque contract ref to one packaged JSON Schema. It also
@@ -22,7 +24,7 @@ constructed `requiredControls` with schema name
 Validation:
 
 - 35 Cockpit fallback and adapter tests passed before the broader run.
-- 126 relevant Cockpit fallback, adapter, and Event Judgement tests passed.
+- 129 relevant Cockpit fallback, adapter, Event Judgement, and retry tests passed.
 - Focused tests prove the provider controls reach the transport boundary, the
   packaged schema is the event schema rather than the thesis schema, the new
   identity differs from the failed legacy work, and unknown/cross-purpose

@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from importlib import resources
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +36,12 @@ from dalton_core.scheduler import Scheduler
 FIXED_NOW = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
 AUTH_CLIENT_ID = "client:dalton-runtime"
 AUTH_SECRET = b"a" * 64
+
+
+def event_verifier_schema_hash() -> str:
+    schema = json.loads(resources.files("dalton_core").joinpath(
+        "event-judgement-verifier-provider-output-v0.1.schema.json").read_text("utf-8"))
+    return canonical_hash(schema)
 
 
 def endpoint_profile() -> dict[str, Any]:
@@ -522,6 +529,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                 "verifier_output_schema_version": "0.1",
                 "verifier_provider_contract":
                     "event-judgement-verifier-provider-output-0.1",
+                "verifier_provider_schema_hash": event_verifier_schema_hash(),
             },
         })
         routed = self.router.route(
@@ -549,7 +557,8 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             "requested_capabilities": ["verify"],
             "idempotency_key": "work-key:unknown-verification-1",
             "metadata": {"verifier_output_schema_version": "0.1",
-                         "verifier_provider_contract": "caller-file.json"},
+                         "verifier_provider_contract": "caller-file.json",
+                         "verifier_provider_schema_hash": "0" * 64},
         })
         routed = self.router.route(
             verifier, attempt_number=1, capability="verify",
@@ -571,7 +580,8 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             "metadata": {"purpose": "company_dossier_verifier",
                          "verifier_output_schema_version": "0.1",
                          "verifier_provider_contract":
-                             "event-judgement-verifier-provider-output-0.1"},
+                             "event-judgement-verifier-provider-output-0.1",
+                         "verifier_provider_schema_hash": event_verifier_schema_hash()},
         })
         routed = self.router.route(
             verifier, attempt_number=1, capability="verify",
