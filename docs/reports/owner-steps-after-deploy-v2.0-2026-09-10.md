@@ -11,6 +11,9 @@
 安装脚本从不批准任何东西、从不签任何策略、从不发任何版本——它只是把要批的东西放到你面前。
 没做的那些，驾驶舱会如实说出来（「等你批准数据源」「缺授权，一次也没跑」），不会装作在跑。
 
+文中带「演练实测」或 live 行数的数字都是 2026-09-10 部署演练的历史快照；截至本次修订，
+新集成仍未部署，不能把这些数字读成当前 live 已经运行新代码。
+
 约定：
 
 ```sh
@@ -28,9 +31,9 @@ export OWNER=human:lumos      # 换成你自己的主体
 **三件事必须在服务停着的时候做**：备份（第 2 节）、日账本迁移（第 5 节）、以及
 `thesis_impact.enabled` 翻成 true 之后的重装（第 13 节）。其余全部可以在服务跑着的时候做。
 
-**七件事只有你能做，跳过任何一件都有代价，代价写在每一节里**：批准 26 份治理记录、
+**八件事只有你能做，跳过任何一件都有代价，代价写在每一节里**：批准 26 份治理记录、
 发一版 mission、放宽 mandate、发一份回答充分性策略、重签 figure 准入策略、
-重指 verifier 的 phase pin、确认十条 IR 网址。
+重指 verifier 的 phase pin、确认十条 IR 网址、把 live 的 tracking policy 从 v1 明确换到 v2。
 
 ---
 
@@ -140,13 +143,14 @@ plist **只在安装时渲染一次**。一条「因为某个文件出现才存�
 | `DALTON_OPENCLAW_WORKSPACE` | 默认 `~/.openclaw/workspace`。有 `skills/market-digest/output` 目录就种 sales-notes 两份记录 + feed plan，并把该目录 `ln -s` 到 `$STATE/feeds/market-digest-output`（**软链，不是拷贝**）；有 `wiki-index.sqlite` 就种 company-wiki 两份记录，并把**整个工作区** `ln -s` 到 `$STATE/feeds/company-wiki`（语料里的路径是相对工作区根的） | 打印 `note: no market-digest output at …` / `note: no wiki index at …`，两条投喂 lane 不装 |
 | `DALTON_AGENT_REACH_TOOL`<br>`DALTON_XUEQIU_HOT_RANK_TOOL`<br>`DALTON_XREACH_TOOL` | 三个都要是可执行文件，**缺一个整块不装**（7 份大众源记录 + 每公司映射）。装上后软链到 `$STATE/host-tools/{agent-reach,xueqiu-hot-rank,xreach}` | 演练实测：`gate shut, 8 seed(s) not installed -- crowd-tools: not set to an executable: …`。热榜**不是** agent-reach 的子命令，要一个 shim 补上 `<tool> hot-rank --limit N --stock-type T --json`；另两个是 xreach 自己的 |
 | `DALTON_EVENT_JUDGEMENT_MODEL_TIER=brain`<br>`DALTON_EVENT_VERIFIER_MODEL_TIER=verifier` | 成对写出 `$STATE/event-judgement-model-config.json` 与 `$STATE/event-verifier-model-config.json` | **只设一个 `exit 2` 且两个都不装；两个设成同一个值也 `exit 2`**——一个模型自己核验自己不是核验，路由会以 `gated:same_family` 拒绝，一次调用都不花。都不设：`event_judgement unconfigured`（演练实测） |
+| `DALTON_ZERO_BASE_REVIEW_MODEL_TIER=brain`<br>`DALTON_ZERO_BASE_REVIEW_VERIFIER_MODEL_TIER=verifier` | 成对写出 `$STATE/zero-base-review-model-config.json` 与 `$STATE/zero-base-review-verifier-model-config.json` | **只设一个或显式 pin 相同会 `exit 2`**。运行时还按实际 route family 检查两者不同；无法解析或同 family 都拒绝，该公司复盘不发布 |
 | `DALTON_CLAIM_INDEX_MODEL_TIER=cheap` | 写出 `$STATE/claim-index-model-config.json` | `claim_index unconfigured`（演练实测）。落 C2 的 maintenance 池，是四个池里最紧的（5%） |
 | `DALTON_PLANNER_MODEL_PROFILE` / `_TIER` | 重写 `$STATE/research-planner-model-config.json`，**并把 `budget_db` + `budget_policy_ref` 写进去** | W3：Tier-1 规划调用不进日账本，op 结果一直是 `budget: {"status": "unbudgeted"}`，**你设的 25% `adhoc` 池对它管不着**。这台机器已经有这个文件，但要重跑一次才带上账本字段 |
 | `DALTON_DELIVERABLE_MODEL_PROFILE` / `_TIER` | 写出 `$STATE/initial-screen-model-config.json` | 保持原有 pin。**注意这一份现在被四条 lane 共用**：initial screen、debate map、industry framework、conviction call（演练读 plist 确认） |
 | `DALTON_EXTRACTION_MODEL_TIER` | 默认就是 `cheap`（链：`deepseek-v4-flash → zai-glm-5-3-flash → gemini-3-5-flash-lite`）。设成**空**才回到单一 pin | 默认已是链 |
 | `DALTON_EXTRACTION_MAX_WINDOWS`（1–50）<br>`DALTON_EXTRACTION_NUMERIC_WINDOWS`（0–50）<br>`DALTON_EXTRACTION_DISCOVERY_WINDOWS`（0–50） | 校验后写进 `service.json`，并作为 `--extraction-max-windows` 传下去。**设了后两个而不设第一个是硬错误** | live 现值 30/10/10 —— 见第 19.2 节，这个组合超了 mission 的调用上限 |
 | `DALTON_ALPHAENGINE_OWNER_CALL_CAP`（1–2000） | 校验后写进 `service.json` | 上限不变 |
-| `DALTON_PRIOR_RESEARCH_DIR` | **今天还不存在。** 我在整个仓库里 grep 过，零命中——它属于还在飞的 `prior-research` 分支。那条分支合入之前，设它没有任何作用 | — |
+| `DALTON_PRIOR_RESEARCH_DIR` | 指向团队既有研究根目录；目录下每家公司一层并带 `manifest.json`。安装脚本据此种两份 prior-research 治理记录、v2 feed plan，并软链到 `$STATE/feeds/prior-research` | 不设或目录不存在：打印 note，prior-research lane 不安装；不会猜盘上哪个目录属于团队研究 |
 
 一个典型的完整安装命令：
 
@@ -154,13 +158,41 @@ plist **只在安装时渲染一次**。一条「因为某个文件出现才存�
 DALTON_OPENCLAW_WORKSPACE=~/.openclaw/workspace \
 DALTON_EVENT_JUDGEMENT_MODEL_TIER=brain \
 DALTON_EVENT_VERIFIER_MODEL_TIER=verifier \
+DALTON_ZERO_BASE_REVIEW_MODEL_TIER=brain \
+DALTON_ZERO_BASE_REVIEW_VERIFIER_MODEL_TIER=verifier \
 DALTON_CLAIM_INDEX_MODEL_TIER=cheap \
 DALTON_PLANNER_MODEL_TIER=brain \
   deploy/macos/install.sh
 ```
 
-跳过全部三个 lane 开关是**受支持的部署**：`claim_index` 与 `event_judgement` 停在 `unconfigured`，
-一分钱不花。
+跳过这些模型 lane 开关是**受支持的部署**：`claim_index`、`event_judgement` 与
+`zero_base_review` 停在 `unconfigured`，一分钱不花。
+
+### 4.2 tracking policy：v1 保留，live 已有文件不会被 install 覆盖
+
+仓库同时保留 `deploy/phase9/p14a-tracking-policy-v1.json` 与新文件
+`p14a-tracking-policy-v2.json`。v2 在 v1 基础上加入固定每日一次的 `sec-ownership`，并把 `sec`
+的理由写清到 filing / issuer-purchases 路径。`install.sh` 只有在 `$STATE/tracking-policy.json`
+不存在时才复制 v2；live 已有 v1 时重跑安装**不会覆盖**。
+
+先读当前版本：
+
+```sh
+python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["policy_ref"])' \
+  "$STATE/tracking-policy.json"
+```
+
+若输出正是 `tracking-policy:p14a:v1`，服务仍停着时保留旧文件并显式换成 v2：
+
+```sh
+cp "$STATE/tracking-policy.json" "$STATE/tracking-policy.v1.pre-v2.json"
+install -m 600 "$REPO/deploy/phase9/p14a-tracking-policy-v2.json" \
+  "$STATE/tracking-policy.json"
+```
+
+再读一次，期望 `tracking-policy:p14a:v2`。仓库没有 tracking policy 的独立签名/发布命令；这里的
+控制是版本化文件、copy-once 安装和 owner 明确替换，不能套用 figure policy 或 mission 的签名流程。
+若当前既不是 v1 也不是 v2，先停下比较内容，不要覆盖未知的 owner 修改。
 
 ---
 
@@ -372,6 +404,11 @@ PYTHONPATH="$REPO/src" "$VENV/bin/python" scripts/build_mission_v2_params.py \
   --add-scope conviction_call \
   --set-source-status source:guidepoint=connected \
   --set-source-status source:company-ir=connected \
+  --set-source-status source:sales-notes=connected \
+  --set-source-status source:company-wiki=connected \
+  --set-source-status source:xueqiu=connected \
+  --set-source-status source:x=connected \
+  --set-source-status source:blind=connected \
   --output /tmp/us-it-services-mission-v14.params.json
 ```
 
@@ -408,7 +445,7 @@ thesis_revision_candidate, conviction_call
 `consensus_estimate` / `valuation` / `dossier` / `debate_map` 今天的消费者还在长，
 一起授予是为了少发几次版本。
 
-### 8.2 然后手改这份 params 文件——两处，脚本都做不到
+### 8.2 然后手改这份 params 文件——只改 checkpoints
 
 **(a) `autonomy.human_checkpoints` 加三个词。** `build_mission_v2_params.py` 没有
 `--add-checkpoint`。改完之后应当是：
@@ -427,21 +464,11 @@ thesis_revision_candidate, gate_reopen, conviction_call
 
 `deep_insight_gate` **已经在里面**（Playbook 强制），不用动。
 
-**(b) `source_plan` 加五行。** `--set-source-status` 要求那一行**已经在计划里**，
-不在就报 `active mission source plan does not list <ref>`（演练实测）。live 的计划只有五行：
-`source:sec-edgar` / `source:alphaengine` / `source:web-search`（都已 `connected`）、
-`source:company-ir` / `source:guidepoint`（8.1 那两个 flag 已经把它们翻成 `connected`）。
-剩下五个源**从来没有过一行**，要手加：
+F18 已修：8.1 的五个 `--set-source-status source:<name>=connected` 会在缺行时按打包
+connector inventory 补建合法的三字段行，`role` 写明匹配到的 connector 和
+`created_by=set-source-status`。inventory 不认识的 source 仍然 fail-closed；不再手改 JSON。
 
-```json
-{"source_ref": "source:sales-notes",  "role": "卖方 sales note（本地人工投喂）", "status": "connected"},
-{"source_ref": "source:company-wiki", "role": "公司维基（本地语料）",           "status": "connected"},
-{"source_ref": "source:xueqiu",       "role": "雪球帖子与热榜（大众情绪）",       "status": "connected"},
-{"source_ref": "source:x",            "role": "X 时间线、搜索与线程（大众情绪）", "status": "connected"},
-{"source_ref": "source:blind",        "role": "Blind 员工评价（一手员工视角）",   "status": "connected"}
-```
-
-演练把这两处手改都过了一遍校验器：三个新 checkpoint 与五行新 source 全部合法。
+三个新 checkpoint 的手改已经过校验器。
 `source:cn-hk-findata` **不要加**（7.7）。
 
 `source:alphaengine` 已经是 `connected`——v1.0 说它是 `probe_only`，那句话现在不对了。
@@ -862,12 +889,12 @@ reservation used  (route-estimate max × headroom): 10992 micros   (原来是一
 | §2.1「加九个词」 | **十一个**：多了 `forecast_revision_proposal` 与 `conviction_call` |
 | §2.3「checkpoints 加一个」 | **三个**：`thesis_revision_candidate`、`gate_reopen`、`conviction_call` |
 | §2.2「`source_discovery` live 第 13 版没有」 | **有。** 演练直接读出来的 11 个词里就有它 |
-| §2.4「`source_plan` 把这些改成 `connected`」 | 其中五个源**在计划里根本没有行**，`--set-source-status` 会报错；要手加（第 8.2(b) 节）。`source:alphaengine` **已经**是 `connected`，不是 `probe_only` |
-| §4.4 / §4.5 手写三份模型配置 | 由 `DALTON_EVENT_JUDGEMENT_MODEL_TIER` / `DALTON_EVENT_VERIFIER_MODEL_TIER` / `DALTON_CLAIM_INDEX_MODEL_TIER` 写出，并有 `exit 2` 的成对与异 family 检查（第 4.1 节） |
+| §2.4「`source_plan` 把这些改成 `connected`」 | F18 后可直接对缺行使用五个 `--set-source-status source:<name>=connected`，生成器按 connector inventory 补行（第 8.1 节）。`source:alphaengine` **已经**是 `connected`，不是 `probe_only` |
+| §4.4 / §4.5 手写三份模型配置 | event judgement 两份、zero-base review 两份、claim index 一份都由对应 `DALTON_*_MODEL_PROFILE/TIER` 写出；两个 producer/verifier 对都有安装时成对检查，运行时再按实际 family fail-closed（第 4.1 节） |
 | §6「上限是 30」 | **130**，而且 W2 量到已经打满（第 19.1 节） |
 | §1 二十份记录 | **二十六份**：多了 S5 的四份持股 + 两份 IR 页面（第 7.5 / 7.6 节） |
 | — | 新增：C2 日账本迁移（第 5 节）、W3 重跑 install 让 planner 进日账本（第 4.1 节）、IR 十条网址（第 15 节）、13F 名单（第 16 节）、回答充分性策略（第 10 节）、thesis-impact canary（第 13 节）、抽取吞吐（第 19.2 节） |
-| — | `DALTON_PRIOR_RESEARCH_DIR` **今天不存在**，属于还在飞的 `prior-research` 分支 |
+| — | `DALTON_PRIOR_RESEARCH_DIR` 已接入 install：声明既有研究根目录，种 prior-research 两份治理记录与 v2 feed plan，并建立受控软链（第 4.1 节） |
 
 ---
 
