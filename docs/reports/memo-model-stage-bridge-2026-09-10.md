@@ -54,3 +54,32 @@ Result: 322 tests passed. Focused cases cover every readiness dimension,
 waiting-to-pass recovery across a mission version change, and refusal to act
 while the next stage is the human Deep Insight checkpoint. `git diff --check`
 also passed.
+
+## Cross-review correction
+
+The original readiness predicates were too weak for the bound playbook. In
+particular, a candidate high-frequency source was treated as though it had
+already entered the update calendar, and independently selected latest model
+and sensitivity versions could be combined despite a stale model binding.
+
+The bridge now reads records through each authority's checked public reader
+and requires the current mission, company, model ref, and model hash to agree.
+It reports each unmet playbook criterion and remains `entered`/`waiting`.
+There is intentionally no positive gate-pass fixture today: the current
+IndustryFramework authority does not record per-input as-of dates or an update
+calendar binding, while the model/sensitivity authorities do not record a
+completed two-year filing reconciliation or peer-relative sensitivity bands.
+Inventing proxy fields for those outputs would recreate the false pass. A
+later producer/schema change can supply these facts without changing the
+recoverable stage behavior.
+
+Cross-review validation:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.test_model_stage_bridge tests.test_lane_registry tests.test_service
+```
+
+Result: 73 tests passed. Regressions cover the formerly accepted framework
+without as-of/calendar proof and a sensitivity projection bound to an older
+forecast model.

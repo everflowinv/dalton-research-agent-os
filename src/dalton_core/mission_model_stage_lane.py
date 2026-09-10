@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,41 +11,35 @@ from .model_stage_readiness import company_model_readiness, industry_model_readi
 ACTOR_REF = "automation:coverage-mission"
 
 
-def _latest_json(connection: Any, table: str, where: str, value: str,
-                 order: str) -> dict[str, Any] | None:
+def _reader(connection: Any, authority_type: type[Any]) -> Any:
+    authority = authority_type.__new__(authority_type)
+    authority.connection = connection
+    return authority
+
+
+def _latest(connection: Any, authority_type: type[Any], subject_ref: str) -> dict[str, Any] | None:
+    """Read through an authority's checked public reader, without running DDL."""
     try:
-        row = connection.execute(
-            f"SELECT record_json FROM {table} WHERE {where}=? ORDER BY {order} DESC LIMIT 1",
-            (value,),
-        ).fetchone()
-    except Exception:  # absent pre-existing authority is an honest waiting state
+        return _reader(connection, authority_type).latest(subject_ref)
+    except Exception:  # absent or corrupt authority is an honest, fail-closed wait
         return None
-    return None if row is None else json.loads(row["record_json"])
 
 
 def _evaluate(connection: Any, mission: Mapping[str, Any], company_ref: str,
               stage_ref: str) -> dict[str, Any]:
     if stage_ref == "industry_model":
-        from .industry_framework import validate_framework_version
+        from .industry_framework import IndustryFrameworkAuthority
 
-        framework = _latest_json(connection, "industry_framework_versions",
-                                 "industry_ref", str(mission["industry_ref"]),
-                                 "version_number")
-        if framework is not None:
-            framework = validate_framework_version(framework)
-        return industry_model_readiness(framework)
-    from .forecast_sensitivity import validate_projection
-    from .model_forecast_driver import validate_forecast_model
+        framework = _latest(connection, IndustryFrameworkAuthority,
+                            str(mission["industry_ref"]))
+        return industry_model_readiness(framework, mission=mission)
+    from .forecast_sensitivity import SensitivityProjectionAuthority
+    from .model_forecast_driver import ForecastModelAuthority
 
-    model = _latest_json(connection, "forecast_model_versions", "company_ref",
-                         company_ref, "version_number")
-    sensitivity = _latest_json(connection, "sensitivity_projections", "company_ref",
-                               company_ref, "version_number")
-    if model is not None:
-        model = validate_forecast_model(model)
-    if sensitivity is not None:
-        sensitivity = validate_projection(sensitivity)
-    return company_model_readiness(model, sensitivity)
+    model = _latest(connection, ForecastModelAuthority, company_ref)
+    sensitivity = _latest(connection, SensitivityProjectionAuthority, company_ref)
+    return company_model_readiness(model, sensitivity, mission=mission,
+                                   company_ref=company_ref)
 
 
 def advance_once(missions: Any, connection: Any,

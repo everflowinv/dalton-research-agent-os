@@ -55,7 +55,10 @@ class ModelStageReadinessTests(unittest.TestCase):
             "gaps": [{"gap_ref": "gap:high-frequency-demand", "status": "open",
                       "candidate_sources": [{"source_ref": "source:web"}]}],
         }
-        self.assertTrue(industry_model_readiness(framework)["passed"])
+        result = industry_model_readiness(framework, mission=mission())
+        self.assertFalse(result["passed"])
+        self.assertIn("input_as_of_dates_bound", result["reasons"])
+        self.assertIn("high_frequency_update_calendar_bound", result["reasons"])
         framework["cross_company_comparison"]["cells"] = []
         result = industry_model_readiness(framework)
         self.assertFalse(result["passed"])
@@ -78,10 +81,35 @@ class ModelStageReadinessTests(unittest.TestCase):
                          "what_if": [{"lines": [{"cells": [{"status": "computed"}]}]}]}],
             "consensus_bridge": {"status": "available", "metrics": [{}]},
         }
-        self.assertTrue(company_model_readiness(model, sensitivity)["passed"])
+        result = company_model_readiness(
+            model, sensitivity, mission=mission(), company_ref="company:a")
+        self.assertFalse(result["passed"])
+        self.assertIn("three_to_five_key_drivers", result["reasons"])
+        self.assertIn("two_year_filings_reconciled_zero_error", result["reasons"])
+        self.assertIn("peer_relative_sensitivity_quantified", result["reasons"])
         model["assumptions"][0]["refs"] = []
         self.assertIn("forecast_assumptions_explicit",
                       company_model_readiness(model, sensitivity)["reasons"])
+
+    def test_stale_sensitivity_cannot_pass_a_newer_model(self):
+        model = {"id": "forecast-model-version:company-a:2", "content_hash": "b" * 64,
+                 "company_ref": "company:a", "mission_version_ref": "mission:v14",
+                 "history_periods": [{}] * 8, "forecast_periods": [{}],
+                 "drivers": [{"ref": f"driver:{n}", "history": [{}], "role": "revenue",
+                              "status": "forecastable"} for n in range(3)],
+                 "assumptions": [{"driver_ref": f"driver:{n}", "because": "filed",
+                                  "refs": [{"ref": "claim:1"}]} for n in range(3)],
+                 "results": [{"ref": "result:revenue", "status": "computed"}]}
+        sensitivity = {"id": "sensitivity:v1", "company_ref": "company:a",
+                       "mission_version_ref": "mission:v14",
+                       "model_version_ref": "forecast-model-version:company-a:1",
+                       "model_version_hash": "a" * 64,
+                       "selection": {"status": "selected"}, "drivers": [],
+                       "consensus_bridge": {"status": "available", "metrics": [{}]}}
+        result = company_model_readiness(
+            model, sensitivity, mission=mission(), company_ref="company:a")
+        self.assertFalse(result["passed"])
+        self.assertIn("active_mission_model_sensitivity_binding", result["reasons"])
 
     def test_waiting_readiness_recovers_without_terminal_gate_failure(self):
         stages = {"company:a": {"current_stage": "deep_insight_gate",
