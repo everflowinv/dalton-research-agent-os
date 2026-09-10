@@ -2,6 +2,10 @@
 
 更新日期：2026-09-10（恢复开发；以下历史时间记录保留）
 
+## 最新 live 状态（2026-09-10，部署恢复）
+
+Owner 的首次部署因目录同步晚于抽取配置而中断，mission 签署未执行。安装顺序修复 `67373c0` 已提交；11 项针对性测试在 Python 3.13/3.14 均通过，433 个运行文件保持与全量验收版本一致。已重试部署并清理确认的旧 unmanaged controller，新服务 health 全部通过。**现在只需 owner 签署 mission v14，然后验收真实产物。** 详见 [部署恢复记录](reports/wave4-live-deployment-recovery-2026-09-10.md)。下方“尚未部署”是此前验收阶段的历史记录。后续补 controller 单实例锁与升级前遗留进程检测。
+
 ## 当前开发与验收（2026-09-10，覆盖下方历史状态）
 
 Owner 要求持续开发，尽量使用 GPT-5.6 Sol 并行，及时记录并 commit/push；部署和人工签署交给 owner。代码在隔离分支 `continuous-integration-wave4` 集成，原 main 中另一会话的四个 DeepSeek 文件完整保留。

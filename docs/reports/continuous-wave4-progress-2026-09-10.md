@@ -49,3 +49,7 @@ Copied-state diagnosis also found a rehearsal gap: extraction model config retai
 `79e0ef7ca9348484bc549cdc36b3846bd404f7b3` passed **6,248 tests / 519.224s, 1 skip**. The same unchanged checkout passed 430 Python/SQL + 3 HTML byte comparisons, JavaScript syntax, the 13-step current-copy rehearsal (all 12 model configs internally confined), and the copied Cockpit model page. Original main's external DeepSeek patch hash remains unchanged. [Final report](continuous-wave4-release-2026-09-10.md) is now the authoritative acceptance record.
 
 Next step is owner deployment and mission v14 signing using the prepared private packet, followed by installed-runtime and actual product acceptance. The packet preserves exact source/wheel/test/rehearsal bindings and includes a read-only postdeploy checker. No live deployment, signature, metadata declaration or paid model call has run. This checkpoint completes predeployment development and acceptance, not live product acceptance.
+
+## Live deployment recovery
+
+Owner deployment exposed an actual installer-order gap, fixed in `67373c0` with 11 focused tests on both development and installed Python. Recovery deployment completed catalog/roles/startup; an unmanaged preexisting controller was then identified and stopped, and fresh health passed. Installed 433 source files match the accepted runtime. Mission remains v13: only the owner's v14 signature is pending before product acceptance. [Recovery details and next step](wave4-live-deployment-recovery-2026-09-10.md).
