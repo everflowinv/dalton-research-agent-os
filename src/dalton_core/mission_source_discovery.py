@@ -448,7 +448,8 @@ def plan_spec(plan: Mapping[str, Any], spec_ref: str) -> dict[str, Any]:
 
 
 def build_discovery_parameters(
-    plan: Mapping[str, Any], *, spec_ref: str, company_ref: str, as_of: date
+    plan: Mapping[str, Any], *, spec_ref: str, company_ref: str, as_of: date,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Deterministic search parameters for one plan spec and company.
 
@@ -490,7 +491,7 @@ def build_discovery_parameters(
             "date_from": window_start,
             "date_to": as_of.isoformat(),
         },
-        "cursor": None,
+        "cursor": cursor,
     })
 
 
@@ -623,6 +624,7 @@ class _SearchLauncherBase:
         mission_version_hash: str,
         as_of: str,
         ticket_dir: Path,
+        cursor: str | None = None,
     ) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
@@ -640,6 +642,8 @@ class _SearchLauncherBase:
         ]
         if self.spool_dir is not None:
             command += ["--spool-dir", str(self.spool_dir)]
+        if cursor is not None:
+            command += ["--cursor", cursor]
         command += self._extra_command_args()
         command += list(self.mode_args)
         return command
@@ -650,6 +654,7 @@ class _SearchLauncherBase:
         authorization: Mapping[str, Any],
         spec_ref: str,
         as_of: date | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """Spawn one discovery child bound to an exact mission authorization."""
 
@@ -706,7 +711,7 @@ class _SearchLauncherBase:
                 requested_by=requested_by,
                 mission_version_ref=authorization["mission_version_ref"],
                 mission_version_hash=authorization["mission_version_hash"],
-                as_of=as_of_date.isoformat(), ticket_dir=ticket_dir,
+                as_of=as_of_date.isoformat(), ticket_dir=ticket_dir, cursor=cursor,
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1283,8 +1288,10 @@ class MissionSourceDiscoveryCoordinator:
                 return satisfied
         return self._cadence_block(
             mission["id"], company_ref, spec,
-            use_retry_interval=self._checklist_shortfall(mission, company_ref,
-                                                         spec_ref),
+            use_retry_interval=(
+                self._checklist_shortfall(mission, company_ref, spec_ref)
+                and self._continuation_cursor(mission["id"], company_ref, spec_ref) is not None
+            ),
         )
 
     def _checklist_shortfall(self, mission: Mapping[str, Any], company_ref: str,
@@ -1317,6 +1324,37 @@ class MissionSourceDiscoveryCoordinator:
             return True
         floor = max(int(held["required"]), required or 0)
         return int(held["have"]) < floor
+
+    def _continuation_cursor(self, mission_version_ref: str, company_ref: str,
+                             spec_ref: str) -> str | None:
+        """Read the provider cursor bound to the latest accepted search page."""
+        if self.source_ref != ALPHAENGINE_SOURCE_REF:
+            return None
+        discoveries = self.missions.source_discoveries(
+            mission_version_ref, company_ref=company_ref,
+            spec_ref=spec_ref, limit=1,
+        )
+        if not discoveries:
+            return None
+        row = self.store.connection.execute(
+            "SELECT record_json,content_hash FROM connector_source_envelopes "
+            "WHERE source_envelope_id=?",
+            (discoveries[0]["source_envelope_ref"],),
+        ).fetchone()
+        if row is None:
+            return None
+        envelope = json.loads(row["record_json"])
+        stored_hash = envelope.get("content_hash")
+        hashed = dict(envelope)
+        hashed.pop("content_hash", None)
+        if (
+            stored_hash != row["content_hash"]
+            or stored_hash != discoveries[0]["source_envelope_hash"]
+            or content_hash(hashed) != stored_hash
+        ):
+            return None
+        cursor = envelope.get("cursor")
+        return cursor if isinstance(cursor, str) and cursor else None
 
     def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
                          spec_ref: str) -> str | None:
@@ -1521,12 +1559,14 @@ class MissionSourceDiscoveryCoordinator:
                     return {"status": "budget_exhausted", "budget": budget, "skipped": skipped}
                 parameters = build_discovery_parameters(
                     self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
-                    as_of=self.clock().date(),
+                    as_of=self.clock().date(), cursor=self._continuation_cursor(
+                        mission["id"], company_ref, spec["spec_ref"]),
                 )
                 try:
                     ticket = self.search_launcher.start(
                         authorization=authorization, spec_ref=spec["spec_ref"],
                         as_of=self.clock().date(),
+                        cursor=parameters.get("cursor"),
                     )
                 except DiscoveryLaunchConflict as exc:
                     return {"status": "busy", "reason": str(exc), "skipped": skipped}

@@ -18,13 +18,14 @@ This does not raise any signed or owner cap.
 
 ## Validation
 
-Two focused regressions pass:
+Three focused regressions pass:
 
-- successful searches below the accepted evidence floor retry after the short interval and CTSH is reached despite an earlier incomplete company;
+- successful searches below the accepted evidence floor retry after the short interval when a real continuation cursor exists, and the cursor reaches the governed request;
+- a failed acquisition still follows its existing retry behavior without colliding with a replayed first-page source envelope;
 - a quota-window refusal writes no terminal outcome, then the same round resumes successfully on the next tick.
 
-The complete source-discovery module currently has unrelated clock-sensitive fixture failures because its fixed September 2 mission date is outside the running September 10 process assumptions. The two new deterministic regressions pass independently.
+A same-environment parent/current comparison ran both complete modules. Parent: 53 tests with two existing child-process failures. Current: 56 tests with the identical two child-process failures and no additional failure. The three added deterministic regressions pass independently.
 
 ## Remaining acquisition limitation
 
-The plan's CTSH query is broad and discovery parameters always begin with a null cursor. Authority-level document deduplication prevents an existing document from being requeued, but repeated searches can still spend calls on the same first-page results. The cadence fix makes the retry honest and fair; period-targeted query evolution or persisted pagination remains a separate acquisition-quality improvement.
+The plan's CTSH query remains broad. Continuation now consumes the provider's opaque cursor while it exists; when the provider reports no cursor, the coordinator retains the longer rediscovery cadence instead of replaying page one at the short interval. Period-targeted query evolution remains a separate acquisition-quality improvement after pagination is exhausted.

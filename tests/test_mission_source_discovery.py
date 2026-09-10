@@ -439,11 +439,15 @@ class FakeSearchLauncher:
     def running(self) -> bool:
         return any(ticket["status"] == "running" for ticket in self.tickets.values())
 
-    def start(self, *, authorization, spec_ref, as_of=None):
-        self.starts.append({"authorization": dict(authorization), "spec_ref": spec_ref})
+    def start(self, *, authorization, spec_ref, as_of=None, cursor=None):
+        self.starts.append({
+            "authorization": dict(authorization), "spec_ref": spec_ref,
+            "cursor": cursor,
+        })
         ticket_id = f"alphaengine-discovery:{len(self.starts):024x}"
         params = build_discovery_parameters(
-            self.plan, spec_ref=spec_ref, company_ref=authorization["company_ref"], as_of=as_of,
+            self.plan, spec_ref=spec_ref, company_ref=authorization["company_ref"],
+            as_of=as_of, cursor=cursor,
         )
         summary = {"discovery_ref": None, "new_document_count": 0, "failure_reason": None}
         status = "succeeded"
@@ -597,14 +601,20 @@ class CoordinatorTests(unittest.TestCase):
         seed_known_document(self.h)
         self.coordinator.dispatch_once()  # ACN
         self.coordinator.dispatch_once()  # settle ACN, launch CTSH
-        tick = self.coordinator.dispatch_once()  # settle CTSH; both are in cadence
+        from unittest.mock import patch
+        with patch.object(self.coordinator, "_continuation_cursor", return_value="ae1:next"):
+            tick = self.coordinator.dispatch_once()  # settle CTSH; both are in cadence
         self.assertEqual(tick["discovery"]["status"], "idle")
         self.assertTrue(any("shortfall retry" in row["reason"]
                             for row in tick["discovery"]["skipped"]))
         self.clock.advance(days=2)
         mission = self.missions.active_mission(self.coordinator.plan["mission_ref"])
         spec = self.coordinator.plan["specs"][0]
-        self.assertIsNone(self.coordinator._spec_block(mission, CTSH, spec))
+        with patch.object(self.coordinator, "_continuation_cursor", return_value="ae1:next"):
+            self.assertIsNone(self.coordinator._spec_block(mission, CTSH, spec))
+            tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["discovery"]["status"], "launched")
+        self.assertEqual(self.search_launcher.starts[-1]["cursor"], "ae1:next")
 
     def test_acquired_document_enters_human_extraction_review_queue(self) -> None:
         v1 = self.create_mission()
