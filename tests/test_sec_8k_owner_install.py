@@ -2,7 +2,7 @@ import argparse, hashlib, json, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from scripts.build_sec_8k_discovery_proposal import build_candidate_plan, build_selector_proposal
-from scripts.install_sec_8k_discovery_selection import run
+from scripts.install_sec_8k_discovery_selection import atomic_create, run
 from dalton_core.connector_governance import build_governance_record
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.store import DaltonStore
@@ -32,6 +32,27 @@ class OwnerInstallTests(unittest.TestCase):
    first=run(self.args); second=run(self.args)
   self.assertEqual(first['candidate']['write'],'created'); self.assertEqual(second['candidate']['write'],'identical'); self.assertEqual(json.loads((self.target/'sec-filings-plan-selection-v1.json').read_text())['status'],'approved')
   self.assertEqual(json.loads((self.target/'sec-filings-plan-selection-v1.approval.json').read_text())['actor_ref'],'human:owner')
+ def test_apply_rolls_back_outputs_created_before_a_late_filesystem_failure(self):
+  self.args.command='apply'; self.args.actor='human:owner'; self.args.execute=True; self.args.service_stopped_ack=True
+  calls=0
+  def fail_second(path,data):
+   nonlocal calls
+   calls+=1
+   if calls==2: raise OSError('fixture late failure')
+   return atomic_create(path,data)
+  with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission), patch('scripts.install_sec_8k_discovery_selection.atomic_create',side_effect=fail_second):
+   with self.assertRaisesRegex(OSError,'late failure'): run(self.args)
+  self.assertFalse((self.target/json.loads(self.selector.read_text())['plan_path']).exists())
+  self.assertFalse((self.target/'sec-filings-plan-selection-v1.approval.json').exists())
+  self.assertFalse((self.target/'sec-filings-plan-selection-v1.json').exists())
+ def test_existing_receipt_refuses_a_rehashed_different_signing_packet(self):
+  self.args.command='apply'; self.args.actor='human:owner'; self.args.execute=True; self.args.service_stopped_ack=True
+  with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission): run(self.args)
+  candidate=build_candidate_plan(json.loads(self.active.read_text()),created_at='2026-09-10T00:00:01+00:00')
+  self.args.candidate_sha256=write(self.candidate,candidate)
+  selector=build_selector_proposal(candidate); self.args.selector_sha256=write(self.selector,selector)
+  with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission):
+   with self.assertRaisesRegex(FileExistsError,'different packet'): run(self.args)
  def test_tamper_stale_and_existing_different_target_refuse(self):
   with patch('scripts.install_sec_8k_discovery_selection.read_active_mission',return_value=self.mission):
    self.args.candidate_sha256='0'*64

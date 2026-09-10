@@ -280,11 +280,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "artifact_acceptance": False,
     }
     if args.command == "apply":
-        report["candidate"]["write"] = atomic_create(target_plan, plan_bytes)
-        report["approval_receipt"]["write"] = atomic_create(
-            target_receipt, receipt_bytes
-        )
-        report["selector"]["write"] = atomic_create(target_selector, selector_bytes)
+        created: list[tuple[Path, bytes]] = []
+        try:
+            for name, path, data in (
+                ("candidate", target_plan, plan_bytes),
+                ("approval_receipt", target_receipt, receipt_bytes),
+                ("selector", target_selector, selector_bytes),
+            ):
+                outcome = atomic_create(path, data)
+                report[name]["write"] = outcome
+                if outcome == "created":
+                    created.append((path, data))
+        except BaseException:
+            # Preserve pre-existing identical outputs, but do not leave a
+            # half-installed packet when a later atomic link loses a race or
+            # the filesystem fails. Only unlink bytes this invocation created.
+            for path, data in reversed(created):
+                if path.is_file() and not path.is_symlink() and path.read_bytes() == data:
+                    path.unlink()
+            raise
         report["result"] = "installed_for_next_render; run install/re-render before activation"
     else:
         report["result"] = "prepared_only; no files written"
