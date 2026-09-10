@@ -1,19 +1,21 @@
 # P15d 高 conviction call：自动化提案，人裁决 v1.0
 
 日期：2026-09-09
-分支：`w3-conviction-call`（worktree `~/Projects/dalton-w3-conviction-call-worktree`），基线 main `ebd2ea8`
+分支：`w3-conviction-call`（worktree `~/Projects/dalton-w3-conviction-call-worktree`），基线 main `ebd2ea8`，过 review 后已 `git merge main` 到 `56cf508`（P14b/P14d 修订回路、INT2、ADR-0009 都已并入）
 作者：Wave 3 agent「conviction-call」（Opus 5）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) §1 owner 自我反思规则与 §5.2 P15d、[能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §3 ②「high conviction 超预期机会」与 §5.2 P15d、ADR-0006 / ADR-0007 / ADR-0008、[P12c DebateMap](p12c-debate-map-v1.0-2026-09-09.md)、[P12a 公司档案](p12a-company-dossier-v1.0-2026-09-09.md)、[P14a 每日跟踪](p14a-daily-tracking-v1.0-2026-09-09.md)、[P13-M2 预测行](p13-m2-forecast-lines-v1.0-2026-09-09.md)、[P11a 市场层](p11a-market-layer-v1.0-2026-09-09.md)、[Q1 质量回路](q1-research-quality-loop-v1.0-2026-09-09.md)、[INT1 Cockpit](int1-cockpit-install-v1.0-2026-09-09.md)
 
 全量测试：
 
 ```
-Ran 4061 tests in 566.589s
+Ran 4357 tests in 728.094s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；基线 main `ebd2ea8` 是 3,932，本片 +129。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，`git merge main` 到 `56cf508` 之后。
+本片自己 156 项：`test_conviction_call` 73、`_draft` 42、`_lane` 38、`_cockpit` 3。
+merge 之前在基线 main `ebd2ea8`（3,932）上是 4,061。）
 
 ---
 
@@ -39,7 +41,7 @@ variant view、预期差、可观察的靠拢路径、对照手册风险回报�
 | `conviction_call_launcher.py` | 新增 | `LaneChildLauncher` 子类，run 按 (company, fingerprint) 命名 |
 | `mission_conviction_lane.py` | 新增 | tick 协调器 + `LaneSpec`（order 141，driver_key `conviction_call`） |
 | `deploy/phase9/p15d-conviction-policy-v1.json` | 新增 | 冻结策略（阈值、周配额、手册风险回报标准表），与代码里的 `CONVICTION_POLICY` 有漂移测试 |
-| `tests/test_conviction_call.py` / `_draft.py` / `_lane.py` / `_cockpit.py` | 新增 | 55 + 38 + 33 + 3 |
+| `tests/test_conviction_call.py` / `_draft.py` / `_lane.py` / `_cockpit.py` | 新增 | 73 + 42 + 38 + 3 |
 | `tests/golden/conviction_call/*.json` | 新增 | 5 例 golden（1 正例、3 反例、1 边界） |
 | `lane_registry.LANE_MODULES` | 加一行 | 注册 lane 模块 |
 | `research_quality_rubrics.py` | additive | `CONVICTION_CALL` rubric（7 条标准）+ alias + `__all__`；既有四份 rubric 的 body 与哈希不变 |
@@ -83,12 +85,34 @@ call 断言「市场错了」，而没有市场看法的时候，「市场错在
 `met` / `not_met` 是对已给数字的判决；`unavailable` 是「有标准但这份 call 没给可测的数字」，
 是 call 的缺口而不是通过；`avoid` 得 `not_applicable`——手册对「站在一边不动」没有回报标准。
 做空落在 3–6 个月之外直接 `not_met`，因为手册明写「做空：3–6 个月 30% downside；交易时间跨度必须写明」。
+表里每一行的 `playbook_text` 都有漂移测试盯着它**逐字**出现在 `deploy/phase9/p9a-research-playbook-v1.json`
+的 `risk_reward_standards` 里；手册那五句里唯一没有被读进表的是「Dalton 只提出研究观点和仓位建议，
+人类团队决定交易」——它不是阈值，它是这个模块以人类裁决收尾的原因，测试也把这一点钉住了。
+
+**百分比必须是有限的，而且有上界。** review 抓到的 blocker：`inf`、`1e999`、`nan` 都能原样穿过 `float()`，
+而无穷大的上行满足手册表里的每一条阈值——标准检查会对一份什么都没说的回复答 `met`；`nan` 则对每条阈值
+都比较为假，并在比例规则里抛出 `InvalidOperation`，而那时起草调用的钱已经花掉了。现在起草解析层与权威层
+各自独立拒绝非有限值，并共用同一个 `MAX_PERCENT = 10_000` 上界——只查有限性不够，`Decimal("1e999")`
+是有限的，而且照样满足每一条阈值。
 
 **决定与提案是两张表。** 自动化能写第一张、永远写不了第二张。决定 append-only 带 `decision_number`，
 绑 `proposal_hash`；`accept` / `reject` 结案，再裁一次是 conflict 而不是更正——「先接受了后来又悄悄没做」
 正是这条记录要让它无法发生的历史。`defer` 不结案：它离开审批队列（deferred 的 call 每 tick 再弹一次
 只会教会 owner 忽略队列），但留在 `deferred_calls()` 里，可以在财报之后再裁一次，链上看得见
-「9 号推迟、26 号接受」。
+「9 号推迟、26 号接受」。`defer` 也是唯一一个调用方能重试的决定（另外两个撞 conflict），
+所以它带 `idempotency_key`：回包丢了再按一次不应该变成两条推迟。
+
+**没有终态的 call（ADR-0008）。** 一家公司的 call 是一条版本链：`call_ref` 命名它、`version_number`
+排序它、`prior_version_ref` 串起它，每一版带 `change_reason`（取自 `model_forecast_driver.CHANGE_REASONS`，
+导入而不是重写）与**这一版比上一版多引了哪些 refs**（`change_evidence_refs`，必须真的出现在这份 call 里）。
+起草 lane 只能诚实地说 `evidence_thicker`——其余几个词是关于世界的断言（filing 落地、driver 动了、人改了主意），
+一条读 thesis / map / 模型再写 call 的 lane 并不知道那些。
+
+「被取代」在这里比在预测格里窄，而且**故意是一件人做的事**：owner 接受一家公司的新 call，就取代了他之前
+接受的那一条。没有任何一行被改写来记录这件事——**做出取代的那条 accept 决定带 `supersedes_ref`**，
+所以标记与造成它的那个行为是同一行，旧的那条是「往前读」读出来被取代的，而不是被编辑过。
+`accepted_calls(window)` 只返回还站着的那些（一份把两条都列出来的周报，等于告诉 owner 他对一家公司持两种看法），
+被取代的那条留在链上，`replay(company)` 把「哪一版说了什么、人怎么裁的、被谁取代」一行一行读回来。
 
 ---
 
@@ -101,6 +125,18 @@ call 断言「市场错了」，而没有市场看法的时候，「市场错在
 | `active_thesis` | 该公司至少有一条 current thesis（含覆盖它的行业 thesis） | `no_active_thesis` |
 | `divergence` | 有一条 live debate 满足 `market_position.available` 且 `our_position.state=held` 且 `our_position.side != market_position.lean`；**或**某条 metric 的 forecast-vs-consensus 差 ≥ 策略阈值（10%） | `we_agree_with_the_market` / `no_debate_map_and_no_consensus` |
 | `variant_material` | 市场看法有来源：档案的 `variant_view`（`market_view_available`）、任一 debate 的 `market_position`、或 consensus | `no_variant_material` |
+
+`divergence` 那一格有两条容易读错的细则。**`our_position.side == "neither"` 不算分歧**：P12c 用这个词表示
+「我们有看法，而且看法是两边都不对」，那是一个立场但不是一个**方向**，而 call 是方向；少了这条判断，
+字符串比较只要不相等就会把这家公司放进来。**`market_position.lean == "split"` 算分歧**：街上真的分裂时
+我们站 bull 是一条早期 call 的常见形状，这一条是特意留下的。
+
+**consensus 的形状在闸之前就查。** P11b 在一次按名字的查找之后，不是这一片的代码。所以 `consensus_gap()`
+拿到东西之后立刻过 `validate_consensus_gap`（多余的键、空 refs、超过 12 行、不是数字的百分比都算问题），
+任何一条不过就退化成诚实的 `unavailable` 带原因，而不是抛出来。理由有两个：形状不对的行进了闸，
+要么开出一条谁也验证不了的 call，要么——更糟——在两次模型调用花完之后才被权威发现。
+同理，只有**真正被展示给起草者的那些行**会进入记录：输入表是有界的、会丢掉没有引用的行，
+一份带着起草者没见过的 metric 的 call，那个数字是没人掂量过的，而在记录里它和被争论过的那些长得一模一样。
 
 第二格特意分两个词。「有 map 也有 consensus，但我们跟街上站在一边」是关于这家公司的**发现**；
 「根本没有 map、也没有 consensus」是管线上的缺口。周会应该能不打开 Core 就分清这两种沉默。
@@ -194,6 +230,8 @@ company:sec-cik:001688568  (DXC)   True   1      0       n       unavailable   F
    `valuation_snapshot_versions` 与 `catalyst_calendar_versions` 同样不存在（路径都有表存在性守卫，
    读一台没有这些表的 Core 不会留下任何 schema——有测试）。
 
+（并入 main `56cf508` 之后重跑，结论不变。）
+
 thesis 是有的：ACN 两条（一条公司级、一条覆盖它的行业级），其余四家各一条。所以三条闸里
 `active_thesis` 已经满足，卡住的是后两条，而后两条要等 DebateMap 与 consensus 在 live Core 上真的有东西。
 
@@ -228,7 +266,8 @@ operation: decide_conviction_call
 params:    {"proposal_ref": "conviction-call-proposal:…",
             "proposal_hash": "<卡片上的 hash>",
             "decision": "accept" | "reject" | "defer",
-            "reason": "一句话，会进正式记录"}
+            "reason": "一句话，会进正式记录",
+            "idempotency_key": "<可选；重试同一个决定时带同一个键>"}
 ```
 
 `actor_ref` 由写者按已认证的 principal 绑定，不由调用方给；非 `human:` 的 actor 被拒三次
@@ -254,6 +293,25 @@ params:    {"proposal_ref": "conviction-call-proposal:…",
 
 ---
 
+## 9.5 review 之后改了什么（2026-09-09 晚）
+
+| 项 | 改动 |
+| --- | --- |
+| **BLOCKER：非有限百分比** | `conviction_call_draft._percent` 与 `conviction_call._decimal` 各自独立拒绝 `inf` / `-inf` / `nan`，并共用 `MAX_PERCENT = 10_000` 上界（只查有限性不够：`Decimal("1e999")` 是有限的）。`inf` / `nan` / `1e999` 三个值在起草层、权威层、consensus 层各有测试 |
+| **`neither` 不是分歧** | `divergent_debates` 要求 `our_position.side ∈ {bull, bear}`；`split` 的市场仍然算分歧，两条都写进 docstring 并各有测试 |
+| **consensus 形状** | `consensus_gap()` 在闸之前、任何花费之前过 `validate_consensus_gap`，多余键 / 空 refs / 超 12 行 / 非数字百分比都退化成 `unavailable` 带原因；输入表只把**展示过的**行带进记录，一份 available 但每行都没引用的 gap 变成诚实的 unavailable |
+| **手册漂移测试** | 每条标准的 `playbook_text` 必须逐字出现在 `deploy/phase9/p9a-research-playbook-v1.json`；另有一条测试钉住「唯一没被读进表的那句是没有阈值的那句」 |
+| **ADR-0008** | 提案按公司版本化（`version` / `prior_version_ref` / `change_reason` / `change_evidence_refs`）；accept 带 `supersedes_ref` 取代上一条被接受的 call；`accepted_calls(window)` 只返回未被取代的；新增 `current` / `versions` / `superseded_by` / `replay` 读取面 |
+| 部署 | 新 schema 在 `scripts/rehearse_deploy.CORE_MIGRATIONS` 里登记（main 合进来的检查要求每个 `*_schema.sql` 有具名 owner，否则演练会把一次从没跑过这条迁移的部署报成干净的） |
+| nits | 模型配置没有 `model_router_db` 时 fail closed（family 不可知 → 独立性判定拒绝）；周配额同时是 `UNIQUE(company_ref, week_key)` 约束；`decide` 接受 `idempotency_key`（写者 op 也开了这个字段） |
+
+合并 main `56cf508` 时两处冲突，都是「两边各加了一条相邻的条目」，取双方：`writer_server` 里
+`decide_conviction_call` 与 P14b/P14d 的 `decide_thesis_revision_candidate` / `decide_gate_reopen` 并存；
+`cockpit_plane` 里本片的 call 卡片与 INT2 的 `_revision_checkpoints()` 并存。两边都选择了「先列出来、
+不给按钮」，理由也一样。
+
+---
+
 ## 10. 开放问题（留给 owner / 主 agent）
 
 1. **`avoid` 方向要不要占周配额？** 现在占。理由是「不值得碰」也是一条要人读的结论；
@@ -264,12 +322,14 @@ params:    {"proposal_ref": "conviction-call-proposal:…",
    与模块里的常量（有漂移测试盯着两者一致）。
 3. **预期差阈值 10% 是拍的。** 一条 revenue 线上 10% 是真分歧、2% 是两个人的模型差异——这个判断没有数据支撑，
    等 P11b 真的有 consensus 之后应该按实际分布重标。
-4. **`defer` 要不要带一个「什么时候再问我」？** 现在 defer 之后 call 就静默地待在 `deferred_calls()` 里，
-   除非有人主动去看。一个 `defer_until` 日期（多半就是下一个 catalyst 的日期）会让它自己回到队列，
-   但那是一条新的调度规则，需要 owner 点头。
-5. **同一家公司同时存在 long 与 short 的 call 怎么办？** 契约不禁止（周配额 1 条实际上挡住了同周的第二条），
-   但跨周是可能的，而且没有任何东西会把旧的 accepted call 标记为被取代。
-   这属于 ADR-0008 的「没有终态」：也许 call 也该有版本链而不是一次性对象。本片没有做这个决定。
+4. **`defer` 要不要带一个「什么时候再问我」？** 重试已经安全了（`idempotency_key`），但 defer 之后
+   call 仍然静默地待在 `deferred_calls()` 里，除非有人主动去看。一个 `defer_until` 日期
+   （多半就是下一个 catalyst 的日期）会让它自己回到队列，但那是一条新的调度规则，需要 owner 点头。
+5. **~~同一家公司同时存在 long 与 short 的 call 怎么办？~~** review 之后做掉了：版本链 + 接受即取代，
+   `accepted_calls` 只返回还站着的那条。留下的余数是**这一条**——取代只在人接受新 call 时发生，
+   所以一条被接受、然后公司基本面明显变了、但没有人再提新 call 的旧 call，会一直站着。
+   要不要给 accepted call 一个「过期」判据（比如它的 `time_horizon` 走完、或者它的证伪条件被触发），
+   是一条 owner 该定的规则，本片没有定。
 6. **`market_view.sources` 里的 `crowd_narrative` 该不该单独成立一条 call？** 现在可以：
    只要 sources 非空即可。按证据阶梯，只靠雪球和推特确立的「市场看法」大概不该支撑一条 call，
    但把它写死成规则之前想听 owner 的意见。
