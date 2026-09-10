@@ -145,15 +145,6 @@ class SharedCapacityAuthority:
             self.connection.close()
             raise SharedCapacityUnavailable(
                 "declared shared capacity scope/account binding differs")
-        head = self.connection.execute(
-            "SELECT policy_ref,policy_hash,account_ref FROM shared_capacity_policy_heads "
-            "WHERE scope_ref=?", (policy["scope_ref"],)).fetchone()
-        if head is None or head["policy_ref"] != policy_ref \
-                or head["policy_hash"] != policy_hash \
-                or head["account_ref"] != policy["account_ref"]:
-            self.connection.close()
-            raise SharedCapacityUnavailable(
-                "declared shared capacity policy is not the active scope head")
         self.policy = policy
 
     @classmethod
@@ -261,6 +252,16 @@ class SharedCapacityAuthority:
             (ref, kind, now, json.dumps(dict(detail), sort_keys=True, separators=(",", ":"))),
         )
 
+    def _require_active(self) -> None:
+        head = self.connection.execute(
+            "SELECT policy_ref,policy_hash,account_ref FROM shared_capacity_policy_heads "
+            "WHERE scope_ref=?", (self.policy["scope_ref"],)).fetchone()
+        if head is None or head["policy_ref"] != self.policy["id"] \
+                or head["policy_hash"] != self.policy["content_hash"] \
+                or head["account_ref"] != self.policy["account_ref"]:
+            raise SharedCapacityUnavailable(
+                "declared shared capacity policy is not the active scope head")
+
     def reserve(
         self, *, workspace_id: str, invocation_ref: str, provider: str,
         credential_slot_ref: str, maximum_cost_micros: int, expires_at: datetime,
@@ -292,6 +293,7 @@ class SharedCapacityAuthority:
                     raise SharedCapacityConflict("invocation already has a different reservation")
                 self.connection.commit()
                 return dict(existing)
+            self._require_active()
             # Only undispatched reservations expire. A dispatched call keeps its
             # conservative charge until an exact replay settles it.
             stale = self.connection.execute(
@@ -340,6 +342,7 @@ class SharedCapacityAuthority:
             if row is None:
                 raise SharedCapacityConflict("shared reservation is missing")
             if row["status"] == "reserved":
+                self._require_active()
                 if row["expires_at"] <= now:
                     raise SharedCapacityConflict("undispatched shared reservation has expired")
                 self.connection.execute(

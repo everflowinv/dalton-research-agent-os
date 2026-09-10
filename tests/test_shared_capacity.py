@@ -106,9 +106,11 @@ class SharedCapacityTests(unittest.TestCase):
         self.assertEqual([item[0] for item in results].count("ok"), 1)
         self.assertEqual([item[0] for item in results].count("SharedCapacityExceeded"), 1)
 
-    def test_replacement_policy_keeps_same_day_usage_and_old_head_is_refused(self):
+    def test_replacement_keeps_usage_and_old_calls_can_settle_but_not_start(self):
         first = self.init(calls=1)
-        with self.open(first) as authority:
+        authority = self.open(first)
+        self.addCleanup(authority.close)
+        with authority:
             reservation = authority.reserve(
                 workspace_id=str(uuid.uuid4()), invocation_ref="invocation:first",
                 provider="openai",
@@ -117,8 +119,6 @@ class SharedCapacityTests(unittest.TestCase):
                 expires_at=NOW + timedelta(minutes=1),
             )
             authority.mark_dispatched(reservation["reservation_ref"])
-            authority.settle(reservation["reservation_ref"], actual_cost_micros=50,
-                             outcome="broker_succeeded")
         replacement = policy(
             calls=1, policy_id="shared-capacity-policy:model-openai-main-v2")
         SharedCapacityAuthority.activate(
@@ -128,8 +128,20 @@ class SharedCapacityTests(unittest.TestCase):
             SharedCapacityAuthority.activate(
                 self.db, policy(calls=100, policy_id="shared-capacity-policy:stale"),
                 expected_policy_ref=first["id"], expected_policy_hash=first["content_hash"])
-        with self.assertRaisesRegex(Exception, "active scope head"):
-            self.open(first)
+        # Exact historical policy bytes remain readable so a call dispatched
+        # before activation can reconcile after an adapter/process restart.
+        with self.open(first) as historical:
+            historical.settle(
+                reservation["reservation_ref"], actual_cost_micros=50,
+                outcome="broker_succeeded")
+            with self.assertRaisesRegex(Exception, "active scope head"):
+                historical.reserve(
+                    workspace_id=str(uuid.uuid4()), invocation_ref="invocation:stale",
+                    provider="openai",
+                    credential_slot_ref="credential-slot:openai:dalton",
+                    maximum_cost_micros=100,
+                    expires_at=NOW + timedelta(minutes=1),
+                )
         with self.open(replacement) as authority:
             with self.assertRaisesRegex(SharedCapacityExceeded, "daily call"):
                 authority.reserve(
@@ -139,6 +151,24 @@ class SharedCapacityTests(unittest.TestCase):
                     maximum_cost_micros=100,
                     expires_at=NOW + timedelta(minutes=1),
                 )
+
+    def test_activation_between_open_and_reserve_refuses_old_policy(self):
+        first = self.init(calls=2)
+        authority = self.open(first)
+        self.addCleanup(authority.close)
+        replacement = policy(
+            calls=2, policy_id="shared-capacity-policy:model-openai-main-v2")
+        SharedCapacityAuthority.activate(
+            self.db, replacement, expected_policy_ref=first["id"],
+            expected_policy_hash=first["content_hash"])
+        with self.assertRaisesRegex(Exception, "active scope head"):
+            authority.reserve(
+                workspace_id=str(uuid.uuid4()), invocation_ref="invocation:stale-open",
+                provider="openai",
+                credential_slot_ref="credential-slot:openai:dalton",
+                maximum_cost_micros=100,
+                expires_at=NOW + timedelta(minutes=1),
+            )
 
     def test_zero_limits_are_refused_instead_of_being_treated_as_free(self):
         for field in ("calls", "cost", "concurrency"):
