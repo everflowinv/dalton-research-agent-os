@@ -1002,6 +1002,19 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(held["status"], "terminal")
         self.assertEqual(len(launcher.started), 1)
 
+    def test_a_failed_verifier_transport_is_not_mislabeled_as_content(self):
+        launcher = self.Launcher(
+            ticket_status="failed",
+            summary={"dossier_status": "verification_failed",
+                     "failure_reason": "TransportError: verifier socket unavailable"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        # Settlement classifies the transport as a dependency and grants its
+        # one governed probe; it is not a permanent content terminal.
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(len(launcher.started), 2)
+
     def test_a_draft_contract_change_moves_the_lane_signature_once(self):
         before = ledger_signature(self.connection)
         with patch("dalton_core.company_dossier_draft.draft_contract_fingerprint",

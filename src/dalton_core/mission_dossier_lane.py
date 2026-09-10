@@ -176,12 +176,20 @@ class MissionDossierLaneCoordinator:
             self.budget.record(str(signature),
                                status="gated:not permitted",
                                reason="gated:mission does not grant dossier")
-        elif status in CONTENT_TERMINAL_STATUSES and signature:
+        # A child whose producer output itself broke the closed rubric exits
+        # failed, but that exact input is terminal.  Other failed children
+        # (notably verification_failed when the verifier transport never ran)
+        # must still reach the shared classifier instead of being mistaken for
+        # a content verdict.
+        elif status == "rubric_refused" and signature:
             self.budget.record(str(signature), status=f"content_refused:{status}",
                                reason=settled.get("failure_reason") or status)
         elif settled.get("status") != "succeeded" and settled.get("status") != "orphaned":
             if signature:
                 self.budget.record_settled(str(signature), settled)
+        elif status in CONTENT_TERMINAL_STATUSES and signature:
+            self.budget.record(str(signature), status=f"content_refused:{status}",
+                               reason=settled.get("failure_reason") or status)
         elif status in QUIET_STATUSES and signature:
             settled["resumed"] = self.budget.clear(str(signature))
             self._quiet_signature = str(signature)
