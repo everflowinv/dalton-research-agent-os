@@ -250,18 +250,28 @@ CTSH 读了 18 份卖方 → 149 条，ACN 读了 2 份 → 5 条。**每份文�
 ## 四、测试
 
 ```
-Ran 3855 tests in 370.135s
+Ran 3992 tests in 455.652s
 
-OK (skipped=1)
+FAILED (failures=1, skipped=1)
 ```
 
 （`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，merge main `7011104` 之后。
 本片新增 58 项 + 3 项端到端准入用例。）
 
-**注意：main `7011104` 自身带着一条失败**
+**那一条失败不是本片的，是 main 上一条会在 UTC 午夜翻车的时间依赖测试。**
 `tests.test_mission_research_task_lane.LaneTests.test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`
-（`'launched' != 'skipped:pool_exhausted'`）。在 main 检出上单独跑同样失败，与本分支无关，
-已单列上报，未在本片修改。上面的 `OK` 是把这条排除后的结果。
+报 `'launched' != 'skipped:pool_exhausted'`。在 main 检出（`7011104`）上单独跑同样失败。查清了：
+
+- `research_task.day_reserved_micros` 用 **loop 的 `created_at` 前 10 个字符**当日期
+  （`research_task.py:448`，注释写明「不另设账本，用 loop 自己的准入日」）；
+- 但那个 `created_at` 是**墙上时间**，而测试与 `ResearchTaskCoordinator` 用的是冻结时钟
+  `2026-09-09T12:00Z`。实测 loop 落在 `2026-09-10T00:24Z`；
+- 于是 `pool_state(day='2026-09-09')` 数到 `reserved_micros: 0`、`remaining_micros: 5000000`，
+  池子永远不满，`dispatch_once()` 返回 `launched`。
+
+也就是说这条测试在 UTC 09-09 当天通过、过了午夜就失败。修法是把 fixture 的时钟注进
+loop 的 `created_at`（或让 `day_reserved_micros` 收一个显式的 day 而不是从 `created_at` 推）。
+**属于 P14e / C2 的切片，本片没有改动它。**上面的失败数就是这一条。
 
 新用例覆盖：
 
@@ -415,8 +425,10 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
    建议 DebateMap 自己声明一条按 `broker_key` 去重的需求，而不是把清单下限调大。
 4. **`document_extraction.max_windows_per_tick` 现在配的 30/10/10 超出 mission 的 9,000 次调用上限**
    （满负荷 14,400）。本片给了推导函数，但没有改 `service.json`——那是部署动作。
-5. **main `7011104` 上有一条与本片无关的失败测试**（ad-hoc 研究池
-   `test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`），在 main 检出上单独跑同样失败。
+5. **main `7011104` 上有一条与本片无关的时间依赖失败测试**（ad-hoc 研究池
+   `test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise`）：
+   `day_reserved_micros` 按 loop 的墙上时间 `created_at` 分日，测试用冻结时钟，
+   过了 UTC 午夜就对不上。诊断见第四节，修在 P14e / C2 的切片里。
 
 ## 八、接线需求（集成时统一做，本片没碰）
 
