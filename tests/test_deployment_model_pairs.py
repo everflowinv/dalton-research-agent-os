@@ -6,14 +6,17 @@ import json
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dalton_core.mission_dossier_lane import argv_fragment as dossier_argv
 from dalton_core.mission_earnings_season_lane import argv_fragment as earnings_argv
 from dalton_core.mission_deep_insight_lane import argv_fragment as deep_insight_argv
 from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
 from dalton_core.research_planner_setup import install
 from tests.test_document_extraction_setup import _service
+from tests.test_openclaw_catalog_reconcile import _config
 
 
 class DeploymentModelPairTests(unittest.TestCase):
@@ -25,6 +28,11 @@ class DeploymentModelPairTests(unittest.TestCase):
         service = json.loads(self.config.read_text("utf-8"))
         self.state = Path(service["core_db"]).resolve().parent
         self.context = type("Context", (), {"state": self.state})()
+        # Production synchronizes the current broker catalog before installing
+        # role policies. Role setup must not resurrect static profile seeds.
+        with ModelRouter(service["model_router_db"]) as router:
+            sync_openclaw_model_catalog(router, _config(),
+                                       checked_at=datetime.now(timezone.utc))
 
     def install_pair(self, producer_policy: str, producer_file: str,
                      verifier_policy: str, verifier_file: str) -> None:
