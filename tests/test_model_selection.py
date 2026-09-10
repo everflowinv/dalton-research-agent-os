@@ -1438,6 +1438,31 @@ class GovernanceOperationTests(unittest.TestCase):
             self.assertEqual(routed["selected_profile_version_ref"],
                              current["profile_version_ref"])
 
+            # The host catalog can change after the page/profile was read but
+            # before the saved declaration is applied. Never claim that the
+            # old-route declaration took effect on the replacement model.
+            config = _allowing_config()
+            broker = next(item for item in config["plugins"]["entries"]
+                          ["dalton-openclaw-model-broker"]["config"]["profiles"]
+                          if item["id"] == current["id"])
+            config["models"]["providers"][current["provider"]]["models"].append({
+                "id": "changed-after-read", "contextWindow": 100_000,
+                "maxTokens": 8_000, "cost": {"input": 1, "output": 2},
+            })
+            broker["model"] = f"{current['provider']}/changed-after-read"
+            openclaw_path.write_text(json.dumps(config), encoding="utf-8")
+            again = server._op_declare_model_profile_metadata({
+                "profile_id": current["id"], "family": "owner-declared-family",
+                "capabilities": ["research", "verify"], "actor_ref": OWNER,
+                "profile_version_ref": current["profile_version_ref"],
+                "profile_hash": current["content_hash"],
+            })
+            self.assertEqual(again["status"], "duplicate")
+            self.assertEqual(again["application_status"], "route_changed")
+            openclaw_path.write_text("{invalid", encoding="utf-8")
+            self.assertEqual(server._sync_model_metadata_now(result["declaration"]),
+                             "pending_catalog_sync")
+
     def test_writer_refuses_metadata_for_a_profile_that_is_not_live(self) -> None:
         from dalton_core.writer_server import WriterServer, WriterServerError
 

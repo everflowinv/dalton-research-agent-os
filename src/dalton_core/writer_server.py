@@ -2767,26 +2767,39 @@ class WriterServer:
                     )
         except (ModelRouterError, KeyError, ValueError) as exc:
             raise WriterServerError(str(exc)) from exc
-        result["application_status"] = self._sync_model_metadata_now()
+        result["application_status"] = self._sync_model_metadata_now(result["declaration"])
         return result
 
-    def _sync_model_metadata_now(self) -> str:
+    def _sync_model_metadata_now(self, declaration: Mapping[str, Any]) -> str:
         """Apply declarations now when this writer follows a broker catalog."""
 
         from .mission_model_catalog_lane import LAUNCHER_KWARG, load_lane_config
         from .openclaw_catalog_reconcile import (
-            load_openclaw_config, sync_openclaw_model_catalog,
+            OpenClawCatalogError, load_openclaw_config, sync_openclaw_model_catalog,
         )
-        from .model_router import ModelRouter
+        from .model_router import ModelRouter, ModelRouterError
 
         launcher = self.lane_launcher(LAUNCHER_KWARG)
         if launcher is None:
             return "pending_catalog_sync"
-        settings = load_lane_config(launcher.config_path)
-        config = load_openclaw_config(settings["openclaw_config_path"])
-        with ModelRouter(settings["model_router_db"]) as router:
-            sync_openclaw_model_catalog(
-                router, config, checked_at=datetime.now(timezone.utc))
+        try:
+            settings = load_lane_config(launcher.config_path)
+            if Path(settings["model_router_db"]).resolve() != Path(self._model_router_db()).resolve():
+                return "pending_catalog_sync"
+            config = load_openclaw_config(settings["openclaw_config_path"])
+            with ModelRouter(settings["model_router_db"]) as router:
+                sync_openclaw_model_catalog(
+                    router, config, checked_at=datetime.now(timezone.utc))
+                current = next((item for item in router.latest_profiles()
+                                if item["id"] == declaration["profile_id"]), None)
+                if (current is None or current.get("status") == "retired"
+                        or any(current[key] != declaration[key]
+                               for key in ("provider", "model", "family", "capabilities"))):
+                    return "route_changed"
+        except (OSError, ValueError, OpenClawCatalogError, ModelRouterError):
+            # The declaration is already durable. A failed catalog read must
+            # not tell the owner that publication itself failed or was undone.
+            return "pending_catalog_sync"
         return "applied"
 
     def _deep_insight_gates(self) -> Any:
