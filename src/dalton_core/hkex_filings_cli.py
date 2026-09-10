@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -69,6 +70,7 @@ from .hkex_filings_core import (
     ANNOUNCEMENTS_INDEX_OPERATION,
     CAPTURE_SCHEMA_VERSION,
     DISCLOSURE_OF_INTERESTS_OPERATION,
+    DAILY_BUYBACK_TAPE_OPERATION,
     HKEX_EVIDENCE_TIER,
     HkexFilingsError,
     MONTHLY_RETURNS_OPERATION,
@@ -116,6 +118,23 @@ def _write_owner_only(path: Path, value: Any) -> None:
     tmp.write_text(canonical_json(value) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def _write_bytes_owner_only(path: Path, raw: bytes) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _load_governance(path: Path, operation: str) -> ConnectorGovernance:
@@ -354,6 +373,84 @@ def spool_capture(spool: RawSpool, capture: dict[str, Any]) -> Any:
     return sink.finalize()
 
 
+def _daily_acquisition(*, state: Path, as_of: str,
+                       governance: ConnectorGovernance, spool: RawSpool) -> dict[str, Any]:
+    """Return one verified, day-scoped market tape under an interprocess lock."""
+    url = share_buyback_report_url(as_of)
+    identity = hkex_identity(DAILY_BUYBACK_TAPE_OPERATION)
+    key_payload = {
+        "operation": DAILY_BUYBACK_TAPE_OPERATION, "as_of": as_of, "url": url,
+        "governance_ref": governance.id, "governance_hash": governance.content_hash,
+        "source_hash": identity["source_hash"], "schema_hash": identity["schema_hash"],
+    }
+    key = content_hash(key_payload)
+    root = state / "hkex-daily-acquisitions" / key
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    manifest_path, source_path = root / "manifest.json", root / "source.xls"
+    descriptor = os.open(root / "acquisition.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with os.fdopen(descriptor, "r+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text("utf-8"))
+                if manifest.get("key") != key or manifest.get("identity") != key_payload:
+                    raise HkexFilingsRunError("daily acquisition cache manifest identity is corrupt")
+                raw = source_path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != manifest.get("source_sha256"):
+                    raise HkexFilingsRunError("daily acquisition cached source bytes are corrupt")
+                capture = manifest.get("capture")
+                if not isinstance(capture, dict):
+                    raise HkexFilingsRunError("daily acquisition cached capture is corrupt")
+                digest = hashlib.sha256(canonical_json(artifact_payload(capture)).encode("utf-8")).hexdigest()
+                if digest != (manifest.get("artifact") or {}).get("content_hash"):
+                    raise HkexFilingsRunError("daily acquisition cached artifact is corrupt")
+                locator = str((manifest.get("artifact") or {}).get("storage_locator") or "")
+                if not locator.startswith("spool:"):
+                    raise HkexFilingsRunError("daily acquisition cached artifact locator is corrupt")
+                artifact_bytes = (state / DEFAULT_SPOOL_NAME / "connector-spool" /
+                                  locator.removeprefix("spool:")).read_bytes()
+                if hashlib.sha256(artifact_bytes).hexdigest() != digest:
+                    raise HkexFilingsRunError("daily acquisition spooled artifact is corrupt")
+                return dict(manifest, cache_status="hit")
+            raw, content_type = fetch(url, operation=DAILY_BUYBACK_TAPE_OPERATION)
+            source_sha = hashlib.sha256(raw).hexdigest()
+            raw_sink = spool.open_sink(f"raw-sink:{source_sha}", max_response_bytes=MAX_RAW_BYTES)
+            raw_sink.write(raw)
+            raw_sink.finalize()
+            capture = _capture_envelope(DAILY_BUYBACK_TAPE_OPERATION, {"as_of": as_of})
+            document = _document(url, "share_buyback_report", raw, content_type)
+            document["grid"] = _workbook_grid(raw)
+            capture["documents"].append(document)
+            artifact = spool_capture(spool, capture)
+            daily_wire = {
+                "schema_version": CAPTURE_SCHEMA_VERSION,
+                "operation": DAILY_BUYBACK_TAPE_OPERATION,
+                "report_printed_on": as_of, "report_url": url,
+                "report_sha256": source_sha, "universe_grid": document["grid"],
+                "artifact_hash": artifact.content_hash,
+                "source_record_refs": [SOURCE_REF, f"raw-sink:{artifact.content_hash}"],
+                "next_cursor": None, "provider_status": 200,
+            }
+            from .authority_resolver import _schema_matches
+            _schema_matches(daily_wire, hkex_output_schema(DAILY_BUYBACK_TAPE_OPERATION),
+                            "daily acquisition output")
+            invocation = build_invocation_ref(
+                operation=DAILY_BUYBACK_TAPE_OPERATION, governance_ref=governance.id,
+                governance_hash=governance.content_hash, parameters={"as_of": as_of},
+                artifact_hash=artifact.content_hash,
+            )
+            manifest = {"schema_version": "0.1", "key": key, "identity": key_payload,
+                        "source_sha256": source_sha, "artifact": artifact.to_dict(),
+                        "invocation_ref": invocation, "capture": capture,
+                        "wire": daily_wire}
+            _write_bytes_owner_only(source_path, raw)
+            _write_owner_only(manifest_path, manifest)
+            return dict(manifest, cache_status="miss")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HkexFilingsRunError(f"daily acquisition cache is unreadable: {exc}") from exc
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one linear run
     state = Path(args.state_dir).expanduser().resolve()
     summary_dir = (
@@ -372,6 +469,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
         "governance_hash": None,
         "artifact": None,
         "invocation_ref": None,
+        "derived_view_ref": None,
+        "acquisition": None,
         "source_documents": [],
         "parsed_row_count": 0,
         "universe_row_count": None,
@@ -405,33 +504,55 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
         summary["governance_hash"] = governance.content_hash
 
         spool = RawSpool(str(state / DEFAULT_SPOOL_NAME), max_total_bytes=1_000_000_000)
-        capture = (
-            replayed_capture(args) if args.fixture_file else capture_live(args, spool)
-        )
-        artifact = spool_capture(spool, capture)
-        summary["artifact"] = artifact.to_dict()
+        if (args.operation == NEXT_DAY_DISCLOSURE_OPERATION and not args.fixture_file
+                and getattr(args, "daily_buyback_tape_governance", None)):
+            acquisition_governance = _load_governance(
+                Path(args.daily_buyback_tape_governance).expanduser().resolve(),
+                DAILY_BUYBACK_TAPE_OPERATION,
+            )
+            acquisition = _daily_acquisition(
+                state=state, as_of=args.as_of, governance=acquisition_governance,
+                spool=spool,
+            )
+            capture = copy.deepcopy(acquisition["capture"])
+            capture["operation"] = NEXT_DAY_DISCLOSURE_OPERATION
+            capture["parameters"] = _parameters(args)
+            artifact_dict = acquisition["artifact"]
+            artifact_hash = artifact_dict["content_hash"]
+            invocation = acquisition["invocation_ref"]
+            summary["acquisition"] = {key: acquisition[key] for key in (
+                "key", "identity", "artifact", "invocation_ref", "cache_status"
+            )}
+            summary["derived_view_ref"] = "hkex-derived-view:" + content_hash({
+                "acquisition_invocation_ref": invocation, "operation": args.operation,
+                "parameters": _parameters(args),
+            })[:32]
+        else:
+            capture = replayed_capture(args) if args.fixture_file else capture_live(args, spool)
+            artifact = spool_capture(spool, capture)
+            artifact_dict = artifact.to_dict()
+            artifact_hash = artifact.content_hash
+            invocation = build_invocation_ref(
+                operation=args.operation, governance_ref=governance.id,
+                governance_hash=governance.content_hash, parameters=_parameters(args),
+                artifact_hash=artifact_hash,
+            )
+        summary["artifact"] = artifact_dict
         summary["source_documents"] = [
             {key: document[key] for key in ("role", "url", "sha256", "byte_length",
                                             "content_type")}
             for document in capture.get("documents", [])
         ]
 
-        invocation = build_invocation_ref(
-            operation=args.operation,
-            governance_ref=governance.id,
-            governance_hash=governance.content_hash,
-            parameters=_parameters(args),
-            artifact_hash=artifact.content_hash,
-        )
         summary["invocation_ref"] = invocation
         refs = [
             f"{SOURCE_REF}:{ticker}",
-            f"raw-sink:{artifact.content_hash}",
+            f"raw-sink:{artifact_hash}",
         ]
 
         wire = parse_capture(
             args.operation, capture, ticker=ticker,
-            artifact_hash=artifact.content_hash, source_record_refs=refs,
+            artifact_hash=artifact_hash, source_record_refs=refs,
         )
 
         # Contract last: a read the frozen schema cannot describe is refused
@@ -444,14 +565,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
         if args.operation == NEXT_DAY_DISCLOSURE_OPERATION:
             events = buyback_events(
                 wire, company_ref=company_ref, invocation_ref=invocation,
-                artifact_hash=artifact.content_hash, prior_rows=prior_rows,
+                artifact_hash=artifact_hash, prior_rows=prior_rows,
                 current_price=args.current_price,
             )
             summary["universe_row_count"] = wire["universe_row_count"]
         elif args.operation == DISCLOSURE_OF_INTERESTS_OPERATION:
             events = di_events(
                 wire, company_ref=company_ref, invocation_ref=invocation,
-                artifact_hash=artifact.content_hash,
+                artifact_hash=artifact_hash,
                 prior_rows=prior_rows or wire["rows"],
             )
         else:
@@ -505,6 +626,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--governance", required=True,
                         help="approved record for this exact operation")
+    parser.add_argument("--daily-buyback-tape-governance", default=None,
+                        help="approved day-scoped acquisition record; absent keeps legacy reads")
     parser.add_argument("--operation", required=True, choices=list(OPERATIONS))
     parser.add_argument("--hk-ticker", required=True,
                         help="the Hong Kong stock code, e.g. 00700")

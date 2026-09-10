@@ -2517,6 +2517,27 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "row_count", "universe_row_count", *hkex_envelope_fields,
                 ),
             )
+        if operation == "daily_buyback_tape":
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "operation": {"type": "string", "enum": ["daily_buyback_tape"]},
+                    "report_printed_on": iso_date,
+                    "report_url": _string(),
+                    "report_sha256": sha256,
+                    "universe_grid": {
+                        "type": "array", "items": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                    },
+                    **hkex_envelope,
+                },
+                (
+                    "schema_version", "operation", "report_printed_on",
+                    "report_url", "report_sha256", "universe_grid",
+                    *hkex_envelope_fields,
+                ),
+            )
         index_row_properties = {
             "news_id": nullable_string,
             "filed_at": _string(),
@@ -3041,6 +3062,10 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         # would be the same fact.
         "fallbacks": (),
         "operations": (
+            _operation(
+                "daily_buyback_tape", completeness="enumerated",
+                input_fields=("as_of",),
+            ),
             # The only enumerated one, and genuinely: the Exchange publishes
             # the complete market-wide table for one trading day in one
             # document with no paging, so a window of days can be reconciled

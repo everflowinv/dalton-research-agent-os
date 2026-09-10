@@ -8,9 +8,11 @@ capture take exactly the same path from the governance check onwards.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from dalton_core.hkex_filings_cli import (
 from dalton_core.hkex_filings_core import (
     ANNOUNCEMENTS_INDEX_OPERATION,
     DISCLOSURE_OF_INTERESTS_OPERATION,
+    DAILY_BUYBACK_TAPE_OPERATION,
     KIND_BY_OPERATION,
     MONTHLY_RETURNS_OPERATION,
     NEXT_DAY_DISCLOSURE_OPERATION,
@@ -174,6 +177,100 @@ class ReplayTests(ChildHarness):
         args.allow_network = True
         summary = run(args)
         self.assertIn("exactly one of", summary["failure_reason"])
+
+
+class DailyAcquisitionTests(ChildHarness):
+    def setUp(self) -> None:
+        super().setUp()
+        self.daily = self.write_record(DAILY_BUYBACK_TAPE_OPERATION, status="approved")
+        self.grid = json.loads((FIXTURES / "next-day-disclosure-00700-20260909.json").read_text(
+            "utf-8"))["documents"][0]["grid"]
+
+    def network_args(self, ticker: str = "00700", day: str = "2026-09-09") -> argparse.Namespace:
+        args = self.namespace(NEXT_DAY_DISCLOSURE_OPERATION, hk_ticker=ticker,
+                              as_of=day)
+        args.fixture_file = None
+        args.allow_network = True
+        args.daily_buyback_tape_governance = str(self.daily)
+        args.summary_dir = str(self.root / f"summary-{ticker}-{day}")
+        return args
+
+    def test_concurrent_company_views_fetch_once(self) -> None:
+        calls = []
+        def fake_fetch(url: str, *, operation: str, timeout: float = 60.0):
+            calls.append(url)
+            return b"one-market-workbook", "application/vnd.ms-excel"
+        with mock.patch("dalton_core.hkex_filings_cli.fetch", side_effect=fake_fetch), \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid), \
+             concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda ticker: run(self.network_args(ticker)),
+                                    ("00700", "00001")))
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(item["status"] == "succeeded" for item in results))
+        self.assertEqual(len({item["invocation_ref"] for item in results}), 1)
+
+    def test_two_company_views_share_one_acquisition_across_restart(self) -> None:
+        calls = []
+        def fake_fetch(url: str, *, operation: str, timeout: float = 60.0):
+            calls.append((url, operation))
+            return b"one-market-workbook", "application/vnd.ms-excel"
+        with mock.patch("dalton_core.hkex_filings_cli.fetch", side_effect=fake_fetch), \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid):
+            first = run(self.network_args("00700"))
+            second = run(self.network_args("00001"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["status"], "succeeded")
+        self.assertEqual(second["status"], "succeeded")
+        self.assertEqual(first["invocation_ref"], second["invocation_ref"])
+        self.assertEqual(first["artifact"], second["artifact"])
+        self.assertNotEqual(first["derived_view_ref"], second["derived_view_ref"])
+        self.assertEqual(first["acquisition"]["cache_status"], "miss")
+        self.assertEqual(second["acquisition"]["cache_status"], "hit")
+        cache_dir = self.root / "hkex-daily-acquisitions" / first["acquisition"]["key"]
+        self.assertEqual(cache_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((cache_dir / "manifest.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((cache_dir / "source.xls").stat().st_mode & 0o777, 0o600)
+        self.assertTrue(all(row["stock_code"] == "00700" for row in first["wire"]["rows"]))
+        self.assertTrue(all(row["stock_code"] == "00001" for row in second["wire"]["rows"]))
+
+    def test_cache_corruption_fails_closed_without_refetch(self) -> None:
+        with mock.patch("dalton_core.hkex_filings_cli.fetch",
+                        return_value=(b"workbook", "application/vnd.ms-excel")) as fetcher, \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid):
+            first = run(self.network_args())
+            key = first["acquisition"]["key"]
+            (self.root / "hkex-daily-acquisitions" / key / "source.xls").write_bytes(b"bad")
+            second = run(self.network_args("00001"))
+        self.assertEqual(fetcher.call_count, 1)
+        self.assertEqual(second["status"], "failed")
+        self.assertIn("corrupt", second["failure_reason"])
+        self.assertIsNone(second["wire"])
+
+    def test_unapproved_acquisition_cannot_use_an_existing_cache(self) -> None:
+        with mock.patch("dalton_core.hkex_filings_cli.fetch",
+                        return_value=(b"workbook", "application/vnd.ms-excel")), \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid):
+            self.assertEqual(run(self.network_args())["status"], "succeeded")
+        self.write_record(DAILY_BUYBACK_TAPE_OPERATION, status="proposed")
+        with mock.patch("dalton_core.hkex_filings_cli.fetch") as fetcher:
+            refused = run(self.network_args("00001"))
+        self.assertEqual(refused["status"], "failed")
+        self.assertIn("not approved", refused["failure_reason"])
+        fetcher.assert_not_called()
+
+    def test_day_and_governance_identity_partition_the_cache(self) -> None:
+        with mock.patch("dalton_core.hkex_filings_cli.fetch",
+                        return_value=(b"workbook", "application/vnd.ms-excel")) as fetcher, \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid):
+            one = run(self.network_args(day="2026-09-09"))
+            two = run(self.network_args(day="2026-09-10"))
+            self.daily.write_text(json.dumps(build_hkex_filings_governance_record(
+                operation=DAILY_BUYBACK_TAPE_OPERATION, approved_by="human:lumos",
+                status="approved", version=2)), encoding="utf-8")
+            three = run(self.network_args(day="2026-09-09"))
+        self.assertEqual(fetcher.call_count, 3)
+        self.assertEqual(len({one["acquisition"]["key"], two["acquisition"]["key"],
+                              three["acquisition"]["key"]}), 3)
 
 
 class ArtifactTests(ChildHarness):

@@ -390,6 +390,7 @@ class DeliberatelyUnseededTests(unittest.TestCase):
         self.assertEqual(
             named,
             frozenset({
+                "hkex-filings-daily-buyback-tape-v1.json",
                 "roic-list-transcripts-v1.json",
                 "roic-get-transcript-v1.json",
                 "guidepoint-get-transcript-narrowing-v1.json",

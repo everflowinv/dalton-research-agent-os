@@ -61,6 +61,10 @@ fi
 # to the decision instead of in a report, and so the test above has something
 # to check against.
 DELIBERATELY_UNSEEDED=(
+  # F13: a separately governed full-market acquisition. It remains proposed
+  # until the owner signs and installs it; silently seeding it would turn a new
+  # network permission into deployment policy.
+  hkex-filings-daily-buyback-tape-v1.json
   # P13ah: roic.ai answers 403 on every page, site-wide, from 2026-08-29 --
   # confirmed here (NVDA, AAPL) and independently by the OpenClaw source survey
   # (`docs/reports/openclaw-data-source-survey-v1.0-2026-09-09.md`), which

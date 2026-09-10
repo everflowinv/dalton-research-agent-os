@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .hkex_filings_core import (
+    DAILY_BUYBACK_TAPE_OPERATION,
     KIND_BY_OPERATION,
     NEXT_DAY_DISCLOSURE_OPERATION,
     OPERATIONS,
@@ -60,6 +61,13 @@ class HkexFilingsLauncher(LaneChildLauncher):
         path = self.governance_dir / GOVERNANCE_FILENAME_BY_OPERATION[operation]
         return path if path.is_file() else None
 
+    def daily_acquisition_governance_path(self) -> Path | None:
+        if self.governance_dir is None:
+            return None
+        path = self.governance_dir / GOVERNANCE_FILENAME_BY_OPERATION[
+            DAILY_BUYBACK_TAPE_OPERATION]
+        return path if path.is_file() else None
+
     def approved_operations(self) -> tuple[str, ...]:
         """Which of the four this Core may run at all, in the frozen order."""
 
@@ -89,6 +97,10 @@ class HkexFilingsLauncher(LaneChildLauncher):
             "--allow-network",
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
+        if (operation == NEXT_DAY_DISCLOSURE_OPERATION
+                and self.daily_acquisition_governance_path() is not None):
+            command.extend(["--daily-buyback-tape-governance",
+                            str(self.daily_acquisition_governance_path())])
         for flag, value in (
             ("--as-of", as_of), ("--since", since), ("--until", until),
             ("--headline-category", headline_category),

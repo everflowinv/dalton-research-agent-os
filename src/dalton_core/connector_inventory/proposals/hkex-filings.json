@@ -1,6 +1,6 @@
 {
   "adapter_package_ref": "inventory-artifact:adapter-contract:hkex-filings:0.1",
-  "adapter_source_hash": "41e1f677553dcb972555d4c2251071e35e531dc42c1383bcf6bce327a4b887ca",
+  "adapter_source_hash": "3839692cfc8a97d743e285c106d14081cbe30d1d60296beddb61fc06c7a601a0",
   "auth_boundary": {
     "credential_material": "forbidden",
     "mode": "none",
@@ -10,14 +10,26 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:hkex-filings:0.1",
   "connector_ref": "connector:hkex-filings",
-  "content_hash": "df370c9e23cb9f7102e4350abf815a51bdcae7fae0a62dc885146c9b4686ebac",
+  "content_hash": "86b02756adec0d79bd9c8a20a43f6ba1ced0077888a9f4c652598e8f6ae7d0d8",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
-  "fixture_manifest_hash": "1931f13dba71f255e389faf2342373745b7354d5457b3addd74153e2f18d1973",
+  "fixture_manifest_hash": "9909a725af112d562a8fca0cfca9c7da9c8db05f232dc224243c14e23719b00b",
   "fixture_manifest_ref": "connector-fixture-manifest:hkex-filings:0.1",
   "id": "connector-proposal-manifest:hkex-filings:0.2",
   "inventory_state": "proposal_only",
   "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
   "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "827ea0407dfa59b4fa7355ef3482b3c12a51580412a607a0e6e877bff061aefb",
+      "input_schema_ref": "schema:connector-inventory:hkex-filings:daily_buyback_tape:input:0.1",
+      "operation": "daily_buyback_tape",
+      "output_schema_hash": "0cfc5c353cfa9a22d8b6d0d6daea11e3c1c7c6f59ac6b1b807d3b1c14c120a5a",
+      "output_schema_ref": "schema:connector-inventory:hkex-filings:daily_buyback_tape:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
     {
       "completeness": "enumerated",
       "input_schema_hash": "d026eccffa5aa69f595939a037ac54068bc64b720730d4f5651fd9b5238f3079",
@@ -67,7 +79,7 @@
       ]
     }
   ],
-  "profile_template_hash": "e8b12a4e07268ed9fa0bb7f53e6cfbacb1962eb27e1c10b36c88e9b19c5ec5b9",
+  "profile_template_hash": "8220f70634b4c1794044f8ed856e1fd530f61e90e7443af748254a912c69ea40",
   "profile_template_ref": "connector-profile-template:hkex-filings:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,
