@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -138,6 +141,76 @@ class WorkspaceTests(unittest.TestCase):
                                  "policy_ref": "vendor-capacity-policy:one",
                                  "policy_hash": "b" * 64},
             )
+
+    def test_create_cli_accepts_repeated_connector_capacity_bindings(self):
+        bindings = []
+        for index in range(2):
+            path = Path(self.temp.name) / f"connector-{index}.json"
+            path.write_text(json.dumps({
+                "database": str(self.host / "fleet-capacity" / f"connector-{index}.sqlite"),
+                "policy_ref": f"connector-capacity-policy:{index}",
+                "policy_hash": chr(ord("b") + index) * 64,
+            }))
+            bindings.append(path)
+        command = [
+            sys.executable, "-m", "dalton_core.workspace", "create",
+            "--host-root", str(self.host), "--slug", "analyst-cli",
+            "--cockpit-port", "8791", "--release-ref", RELEASE_REF,
+            "--release-path", str(self.release),
+        ]
+        for path in bindings:
+            command.extend(["--shared-connector-capacity-binding", str(path)])
+        completed = subprocess.run(
+            command, capture_output=True, text=True, check=False,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        workspace = load_workspace_manifest(result["manifest"])
+        self.assertEqual(len(workspace.shared_connector_capacity), 2)
+        self.assertEqual(
+            [row["policy_ref"] for row in workspace.shared_connector_capacity],
+            ["connector-capacity-policy:0", "connector-capacity-policy:1"],
+        )
+
+    def test_create_cli_rejects_bad_connector_bindings_before_workspace_write(self):
+        valid = {
+            "database": str(self.host / "fleet-capacity" / "connector.sqlite"),
+            "policy_ref": "connector-capacity-policy:one",
+            "policy_hash": "b" * 64,
+        }
+        cases = {
+            "malformed": "{",
+            "unsupported": json.dumps({**valid, "daily_limit": 100}),
+            "duplicate": json.dumps(valid),
+        }
+        for name, body in cases.items():
+            with self.subTest(name=name):
+                case_host = Path(self.temp.name) / name / "Dalton"
+                existing = create_workspace_manifest(
+                    case_host, "existing", 8892, RELEASE_REF, self.release)
+                existing_bytes = existing.manifest_path.read_bytes()
+                binding = Path(self.temp.name) / f"{name}.json"
+                binding.write_text(body)
+                command = [
+                    sys.executable, "-m", "dalton_core.workspace", "create",
+                    "--host-root", str(case_host), "--slug", "must-not-exist",
+                    "--cockpit-port", "8792", "--release-ref", RELEASE_REF,
+                    "--release-path", str(self.release),
+                    "--shared-connector-capacity-binding", str(binding),
+                ]
+                if name == "duplicate":
+                    command.extend(["--shared-connector-capacity-binding", str(binding)])
+                completed = subprocess.run(
+                    command, capture_output=True, text=True, check=False,
+                    env={**os.environ,
+                         "PYTHONPATH": str(Path(__file__).parents[1] / "src")},
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertFalse(
+                    (case_host / "workspaces" / "must-not-exist").exists()
+                )
+                self.assertEqual(existing.manifest_path.read_bytes(), existing_bytes)
 
     def test_service_binding_rejects_manifest_or_path_substitution(self):
         workspace = self.create("analyst-a", 8787)

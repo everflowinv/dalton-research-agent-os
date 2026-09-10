@@ -68,7 +68,17 @@ Each model-provider account shared by multiple workspaces needs an owner-publish
 
 Create one file per provider/account binding, mode `0600`, outside every workspace root. A workspace may repeat `--shared-model-capacity-binding` for multiple providers. Two workspaces that consume the same provider account must point to the same capacity database and owner-declared account scope, with exact active policy refs and hashes. Do not copy credential tokens into this file.
 
-Connector capacity is also explicit in the workspace manifest (`shared_connector_capacity`). The current `dalton-workspace create` CLI does not expose a connector-binding flag. Do not hand-edit the hashed manifest. Until an operator-facing creator supports that field, create only workspaces whose connector capacity needs are represented by the approved creation workflow; otherwise stop and record that the workspace is not ready for governed connector dispatch.
+Connector capacity is also explicit. Prepare one mode `0600` JSON file per approved connector policy binding:
+
+```json
+{
+  "database": "<HOST_ROOT>/fleet-capacity/<CONNECTOR_CAPACITY_DB_FILENAME>",
+  "policy_ref": "<EXACT_ACTIVE_CONNECTOR_POLICY_REF>",
+  "policy_hash": "<EXACT_ACTIVE_CONNECTOR_POLICY_SHA256>"
+}
+```
+
+Repeat `--shared-connector-capacity-binding <FILE>` for every governed connector account/scope required by the workspace. The creator validates these bindings as part of the closed manifest before creating the workspace directory. Do not hand-edit the hashed manifest.
 
 ## Create two isolated workspaces
 
@@ -91,7 +101,8 @@ The CLI currently generates a UUID itself. Omit any attempt to force or copy one
   --release-ref "$RELEASE_REF" \
   --release-path "$RELEASE_PATH" \
   --shared-readonly-path "$RELEASE_PATH" \
-  --shared-model-capacity-binding "$BINDING_A"
+  --shared-model-capacity-binding "$BINDING_A" \
+  --shared-connector-capacity-binding <CONNECTOR_CAPACITY_BINDING_JSON_A>
 
 "$RELEASE_PATH/bin/dalton-workspace" create \
   --host-root "$HOST_ROOT" \
@@ -100,7 +111,8 @@ The CLI currently generates a UUID itself. Omit any attempt to force or copy one
   --release-ref "$RELEASE_REF" \
   --release-path "$RELEASE_PATH" \
   --shared-readonly-path "$RELEASE_PATH" \
-  --shared-model-capacity-binding "$BINDING_B"
+  --shared-model-capacity-binding "$BINDING_B" \
+  --shared-connector-capacity-binding <CONNECTOR_CAPACITY_BINDING_JSON_B>
 ```
 
 Record each returned `manifest`, `workspace_id`, and `content_hash`. Confirm the IDs, ports, workspace roots, and derived database paths differ:

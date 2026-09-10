@@ -423,6 +423,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--shared-model-capacity-binding", type=Path, action="append", default=[],
         help="JSON file containing one exact provider/account capacity binding",
     )
+    create.add_argument(
+        "--shared-connector-capacity-binding", type=Path, action="append", default=[],
+        help="JSON file containing one exact connector capacity policy binding",
+    )
     show = sub.add_parser("show")
     show.add_argument("--manifest", type=Path, required=True)
     validate = sub.add_parser("validate")
@@ -455,12 +459,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 parser.error(f"invalid shared model capacity binding file: {exc}")
             model_bindings.append(binding)
+        connector_bindings = []
+        for path in args.shared_connector_capacity_binding:
+            try:
+                binding = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                parser.error(f"invalid shared connector capacity binding file: {exc}")
+            connector_bindings.append(binding)
         result = create_workspace_manifest(args.host_root, args.slug,
                                            args.cockpit_port, args.release_ref,
                                            args.release_path,
                                            shared_readonly_paths=args.shared_readonly_path,
                                            shared_capacity=shared_capacity,
-                                           shared_model_capacity_bindings=model_bindings)
+                                           shared_model_capacity_bindings=model_bindings,
+                                           shared_connector_capacity=connector_bindings)
         wire: Any = {"manifest": str(result.manifest_path),
                      "workspace_id": result.workspace_id,
                      "content_hash": result.content_hash}
