@@ -57,6 +57,15 @@ _LEGACY_HTML_PATH = Path(__file__).with_name("cockpit_control_legacy.html")
 MAX_BODY_BYTES = 16384
 SESSION_TTL_SECONDS = 3600
 AUTOMATION_SUBJECT = "automation:timeout"
+# ADR-0009: the Perception/Agenda plane is retired.  ``/legacy`` keeps serving
+# the delivered decisions -- they are history and history is not deleted -- but
+# the view says so rather than presenting itself as a live queue that someone
+# is still filling.
+AGENDA_PLANE_RETIREMENT_REF = "adr:0009-one-event-plane"
+AGENDA_PLANE_RETIREMENT_NOTE = (
+    "议程/感知平面已退役（ADR-0009）。这里只读已送达的历史，不会再有新的议程；"
+    "事件平面是 ResearchEvent 与判断车道。"
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -424,6 +433,9 @@ class AgendaControlPlane:
             "as_of": now.isoformat(timespec="seconds"),
             "timeout_seconds": self.config.feedback_timeout_seconds,
             "items": rows,
+            "retired": True,
+            "retirement_ref": AGENDA_PLANE_RETIREMENT_REF,
+            "retirement_note": AGENDA_PLANE_RETIREMENT_NOTE,
         }
 
     def record(self, login: str, decision_ref: str, verdict: str) -> dict[str, Any]:
