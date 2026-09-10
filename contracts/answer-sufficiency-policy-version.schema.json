@@ -99,10 +99,15 @@
       "additionalProperties": false,
       "required": ["enabled", "max_cost_units", "max_rounds"],
       "properties": {
-        "enabled": {"const": false},
-        "max_cost_units": {"const": 0},
-        "max_rounds": {"const": 0}
-      }
+        "enabled": {"type": "boolean", "default": false},
+        "max_cost_units": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "max_rounds": {"type": "integer", "minimum": 0, "maximum": 100}
+      },
+      "allOf": [{
+        "if": {"properties": {"enabled": {"const": true}}, "required": ["enabled"]},
+        "then": {"properties": {"max_cost_units": {"minimum": 1}, "max_rounds": {"minimum": 1}}},
+        "else": {"properties": {"max_cost_units": {"const": 0}, "max_rounds": {"const": 0}}}
+      }]
     },
     "effective_from": {"type": "string", "format": "date-time"},
     "effective_until": {"type": ["string", "null"], "format": "date-time"},

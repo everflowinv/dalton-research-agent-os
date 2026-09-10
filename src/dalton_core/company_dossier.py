@@ -81,7 +81,7 @@ SECTION_SET = frozenset(SECTIONS)
 # shapes in the record -- but they are drafted by the same machinery.
 CLASSIFICATION_UNIT = "industry_classification"
 VARIANT_UNIT = "variant_view"
-UNITS: tuple[str, ...] = SECTIONS + (CLASSIFICATION_UNIT, VARIANT_UNIT)
+UNITS: tuple[str, ...] = (CLASSIFICATION_UNIT,) + SECTIONS + (VARIANT_UNIT,)
 
 # Deep Insight Gate question 1, as a closed vocabulary.  The Playbook asks
 # "是商品周期、资本周期、合同型 compounder、结构成长还是转型公司？分类依据和反例

@@ -45,11 +45,13 @@ import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
+from datetime import date
 from types import MappingProxyType
 from typing import Any
 
 from .document_numeric_claim import numbers_in
 from .store import content_hash
+from .research_event import validate_payload
 
 SCHEMA_VERSION = "0.1"
 
@@ -614,6 +616,10 @@ def issuer_purchase_events(
     for row in parsed["rows"]:
         payload = {
             "disclosure_kind": "issuer_purchases_table",
+            "market": "US",
+            "cluster_key": f"{date.fromisoformat(occurred).strftime('%G-W%V')}:{accession}",
+            "cumulative_shares": None,
+            "cumulative_basis": None,
             "accession": accession,
             "form": form,
             "filing_date": filing_date,
@@ -642,6 +648,7 @@ def issuer_purchase_events(
                 "kind": "issuer_purchases_table",
             }),
         }
+        payload = validate_payload("buyback_disclosure", payload)
         events.append({
             "kind": "buyback_disclosure",
             "company_ref": company_ref,
@@ -695,6 +702,10 @@ def authorisation_events(
     for row in found:
         payload = {
             "disclosure_kind": "authorisation",
+            "market": "US",
+            "cluster_key": f"{date.fromisoformat(filing_date).strftime('%G-W%V')}:{accession}",
+            "cumulative_shares": None,
+            "cumulative_basis": None,
             "accession": accession,
             "form": form,
             "filing_date": filing_date,
@@ -723,6 +734,7 @@ def authorisation_events(
                 "kind": "authorisation",
             }),
         }
+        payload = validate_payload("buyback_disclosure", payload)
         events.append({
             "kind": "buyback_disclosure",
             "company_ref": company_ref,

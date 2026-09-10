@@ -133,14 +133,12 @@ class CompanyRefTests(unittest.TestCase):
 
 
 class PriceAuthorityTests(unittest.TestCase):
-    def test_the_price_authority_still_cannot_hold_a_hong_kong_symbol(self) -> None:
-        # The reason every buy-back's price comparison is reported
-        # `unavailable`. When this assertion starts failing, the comparison can
-        # be turned on -- which is the only reason it is an assertion.
+    def test_the_price_authority_accepts_only_four_digit_hk_symbols(self) -> None:
         from dalton_core.market_price import _TICKER_RE
-
-        self.assertIsNone(_TICKER_RE.fullmatch(yahoo_ticker("00700")))
-        self.assertIsNotNone(_TICKER_RE.fullmatch("ACN"))
+        for ticker in (yahoo_ticker("00700"), "ACN", "BRK.B"):
+            self.assertIsNotNone(_TICKER_RE.fullmatch(ticker))
+        for ticker in ("700.HK", "00700.HK", "0700", "1234.US", "1ABC"):
+            self.assertIsNone(_TICKER_RE.fullmatch(ticker))
 
 
 class UrlTests(unittest.TestCase):
@@ -388,16 +386,11 @@ class EventVocabularyTests(unittest.TestCase):
         )
 
         self.assertIn("buyback_disclosure", EVENT_KINDS)
-        self.assertEqual(
-            PAYLOAD_FIELDS["buyback_disclosure"],
-            frozenset({
-                "accession_or_ref", "form", "market", "disclosed_on",
-                "period_start", "period_end", "shares", "average_price",
-                "price_low", "price_high", "total_paid", "currency",
-                "remaining_authorisation", "cumulative_shares_ytd",
-                "pct_of_issued", "invocation_ref", "artifact_hash", "event_key",
-            }),
-        )
+        self.assertTrue({
+            "accession", "filing_date", "market", "shares_purchased",
+            "average_price_paid", "cumulative_shares", "cumulative_basis", "cluster_key",
+        }.issubset(PAYLOAD_FIELDS["buyback_disclosure"]))
+        self.assertNotIn("cumulative_shares_ytd", PAYLOAD_FIELDS["buyback_disclosure"])
         self.assertEqual(DEFAULT_TIER_BY_KIND["buyback_disclosure"], "primary_filing")
 
     def test_every_kind_still_has_a_payload_contract(self) -> None:

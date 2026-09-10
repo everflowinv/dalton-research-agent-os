@@ -191,12 +191,9 @@ def yahoo_ticker(ticker: Any) -> str:
 
 # What the price authority does with that symbol, checked rather than assumed.
 PRICE_AUTHORITY_NOTE = (
-    "yfinance itself serves `.HK` symbols, but Dalton's price authority cannot "
-    "hold one: `market_price._TICKER_RE` is `^[A-Z][A-Z0-9.\\-]{0,15}$`, and a "
-    "Hong Kong symbol begins with a digit (`0700.HK`). Until that shape is "
-    "widened -- an integration decision, because it is the authority's contract "
-    "-- every buy-back's average price against the current price is reported "
-    "`unavailable` rather than compared against a series that is not there."
+    "No current HKD price observation was supplied for this company. "
+    "Dalton accepts Yahoo's four-digit .HK symbols; the comparison stays "
+    "unavailable until a governed price observation is available."
 )
 
 MONTHLY_RETURN_LIMIT_NOTE = (

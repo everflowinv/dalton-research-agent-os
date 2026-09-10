@@ -1258,17 +1258,13 @@ def buyback_events(
     prior_rows: Sequence[Mapping[str, Any]] = (),
     current_price: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One ``buyback_disclosure`` per row of the day's report for this issuer.
+    """Map filed HK daily returns to the shared US/HK event contract.
 
-    ``cumulative_shares_ytd`` is deliberately ``None`` on every Hong Kong row.
-    The Exchange's cumulative column is *since the resolution granting the
-    current repurchase mandate* -- Tencent's runs from 13 May 2026 -- and a
-    figure filed under a field whose name says "year to date" would be read as
-    a calendar year by everything downstream. The number is not lost: it is on
-    the wire verbatim and in the derived context under its own basis.
-    ``pct_of_issued`` does carry the report's percentage, because that field
-    claims a denominator and not a period.
+    The exchange cumulative count is since the repurchase mandate, never YTD.
+    The average remains derived in context rather than represented as filed.
     """
+
+    from .research_event import validate_payload
 
     events: list[dict[str, Any]] = []
     for row in wire["rows"]:
@@ -1277,17 +1273,17 @@ def buyback_events(
             continue
         reference = buyback_reference(wire, row)
         payload = {
-            "accession_or_ref": reference,
+            "accession": reference,
             "form": BUYBACK_FORM,
             "market": MARKET,
-            "disclosed_on": wire.get("report_printed_on"),
+            "filing_date": wire.get("report_printed_on"),
             "period_start": row.get("trading_date"),
             "period_end": row.get("trading_date"),
-            "shares": row.get("shares_repurchased"),
+            "shares_purchased": row.get("shares_repurchased"),
             # Not disclosed. The report gives the highest and the lowest; the
             # average is arithmetic and lives in the derived context, where a
             # reader can see the formula that produced it.
-            "average_price": None,
+            "average_price_paid": None,
             "price_low": row.get("lowest_price"),
             "price_high": row.get("highest_price"),
             "total_paid": row.get("aggregate_price_paid"),
@@ -1295,12 +1291,16 @@ def buyback_events(
             # Only the issuer's own return carries the mandate ceiling; the
             # Exchange's aggregation does not.
             "remaining_authorisation": None,
-            "cumulative_shares_ytd": None,
+            "cumulative_shares": row.get("mandate_to_date_shares"),
+            "cumulative_basis": "since_mandate" if row.get("mandate_to_date_shares") is not None else None,
+            "cluster_key": f"{buyback_cluster_key(row)}:{wire.get('report_printed_on')}",
+            "disclosure_kind": "next_day_disclosure_return",
             "pct_of_issued": row.get("mandate_to_date_pct_of_issued"),
             "invocation_ref": invocation_ref,
             "artifact_hash": artifact_hash,
             "event_key": content_hash({"row": row["record_hash"], "ref": reference}),
         }
+        payload = validate_payload(BUYBACK_EVENT_KIND, payload)
         events.append({
             "kind": BUYBACK_EVENT_KIND,
             "company_ref": company_ref,

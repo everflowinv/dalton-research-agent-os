@@ -414,13 +414,13 @@ class DerivedContextTests(unittest.TestCase):
         # arithmetic and the event payload says so by leaving it null.
         events = buyback_events(self.wire, company_ref=COMPANY,
                                 invocation_ref="i", artifact_hash="a" * 64)
-        self.assertIsNone(events[0]["payload"]["average_price"])
+        self.assertIsNone(events[0]["payload"]["average_price_paid"])
         self.assertEqual(events[0]["context"]["average_price_paid"], "436.708100")
 
     def test_the_price_comparison_is_unavailable_with_its_reason(self) -> None:
         context = buyback_context(self.row)
         self.assertEqual(context["price_vs_current"]["status"], "unavailable")
-        self.assertIn("_TICKER_RE", context["price_vs_current"]["reason"])
+        self.assertIn("No current HKD price", context["price_vs_current"]["reason"])
 
     def test_a_handed_in_price_is_compared_with_the_formula_beside_it(self) -> None:
         context = buyback_context(self.row, current_price="400.00")
@@ -491,12 +491,12 @@ class EventTests(unittest.TestCase):
         self.assertEqual(set(payload), set(PAYLOAD_FIELDS["buyback_disclosure"]))
         validate_payload("buyback_disclosure", payload)
         self.assertEqual(payload["market"], "HK")
-        self.assertEqual(payload["shares"], "230,000")
+        self.assertEqual(payload["shares_purchased"], "230,000")
         self.assertEqual(payload["currency"], "HKD")
         self.assertEqual(payload["period_start"], payload["period_end"])
-        self.assertEqual(payload["disclosed_on"], "2026-09-09")
+        self.assertEqual(payload["filing_date"], "2026-09-09")
 
-    def test_the_year_to_date_field_stays_null_on_a_hong_kong_row(self) -> None:
+    def test_hong_kong_cumulative_shares_keep_the_since_mandate_basis(self) -> None:
         # The Exchange's cumulative column is since the *repurchase mandate*.
         # A figure filed under a field whose name says "year to date" would be
         # read as a calendar year by everything downstream.
@@ -505,7 +505,9 @@ class EventTests(unittest.TestCase):
                              ticker="00700", artifact_hash="a" * 64)
         payload = buyback_events(wire, company_ref=COMPANY, invocation_ref="i",
                                  artifact_hash="a" * 64)[0]["payload"]
-        self.assertIsNone(payload["cumulative_shares_ytd"])
+        self.assertEqual(payload["cumulative_shares"], "44,382,700")
+        self.assertEqual(payload["cumulative_basis"], "since_mandate")
+        self.assertEqual(payload["cluster_key"], "2026-W37:2026-09-09")
         self.assertIsNone(payload["remaining_authorisation"])
         self.assertEqual(payload["pct_of_issued"], "0.48676")
 

@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BuybackDisclosurePayload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accession",
+    "announced_date",
+    "artifact_hash",
+    "authorisation_change",
+    "authorised_amount",
+    "authorised_amount_unit",
+    "average_price_paid",
+    "cluster_key",
+    "cumulative_basis",
+    "cumulative_shares",
+    "currency",
+    "disclosure_kind",
+    "document_ref",
+    "event_key",
+    "excerpt",
+    "excerpt_hash",
+    "exhibit",
+    "filing_date",
+    "form",
+    "invocation_ref",
+    "items",
+    "market",
+    "pct_of_issued",
+    "period_end",
+    "period_label",
+    "period_start",
+    "price_high",
+    "price_low",
+    "remaining_authorisation",
+    "remaining_authorisation_unit",
+    "shares_purchased",
+    "shares_purchased_under_plans",
+    "source_ref",
+    "total_paid"
+  ],
+  "properties": {
+    "accession": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "announced_date": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "artifact_hash": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "authorisation_change": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "authorised_amount": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "authorised_amount_unit": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "average_price_paid": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "cluster_key": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "cumulative_basis": {
+      "enum": [
+        null,
+        "calendar_year",
+        "since_mandate",
+        "fiscal_year"
+      ]
+    },
+    "cumulative_shares": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "currency": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "disclosure_kind": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "document_ref": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "event_key": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "excerpt": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "excerpt_hash": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "exhibit": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "filing_date": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "form": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "invocation_ref": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "items": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "market": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "pct_of_issued": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "period_end": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "period_label": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "period_start": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "price_high": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "price_low": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "remaining_authorisation": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "remaining_authorisation_unit": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "shares_purchased": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "shares_purchased_under_plans": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "source_ref": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    },
+    "total_paid": {
+      "type": [
+        "string",
+        "integer",
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "cumulative_shares": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cumulative_basis": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "cumulative_basis": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

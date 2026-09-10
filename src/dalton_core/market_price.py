@@ -59,7 +59,7 @@ MAX_OBSERVATIONS = 4000
 _SCHEMA_PATH = Path(__file__).with_name("market_price_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
-_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,15}$")
+_TICKER_RE = re.compile(r"^(?:[A-Z][A-Z0-9.\-]{0,15}|[0-9]{4}\.HK)$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 

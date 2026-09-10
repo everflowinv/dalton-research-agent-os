@@ -624,6 +624,9 @@ def stale_units(
              and (entry["unit"] in asked
                   or (entry.get("stale") and entry["new_refs"] > 0))]
     ready.sort(key=lambda entry: (
+        # Classification supplies the demand template, even when another
+        # section has more new references in this bounded batch.
+        0 if entry["unit"] == CLASSIFICATION_UNIT else 1,
         0 if entry.get("last_drafted") is None else 1,
         -int(entry["new_refs"]),
         order[entry["unit"]],
@@ -839,13 +842,10 @@ def run_dossier(
             outcome = draft_unit(
                 model, unit=unit, structure=entry["structure"], material=material,
                 company=company, mission=mission,
-                # The classification this file already holds. It is drafted
-                # after the sections in ``UNITS`` order, so a run that is
-                # writing it for the first time frames demand with the generic
-                # template and the next run picks up the answer -- which is the
-                # honest order: the frame follows the classification, not the
-                # other way round.
-                classification=held_classification,
+                # Use the classification drafted earlier in this same run;
+                # a first dossier should not need another tick to choose its frame.
+                classification=(blocks.get(CLASSIFICATION_UNIT) or {}).get(
+                    "classification", held_classification),
                 prior_body="" if held is None else section_body(held),
                 profile=profile if unit == "guidance_style" else None,
                 profile_table=profile_table if unit == "guidance_style" else "",

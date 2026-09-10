@@ -27,6 +27,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from dalton_core.connector_inventory import load_packaged_connector_inventory
+
 from dalton_core.coverage_mission import (  # noqa: E402
     AUTOMATION_WRITE_SCOPES,
     SOURCE_STATUSES,
@@ -61,9 +63,22 @@ def build_next_version_params(
         if status not in SOURCE_STATUSES:
             raise ValueError(f"{status} is outside the frozen source status vocabulary")
         rows = [row for row in params["source_plan"] if row["source_ref"] == source_ref]
-        if len(rows) != 1:
-            raise ValueError(f"active mission source plan does not list {source_ref}")
-        rows[0]["status"] = status
+        if len(rows) > 1:
+            raise ValueError(f"active mission source plan repeats {source_ref}")
+        if not rows:
+            matches = [profile for profile in load_packaged_connector_inventory()["templates"].values()
+                       if profile["source_identity"]["source_ref"] == source_ref]
+            if not matches:
+                raise ValueError(f"connector inventory does not list {source_ref}")
+            connectors = ", ".join(sorted({profile["connector_ref"] for profile in matches}))
+            # source_plan rows have a closed three-field contract. Provenance
+            # belongs in role, not an undeclared key that the writer rejects.
+            params["source_plan"].append({
+                "source_ref": source_ref, "status": status,
+                "role": f"Inventory source ({connectors}); created_by=set-source-status",
+            })
+        else:
+            rows[0]["status"] = status
     if title is not None:
         params["title"] = title
     slug = active["mission_ref"].split(":", 1)[1]

@@ -1794,6 +1794,37 @@ def derived_context(
             )
             return {"context": built, "lines": insider_block(built),
                     "refs": built["refs"]}
+        if (event.get("payload") or {}).get("market") == "HK":
+            from .hkex_filings_adapter import buyback_context as hk_buyback_context
+
+            def hk_row(item):
+                payload = item.get("payload") or {}
+                return {
+                    "trading_date": payload.get("period_end"),
+                    "shares_repurchased": payload.get("shares_purchased"),
+                    "aggregate_price_paid": payload.get("total_paid"),
+                    "currency": payload.get("currency"),
+                    "mandate_to_date_shares": payload.get("cumulative_shares"),
+                    "mandate_to_date_pct_of_issued": payload.get("pct_of_issued"),
+                }
+
+            history = [item for item in recent_events
+                       if item.get("company_ref") == company_ref
+                       and item.get("kind") == "buyback_disclosure"
+                       and (item.get("payload") or {}).get("market") == "HK"]
+            comparable = price if price and price.get("currency") == (event.get("payload") or {}).get("currency") else None
+            built = hk_buyback_context(
+                hk_row(event), prior_rows=[hk_row(item) for item in history],
+                current_price=(comparable or {}).get("close"),
+                current_price_ref=(comparable or {}).get("version_ref"),
+            )
+            refs = [item.get("id") for item in [event, *history]]
+            refs += [(event.get("payload") or {}).get("invocation_ref"),
+                     (comparable or {}).get("version_ref")]
+            return {"context": built,
+                    "lines": ["HK daily buyback context (filed total / shares; cumulative since mandate):",
+                              json.dumps(built, ensure_ascii=False, sort_keys=True)],
+                    "refs": list(dict.fromkeys(ref for ref in refs if ref))}
         from .buyback_context import build_buyback_context, statement_figures
         from .buyback_context import prompt_block as buyback_block
         from .buyback_disclosure import transcript_mentions_buyback

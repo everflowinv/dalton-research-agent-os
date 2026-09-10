@@ -209,23 +209,6 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         # substantial-shareholder notice becomes.
         "notes_text_hash",
     }),
-    # W4.  The field set is shared with the US 10-Q/10-K/8-K buy-back slice, so
-    # that one company's repurchases read the same whichever market disclosed
-    # them; ``market`` is what says which one it was.
-    #
-    # ``cumulative_shares_ytd`` is the one field a Hong Kong row always leaves
-    # null, and deliberately: the Exchange's cumulative column is *since the
-    # resolution granting the current repurchase mandate*, which is not a
-    # calendar year and would be read as one under this name.  The figure is on
-    # the connector's wire verbatim and in its derived context under its own
-    # basis; see ``hkex_filings_adapter.buyback_events``.
-    "buyback_disclosure": frozenset({
-        "accession_or_ref", "form", "market", "disclosed_on", "period_start",
-        "period_end", "shares", "average_price", "price_low", "price_high",
-        "total_paid", "currency", "remaining_authorisation",
-        "cumulative_shares_ytd", "pct_of_issued",
-        "invocation_ref", "artifact_hash", "event_key",
-    }),
     "holdings_change": frozenset({
         "accession", "form", "holder_name", "holder_cik", "quarter",
         "prior_quarter", "cusip", "issuer_name", "title_of_class", "put_call",
@@ -259,6 +242,10 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "announced_date", "items", "exhibit",
         "document_ref", "source_ref", "excerpt", "excerpt_hash",
         "invocation_ref", "artifact_hash", "event_key",
+        # Shared US / HK contract. Cumulative counts always name their basis;
+        # daily HK ranges and totals remain filed figures, not guessed means.
+        "market", "period_start", "price_low", "price_high", "total_paid",
+        "pct_of_issued", "cumulative_shares", "cumulative_basis", "cluster_key",
     }),
     "ir_page_change": frozenset({
         "watch_ref", "url", "host", "diff_hash", "previous_snapshot_hash",
@@ -396,6 +383,12 @@ def validate_payload(kind: str, payload: Any) -> dict[str, Any]:
             raise ResearchEventValidationError(
                 f"payload.{field} must be text, an integer, a boolean or null"
             )
+    if kind == "buyback_disclosure":
+        basis = result["cumulative_basis"]
+        if basis is not None and basis not in {"calendar_year", "since_mandate", "fiscal_year"}:
+            raise ResearchEventValidationError("buyback cumulative_basis is outside the vocabulary")
+        if (result["cumulative_shares"] is None) != (basis is None):
+            raise ResearchEventValidationError("buyback cumulative shares and basis must be supplied together")
     if all(value is None for value in result.values()):
         raise ResearchEventValidationError(f"a {kind} payload that says nothing is not an event")
     return result
