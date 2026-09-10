@@ -357,12 +357,13 @@ class CoordinatorTests(unittest.TestCase):
         self.source_map = load_crowd_source_map(MAP_PATH)
 
     def coordinator(self, mission_value: Any, *, since: str | None = None,
-                    source_map: Mapping[str, Any] | None = None) -> MissionCrowdSourceLaneCoordinator:
+                    source_map: Mapping[str, Any] | None = None,
+                    clock=None) -> MissionCrowdSourceLaneCoordinator:
         return MissionCrowdSourceLaneCoordinator(
             mission=lambda: mission_value, runners=self.launchers,
             source_map=source_map or self.source_map, ledger=self.ledger,
             since=since, failure_ledger_dir=self.root / "failure-ledger",
-            clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc))
+            clock=clock or (lambda: datetime(2026, 9, 9, tzinfo=timezone.utc)))
 
     def test_the_lane_needs_both_write_scopes(self):
         self.assertEqual(LANE_GRANTS, {"observation", "source_discovery"})
@@ -506,6 +507,20 @@ class CoordinatorTests(unittest.TestCase):
         events = coordinator.failure_budget.ledger.events(lane="crowd_source")
         self.assertTrue(any(row["event"] == "superseded" for row in events))
         self.assertFalse(any(row["event"] == "dependency_ok" for row in events))
+
+    def test_same_parameters_are_new_input_on_the_next_utc_day(self):
+        one_company = {**self.source_map,
+                       "companies": self.source_map["companies"][:1]}
+        now = [datetime(2026, 9, 9, 23, 59, tzinfo=timezone.utc)]
+        coordinator = self.coordinator(mission(), source_map=one_company,
+                                       clock=lambda: now[0])
+        self.launchers["xueqiu"].reject = "content_refused: unusable response"
+        coordinator.dispatch_once()
+        coordinator.dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 1)
+        now[0] = datetime(2026, 9, 10, 0, 1, tzinfo=timezone.utc)
+        coordinator.dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 2)
 
     def test_terminal_inputs_are_isolated_between_companies(self):
         two_companies = {**self.source_map,
@@ -771,6 +786,29 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(failure["failure_class"], "dependency_unavailable")
         self.assertEqual(failure["action"], "parked")
         self.assertIn("ConnectionError", result["sources"][0]["reason"])
+
+    def test_real_governance_approval_changes_control_and_retries_same_job(self):
+        execution = self.execution(status="proposed")
+        coordinator = MissionCrowdSourceLaneCoordinator(
+            mission=lambda: mission(connected=("source:blind",)),
+            runners={"employee-reviews": execution},
+            source_map={"companies": [{
+                "company_ref": "company:x", "ticker": "X", "xueqiu_query": None,
+                "x_handles": [], "employer_slug": "SyntheticCo",
+            }]},
+            ledger=CrowdObservationLedger(self.root / "approval-observations.jsonl"),
+            failure_ledger_dir=self.root / "approval-failures",
+            clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc),
+        )
+        first = coordinator.dispatch_once()["sources"][0]
+        self.assertEqual(first["failure"]["failure_class"], "not_permitted")
+        path = execution.launcher.governance_paths["blind_reviews"]
+        approved = build_governance_record(
+            "employee-reviews-blind", approved_by="human:tester", status="approved")
+        path.write_text(json.dumps(approved, sort_keys=True), encoding="utf-8")
+        second = coordinator.dispatch_once()["sources"][0]
+        self.assertEqual(second["status"], "recorded")
+        self.assertEqual(len(self.commands), 1)
 
     def test_the_runner_is_bound_to_the_slug_the_quota_table_uses(self):
         """The declared fifty a day is only real if these two strings match."""

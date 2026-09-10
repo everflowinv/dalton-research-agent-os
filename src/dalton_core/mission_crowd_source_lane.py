@@ -540,7 +540,23 @@ class MissionCrowdSourceLaneCoordinator:
         return f"{source}|{company_ref}|input:" + content_hash({
             "source": source, "company_ref": company_ref,
             "operation": operation, "parameters": dict(parameters),
+            "run_day": self.clock().astimezone(timezone.utc).date().isoformat(),
+            "source_governance": self._source_configuration(source),
         })[:24]
+
+    def _source_configuration(self, source: str) -> str:
+        runner = self.runners[source]
+        launcher = getattr(runner, "launcher", runner)
+        paths = getattr(launcher, "governance_paths", {}) or {}
+        parts: list[str] = []
+        for operation in sorted(paths):
+            try:
+                governance = launcher.load_governance(operation)
+            except Exception:  # noqa: BLE001 - unreadable is a control state
+                parts.append(f"{operation}:unreadable")
+                continue
+            parts.append(f"{operation}:{getattr(governance, 'content_hash', '')}")
+        return content_hash(parts)
 
     def _retire_superseded(self, prefix: str, current: str) -> None:
         rows = (self.failure_budget.parked_items()
@@ -685,17 +701,7 @@ class MissionCrowdSourceLaneCoordinator:
     def _configuration_digest(self) -> str:
         parts: list[str] = []
         for source in sorted(self.runners):
-            runner = self.runners[source]
-            paths = getattr(runner, "governance_paths", {}) or {}
-            for operation in sorted(paths):
-                try:
-                    governance = runner.load_governance(operation)
-                except Exception:  # noqa: BLE001 - unreadable is its own state
-                    parts.append(f"{source}:{operation}:unreadable")
-                    continue
-                parts.append(
-                    f"{source}:{operation}:{getattr(governance, 'content_hash', '')}"
-                )
+            parts.append(f"{source}:{self._source_configuration(source)}")
         return content_hash(parts)
 
     def held(self) -> dict[str, str]:
