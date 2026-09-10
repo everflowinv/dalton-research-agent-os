@@ -86,8 +86,10 @@ stage-ladder（阶段状态跨 mission 版本折叠）、ask v2。
 **owner 新增方向（09-10）**：既有资料（旧 Initial Screen、memo、Excel 模型）作为受治理的 `internal_prior` 来源，旧 screen 导入为
 版本链 v0，Dalton 仍独立写 v1 并逐条判断旧关注点是否还成立；旧模型只提供假设区间，永不当 actual。
 
-**在飞**：P14f 业绩季（修 review）、P13-M3 敏感性、P12e 行业框架、consensus P11b（在审）、planner 日账本（在审）、
-prior-research、reopen-ledger 续篇。
+**09-10 下午续**：P14f 业绩季、reopen-ledger（重开成为阶段账本记录）、planner 日账本（planner 调用进日账本与四池）、
+consensus P11b（财年末从「从不交 10-Q 的季度」推导；页首抽取 15 个目标价；两家独立券商规则）、authority 授权标志统一
+（19 个 authority 共享按连接的标志）都已合入；main 5,055 项通过。owner 新增：cockpit 按环节选模型 + 模型目录随 openclaw 自动
+登记（agent 开发中）。在修 review：P12e 行业框架、prior-research、P13-M3 敏感性。
 
 **方法上的两次事故**：用量上限两次打断十余个 agent，全部从上下文恢复；一次误判「静默 = 死亡」造成同一 worktree 双写，
 已裁决归属并写成规则。

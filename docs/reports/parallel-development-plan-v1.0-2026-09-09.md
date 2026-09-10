@@ -280,6 +280,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 中午 | reopen-ledger 合入（4,835 项通过，已 push）。合入 planner 日账本（planner 调用进日账本与四池，四处可观测性修复）与 consensus（财年末从「从不交 10-Q 的季度」推导；页首抽取 15 个目标价；两家独立券商规则）。在审：P12e、P13-M3、prior-research；后续：authority 授权标志统一 | 进行中 |
 | 09-10 中午 | planner 日账本合入（4,876 项通过，已 push）；consensus 合入中。P13-M3 review 一 blocker（bridge 单券商可冒充共识）已发回；P12e、prior-research 在修 | 进行中 |
 | 09-10 下午 | consensus 合入（5,045 项通过，已 push）；合入 authority 授权标志统一（19 个 authority 共享按连接的标志；受保护表自动识别）。在修：P12e、prior-research、P13-M3 | 进行中 |
+| 09-10 下午 | authority 标志统一合入（5,055 项通过，已 push）。派出模型选择与自动登记（cockpit 按环节选模型 → 新 policy 版本；每小时目录 lane；一键放行写 broker 子树）。在修：P12e、prior-research、P13-M3 | 进行中 |
 
 ---
 
