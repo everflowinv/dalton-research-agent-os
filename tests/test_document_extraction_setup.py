@@ -35,6 +35,39 @@ def _service(root: Path) -> Path:
 
 
 class ExtractionSetupTests(unittest.TestCase):
+    def test_reinstall_and_tier_switch_preserve_only_valid_budget_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config_path = _service(root)
+            now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+            install(config_path, now=now)
+            target = root / "state" / CONFIG_FILE_NAME
+            wire = json.loads(target.read_text(encoding="utf-8"))
+            budgets = {
+                "call_budget": {"max_cost_usd": 0.04},
+                "purpose_call_budgets": {"document_numeric_extraction": {"max_output_tokens": 777}},
+                "run_budget": {"max_units": 9},
+                "purpose_run_budgets": {"document_extraction": {"max_calls": 4}},
+            }
+            wire.update(budgets)
+            wire["unknown_private_field"] = "must not survive"
+            target.write_text(json.dumps(wire), encoding="utf-8")
+            install(config_path, profile_ids=["profile:deepseek-v4-flash"], now=now)
+            rewritten = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual({key: rewritten[key] for key in budgets}, budgets)
+            self.assertNotIn("unknown_private_field", rewritten)
+
+    def test_invalid_existing_budget_refuses_before_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config_path = _service(root)
+            install(config_path, now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc))
+            target = root / "state" / CONFIG_FILE_NAME
+            original = json.loads(target.read_text(encoding="utf-8"))
+            target.write_text(json.dumps({**original, "call_budget": {"max_cost_usd": -1}}))
+            with self.assertRaises(ValueError):
+                install(config_path, now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc))
+            self.assertEqual(json.loads(target.read_text()),
+                             {**original, "call_budget": {"max_cost_usd": -1}})
+
     def test_install_appends_policy_once_writes_config_and_points_service_at_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); config_path = _service(root)

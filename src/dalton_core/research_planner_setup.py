@@ -209,6 +209,12 @@ def install(
         policy = ensure_planner_policy(router, profile_ids=list(profile_ids), now=now,
                                        policy_id=policy_id, tier=tier)
         slots = credential_slots_for(router, list(profile_ids))
+    target = state_dir / config_file_name
+    from .budget_config_install import BudgetConfigInstallError, preserved_budget_overrides
+    try:
+        budget_overrides = preserved_budget_overrides(target)
+    except BudgetConfigInstallError as exc:
+        raise PlannerSetupError(str(exc)) from exc
     model_config = validate_model_config({
         "routing_policy_ref": policy["policy_version_ref"],
         "credential_slot_refs": slots,
@@ -219,8 +225,8 @@ def install(
         "expected_agent_id": planner["planner_expected_agent_id"],
         "budget_db": str(Path(thesis["budget_db"]).resolve()),
         "budget_policy_ref": thesis["budget_policy_version_id"],
+        **budget_overrides,
     })
-    target = state_dir / config_file_name
     changed = (not target.exists()
                or json.loads(target.read_text(encoding="utf-8")) != model_config)
     if changed:

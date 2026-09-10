@@ -20,6 +20,25 @@ from tests.test_openclaw_catalog_reconcile import _config
 
 
 class DeploymentModelPairTests(unittest.TestCase):
+    def test_role_reinstall_preserves_budget_overrides(self) -> None:
+        name = "dossier-model-config.json"
+        install(self.config, tier="brain", policy_id="model-routing-policy:test-budget",
+                config_file_name=name)
+        target = self.state / name
+        wire = json.loads(target.read_text("utf-8"))
+        budgets = {
+            "call_budget": {"max_output_tokens": 2345},
+            "purpose_call_budgets": {"dossier": {"max_cost_usd": 0.42}},
+            "run_budget": {"max_units": 2},
+            "purpose_run_budgets": {"dossier": {"max_cost_usd": 1.25}},
+        }
+        target.write_text(json.dumps({**wire, **budgets, "unrecognized": "drop-me"}))
+        install(self.config, tier="verifier", policy_id="model-routing-policy:test-budget",
+                config_file_name=name)
+        rewritten = json.loads(target.read_text("utf-8"))
+        self.assertEqual({key: rewritten[key] for key in budgets}, budgets)
+        self.assertNotIn("unrecognized", rewritten)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

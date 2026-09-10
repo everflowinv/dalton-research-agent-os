@@ -1,0 +1,48 @@
+"""Preserve validated owner budget overrides when regenerating model configs."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from .call_budget import validate_budget_overrides, validate_run_budget_overrides
+
+BUDGET_KEYS = ("call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets")
+
+
+class BudgetConfigInstallError(ValueError):
+    pass
+
+
+def preserved_budget_overrides(path: str | Path) -> dict[str, Any]:
+    """Read only the four owner budget blocks; malformed blocks fail closed."""
+
+    target = Path(path)
+    if not target.exists():
+        return {}
+    try:
+        wire = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BudgetConfigInstallError(f"existing model config cannot be read: {exc}") from exc
+    if not isinstance(wire, Mapping):
+        raise BudgetConfigInstallError("existing model config must be an object")
+    kept: dict[str, Any] = {}
+    for key in ("call_budget", "run_budget"):
+        if key in wire:
+            validator = validate_budget_overrides if key == "call_budget" else validate_run_budget_overrides
+            kept[key] = validator(wire[key])
+    for key in ("purpose_call_budgets", "purpose_run_budgets"):
+        if key not in wire:
+            continue
+        raw = wire[key]
+        if not isinstance(raw, Mapping):
+            raise BudgetConfigInstallError(f"existing {key} must be an object")
+        validator = (validate_budget_overrides if key == "purpose_call_budgets"
+                     else validate_run_budget_overrides)
+        kept[key] = {purpose: validator(value) for purpose, value in raw.items()}
+    return kept
+
+
+__all__ = ["BUDGET_KEYS", "BudgetConfigInstallError", "preserved_budget_overrides"]

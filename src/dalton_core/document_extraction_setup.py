@@ -156,6 +156,9 @@ def install(
             # refuses it with credential_slot_unavailable -- which reads like a
             # missing key and is really a missing line in a config.
             credential_slots = credential_slots_for(router, list(tier_chain(tier)))
+    target = state_dir / CONFIG_FILE_NAME
+    from .budget_config_install import preserved_budget_overrides
+    budget_overrides = preserved_budget_overrides(target)
     model_config = validate_model_config({
         "routing_policy_ref": policy["policy_version_ref"],
         "credential_slot_refs": list(credential_slots or DEFAULT_CREDENTIAL_SLOTS),
@@ -166,8 +169,8 @@ def install(
         "expected_agent_id": planner["planner_expected_agent_id"],
         "budget_db": str(Path(thesis["budget_db"]).resolve()),
         "budget_policy_ref": thesis["budget_policy_version_id"],
+        **budget_overrides,
     })
-    target = state_dir / CONFIG_FILE_NAME
     changed = not target.exists() or json.loads(target.read_text(encoding="utf-8")) != model_config
     if changed:
         _write_owner_only(target, model_config)
