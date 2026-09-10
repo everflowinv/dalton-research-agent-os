@@ -74,3 +74,18 @@ connector inventory `--check` 通过，`git diff --check` 通过。此前两次�
 - `test_extraction_window_settings.CoordinatorTests` 的旧 `RecordingLauncher` 未提供真实 launcher 已有的 `state_dir`，F15 新增持久账本初始化无法运行该测试；补齐 test double 的目录属性，不放宽生产代码要求。
 
 此前聚焦与复演通过不代表主线全量通过。本轮尚未 push，修复后重新运行完整 discovery，最终结果待下节。
+
+## 当前 live 新快照复演（`2f64b3a`）
+
+全量重跑期间，进一步直接对当前 Dalton 根执行 read-only SQLite backup，再在新目录 `/tmp/dalton-resume-current-live-rehearsal-20260910` 演练，排除此前只用了早间旧快照的时效限制：
+
+```
+PYTHONPATH=src .venv/bin/python scripts/rehearse_deploy.py \
+  --live-root '/Users/everflow/Library/Application Support/Dalton' \
+  --temp-root /tmp/dalton-resume-current-live-rehearsal-20260910 \
+  --report /tmp/dalton-resume-current-live-rehearsal-20260910.md
+```
+
+全部 12 步通过，23 个文件 / 827 MB，66/66 schemas、27 seeds、35 lanes、38 entries、0 escaped，tick 3.9s。当前快照仍有同样的 11 个 may_write / 3 个 checkpoint 缺项、5/11 模型开关与 retired verifier pin，故下一步是运行配置/授权激活与产物验收。所有 child 已退出，live 只被读取，部署与治理版本未改变。新快照结果更新了上文的时效限制；未来真正部署时仍须以当时状态核对配置。
+
+首轮全量遗漏修正后的模型选择/抽取相关 85 项测试（0.989s）通过；最终完整 discovery 正在 `2f64b3a` 上重跑。Python wheel 已重新构建，确保包括最新中文阶段名。
