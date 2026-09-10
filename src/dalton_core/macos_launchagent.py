@@ -98,6 +98,7 @@ def render(
     extraction_discovery_windows: int | None = None,
     alphaengine_owner_call_cap: int | None = None,
     label_namespace: str | None = None,
+    workspace_manifest_path: str | Path | None = None,
 ) -> dict[str, str]:
     destination = Path(launch_agents_dir).expanduser().resolve()
     bin_dir = Path(python_env_bin).expanduser().resolve()
@@ -167,6 +168,15 @@ def render(
         if candidate_socket.exists() and candidate_key.exists():
             web_search_broker_socket = candidate_socket
             web_search_broker_auth_key = candidate_key
+    environment = {"PYTHONUNBUFFERED": "1"}
+    if workspace_manifest_path is not None:
+        manifest_path = Path(workspace_manifest_path).expanduser().resolve()
+        from .workspace import load_workspace_manifest
+
+        workspace = load_workspace_manifest(manifest_path)
+        if workspace.state_dir != state or workspace.config_path != config:
+            raise ValueError("workspace manifest does not bind the rendered state and config")
+        environment["DALTON_WORKSPACE_MANIFEST"] = str(manifest_path)
     common: dict[str, Any] = {
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -174,7 +184,7 @@ def render(
         "ThrottleInterval": 10,
         "Umask": 0o077,
         "WorkingDirectory": str(state),
-        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+        "EnvironmentVariables": environment,
     }
     writer = common | {
         "Label": labels["writer"],
@@ -365,6 +375,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument("--label-namespace")
+    parser.add_argument("--workspace-manifest", type=Path)
     parser.add_argument(
         "--extraction-numeric-windows", type=int, default=None,
         help="Windows per tick also read for figures (0..50); omit to keep the config value",
@@ -394,6 +406,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         extraction_max_windows=args.extraction_max_windows,
         extraction_numeric_windows=args.extraction_numeric_windows,
         extraction_discovery_windows=args.extraction_discovery_windows,
+        label_namespace=args.label_namespace,
+        workspace_manifest_path=args.workspace_manifest,
     )
     for name, path in paths.items():
         print(f"{name}={path}")
