@@ -18,7 +18,7 @@ from .model_forecast_driver import ForecastModelAuthority, validate_forecast_mod
 from .store import DaltonStore, canonical_json, content_hash
 from .valuation_snapshot import ValuationSnapshotAuthority
 
-LAYOUT_VERSION = "fund-xlsx-layout:0.1"
+LAYOUT_VERSION = "fund-xlsx-layout:0.2"
 
 
 class FundWorkbookExportError(RuntimeError):
@@ -62,6 +62,35 @@ def _style_sheet(ws: Any, font: Any, fill: Any) -> None:
     for cell in ws[4]:
         cell.font = font(name="Arial", size=10, bold=True, color="FFFFFF")
         cell.fill = fill("solid", fgColor="1F4E78")
+
+
+def _quarter_label(
+    period: str,
+    binding: Mapping[str, Any] | None,
+    historical: set[str],
+) -> str:
+    suffix = "A" if period in historical else "E"
+    if binding is None:
+        return f"{period}{suffix}"
+    year = int(period[:4])
+    month = int(period[5:7])
+    fiscal_end = binding["fiscal_year_end_month"]
+    fiscal_year = year if month <= fiscal_end else year + 1
+    months_to_end = (fiscal_end - month) % 12
+    quarter = 4 - (months_to_end // 3)
+    if months_to_end % 3:
+        return f"{period}{suffix}"
+    return f"Q{quarter} FY{fiscal_year}{suffix}"
+
+
+def _number_format(unit: str, *, per_share: bool = False) -> str:
+    if unit == "ratio":
+        return "0.0%;(0.0%);-"
+    if per_share:
+        return '"$"#,##0.00;[Red]("$"#,##0.00);-'
+    if unit == "USD":
+        return '"$"#,##0;[Red]("$"#,##0);-'
+    return "#,##0;[Red](#,##0);-"
 
 
 def _formula_for(
@@ -208,10 +237,21 @@ def export_fund_workbook(
     if not periods:
         periods = sorted({c["period"]["end"] for r in model["results"] for c in r["cells"]})
     history = list(model["history_periods"])
-    future = [p["end"] for p in model["realised_periods"] + model["forecast_periods"]]
     calendar_binding = _calendar_binding(calendar_binding)
     annual_groups = _fiscal_groups(periods, calendar_binding, set(history))
-    headers = ["Line / role", *periods, *[label for label, _ in annual_groups]]
+    annual_columns = {
+        label: 2 + index for index, (label, _) in enumerate(annual_groups)
+    }
+    quarter_start = 2 + len(annual_groups) + (1 if annual_groups else 0)
+    period_columns = {
+        period: quarter_start + index for index, period in enumerate(periods)
+    }
+    headers = ["Line / role", *[label for label, _ in annual_groups]]
+    if annual_groups:
+        headers.append(None)
+    headers.extend(
+        _quarter_label(period, calendar_binding, set(history)) for period in periods
+    )
     formula_map: list[dict[str, Any]] = []
 
     for ws, title in ((driver, "Driver model"), (financials, "Financial statements"),
@@ -220,7 +260,6 @@ def export_fund_workbook(
         ws.append([title])
         ws.append([model["company_ref"], f"As of {model['created_at']}"])
         ws.append([])
-        _style_sheet(ws, Font, PatternFill)
 
     for ci, value in enumerate(headers, 1):
         driver.cell(4, ci, value)
@@ -229,12 +268,17 @@ def export_fund_workbook(
     row = 5
     for item in model["drivers"]:
         values = {c["period_end"]: c for c in item.get("history") or []}
-        driver.cell(row, 1, f"{item['label']} — actual")
-        for ci, period in enumerate(periods, 2):
+        unit_label = item.get("unit") or "number"
+        driver.cell(row, 1, f"{item['label']} ({unit_label}) — actual")
+        for period in periods:
+            ci = period_columns[period]
             value = values.get(period)
             if value:
                 driver.cell(row, ci, _number(value["value"]))
-                driver.cell(row, ci).font = Font(name="Arial", color="000000")
+                driver.cell(row, ci).font = Font(name="Arial", color="0000FF")
+                driver.cell(row, ci).number_format = _number_format(
+                    item.get("unit") or "number"
+                )
                 history_cells[(item.get("concept"), period)] = f"'Driver'!{_col(ci)}{row}"
                 history_cells[(item["ref"], period)] = f"'Driver'!{_col(ci)}{row}"
                 history_values[(item.get("concept"), period)] = Decimal(str(value["value"]))
@@ -245,13 +289,17 @@ def export_fund_workbook(
     driver_labels = {item["ref"]: item["label"] for item in model["drivers"]}
     for assumption in model["assumptions"]:
         label = driver_labels.get(assumption["driver_ref"], assumption["driver_ref"])
-        driver.cell(row, 1, f"{label} — {assumption['measure']} — assumption")
+        driver.cell(
+            row,
+            1,
+            f"{label} ({assumption['unit']}) — {assumption['measure']} — assumption",
+        )
         period = assumption["period"]["end"]
         if period in periods:
-            ci = 2 + periods.index(period)
+            ci = period_columns[period]
             driver.cell(row, ci, _number(assumption["value"]))
             driver.cell(row, ci).font = Font(name="Arial", color="0000FF")
-            driver.cell(row, ci).number_format = "0.0%" if assumption["unit"] == "ratio" else "#,##0;(#,##0);-"
+            driver.cell(row, ci).number_format = _number_format(assumption["unit"])
             assumption_cells[assumption["ref"]] = f"'Driver'!{_col(ci)}{row}"
             assumption_values[assumption["ref"]] = Decimal(str(assumption["value"]))
         row += 1
@@ -271,9 +319,15 @@ def export_fund_workbook(
     for result in model["results"]:
         rr = result_rows[result["ref"]]
         role = ("formula output" if result["status"] == "computed" else "unavailable")
-        financials.cell(rr, 1, f"{result['label']} — {role} — {result['role'] or 'calculated'}")
+        financials.cell(
+            rr,
+            1,
+            f"{result['label']} ({result['unit']}) — {role} — "
+            f"{result['role'] or 'calculated'}",
+        )
         by_period = {c["period"]["end"]: c for c in result["cells"]}
-        for ci, period in enumerate(periods, 2):
+        for period in periods:
+            ci = period_columns[period]
             cell = by_period.get(period)
             formula = None
             model_cell_ref = None
@@ -313,19 +367,58 @@ def export_fund_workbook(
                 continue
             financials.cell(rr, ci, formula)
             result_cells[(result["ref"], period)] = f"'Financials'!{_col(ci)}{rr}"
-            financials.cell(rr, ci).font = Font(name="Arial", color="008000")
+            financials.cell(rr, ci).font = Font(
+                name="Arial", color="008000" if "'Driver'!" in formula else "000000"
+            )
+            financials.cell(rr, ci).number_format = _number_format(result["unit"])
             formula_map.append({"cell": f"Financials!{_col(ci)}{rr}",
                                 "model_cell_ref": model_cell_ref, "formula": formula,
                                 "model_formula": result["formula"]})
-        for annual_i, (label, group) in enumerate(annual_groups, 2 + len(periods)):
-            quarter_cols = [2 + periods.index(p) for p in group
+        for label, group in annual_groups:
+            annual_i = annual_columns[label]
+            quarter_cols = [period_columns[p] for p in group
                             if (result["ref"], p) in result_cells]
             target = financials.cell(rr, annual_i)
             if len(group) == 4 and len(quarter_cols) == 4 and result["unit"] != "ratio":
                 target.value = f"=SUM({_col(quarter_cols[0])}{rr}:{_col(quarter_cols[-1])}{rr})"
+                target.font = Font(name="Arial", color="000000")
+                target.number_format = _number_format(result["unit"])
+                result_cells[(result["ref"], label)] = (
+                    f"'Financials'!{target.coordinate}"
+                )
                 formula_map.append({"cell": f"Financials!{target.coordinate}",
                                     "model_cell_ref": None, "formula": target.value,
                                     "model_formula": "annual_from_four_fiscal_quarters"})
+            elif len(group) == 4 and len(quarter_cols) == 4 and result["unit"] == "ratio":
+                quarter_cells = [by_period.get(period) for period in group]
+                component_refs = [
+                    [item.get("ref") for item in (cell or {}).get("result_refs") or []]
+                    for cell in quarter_cells
+                ]
+                stable_components = (
+                    len(component_refs[0]) == 2
+                    and all(refs == component_refs[0] for refs in component_refs)
+                )
+                numerator = result_cells.get((component_refs[0][0], label)) if stable_components else None
+                denominator = result_cells.get((component_refs[0][1], label)) if stable_components else None
+                if numerator and denominator:
+                    target.value = f"={numerator}/{denominator}"
+                    target.font = Font(name="Arial", color="000000")
+                    target.number_format = _number_format("ratio")
+                    result_cells[(result["ref"], label)] = (
+                        f"'Financials'!{target.coordinate}"
+                    )
+                    formula_map.append({
+                        "cell": f"Financials!{target.coordinate}",
+                        "model_cell_ref": None,
+                        "formula": target.value,
+                        "model_formula": "annual_ratio_from_bound_components",
+                    })
+                else:
+                    gaps.append(
+                        f"{result['ref']} {label}: annual unavailable; "
+                        "ratio lacks two stable annual component bindings"
+                    )
             else:
                 target.value = None
                 target.comment = None
@@ -333,11 +426,11 @@ def export_fund_workbook(
                 gaps.append(f"{result['ref']} {label}: annual unavailable; {reason}")
     for ws in (driver, financials):
         for col in range(2, len(headers) + 1):
-            ws.column_dimensions[_col(col)].width = 14
+            ws.column_dimensions[_col(col)].width = 16
         for cells in ws.iter_rows(min_row=5, min_col=2):
             for cell in cells:
                 if cell.number_format == "General":
-                    cell.number_format = "#,##0;(#,##0);-"
+                    cell.number_format = "#,##0;[Red](#,##0);-"
 
     for ci, value in enumerate(["Metric", "Value", "Role", "Authority formula / gap"], 1):
         valuation_ws.cell(4, ci, value)
@@ -368,13 +461,18 @@ def export_fund_workbook(
             valuation_ws.cell(offset, 2, value)
             valuation_ws.cell(offset, 3, role)
             valuation_ws.cell(offset, 2).font = Font(name="Arial", color="0000FF")
+        valuation_ws["B5"].number_format = "0.0x"
+        valuation_ws["B6"].number_format = _number_format("USD")
+        valuation_ws["B7"].number_format = "#,##0;[Red](#,##0);-"
+        valuation_ws["B8"].number_format = _number_format("ratio")
+        valuation_ws["B9"].number_format = "0.0x"
         target_ref = ("result:revenue" if scenario["multiple_kind"] == "ev_revenue"
                       else "result:net_income")
         complete = [(label, group) for label, group in annual_groups
                     if len(group) == 4 and all((target_ref, p) in result_cells for p in group)]
         if complete:
             label, _ = complete[-1]
-            annual_col = 2 + len(periods) + [x[0] for x in annual_groups].index(label)
+            annual_col = annual_columns[label]
             model_row = result_rows[target_ref]
             base = f"'Financials'!{_col(annual_col)}{model_row}"
             valuation_ws.append(["Forecast metric", f"={base}", "formula output", target_ref])
@@ -389,6 +487,12 @@ def export_fund_workbook(
             valuation_ws.append(["Discounted target price", "=B12/(1+B8)^B9",
                                  "formula output", "future target / required return"])
             for row in range(10, 14):
+                valuation_ws.cell(row, 2).font = Font(
+                    name="Arial", color="008000" if row == 10 else "000000"
+                )
+                valuation_ws.cell(row, 2).number_format = _number_format(
+                    "USD", per_share=row in {12, 13}
+                )
                 formula_map.append({"cell": f"Valuation!B{row}",
                                     "model_cell_ref": target_ref if row == 10 else None,
                                     "formula": valuation_ws.cell(row, 2).value,
@@ -447,9 +551,15 @@ def export_fund_workbook(
         ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 54)
         ws.sheet_properties.pageSetUpPr.fitToPage = True
         ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_TABLOID
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 0
         ws.print_title_rows = "1:4"
+        ws.sheet_properties.pageSetUpPr.autoPageBreaks = False
+        if ws in (driver, financials) and annual_groups:
+            spacer_col = 2 + len(annual_groups)
+            ws.column_dimensions[_col(spacer_col)].width = 3
+            ws.freeze_panes = f"{_col(quarter_start)}5"
         for row_cells in ws.iter_rows():
             for cell in row_cells:
                 if cell.row not in {1, 4} and cell.font.name != "Arial":

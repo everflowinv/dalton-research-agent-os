@@ -55,9 +55,18 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         self.assertEqual(book.sheetnames,
                          ["Driver", "Financials", "Valuation", "Sources", "Formula Map"])
-        revenue = book["Financials"]["F5"]
-        self.assertTrue(revenue.value.startswith("='Driver'!E5*(1+"), revenue.value)
-        self.assertEqual(book["Driver"]["F17"].font.color.rgb[-6:], "0000FF")
+        headers = {cell.value: cell.column for cell in book["Financials"][4]}
+        revenue = book["Financials"].cell(5, headers["Q4 FY2026E"])
+        self.assertTrue(revenue.value.startswith("='Driver'!J5*(1+"), revenue.value)
+        assumption_row = next(
+            row for row in range(5, book["Driver"].max_row + 1)
+            if "Revenues (ratio) — quarterly_growth — assumption"
+            in str(book["Driver"].cell(row, 1).value)
+        )
+        assumption = book["Driver"].cell(
+            assumption_row, headers["Q4 FY2026E"]
+        )
+        self.assertEqual(assumption.font.color.rgb[-6:], "0000FF")
         self.assertIn(self.model["content_hash"],
                       [cell.value for cell in book["Sources"]["C"]])
         hashes = [book["Formula Map"].cell(row, 2).value
@@ -76,6 +85,35 @@ class FundXlsxExportTests(unittest.TestCase):
         self.assertTrue(sheet.cell(5, headers["FY2026A/E"]).value.startswith("=SUM("))
         self.assertTrue(sheet.cell(5, headers["FY2027E"]).value.startswith("=SUM("))
         self.assertTrue(any("FY2025A: annual unavailable" in gap for gap in result["gaps"]))
+
+    def test_fund_layout_and_formula_roles_are_explicit(self):
+        from openpyxl import load_workbook
+
+        self.export(scenario=self.scenario())
+        book = load_workbook(self.path, data_only=False)
+        sheet = book["Financials"]
+        headers = [cell.value for cell in sheet[4]]
+        self.assertEqual(headers[1:5], [
+            "FY2025A", "FY2026A/E", "FY2027E", "FY2028E (partial)",
+        ])
+        self.assertIsNone(headers[5])
+        self.assertEqual(headers[6:11], [
+            "Q4 FY2025A", "Q1 FY2026A", "Q2 FY2026A",
+            "Q3 FY2026A", "Q4 FY2026E",
+        ])
+        self.assertEqual(sheet["A4"].fill.fgColor.rgb[-6:], "1F4E78")
+        self.assertEqual(sheet["A4"].font.color.rgb[-6:], "FFFFFF")
+        self.assertEqual(sheet.freeze_panes, "G5")
+        self.assertEqual(sheet.column_dimensions["F"].width, 3)
+
+        # Cross-sheet links are green; local quarter and annual formulas are black.
+        self.assertEqual(sheet["G5"].font.color.rgb[-6:], "008000")
+        self.assertEqual(sheet["K7"].font.color.rgb[-6:], "000000")
+        self.assertEqual(sheet["C5"].font.color.rgb[-6:], "000000")
+        self.assertIn('"$"', sheet["C5"].number_format)
+        self.assertEqual(book["Valuation"]["B8"].number_format,
+                         "0.0%;(0.0%);-")
+        self.assertIn('"$"', book["Valuation"]["B13"].number_format)
 
     def test_without_calendar_binding_does_not_guess_annual_columns(self):
         from openpyxl import load_workbook
@@ -107,9 +145,10 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         revenue_assumption = next(
             row for row in range(5, book["Driver"].max_row + 1)
-            if "Revenues — quarterly_growth — assumption"
+            if "Revenues (ratio) — quarterly_growth — assumption"
             in str(book["Driver"].cell(row, 1).value))
-        book["Driver"].cell(revenue_assumption, 6, 0.20)
+        headers = {cell.value: cell.column for cell in book["Driver"][4]}
+        book["Driver"].cell(revenue_assumption, headers["Q4 FY2026E"], 0.20)
         changed = Path(self.temp.name) / "changed" / "changed.xlsx"
         changed.parent.mkdir()
         book.save(changed)
@@ -121,8 +160,9 @@ class FundXlsxExportTests(unittest.TestCase):
             "--convert-to", "xlsx", "--outdir", str(out), str(changed),
         ], check=True, capture_output=True, text=True)
         calculated = load_workbook(out / "changed.xlsx", data_only=True)
-        revenue = calculated["Financials"]["F5"].value
-        operating_income = calculated["Financials"]["F9"].value
+        headers = {cell.value: cell.column for cell in calculated["Financials"][4]}
+        revenue = calculated["Financials"].cell(5, headers["Q4 FY2026E"]).value
+        operating_income = calculated["Financials"].cell(9, headers["Q4 FY2026E"]).value
         self.assertAlmostEqual(revenue, 1597200000, places=2)
         self.assertAlmostEqual(operating_income, 159720000, places=2)
         headers = {cell.value: cell.column for cell in calculated["Financials"][4]}
