@@ -82,6 +82,14 @@ stop_job() {
 for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller; do
   stop_job "$label"
 done
+# A controller started outside this LaunchAgent can still hold the same Core
+# after the managed job is gone.  Check with the new checkout's stdlib-only
+# detector before draining lanes or replacing any installed runtime files.
+if ! "$python_source" "$repo_root/src/dalton_core/controller_singleton.py" \
+    --check --config "$config_path"; then
+  print -u2 "Another controller still owns this Dalton config; runtime has not been upgraded."
+  exit 1
+fi
 if ! "$python_source" "$repo_root/src/dalton_core/launch_drain.py" \
     --state-dir "$state_dir" --timeout "${DRAIN_TIMEOUT:-600}"; then
   print -u2 "Lane drain incomplete; writer and runtime left intact. Retry after children finish."
