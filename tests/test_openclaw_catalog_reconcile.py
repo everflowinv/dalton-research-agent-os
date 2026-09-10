@@ -127,6 +127,138 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         self.assertNotIn("provider-controlled-verify",
                          catalog[uncontrolled["id"]]["capabilities"])
 
+    def test_malformed_or_expired_provider_controls_never_grant_verifier_capability(self):
+        malformed_controls = (
+            {},
+            {"mode": "openai-responses-input-count-v1", "rateCard": {}},
+            {
+                "mode": "openai-responses-input-count-v1",
+                "rateCard": {
+                    "inputPerMillionUsd": True,
+                    "outputPerMillionUsd": 2,
+                    "validUntil": "2026-09-10T09:00:00+00:00",
+                },
+            },
+            {
+                "mode": "openai-responses-input-count-v1",
+                "rateCard": {
+                    "inputPerMillionUsd": 1,
+                    "outputPerMillionUsd": float("inf"),
+                    "validUntil": "2026-09-10T09:00:00+00:00",
+                },
+            },
+            {
+                "mode": "openai-responses-input-count-v1",
+                "rateCard": {
+                    "inputPerMillionUsd": 1,
+                    "outputPerMillionUsd": 2,
+                    "validUntil": "2026-08-22T07:59:59+00:00",
+                },
+            },
+        )
+        for controls in malformed_controls:
+            with self.subTest(controls=controls):
+                config = _config()
+                profile = config["plugins"]["entries"][
+                    "dalton-openclaw-model-broker"
+                ]["config"]["profiles"][0]
+                profile["providerControls"] = controls
+                projected = next(
+                    item
+                    for item in openclaw_broker_profiles_from_config(
+                        config, checked_at=NOW
+                    )
+                    if item["id"] == profile["id"]
+                )
+                self.assertNotIn(
+                    "provider-controlled-verify", projected["capabilities"]
+                )
+
+    def test_malformed_controls_append_refusing_version_without_mutating_history(self):
+        config = _config()
+        profile = config["plugins"]["entries"][
+            "dalton-openclaw-model-broker"
+        ]["config"]["profiles"][0]
+        profile["providerControls"] = {
+            "mode": "openai-responses-input-count-v1",
+            "rateCard": {
+                "inputPerMillionUsd": 1,
+                "outputPerMillionUsd": 2,
+                "validUntil": "2026-09-10T09:00:00+00:00",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with ModelRouter(Path(directory) / "router.sqlite") as router:
+                sync_openclaw_model_catalog(router, config, checked_at=NOW)
+                before = next(
+                    item
+                    for item in router.latest_profiles()
+                    if item["id"] == profile["id"]
+                )
+                frozen = copy.deepcopy(before)
+                self.assertIn(
+                    "provider-controlled-verify", before["capabilities"]
+                )
+
+                profile["providerControls"]["rateCard"] = {}
+                result = sync_openclaw_model_catalog(
+                    router, config, checked_at=NOW
+                )
+                after = next(
+                    item
+                    for item in router.latest_profiles()
+                    if item["id"] == profile["id"]
+                )
+
+                self.assertEqual(result["updated_profile_ids"], [profile["id"]])
+                self.assertEqual(
+                    router.get_profile(before["profile_version_ref"]), frozen
+                )
+                self.assertEqual(
+                    after["prior_version_ref"], before["profile_version_ref"]
+                )
+                self.assertNotIn(
+                    "provider-controlled-verify", after["capabilities"]
+                )
+
+    def test_expired_controls_are_removed_by_the_next_catalog_sync(self):
+        config = _config()
+        profile = config["plugins"]["entries"][
+            "dalton-openclaw-model-broker"
+        ]["config"]["profiles"][0]
+        profile["providerControls"] = {
+            "mode": "openai-responses-input-count-v1",
+            "rateCard": {
+                "inputPerMillionUsd": 1,
+                "outputPerMillionUsd": 2,
+                "validUntil": "2026-08-22T08:30:00+00:00",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with ModelRouter(Path(directory) / "router.sqlite") as router:
+                sync_openclaw_model_catalog(router, config, checked_at=NOW)
+                before = next(
+                    item for item in router.latest_profiles()
+                    if item["id"] == profile["id"]
+                )
+                result = sync_openclaw_model_catalog(
+                    router,
+                    config,
+                    checked_at=datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc),
+                )
+                after = next(
+                    item for item in router.latest_profiles()
+                    if item["id"] == profile["id"]
+                )
+
+                self.assertEqual(result["updated_profile_ids"], [profile["id"]])
+                self.assertEqual(
+                    after["prior_version_ref"], before["profile_version_ref"]
+                )
+                self.assertNotIn(
+                    "provider-controlled-verify", after["capabilities"]
+                )
+
     def test_adding_controls_appends_a_profile_version_without_changing_history(self):
         config = _config()
         with tempfile.TemporaryDirectory() as directory:

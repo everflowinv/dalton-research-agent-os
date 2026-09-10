@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import re
+import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -150,7 +151,40 @@ def _provider_models(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return output
 
 
-def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def _provider_controls_valid(value: Any, checked_at: datetime | None = None) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {"mode", "rateCard"}:
+        return False
+    if value["mode"] not in {
+        "openai-responses-input-count-v1",
+        "google-generative-ai-count-tokens-v1",
+    }:
+        return False
+    rate = value["rateCard"]
+    if not isinstance(rate, Mapping) or set(rate) != {
+        "inputPerMillionUsd", "outputPerMillionUsd", "validUntil"
+    }:
+        return False
+    for key in ("inputPerMillionUsd", "outputPerMillionUsd"):
+        if isinstance(rate[key], bool):
+            return False
+        try:
+            number = float(rate[key])
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(number) or number <= 0:
+            return False
+    try:
+        expires = datetime.fromisoformat(rate["validUntil"].replace("Z", "+00:00"))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if expires.tzinfo is None:
+        return False
+    return checked_at is None or expires.astimezone(timezone.utc) > checked_at
+
+
+def _broker_profiles(
+    config: Mapping[str, Any], *, checked_at: datetime | None = None
+) -> dict[str, dict[str, Any]]:
     plugins = _mapping(config.get("plugins", {}), "plugins")
     entries = _mapping(plugins.get("entries", {}), "plugins.entries")
     plugin = _mapping(entries.get(_BROKER_PLUGIN_ID, {}), f"plugin {_BROKER_PLUGIN_ID}")
@@ -170,14 +204,7 @@ def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
         provider_controls = profile.get("providerControls")
-        controls_declared = (
-            isinstance(provider_controls, Mapping)
-            and provider_controls.get("mode") in {
-                "openai-responses-input-count-v1",
-                "google-generative-ai-count-tokens-v1",
-            }
-            and isinstance(provider_controls.get("rateCard"), Mapping)
-        )
+        controls_declared = _provider_controls_valid(provider_controls, checked_at)
         output[profile_id] = {
             "id": profile_id,
             "provider": provider,
@@ -212,7 +239,7 @@ def reconcile_openclaw_model_catalog(
     """Return a secret-free drift report and the profiles needing a smoke test."""
 
     providers = _provider_models(config)
-    brokers = _broker_profiles(config)
+    brokers = _broker_profiles(config, checked_at=checked_at)
     static = _static_routes(checked_at)
     configured_refs = set(providers)
     broker_refs = {item["model_ref"] for item in brokers.values()}
@@ -273,7 +300,7 @@ def openclaw_broker_profiles_from_config(
     if availability_ttl.total_seconds() <= 0:
         raise OpenClawCatalogError("availability_ttl must be positive")
     providers = _provider_models(config)
-    brokers = _broker_profiles(config)
+    brokers = _broker_profiles(config, checked_at=checked_at)
     if profile_ids is not None:
         selected = set(profile_ids)
         if not selected or any(
