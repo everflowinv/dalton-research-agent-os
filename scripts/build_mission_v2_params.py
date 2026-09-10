@@ -31,6 +31,7 @@ from dalton_core.connector_inventory import load_packaged_connector_inventory
 
 from dalton_core.coverage_mission import (  # noqa: E402
     AUTOMATION_WRITE_SCOPES,
+    CHECKPOINT_KINDS,
     SOURCE_STATUSES,
     validate_coverage_mission_version,
 )
@@ -44,6 +45,7 @@ BODY_FIELDS = (
 def build_next_version_params(
     active: dict[str, Any], *, add_scopes: list[str], title: str | None = None,
     source_statuses: dict[str, str] | None = None,
+    add_checkpoints: list[str] | None = None,
 ) -> dict[str, Any]:
     for scope in add_scopes:
         if scope not in AUTOMATION_WRITE_SCOPES:
@@ -56,6 +58,12 @@ def build_next_version_params(
     for field in BODY_FIELDS:
         params[field] = json.loads(json.dumps(active[field]))
     params["autonomy"]["may_write"] = may_write
+    checkpoints = params["autonomy"]["human_checkpoints"]
+    for checkpoint in add_checkpoints or ():
+        if checkpoint not in CHECKPOINT_KINDS:
+            raise ValueError(f"{checkpoint} is outside the frozen checkpoint vocabulary")
+        if checkpoint not in checkpoints:
+            checkpoints.append(checkpoint)
     # P9d-1: promoting a source (probe_only -> connected) is a mission change
     # the owner publishes as the next version; the plan keeps every other
     # source row untouched.
@@ -115,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-core", type=Path, required=True)
     parser.add_argument("--mission-ref", default="coverage-mission:us-it-services")
     parser.add_argument("--add-scope", action="append", default=[])
+    parser.add_argument("--add-checkpoint", action="append", default=[])
     parser.add_argument(
         "--set-source-status", action="append", default=[], metavar="SOURCE_REF=STATUS",
         help="e.g. source:alphaengine=connected (repeatable)",
@@ -131,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     active = read_active_mission(args.source_core, args.mission_ref)
     params = build_next_version_params(
         active, add_scopes=args.add_scope, title=args.title, source_statuses=source_statuses,
+        add_checkpoints=args.add_checkpoint,
     )
     text = json.dumps(params, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output is not None:

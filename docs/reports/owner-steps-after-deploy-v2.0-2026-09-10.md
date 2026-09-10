@@ -402,6 +402,9 @@ PYTHONPATH="$REPO/src" "$VENV/bin/python" scripts/build_mission_v2_params.py \
   --add-scope forecast_revision_proposal \
   --add-scope thesis_revision_candidate \
   --add-scope conviction_call \
+  --add-checkpoint thesis_revision_candidate \
+  --add-checkpoint gate_reopen \
+  --add-checkpoint conviction_call \
   --set-source-status source:guidepoint=connected \
   --set-source-status source:company-ir=connected \
   --set-source-status source:sales-notes=connected \
@@ -445,10 +448,9 @@ thesis_revision_candidate, conviction_call
 `consensus_estimate` / `valuation` / `dossier` / `debate_map` 今天的消费者还在长，
 一起授予是为了少发几次版本。
 
-### 8.2 然后手改这份 params 文件——只改 checkpoints
+### 8.2 核对自动生成的 checkpoints
 
-**(a) `autonomy.human_checkpoints` 加三个词。** `build_mission_v2_params.py` 没有
-`--add-checkpoint`。改完之后应当是：
+持续开发修复后，`build_mission_v2_params.py --add-checkpoint` 会校验封闭词表、追加缺项并去重；8.1 已包含三个 flag，不再需要手改 params。该历史快照生成后应当是：
 
 ```
 deep_insight_gate, investment_memo, thesis_admission, thesis_revision,
@@ -468,7 +470,7 @@ F18 已修：8.1 的五个 `--set-source-status source:<name>=connected` 会在�
 connector inventory 补建合法的三字段行，`role` 写明匹配到的 connector 和
 `created_by=set-source-status`。inventory 不认识的 source 仍然 fail-closed；不再手改 JSON。
 
-三个新 checkpoint 的手改已经过校验器。
+三个新 checkpoint 由生成器加入，并已通过真实 CoverageMissionAuthority 发布回归。
 `source:cn-hk-findata` **不要加**（7.7）。
 
 `source:alphaengine` 已经是 `connected`——v1.0 说它是 `probe_only`，那句话现在不对了。

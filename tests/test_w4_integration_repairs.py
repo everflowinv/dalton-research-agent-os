@@ -83,6 +83,25 @@ class DossierOrderTests(unittest.TestCase):
 
 
 class MissionSourceTests(unittest.TestCase):
+    def test_checkpoint_params_publish_without_manual_json_edits(self):
+        harness = Harness()
+        self.addCleanup(harness.close)
+        active = harness.mission
+        original = copy.deepcopy(active)
+        requested = ['thesis_revision_candidate', 'gate_reopen', 'conviction_call']
+        params = build_next_version_params(
+            active, add_scopes=[], add_checkpoints=requested + requested)
+        self.assertEqual(active, original)
+        self.assertEqual(params['source_plan'], active['source_plan'])
+        self.assertEqual(params['autonomy']['may_write'], active['autonomy']['may_write'])
+        for checkpoint in requested:
+            self.assertEqual(params['autonomy']['human_checkpoints'].count(checkpoint), 1)
+        params['actor_ref'] = 'human:lumos'
+        published = harness.missions.create_mission(params.pop('mission_ref'), **params)
+        self.assertEqual(published['autonomy']['human_checkpoints'], params['autonomy']['human_checkpoints'])
+        with self.assertRaisesRegex(ValueError, 'checkpoint vocabulary'):
+            build_next_version_params(active, add_scopes=[], add_checkpoints=['invented'])
+
     def test_five_inventory_sources_append_without_changing_the_active_mission(self):
         harness = Harness()
         self.addCleanup(harness.close)
