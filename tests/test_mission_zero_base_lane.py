@@ -70,7 +70,7 @@ class DispatchTests(unittest.TestCase):
         launcher = FakeLauncher()
         result = coordinator(launcher, due=(), digest="digest-1").dispatch_once()
         self.assertEqual((result["status"], result["mode"]), ("launched", "checks"))
-        self.assertEqual(len(launcher.started[0]["batch_ref"]), 64)
+        self.assertEqual(launcher.started[0]["batch_ref"], "digest-1")
 
     def test_a_settled_check_pass_makes_the_lane_idle_until_it_moves(self) -> None:
         launcher = FakeLauncher()
@@ -123,6 +123,34 @@ class DispatchTests(unittest.TestCase):
             lane.budget.record(old_key, classification=Classification(
                 CONTENT_REFUSED, "verifier refused the content", "fixture"))
             self.assertEqual(lane.dispatch_once()["status"], "terminal")
+        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
+                   return_value="b" * 64):
+            self.assertEqual(lane.dispatch_once()["status"], "launched")
+
+    def test_old_child_failure_is_settled_against_its_launch_contract(self) -> None:
+        launcher = FakeLauncher()
+        due = [{**DUE[0], "inputs_hash": "input-1"}]
+        current_due = list(due)
+        lane = coordinator(launcher, due=(), digest="")
+        lane.lane_state = lambda _m, _n: {"due": list(current_due), "checks_digest": ""}
+        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
+                   return_value="a" * 64):
+            first = lane.dispatch_once()
+        launcher.tickets[first["ticket_ref"]] = {
+            "status": "failed", "mode": "review", "batch_ref": launcher.started[-1]["batch_ref"],
+            "summary": {"failure_reason": "content_refused", "reviews": [{
+                **due[0], "status": "refused",
+                "reason": "content_refused"}]},
+        }
+        current_due.clear()
+        with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
+                   return_value="b" * 64):
+            settled = lane.dispatch_once()
+        self.assertEqual(settled["status"], "idle")
+        terminal_keys = [row["item_key"] for row in lane.budget.terminal_items()]
+        self.assertTrue(any(key.endswith("a" * 64) for key in terminal_keys), terminal_keys)
+        self.assertFalse(any(key.endswith("b" * 64) for key in terminal_keys), terminal_keys)
+        current_due.extend(due)
         with patch("dalton_core.mission_zero_base_lane.verifier_provider_contract_fingerprint",
                    return_value="b" * 64):
             self.assertEqual(lane.dispatch_once()["status"], "launched")

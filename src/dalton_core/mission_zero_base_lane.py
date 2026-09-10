@@ -70,10 +70,11 @@ def may_write_review(mission: Mapping[str, Any] | None) -> bool:
     return WRITE_SCOPE in set(scopes)
 
 
-def review_item_key(item: Mapping[str, Any]) -> str:
+def review_item_key(item: Mapping[str, Any], *, provider_contract: str | None = None) -> str:
     """A refusal belongs to one company's actual review input, not its month."""
     fingerprint = item.get("inputs_hash") or content_hash(dict(item))
-    contract = verifier_provider_contract_fingerprint("zero_base_review_verifier")
+    contract = (provider_contract if provider_contract is not None
+                else verifier_provider_contract_fingerprint("zero_base_review_verifier"))
     return (f"review:{item['company_ref']}|{item['trigger']}|"
             f"{item['period_label']}|{fingerprint}|{contract}")
 
@@ -101,6 +102,7 @@ class MissionZeroBaseLaneCoordinator:
         self.lane_state = lane_state
         self.clock = clock or (lambda: datetime.now().astimezone())
         self._open: str | None = None
+        self._open_provider_contract: str | None = None
         self._checked: str | None = None
         # Batches that failed, so a broken month does not consume the child
         # slot every five minutes -- and so a batch whose inputs then move is
@@ -150,7 +152,9 @@ class MissionZeroBaseLaneCoordinator:
         settled = self._settle(self._open)
         if settled is None or settled.get("status") == "running":
             return settled
+        launch_provider_contract = self._open_provider_contract or "legacy"
         self._open = None
+        self._open_provider_contract = None
         mode = str(settled.get("mode") or "")
         batch = str(settled.get("batch_ref") or "")
         if settled.get("status") == "succeeded":
@@ -180,7 +184,7 @@ class MissionZeroBaseLaneCoordinator:
                     "company_ref", "trigger", "period_label", "inputs_hash"
                 )):
                     continue
-                key = review_item_key(outcome)
+                key = review_item_key(outcome, provider_contract=launch_provider_contract)
                 if outcome.get("status") in {"fresh", "duplicate"}:
                     self.budget.clear(key)
                 else:
@@ -245,8 +249,7 @@ class MissionZeroBaseLaneCoordinator:
         elif digest and digest != self._checked:
             mode = "checks"
             companies = []
-            batch = content_hash({"checks_digest": digest, "verifier_provider_contract":
-                verifier_provider_contract_fingerprint("zero_base_review_verifier")})
+            batch = digest
         elif holds:
             return {"status": holds[0].action, "mode": "review", "settled": settled,
                     "failure": holds[0].as_wire(), "blocked_reviews": len(holds)}
@@ -273,6 +276,9 @@ class MissionZeroBaseLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         self._launch_mission = mission
         self._open = ticket["id"]
+        self._open_provider_contract = (
+            verifier_provider_contract_fingerprint("zero_base_review_verifier")
+            if mode == "review" else None)
         return {"status": "launched", "mode": mode, "ticket_ref": ticket["id"],
                 "due": len(due), "settled": settled}
 
