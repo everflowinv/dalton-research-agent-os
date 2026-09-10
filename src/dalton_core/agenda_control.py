@@ -1131,10 +1131,32 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
     return Handler
 
 
+def _research_task_grant(config: AgendaControlConfig) -> Any:
+    """The resolver ``adhoc_research_enabled`` needs, or None when it cannot be.
+
+    P14e made the flag a question and left nobody to ask: the plane accepted a
+    resolver, no caller passed one, and ``adhoc_research_enabled`` therefore
+    answered False for a reason that had nothing to do with the owner's
+    grant.  The cockpit section is where this process learns the Core's path,
+    so a Core configured without it still answers False -- but now because the
+    path is unknown rather than because the wiring was never finished.
+    """
+
+    if config.cockpit is None:
+        return None
+    from .research_task import cockpit_grant_resolver
+
+    return cockpit_grant_resolver(
+        config.cockpit.core_db, mission_ref=config.cockpit.mission_ref,
+    )
+
+
 def serve(config: AgendaControlConfig) -> None:
     if config.host not in {"127.0.0.1", "::1"}:
         raise AgendaControlError("Agenda control must bind loopback")
-    plane = AgendaControlPlane(config)
+    plane = AgendaControlPlane(
+        config, research_task_grant=_research_task_grant(config),
+    )
     review_plane = (
         None
         if config.research_review is None

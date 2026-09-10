@@ -189,13 +189,54 @@ step 3 already put `--market-price-governance` into the writer plist. Approving
 in place is enough; you do **not** need to re-run `install.sh`. You do need the
 writer restart in step 11.
 
-Not seeded, and therefore not approvable yet — the catalyst-calendar lane's
-record `yfinance-calendar-v1.json` is committed in `deploy/connector-governance/`
-and `install.sh` has no block for it. Until someone adds that block the C1 lane
-reports `unconfigured` every tick. Same for the six `cn-hk-findata-*`, the three
-`xueqiu-*`, the three `x-xreach-*`, `employee-reviews-blind-v1.json`,
-`guidepoint-get-transcript-narrowing-v1.json`, and the four S1 feed records —
-the last four deliberately, per the comment in `install.sh`.
+**Corrected 2026-09-10 (INT2 landed on main).** An earlier draft of this step
+said the catalyst calendar, the China records, the crowd sources and the S1
+feeds were not seeded by `install.sh`. They are now — every committed
+governance record has a seed path. What is left is a set of approvals, not a
+set of gaps:
+
+```sh
+"$VENV/bin/dalton-connector-governance" approve --approved-by "$OWNER" \
+  --path "$STATE/connector-governance/yfinance-calendar-v1.json"
+```
+
+That one record is the whole switch for the C1 catalyst-calendar lane, and the
+lane needs no new mission version — the live mission already grants
+`observation`. Until you approve it the lane still *runs* every tick and its
+child fails closed with `yfinance calendar governance record is not approved`,
+which the rehearsal observed on a copy. So the lane will read `launched` in the
+tick summary rather than `unconfigured`; the refusal is one layer down, in the
+next tick's `settled`.
+
+The two Guidepoint records behave the same way — `install.sh` now seeds their
+discovery plan too, so the lane is installed and reports
+`idle / all_grants_refused` until you approve them.
+
+Three seed groups are **gated** on this machine's environment rather than on an
+approval. `install.sh` skips them silently and so does the rehearsal:
+
+| group | installs when |
+| --- | --- |
+| sales notes | `$DALTON_OPENCLAW_WORKSPACE/skills/market-digest/output` is a directory |
+| company wiki | `$DALTON_OPENCLAW_WORKSPACE/wiki-index.sqlite` exists |
+| crowd sources (7 records + the map) | `DALTON_AGENT_REACH_TOOL`, `DALTON_XUEQIU_HOT_RANK_TOOL` and `DALTON_XREACH_TOOL` all name executables |
+
+On the deploy machine as it stands, sales notes is open and the other two are
+shut. Set the variables before step 3 if you want those lanes; setting them
+afterwards means re-running `install.sh`.
+
+The six `cn-hk-findata-*` records are seeded ungated and have no lane in this
+wave — the mission universe is US-listed. Seeding them turns nothing on. They
+are on disk so you can approve six schema hashes separately, whenever S4 grows
+a lane.
+
+One record is deliberately **not** in `connector-governance/`:
+`guidepoint-get-transcript-narrowing-v1.json` goes to
+`$STATE/governance-decisions/`. Nothing loads it. It is the note to read before
+deciding what to do about an approval for an operation the upstream does not
+have. Do not move it — a permanently-`proposed` record under
+`connector-governance/` is a lane the cockpit shows as waiting for an approval
+about nothing.
 
 ## 7. Publish the mission version
 
@@ -365,9 +406,21 @@ Expected: **no lane whose status begins `unavailable:`**. Every lane should
 read one of `idle`, `launched`, `ungranted`, `unconfigured`, `held` or
 `deferred`, and `tick_ledger` should read `recorded`. The rehearsal's table for
 this exact code against a copy of this exact state is in
-`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md`; the two lanes that
-should *change* after steps 6 and 7 are `mission_market_prices` (`ungranted` ->
-`launched`/`idle`) and `claim_index` (stays `unconfigured` until step 10).
+`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md` (§6 has the table for
+merged main). The lanes that should *change* after the later steps:
+
+| lane | before | after |
+| --- | --- | --- |
+| `mission_market_prices` | `ungranted` | `launched` once step 7 grants `market_price` |
+| `mission_catalyst_calendar` | `launched`, child refuses | `launched`, child succeeds once step 6 approves the calendar record |
+| `guidepoint_discovery` | `idle / all_grants_refused` | `idle`/`launched` once step 6 approves the two Guidepoint records |
+| `claim_index` | `unconfigured` | stays `unconfigured` until step 10 writes its model config |
+
+`launched` means a child was started, not that it did anything: the outcome
+arrives in the next tick's `settled`. A lane reading `launched` whose record is
+still `proposed` is a child that failed closed, which is the correct answer and
+looks identical in the tick summary. Check `settled` before concluding a lane
+is working.
 
 Then confirm the tick ledger is being written, which is new in this deploy:
 
