@@ -8,12 +8,12 @@
 全量测试：
 
 ```
-Ran 4063 tests in 502.195s
+Ran 4063 tests in 659.586s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；合并 main `1fc7c5f`（3,983）之后，本片 +80。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；合并 main `1fc7c5f`（3,983）之后，本片 +80。**跑满十一分钟才 OK 是重点**，见 §8.1。）
 
 ---
 
@@ -314,6 +314,22 @@ Ran 4011 tests in 394.933s
 
 OK (skipped=1)
 ```
+
+### 8.1 顺手修了一个到期的 fixture（`tests/test_openclaw_web_search_broker_client.py`）
+
+本片 +80 项把全量跑时间推过了十分钟，于是 `test_openclaw_web_search_broker_client` 的 8 项开始报
+`web search deadline has already passed`。原因不在这一片，也不在被测代码：那个文件的
+`FUTURE` 是**在 import 时**算的 now+5 分钟，等 discover 跑到那个模块时早就过期了。
+同一个文件里的 Node broker 那条测试已经踩过一次并在本地取了自己的 deadline（它的注释写着
+「in the full suite it ran ~180s later」），只是当时没有把那个常量一起改掉。
+
+改成 `future()` 函数，在用到的地方读钟，断言一条没动。这次 659 秒的全量跑通过，正好证明修的是这个。
+
+另外观察到一次 `test_writer_service.test_partial_frame_does_not_block_valid_client_and_connection_limit`
+在机器负载高时以 `BrokenPipeError` 挂掉（连接数上限的竞态），四次全量跑里只出现一次，**没有动它**——
+它不属于这一片，也不是这一片造成的，记在这里给集成时参考。
+
+### 8.2 覆盖的判据
 
 覆盖的判据，逐条对应任务书：
 

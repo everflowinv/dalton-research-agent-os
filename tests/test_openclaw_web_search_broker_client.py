@@ -34,7 +34,24 @@ from dalton_core.store import canonical_json, content_hash
 ROOT = Path(__file__).resolve().parents[1]
 BROKER_DIR = ROOT / "integrations" / "openclaw-web-search-broker"
 KEY = "a" * 64
-FUTURE = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="microseconds")
+
+
+def future(minutes: int = 5) -> str:
+    """A deadline that is still in the future when the *test* runs.
+
+    This was a module-level constant, and a constant computed at import is a
+    deadline that expires while the suite is running. The Node-broker test
+    below already hit it once and took its own deadline locally (see its
+    comment); with the suite past ten minutes the pure-Python tests reached it
+    too and every one of them failed with "web search deadline has already
+    passed" -- a fixture expiring, not a client misbehaving. Called rather
+    than stored, so the clock is read where the deadline is used.
+    """
+
+    return (
+        datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    ).isoformat(timespec="microseconds")
+
 CITATIONS = [{"url": "https://Example.com/investors?q=ai#top", "title": "IR"},
              {"url": "https://news.example.org/demand", "title": "News"}]
 
@@ -153,7 +170,7 @@ class BrokerClientTests(unittest.TestCase):
         arguments = {"query": "Accenture AI demand", "count": 5, **overrides}
         return handle.invoke(
             "web_search", arguments,
-            call_ref="credential-use:web-search:1", deadline_at=FUTURE, max_response_bytes=1_000_000,
+            call_ref="credential-use:web-search:1", deadline_at=future(), max_response_bytes=1_000_000,
         )
 
     def test_signed_request_is_closed_and_the_reply_frame_is_the_raw_artifact(self) -> None:
@@ -214,7 +231,7 @@ class BrokerClientTests(unittest.TestCase):
         broker = self.broker()
         handle = self.handle(broker)
         with self.assertRaises(BridgeRequestRejected):
-            handle.invoke("other_tool", {"query": "x", "count": 1}, call_ref="credential-use:a", deadline_at=FUTURE, max_response_bytes=1000)
+            handle.invoke("other_tool", {"query": "x", "count": 1}, call_ref="credential-use:a", deadline_at=future(), max_response_bytes=1000)
         with self.assertRaises(BridgeRequestRejected):
             self.invoke(handle, freshness="week")
         with self.assertRaises(BridgeRequestRejected):
@@ -223,7 +240,7 @@ class BrokerClientTests(unittest.TestCase):
             self.invoke(handle, count=0)
         with self.assertRaises(BridgeRequestRejected):
             handle.invoke("web_search", {"query": "x", "count": 1}, call_ref="invocation:wrong",
-                          deadline_at=FUTURE, max_response_bytes=1000)
+                          deadline_at=future(), max_response_bytes=1000)
         past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="microseconds")
         with self.assertRaises(BridgeRequestRejected):
             handle.invoke("web_search", {"query": "x", "count": 1}, call_ref="credential-use:a",
@@ -242,7 +259,7 @@ class BrokerClientTests(unittest.TestCase):
         handle = self.handle(broker)
         with self.assertRaises(BridgeResponseTooLarge):
             handle.invoke("web_search", {"query": "q", "count": 1}, call_ref="credential-use:web-search:1",
-                          deadline_at=FUTURE, max_response_bytes=1024)
+                          deadline_at=future(), max_response_bytes=1024)
 
     def test_malformed_replies_fail_closed(self) -> None:
         for responder in (
@@ -264,7 +281,7 @@ class BrokerClientTests(unittest.TestCase):
         source = {
             "id": "source-envelope:web-search:1", "source": "source:public-web", "operation": "search_web",
             "source_record_refs": refs, "completeness": "ranked", "status": "complete", "cursor": None,
-            "retrieved_at": FUTURE, "raw_artifact_version_ref": "artifact-version:1",
+            "retrieved_at": future(), "raw_artifact_version_ref": "artifact-version:1",
             "raw_response_hash": sha256(result.raw_response).hexdigest(),
         }
         source["content_hash"] = content_hash(source)
@@ -281,7 +298,7 @@ class NodeBrokerRoundTripTests(unittest.TestCase):
         # The deadline is taken now, not at import. The client sends
         # timeoutMs = min(deadline - now, 240s) and the broker hashes it as
         # part of the request, so a replay is only byte-identical while the
-        # clamp is what decides that number. Module-level FUTURE was five
+        # clamp is what decides that number. The module-level constant was five
         # minutes out: fine when this test ran first, but in the full suite it
         # ran ~180s later, the remaining time fell under the clamp, and the two
         # calls sent timeouts milliseconds apart -- a genuinely different
