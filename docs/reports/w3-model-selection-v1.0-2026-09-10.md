@@ -211,11 +211,23 @@ policy，所以都是档位链。`live:` 是其中此刻真的能路由到的）
 
 ## 10. 测试
 
+全量（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）：
+
 ```
-（见下方「全量」原文）
+Ran 5108 tests in 446.985s
+
+OK (skipped=1)
 ```
 
-新文件 `tests/test_model_selection.py`：53 项，全部离线。覆盖：override 解析
+新模块单独跑（`... -m unittest tests.test_model_selection`）：
+
+```
+Ran 54 tests in 0.924s
+
+OK
+```
+
+新文件 `tests/test_model_selection.py`：54 项，全部离线。覆盖：override 解析
 （跟随档位 / 自己点名 / 未定价只能垫底 / verifier 同家族被拒）、policy 版本追加与
 回滚（旧版本 hash 不动、重复发布不追加、三个版本的版本链）、fixture openclaw.json
 上的三个差集、临时副本上的补丁应用（备份、只动子树、读回校验、按两次不重复、
