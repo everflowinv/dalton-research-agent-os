@@ -102,7 +102,6 @@ class MissionZeroBaseLaneCoordinator:
         self.lane_state = lane_state
         self.clock = clock or (lambda: datetime.now().astimezone())
         self._open: str | None = None
-        self._open_provider_contract: str | None = None
         self._checked: str | None = None
         # Batches that failed, so a broken month does not consume the child
         # slot every five minutes -- and so a batch whose inputs then move is
@@ -140,6 +139,7 @@ class MissionZeroBaseLaneCoordinator:
             "checked": checks.get("checked"),
             "checks_fresh": checks.get("fresh"),
             "checks_digest": checks.get("digest"),
+            "verifier_provider_contract": ticket.get("verifier_provider_contract"),
         }
         reason = summary.get("failure_reason")
         if reason:
@@ -152,9 +152,8 @@ class MissionZeroBaseLaneCoordinator:
         settled = self._settle(self._open)
         if settled is None or settled.get("status") == "running":
             return settled
-        launch_provider_contract = self._open_provider_contract or "legacy"
+        launch_provider_contract = str(settled.get("verifier_provider_contract") or "legacy")
         self._open = None
-        self._open_provider_contract = None
         mode = str(settled.get("mode") or "")
         batch = str(settled.get("batch_ref") or "")
         if settled.get("status") == "succeeded":
@@ -276,9 +275,6 @@ class MissionZeroBaseLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         self._launch_mission = mission
         self._open = ticket["id"]
-        self._open_provider_contract = (
-            verifier_provider_contract_fingerprint("zero_base_review_verifier")
-            if mode == "review" else None)
         return {"status": "launched", "mode": mode, "ticket_ref": ticket["id"],
                 "due": len(due), "settled": settled}
 

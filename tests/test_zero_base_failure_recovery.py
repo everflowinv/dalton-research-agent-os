@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 from unittest.mock import patch
 
@@ -86,6 +87,20 @@ class ChildRecoveryTests(unittest.TestCase):
                        return_value={"status": "succeeded"}) as run:
                 self.assertEqual(main(command[3:]), 0)
             self.assertEqual(run.call_args.kwargs["company_refs"], selected)
+
+    def test_launcher_persists_the_provider_contract_in_the_ticket_record(self):
+        with TemporaryDirectory() as directory:
+            launcher = ZeroBaseReviewLauncher(state_dir=directory)
+            class Process:
+                pid = 424242
+                def poll(self): return None
+            with patch("dalton_core.lane_child_launcher.subprocess.Popen", return_value=Process()):
+                ticket = launcher.start(mode="checks", batch_ref="checks:1")
+            path = launcher._ticket_path(ticket["id"])
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(len(record["verifier_provider_contract"]), 64)
+            self.assertEqual(record["verifier_provider_contract"],
+                             ticket["verifier_provider_contract"])
 
     def test_unchanged_top_grant_does_not_append_every_tick(self):
         with TemporaryDirectory() as directory:

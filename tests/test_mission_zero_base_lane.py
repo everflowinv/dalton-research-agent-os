@@ -37,9 +37,12 @@ class FakeLauncher:
         self.counter = 0
 
     def start(self, *, mode, batch_ref, company_refs=()):
+        from dalton_core.mission_zero_base_lane import verifier_provider_contract_fingerprint
         self.counter += 1
         ticket = {"id": f"zero-base-review-run:{self.counter:024x}", "mode": mode,
-                  "batch_ref": batch_ref, "company_refs": list(company_refs)}
+                  "batch_ref": batch_ref, "company_refs": list(company_refs),
+                  "verifier_provider_contract": verifier_provider_contract_fingerprint(
+                      "zero_base_review_verifier")}
         self.started.append(ticket)
         self.tickets.setdefault(ticket["id"], {"status": "running", **ticket})
         return ticket
@@ -138,6 +141,7 @@ class DispatchTests(unittest.TestCase):
             first = lane.dispatch_once()
         launcher.tickets[first["ticket_ref"]] = {
             "status": "failed", "mode": "review", "batch_ref": launcher.started[-1]["batch_ref"],
+            "verifier_provider_contract": "a" * 64,
             "summary": {"failure_reason": "content_refused", "reviews": [{
                 **due[0], "status": "refused",
                 "reason": "content_refused"}]},

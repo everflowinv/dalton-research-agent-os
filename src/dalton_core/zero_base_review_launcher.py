@@ -102,7 +102,8 @@ class ZeroBaseReviewLauncher(LaneChildLauncher):
         return self.spawn(
             digest=digest,
             record={"mode": mode, "batch_ref": batch_ref.strip(),
-                    "company_refs": list(company_refs)},
+                    "company_refs": list(company_refs),
+                    "verifier_provider_contract": provider_contract},
             mode=mode, company_refs=list(company_refs),
         )
 
