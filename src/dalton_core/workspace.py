@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -121,6 +122,14 @@ class WorkspacePaths:
         shared_paths = tuple(_absolute(item, "shared_readonly_paths item") for item in shared)
         if len(set(shared_paths)) != len(shared_paths):
             raise WorkspaceError("shared_readonly_paths must be unique")
+        host_root = root.parent.parent
+        workspaces_root = root.parent
+        for path in shared_paths:
+            if (path == Path(path.anchor) or path == host_root
+                    or path == workspaces_root or path.is_relative_to(workspaces_root)
+                    or host_root.is_relative_to(path)
+                    or workspaces_root.is_relative_to(path)):
+                raise WorkspaceError("shared read-only path is dangerously broad or overlaps workspaces")
         if release not in shared_paths:
             raise WorkspaceError("release_path must be declared shared read-only")
         capacity = value.get("shared_capacity")
@@ -129,7 +138,6 @@ class WorkspacePaths:
                     "database", "policy_ref", "policy_hash"}:
                 raise WorkspaceError("shared_capacity has an invalid closed shape")
             database = _absolute(capacity["database"], "shared_capacity.database")
-            host_root = root.parent.parent
             if database.parent != (host_root / "fleet-capacity").resolve():
                 raise WorkspaceError(
                     "shared capacity database must be directly under host fleet-capacity")
@@ -178,6 +186,11 @@ def validate_service_mapping_paths(
 ) -> None:
     """Check known path-bearing config fields without copying or exposing values."""
     suffixes = ("_path", "_db", "_socket", "_root", "_dir", "_executable")
+    external_readonly_keys = {
+        "broker_socket", "planner_broker_socket", "broker_auth_key",
+        "planner_broker_auth_key", "openclaw_config_path", "tailscale_executable",
+        "python_executable",
+    }
 
     def visit(node: Any, key: str = "") -> None:
         if isinstance(node, Mapping):
@@ -188,9 +201,16 @@ def validate_service_mapping_paths(
         elif isinstance(node, list):
             for child in node:
                 visit(child, key)
-        elif (isinstance(node, str) and key.endswith(suffixes)
-              and Path(node).is_absolute() and not path_is_declared(node, workspace)):
-            raise WorkspaceError(f"service path {key} is outside the workspace allowlist")
+        elif isinstance(node, str) and key.endswith(suffixes) and Path(node).is_absolute():
+            candidate = Path(node).expanduser().resolve()
+            if candidate == workspace.workspace_root or candidate.is_relative_to(
+                    workspace.workspace_root):
+                return
+            if key not in external_readonly_keys or not any(
+                    candidate == root or candidate.is_relative_to(root)
+                    for root in workspace.shared_readonly_paths):
+                raise WorkspaceError(
+                    f"service path {key} is outside its permitted workspace boundary")
 
     visit(value)
 
@@ -261,26 +281,35 @@ def create_workspace_manifest(
                               workspace_id=workspace_id,
                               shared_readonly_paths=shared_readonly_paths,
                               shared_capacity=shared_capacity)
-    target = Path(wire["workspace_root"]) / "workspace.json"
-    candidate = WorkspacePaths.from_manifest(wire, manifest_path=target)
-    if target.exists():
-        current = load_workspace_manifest(target)
-        if current.content_hash == candidate.content_hash:
-            return current
-        raise WorkspaceError("workspace manifest already exists with different content")
-    validate_fleet_candidate(candidate, host)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=False)
-    fd, temporary_name = tempfile.mkstemp(prefix=".workspace.", dir=target.parent)
+    host.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(host, 0o700)
+    lock_path = host / ".workspace-registry.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(wire, stream, ensure_ascii=False, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary_name, 0o600)
-        os.replace(temporary_name, target)
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        target = Path(wire["workspace_root"]) / "workspace.json"
+        candidate = WorkspacePaths.from_manifest(wire, manifest_path=target)
+        if target.exists():
+            current = load_workspace_manifest(target)
+            if current.content_hash == candidate.content_hash:
+                return current
+            raise WorkspaceError("workspace manifest already exists with different content")
+        validate_fleet_candidate(candidate, host)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=False)
+        fd, temporary_name = tempfile.mkstemp(prefix=".workspace.", dir=target.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(wire, stream, ensure_ascii=False, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary_name, 0o600)
+            os.replace(temporary_name, target)
+        finally:
+            Path(temporary_name).unlink(missing_ok=True)
     finally:
-        Path(temporary_name).unlink(missing_ok=True)
+        os.close(lock_fd)
     return load_workspace_manifest(target)
 
 

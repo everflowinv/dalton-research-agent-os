@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import sqlite3
 import tempfile
 import unittest
@@ -24,6 +25,15 @@ from dalton_core.workspace import (
 
 RELEASE_HASH = "a" * 64
 RELEASE_REF = "release:sha256:" + RELEASE_HASH
+
+
+def _create_workspace_process(host, release, slug, port, start, queue):
+    start.wait()
+    try:
+        result = create_workspace_manifest(host, slug, port, RELEASE_REF, release)
+        queue.put(("ok", result.slug))
+    except Exception as exc:
+        queue.put((type(exc).__name__, str(exc)))
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -81,7 +91,7 @@ class WorkspaceTests(unittest.TestCase):
         outside.mkdir()
         escape = self.host / "workspaces" / "escape"
         escape.symlink_to(outside, target_is_directory=True)
-        with self.assertRaisesRegex(WorkspaceError, "outside the host"):
+        with self.assertRaisesRegex(WorkspaceError, "outside the host|dangerously broad"):
             self.create("escape", 8790)
         self.assertFalse((outside / "workspace.json").exists())
 
@@ -91,11 +101,24 @@ class WorkspaceTests(unittest.TestCase):
         raw["state_dir"] = str(workspace.workspace_root / "other")
         with self.assertRaisesRegex(WorkspaceError, "content hash"):
             WorkspacePaths.from_manifest(raw)
-        with self.assertRaisesRegex(WorkspaceError, "allowlist"):
+        with self.assertRaisesRegex(WorkspaceError, "boundary"):
             validate_service_mapping_paths(
                 {"broker_socket": str(Path(self.temp.name) / "other.sock")}, workspace)
         validate_service_mapping_paths(
             {"broker_socket": str(self.release / "broker.sock")}, workspace)
+        with self.assertRaisesRegex(WorkspaceError, "boundary"):
+            validate_service_mapping_paths(
+                {"candidate_staging_path": str(self.release / "must-not-write.sqlite")},
+                workspace)
+
+    def test_shared_readonly_roots_cannot_cover_host_or_any_workspace(self):
+        for unsafe in (Path("/"), self.host, self.host / "workspaces",
+                       self.host / "workspaces" / "other"):
+            with self.subTest(path=unsafe), self.assertRaisesRegex(
+                    WorkspaceError, "dangerously broad"):
+                workspace_manifest(
+                    self.host, "analyst-a", 8787, RELEASE_REF, self.release,
+                    shared_readonly_paths=[unsafe])
 
     def test_shared_capacity_is_explicit_host_binding_or_absent_unknown(self):
         plain = self.create("analyst-a", 8787)
@@ -161,6 +184,26 @@ class WorkspaceTests(unittest.TestCase):
                                               run=lambda *a, **k: Result()), [101])
         self.assertEqual(resident_controllers(two.config_path, self_pid=999,
                                               run=lambda *a, **k: Result()), [102])
+
+    def test_registry_lock_serializes_cross_slug_port_collision(self):
+        context = multiprocessing.get_context("spawn")
+        start, queue = context.Event(), context.Queue()
+        processes = [context.Process(
+            target=_create_workspace_process,
+            args=(str(self.host), str(self.release), f"analyst-{letter}", 8787,
+                  start, queue),
+        ) for letter in ("a", "b")]
+        for process in processes:
+            process.start()
+        start.set()
+        results = [queue.get(timeout=15) for _ in processes]
+        for process in processes:
+            process.join(15)
+            self.assertEqual(process.exitcode, 0)
+        self.assertEqual([row[0] for row in results].count("ok"), 1)
+        self.assertEqual([row[0] for row in results].count("WorkspaceError"), 1)
+        self.assertIn("cockpit_port", next(row[1] for row in results
+                                           if row[0] == "WorkspaceError"))
 
 
 if __name__ == "__main__":
