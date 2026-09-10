@@ -194,9 +194,9 @@ owner：在 cockpit 上可以为各个调用环节选择用哪个模型；模型
    在 cockpit 显示「可用但未放行」，owner 一键放行 = 带备份写 openclaw.json 的 broker 子树 + 提示重载 gateway。
 3. 不自动改 openclaw 的 provider 配置本身。
 4. **模型被 openclaw 移除时的退化路径（owner 09-10 追加）**：目录 lane 退役它；任何环节链里含它的那一环自动跳过（首选被移除即落到回退；
-   显式链全部退役则落回该环节的档位链；verifier 独立性规则在回退后仍须成立，否则拒绝并说明）；通过现有的待决事项通知渠道给 owner
-   发一条人话通知（按 (模型, 环节) 去重、append-only 记录），cockpit 模型页与待办列表显示到 owner 确认或重选为止；无通知渠道时
-   cockpit 仍显示且 tick 摘要标 `notification_channel: none`。绝不静默。
+   显式链全部退役则落回该环节的档位链；verifier 独立性规则在回退后仍须成立，否则拒绝并说明）；通知先只落在 cockpit（owner 09-10：Feishu / Discord 投递链尚未建）：
+   append-only `model_fallback_notices`（按 (模型, 环节) 去重），cockpit 模型页与待办列表显示到 owner 确认或重选为止；留一个
+   `notice_delivery` 接缝给以后的投递线，tick 摘要标 `notification_channel: cockpit`。绝不静默。
 
 ### 既有资料的入职处理（owner 2026-09-10 提问，主 agent 定案）
 
