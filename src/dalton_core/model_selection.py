@@ -72,6 +72,7 @@ PURPOSE_LABELS: dict[str, str] = {
     "agenda_planning": "旧议程规划",
     "thesis_impact_assessment": "评估新事实对论点的影响",
     "thesis_impact_verifier": "核验论点影响评估",
+    "quality_verifier": "核验产出评分",
     "event_judgement": "判断新发生的事",
     "event_judgement_verifier": "核验事件判断",
     "zero_base_review": "从零复盘研究判断",

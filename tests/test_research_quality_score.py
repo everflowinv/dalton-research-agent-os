@@ -419,6 +419,7 @@ class JudgePurposeRegistrationTests(unittest.TestCase):
 
         self.assertEqual(JUDGE_PURPOSE, "quality")
         self.assertIn(JUDGE_PURPOSE, purposes())
+        self.assertIn("quality_verifier", purposes())
 
     def test_a_work_order_can_actually_be_built_for_it(self):
         from dalton_core.cockpit_model import build_work
@@ -511,7 +512,8 @@ class VerifierTests(unittest.TestCase):
                         "numbers": [], "gaps": []}])
 
     def judged(self):
-        return {"status": "scored", "scores": full_scores(SCREEN)["scores"]}
+        return {"status": "scored", "scores": full_scores(SCREEN)["scores"],
+                "model": {"route_decision_ref": "route:producer"}}
 
     def test_a_pass_verdict_carries_no_findings(self):
         self.assertEqual(validate_verifier_output({"verdict": "pass", "findings": []}, SCREEN),
@@ -542,6 +544,15 @@ class VerifierTests(unittest.TestCase):
                         mission={"id": "m", "content_hash": "h"}, request_id="v")
         self.assertEqual(result["status"], "verified")
         self.assertEqual(result["judged_scores_hash"], content_hash(judged["scores"]))
+        self.assertEqual(model.calls[0]["purpose"], "quality_verifier")
+
+    def test_an_unattributed_producer_costs_no_verifier_call(self):
+        model = FakeModel(json.dumps({"verdict": "pass", "findings": []}))
+        judged = {"status": "scored", "scores": full_scores(SCREEN)["scores"]}
+        result = verify(self.artefact(), SCREEN, judged, model=model,
+                        mission={"id": "m", "content_hash": "h"}, request_id="v")
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(model.calls, [])
 
     def test_there_is_nothing_to_verify_when_the_judge_refused(self):
         result = verify(self.artefact(), SCREEN, {"status": "refused", "reason": "x"},

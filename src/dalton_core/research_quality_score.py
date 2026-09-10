@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterator
 
 from .cockpit_model import (
     CockpitModelError,
+    independent_model_call,
     lane_status_for,
     register_purpose,
     unwrap_json_object,
@@ -86,6 +87,7 @@ ARTEFACT_KINDS: tuple[str, ...] = (
 # a purpose that is registered later than the call that uses it is a purpose
 # that is not registered.
 JUDGE_PURPOSE = register_purpose("quality")
+VERIFIER_PURPOSE = register_purpose("quality_verifier")
 # The judge runs on the deliverable-drafting configuration, which is already in
 # the registry: it is the same route, the same broker and the same day ledger
 # as the drafting it grades, and a separate configuration would only be worth
@@ -1260,7 +1262,9 @@ def judge(
     prompt = build_judge_prompt(art, rubric, deterministic)
     withheld = withheld_criteria(deterministic)
     try:
-        call = model.call(purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
+        call = model.call(
+            purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt,
+            mission=mission)
     except CockpitModelError as exc:
         return {
             # C2: refused either way -- the scoring path branches on
@@ -1410,7 +1414,13 @@ def verify(
         return {"status": "skipped", "reason": "没有可复核的评分"}
     prompt = build_verifier_prompt(art, rubric, judgement)
     try:
-        call = model.call(purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
+        call = independent_model_call(
+            model,
+            producer_route_decision_refs=[
+                (judgement.get("model") or {}).get("route_decision_ref")],
+            purpose=VERIFIER_PURPOSE, request_id=request_id, prompt=prompt,
+            mission=mission,
+        )
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"复核调用没有成功：{exc}",
                 "lane_status": lane_status_for(exc, "refused")}
@@ -1420,6 +1430,7 @@ def verify(
         "route_decision_ref": call.get("route_decision_ref"),
         "replayed": call.get("replayed"),
         "cost_usd": round((call.get("cost_micros") or 0) / 1_000_000, 6),
+        "purpose": VERIFIER_PURPOSE,
     }
     try:
         validated = validate_verifier_output(unwrap_json_object(call["text"]), rubric)
@@ -1718,6 +1729,7 @@ __all__ = [
     "CHECKS",
     "INITIAL_SCREEN_SECTIONS",
     "JUDGE_MODEL_CONFIG_NAME",
+    "VERIFIER_PURPOSE",
     "JUDGE_PURPOSE",
     "MAX_ARTEFACT_CHARS",
     "MAX_COST_USD",

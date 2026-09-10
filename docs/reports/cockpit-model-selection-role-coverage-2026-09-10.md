@@ -12,9 +12,13 @@ selecting a model does not activate a lane.
 
 Independent verification is now a separately selectable stage for dossier,
 deep insight, industry framework, earnings preview, earnings calibration,
-event judgement, and thesis reflection. Each actual verifier call uses its
+event judgement, thesis reflection, and research-quality scoring. Each actual verifier call uses its
 verifier purpose and verifier tier. Existing producer purpose names remain
 unchanged. Zero-base already had separate producer and verifier purposes.
+
+The quality verifier also passes the judge's recorded route decision into the
+independent-call path. A score without a producer route is refused before a
+verifier call; omitting `verifier_model` retains the prior judge-only result.
 
 This slice covers calls that resolve a named purpose through the fallback
 router, including the bounded planner's `plan` purpose. Document extraction
