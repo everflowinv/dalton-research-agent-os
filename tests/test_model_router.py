@@ -351,7 +351,7 @@ class ModelRouterTests(unittest.TestCase):
                 capability="verify", producer_family="family-alpha",
                 idempotency_key="route-key:purpose-override",
             ),
-            tier="verifier", purpose="dossier_verifier",
+            purpose="dossier_verifier",
         )["decision"]
         self.assertEqual(
             decision["selected_profile_version_ref"], second["profile_version_ref"]

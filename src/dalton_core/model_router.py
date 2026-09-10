@@ -1804,7 +1804,7 @@ class ModelRouter:
             live_chain: list[str] = []
             latest_profiles = self._latest_profiles(cur)
             by_id = {profile["id"]: profile for profile in latest_profiles}
-            if tier is not None:
+            if tier is not None or purpose_override:
                 resolved = resolve_chain(
                     policy, tier=tier, purpose=purpose, profiles=by_id
                 )
