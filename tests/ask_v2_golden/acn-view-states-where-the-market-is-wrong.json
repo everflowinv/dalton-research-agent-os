@@ -1,0 +1,106 @@
+{
+ "case_ref": "acn-view-states-where-the-market-is-wrong",
+ "expected": {
+  "cited_tags": [
+   "D1",
+   "C2",
+   "B1"
+  ],
+  "confidence": "medium",
+  "quality": {
+   "cites_only_shown_claims": "pass",
+   "confidence_stated": "pass",
+   "numbers_without_refs": "pass"
+  },
+  "question_kind": "view",
+  "rationale": "五个槽位都写满，pathway 指向一个有日期的可观察量；这是与市场同向但无 pathway 的反面。",
+  "refused": false,
+  "verification": {
+   "cites_only_shown_rows": "pass",
+   "confidence_in_vocabulary": "pass",
+   "market_vs_us_present": "pass",
+   "numeric_sentences_cite": "pass",
+   "refresh_names_a_capable_source": "pass",
+   "refusal_states_why": "pass",
+   "unknowns_typed": "pass"
+  },
+  "wants_market_vs_us": true
+ },
+ "note": "正例，也是 owner 那条原则的判例：看法类问题必须给出我们与市场的差、错在哪、以及市场靠拢的路径与可观察信号。没有 pathway 的看法在 Q 线 rubric 里得低分。",
+ "question": "你怎么看 ACN 现在的位置？",
+ "reply": {
+  "confidence": "medium",
+  "market_vs_us": {
+   "convergence_pathway": "十月的 bookings 与 book-to-bill 会先于收入证实或证伪这一点。",
+   "market_view": "卖方多数把审批延后读成需求下修，四家里有三家在下调 2027 年收入。",
+   "observable_signals": "月度招聘公告、外包合同披露、以及电话会上对审批周期的措辞变化。",
+   "our_view": "预算恢复只是被审批链条推迟了一到两个季度，不是需求塌了。",
+   "refs": [
+    "D1",
+    "B1"
+   ],
+   "where_market_is_wrong": "市场把「签得慢」当成「不签」，两者在 bookings 上会分岔。"
+  },
+  "refresh_suggested": {
+   "content_kind": "sell_side_report",
+   "query": "Accenture bookings book-to-bill 2026",
+   "source": "alphaengine"
+  },
+  "refusal_detail": null,
+  "refusal_reason": null,
+  "refused": false,
+  "sentences": [
+   {
+    "refs": [
+     "D1"
+    ],
+    "text": "我们比市场乐观一档，理由是预算恢复被审批周期拉长，而不是需求消失。"
+   },
+   {
+    "refs": [
+     "C2",
+     "B1"
+    ],
+    "text": "GCC 自建是真实的结构性威胁，但它抢的是可标准化的那一层。"
+   }
+  ],
+  "unknowns": [
+   {
+    "content_kind": "sell_side_report",
+    "source": "alphaengine",
+    "what": "缺卖方最近两个月对 ACN 的评级与目标价分布"
+   }
+  ]
+ },
+ "shown": [
+  {
+   "block": "dossier",
+   "period": null,
+   "ref": "company-dossier-version:acn:2",
+   "statement": "客户预算在恢复，但审批链条比 2024 年长；管理层在两次电话会上都提到这一点。",
+   "tag": "D1"
+  },
+  {
+   "block": "debates",
+   "period": null,
+   "ref": "debate-map-version:acn:3",
+   "statement": "GCC 自建是否结构性压低 ACN 的可服务市场？",
+   "tag": "B1"
+  },
+  {
+   "block": "claims",
+   "period": "2026-03-01..2026-05-31",
+   "ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+   "statement": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
+   "tag": "C1"
+  },
+  {
+   "block": "claims",
+   "period": "fiscal 2025",
+   "ref": "claim-version:ec52d36d94",
+   "statement": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
+   "tag": "C2"
+  }
+ ],
+ "source": "P12a 档案的 variant_view 五个槽位与 P12c DebateMap 的市场立场；问题是 PM 的原话。"
+}

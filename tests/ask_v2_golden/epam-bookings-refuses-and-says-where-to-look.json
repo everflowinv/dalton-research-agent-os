@@ -1,0 +1,71 @@
+{
+ "case_ref": "epam-bookings-refuses-and-says-where-to-look",
+ "expected": {
+  "cited_tags": [
+   "C3"
+  ],
+  "confidence": "low",
+  "quality": {
+   "cites_only_shown_claims": "pass",
+   "confidence_stated": "pass",
+   "numbers_without_refs": "pass"
+  },
+  "question_kind": "fact",
+  "rationale": "拒答有理由、有类型、有去处；这是 P15a 想让 answer_after_refresh 第一次真正跑起来的入口。",
+  "refused": true,
+  "verification": {
+   "cites_only_shown_rows": "pass",
+   "confidence_in_vocabulary": "pass",
+   "market_vs_us_present": "skipped",
+   "numeric_sentences_cite": "pass",
+   "refresh_names_a_capable_source": "pass",
+   "refusal_states_why": "pass",
+   "unknowns_typed": "pass"
+  },
+  "wants_market_vs_us": false
+ },
+ "note": "正例，且是「答不出来是满分」的那一类：拒答带封闭词表里的理由，缺口带内容类型与来源，补搜建议指向一个真能给出卖方研报的来源。",
+ "question": "EPAM 上季度的新签订单是多少？",
+ "reply": {
+  "confidence": "low",
+  "market_vs_us": null,
+  "refresh_suggested": {
+   "content_kind": "sell_side_report",
+   "query": "EPAM bookings backlog",
+   "source": "alphaengine"
+  },
+  "refusal_detail": "回答它需要最近四个季度的 bookings 金额，账本上没有。",
+  "refusal_reason": "needs_refresh",
+  "refused": true,
+  "sentences": [
+   {
+    "refs": [
+     "C3"
+    ],
+    "text": "我不知道。账本里没有任何一条记录 EPAM 新签订单金额的结论，只有利用率与收入。"
+   }
+  ],
+  "unknowns": [
+   {
+    "content_kind": "sell_side_report",
+    "source": "alphaengine",
+    "what": "缺 EPAM 最近四个季度的 bookings 金额与同比"
+   },
+   {
+    "content_kind": "transcript",
+    "source": "alphaengine",
+    "what": "缺 book-to-bill 的口径说明，不同来源定义不一致"
+   }
+  ]
+ },
+ "shown": [
+  {
+   "block": "claims",
+   "period": "years ended December 31, 2025, 2024 and 2023",
+   "ref": "claim-version:29b5ce3638",
+   "statement": "EPAM reports utilization rates of its delivery professionals increased modestly year over year, with a slightly larger increase compared to the prior year, suggesting stable demand.",
+   "tag": "C3"
+  }
+ ],
+ "source": "live 只读副本 2026-09-09：EPAM 的 775 条 Claim 里没有一条记录 bookings 金额。"
+}

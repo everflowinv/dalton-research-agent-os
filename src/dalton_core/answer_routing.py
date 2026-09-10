@@ -1366,7 +1366,14 @@ class AnswerRoutingAuthority:
                 ),
                 "refresh_route_available": refresh_plan is not None,
                 "refresh_plan": refresh_plan,
-                "adhoc_research_route_available": False,
+                # P15a: this was the literal ``False``.  It is now the question
+                # it always claimed to answer -- has the owner budgeted an
+                # ad-hoc route in this policy, and does the active mission carry
+                # the word that lifted the ban -- asked of the same Core this
+                # decision is being read out of.
+                "adhoc_research_route_available": adhoc_route_available(
+                    policy, self._active_mission()
+                ),
                 "agenda_recommendation": (
                     None if route != "recommend_agenda_item" else {
                         "mandate_version_ref": mandate["id"],
@@ -1380,6 +1387,28 @@ class AnswerRoutingAuthority:
                 "write_performed": False,
             })
             return {"context_pack": pack, "decision": decision}
+
+    def _active_mission(self) -> dict[str, Any] | None:
+        """The mission this Core is currently running, or None.
+
+        Read here rather than passed in because ``route`` is called from four
+        places that have no reason to know about coverage missions, and a
+        parameter none of them can fill would make the flag optional again.
+        """
+
+        row = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='coverage_mission_pointer'"
+        ).fetchone()
+        if row is None:
+            return None
+        record = self.connection.execute(
+            "SELECT v.record_json FROM coverage_mission_versions v "
+            "JOIN coverage_mission_pointer p "
+            "ON p.mission_version_id=v.mission_version_id "
+            "ORDER BY p.updated_at DESC LIMIT 1"
+        ).fetchone()
+        return None if record is None else json.loads(record["record_json"])
 
     def refresh_reservation_for_decision(
         self, decision_ref: str
@@ -2095,10 +2124,36 @@ class AnswerRefreshControlPlane:
         return {"status": receipt["status"], "outcome_receipt": receipt}
 
 
+def adhoc_route_available(
+    policy: Mapping[str, Any] | None, mission: Mapping[str, Any] | None
+) -> bool:
+    """Whether ad-hoc research may run: the policy budgets it, the owner grants it.
+
+    Two versioned human acts and no code constant.  The owner lifted the ad-hoc
+    ban on 2026-09-09 and P14e made the *lane*'s gate real; this is the same
+    gate for the *answer* route, which was still hard-coded to ``False`` and so
+    reported "no" on a Core where the owner had said yes.  Kept here rather than
+    in the caller because the cockpit's one-shot refresh asks the identical
+    question, and two readings of one grant is how a grant stops being one.
+    """
+
+    if policy is None or mission is None:
+        return False
+    route = policy.get("adhoc_research_route") or {}
+    if not route.get("enabled"):
+        return False
+    if int(route.get("max_cost_units") or 0) <= 0 or int(route.get("max_rounds") or 0) <= 0:
+        return False
+    from .research_task import GRANT_WORD
+
+    return GRANT_WORD in ((mission.get("autonomy") or {}).get("may_write") or ())
+
+
 __all__ = [
     "ANSWER_REFRESH_OUTPUT_CONTRACT_REF", "ANSWER_REFRESH_VERIFIER_REF",
     "AnswerRefreshControlPlane", "AnswerRoutingAuthority",
     "AnswerRoutingConflict", "AnswerRoutingError",
     "AnswerRoutingNotFound", "AnswerRoutingValidationError",
+    "adhoc_route_available",
     "validate_answer_sufficiency_policy",
 ]
