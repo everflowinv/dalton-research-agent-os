@@ -231,6 +231,7 @@ from .forecast_reconciliation import (
 )
 from .bounded_alphaengine_probe import (
     BoundedAlphaEngineProbeError,
+    MAX_CALLS_PER_WINDOW,
     execute_alphaengine_probe,
 )
 from .company_research_view import (
@@ -3729,10 +3730,57 @@ class WriterServer:
         # the budget gate counts Core invocations before any call is spent.
         if self._acquisition_launcher is None:
             raise WriterServerError("alphaengine acquisition is not configured")
+        work_order = dict(p)["work_order"]
+        metadata = work_order.get("metadata") or {}
+        mission_ref = metadata.get("mission_version_ref")
+        mission_hash = metadata.get("mission_version_hash")
+        if not isinstance(mission_ref, str) or not isinstance(mission_hash, str):
+            loop_ref = metadata.get("bounded_loop_version_ref")
+            loop_hash = metadata.get("bounded_loop_version_hash")
+            try:
+                loop = self.bounded_planner.loop(loop_ref)
+            except (BoundedPlannerError, TypeError) as exc:
+                raise WriterServerError(
+                    "legacy AlphaEngine probe work cannot resolve its exact loop binding"
+                ) from exc
+            if loop["content_hash"] != loop_hash or not loop.get("admission"):
+                raise WriterServerError(
+                    "legacy AlphaEngine probe work does not match its loop authority"
+                )
+            plan_ref = loop["admission"]["plan_ref"]
+            row = self.store.connection.execute(
+                "SELECT mission_version_ref FROM coverage_mission_research_plans "
+                "WHERE plan_id=?", (plan_ref,),
+            ).fetchone()
+            if row is None:
+                raise WriterServerError(
+                    "legacy AlphaEngine probe work has no exact mission research plan"
+                )
+            mission_ref = row["mission_version_ref"]
+            mission_hash = self.coverage_mission.mission(mission_ref)["content_hash"]
+        try:
+            mission = self.coverage_mission.mission(mission_ref)
+        except CoverageMissionError as exc:
+            raise WriterServerError(
+                "AlphaEngine probe mission binding cannot be resolved; "
+                "re-admit the research inquiry"
+            ) from exc
+        if mission["content_hash"] != mission_hash:
+            raise WriterServerError(
+                "AlphaEngine probe mission hash does not match authority; "
+                "re-admit the research inquiry"
+            )
+        total_cap = int(mission["budget"]["max_alphaengine_calls_24h"])
+        probe_cap = int(
+            mission["budget"].get(
+                "max_alphaengine_probe_calls_24h", MAX_CALLS_PER_WINDOW
+            )
+        )
         return execute_alphaengine_probe(
-            dict(p)["work_order"],
+            work_order,
             launcher=self._acquisition_launcher,
             connection=self.store.connection,
+            max_calls_per_window=min(total_cap, probe_cap),
         )
 
     def _op_bounded_planner_propose_next_with_context(self, p: Mapping[str, Any]) -> Any:

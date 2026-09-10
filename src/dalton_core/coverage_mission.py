@@ -545,7 +545,10 @@ def validate_mission_body(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(body["budget"], Mapping):
         raise CoverageMissionValidationError("budget must be an object")
     budget = dict(body["budget"])
-    if set(budget) not in {required_budget, required_budget | {"pools"}}:
+    optional_budget = {"pools", "max_alphaengine_probe_calls_24h"}
+    if not required_budget.issubset(budget) or not set(budget).issubset(
+        required_budget | optional_budget
+    ):
         raise CoverageMissionValidationError(
             "budget has an invalid closed shape; expected the three legacy fields "
             "and optional pools"
@@ -574,6 +577,17 @@ def validate_mission_body(value: Mapping[str, Any]) -> dict[str, Any]:
             pool_caps(validated_budget)
         except BudgetPoolError as exc:
             raise CoverageMissionValidationError(f"budget.pools is invalid: {exc}") from exc
+    if "max_alphaengine_probe_calls_24h" in budget:
+        probe_cap = _non_negative_int(
+            budget["max_alphaengine_probe_calls_24h"],
+            "budget.max_alphaengine_probe_calls_24h",
+        )
+        if probe_cap > validated_budget["max_alphaengine_calls_24h"]:
+            raise CoverageMissionValidationError(
+                "budget.max_alphaengine_probe_calls_24h cannot exceed "
+                "budget.max_alphaengine_calls_24h"
+            )
+        validated_budget["max_alphaengine_probe_calls_24h"] = probe_cap
     body["budget"] = validated_budget
     return body
 

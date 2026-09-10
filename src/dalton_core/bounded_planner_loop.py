@@ -211,18 +211,31 @@ def _validate_admission(value: Any) -> dict[str, Any]:
     the intended reading -- the question really did change.
     """
 
-    obj = _closed(
-        value, {"source", "content_hash", "inquiry_ref", "plan_ref"}, "admission",
-    )
+    legacy = {"source", "content_hash", "inquiry_ref", "plan_ref"}
+    current = legacy | {"mission_version_ref", "mission_version_hash"}
+    if (not isinstance(value, Mapping)
+            or frozenset(value) not in {frozenset(legacy), frozenset(current)}):
+        raise BoundedPlannerValidationError("admission has an invalid closed shape")
+    obj = dict(value)
     source = _text(obj["source"], "admission.source")
     if source not in ADMISSION_SOURCES:
         raise BoundedPlannerValidationError("admission source is outside the closed set")
-    return {
+    result = {
         "source": source,
         "content_hash": _sha256(obj["content_hash"], "admission.content_hash"),
         "inquiry_ref": _text(obj["inquiry_ref"], "admission.inquiry_ref"),
         "plan_ref": _text(obj["plan_ref"], "admission.plan_ref"),
     }
+    if "mission_version_ref" in obj:
+        result.update({
+            "mission_version_ref": _text(
+                obj["mission_version_ref"], "admission.mission_version_ref"
+            ),
+            "mission_version_hash": _sha256(
+                obj["mission_version_hash"], "admission.mission_version_hash"
+            ),
+        })
+    return result
 
 
 def _validate_budget(value: Any) -> dict[str, int]:
@@ -1341,6 +1354,12 @@ class BoundedPlannerControlPlane:
                 "parameters": action["parameters"],
             },
         }
+        admission = loop.get("admission") or {}
+        if "mission_version_ref" in admission:
+            wire["metadata"].update({
+                "mission_version_ref": admission["mission_version_ref"],
+                "mission_version_hash": admission["mission_version_hash"],
+            })
         return WorkOrder.from_dict(wire).to_dict()
 
     def record_observation_followup(

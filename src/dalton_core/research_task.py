@@ -950,6 +950,8 @@ def admit_inquiry(
             "content_hash": digest,
             "inquiry_ref": inquiry_ref_for(digest),
             "plan_ref": plan_ref,
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
         },
     )
     return {

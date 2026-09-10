@@ -93,6 +93,7 @@
         "max_daily_paid_calls": {"type": "integer", "minimum": 0},
         "max_daily_cost_usd": {"type": "number", "minimum": 0},
         "max_alphaengine_calls_24h": {"type": "integer", "minimum": 0},
+        "max_alphaengine_probe_calls_24h": {"type": "integer", "minimum": 0},
         "pools": {
           "type": "object",
           "additionalProperties": false,

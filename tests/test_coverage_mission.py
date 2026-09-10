@@ -84,6 +84,22 @@ class CoverageMissionTests(MissionHarness):
             event_pool(mission)["cap_micros"], caps["caps_micros"]["event_response"]
         )
 
+    def test_signed_mission_can_bound_alphaengine_probes_below_its_total_cap(self) -> None:
+        params = mission_params(self.state)
+        total = params["budget"]["max_alphaengine_calls_24h"]
+        params["budget"]["max_alphaengine_probe_calls_24h"] = total - 1
+        mission = self.authority.create_mission(params.pop("mission_ref"), **params)
+        self.assertEqual(
+            mission["budget"]["max_alphaengine_probe_calls_24h"], total - 1
+        )
+
+        params = mission_params(self.state)
+        params["budget"]["max_alphaengine_probe_calls_24h"] = (
+            params["budget"]["max_alphaengine_calls_24h"] + 1
+        )
+        with self.assertRaisesRegex(CoverageMissionValidationError, "cannot exceed"):
+            self.authority.create_mission(params.pop("mission_ref"), **params)
+
     def test_explicit_pool_caps_are_closed_finite_and_within_the_daily_cap(self) -> None:
         valid = {"coverage": 1, "event_response": 1, "adhoc": 1, "maintenance": 1}
         cases = [

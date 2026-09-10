@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from dalton_core.bounded_alphaengine_probe import (
@@ -195,6 +196,99 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
             "ALPHAENGINE_PROBE_BUDGET_EXCEEDED", envelope["error"]["code"]
         )
         self.assertEqual([], launcher.calls)
+
+    def test_explicit_probe_cap_can_be_lower_or_higher_than_the_legacy_default(self) -> None:
+        seed_invocation(self.conn, hours_ago=1, count=31)
+        refused = execute_alphaengine_probe(
+            work_order("alphaengine-doc:2"), launcher=FakeLauncher(),
+            connection=self.conn, as_of=NOW, max_calls_per_window=10,
+        )
+        self.assertEqual(refused["error"]["code"], "ALPHAENGINE_PROBE_BUDGET_EXCEEDED")
+        launcher = FakeLauncher(final_status="failed")
+        admitted = execute_alphaengine_probe(
+            work_order("alphaengine-doc:3"), launcher=launcher,
+            connection=self.conn, as_of=NOW, max_calls_per_window=40,
+        )
+        self.assertEqual(admitted["error"]["code"], "SOURCE_UNAVAILABLE")
+        self.assertEqual(len(launcher.calls), 1)
+
+    def test_writer_uses_only_the_exact_signed_mission_probe_cap(self) -> None:
+        from dalton_core.writer_server import WriterServer, WriterServerError
+
+        mission = {
+            "id": "coverage-mission-version:test:2", "content_hash": "a" * 64,
+            "budget": {"max_alphaengine_calls_24h": 130,
+                       "max_alphaengine_probe_calls_24h": 45},
+        }
+        server = WriterServer.__new__(WriterServer)
+        server._acquisition_launcher = FakeLauncher()
+        server._store = type("Store", (), {"connection": self.conn})()
+        server._coverage_mission = type(
+            "Missions", (), {"mission": lambda _self, _ref: mission}
+        )()
+        work = work_order("alphaengine-doc:9")
+        work["metadata"].update({
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+        })
+        with patch(
+            "dalton_core.writer_server.execute_alphaengine_probe",
+            return_value={"status": "succeeded"},
+        ) as execute:
+            server._op_bounded_alphaengine_probe({"work_order": work})
+        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 45)
+
+        mission["budget"] = {"max_alphaengine_calls_24h": 20}
+        with patch(
+            "dalton_core.writer_server.execute_alphaengine_probe",
+            return_value={"status": "succeeded"},
+        ) as execute:
+            server._op_bounded_alphaengine_probe({"work_order": work})
+        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 20)
+
+        work["metadata"]["mission_version_hash"] = "b" * 64
+        with self.assertRaisesRegex(WriterServerError, "re-admit"):
+            server._op_bounded_alphaengine_probe({"work_order": work})
+
+    def test_legacy_work_recovers_exact_mission_through_its_bound_plan(self) -> None:
+        from dalton_core.writer_server import WriterServer
+
+        mission = {
+            "id": "coverage-mission-version:test:1", "content_hash": "a" * 64,
+            "budget": {"max_alphaengine_calls_24h": 130},
+        }
+        loop = {
+            "content_hash": "b" * 64,
+            "admission": {"plan_ref": "mission-research-plan:test"},
+        }
+        class Connection:
+            def execute(self, _query, params):
+                self.params = params
+                return self
+
+            def fetchone(self):
+                return {"mission_version_ref": mission["id"]}
+
+        server = WriterServer.__new__(WriterServer)
+        server._acquisition_launcher = FakeLauncher()
+        server._store = type("Store", (), {"connection": Connection()})()
+        server._coverage_mission = type(
+            "Missions", (), {"mission": lambda _self, _ref: mission}
+        )()
+        server._bounded_planner = type(
+            "Planner", (), {"loop": lambda _self, _ref: loop}
+        )()
+        work = work_order("alphaengine-doc:10")
+        work["metadata"].update({
+            "bounded_loop_version_ref": "bounded-planner-loop-version:test",
+            "bounded_loop_version_hash": loop["content_hash"],
+        })
+        with patch(
+            "dalton_core.writer_server.execute_alphaengine_probe",
+            return_value={"status": "succeeded"},
+        ) as execute:
+            server._op_bounded_alphaengine_probe({"work_order": work})
+        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 30)
 
     def test_old_calls_outside_window_do_not_count(self) -> None:
         seed_invocation(self.conn, hours_ago=25, count=MAX_CALLS_PER_WINDOW)

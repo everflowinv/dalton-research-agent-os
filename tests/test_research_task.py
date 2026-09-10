@@ -186,12 +186,33 @@ class AdmissionTests(ResearchTaskFixture):
             "content_hash": record["inquiry_hash"],
             "inquiry_ref": record["inquiry_ref"],
             "plan_ref": plan["plan_id"],
+            "mission_version_ref": self.mission["id"],
+            "mission_version_hash": self.mission["content_hash"],
         })
         self.assertEqual(loop["actor_ref"], "automation:coverage-mission")
         # And the driver will pick it up, because it is simply an active loop.
         self.assertIn(
             record["loop_version_ref"],
             [item["id"] for item in self.authority.active_loops()],
+        )
+        binding = loop["template_bindings"][0]
+        template = self.authority.probe_template(binding["template_version_ref"])
+        work = BoundedPlannerControlPlane._work_order(
+            loop,
+            {
+                "id": "planner-proposal:test-binding",
+                "created_at": loop["created_at"],
+                "content_hash": "b" * 64,
+                "action": {
+                    "coverage_item_ref": binding["coverage_item_ref"],
+                    "parameters": binding["parameters"],
+                },
+            },
+            template,
+        )
+        self.assertEqual(work["metadata"]["mission_version_ref"], self.mission["id"])
+        self.assertEqual(
+            work["metadata"]["mission_version_hash"], self.mission["content_hash"]
         )
 
 

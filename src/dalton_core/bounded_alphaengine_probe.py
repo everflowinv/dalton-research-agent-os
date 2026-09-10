@@ -81,9 +81,17 @@ def execute_alphaengine_probe(
     poll_seconds: float = 2.0,
     timeout_seconds: float = 150.0,
     max_pages: int = 20,
+    max_calls_per_window: int = MAX_CALLS_PER_WINDOW,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Execute one AlphaEngine document probe; returns a ResultEnvelope wire."""
+
+    if (isinstance(max_calls_per_window, bool)
+            or not isinstance(max_calls_per_window, int)
+            or max_calls_per_window < 0):
+        raise BoundedAlphaEngineProbeError(
+            "max_calls_per_window must be a non-negative integer"
+        )
 
     metadata = work_order.get("metadata") or {}
     if metadata.get("permission_scope") != PROBE_PERMISSION_SCOPE:
@@ -124,13 +132,13 @@ def execute_alphaengine_probe(
         return envelope
 
     spent = count_recent_alphaengine_calls(connection, as_of=as_of)
-    if spent >= MAX_CALLS_PER_WINDOW:
+    if spent >= max_calls_per_window:
         envelope["status"] = "failed"
         envelope["error"] = {
             "code": "ALPHAENGINE_PROBE_BUDGET_EXCEEDED",
             "message": (
                 f"{spent} AlphaEngine calls in the trailing 24h window; "
-                f"owner cap is {MAX_CALLS_PER_WINDOW}"
+                f"configured probe cap is {max_calls_per_window}"
             ),
         }
         return envelope
