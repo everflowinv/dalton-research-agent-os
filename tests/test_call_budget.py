@@ -82,6 +82,11 @@ class CallBudgetTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(CallBudgetError):
                 validate_run_budget_overrides(value)
 
+    def test_packaged_run_budget_overrides_legacy_defaults(self):
+        self.assertEqual(resolve_run_budget(
+            {}, "dossier", defaults={"max_cost_usd": 9.0, "max_units": 9}),
+            {"max_cost_usd": 2.5, "max_units": 3})
+
 
 if __name__ == "__main__":
     unittest.main()

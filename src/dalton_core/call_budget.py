@@ -72,7 +72,7 @@ def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
         raise CallBudgetError("model configuration must be an object")
     if not isinstance(purpose, str) or not _PURPOSE.fullmatch(purpose):
         raise CallBudgetError("purpose must be a canonical token")
-    resolved = validate_run_budget_overrides(defaults)
+    resolved = default_run_budget(purpose, defaults=defaults)
     if not resolved:
         raise CallBudgetError("run budget defaults must not be empty")
     resolved.update(validate_run_budget_overrides(config.get("run_budget", {})))
@@ -84,6 +84,42 @@ def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
             raise CallBudgetError("purpose_run_budgets keys must be canonical purpose tokens")
         validate_run_budget_overrides(value)
     resolved.update(validate_run_budget_overrides(per_purpose.get(purpose, {})))
+    return resolved
+
+
+def default_run_budget(purpose: str, *,
+                       defaults: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Read packaged run bounds, preserving unlisted callers' own defaults."""
+    if not isinstance(purpose, str) or not _PURPOSE.fullmatch(purpose):
+        raise CallBudgetError("purpose must be a canonical token")
+    path = Path(__file__).with_name("run_budget_defaults.json")
+    if path.is_file():
+        try:
+            wire = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CallBudgetError(f"packaged run budget defaults cannot be read: {exc}") from exc
+        if (not isinstance(wire, Mapping) or set(wire) != {"schema_version", "purposes"}
+                or wire.get("schema_version") != "0.1"
+                or not isinstance(wire.get("purposes"), Mapping)):
+            raise CallBudgetError("packaged run budget defaults have an invalid shape")
+        for key, value in wire["purposes"].items():
+            if not isinstance(key, str) or not _PURPOSE.fullmatch(key):
+                raise CallBudgetError("packaged run purpose keys must be canonical tokens")
+            validate_run_budget_overrides(value)
+        if purpose in wire["purposes"]:
+            resolved = ({} if defaults is None
+                        else validate_run_budget_overrides(defaults))
+            resolved.update(validate_run_budget_overrides(wire["purposes"][purpose]))
+        elif defaults is not None:
+            resolved = validate_run_budget_overrides(defaults)
+        else:
+            raise CallBudgetError(f"no packaged run budget for purpose {purpose}")
+    elif defaults is not None:
+        resolved = validate_run_budget_overrides(defaults)
+    else:
+        raise CallBudgetError("packaged run budget defaults are missing")
+    if not resolved:
+        raise CallBudgetError("run budget defaults must not be empty")
     return resolved
 
 
@@ -158,6 +194,6 @@ def budget_fingerprint(budget: Mapping[str, Any]) -> str:
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
 
 
-__all__ = ["CallBudgetError", "budget_fingerprint", "default_call_budget",
+__all__ = ["CallBudgetError", "budget_fingerprint", "default_call_budget", "default_run_budget",
            "resolve_call_budget", "resolve_run_budget", "validate_budget_overrides",
            "validate_run_budget_overrides"]
