@@ -17,10 +17,11 @@ Chem 54 天里最有价值的不是文件数量，而是三件事：**按商业�
 | --- | --- | --- | --- |
 | **不同商业模式用不同框架**：万华按商品周期 / 成本 / 资本扩张，Linde 按合同 / 网络密度 / 项目回报，BASF 按多元化资本周期 / 组合调整 / FCF | §7.1 | 档案有 `industry_classification`（五类），但建模规格与 driver 是逐公司的通用形状，没有按分类给的 driver 模板 | **按分类给 driver 模板**：commodity_cycle → 价差 / 开工率 / 成本曲线位置；capital_cycle → 资本开支 / 回报 / 产能周期；compounder → 定价 / 留存 / 单位经济；structural_growth → 渗透 / TAM；turnaround → 里程碑 / 现金跑道。规格 lane 起草时先按分类选模板再填 basis_concept；DebateMap 与 dossier 的 `demand_drivers` 也按模板组织 |
 | **四类数字分开且写明口径理由**：未披露分部成本不强行分摊；MDI–纯苯粗价差不当装置现金利润；backlog 不当收入；政策毛收益不进基准 | §7.2 | 有 grade / tier（filing、management、sell_side、internal_prior、crowd），有 `estimate/actual`，但没有「**市场代理**」这一类——价差、挂牌价、期货连续代理这些「与公司实现值有距离的公开量」在我们这里会被当成普通 observation | 新增证据种类 `market_proxy`（带「与公司实现值的距离」说明），进 claim index 词表与判断层提示；forecast 假设引用 market_proxy 时必须写 `proxy_gap` 理由。这是 owner 8-25 思考里「不靠推测填缺口」的落地 |
-| **月度 zero-base 复盘**：从零仓位重问「现在要不要建立观点」 | §4.5 | 有周度 `ResearchCycleReflection`（时间花在哪）、有事件驱动的 `ThesisReflection`（为什么错），没有「从零重问」 | 加 `ZeroBaseReview`（月度或财报后）：判断层对每家覆盖公司重问四件事——如果今天第一次看这家公司会不会建观点、现有 thesis 哪条会被重新写、哪条 debate 已经不重要、下一个验证点是什么。产出走 deliverable + 候选，人裁决 |
+| **月度 zero-base 复盘**：从零仓位重问「现在要不要建立观点」（注意：支撑材料显示 `dalton-coverage-zero-base` 这条 cron 一次都没跑过，任务清单里只有 3 条 `zero_base_review`，所以这是 Chem 设计了、基本没执行的想法） | §4.5；附录 A.1 | 有周度 `ResearchCycleReflection`（时间花在哪）、有事件驱动的 `ThesisReflection`（为什么错），没有「从零重问」 | 加 `ZeroBaseReview`（月度或财报后）：判断层对每家覆盖公司重问四件事——如果今天第一次看这家公司会不会建观点、现有 thesis 哪条会被重新写、哪条 debate 已经不重要、下一个验证点是什么。产出走 deliverable + 候选，人裁决 |
 | **事故 → 机器检查**：负价差百分比错、行情断日、公式链重复派单，都变成 16 项测试 | §7.5 | 我们也这么做（今天的 socket 期限、括号丢失、CIK 补零都变成了测试与规则） | 写成硬规则：每次 live 事故必须产出一条测试或一条 policy 检查，记在 PROJECT_STATUS 的事故段 |
 | **失败纪律**：Task 62 三次源不可用后保持 failed，不补假报告 | §6 例 6 | 一致：refuse-whole、never repaired、`unavailable` with reason 遍布各 lane | 保持；但见 §2 第 5 条的反面 |
 | **持久队列 + 无到期任务就跳过**：dispatcher 168 次调度 148 次跳过（88.1%），只在有事时叫模型 | §7.3 | tick + 每 lane 有界 child + 池；第 36 周全 mission 只花 0.026 美元 | 一致；tick 账本（C2）现在能算出空转比例，Chem 当年算不出 |
+| **模型每个硬编码格子都有来源行**：万华 Q2 模型 Sources 表 358 行，一格一行（表 / 格 / 字段 / 状态类型 / 期间 / 文件 / 页码 / URL / 口径备注 / 是否核对），Checks 表 46 条公式驱动 | 附录 A.5 | 我们的建模输入表每行绑 accession + 页码，但 Excel 导出（P13-M5，owner 搁置）规格里还没写「每格一行来源」 | 写进 P13-M5 规格：导出时每个硬编码格子在 Sources 表落一行，来源从 authority 直接生成，不允许手填 |
 | **报告只从唯一状态源生成** | §8.5 教训 | stage-ladder 刚合入：阶段状态跨版本折叠，四处读者共用一个 fold | 一致，且是 Chem 没做到的 |
 
 ## 2. Chem 踩过、我们已经堵上的坑
@@ -55,6 +56,19 @@ Chem 54 天里最有价值的不是文件数量，而是三件事：**按商业�
 - **以文件存在性作完成标准**：Chem 80 项 done = 80 个非空文件。我们的验收是 PM 可用性、独立来源数、rubric 分数。保持。
 - **一个 agent 自证**（写代码、写测试、写报告同一人）：Chem 的 §2 已经在替自己划证据边界。我们今天每条线一个作者一个 reviewer，共抓出 30 多个 blocker，这条差异是实打实的。
 
+## 4b. owner 8-25 思考文档 vs 现行 practice
+
+那篇文档的标注是「外部观点，非设计约束」，但几条和我们的结构直接对得上，列出来是为了说明哪些已经落地、哪些还是空话：
+
+| 原则 | 现在对应 | 状态 |
+| --- | --- | --- |
+| 「组合 PnL = idea 数量 × 命中率 × sizing」 | ConvictionCall 只提案不执行；命中率靠 §3.3 的观点—结果台账 | 台账未建 |
+| 「知道一件事不等于知道它有多重要、该怎么定价」 | DebateMap 的 materiality 排序 + 独立性阶梯；Deep Insight Gate 12 问 | 已建，live 未跑 |
+| 「事实是 fact-empowered views」 | grade / tier + 数字逐字核对 + `[unverified]` 不允许进产出（Chem 的初筛有 56 个 `[unverified]` 标签、54 天没更新） | 已建 |
+| 「文档就是思考过程本身，也是仓库；可前后链接、可搜索、可主动监控」 | CompanyDossierVersion + claim index + FTS；档案版本链就是「前后链接」 | 已建；embedding 检索按 owner 决定 Wave 2 先量 FTS 漏检率 |
+| 「覆盖到只达到共识水平没什么用」 | variant_view 是 dossier 的 constitution 槽位；agree-with-market 在 reflection 里记零价值 | 已建 |
+| 「自建工具过一段时间就得重制」 | 这正是 Chem 的命运；我们靠 registry + contracts + 5,381 项测试对冲 | 结构上已对冲 |
+
 ## 5. 直接落地的清单
 
 | # | 事项 | 去处 | 大小 |
@@ -70,6 +84,39 @@ Chem 54 天里最有价值的不是文件数量，而是三件事：**按商业�
 | 9 | 规则：每次 live 事故必须产出一条测试或 policy 检查 | 计划文档规则 14 | 已写 |
 | 10 | **部署 + mission 版本授权 + 五家第一版档案与 DebateMap 先于任何新切片** | owner runbook v2.0 | 决策 |
 
-## 附录 A：支撑材料数字（subagent 提炼）
+## 附录 A：支撑材料数字（Opus 5 subagent 从 `chem-review-20260910/` 提炼；只读了支撑文件，没读主报告）
 
-（待提炼结果落地后补入：cron 任务与频率、88 项任务的类型分布、92 条决定的词表、176 份产物的版本 / 覆盖分布、Linde 复算细节、owner 8-25 思考的原则清单。）
+### A.1 cron
+21 个 job，574 次记录运行，状态全部 `ok`（零失败、零超时被记录）；21 个里 12 个一次没跑（task2/3/4 系列、template-upgrade、check-phase1-output、`dalton-coverage-zero-base`、skill-collection-review）。历史窗口只有 09-03 → 09-10 约 7 天。
+
+| job | 运行 | 折算频率 |
+| --- | --- | --- |
+| coverage-maintenance | 336 | 约 30 分钟 |
+| coverage-dispatcher | 168 | 约 60 分钟 |
+| coverage-market / filings | 20 / 20 | 约 8.5 小时 |
+| coverage-source-monitor | 14 | 约 12 小时 |
+| coverage-daily-report / health / industry | 5 / 5 / 5 | 约 36 小时（「日报」并非每日） |
+| coverage-weekly-pack | 1 | 09-07 单次 |
+
+停用：本轮新停 10、原已停 10、1 个仍启用（skill-collection-review-chem，「系统限制」）。缺：每 job 停用理由、每次运行成本 / token / 时长、运行级失败日志。`交付验证.json` 仍写 `all_cron_stopped: false`。
+
+### A.2 任务（88 行）
+done 80 / ready 7 / failed 1；尝试次数 1×74、0×7、2×6、3×1。公司：basf 30、wanhua 27、linde 10、行业 21。38 种任务类型，`industry_driver_update` 28、`company_driver_update` 8、`deep_insight_initiation` 3、`price_move_analysis` / `zero_base_review` / `peer_read_across_analysis` 各 3，其余一次性。唯一失败 = 62 号 linde `peer_read_across_analysis`，3 次，`AlphaEngine Desktop status=no_module_page`。缺：创建者列（人 / cron / agent 不可分）、创建 / 开始 / 完成时间戳。
+
+### A.3 决定（92 行）
+词表只有三个 token：NO_CHANGE 89（96.7%）、NEW_THESIS 2、THESIS_STRENGTHENED 1。置信度 medium 67 / high 22 / low 3。100% 引用一个产物路径（72 个不同产物）；88/92 的 thesis 字段含数字，只有 14/92 在行内写来源。缺：作者列。
+
+### A.4 产物（176 个 markdown，1.34 MB）
+research-outputs 106 / wiki 70。basf 26、reports 24（20 日报 + 4 周报）、industry 22、wanhua 22、linde 8、initial-screens 2、consensus 1；wiki = 61 张事实卡 + 3 chains + 4 公司页 + 行业地图。来源链接共 792，61 个文件零链接。155 个文件名带日期（08-11 → 09-09）；只有 4 个 `-v1`、没有 `-v2`、没有重复 SHA——markdown 是「覆盖 vs 换版」不可观测；Excel 版本可见（BASF v0.1 → v0.4）。
+
+### A.5 审计与复算
+9 个工作簿公式 70 – 1,916，`cached_errors` 全空；BASF v0.2 – v0.4 退化为 6 – 8 张表、70 – 229 条公式；`basf-model-v0.1` 与模板字节数、公式数完全一致（从未填过）。Linde 三个情景与备忘录 §4.2 – 4.3 逐位复现，包括缺陷：保守 15 年 IRR = 0.0，因为二分法上下界写死 `[0.0, 1.0]`，负 IRR 被夹到零。交付验证：7 页 PDF、16 个样本哈希一致，但 `historical_financial_sources_all_revalidated: false`。
+
+万华 Q2 模型：11 张表；Cover 写明版本 "2026H1 actual update v2.1"；Sources 表 358 行一格一行；Checks 46 条；Assumptions 表写明「预测列全部有意留空交接」——即 Chem 从未产出自己的预测或估值。万华初筛：12 个 `[W#]` 来源、56 个 `[unverified]` 标签、判定 WATCHLIST（07-18）、价格 as-of 07-17、无修订历史。
+
+### A.6 practice → 可观测结果（摘）
+- maintenance 每 30 分钟跑 336 次，文件索引里没有任何一份产物能归到它名下。
+- 574 次 cron 运行 → 88 个任务 → 92 条决定 → 1 次 thesis 变化。
+- 「日报」job 6 天跑 5 次；30 天里有 20 份日报、4 份周报。
+- 外部依赖（AlphaEngine 桌面页 / 配额）是唯一的真实失败来源，且只在任务 CSV 里可见，cron 历史里看不到。
+- 全部 16 个样本里没有任何飞书 / 投递通道的痕迹。
