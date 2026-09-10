@@ -10,6 +10,8 @@ F16 changes the recurring trigger from calendar-month membership to at least 30 
 
 F17 adds a mandatory verifier call before `ZeroBaseReviewAuthority.record()`. The verifier prompt receives the four answers, the as-of date, and bounded canonical content for the archived theses, debates, and claims. Deterministic validation also rejects global citations or rewritten-line refs outside those archive classes, including event-only grounding. The verifier output is closed to `verdict` and `findings`; malformed output, rejection, an unresolved model family, or a verifier from the producer's family returns `refused` and publishes no review. A successful review stores verifier provenance and the `model_family_ne` evidence in its append-only record. Both purposes charge the coverage pool.
 
+Prompt construction is also fail-closed per company: if bounded archive content would exceed the verifier prompt limit, the result is `refused` before a verifier call and before authority publication; the child continues with the remaining companies.
+
 Deployment wiring now treats producer and verifier as a pair across the CLI, child launcher, lane arguments, plist fragment, model-purpose tier map, `install.sh`, and rehearsal lane-switch inventory. The installer refuses a visibly identical producer/verifier pin.
 
 ## Scope held
@@ -27,7 +29,7 @@ PYTHONPATH=$PWD/src python3 -m unittest tests.test_zero_base_review tests.test_m
 Result:
 
 ```
-Ran 187 tests in 0.459s
+Ran 188 tests in 0.579s
 
 OK
 ```

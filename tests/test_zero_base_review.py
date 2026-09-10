@@ -410,6 +410,22 @@ class ModelCallTests(unittest.TestCase):
         )
         self.assertEqual(found["status"], "refused")
 
+    def test_an_oversize_verifier_prompt_is_refused_before_a_call(self) -> None:
+        producer = review(context(), model=FakeModel(answer()), mission=MISSION,
+                          request_id="r1")
+        verifier = FakeModel({"verdict": "pass", "findings": []})
+        oversized = context(claims=[{
+            "ref": "claim-version:huge", "statement": "x" * 26_000,
+            "aspect": "margin",
+        }])
+        found = verify_review(
+            oversized, producer, model=verifier, mission=MISSION,
+            request_id="r1-verify", family_resolver=lambda _: "openai",
+        )
+        self.assertEqual(found["status"], "refused")
+        self.assertIn("verifier prompt", found["reason"])
+        self.assertEqual(verifier.calls, [])
+
     def test_the_purpose_routes_to_the_brain_tier_and_the_coverage_pool(self) -> None:
         from dalton_core.budget_pools import pool_for_purpose
         from dalton_core.model_fallback_chain import tier_for

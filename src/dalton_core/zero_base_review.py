@@ -780,7 +780,11 @@ def verify_review(
     if producer_family is None:
         return {"status": "refused", "reason": "the producer model family could not be resolved",
                 "independence": independence, "model": None}
-    prompt = build_verifier_prompt(context, answered)
+    try:
+        prompt = build_verifier_prompt(context, answered)
+    except ZeroBaseReviewValidationError as exc:
+        return {"status": "refused", "reason": str(exc), "model": None,
+                "independence": independence}
     try:
         call = model.call(purpose=VERIFIER_PURPOSE, request_id=request_id,
                           prompt=prompt, mission=mission)
