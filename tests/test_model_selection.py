@@ -1295,6 +1295,41 @@ class ReviewFindingTests(StateDirectoryCase):
             carried["purpose_overrides"][BRAIN_PURPOSE]["actor_ref"], OWNER
         )
 
+    def test_reinstall_carries_all_live_product_verifier_overrides(self) -> None:
+        purposes = (
+            "debate_map_verifier", "conviction_call_verifier",
+            "event_judgement_verifier", "thesis_reflection_verifier",
+            "zero_base_review_verifier", "dossier_verifier",
+            "deep_insight_gate_verifier", "industry_framework_verifier",
+            "investment_memo_verifier", "earnings_preview_verifier",
+            "earnings_calibration_verifier",
+        )
+        policy_ref = self.policies["verifier"]
+        for purpose in purposes:
+            policy_ref = publish_selection(
+                self.router, policy_version_ref=policy_ref, purpose=purpose,
+                mode="explicit", chain=["profile:gemini-3-8-flash"],
+                actor_ref=OWNER, now=NOW,
+            )["policy_version_ref"]
+        before = self.router.get_policy(policy_ref)
+
+        # The installer/setup path calls ensure_planner_policy again. A setup
+        # contract change appends a version; every owner override must ride it.
+        installed = ensure_planner_policy(
+            self.router, tier="cheap", now=NOW,
+            policy_id="model-routing-policy:p14m2-verifier",
+        )
+        after = self.router.get_policy(installed["policy_version_ref"])
+        self.assertEqual(after["prior_version_ref"], policy_ref)
+        self.assertEqual(after["purpose_overrides"], before["purpose_overrides"])
+        for purpose in purposes:
+            self.assertEqual(
+                effective_chain(after, purpose, profiles={
+                    row["id"]: row for row in self.router.latest_profiles()
+                })["chain"],
+                ["profile:gemini-3-8-flash"],
+            )
+
     def test_publishing_against_a_version_that_has_moved_on_is_refused(self) -> None:
         stale = self.policies["brain"]
         publish_selection(
