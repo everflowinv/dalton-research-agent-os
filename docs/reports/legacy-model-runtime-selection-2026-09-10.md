@@ -25,10 +25,17 @@ also discovers the conventional deployed `config/service.json` beside a Dalton
 state directory and, for the relevant purpose only, includes the exact nested
 resident pin:
 
-- `bounded_planner.config.routing_policy_ref` for `plan`;
+- `bounded_planner.config.planner_routing_policy_ref` for `plan`;
 - `agenda.config.routing_policy_ref` for `agenda_planning`;
 - `thesis_impact.config.assessment_routing_policy_ref`;
 - `thesis_impact.config.verifier_routing_policy_ref`.
+
+Each resident entry now also receives the selected catalog profile's public
+`credential_slot_ref` in its real slot field (the bounded planner uses
+`planner_credential_slot_refs`; the others use `credential_slot_refs`).  Prior
+slots remain present.  Thus selecting a model on another provider does not
+leave the new policy unusable behind the old provider's single credential
+slot.  No credential value is read or copied.
 
 The service document joins the existing staged write/rollback set, so a late
 replacement failure cannot leave model files and service pins on different
@@ -60,3 +67,36 @@ explicit `plan` choice, verifies both the ordinary model config and the nested
 bounded-planner pin move atomically, and verifies the restart requirement is
 reported. No service was restarted and no live configuration or model was
 called.
+
+An additional route test begins with an OpenAI-only configuration, selects a
+Claude profile outside that legacy pin, reads the updated credential slots,
+and asks the real router for a decision.  It selects the Claude gateway.  An
+absent-purpose route remains on the legacy profile through the companion
+router regression.  The thesis same-family verifier regression now also
+asserts that only the assessment budget admission exists: the verifier is
+rejected before budget reservation and before a second broker call.
+
+## Read-only live-copy rehearsal
+
+The current live router was opened with SQLite `mode=ro`, backed up to a fresh
+temporary directory, synchronized there from the public OpenClaw catalog, and
+paired with temporary copies of the three installed model configurations and
+`service.json`.  Every router path used by the four resident sections pointed
+at the temporary database.  No broker or model was called.
+
+On separate fresh copies, `plan`, `thesis_impact_assessment`, and
+`thesis_impact_verifier` published successfully, changed only temporary files,
+added the selected provider's slot, and reported `requires_restart=true`.
+`agenda_planning` correctly refused before writing because the copied live
+agenda pin is `model-routing-policy-version:dalton-openclaw:2` while `:3` is
+current.  Hashes of every temporary config remained unchanged on that failed
+attempt.  The live activation packet must first align that stale agenda pin
+with the current policy head; the setter does not silently skip it.
+
+After the final router chain was applied, the focused selection suite ran 69
+tests successfully.  The broader 188-test runtime set passed 187 tests and
+exposed one companion-chain failure in
+`test_reservation_covers_expensive_fallback_in_owner_selected_chain`: the
+served fallback cost exceeded its admitted reservation.  That budget defect
+is outside this runtime configuration slice and is reported as an unresolved
+integration blocker rather than described as green.

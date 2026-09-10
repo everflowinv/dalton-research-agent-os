@@ -1329,6 +1329,15 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         shared_ref, assessment_ref, verifier_ref = self._impact_profiles_and_policies(
             router, pinned_profile_id="profile:impact-a"
         )
+        budget = ThesisImpactBudgetStore(
+            Path(self.temp.name) / "fail-closed-budget.sqlite",
+            clock=lambda: fixed_now,
+        )
+        self.addCleanup(budget.close)
+        budget.register_policy(
+            policy_version_id="budget-policy:fail-closed:1",
+            day_cap_micros=1_000_000,
+        )
         broker = FakeBroker(
             Path(self.temp.name),
             self._recorded_response(
@@ -1358,6 +1367,8 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 "credential-slot:openai:impact-a",
                 "credential-slot:anthropic:impact-b",
             ),
+            budget=budget,
+            budget_policy_version_id="budget-policy:fail-closed:1",
             token_counter=lambda _text: 800,
             clock=lambda: fixed_now,
         )
@@ -1373,6 +1384,12 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             "model_family_not_independent", verifier_route["rejection_reasons"]
         )
         self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(
+            budget.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+            ).fetchone()[0],
+            1,
+        )
         self.assertEqual(
             self.harness.core.connection.execute(
                 "SELECT COUNT(*) FROM thesis_impact_assessments"
