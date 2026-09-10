@@ -29,7 +29,7 @@ from typing import Any, Callable, Mapping, Sequence
 from .contracts import ResultEnvelope, WorkOrder
 from .document_extraction import validate_model_config
 from .model_accounting import ModelAccountingError, _route_estimate_micros
-from .model_router import ModelRouter, RoutingPolicyNotFound
+from .model_router import ModelRouter, RoutingPolicyNotFound, independent_families
 from .openclaw_model_adapter import OpenClawModelAdapter, OpenClawModelAdapterError
 from .scheduler import Scheduler
 from .store import content_hash
@@ -418,6 +418,13 @@ class CockpitModel:
                         raise CockpitModelError(
                             "a producer route decision could not prove its model family"
                         ) from exc
+                    if any(family.startswith("unclassified:")
+                           for family in producer_families):
+                        result = _failure(work, "MODEL_ROUTE_REJECTED", None)
+                        scheduler.complete(
+                            work.id, attempt, WORKER_REF, lease["lease_token"], result,
+                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                        raise CockpitModelError("verifier_not_independent")
                     tier = self._chain_tier(router, purpose)
                     if tier is not None:
                         # P14-M: the pinned policy carries this tier's fallback
@@ -456,7 +463,9 @@ class CockpitModel:
                     else:
                         profile = router.get_profile(route["selected_profile_version_ref"])
                         if producer_refs:
-                            if profile.get("family") in producer_families:
+                            if any(not independent_families(
+                                profile["family"], producer_family
+                            ) for producer_family in producer_families):
                                 result = _failure(work, "MODEL_ROUTE_REJECTED", route["id"])
                                 failure = "verifier_not_independent"
                                 completion = scheduler.complete(
@@ -532,9 +541,10 @@ class CockpitModel:
         except RoutingPolicyNotFound:
             return None
         declared = (policy.get("fallback_chains") or {}).get("tiers", {})
-        if not declared:
-            return None
         tier = purpose_tiers().get(purpose)
+        override = (policy.get("purpose_overrides") or {}).get(purpose)
+        if not declared and override is None:
+            return None
         if tier is None:
             # The policy offers chains and this purpose has not said which one
             # it belongs to. Refusing beats guessing: the tier decides what kind
@@ -542,7 +552,7 @@ class CockpitModel:
             raise CockpitModelError(
                 f"the purpose {purpose!r} has no model tier; register one before routing"
             )
-        return tier if tier in declared else None
+        return tier if tier in declared or override is not None else None
 
     def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int) -> int:
         """The most this attempt could cost, whichever link ends up serving.

@@ -169,27 +169,12 @@ def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             raise OpenClawCatalogError(f"broker profile {profile_id} has an invalid model")
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
-        family = profile.get("family")
-        if family is not None and (
-            not isinstance(family, str) or not _TOKEN_RE.fullmatch(family)
-        ):
-            raise OpenClawCatalogError(f"broker profile {profile_id} has an invalid family")
-        capabilities = profile.get("capabilities")
-        if capabilities is not None:
-            capabilities = list(_sequence(capabilities, f"{profile_id}.capabilities"))
-            if (not capabilities or len(set(capabilities)) != len(capabilities)
-                    or any(not isinstance(item, str) or not _TOKEN_RE.fullmatch(item)
-                           for item in capabilities)):
-                raise OpenClawCatalogError(
-                    f"broker profile {profile_id} has invalid capabilities")
         output[profile_id] = {
             "id": profile_id,
             "provider": provider,
             "model": model,
             "model_ref": model_ref,
             "max_tokens": profile.get("maxTokens"),
-            "family": family,
-            "capabilities": capabilities,
         }
     return output
 
@@ -262,6 +247,7 @@ def openclaw_broker_profiles_from_config(
     checked_at: datetime,
     availability_ttl: timedelta = timedelta(days=7),
     profile_ids: Sequence[str] | None = None,
+    metadata_declarations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the runnable verifier catalog from explicitly brokered models.
 
@@ -304,6 +290,12 @@ def openclaw_broker_profiles_from_config(
             raise OpenClawCatalogError(
                 f"broker profile {profile_id} references unknown model {model_ref}"
             )
+        declaration = (metadata_declarations or {}).get(profile_id)
+        if declaration is not None and (
+            declaration.get("provider") != provider_model["provider"]
+            or declaration.get("model") != provider_model["model"]
+        ):
+            declaration = None
         static_route = static.get(profile_id)
         if static_route is not None:
             profile = copy.deepcopy(static_route["profile"])
@@ -315,10 +307,9 @@ def openclaw_broker_profiles_from_config(
             )
             if route_changed:
                 profile["family"] = f"unclassified:{provider_model['provider']}"
-            if broker["family"] is not None:
-                profile["family"] = broker["family"]
-            if broker["capabilities"] is not None:
-                profile["capabilities"] = broker["capabilities"]
+            if declaration is not None:
+                profile["family"] = declaration["family"]
+                profile["capabilities"] = list(declaration["capabilities"])
             context_window = provider_model["context_window"]
             max_output = provider_model["max_output_tokens"]
             broker_max = broker["max_tokens"]
@@ -386,12 +377,13 @@ def openclaw_broker_profiles_from_config(
             "prior_version_ref": None,
             "provider": provider_model["provider"],
             "model": provider_model["model"],
-            "family": broker["family"] or f"unclassified:{provider_model['provider']}",
+            "family": ((declaration or {}).get("family")
+                       or f"unclassified:{provider_model['provider']}"),
             "adapter_ref": ADAPTER_REF,
             "credential_slot_ref": f"credential-slot:openclaw:{provider_model['provider']}",
             # An unknown catalog entry is visible and priceable, but it is not
             # silently certified for hard research or independent verification.
-            "capabilities": broker["capabilities"] or ["research"],
+            "capabilities": list((declaration or {}).get("capabilities") or ["research"]),
             "modalities": ["text"],
             "context": {
                 "max_context_tokens": context_window,
@@ -540,6 +532,22 @@ def _profile_semantics(profile: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _metadata_declarations(router: ModelRouter) -> dict[str, dict[str, Any]]:
+    exists = router.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='model_profile_metadata_declarations'"
+    ).fetchone()
+    if exists is None:
+        return {}
+    rows = router.connection.execute(
+        "SELECT declaration_json FROM model_profile_metadata_declarations d "
+        "WHERE version=(SELECT MAX(version) FROM model_profile_metadata_declarations "
+        "WHERE profile_id=d.profile_id)"
+    ).fetchall()
+    records = [json.loads(row["declaration_json"]) for row in rows]
+    return {record["profile_id"]: record for record in records}
+
+
 def _changed_version(
     latest: Mapping[str, Any], desired: Mapping[str, Any], *, checked_at: datetime
 ) -> dict[str, Any]:
@@ -587,7 +595,10 @@ def catalog_sync_status(
     held = _router_broker_profiles(router)
     desired = {
         profile["id"]: profile
-        for profile in openclaw_broker_profiles_from_config(config, checked_at=checked_at)
+        for profile in openclaw_broker_profiles_from_config(
+            config, checked_at=checked_at,
+            metadata_declarations=_metadata_declarations(router),
+        )
     }
     live = {
         profile_id
@@ -650,7 +661,8 @@ def sync_openclaw_model_catalog(
     desired = {
         profile["id"]: profile
         for profile in openclaw_broker_profiles_from_config(
-            config, checked_at=checked_at, availability_ttl=availability_ttl
+            config, checked_at=checked_at, availability_ttl=availability_ttl,
+            metadata_declarations=_metadata_declarations(router),
         )
     }
     held = _router_broker_profiles(router)

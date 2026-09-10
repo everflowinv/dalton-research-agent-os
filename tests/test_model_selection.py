@@ -138,7 +138,6 @@ def _with_unpriced_model(config: dict) -> dict:
     entry = config["plugins"]["entries"]["dalton-openclaw-model-broker"]
     entry["config"]["profiles"].append({
         "id": UNPRICED_PROFILE_ID, "model": UNPRICED_MODEL_REF, "maxTokens": 131_072,
-        "family": "zai-glm-6", "capabilities": ["verify"],
     })
     entry["llm"]["allowedModels"] = sorted(
         set(entry["llm"]["allowedModels"]) | {UNPRICED_MODEL_REF}
@@ -1243,11 +1242,8 @@ class ReviewFindingTests(StateDirectoryCase):
         _drop_broker_profile(config, "profile:gemini-3-5-flash-lite")
         sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
         decision = self.router.route(
-            # ``verify`` because a profile the catalog lane built for a model
-            # Dalton never curated is conservatively verify-only until somebody
-            # calibrates it; the rule under test is about position, not capability.
-            _work("work:p14m2-unpriced-live", capability="verify"),
-            attempt_number=1, capability="verify",
+            _work("work:p14m2-unpriced-live", capability="research"),
+            attempt_number=1, capability="research",
             policy_version_ref=wire["policy_version_ref"],
             credential_slot_refs=credential_slots_for(
                 self.router, [UNPRICED_PROFILE_ID]

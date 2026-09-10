@@ -246,3 +246,32 @@ CREATE TRIGGER IF NOT EXISTS model_fallback_ack_no_delete
 BEFORE DELETE ON model_fallback_notice_acks BEGIN
     SELECT RAISE(ABORT, 'model fallback acknowledgements are append-only');
 END;
+
+CREATE TABLE IF NOT EXISTS model_profile_metadata_declarations (
+    declaration_ref TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    prior_declaration_ref TEXT,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    family TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    declaration_hash TEXT NOT NULL UNIQUE,
+    declaration_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(profile_id, version)
+);
+CREATE TRIGGER IF NOT EXISTS model_profile_metadata_declaration_insert_authorized
+BEFORE INSERT ON model_profile_metadata_declarations
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'model profile metadata declarations require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_profile_metadata_declaration_no_update
+BEFORE UPDATE ON model_profile_metadata_declarations BEGIN
+    SELECT RAISE(ABORT, 'model profile metadata declarations are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_profile_metadata_declaration_no_delete
+BEFORE DELETE ON model_profile_metadata_declarations BEGIN
+    SELECT RAISE(ABORT, 'model profile metadata declarations are append-only');
+END;

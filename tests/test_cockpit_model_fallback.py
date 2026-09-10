@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -263,6 +264,27 @@ class CockpitChainTests(unittest.TestCase):
                 purpose="p14m_route_verify", request_id="unknown-producer",
                 prompt="verify", mission=self.mission,
                 producer_route_decision_refs=["model-route-decision:missing"],
+            )
+        self.assertEqual(adapter.served, [])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            count = ledger.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_mixed_known_and_unclassified_producers_fail_before_charge(self) -> None:
+        adapter = ChainAdapter({})
+        with patch(
+            "dalton_core.model_fallback_chain.served_family",
+            side_effect=["openai-gpt-6", "unclassified:deepseek"],
+        ), self.assertRaisesRegex(CockpitModelError, "verifier_not_independent"):
+            self._model(
+                adapter, policy_version_ref=self.pinned_policy,
+                slots=["credential-slot:openclaw:openai"],
+            ).call(
+                purpose="p14m_route_verify", request_id="mixed-producers",
+                prompt="verify", mission=self.mission,
+                producer_route_decision_refs=["route:known", "route:unknown"],
             )
         self.assertEqual(adapter.served, [])
         with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:

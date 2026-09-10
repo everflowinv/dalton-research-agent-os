@@ -90,10 +90,25 @@ class CatalogSyncTests(unittest.TestCase):
             ["dalton-openclaw-model-broker"]["config"]["profiles"]
             if row["id"] == profile_id
         )
-        broker.update({
-            "model": "zai/deepseek-next", "maxTokens": 10_000,
-            "family": "deepseek-next", "capabilities": ["research", "verify"],
-        })
+        broker.update({"model": "zai/deepseek-next", "maxTokens": 10_000})
+        declared = self.router.declare_profile_metadata(
+            declaration_ref="model-profile-metadata:deepseek-flash:1",
+            profile_id=profile_id, version=1, prior_declaration_ref=None,
+            provider="zai", model="deepseek-next", family="deepseek-next",
+            capabilities=["research", "verify"], actor_ref="human:owner",
+            created_at=LATER.isoformat(timespec="microseconds"),
+        )
+        replayed = self.router.declare_profile_metadata(
+            declaration_ref="model-profile-metadata:deepseek-flash:1",
+            profile_id=profile_id, version=1, prior_declaration_ref=None,
+            provider="zai", model="deepseek-next", family="deepseek-next",
+            capabilities=["research", "verify"], actor_ref="human:owner",
+            created_at=(LATER + timedelta(minutes=1)).isoformat(timespec="microseconds"),
+        )
+        self.assertEqual((declared["status"], replayed["status"]),
+                         ("fresh", "duplicate"))
+        self.assertEqual(replayed["declaration"]["created_at"],
+                         declared["declaration"]["created_at"])
         rows_before = self.router.connection.execute(
             "SELECT COUNT(*) FROM model_endpoint_profile_versions").fetchone()[0]
         status = catalog_sync_status(self.router, changed, checked_at=LATER)
@@ -190,7 +205,13 @@ class CatalogSyncTests(unittest.TestCase):
             if row["id"] == "profile:deepseek-v4-flash"
         )
         self.assertFalse(independent_families(unknown["family"], "openai-gpt-6"))
-        broker["family"] = "deepseek-v4"
+        self.router.declare_profile_metadata(
+            declaration_ref="model-profile-metadata:deepseek-flash:1",
+            profile_id="profile:deepseek-v4-flash", version=1,
+            prior_declaration_ref=None, provider="deepseek", model="deepseek-alias",
+            family="deepseek-v4", capabilities=["research", "verify"],
+            actor_ref="human:owner", created_at=LATER.isoformat(timespec="microseconds"),
+        )
         recovered = sync_openclaw_model_catalog(self.router, changed, checked_at=LATER)
         self.assertEqual(recovered["updated_profile_ids"], ["profile:deepseek-v4-flash"])
         explicit = next(

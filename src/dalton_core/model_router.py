@@ -892,6 +892,83 @@ class ModelRouter:
             )
             return result
 
+    def declare_profile_metadata(
+        self,
+        *,
+        declaration_ref: str,
+        profile_id: str,
+        version: int,
+        prior_declaration_ref: str | None,
+        provider: str,
+        model: str,
+        family: str,
+        capabilities: Sequence[str],
+        actor_ref: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        """Append an owner declaration bound to one exact broker route."""
+
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "declaration_ref": _ref(declaration_ref, "declaration_ref"),
+            "profile_id": _ref(profile_id, "profile_id"),
+            "version": _positive_int(version, "version"),
+            "prior_declaration_ref": _ref(
+                prior_declaration_ref, "prior_declaration_ref", nullable=True
+            ),
+            "provider": _token(provider, "provider"),
+            "model": _token(model, "model"),
+            "family": _token(family, "family"),
+            "capabilities": list(_unique_tokens(
+                capabilities, "capabilities", nonempty=True
+            )),
+            "actor_ref": _string(actor_ref, "actor_ref"),
+            "created_at": _string(created_at, "created_at"),
+        }
+        _parse_time(body["created_at"], "created_at")
+        record = {**body, "content_hash": canonical_hash(body)}
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT declaration_json FROM model_profile_metadata_declarations "
+                "WHERE declaration_ref=?", (record["declaration_ref"],),
+            ).fetchone()
+            if existing is not None:
+                held = json.loads(existing["declaration_json"])
+                semantic_keys = set(record) - {"created_at", "content_hash"}
+                if any(held.get(key) != record.get(key) for key in semantic_keys):
+                    raise ModelRouterConflict("declaration_ref already has different content")
+                return {"status": "duplicate", "declaration": held}
+            latest = cur.execute(
+                "SELECT declaration_ref,version FROM model_profile_metadata_declarations "
+                "WHERE profile_id=? ORDER BY version DESC LIMIT 1", (record["profile_id"],),
+            ).fetchone()
+            if latest is None:
+                if record["version"] != 1 or record["prior_declaration_ref"] is not None:
+                    raise ModelRouterConflict("first metadata declaration must be version 1")
+            elif (record["version"] != latest["version"] + 1
+                  or record["prior_declaration_ref"] != latest["declaration_ref"]):
+                raise ModelRouterConflict("metadata declaration must extend latest version")
+            cur.execute(
+                "INSERT INTO model_profile_metadata_declarations "
+                "(declaration_ref,profile_id,version,prior_declaration_ref,provider,model,"
+                "family,capabilities_json,actor_ref,declaration_hash,declaration_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (record["declaration_ref"], record["profile_id"], record["version"],
+                 record["prior_declaration_ref"], record["provider"], record["model"],
+                 record["family"], canonical_json(record["capabilities"]),
+                 record["actor_ref"], record["content_hash"], canonical_json(record),
+                 record["created_at"]),
+            )
+        return {"status": "fresh", "declaration": record}
+
+    def latest_profile_metadata(self, profile_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT declaration_json FROM model_profile_metadata_declarations "
+            "WHERE profile_id=? ORDER BY version DESC LIMIT 1",
+            (_ref(profile_id, "profile_id"),),
+        ).fetchone()
+        return None if row is None else json.loads(row["declaration_json"])
+
     def register_policy(self, policy: Mapping[str, Any]) -> dict[str, Any]:
         """Append one routing-policy version with closed filters/preferences."""
         wire = _policy_wire(policy)
