@@ -1,0 +1,11 @@
+{
+  "checked_at": "2026-09-10T03:15:13.124952-04:00",
+  "all_job_ids_preserved": true,
+  "target_count": 21,
+  "newly_disabled": 10,
+  "enabled_remaining": [
+    "skill-collection-review-chem"
+  ],
+  "unrelated_definition_changes": [],
+  "system_owned_block": "system-owned monitor jobs cannot be edited by cron clients"
+}

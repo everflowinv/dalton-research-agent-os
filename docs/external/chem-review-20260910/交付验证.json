@@ -1,0 +1,14 @@
+{
+  "report_pages": 7,
+  "pdf_replacement_characters": 0,
+  "all_sections_present": true,
+  "sample_count": 16,
+  "sample_hashes_match": true,
+  "pdf_text_within_page_bounds": true,
+  "visual_checks": [
+    "page1",
+    "page6"
+  ],
+  "historical_financial_sources_all_revalidated": false,
+  "all_cron_stopped": false
+}

@@ -1,0 +1,188 @@
+[
+  {
+    "job": "dalton-coverage-daily-report",
+    "count": 5,
+    "reported_total": 5,
+    "statuses": {
+      "ok": 5
+    },
+    "first": 1788481800062,
+    "last": 1789000200062
+  },
+  {
+    "job": "dalton-task3-initial-screens",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-coverage-health",
+    "count": 5,
+    "reported_total": 5,
+    "statuses": {
+      "ok": 5
+    },
+    "first": 1788481155309,
+    "last": 1788999300665
+  },
+  {
+    "job": "dalton-task4-model-template",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-coverage-maintenance",
+    "count": 336,
+    "reported_total": 336,
+    "statuses": {
+      "ok": 336
+    },
+    "first": 1788420600057,
+    "last": 1789023600039
+  },
+  {
+    "job": "dalton-coverage-market",
+    "count": 20,
+    "reported_total": 20,
+    "statuses": {
+      "ok": 20
+    },
+    "first": 1788430800057,
+    "last": 1789014000066
+  },
+  {
+    "job": "dalton-coverage-weekly-pack",
+    "count": 1,
+    "reported_total": 1,
+    "statuses": {
+      "ok": 1
+    },
+    "first": 1788741900071,
+    "last": 1788741900071
+  },
+  {
+    "job": "dalton-task4-resume",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-task4-fix",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "chem-template-upgrade-验收-20260727",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-task4fix-acceptance",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "skill-collection-review-chem",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "check-dalton-phase1-output",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "chem-template-upgrade-20260727",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-task4-sol",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-coverage-source-monitor",
+    "count": 14,
+    "reported_total": 14,
+    "statuses": {
+      "ok": 14
+    },
+    "first": 1788434100057,
+    "last": 1788995700060
+  },
+  {
+    "job": "dalton-coverage-filings",
+    "count": 20,
+    "reported_total": 20,
+    "statuses": {
+      "ok": 20
+    },
+    "first": 1788431700061,
+    "last": 1789014900053
+  },
+  {
+    "job": "dalton-coverage-industry",
+    "count": 5,
+    "reported_total": 5,
+    "statuses": {
+      "ok": 5
+    },
+    "first": 1788433800052,
+    "last": 1788952200056
+  },
+  {
+    "job": "dalton-task2-ethylene-tracker",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  },
+  {
+    "job": "dalton-coverage-dispatcher",
+    "count": 168,
+    "reported_total": 168,
+    "statuses": {
+      "ok": 168
+    },
+    "first": 1788419100043,
+    "last": 1789020300147
+  },
+  {
+    "job": "dalton-coverage-zero-base",
+    "count": 0,
+    "reported_total": 0,
+    "statuses": {},
+    "first": null,
+    "last": null
+  }
+]

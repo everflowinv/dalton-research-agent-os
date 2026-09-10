@@ -1,0 +1,82 @@
+[
+  {
+    "样例文件": "01_万华初始筛选.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/initial-screens/wanhua.md",
+    "SHA256": "c6d02df047dddf86b259aaadfcc3eb28311e6cd05133d49027354238f670e654"
+  },
+  {
+    "样例文件": "02_Linde初始筛选.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/initial-screens/linde.md",
+    "SHA256": "372167052ea41c2200de1d251c81e71fac3b4044b0b66308b78fc9d26ff004b0"
+  },
+  {
+    "样例文件": "03_万华DeepInsight.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/wanhua/deep-insights-v1.md",
+    "SHA256": "106ffbd4a938f472683631aebcbf40f45cb00cf87527324726ed9993eac47556"
+  },
+  {
+    "样例文件": "04_万华半年报更新.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/wanhua/2026-08-24-2026h1-earnings-update.md",
+    "SHA256": "7dc4bb888e1be408973aaa0231b5f5895ff21bcba6f6dde810d790bad38c8913"
+  },
+  {
+    "样例文件": "05_万华Q2实际模型.xlsx",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/models/wanhua-simple-model-final.xlsx",
+    "SHA256": "9268098b0c683ba968a149b87495e70cb08e1032127b7d7dc32ff0664275cddb"
+  },
+  {
+    "样例文件": "06_BASF政策审计.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/basf/2026-09-03-citi-eu-protection-policy-scenario.md",
+    "SHA256": "1c7cb90459814af1017a634868f2b555e454b10c389eec23ee2b2098058a242b"
+  },
+  {
+    "样例文件": "07_BASF政策模型.xlsx",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/models/basf-model-v0.4-citi-eu-policy-2026-09-03.xlsx",
+    "SHA256": "c25c04dc64cb2bc2937f624859b9efc15d5c5d02a0679100da8a18393429a89b"
+  },
+  {
+    "样例文件": "08_Linde项目情景_存在待修问题.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/linde/sog-backlog-roic-v1.md",
+    "SHA256": "a786c306ac15a24ecff66c1529af786d410d769c8102c9dbb56feba6d9491b8e"
+  },
+  {
+    "样例文件": "09_Linde原复算脚本_负IRR缺陷.py.txt",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/temp/linde_sog_model.py",
+    "SHA256": "a202665d60710e239624e9d65d9fc9e173b9e5858da71afac8bffc13437b89ae"
+  },
+  {
+    "样例文件": "10_最新日报.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/reports/2026-09-09-daily.md",
+    "SHA256": "105fd4927ad4b4e3e2e01acd107fb4c598ccae1155d3c55e5eb3ed2673cdeb25"
+  },
+  {
+    "样例文件": "11_周报样例.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/reports/2026-09-06-weekly.md",
+    "SHA256": "1d8b2e3dd9cc268edde714d349405220d74c028686e69cf729d7f1a98c6203fe"
+  },
+  {
+    "样例文件": "12_负价差修复.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/industry/2026-09-01-signed-spread-collector-fix.md",
+    "SHA256": "7f4a264347202c6633fe96c3d38476fe9617700ede0b2f38111068f0a61703a9"
+  },
+  {
+    "样例文件": "13_同源公式链去重.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/research-outputs/active-coverage/industry/2026-09-02-industry-companion-event-coalescing.md",
+    "SHA256": "3660b2e383c0da19534fcd60b7002d72725535fcd191376ba904c59bc4cc233f"
+  },
+  {
+    "样例文件": "14_行业地图.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/wiki/industry-map.md",
+    "SHA256": "d5f1e51668a871d40b64cd4342fda961f4a3e6ffea554d64aec0589efeb76e5f"
+  },
+  {
+    "样例文件": "15_事实卡样例.md",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/wiki/facts/2026-09-09-basf-durasorb-cheniere.md",
+    "SHA256": "f2fdb09cd805aa8eb85870fb2842b83902190d2d8c3b019f552568bbced3fdb5"
+  },
+  {
+    "样例文件": "16_化工模型模板.xlsx",
+    "原文件": "/Users/everflow/.openclaw/workspace-chem/models/chem-model-template.xlsx",
+    "SHA256": "7d9da9c89b98301f5dd7bba2e44ea40fcecfad1364fe9cda237cec48f2842729"
+  }
+]

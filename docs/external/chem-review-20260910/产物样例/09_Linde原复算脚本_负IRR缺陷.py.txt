@@ -1,0 +1,70 @@
+import json
+
+# ===== Company-disclosed inputs =====
+backlog_q2_26 = 8.1e9          # SOG backlog 2026-06-30 (10-Q)
+backlog_fy25  = 7.3e9          # 2025-12-31 (10-K)
+backlog_q1_26 = 7.1e9          # 2026-03-31
+startups_2026 = 1.3e9          # company: ~$1.3B project startups during 2026 (H2)
+shares        = 465.0e6       # Q2 2026 diluted shares (464,523K)
+tax_rate      = 0.239         # Q2 2026 adjusted ETR
+da_pct        = 0.05          # D&A = 5% of capex/yr (Dalton assumption)
+maint_pct     = 0.01          # maintenance capex = 1% of capex/yr (Dalton assumption)
+eps_2026_mid  = 17.80
+sellside_2027 = {"JPM": 19.45, "Bernstein": 19.89, "Citi": 20.02}
+
+scenarios = {
+  "conservative": {"rev_conv": 0.20, "ebitda_m": 0.40},
+  "base":         {"rev_conv": 0.30, "ebitda_m": 0.45},
+  "bull":         {"rev_conv": 0.50, "ebitda_m": 0.50},
+}
+# management quotes 20-50% conversion of capex into annual sales; EBITDA margin 40-50% for on-site gas (Dalton assumption range)
+
+out = {}
+for name, s in scenarios.items():
+    rc, em = s["rev_conv"], s["ebitda_m"]
+    full_sales = backlog_q2_26 * rc
+    ebitda     = full_sales * em
+    da         = backlog_q2_26 * da_pct
+    ebit       = ebitda - da
+    nopat      = ebit * (1 - tax_rate)
+    maint      = backlog_q2_26 * maint_pct
+    ufcf       = ebitda - maint - (ebit * tax_rate)
+    roc_ss     = nopat / backlog_q2_26
+    fcf_yield  = ufcf / backlog_q2_26
+
+    def irr_approx(n_years, cf, capex):
+        lo, hi = 0.0, 1.0
+        for _ in range(120):
+            mid = (lo+hi)/2
+            pv = cf * (1-(1+mid)**-n_years)/mid if mid>0 else cf*n_years
+            if pv > capex: lo = mid
+            else: hi = mid
+        return (lo+hi)/2
+
+    irrs = {f"{n}y": round(irr_approx(n, ufcf, backlog_q2_26)*100,1) for n in (15,20,25)}
+
+    # 2027 full-year incremental EPS from 2026 startups ($1.3B capex gas-on in 2026, ramping in 2027)
+    inc_ebitda_2027 = startups_2026 * rc * em
+    inc_nopat_2027  = (startups_2026*rc*em - startups_2026*da_pct) * (1-tax_rate)
+    inc_eps_2027    = inc_nopat_2027 / shares
+    # Full backlog at full ramp: incremental EPS
+    inc_eps_full    = nopat / shares
+    # Share of 2027E EPS growth from 2026 startups (vs Bernstein mid 19.89)
+    growth_2027     = (sellside_2027["Bernstein"] - eps_2026_mid)
+
+    out[name] = {
+        "rev_conv_%": rc*100, "ebitda_margin_%": em*100,
+        "full_ramp_sales_$B": round(full_sales/1e9,2),
+        "full_ramp_ebitda_$B": round(ebitda/1e9,2),
+        "nopat_$B": round(nopat/1e9,2),
+        "unlevered_fcf_$B": round(ufcf/1e9,2),
+        "steady_state_aftertax_roc_%": round(roc_ss*100,1),
+        "unlevered_fcf_yield_%": round(fcf_yield*100,1),
+        "unlevered_irr_%": irrs,
+        "2027_inc_eps_from_2026_startups_$": round(inc_eps_2027,2),
+        "2027_inc_eps_pct_of_growth_%": round(inc_eps_2027/growth_2027*100,1),
+        "full_backlog_inc_eps_$": round(inc_eps_full,2),
+        "full_backlog_pct_of_2026E_eps_%": round(inc_eps_full/eps_2026_mid*100,1),
+    }
+
+print(json.dumps(out, indent=2))
