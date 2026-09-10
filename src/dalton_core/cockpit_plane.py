@@ -173,6 +173,7 @@ REGISTRY_LANE_LABELS = {
     "mission_market_prices": "取每日股价",
     "mission_tracking": "每天盯着已覆盖的公司",
     "mission_catalyst_calendar": "记下公司下次开口的日子",
+    "mission_consensus": "看街上预期什么",
     "company_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
     "claim_index": "给结论建索引",
