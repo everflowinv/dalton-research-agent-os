@@ -180,6 +180,7 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_dossier_lane",
     "dalton_core.mission_deep_insight_lane",
     "dalton_core.mission_conviction_lane",
+    "dalton_core.mission_model_catalog_lane",
 )
 
 # The keys the controller tick's summary already uses for things that are not

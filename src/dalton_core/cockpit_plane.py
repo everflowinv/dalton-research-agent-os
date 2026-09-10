@@ -194,6 +194,7 @@ REGISTRY_LANE_LABELS = {
     "mission_ownership": "看谁在买卖这家公司",
     "conviction_call": "提出值得下注的判断，等你裁决",
     "mission_reopen": "看已过闸的公司够不够重写一版",
+    "catalog_sync": "跟住网关有哪些模型可用",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})

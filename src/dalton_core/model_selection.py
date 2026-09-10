@@ -1,0 +1,325 @@
+"""P14-M2: the owner chooses which model each calling stage uses.
+
+The owner's instruction: in the cockpit, pick the model for each stage of the
+work.  The mechanism is deliberately not a new authority.  **A selection is a
+new pinned routing-policy version**, whose content carries the per-purpose
+override, and whose every predecessor stays byte-identical.
+
+That single decision buys four things that a selection table would have had to
+re-earn one at a time:
+
+* it takes effect on the *next call*, not on the next restart, because every
+  lane already resolves its chain out of the policy version it pinned;
+* it rolls back by being published again -- the previous content is still
+  there, still hashed, still the thing a June route decision names;
+* it cannot drift from what actually ran, because the route decision records
+  the policy hash it routed under, so "which model did the owner have selected
+  when this Claim was produced" is answerable from the decision alone;
+* it is append-only for free.
+
+What this module adds on top is the bookkeeping the choice needs: a lane's
+model configuration file pins a policy *version*, so publishing a new one and
+stopping would leave every lane pinned to the old selection.  Repointing those
+files is the same move ``scripts/raise_day_budget_cap.py`` already makes when
+it appends a day-budget policy version, and it uses the same registry of
+configuration file names, so a lane that registered its configuration is
+repointed without this module having heard of it.
+
+Nothing here opens the Core, writes a Claim, or touches ``openclaw.json``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .model_configurations import model_config_names
+from .model_fallback_chain import (
+    FallbackChainError,
+    purpose_selection,
+    purpose_tiers,
+    tier_for,
+    validate_selection,
+)
+from .model_router import ModelRouter, canonical_json
+from .store import content_hash
+
+SELECTION_MODES: tuple[str, ...] = ("tier", "explicit")
+# The keys that make a policy version a *version* rather than content. Two
+# versions are "the same selection" when everything except these agrees.
+_VERSION_KEYS = frozenset({"policy_version_ref", "version", "created_at",
+                           "prior_version_ref", "content_hash"})
+
+
+class ModelSelectionError(RuntimeError):
+    """The selection cannot be published as asked."""
+
+
+def _write_owner_only(path: Path, value: Any) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def model_configs(state_dir: str | Path) -> list[dict[str, Any]]:
+    """Every registered model configuration file present in the state directory.
+
+    The registry rather than a list here, for the reason it exists: a lane that
+    spends money on a model registers its own configuration name, and a list in
+    this module could only ever be right about the lanes that existed the day it
+    was written.
+    """
+
+    # A registration happens at import, so the registry only knows what has been
+    # imported. Loading the lane registry imports every tick lane; the
+    # claim-index tagger spends on its own configuration without being a tick
+    # lane, so it is named here for the same reason the cap raise names it.
+    from .lane_registry import load_lanes
+
+    load_lanes()
+    import dalton_core.claim_index_tagging  # noqa: F401
+
+    directory = Path(state_dir).expanduser().resolve()
+    found: list[dict[str, Any]] = []
+    for name in model_config_names():
+        path = directory / name
+        if not path.is_file():
+            continue
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ModelSelectionError(f"{path} cannot be read: {exc}") from exc
+        if not isinstance(config, dict) or not isinstance(
+            config.get("routing_policy_ref"), str
+        ):
+            raise ModelSelectionError(f"{path} names no routing policy version")
+        found.append({"name": name, "path": path, "config": config})
+    return found
+
+
+def _next_version_ref(latest: Mapping[str, Any]) -> str:
+    root, separator, tail = str(latest["policy_version_ref"]).rpartition(":")
+    version = int(latest["version"]) + 1
+    if separator and tail.isdigit():
+        return f"{root}:{version}"
+    slug = str(latest["id"]).split(":", 1)[1]
+    return f"model-routing-policy-version:{slug}:{version}"
+
+
+def _latest_policy(router: ModelRouter, policy_id: str) -> dict[str, Any]:
+    row = router.connection.execute(
+        "SELECT policy_json FROM model_routing_policy_versions WHERE policy_id=? "
+        "ORDER BY version DESC LIMIT 1",
+        (policy_id,),
+    ).fetchone()
+    if row is None:
+        raise ModelSelectionError(f"{policy_id} has no versions to build on")
+    return json.loads(row["policy_json"])
+
+
+def publish_selection(
+    router: ModelRouter,
+    *,
+    policy_version_ref: str,
+    purpose: str,
+    mode: str,
+    chain: Sequence[str] = (),
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Append the routing-policy version that carries this selection.
+
+    Built from the *pinned* version's content rather than from scratch, so a
+    selection changes one purpose and leaves every filter, preference and chain
+    exactly as the lane pinned them; appended after the *latest* version,
+    because a version chain is a chain.  Republishing the selection that is
+    already current is a no-op and says so -- pressing 「保存」 twice must not
+    grow the chain by a version that changed nothing.
+    """
+
+    pinned = router.get_policy(policy_version_ref)
+    checked = validate_selection(router, purpose=purpose, mode=mode, chain=chain)
+    overrides = dict(pinned.get("purpose_overrides") or {})
+    entry: dict[str, Any] = {"mode": checked["mode"]}
+    if checked["mode"] == "explicit":
+        entry["chain"] = list(checked["chain"])
+    overrides[purpose] = entry
+    latest = _latest_policy(router, pinned["id"])
+    wire = {
+        key: value for key, value in pinned.items() if key not in _VERSION_KEYS
+    }
+    wire["purpose_overrides"] = overrides
+    comparable = {
+        key: value for key, value in latest.items() if key not in _VERSION_KEYS
+    }
+    if canonical_json(comparable) == canonical_json(wire):
+        return {
+            "status": "duplicate",
+            "policy_id": pinned["id"],
+            "policy_version_ref": latest["policy_version_ref"],
+            "prior_version_ref": latest["prior_version_ref"],
+            **checked,
+        }
+    wire.update({
+        "version": int(latest["version"]) + 1,
+        "prior_version_ref": latest["policy_version_ref"],
+        "policy_version_ref": _next_version_ref(latest),
+        "created_at": (now or datetime.now(timezone.utc)).isoformat(
+            timespec="microseconds"
+        ),
+    })
+    wire["content_hash"] = content_hash(wire)
+    result = router.register_policy(wire)
+    if result["status"] == "conflict":
+        raise ModelSelectionError(result.get("reason", "the policy version conflicted"))
+    return {
+        "status": result["status"],
+        "policy_id": pinned["id"],
+        "policy_version_ref": wire["policy_version_ref"],
+        "prior_version_ref": wire["prior_version_ref"],
+        **checked,
+    }
+
+
+def set_model_selection(
+    state_dir: str | Path,
+    *,
+    purpose: str,
+    mode: str,
+    chain: Sequence[str] = (),
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Publish one stage's selection and repoint every lane that pins a policy.
+
+    Every registered model configuration is repointed, not only the one whose
+    lane happens to own this purpose.  A purpose is a stage of the work, and
+    the stages share policies: pinning the selection into one configuration and
+    not another would mean the same purpose ran different models depending on
+    which lane happened to make the call, which is exactly the confusion
+    per-stage selection exists to end.
+
+    Configurations that pin different policies each get their own new version;
+    a configuration pinning a policy that is already at this selection is left
+    alone rather than rewritten.
+    """
+
+    configs = model_configs(state_dir)
+    if not configs:
+        raise ModelSelectionError(
+            "this machine has no model configuration to point at a selection"
+        )
+    if purpose not in purpose_tiers():
+        raise ModelSelectionError(
+            f"{purpose} is not a calling stage this Core knows about"
+        )
+    published: dict[tuple[str, str], dict[str, Any]] = {}
+    repointed: list[str] = []
+    unchanged: list[str] = []
+    for item in configs:
+        config = item["config"]
+        router_db = config.get("model_router_db")
+        if not isinstance(router_db, str) or not Path(router_db).is_file():
+            raise ModelSelectionError(
+                f"{item['name']} names a model router database that is not here"
+            )
+        key = (router_db, config["routing_policy_ref"])
+        if key not in published:
+            with ModelRouter(router_db) as router:
+                try:
+                    published[key] = publish_selection(
+                        router,
+                        policy_version_ref=config["routing_policy_ref"],
+                        purpose=purpose, mode=mode, chain=chain, now=now,
+                    )
+                except FallbackChainError as exc:
+                    raise ModelSelectionError(str(exc)) from exc
+        outcome = published[key]
+        new_ref = outcome["policy_version_ref"]
+        if new_ref == config["routing_policy_ref"]:
+            unchanged.append(item["name"])
+            continue
+        config["routing_policy_ref"] = new_ref
+        _write_owner_only(item["path"], config)
+        repointed.append(item["name"])
+    versions = sorted(
+        {
+            (outcome["policy_id"], outcome["policy_version_ref"], outcome["status"])
+            for outcome in published.values()
+        }
+    )
+    return {
+        "status": "published" if repointed else "unchanged",
+        "purpose": purpose,
+        "tier": tier_for(purpose),
+        "mode": mode,
+        "chain": list(chain) if mode == "explicit" else [],
+        "policy_versions": [
+            {"policy_id": policy_id, "policy_version_ref": ref, "publication": status}
+            for policy_id, ref, status in versions
+        ],
+        "model_configs_repointed": repointed,
+        "model_configs_unchanged": unchanged,
+        "reload_note": (
+            "不用重启：每条流水线下一次调用时会读到新的策略版本。"
+            "回滚就是把上一版的选择再发布一次。"
+        ),
+    }
+
+
+def current_selection(
+    state_dir: str | Path, *, router_db: str | Path | None = None
+) -> dict[str, Any]:
+    """What each stage runs today, read from the configurations that pin it.
+
+    Read-only, and read through the *pinned* versions rather than the latest,
+    because the pinned version is the one a call will use.
+    """
+
+    configs = model_configs(state_dir)
+    if not configs:
+        return {"available": False,
+                "reason": "这台机器上还没有任何模型配置，所以没有可选的环节"}
+    chosen = configs[0]
+    for item in configs:
+        if router_db is not None and item["config"].get("model_router_db") == str(
+            router_db
+        ):
+            chosen = item
+            break
+    path = chosen["config"]["model_router_db"]
+    if not Path(str(path)).is_file():
+        return {"available": False, "reason": "这台机器上还没有模型路由库"}
+    with ModelRouter(str(path), read_only=True) as router:
+        try:
+            policy: Mapping[str, Any] | None = router.get_policy(
+                chosen["config"]["routing_policy_ref"]
+            )
+        except Exception:  # noqa: BLE001 - an unreadable pin is an empty column
+            policy = None
+        rows = purpose_selection(
+            router, policy=policy, links=router.chain_links()
+        )
+    return {
+        "available": True,
+        "model_config": chosen["name"],
+        "policy_version_ref": chosen["config"]["routing_policy_ref"],
+        "purposes": rows,
+        "modes": list(SELECTION_MODES),
+    }
+
+
+__all__ = [
+    "SELECTION_MODES",
+    "ModelSelectionError",
+    "current_selection",
+    "model_configs",
+    "publish_selection",
+    "set_model_selection",
+]
