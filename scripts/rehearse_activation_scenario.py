@@ -154,17 +154,10 @@ class ActivationScenarioRehearsal(Rehearsal):
         install_model(self.temp_config, tier=manifest["planner"])
         install_deliverable(self.temp_config, tier=manifest["deliverable"])
         installed += ["research-planner-model-config.json", "initial-screen-model-config.json"]
-        outside = []
-        for filename in installed:
-            config = json.loads((self.temp_state / filename).read_text(encoding="utf-8"))
-            for key in ("model_router_db", "broker_socket"):
-                value = config.get(key)
-                if isinstance(value, str) and not Path(value).resolve().is_relative_to(self.temp_root):
-                    outside.append(f"{filename}:{key}={value}")
-        if outside:
-            raise RuntimeError("SIMULATION model configs escaped temp root: " + ", ".join(outside))
+        confined_configs = self.validate_model_config_confinement()
         return (f"SIMULATION mission={mission['id']}; model configs={len(installed)}; "
-                f"governance approvals={len(approved)}; no paid calls", [])
+                f"confined configs={confined_configs}; governance approvals={len(approved)}; "
+                "no paid calls", [])
 
     def report(self) -> str:
         return "SIMULATION — NOT LIVE, NOT PRODUCT ACCEPTANCE\n" + super().report()

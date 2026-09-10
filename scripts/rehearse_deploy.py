@@ -1428,6 +1428,17 @@ class Rehearsal:
             encoding="utf-8",
         )
         os.chmod(self.temp_config, 0o600)
+        rewritten_model_configs = 0
+        for path in sorted(self.temp_state.glob("*-model-config.json")):
+            model_config = json.loads(path.read_text(encoding="utf-8"))
+            rewritten_model = rewrite_paths(model_config, self.replacements)
+            path.write_text(
+                json.dumps(rewritten_model, ensure_ascii=False, indent=2,
+                           sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(path, 0o600)
+            rewritten_model_configs += 1
         remaining = sorted({
             line for line in json.dumps(rewritten, sort_keys=True).split('"')
             if line.startswith(str(self.source_root))
@@ -1442,7 +1453,8 @@ class Rehearsal:
                 "the rewrite, so --source-root is not the root this "
                 "configuration was written against: " + ", ".join(remaining[:4])
             )
-        return f"{self.temp_config} rewritten onto the temp root", []
+        return (f"{self.temp_config} and {rewritten_model_configs} model configs "
+                "rewritten onto the temp root", [])
 
     # -- 2b. confinement ----------------------------------------------------
 
@@ -1451,6 +1463,21 @@ class Rehearsal:
     #: never runs rather than state it could write to.  Anything else is a
     #: rewrite that missed.
     ALLOWED_FOREIGN_KEYS: tuple[str, ...] = ("tailscale_executable", "openclaw_executable")
+
+    def validate_model_config_confinement(self) -> int:
+        """Require every copied or installed runtime model config to be temp-only."""
+
+        checked = 0
+        for path in sorted(self.temp_state.glob("*-model-config.json")):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            stray = foreign_paths(raw, self.temp_root)
+            if stray:
+                raise RuntimeError(
+                    f"{path.name} names {len(stray)} path(s) outside "
+                    f"{self.temp_root}: " + ", ".join(stray[:6])
+                )
+            checked += 1
+        return checked
 
     def confine_to_temp_root(self) -> tuple[str, list[str]]:
         """Refuse to go further unless the tick's configuration is temp-only.
@@ -1480,13 +1507,15 @@ class Rehearsal:
             for key, value in _flatten_paths(raw)
             if value in outside and not key.endswith(self.ALLOWED_FOREIGN_KEYS)
         )
+        model_configs = self.validate_model_config_confinement()
         self.confined = True
         findings = (
             [f"service.json names {len(elsewhere)} path(s) outside the temp root "
              "in blocks the rehearsal does not drive: " + ", ".join(elsewhere[:4])]
             if elsewhere else []
         )
-        return f"bounded_planner.config is confined to {self.temp_root}", findings
+        return (f"bounded_planner.config and {model_configs} model configs are "
+                f"confined to {self.temp_root}", findings)
 
     # -- 3. bootstrap -------------------------------------------------------
 

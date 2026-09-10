@@ -787,6 +787,48 @@ class ConfinementTests(unittest.TestCase):
         self.assertIn(str(self.temp_root), detail)
         self.assertEqual(findings, [])
 
+    def test_rewrite_confines_copied_model_config_without_touching_source(self) -> None:
+        self.live_root.mkdir()
+        live_state = self.live_root / "state" / "dalton-core"
+        live_state.mkdir(parents=True)
+        self.rehearsal.temp_state.mkdir(parents=True)
+        source = live_state / "document-extraction-model-config.json"
+        original = json.dumps({
+            "model_router_db": str(live_state / "model-router.sqlite"),
+            "budget_db": str(live_state / "budget.sqlite"),
+            "broker_socket": str(self.rehearsal.real_home / ".openclaw" / "broker.sock"),
+            "broker_auth_key": str(self.rehearsal.real_home / ".openclaw" / "broker.key"),
+            "routing_policy_ref": "model-routing-policy-version:extraction:1",
+        }).encode()
+        source.write_bytes(original)
+        copied = self.rehearsal.temp_state / source.name
+        copied.write_bytes(original)
+        self._write_config({"core_db": str(self.live_root / "core.sqlite")})
+        self.rehearsal.rewrite_config()
+        rewritten = json.loads(copied.read_text())
+        self.assertEqual(
+            rewritten["model_router_db"],
+            str(self.rehearsal.temp_state / "model-router.sqlite"),
+        )
+        self.assertEqual(
+            rewritten["broker_auth_key"],
+            str(self.rehearsal.stub_broker_dir / "broker.key"),
+        )
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_any_foreign_path_in_a_model_config_fails_confinement(self) -> None:
+        self.rehearsal.temp_state.mkdir(parents=True)
+        (self.rehearsal.temp_state / "document-extraction-model-config.json").write_text(
+            json.dumps({
+                "model_router_db": str(self.temp_root / "state" / "router.sqlite"),
+                "broker_socket": "/foreign/broker.sock",
+            }), encoding="utf-8",
+        )
+        self._write_config({"core_db": str(self.temp_root / "core.sqlite")})
+        with self.assertRaisesRegex(RuntimeError, "document-extraction-model-config"):
+            self.rehearsal.confine_to_temp_root()
+        self.assertFalse(self.rehearsal.confined)
+
     def test_a_config_naming_the_real_root_is_refused(self) -> None:
         live = Path.home() / "Library" / "Application Support" / "Dalton"
         self._write_config({"core_db": str(live / "state" / "dalton-core" / "core.sqlite")})
