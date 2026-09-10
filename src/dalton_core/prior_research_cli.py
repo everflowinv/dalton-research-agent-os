@@ -317,6 +317,7 @@ def import_model(args: argparse.Namespace) -> dict[str, Any]:
 
     from .prior_model_import import (
         PriorModelAuthority,
+        WorkbookReadBudget,
         read_workbook,
         workbook_digest,
     )
@@ -330,6 +331,14 @@ def import_model(args: argparse.Namespace) -> dict[str, Any]:
         )
     root = Path(args.corpus_root).expanduser().resolve()
     workbook = root / header["company"] / header["relative_path"]
+    budget = None
+    model_import_budget = getattr(args, "model_import_budget", None)
+    if model_import_budget is not None:
+        try:
+            raw_budget = json.loads(Path(model_import_budget).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise PriorResearchRunError(f"model import budget is unreadable: {exc}") from exc
+        budget = WorkbookReadBudget.from_mapping(raw_budget)
     store = DaltonStore(str(Path(args.db).expanduser().resolve()))
     try:
         record = PriorModelAuthority(store).publish(
@@ -337,7 +346,7 @@ def import_model(args: argparse.Namespace) -> dict[str, Any]:
             source_document_ref=header["document_id"],
             as_of=header["as_of"],
             workbook_sha256=workbook_digest(workbook),
-            assumptions=read_workbook(workbook),
+            assumptions=read_workbook(workbook, budget=budget),
             actor_ref=args.actor_ref,
             note=header["source_note"],
         )
@@ -360,6 +369,8 @@ def build_import_parser() -> argparse.ArgumentParser:
     parser.add_argument("--corpus-root", required=True)
     parser.add_argument("--document-id", required=True)
     parser.add_argument("--company-ref", required=True)
+    parser.add_argument("--model-import-budget", type=Path, default=None,
+                        help="optional JSON limits; every applied truncation is recorded")
     parser.add_argument(
         "--actor-ref", default="human:coverage-owner",
         help="who is saying this is the fund's earlier view of this company",

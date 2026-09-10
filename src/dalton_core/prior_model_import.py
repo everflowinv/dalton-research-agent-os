@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -58,7 +59,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .store import canonical_json, content_hash
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
+LEGACY_SCHEMA_VERSION = "0.1"
 TABLE = "prior_model_versions"
 _SCHEMA_PATH = Path(__file__).with_name("prior_model_schema.sql")
 
@@ -87,7 +89,35 @@ UNITS: tuple[str, ...] = ("percent", "ratio", "currency", "count")
 MAX_SHEETS = 40
 MAX_ROWS_PER_SHEET = 2_000
 MAX_COLUMNS_PER_SHEET = 200
+# Kept as a legacy export for callers that imported the old safety ceiling.
+# New reads have no silent global cell cap; explicit budgets are recorded.
 MAX_ASSUMPTIONS = 5_000
+
+
+@dataclass(frozen=True)
+class WorkbookReadBudget:
+    max_sheets: int | None = None
+    max_rows_per_sheet: int | None = None
+    max_columns_per_sheet: int | None = None
+    max_cells: int | None = None
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any] | None) -> "WorkbookReadBudget":
+        raw = {} if value is None else dict(value)
+        unknown = set(raw) - {"max_sheets", "max_rows_per_sheet",
+                              "max_columns_per_sheet", "max_cells"}
+        if unknown:
+            raise PriorModelError(f"workbook read budget has unknown fields {sorted(unknown)}")
+        for key, item in raw.items():
+            if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 1):
+                raise PriorModelError(f"workbook read budget {key} must be a positive integer or null")
+        return cls(**raw)
+
+
+class WorkbookReadArtifact(list[dict[str, Any]]):
+    def __init__(self, cells: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any]) -> None:
+        super().__init__(dict(item) for item in cells)
+        self.metadata = dict(metadata)
 MAX_LABEL_CHARS = 200
 MAX_FORMULA_CHARS = 2_000
 
@@ -242,7 +272,8 @@ def _cell_label(
     return ""
 
 
-def read_workbook(path: str | Path) -> list[dict[str, Any]]:
+def read_workbook(path: str | Path, *, budget: WorkbookReadBudget | Mapping[str, Any] | None = None
+                  ) -> WorkbookReadArtifact:
     """Every numeric cell of a workbook, with its formula and its label.
 
     The workbook is opened twice on purpose: once with ``data_only=True`` for
@@ -260,6 +291,7 @@ def read_workbook(path: str | Path) -> list[dict[str, Any]]:
             "guessed at"
         ) from exc
 
+    limits = budget if isinstance(budget, WorkbookReadBudget) else WorkbookReadBudget.from_mapping(budget)
     target = Path(path).expanduser().resolve()
     if not target.is_file():
         raise PriorModelError("prior model workbook is missing")
@@ -267,25 +299,30 @@ def read_workbook(path: str | Path) -> list[dict[str, Any]]:
     formulas = load_workbook(filename=str(target), read_only=False, data_only=False)
     try:
         assumptions: list[dict[str, Any]] = []
+        sheet_metadata: list[dict[str, Any]] = []
+        truncations: list[dict[str, Any]] = []
+        formula_identity: list[dict[str, str]] = []
         for sheet_index, sheet in enumerate(valued.worksheets):
-            if sheet_index >= MAX_SHEETS:
+            if limits.max_sheets is not None and sheet_index >= limits.max_sheets:
+                truncations.append({"scope": "workbook", "reason": "max_sheets",
+                                    "omitted_sheet_count": len(valued.worksheets) - sheet_index})
                 break
             formula_sheet = (
                 formulas[sheet.title] if sheet.title in formulas.sheetnames else None
             )
+            max_row = sheet.max_row if limits.max_rows_per_sheet is None else min(sheet.max_row, limits.max_rows_per_sheet)
+            max_col = sheet.max_column if limits.max_columns_per_sheet is None else min(sheet.max_column, limits.max_columns_per_sheet)
             grid = [
-                list(row[:MAX_COLUMNS_PER_SHEET])
+                list(row[:max_col])
                 for row in sheet.iter_rows(
-                    max_row=MAX_ROWS_PER_SHEET,
-                    max_col=MAX_COLUMNS_PER_SHEET,
+                    max_row=max_row, max_col=max_col,
                     values_only=True,
                 )
             ]
             formula_grid = [] if formula_sheet is None else [
-                list(row[:MAX_COLUMNS_PER_SHEET])
+                list(row[:max_col])
                 for row in formula_sheet.iter_rows(
-                    max_row=MAX_ROWS_PER_SHEET,
-                    max_col=MAX_COLUMNS_PER_SHEET,
+                    max_row=max_row, max_col=max_col,
                     values_only=True,
                 )
             ]
@@ -311,6 +348,7 @@ def read_workbook(path: str | Path) -> list[dict[str, Any]]:
                     if not numeric and not formula:
                         continue
                     cell = sheet.cell(row=row_index + 1, column=column_index + 1)
+                    formula_cell = formula_sheet.cell(row=row_index + 1, column=column_index + 1)
                     address = str(cell.coordinate)
                     label = _cell_label(grid, row_index, column_index)
                     unit, unit_basis = guess_unit(
@@ -324,14 +362,73 @@ def read_workbook(path: str | Path) -> list[dict[str, Any]]:
                         "formula": formula,
                         "unit": unit,
                         "unit_basis": unit_basis,
+                        "cell_role": ("external_formula" if "_xll." in formula or "[" in formula
+                                      else "cross_sheet_formula" if formula and "!" in formula
+                                      else "formula" if formula else "hardcoded_input"),
+                        "number_format": str(cell.number_format)[:200],
+                        "font_color": _font_color(formula_cell),
+                        "period": _period_label(grid, row_index, column_index),
+                        "period_status": _period_status(_period_label(grid, row_index, column_index)),
+                        "source_type": "prior_human_formula" if formula else "prior_human_hardcode",
                     }
                     assumptions.append(entry)
-                    if len(assumptions) >= MAX_ASSUMPTIONS:
-                        return assumptions
-        return assumptions
+                    if formula:
+                        formula_identity.append({"sheet": sheet.title, "cell": address,
+                                                 "formula": formula})
+                    if limits.max_cells is not None and len(assumptions) >= limits.max_cells:
+                        truncations.append({"scope": "workbook", "reason": "max_cells",
+                                            "at_sheet": sheet.title, "at_cell": address})
+                        break
+                if truncations and truncations[-1].get("reason") == "max_cells":
+                    break
+            sheet_metadata.append({"name": sheet.title, "state": sheet.sheet_state,
+                                   "max_row": sheet.max_row, "max_column": sheet.max_column,
+                                   "imported_rows": max_row, "imported_columns": max_col})
+            if sheet.max_row > max_row:
+                truncations.append({"scope": "sheet", "sheet": sheet.title,
+                                    "reason": "max_rows_per_sheet", "omitted_from_row": max_row + 1})
+            if sheet.max_column > max_col:
+                truncations.append({"scope": "sheet", "sheet": sheet.title,
+                                    "reason": "max_columns_per_sheet", "omitted_from_column": max_col + 1})
+            if limits.max_cells is not None and len(assumptions) >= limits.max_cells:
+                break
+        metadata = {"schema_version": "prior-workbook-import-0.1",
+                    "complete": not truncations, "budget": limits.__dict__,
+                    "sheets": sheet_metadata, "truncations": truncations,
+                    "formula_map_hash": content_hash(formula_identity)}
+        return WorkbookReadArtifact(assumptions, metadata)
     finally:
         valued.close()
         formulas.close()
+
+
+def _font_color(cell: Any) -> str | None:
+    color = getattr(getattr(cell, "font", None), "color", None)
+    if color is None:
+        return None
+    if color.type == "rgb" and isinstance(color.rgb, str):
+        return color.rgb
+    if color.type == "theme" and isinstance(color.theme, int):
+        return f"theme:{color.theme}"
+    return None
+
+
+def _period_label(values: Sequence[Sequence[Any]], row_index: int, column_index: int) -> str | None:
+    for up in range(row_index - 1, -1, -1):
+        row = values[up]
+        if column_index < len(row):
+            value = row[column_index]
+            if isinstance(value, (str, int)) and str(value).strip():
+                text = str(value).strip()
+                if re.search(r"(?:FY|CY|[1-4]Q)?\d{2,4}E?$", text):
+                    return text[:40]
+    return None
+
+
+def _period_status(period: str | None) -> str:
+    # Only an explicit estimate suffix is authoritative. An older date may be
+    # an actual, consensus, or historical forecast, so it remains unknown.
+    return "forecast" if period and period.endswith("E") else "unknown"
 
 
 def workbook_digest(path: str | Path) -> str:
@@ -345,6 +442,12 @@ _ASSUMPTION_FIELDS = frozenset({
     "ref", "sheet", "cell", "label", "value", "formula", "unit", "unit_basis",
     "kind", "as_of",
 })
+_ASSUMPTION_FIELDS_V2 = _ASSUMPTION_FIELDS | frozenset({
+    "cell_role", "number_format", "font_color", "period", "period_status", "source_type",
+})
+CELL_ROLES = frozenset({"external_formula", "cross_sheet_formula", "formula", "hardcoded_input"})
+PERIOD_STATUSES = frozenset({"forecast", "unknown"})
+SOURCE_TYPES = frozenset({"prior_human_formula", "prior_human_hardcode"})
 
 _RECORD_FIELDS = frozenset({
     "schema_version", "id", "created_at", "model_ref", "version",
@@ -352,6 +455,7 @@ _RECORD_FIELDS = frozenset({
     "workbook_sha256", "sheets", "assumptions", "assumption_count",
     "note", "actor_ref", "content_hash",
 })
+_RECORD_FIELDS_V2 = _RECORD_FIELDS | frozenset({"import_metadata"})
 
 #: Fields that say when and who rather than what, so a re-import of an
 #: unchanged workbook is a duplicate instead of a second version.
@@ -394,11 +498,13 @@ def model_ref_for(company_ref: str, source_document_ref: str) -> str:
     )
 
 
-def normalize_assumption(raw: Any, *, model_ref: str, as_of: str, index: int) -> dict[str, Any]:
+def normalize_assumption(raw: Any, *, model_ref: str, as_of: str, index: int,
+                         extended: bool = False) -> dict[str, Any]:
     name = f"assumptions[{index}]"
     if not isinstance(raw, Mapping):
         raise PriorModelError(f"{name} must be an object")
-    unknown = set(raw) - _ASSUMPTION_FIELDS
+    allowed = _ASSUMPTION_FIELDS_V2 if extended else _ASSUMPTION_FIELDS
+    unknown = set(raw) - allowed
     if unknown:
         raise PriorModelError(f"{name} has unknown fields {sorted(unknown)}")
     sheet = _text(raw.get("sheet"), f"{name}.sheet", maximum=MAX_LABEL_CHARS)
@@ -423,7 +529,7 @@ def normalize_assumption(raw: Any, *, model_ref: str, as_of: str, index: int) ->
             f"{name}.kind must be {ASSUMPTION_KIND!r}; a prior workbook holds "
             "nothing else, and an imported cell is never an estimate or an actual"
         )
-    return {
+    result = {
         "ref": assumption_ref(model_ref, sheet, cell),
         "sheet": sheet,
         "cell": cell,
@@ -436,6 +542,20 @@ def normalize_assumption(raw: Any, *, model_ref: str, as_of: str, index: int) ->
         "kind": ASSUMPTION_KIND,
         "as_of": as_of,
     }
+    if extended:
+        for field in ("cell_role", "number_format", "font_color", "period",
+                      "period_status", "source_type"):
+            value = raw.get(field)
+            if value is not None and not isinstance(value, str):
+                raise PriorModelError(f"{name}.{field} must be text or null")
+            result[field] = value
+        if result["cell_role"] not in CELL_ROLES:
+            raise PriorModelError(f"{name}.cell_role is not recognized")
+        if result["period_status"] not in PERIOD_STATUSES:
+            raise PriorModelError(f"{name}.period_status is not recognized")
+        if result["source_type"] not in SOURCE_TYPES:
+            raise PriorModelError(f"{name}.source_type is not recognized")
+    return result
 
 
 def build_record(
@@ -445,6 +565,7 @@ def build_record(
     as_of: str,
     workbook_sha256: str,
     assumptions: Sequence[Mapping[str, Any]],
+    import_metadata: Mapping[str, Any] | None = None,
     note: str = "",
 ) -> dict[str, Any]:
     """The un-versioned body of one PriorModelVersion."""
@@ -455,8 +576,10 @@ def build_record(
     if not isinstance(workbook_sha256, str) or _HASH_RE.fullmatch(workbook_sha256) is None:
         raise PriorModelError("workbook_sha256 must be SHA-256 hex")
     model_ref = model_ref_for(company_ref, source_document_ref)
+    extended = import_metadata is not None
     rows = [
-        normalize_assumption(item, model_ref=model_ref, as_of=as_of, index=index)
+        normalize_assumption(item, model_ref=model_ref, as_of=as_of, index=index,
+                             extended=extended)
         for index, item in enumerate(assumptions)
     ]
     if not rows:
@@ -464,13 +587,11 @@ def build_record(
             "a prior model with no assumption cells is not a model; the "
             "workbook read as empty and that is a refusal, not a version"
         )
-    if len(rows) > MAX_ASSUMPTIONS:
-        raise PriorModelError(f"a prior model may hold at most {MAX_ASSUMPTIONS} cells")
     seen = {row["ref"] for row in rows}
     if len(seen) != len(rows):
         raise PriorModelError("two assumptions name the same sheet and cell")
     sheets = sorted({row["sheet"] for row in rows})
-    return {
+    result = {
         "model_ref": model_ref,
         "company_ref": company_ref,
         "source_document_ref": source_document_ref,
@@ -481,16 +602,39 @@ def build_record(
         "assumption_count": len(rows),
         "note": _optional_text(note, "note", maximum=2_000),
     }
+    if import_metadata is not None:
+        metadata = dict(import_metadata)
+        if metadata.get("schema_version") != "prior-workbook-import-0.1":
+            raise PriorModelError("unsupported workbook import metadata schema")
+        if not isinstance(metadata.get("complete"), bool):
+            raise PriorModelError("workbook import metadata complete must be boolean")
+        truncations = metadata.get("truncations")
+        if not isinstance(truncations, list) or metadata["complete"] == bool(truncations):
+            raise PriorModelError("workbook import completeness disagrees with truncations")
+        sheet_rows = metadata.get("sheets")
+        if not isinstance(sheet_rows, list) or len({row.get("name") for row in sheet_rows
+                                                   if isinstance(row, Mapping)}) != len(sheet_rows):
+            raise PriorModelError("workbook import sheets must have unique names")
+        if {row["sheet"] for row in rows} - {row.get("name") for row in sheet_rows}:
+            raise PriorModelError("workbook import metadata omits an imported sheet")
+        formula_identity = [{"sheet": row["sheet"], "cell": row["cell"],
+                             "formula": row["formula"]} for row in rows if row["formula"]]
+        if metadata.get("formula_map_hash") != content_hash(formula_identity):
+            raise PriorModelError("workbook import formula map hash disagrees with cells")
+        result["import_metadata"] = metadata
+    return result
 
 
 def validate_record(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != _RECORD_FIELDS:
+    version_name = value.get("schema_version") if isinstance(value, Mapping) else None
+    fields = _RECORD_FIELDS if version_name == LEGACY_SCHEMA_VERSION else _RECORD_FIELDS_V2
+    if not isinstance(value, Mapping) or set(value) != fields:
         raise PriorModelError(
             "PriorModelVersion has an invalid closed shape; "
-            f"missing={sorted(_RECORD_FIELDS - set(value))}, "
-            f"unknown={sorted(set(value) - _RECORD_FIELDS)}"
+            f"missing={sorted(fields - set(value))}, "
+            f"unknown={sorted(set(value) - fields)}"
         )
-    if value["schema_version"] != SCHEMA_VERSION:
+    if value["schema_version"] not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
         raise PriorModelError("unsupported PriorModelVersion schema_version")
     version = value["version"]
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -501,7 +645,8 @@ def validate_record(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
         raise PriorModelError("PriorModelVersion assumptions must be a non-empty array")
     for index, item in enumerate(rows):
-        normalize_assumption(item, model_ref=model_ref, as_of=as_of, index=index)
+        normalize_assumption(item, model_ref=model_ref, as_of=as_of, index=index,
+                             extended=value["schema_version"] == SCHEMA_VERSION)
     if value["assumption_count"] != len(rows):
         raise PriorModelError("PriorModelVersion assumption_count disagrees with the rows")
     return dict(value)
@@ -596,6 +741,7 @@ class PriorModelAuthority:
         assumptions: Sequence[Mapping[str, Any]],
         actor_ref: str,
         note: str = "",
+        import_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Store one workbook as the next version of its chain.
 
@@ -608,6 +754,8 @@ class PriorModelAuthority:
         actor_ref = _text(actor_ref, "actor_ref")
         if not actor_ref.startswith(("human:", "automation:")):
             raise PriorModelError("actor_ref must use a principal namespace")
+        if import_metadata is None and isinstance(assumptions, WorkbookReadArtifact):
+            import_metadata = assumptions.metadata
         body = build_record(
             company_ref=company_ref,
             source_document_ref=source_document_ref,
@@ -615,6 +763,7 @@ class PriorModelAuthority:
             workbook_sha256=workbook_sha256,
             assumptions=assumptions,
             note=note,
+            import_metadata=import_metadata,
         )
         digest = body_hash(body)
         with self._transaction() as cur:
@@ -627,7 +776,8 @@ class PriorModelAuthority:
                 return {**self.model(head["version_id"]), "status": "duplicate"}
             version = 1 if head is None else int(head["version_number"]) + 1
             record = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": (SCHEMA_VERSION if import_metadata is not None
+                                   else LEGACY_SCHEMA_VERSION),
                 "id": (
                     "prior-model-version:"
                     + content_hash({"ref": body["model_ref"], "version": version})[:32]
@@ -799,6 +949,8 @@ __all__ = [
     "PriorModelAuthority",
     "PriorModelConflict",
     "PriorModelError",
+    "WorkbookReadArtifact",
+    "WorkbookReadBudget",
     "assumption_ref",
     "body_hash",
     "build_record",

@@ -802,6 +802,48 @@ def read_document(
     raise PriorResearchError("no prior-research document with that id is in the corpus")
 
 
+def read_document_artifact(
+    corpus_root: str | Path, document_id: str
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Read one document plus a loss-explicit, inert Office structure manifest.
+
+    The governed connector wire remains byte-compatible. Import and audit tools
+    that need structure call this additive path; embedded objects are hashed but
+    never opened or executed.
+    """
+
+    header, text = read_document(corpus_root, document_id)
+    root = Path(corpus_root).expanduser().resolve()
+    path = _resolve(_company_dir(root, header["company"]), header["relative_path"])
+    if header["doc_format"] == "docx":
+        from .prior_import_assets import docx_artifact_manifest
+        artifact = docx_artifact_manifest(path.read_bytes())
+        artifact["text_projection"] = {
+            "complete": True, "preserves": ["ordered_paragraph_and_table_text"],
+            "omits": ["layout", "styles", "rendered_chart_text"],
+        }
+    elif header["doc_format"] == "xlsx":
+        from .prior_import_assets import xlsx_artifact_manifest
+        artifact = xlsx_artifact_manifest(path)
+        truncated_sheets = [
+            sheet["name"] for sheet in artifact["sheets"]
+            if sheet["max_row"] > MAX_SHEET_ROWS or sheet["max_column"] > MAX_SHEET_COLUMNS
+        ]
+        artifact["text_projection"] = {
+            "complete": not truncated_sheets,
+            "row_limit": MAX_SHEET_ROWS, "column_limit": MAX_SHEET_COLUMNS,
+            "truncated_sheets": truncated_sheets,
+            "preserves": ["cached_values", "sheet_order"],
+            "omits": ["formulas", "styles", "charts", "external_link_targets"],
+        }
+    else:
+        artifact = {"schema_version": "prior-office-artifact-0.1",
+                    "format": header["doc_format"],
+                    "text_projection": {"complete": True, "omits": []}}
+    artifact["file_sha256"] = header["file_sha256"]
+    return header, text, artifact
+
+
 def age_in_months(as_of: str, *, now: date) -> int:
     """Whole months between a prior document's date and ``now``.
 
@@ -864,4 +906,5 @@ __all__ = [
     "prior_research_source_hash",
     "read_body",
     "read_document",
+    "read_document_artifact",
 ]
