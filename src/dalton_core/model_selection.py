@@ -68,6 +68,10 @@ PURPOSE_LABELS: dict[str, str] = {
     "model_spec": "写公司模型规格",
     "claim_index": "给结论打标签",
     "quality": "给产出打分",
+    "document_extraction": "从文档抽取研究事实",
+    "agenda_planning": "旧议程规划",
+    "thesis_impact_assessment": "评估新事实对论点的影响",
+    "thesis_impact_verifier": "核验论点影响评估",
     "event_judgement": "判断新发生的事",
     "event_judgement_verifier": "核验事件判断",
     "zero_base_review": "从零复盘研究判断",
@@ -201,6 +205,33 @@ def model_configs(state_dir: str | Path) -> list[dict[str, Any]]:
     return found
 
 
+def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any] | None:
+    """One resident service pin not represented by a lane model-config file."""
+
+    path = Path(state_dir).expanduser().resolve().parents[1] / "config" / "service.json"
+    if not path.is_file():
+        return None
+    service = json.loads(path.read_text(encoding="utf-8"))
+    locations = {
+        "plan": ("bounded_planner", "routing_policy_ref"),
+        "agenda_planning": ("agenda", "routing_policy_ref"),
+        "thesis_impact_assessment": ("thesis_impact", "assessment_routing_policy_ref"),
+        "thesis_impact_verifier": ("thesis_impact", "verifier_routing_policy_ref"),
+    }
+    location = locations.get(purpose)
+    if location is None:
+        return None
+    section, field = location
+    block = service.get(section)
+    config = block.get("config") if isinstance(block, Mapping) else None
+    if not isinstance(config, Mapping) or not isinstance(config.get(field), str):
+        return None
+    router_db = service.get("model_router_db") or config.get("model_router_db")
+    return {"name": f"service.json#{section}.{field}", "path": path,
+            "config": service, "runtime_config": config, "field": field,
+            "router_db": router_db, "routing_policy_ref": config[field]}
+
+
 def _next_version_ref(latest: Mapping[str, Any]) -> str:
     root, separator, tail = str(latest["policy_version_ref"]).rpartition(":")
     version = int(latest["version"]) + 1
@@ -326,6 +357,9 @@ def set_model_selection(
     """
 
     configs = model_configs(state_dir)
+    runtime = _runtime_policy_config(state_dir, purpose)
+    if runtime is not None:
+        configs.append(runtime)
     if not configs:
         raise ModelSelectionError(
             "this machine has no model configuration to point at a selection"
@@ -340,33 +374,35 @@ def set_model_selection(
     # Validate every router and pinned policy before appending any immutable
     # version. An invalid late config must not leave half the roles selected.
     for item in configs:
-        config = item["config"]
-        router_db = config.get("model_router_db")
+        config = item.get("runtime_config", item["config"])
+        policy_ref = config[item.get("field", "routing_policy_ref")]
+        router_db = item.get("router_db", config.get("model_router_db"))
         if not isinstance(router_db, str) or not Path(router_db).is_file():
             raise ModelSelectionError(
                 f"{item['name']} names a model router database that is not here"
             )
         with ModelRouter(router_db, read_only=True) as router:
-            router.get_policy(config["routing_policy_ref"])
+            router.get_policy(policy_ref)
             try:
                 validate_selection(
                     router, purpose=purpose, mode=mode, chain=chain)
             except FallbackChainError as exc:
                 raise ModelSelectionError(str(exc)) from exc
     for item in configs:
-        config = item["config"]
-        router_db = config.get("model_router_db")
+        config = item.get("runtime_config", item["config"])
+        policy_ref = config[item.get("field", "routing_policy_ref")]
+        router_db = item.get("router_db", config.get("model_router_db"))
         if not isinstance(router_db, str) or not Path(router_db).is_file():
             raise ModelSelectionError(
                 f"{item['name']} names a model router database that is not here"
             )
-        key = (router_db, config["routing_policy_ref"])
+        key = (router_db, policy_ref)
         if key not in published:
             with ModelRouter(router_db) as router:
                 try:
                     published[key] = publish_selection(
                         router,
-                        policy_version_ref=config["routing_policy_ref"],
+                        policy_version_ref=policy_ref,
                         purpose=purpose, mode=mode, chain=chain,
                         actor_ref=actor_ref, now=now,
                     )
@@ -374,10 +410,10 @@ def set_model_selection(
                     raise ModelSelectionError(str(exc)) from exc
         outcome = published[key]
         new_ref = outcome["policy_version_ref"]
-        if new_ref == config["routing_policy_ref"]:
+        if new_ref == policy_ref:
             unchanged.append(item["name"])
             continue
-        config["routing_policy_ref"] = new_ref
+        config[item.get("field", "routing_policy_ref")] = new_ref
         repointed.append(item["name"])
     _write_configs_atomically([
         (item["path"], item["config"])
@@ -402,9 +438,11 @@ def set_model_selection(
         ],
         "model_configs_repointed": repointed,
         "model_configs_unchanged": unchanged,
+        "requires_restart": runtime is not None,
         "reload_note": (
-            "不用重启：每条流水线下一次调用时会读到新的策略版本。"
-            "回滚就是把上一版的选择再发布一次。"
+            ("需要重启常驻服务后生效；service.json 已原子更新。" if runtime is not None
+             else "不用重启：每条流水线下一次调用时会读到新的策略版本。")
+            + "回滚就是把上一版的选择再发布一次。"
         ),
     }
 

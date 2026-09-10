@@ -432,6 +432,7 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
     """Reuse the existing routed worker, including late-lease and replay accounting."""
     worker_ref = WORKER_REF
     namespace = "document-extraction"
+    purpose = "document_extraction"
 
     def __init__(self, *, context_resolver, adapter, budget_store=None, budget_policy_ref=None,
                  mission_resolver=None, **kwargs):

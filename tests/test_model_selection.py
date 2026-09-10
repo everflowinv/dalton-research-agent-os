@@ -517,6 +517,30 @@ class StateDirectoryCase(RouterCase):
 
 
 class SetSelectionTests(StateDirectoryCase):
+    def test_plan_selection_atomically_repoints_the_resident_service_pin(self) -> None:
+        state = self.root / "state" / "dalton-core"
+        state.mkdir(parents=True)
+        moved_config = state / self.config_path.name
+        self.config_path.replace(moved_config)
+        service_path = self.root / "config" / "service.json"
+        service_path.parent.mkdir()
+        service = {
+            "model_router_db": str(self.root / "model-router.sqlite"),
+            "bounded_planner": {"config": {
+                "routing_policy_ref": self.policies["brain"]}},
+        }
+        service_path.write_text(json.dumps(service), encoding="utf-8")
+        result = set_model_selection(
+            state, purpose="plan", mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW)
+        updated = json.loads(service_path.read_text(encoding="utf-8"))
+        self.assertNotEqual(
+            updated["bounded_planner"]["config"]["routing_policy_ref"],
+            self.policies["brain"])
+        self.assertTrue(result["requires_restart"])
+        self.assertIn("service.json#bounded_planner.routing_policy_ref",
+                      result["model_configs_repointed"])
+
     def test_registry_covers_every_installed_role_configuration(self) -> None:
         self.assertEqual(set(model_config_names()), {
             "document-extraction-model-config.json",

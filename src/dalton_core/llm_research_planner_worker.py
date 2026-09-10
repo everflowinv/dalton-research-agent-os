@@ -467,6 +467,7 @@ class LLMResearchPlannerModelWorker:
                 decision_kind="initial" if not prior else "retry",
                 previous_decision_ref=None if not prior else prior[-1]["id"],
                 producer_family=None,
+                purpose="plan",
                 idempotency_key=f"llm-planner-route:{work.id}:{attempt_number}",
             )
             route = routed["decision"]

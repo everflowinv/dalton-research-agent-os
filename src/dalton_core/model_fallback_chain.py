@@ -119,6 +119,10 @@ _PURPOSE_TIERS: dict[str, str] = {
     # a lot of items", which is the cheap tier's whole description.
     "claim_index": TIER_CHEAP,
     "quality": TIER_CHEAP,
+    "document_extraction": TIER_CHEAP,
+    "agenda_planning": TIER_BRAIN,
+    "thesis_impact_assessment": TIER_BRAIN,
+    "thesis_impact_verifier": TIER_VERIFIER,
     # The judgement and cognition layers: each call weighs evidence and writes
     # a position (a decision word, a dossier section, a debate, a call). That
     # is the brain's job, and the verifier chain is what keeps it honest.

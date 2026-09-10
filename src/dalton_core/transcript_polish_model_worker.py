@@ -62,6 +62,7 @@ class RoutedTranscriptPolishModelWorker:
     # retaining the same Scheduler lease, route, replay and accounting chain.
     worker_ref = TRANSCRIPT_POLISH_MODEL_WORKER_REF
     namespace = "transcript-polish-model"
+    purpose: str | None = None
 
     @staticmethod
     def _validate_candidate_sink(sink: Any) -> None:
@@ -320,6 +321,7 @@ class RoutedTranscriptPolishModelWorker:
                 decision_kind="initial" if not prior else "retry",
                 previous_decision_ref=None if not prior else prior[-1]["id"],
                 producer_family=None,
+                purpose=self.purpose,
                 idempotency_key=(
                     f"{self.namespace}-route:{work.id}:{attempt_number}"
                 ),

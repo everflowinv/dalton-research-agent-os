@@ -227,8 +227,11 @@ class ThesisImpactModelWorker:
             raise ThesisImpactModelWorkerRejected(
                 f"{phase} routing policy is not registered in the router authority"
             ) from exc
+        purpose = ("thesis_impact_assessment" if phase == "assessment"
+                   else "thesis_impact_verifier")
+        override = (policy.get("purpose_overrides") or {}).get(purpose)
         allowed = policy.get("filters", {}).get("allowed_profile_ids")
-        if not isinstance(allowed, list) or len(allowed) != 1:
+        if override is None and (not isinstance(allowed, list) or len(allowed) != 1):
             raise ThesisImpactModelWorkerRejected(
                 f"{phase} routing policy is not pinned to exactly one profile"
             )
@@ -768,6 +771,8 @@ class ThesisImpactModelWorker:
                 decision_kind=decision_kind,
                 previous_decision_ref=previous_ref,
                 producer_family=producer_family,
+                purpose=("thesis_impact_assessment" if phase == "assessment"
+                         else "thesis_impact_verifier"),
                 idempotency_key=(
                     f"thesis-impact-route:{work.id}:{attempt_number}"
                 ),

@@ -764,6 +764,7 @@ class AgendaCoordinator:
                         required_context_tokens=max(4096, estimated_input + policy["max_output_tokens"]),
                         estimated_input_tokens=estimated_input,
                         estimated_output_tokens=policy["max_output_tokens"],
+                        purpose="agenda_planning",
                         idempotency_key=f"agenda-route:{cycle_id}:{lease['attempt']['attempt_number']}",
                     )["decision"]
                     if routed["outcome"] != "selected":
