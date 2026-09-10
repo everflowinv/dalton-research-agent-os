@@ -21,3 +21,11 @@ This is a necessary profile-side eligibility check. It does not claim the host r
 `PYTHONPATH=src python3 -m unittest tests.test_model_fallback_chain tests.test_openclaw_catalog_reconcile tests.test_model_catalog_sync tests.test_model_selection tests.test_cockpit_model_fallback`
 
 Result: 150 tests passed. Regression coverage proves the exact error is contract-terminal, the chain makes one broker attempt, only controlled profiles receive verifier eligibility, and provider-contract WorkOrders request the new capability.
+
+## Configured route closure review
+
+The live router gives both controlled candidates the already-declared family `google-gemini-3`; no lineage was invented. The public broker configuration declares `google-generative-ai-count-tokens-v1` for `profile:gemini-3-8-flash` and `profile:gemini-3-1-pro-preview`. The current four verifier policies instead pin Claude Fable 5.1, ZAI GLM 5.3, and Gemini 3.5 Flash Lite, none of which declares provider controls. Catalog synchronization will therefore append new immutable versions for the two controlled profiles and leave the earlier profile bytes/hash intact, but configuration must still explicitly select a controlled profile for each verifier purpose.
+
+Selection validation now refuses an uncontrolled profile before policy publication. A concrete deployment repair can use the existing Cockpit `set_model_selection` operation to select `profile:gemini-3-8-flash` for the relevant verifier purposes (`dossier_verifier`, `deep_insight_gate_verifier`, `industry_framework_verifier`, `investment_memo_verifier`, `earnings_preview_verifier`, `earnings_calibration_verifier`, `event_judgement_verifier`, `thesis_reflection_verifier`, and `zero_base_review_verifier`). This is an explicit per-purpose configuration change rather than a hard-coded default or an implicit expansion of every verifier chain. Actual calls still reject a Google-family producer as non-independent.
+
+No successful controlled invocation for either newly configured Gemini profile exists in the current bounded broker journal, so this review does not claim current host runtime acceptance. The first scheduled call remains the authoritative, no-downgrade runtime check; a runtime capability mismatch will stop on the first profile with `REQUIRED_CONTROLS_UNAVAILABLE` and report the exact safe reason.

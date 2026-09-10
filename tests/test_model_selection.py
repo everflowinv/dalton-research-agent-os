@@ -166,8 +166,22 @@ class RouterCase(unittest.TestCase):
 
     def catalog_config(self) -> dict:
         """What the gateway offers. Overridden where that matters."""
-
-        return _allowing_config()
+        config = _allowing_config()
+        profiles = config["plugins"]["entries"]["dalton-openclaw-model-broker"][
+            "config"
+        ]["profiles"]
+        for profile in profiles:
+            if profile["id"] in {
+                "profile:gemini-3-8-flash",
+                "profile:gemini-3-1-pro-preview",
+            }:
+                profile["providerControls"] = {
+                    "mode": "google-generative-ai-count-tokens-v1",
+                    "rateCard": {"inputPerMillionUsd": "1",
+                                 "outputPerMillionUsd": "2",
+                                 "validUntil": "2026-09-10T09:00:00.000000+00:00"},
+                }
+        return config
 
     def policy(self, tier: str = "brain") -> dict:
         return self.router.get_policy(self.policies[tier])
@@ -380,9 +394,16 @@ class VerifierIndependenceTests(RouterCase):
     def test_bootstrap_brain_defaults_do_not_block_a_verifier_selection(self) -> None:
         checked = validate_selection(
             self.router, purpose=VERIFY_PURPOSE, mode="explicit",
-            chain=["profile:claude-fable-5-1", "profile:zai-glm-5-3"],
+            chain=["profile:gemini-3-8-flash"],
         )
-        self.assertEqual(checked["chain"][0], "profile:claude-fable-5-1")
+        self.assertEqual(checked["chain"][0], "profile:gemini-3-8-flash")
+
+    def test_uncontrolled_profile_cannot_be_selected_for_verification(self) -> None:
+        with self.assertRaisesRegex(FallbackChainError, "providerControls"):
+            validate_selection(
+                self.router, purpose=VERIFY_PURPOSE, mode="explicit",
+                chain=["profile:claude-fable-5-1"],
+            )
 
     def test_unknown_lineage_cannot_be_selected_for_verification(self) -> None:
         config = _config()
@@ -402,7 +423,7 @@ class VerifierIndependenceTests(RouterCase):
     def test_a_verifier_from_a_different_family_is_accepted(self) -> None:
         checked = validate_selection(
             self.router, purpose=VERIFY_PURPOSE, mode="explicit",
-            chain=["profile:zai-glm-5-3", "profile:gemini-3-5-flash-lite"],
+            chain=["profile:gemini-3-8-flash"],
         )
         self.assertEqual(checked["tier"], "verifier")
 
@@ -723,11 +744,11 @@ class SetSelectionTests(StateDirectoryCase):
     ) -> None:
         set_model_selection(
             self.root, purpose=VERIFY_PURPOSE, mode="explicit",
-            chain=["profile:claude-fable-5-1"], now=NOW,
+            chain=["profile:gemini-3-8-flash"], now=NOW,
         )
         current = self.router.get_policy(self.stored()["routing_policy_ref"])
         self.assertEqual(current["purpose_overrides"][VERIFY_PURPOSE]["chain"],
-                         ["profile:claude-fable-5-1"])
+                         ["profile:gemini-3-8-flash"])
 
     def test_a_stage_this_core_does_not_have_is_refused(self) -> None:
         with self.assertRaisesRegex(ModelSelectionError, "not a calling stage"):

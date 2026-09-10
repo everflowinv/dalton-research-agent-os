@@ -12,6 +12,7 @@ from dalton_core.openclaw_catalog_reconcile import (
     load_openclaw_config,
     openclaw_broker_profiles_from_config,
     reconcile_openclaw_model_catalog,
+    sync_openclaw_model_catalog,
 )
 
 
@@ -125,6 +126,39 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         uncontrolled = next(item for item in profiles if item["id"] != controlled["id"])
         self.assertNotIn("provider-controlled-verify",
                          catalog[uncontrolled["id"]]["capabilities"])
+
+    def test_adding_controls_appends_a_profile_version_without_changing_history(self):
+        config = _config()
+        with tempfile.TemporaryDirectory() as directory:
+            with ModelRouter(Path(directory) / "router.sqlite") as router:
+                sync_openclaw_model_catalog(router, config, checked_at=NOW)
+                before = next(
+                    item for item in router.latest_profiles()
+                    if item["id"] == "profile:gemini-3-8-flash"
+                )
+                frozen = copy.deepcopy(before)
+                profile = next(
+                    item for item in config["plugins"]["entries"][
+                        "dalton-openclaw-model-broker"
+                    ]["config"]["profiles"]
+                    if item["id"] == "profile:gemini-3-8-flash"
+                )
+                profile["providerControls"] = {
+                    "mode": "google-generative-ai-count-tokens-v1",
+                    "rateCard": {"inputPerMillionUsd": "1",
+                                 "outputPerMillionUsd": "2",
+                                 "validUntil": "2026-09-10T09:00:00.000000+00:00"},
+                }
+                result = sync_openclaw_model_catalog(router, config, checked_at=NOW)
+                after = next(
+                    item for item in router.latest_profiles()
+                    if item["id"] == "profile:gemini-3-8-flash"
+                )
+                self.assertEqual(result["updated_profile_ids"],
+                                 ["profile:gemini-3-8-flash"])
+                self.assertEqual(router.get_profile(before["profile_version_ref"]), frozen)
+                self.assertEqual(after["prior_version_ref"], before["profile_version_ref"])
+                self.assertIn("provider-controlled-verify", after["capabilities"])
 
     def test_changed_static_route_and_orphan_fail_closed(self):
         config = _config()

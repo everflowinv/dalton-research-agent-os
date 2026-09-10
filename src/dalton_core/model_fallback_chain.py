@@ -461,11 +461,18 @@ def validate_selection(
             )
     if tier == TIER_VERIFIER:
         for profile_id in links:
-            family = held[profile_id]["family"]
+            profile = held[profile_id]
+            family = profile["family"]
             if not family or family.startswith("unclassified:"):
                 raise FallbackChainError(
                     f"{profile_id} has no declared family; declare its lineage "
                     "before selecting it for independent verification"
+                )
+            if "provider-controlled-verify" not in profile["capabilities"]:
+                raise FallbackChainError(
+                    f"{profile_id} does not declare broker-enforced verifier "
+                    "controls; select a profile whose current broker route "
+                    "declares providerControls"
                 )
     return {"purpose": purpose, "tier": tier, "mode": "explicit", "chain": links}
 
