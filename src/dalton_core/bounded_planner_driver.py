@@ -13,7 +13,7 @@ turns the crank.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -71,6 +71,10 @@ class BoundedPlannerDriverConfig:
     planner_broker_client_id: str
     planner_expected_agent_id: str
     planner_max_cost_usd: float
+    planner_call_budget: Mapping[str, Any] = field(default_factory=lambda: {
+        "max_input_tokens": 16_000, "max_output_tokens": 1_200,
+        "max_cost_usd": DEFAULT_PLANNER_MAX_COST_USD, "timeout_seconds": 180,
+    })
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "BoundedPlannerDriverConfig":
@@ -84,7 +88,8 @@ class BoundedPlannerDriverConfig:
             "planner_broker_auth_key", "planner_broker_client_id",
             "planner_expected_agent_id", "planner_max_cost_usd",
         }
-        if set(raw) != expected:
+        optional = {"planner_call_budget"}
+        if set(raw) - optional != expected:
             raise BoundedPlannerDriverError(
                 "bounded planner driver config has an invalid closed shape"
             )
@@ -189,6 +194,25 @@ class BoundedPlannerDriverConfig:
             if value <= 0:
                 raise BoundedPlannerDriverError(f"{field} must be positive")
             numbers[field] = value
+        from .call_budget import CallBudgetError, resolve_call_budget
+        legacy_cost = float(
+            planner_max_cost if planner_max_cost is not None
+            else DEFAULT_PLANNER_MAX_COST_USD
+        )
+        budget_config = {"call_budget": {
+            "max_input_tokens": 16_000,
+            "max_output_tokens": 1_200,
+            "max_cost_usd": legacy_cost,
+            "timeout_seconds": 180,
+        }}
+        if "planner_call_budget" in raw:
+            budget_config["call_budget"].update(raw["planner_call_budget"])
+        try:
+            planner_call_budget = resolve_call_budget(
+                budget_config, "plan", defaults=budget_config["call_budget"]
+            )
+        except (CallBudgetError, TypeError) as exc:
+            raise BoundedPlannerDriverError(f"planner_call_budget is invalid: {exc}") from exc
         return cls(  # type: ignore[arg-type]
             user_agent=user_agent,
             observation_mandate_version_ref=observation_mandate,
@@ -213,6 +237,7 @@ class BoundedPlannerDriverConfig:
                 planner_max_cost if planner_max_cost is not None
                 else DEFAULT_PLANNER_MAX_COST_USD
             ),
+            planner_call_budget=planner_call_budget,
             **paths, **numbers,
         )
 
@@ -437,12 +462,13 @@ class BoundedPlannerDriver:
                         *, pool: str | None = None) -> dict[str, Any]:
         """One bounded model attempt for a loop that can act on the answer."""
 
+        call_budget = self.config.planner_call_budget
         params: dict[str, Any] = {
             "context_pack_ref": context["id"],
-            "max_input_tokens": 16_000,
-            "max_output_tokens": 1_200,
-            "max_cost_usd": self.config.planner_max_cost_usd,
-            "max_seconds": 180,
+            "max_input_tokens": call_budget["max_input_tokens"],
+            "max_output_tokens": call_budget["max_output_tokens"],
+            "max_cost_usd": call_budget["max_cost_usd"],
+            "max_seconds": call_budget["timeout_seconds"],
         }
         # C2b: which capacity pool this loop's call spends from, as the active
         # loops projection reported it. The writer checks it against the loop

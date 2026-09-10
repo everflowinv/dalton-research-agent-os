@@ -710,6 +710,18 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             "mandate-version:test:1", parsed.observation_mandate_version_ref
         )
         self.assertEqual(1, parsed.max_probes_per_tick)
+        self.assertEqual(parsed.planner_call_budget, {
+            "max_input_tokens": 16000, "max_output_tokens": 1200,
+            "max_cost_usd": 0.5, "timeout_seconds": 180,
+        })
+        configured = BoundedPlannerDriverConfig.from_mapping({
+            **raw, "planner_call_budget": {
+                "max_input_tokens": 9000, "max_output_tokens": 700,
+                "max_cost_usd": 0.2, "timeout_seconds": 45,
+            },
+        })
+        self.assertEqual(configured.planner_call_budget["max_cost_usd"], 0.2)
+        self.assertEqual(configured.planner_call_budget["timeout_seconds"], 45)
         bad = dict(raw)
         bad["extra"] = True
         with self.assertRaises(BoundedPlannerDriverError):
