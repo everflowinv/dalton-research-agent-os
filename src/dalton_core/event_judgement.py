@@ -137,6 +137,35 @@ MAX_REFS = 12
 MAX_RECENT_JUDGEMENTS = 5
 MAX_CLAIMS_IN_PROMPT = 12
 MAX_PROMPT_CHARS = 24_000
+MAX_PROMPT_BYTES = 5_000
+
+
+def _bounded_prompt(value: str) -> str:
+    """Keep complete context lines and the complete output contract in-budget."""
+    value = value[:MAX_PROMPT_CHARS]
+    encoded = value.encode("utf-8")
+    if len(encoded) <= MAX_PROMPT_BYTES:
+        return value
+    lines = value.splitlines()
+    contract = next(
+        (index for index, line in enumerate(lines)
+         if line.startswith("Return raw JSON only")),
+        max(0, len(lines) - 12),
+    )
+    tail = lines[contract:]
+    marker = "[additional complete evidence rows omitted at the governed byte bound]"
+    kept = []
+    for line in lines[:contract]:
+        candidate = "\n".join([*kept, line, marker, *tail])
+        if len(candidate.encode("utf-8")) > MAX_PROMPT_BYTES:
+            break
+        kept.append(line)
+    bounded = "\n".join([*kept, marker, *tail])
+    if len(bounded.encode("utf-8")) > MAX_PROMPT_BYTES:
+        raise EventJudgementValidationError(
+            "the closed event output contract exceeds the model input bound"
+        )
+    return bounded
 # Payload fields that hold a ref, named rather than sniffed. Testing a string
 # for a colon would let "3.0:1" or a title with a time in it become a citable
 # ref, and the whole point of the permitted set is that a citation names
@@ -334,7 +363,7 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
     )
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
     prompt = "\n".join(lines)
-    return prompt[:MAX_PROMPT_CHARS]
+    return _bounded_prompt(prompt)
 
 
 def allowed_refs(context: Mapping[str, Any]) -> set[str]:
@@ -615,7 +644,7 @@ def build_reflection_prompt(
         "decides on -- nothing you write here changes a cadence or opens a task."
     )
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
-    return "\n".join(lines)[:MAX_PROMPT_CHARS]
+    return _bounded_prompt("\n".join(lines))
 
 
 def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[str, Any]:
@@ -879,7 +908,7 @@ def build_reflection_verifier_prompt(
         + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict must have no findings; a reject verdict must have at least one.",
     ]
-    return "\n".join(lines)[:MAX_PROMPT_CHARS]
+    return _bounded_prompt("\n".join(lines))
 
 
 def verify_reflection(
@@ -981,7 +1010,7 @@ def build_verifier_prompt(context: Mapping[str, Any], judgement: Mapping[str, An
         + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict must have no findings; a reject verdict must have at least one.",
     ])
-    return "\n".join(lines)[:MAX_PROMPT_CHARS]
+    return _bounded_prompt("\n".join(lines))
 
 
 def validate_verifier_output(value: Any) -> dict[str, Any]:

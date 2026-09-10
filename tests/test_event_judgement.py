@@ -172,8 +172,12 @@ class ContextTests(JudgementHarness):
 
     def test_the_prompt_is_bounded(self):
         for _ in range(40):
-            self.claim(statement="x" * 300)
-        self.assertLessEqual(len(build_judge_prompt(self.context())), 24_000)
+            self.claim(statement="需求仍有韧性，管理层维持全年指引。" * 30)
+        prompt = build_judge_prompt(self.context())
+        self.assertLessEqual(len(prompt.encode("utf-8")), 5_000)
+        self.assertIn("Return raw JSON only", prompt)
+        self.assertIn("Every citation must be a ref printed above", prompt)
+        self.assertIn("complete evidence rows omitted", prompt)
 
     def test_drivers_come_from_the_model_version_with_their_nearest_assumptions(self):
         from tests.test_model_forecast_driver import model as forecast_body

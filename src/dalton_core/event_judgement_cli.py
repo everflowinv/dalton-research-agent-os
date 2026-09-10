@@ -35,6 +35,7 @@ from .budget_pools import POOL_EXHAUSTED_STATUS
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
+    MAX_PROMPT_BYTES,
     EventJudgementAuthority,
     EventJudgementError,
     apply_effect,
@@ -62,8 +63,12 @@ VERIFIER_MODEL_CONFIG = register_model_config_name("event-verifier-model-config.
 # One event's prompt is a table, not a document: the theses, a handful of
 # drivers, five past decisions and a dozen Claims. It has never needed a large
 # window and giving it one would let a bad context grow into a bad answer.
-MAX_INPUT_TOKENS = 60_000
-MAX_OUTPUT_TOKENS = 1_500
+# CockpitModel enforces this field as UTF-8 bytes and also exposes it to the
+# router as the worst-case input-token reservation. Keep the two bounds equal:
+# advertising the old 60k reservation made every current brain route exceed
+# this lane's unchanged $0.10 per-call cap before a call could start.
+MAX_INPUT_TOKENS = MAX_PROMPT_BYTES
+MAX_OUTPUT_TOKENS = 700
 MAX_COST_USD = 0.10
 TIMEOUT_SECONDS = 180
 MAX_EVENTS_PER_COMPANY = 3
