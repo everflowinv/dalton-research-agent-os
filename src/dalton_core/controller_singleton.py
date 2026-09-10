@@ -20,16 +20,18 @@ class ControllerConflict(RuntimeError):
 
 
 def _controller_command(command: str, comm: str, config: Path) -> bool:
-    """Match only a controller executable whose final argument is this config."""
+    """Match only a controller executable whose final arguments name this config."""
 
-    ending = f" --config {config}"
-    if not command.endswith(ending):
+    endings = (f" --config {config}", f" --config {config} --once")
+    ending = next((item for item in endings if command.endswith(item)), None)
+    if ending is None:
         return False
     executable = Path(comm).name.lower()
     prefix = command[:-len(ending)]
-    if executable == "daltond" or prefix.endswith("/daltond") or prefix == "daltond":
+    controller_identity = executable == "daltond" or executable.startswith("python")
+    if controller_identity and (prefix.endswith("/daltond") or prefix == "daltond"):
         return prefix.endswith("daltond")
-    if prefix.endswith(" -m dalton_core.service"):
+    if executable.startswith("python") and prefix.endswith(" -m dalton_core.service"):
         return prefix.endswith(" -m dalton_core.service")
     return False
 
@@ -43,7 +45,7 @@ def resident_controllers(
     target = Path(config).expanduser().resolve()
     try:
         completed = run(
-            ["ps", "-axo", "pid=,comm=,command="], capture_output=True,
+            ["ps", "-axo", "pid=,ucomm=,command="], capture_output=True,
             text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -123,11 +125,15 @@ class ControllerOwnership:
 def check(config: str | Path) -> dict[str, Any]:
     """Read-only pre-install check; deliberately does not create the lock."""
 
-    heartbeat_path(config)  # validate the same config shape the daemon uses
-    pids = resident_controllers(config)
+    path = Path(config).expanduser().resolve()
+    # A first install has no service.json until bootstrap. The installer still
+    # needs to scan the exact future path without creating anything there.
+    if path.exists():
+        heartbeat_path(path)
+    pids = resident_controllers(path)
     if pids:
         raise ControllerConflict(pids, "legacy_controller_already_running")
-    return {"status": "clear", "config": str(Path(config).expanduser().resolve())}
+    return {"status": "clear", "config": str(path)}
 
 
 def main(argv: list[str] | None = None) -> int:

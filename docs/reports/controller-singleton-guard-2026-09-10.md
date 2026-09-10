@@ -34,16 +34,20 @@ It exits 0 with a JSON `clear` result, exits 1 for a matching resident
 controller, and exits 2 when it cannot validate the config or process scan.
 This check is read-only and does not create the lock file, so the installer can
 run it from new source with the old environment before pip, bootstrap, or
-backup. Installer wiring is owned by a separate slice.
+backup. A first install whose `service.json` does not exist is valid: the check
+still scans the exact future path and creates neither its directory nor a lock.
+An existing malformed config remains an error. Installer wiring is owned by a
+separate slice.
 
 ## Validation
 
 `PYTHONPATH=src python3 -m unittest tests.test_controller_singleton tests.test_service`
-passed **50 tests**. Coverage uses real subprocesses to prove lock contention
+passed **51 tests**. Coverage uses real subprocesses to prove lock contention
 and release, and a temporary legacy `dalton_core.service` module with no lock
-to prove resident detection. It also covers different-config and
-string-containing false positives, read-only CLI behavior, and verifies that a
-conflict constructs no `DaltonService` in `--once` mode.
+to prove resident detection, including the `--config PATH --once` form. It also
+covers different-config and fake `echo` false positives, first-install and
+read-only CLI behavior, and verifies that a conflict constructs no
+`DaltonService` in `--once` mode.
 
 Both modified modules passed `py_compile`, and `git diff --check` passed. No
 live process, file, service, or configuration was changed.

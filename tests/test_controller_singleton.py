@@ -62,7 +62,8 @@ class ControllerSingletonTests(unittest.TestCase):
         (package / "__init__.py").write_text("")
         (package / "service.py").write_text("import time; time.sleep(30)\n")
         child = subprocess.Popen(
-            [sys.executable, "-m", "dalton_core.service", "--config", str(self.config)],
+            [sys.executable, "-m", "dalton_core.service", "--config", str(self.config),
+             "--once"],
             env=self._environment(package.parent),
         )
         self.addCleanup(self._stop, child)
@@ -79,14 +80,21 @@ class ControllerSingletonTests(unittest.TestCase):
         output = "\n".join([
             f"10 daltond /runtime/daltond --config {target}",
             f"11 python3 /usr/bin/python3 -m dalton_core.service --config {target}",
-            f"12 echo echo daltond --config {target}",
+            f"12 echo /runtime/daltond --config {target}",
             f"13 daltond /runtime/daltond --config {target}-other",
+            f"14 echo /usr/bin/python3 -m dalton_core.service --config {target}",
+            f"15 Python /usr/bin/python3 -m dalton_core.service --config {target} --once",
         ])
         completed = subprocess.CompletedProcess([], 0, stdout=output, stderr="")
         self.assertEqual(
             resident_controllers(target, self_pid=10, run=lambda *a, **k: completed),
-            [11],
+            [11, 15],
         )
+
+    def test_missing_first_install_config_is_clear_and_creates_nothing(self) -> None:
+        missing = self.root / "fresh" / "service.json"
+        self.assertEqual(check(missing)["status"], "clear")
+        self.assertFalse(missing.parent.exists())
 
     def test_read_only_check_does_not_create_lock_file(self) -> None:
         lock = self.heartbeat.with_name(self.heartbeat.name + ".controller.lock")
