@@ -62,6 +62,11 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("claim_retirement_schema.sql", None),
     ("company_dossier_schema.sql", None),
     ("connector_schema.sql", None),
+    # P15d. Missing since that slice merged: its MigrationSpec was registered
+    # with the deploy rehearsal but not here, so on a live Core the call
+    # schema would have been applied by the first tick of the conviction lane
+    # rather than by the install.
+    ("conviction_call_schema.sql", None),
     ("coverage_mission_schema.sql", None),
     ("credential_authority_schema.sql", None),
     ("debate_map_schema.sql", None),
