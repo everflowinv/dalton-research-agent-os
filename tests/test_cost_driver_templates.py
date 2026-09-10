@@ -9,7 +9,8 @@ from dalton_core.driver_template import (
     cost_slot_ids, cost_template_gaps,
 )
 from dalton_core.model_forecast_driver import (
-    ForecastModelValidationError, build_drivers, build_forecast_model,
+    ForecastModelAuthority, ForecastModelValidationError, build_drivers,
+    build_forecast_model, validate_forecast_model,
 )
 from dalton_core.store import canonical_json
 from dalton_core.store import DaltonStore
@@ -116,6 +117,37 @@ class CostSpecToForecastTests(unittest.TestCase):
         driver = next(item for item in forecast["drivers"]
                       if item.get("concept") == "us-gaap:CostOfRevenue")
         self.assertEqual(driver["cost_driver_slots"], ["delivery_cost"])
+        stored_model = ForecastModelAuthority(store).publish(forecast)
+        reloaded_model = ForecastModelAuthority(store).model(stored_model["id"])
+        reloaded_driver = next(item for item in reloaded_model["drivers"]
+                               if item.get("concept") == "us-gaap:CostOfRevenue")
+        self.assertEqual(reloaded_driver["cost_driver_slots"], ["delivery_cost"])
+
+    def test_forecast_contract_refuses_unknown_or_duplicate_cost_slots(self):
+        body = _spec()
+        body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
+        decided = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        decided = CoverageMissionAuthority(store).record_company_model_spec(
+            decided, mission_version_ref="coverage-mission-version:test:1")
+        table = build_model_inputs(FakeMissions([
+            _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "100"),
+            _line("us-gaap:CostOfRevenue", "2026-03-01", "2026-05-31", "70"),
+        ]), decided)
+        forecast = build_forecast_model(decided, table)
+        stored = ForecastModelAuthority(store).publish(forecast)
+        driver = next(item for item in stored["drivers"]
+                      if item.get("cost_driver_slots"))
+        for invalid in (["not-a-cost-slot"], ["delivery_cost", "delivery_cost"]):
+            changed = json.loads(json.dumps(stored))
+            changed.pop("status", None)
+            changed_driver = next(item for item in changed["drivers"]
+                                  if item["ref"] == driver["ref"])
+            changed_driver["cost_driver_slots"] = invalid
+            with self.assertRaisesRegex(ForecastModelValidationError,
+                                        "cost_driver_slots"):
+                validate_forecast_model(changed)
 
     def test_new_cost_spec_binds_the_registry_and_classification(self):
         body = _spec()
