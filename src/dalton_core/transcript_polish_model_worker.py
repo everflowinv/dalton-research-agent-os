@@ -12,6 +12,7 @@ from .model_accounting import record_model_accounting
 from .model_router import ModelRouter, RoutingPolicyNotFound
 from .openclaw_model_adapter import (
     BrokerConnectionError,
+    BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
 )
@@ -288,13 +289,16 @@ class RoutedTranscriptPolishModelWorker:
 
     def _complete_adapter_failure(self, work, lease, route, exc):
         attempt_number = lease["attempt"]["attempt_number"]
-        retryable = isinstance(exc, BrokerConnectionError)
+        # A generic connection error may follow sendall and therefore may
+        # describe paid work. Only the adapter's proved pre-send subtype can
+        # safely receive another Scheduler attempt.
+        retryable = isinstance(exc, BrokerDefinitelyNotSent)
         result = self._control_result(
             work,
             attempt_number,
             code=(
                 "MODEL_ADAPTER_UNAVAILABLE"
-                if retryable
+                if isinstance(exc, BrokerConnectionError)
                 else "MODEL_ADAPTER_REJECTED"
             ),
             status=(

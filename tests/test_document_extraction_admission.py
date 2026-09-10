@@ -10,7 +10,11 @@ from unittest.mock import patch
 
 from dalton_core.document_extraction import DocumentExtractionService, RESERVATION_HEADROOM, build_work, HermeticExtractionAdapter
 from dalton_core.extraction_priority import window_reservation_micros
-from dalton_core.openclaw_model_adapter import OpenClawModelAdapter, BrokerConnectionError
+from dalton_core.openclaw_model_adapter import (
+    OpenClawModelAdapter,
+    BrokerConnectionError,
+    BrokerDefinitelyNotSent,
+)
 from dalton_core.research_verification import CandidateStagingStore, ResearchVerificationError, ResearchVerificationConflict
 from dalton_core.store import content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore, ThesisImpactDayBudgetExceeded, ThesisImpactBudgetConflict
@@ -282,6 +286,43 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(row['actual_micros'],1000);self.assertTrue(row['usage_entry_ref'])
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM model_mission_budget_bindings').fetchone()[0],1)
 
+    def test_definitely_unsent_link_falls_back_and_admission_names_served_route(self):
+        backup=copy.deepcopy(self.pr);backup.update({
+            'profile_version_ref':'model-profile-version:test-extraction-backup:1',
+            'id':'profile:test-extraction-backup','model':'extraction-backup',
+            'family':'test-extraction-backup',
+            'credential_slot_ref':'credential-slot:openclaw:test-backup'})
+        self.router.register_profile(backup)
+        chain=policy();chain.update({
+            'policy_version_ref':'model-routing-policy-version:test-extraction-chain:1',
+            'id':'model-routing-policy:test-extraction-chain',
+            'purpose_overrides':{'document_extraction':{
+                'mode':'explicit','chain':[self.pr['id'],backup['id']]}}})
+        self.router.register_policy(chain)
+        config=self.h.writer._document_extraction_model_config
+        config['routing_policy_ref']=chain['policy_version_ref']
+        config['credential_slot_refs']=[self.pr['credential_slot_ref'],backup['credential_slot_ref']]
+
+        def fail_then_serve(adapter,work,route,pr,*,before_send=None):
+            if pr['id']==self.pr['id']:
+                self.calls+=1
+                raise BrokerDefinitelyNotSent('synthetic connect refusal')
+            return self.execute(adapter,work,route,pr,before_send=before_send)
+
+        with patch.object(OpenClawModelAdapter,'execute',autospec=True,
+                          side_effect=fail_then_serve):
+            result=self.h.generate()
+        self.assertEqual(result['status'],'succeeded',result)
+        self.assertEqual(self.calls,2)
+        admission=json.loads(self.b.connection.execute(
+            'SELECT record_json FROM thesis_impact_day_admissions').fetchone()[0])
+        decision=self.router.get_decision(admission['route_decision_ref'])
+        self.assertEqual(decision['selected_profile_version_ref'],backup['profile_version_ref'])
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0],1)
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],1)
+
     def test_invalid_provider_output_accounts_failure_and_never_retries(self):
         self.invalid=True
         with self.patch_execute():
@@ -309,6 +350,40 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute('SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],expected)
         self.assertLess(expected,50000)
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],0)
+
+    def test_failed_broker_envelope_keeps_full_reservation_and_does_not_fallback(self):
+        def failed_response(adapter, work, route, pr, *, before_send=None):
+            invocation, result = self.execute(
+                adapter, work, route, pr, before_send=before_send
+            )
+            invocation = replace(
+                invocation,
+                usage={
+                    'input_tokens': None, 'output_tokens': None,
+                    'total_tokens': None, 'cache_read_tokens': None,
+                    'cache_write_tokens': None,
+                    'raw_provider_telemetry': {
+                        'cost': {'available': False, 'usd': None}},
+                },
+            )
+            result = replace(
+                result, status='failed', outputs={},
+                error={'code':'HOST_COMPLETION_FAILED','message':'fixture failed'},
+            )
+            return invocation, result
+
+        with patch.object(OpenClawModelAdapter, 'execute', autospec=True,
+                          side_effect=failed_response):
+            result = self.h.generate()
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0], 0)
+        expected=RESERVATION_HEADROOM*window_reservation_micros(
+            self.pr['cost'],{'max_input_tokens':16000,'max_output_tokens':3000})
+        self.assertEqual(self.b.connection.execute(
+            'SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],
+            expected)
 
     def test_owner_budget_exhausted_blocks_before_adapter(self):
         self.b.admit(policy_version_id='budget:owner:1',day=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).date().isoformat(),

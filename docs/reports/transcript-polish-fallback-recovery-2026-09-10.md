@@ -50,7 +50,10 @@ Command:
 PYTHONPATH=src python3 -m unittest tests.test_transcript_polish_model_worker tests.test_document_extraction_policy_chain
 ```
 
-The final focused run passed 75 tests:
+The final focused run passed 77 tests. It includes a broker-failed envelope
+with unknown usage/cost that remains terminal with its full admission open,
+and an end-to-end B-not-sent to C-served case whose sole admission names C's
+route decision:
 
 ```text
 PYTHONPATH=src python3 -m unittest tests.test_transcript_polish_model_worker tests.test_document_extraction tests.test_document_extraction_admission tests.test_document_extraction_policy_chain tests.test_openclaw_model_adapter
