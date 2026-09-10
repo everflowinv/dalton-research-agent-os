@@ -41,6 +41,7 @@ class MetricDiscoveryLaneTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.h = ExtractionHarness(Path(self.temp.name))
+        self.h.add_issuer_proof()
         self.addCleanup(self.h.close)
 
     def _learn(self, output):
@@ -165,6 +166,7 @@ class ClosedReviewTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.h = ExtractionHarness(Path(self.temp.name))
+        self.h.add_issuer_proof()
         self.addCleanup(self.h.close)
         self.h.missions.resolve_document_review(
             self.h.review["review_id"], resolution="dismissed", actor_ref=OWNER,

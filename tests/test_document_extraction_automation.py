@@ -25,6 +25,7 @@ class AutomationDraftingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.h = ExtractionHarness(self.root); self.addCleanup(self.h.close)
+        self.h.add_issuer_proof()
 
     def _grant_automation(self) -> dict:
         """Publish v2 with AlphaEngine connected and the discovery grant; carry the document forward."""

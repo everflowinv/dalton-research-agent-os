@@ -29,6 +29,7 @@ class NumericLaneTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.h = ExtractionHarness(Path(self.temp.name))
+        self.h.add_issuer_proof()
         self.addCleanup(self.h.close)
 
     def read(self, output):
@@ -130,6 +131,7 @@ class GradedFigureTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.h = ExtractionHarness(Path(self.temp.name))
+        self.h.add_issuer_proof()
         self.addCleanup(self.h.close)
 
     def quote(self):

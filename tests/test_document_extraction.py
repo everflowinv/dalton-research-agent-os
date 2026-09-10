@@ -105,6 +105,27 @@ class ExtractionHarness:
             p = self.ticket_dir / name
             p.write_text(canonical_json(value)); p.chmod(0o600)
 
+    def add_issuer_proof(self):
+        """Record the real search-metadata shape required for an issuer call."""
+        from dalton_core.extraction_backlog import DocumentProvenanceStore
+
+        return DocumentProvenanceStore(
+            self.h.core.connection, clock=self.h.clock
+        ).record({
+            "document_ref": NEW_DOC,
+            "source_ref": "source:alphaengine",
+            "spec_ref": "earnings-call-transcripts",
+            "provenance_tier": "management",
+            "broker": None,
+            "broker_key": "",
+            "title": "Accenture FY2026Q3 Earnings Call Transcript",
+            "authors": None,
+            "sources": None,
+            "named_companies": ["Accenture"],
+            "published_at": None,
+            "metadata_seen": True,
+        })
+
     def context(self, **overrides):
         params = {**self.params, **overrides}
         require_open = params.pop('require_open', True)
