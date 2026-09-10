@@ -3,9 +3,9 @@
 The owner asked that new models register themselves as available rather than
 waiting for somebody to notice.  This is the lane that does it.
 
-Once an hour it reads two subtrees of ``openclaw.json`` -- ``models.providers``
-and the broker plugin's own entry -- and makes the router's catalog agree with
-what the broker offers:
+Once an hour it reads two subtrees of the OpenClaw configuration --
+``models.providers`` and the broker plugin's own entry -- and makes the
+router's catalog agree with what the broker offers:
 
 * a model the broker offers with no profile here is registered as a live
   profile, with the provider's own rate card;
@@ -17,9 +17,10 @@ what the broker offers:
   existing catalog sync appends a version saying so, so a route decision from
   June still resolves its profile and the version chain still reads end to end.
 
-Three things it deliberately does not do.  It never writes ``openclaw.json``:
-letting a model through is a change to a host configuration file and therefore
-the owner's decision, taken in the cockpit through a governance operation.  It
+Three things it deliberately does not do.  It never writes the OpenClaw
+configuration: letting a model through is a change to a host configuration
+file and therefore the owner's decision, taken in the cockpit through a
+governance operation.  It
 never calls a model: registering a profile is bookkeeping, and a lane that
 smoke-tested every new model would spend money on the owner's behalf every time
 the gateway grew one.  And it holds no discretion about *which* models to
@@ -225,8 +226,8 @@ def build_launcher(args: Any) -> Any | None:
 def argv_fragment(context: Any) -> list[str]:
     # The switch file is the switch, as a policy file is for the tracking lane:
     # a Core with no gateway configuration has nothing to follow, and a lane
-    # that guessed at ``~/.openclaw/openclaw.json`` would be a Dalton process
-    # reading a host file nobody pointed it at.
+    # that guessed at the usual place under the home directory would be a
+    # Dalton process reading a host file nobody pointed it at.
     settings = context.state / CONFIG_FILE_NAME
     if not settings.is_file():
         return []
@@ -235,7 +236,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_catalog_sync",
-    order=170,
+    order=20,
     driver_key="catalog_sync",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,
@@ -247,9 +248,10 @@ LANE = register_lane(LaneSpec(
     # modules at once.
     note="P14-M2: follow the gateway's model catalog -- register what the "
          "broker offers, retire what it stopped offering, and name what is "
-         "available but not yet let through. Runs last (170) because nothing "
-         "else in a tick depends on it and it reads a file outside the state "
-         "directory. Makes no model call and no network request.",
+         "available but not yet let through. Runs first (20), before anything "
+         "that routes: a model call in this tick should be admitted against "
+         "the catalog as it is now, not as it was an hour ago. Makes no model "
+         "call and no network request.",
 ))
 
 

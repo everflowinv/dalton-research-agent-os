@@ -25,7 +25,8 @@ it appends a day-budget policy version, and it uses the same registry of
 configuration file names, so a lane that registered its configuration is
 repointed without this module having heard of it.
 
-Nothing here opens the Core, writes a Claim, or touches ``openclaw.json``.
+Nothing here opens the Core, writes a Claim, or touches the OpenClaw
+configuration.
 """
 
 from __future__ import annotations

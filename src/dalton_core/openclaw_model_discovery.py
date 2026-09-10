@@ -11,8 +11,8 @@ because there are three gates, not one:
     the provider catalog offers it and the broker plugin does not list it in
     ``llm.allowedModels``.  Dalton cannot reach it; the gateway could.  This is
     the set the cockpit's 「放行」 button acts on, and letting one through is a
-    write to ``openclaw.json`` and therefore the owner's decision, never a
-    lane's.
+    write to the OpenClaw configuration and therefore the owner's decision,
+    never a lane's.
 
 ``allowed_not_in_dalton``
     the broker allows it and this Core holds no live profile for it.  Normally

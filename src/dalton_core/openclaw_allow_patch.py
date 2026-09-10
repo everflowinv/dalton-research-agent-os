@@ -6,7 +6,8 @@ The owner sees a model in the cockpit's 「可用但未放行」 column and pres
 * two keys move, both inside
   ``plugins.entries.dalton-openclaw-model-broker`` -- one string appended to
   ``llm.allowedModels``, one object appended to ``config.profiles``.  Nothing
-  else in ``openclaw.json`` is read for its value, written, or reordered;
+  else in the OpenClaw configuration is read for its value, written, or
+  reordered;
 * a timestamped backup exists before the write does;
 * the file that lands parses back to exactly the object we meant to write, and
   differs from the file that was there only inside the broker's own subtree --

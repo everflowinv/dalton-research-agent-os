@@ -2971,8 +2971,8 @@ class CockpitPlane:
 
         Everything on this page is read out of two files this process already
         has permission to read -- the model configuration and, when the Core is
-        installed beside a gateway, ``openclaw.json`` -- and out of the router
-        database, read-only.  The cockpit holds no write handle: every button
+        installed beside a gateway, the OpenClaw configuration -- and out of
+        the router database, read-only.  The cockpit holds no write handle: every button
         here goes back out through the writer as the owner's own principal
         (ADR-0006).
         """
@@ -3098,7 +3098,7 @@ class CockpitPlane:
 
         if not configured or not discovery:
             return {"available": False,
-                    "reason": "这台机器没有配 openclaw.json 的位置，所以看不到网关有什么"}
+                    "reason": "这台机器没有配网关配置文件的位置，所以看不到网关有什么"}
         return {
             "available": True,
             "in_sync": bool(discovery.get("in_sync")),
