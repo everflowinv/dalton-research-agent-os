@@ -29,7 +29,8 @@ PYTHONPATH=src:. python3 -m unittest \
   tests.test_earnings_season -q
 ```
 
-All 111 tests passed. The new cases cover first-occurrence refusal followed by a
+All 114 tests passed. The new cases cover first-occurrence refusal followed by a
 different company, restart persistence without another dispatch, affected-only
-input release, and exact launcher targeting. No live state, network, broker, or
-paid model call was used.
+input and model-configuration release, more than eight held windows without
+hiding the ninth, one-read orphan handling, and exact launcher targeting. No
+live state, network, broker, or paid model call was used.

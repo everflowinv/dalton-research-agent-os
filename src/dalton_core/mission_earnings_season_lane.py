@@ -19,6 +19,7 @@ an hour names the same ticket instead of paying twice for the same preview.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -39,6 +40,20 @@ VERIFIER_MODEL_CONFIG = "earnings-season-verifier-model-config.json"
 TRACKING_POLICY = "tracking-policy.json"
 
 
+def _launcher_config_hash(launcher: Any) -> str:
+    parts = []
+    for name in ("writer_model_config", "verifier_model_config", "policy_path"):
+        path = getattr(launcher, name, None)
+        if path is None:
+            parts.append(None)
+            continue
+        try:
+            parts.append(hashlib.sha256(Path(path).read_bytes()).hexdigest())
+        except OSError:
+            parts.append("missing:" + str(path))
+    return content_hash(parts)
+
+
 class MissionEarningsSeasonLaneCoordinator:
     """Launch and settle the earnings-season lane."""
 
@@ -53,6 +68,7 @@ class MissionEarningsSeasonLaneCoordinator:
         self.mission = mission
         self.pending = pending
         self._open: str | None = None
+        self._open_signature: str | None = None
         self._quiet: set[str] = set()
         self.budget = lane_budget("earnings_season", state_dir=launcher.state_dir)
 
@@ -70,6 +86,7 @@ class MissionEarningsSeasonLaneCoordinator:
             "status": ticket.get("status"),
             "ticket_ref": ticket_ref,
             "batch_ref": ticket.get("batch_ref"),
+            "signature": ticket.get("signature") or ticket.get("batch_ref"),
             "season_status": summary.get("season_status"),
             "previews": summary.get("previews"),
             "calibrations": summary.get("calibrations"),
@@ -90,8 +107,7 @@ class MissionEarningsSeasonLaneCoordinator:
         settled = self._settle(self._open)
         if settled is None or settled.get("status") == "running":
             return settled
-        ticket = self.launcher.status(self._open)
-        signature = str(ticket.get("signature") or ticket.get("batch_ref") or "")
+        signature = str(settled.get("signature") or self._open_signature or "")
         windows = settled.get("windows") or []
         if signature and windows:
             outcome = windows[0]
@@ -102,11 +118,18 @@ class MissionEarningsSeasonLaneCoordinator:
                     "status": outcome.get("status"),
                     "failure_reason": outcome.get("reason") or "earnings window refused",
                 })
-        elif signature and not windows:
+        elif signature and not windows and settled.get("status") == "succeeded":
             # Compatibility for pre-window summaries: the historical lane
             # dispatched one opaque batch and suppressed that exact batch.
             self._quiet.add(signature)
+        elif signature and not windows:
+            self.budget.record_settled(signature, {
+                "status": settled.get("status"),
+                "failure_reason": settled.get("failure_reason")
+                or "earnings-season child ended without a window result",
+            })
         self._open = None
+        self._open_signature = None
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -125,6 +148,7 @@ class MissionEarningsSeasonLaneCoordinator:
                               "calibration window open"}
         contract = verifier_provider_contract_fingerprint(
             "earnings_preview_verifier", "earnings_calibration_verifier")
+        config_hash = _launcher_config_hash(self.launcher)
         rows = ([{"occurrence_ref": str(pending).rsplit(":", 1)[0],
                   "window": str(pending).rsplit(":", 1)[-1], "company_ref": None}]
                 if isinstance(pending, str) else list(pending))
@@ -134,7 +158,8 @@ class MissionEarningsSeasonLaneCoordinator:
             occurrence_ref = str(row["occurrence_ref"])
             window = str(row["window"])
             source_hash = str(row.get("input_hash") or content_hash(dict(row)))
-            batch = f"{mission['id']}:{occurrence_ref}:{window}:{source_hash}:{contract}"
+            batch = (f"{mission['id']}:{occurrence_ref}:{window}:{source_hash}:"
+                     f"{config_hash}:{contract}")
             if batch in self._quiet:
                 continue
             decision = self.budget.blocked(batch)
@@ -152,6 +177,7 @@ class MissionEarningsSeasonLaneCoordinator:
                 return {"status": "rejected", "settled": settled,
                         "reason": f"{type(exc).__name__}: {exc}"}
             self._open = ticket["id"]
+            self._open_signature = batch
             return {"status": "launched", "ticket_ref": ticket["id"],
                     "batch_ref": batch, "company_ref": company_ref,
                     "occurrence_ref": occurrence_ref, "window": window,
@@ -162,7 +188,7 @@ class MissionEarningsSeasonLaneCoordinator:
 
 def due_occurrences(
     store: Any, missions: Any, mission: Mapping[str, Any], *, now: Any = None,
-    limit: int = 8,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Every screened company's open, unwritten window.
 
@@ -197,7 +223,7 @@ def due_occurrences(
 
         calendar = CatalystCalendarAuthority(store)
     except Exception:  # noqa: BLE001 - no calendar on this Core
-        return found[:limit]
+        return found if limit is None else found[:limit]
     for row in occurrences_from_calendar(
         store.connection, calendar, company_refs=companies, now=now, limit=limit,
     ):
@@ -205,7 +231,7 @@ def due_occurrences(
             continue
         seen.add((row["occurrence_ref"], row["window"]))
         found.append(row)
-    return found[:limit]
+    return found if limit is None else found[:limit]
 
 
 def newest_due(store: Any, missions: Any, mission: Mapping[str, Any]) -> str | None:

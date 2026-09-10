@@ -30,6 +30,11 @@ class FakeLauncher:
     def __init__(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
         self.state_dir = Path(self._temp.name)
+        self.writer_model_config = self.state_dir / "writer.json"
+        self.verifier_model_config = self.state_dir / "verifier.json"
+        self.writer_model_config.write_text("{}")
+        self.verifier_model_config.write_text("{}")
+        self.policy_path = None
         self.started: list[str] = []
         self.tickets: dict[str, dict] = {}
 
@@ -152,6 +157,51 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(coordinator.dispatch_once()["status"], "held")
         rows[0] = {**rows[0], "input_hash": "c" * 64}
         self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+
+    def test_more_than_eight_held_windows_do_not_hide_the_ninth(self):
+        rows = [{"company_ref": f"company:{number}",
+                 "occurrence_ref": f"occurrence:{number}", "window": "preview",
+                 "input_hash": f"{number:064x}"} for number in range(9)]
+        coordinator = self.coordinator(rows)
+        for number in range(8):
+            launched = coordinator.dispatch_once()
+            self.assertEqual(launched["company_ref"], f"company:{number}")
+            self.launcher.finish(launched["ticket_ref"], season_status="refused", windows=[{
+                **rows[number], "status": "refused", "reason": "refused: unsupported",
+            }])
+        ninth = coordinator.dispatch_once()
+        self.assertEqual(ninth["company_ref"], "company:8")
+
+    def test_model_configuration_change_releases_the_exact_window(self):
+        row = {"company_ref": "company:A", "occurrence_ref": "occurrence:A",
+               "window": "preview", "input_hash": "a" * 64}
+        coordinator = self.coordinator([row])
+        first = coordinator.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], season_status="refused", windows=[{
+            **row, "status": "refused", "reason": "refused: unsupported",
+        }])
+        self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        self.launcher.writer_model_config.write_text('{"routing_policy_ref":"new"}')
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+
+    def test_missing_ticket_is_bounded_without_a_second_status_read(self):
+        from dalton_core.lane_child_launcher import LaneChildTicketNotFound
+
+        row = {"company_ref": "company:A", "occurrence_ref": "occurrence:A",
+               "window": "preview", "input_hash": "a" * 64}
+        coordinator = self.coordinator([row])
+        coordinator.dispatch_once()
+        calls = 0
+
+        def missing(_ticket_ref):
+            nonlocal calls
+            calls += 1
+            raise LaneChildTicketNotFound("gone")
+
+        self.launcher.status = missing
+        result = coordinator.dispatch_once()
+        self.assertEqual(calls, 1)
+        self.assertIn(result["status"], ("launched", "held"))
 
 
 def sqlite_error() -> RuntimeError:

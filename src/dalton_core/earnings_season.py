@@ -385,7 +385,7 @@ def open_occurrences(
     *,
     company_refs: Sequence[str],
     now: datetime | date | None = None,
-    limit: int = 20,
+    limit: int | None = 20,
 ) -> list[dict[str, Any]]:
     """Every occurrence with a window open and nothing written for it yet.
 
@@ -410,7 +410,7 @@ def open_occurrences(
             if already_done(connection, occurrence["window"], occurrence):
                 continue
             out.append(occurrence)
-            if len(out) >= limit:
+            if limit is not None and len(out) >= limit:
                 return out
     return out
 
@@ -421,7 +421,7 @@ def occurrences_from_calendar(
     *,
     company_refs: Sequence[str],
     now: datetime | date | None = None,
-    limit: int = 20,
+    limit: int | None = 20,
 ) -> list[dict[str, Any]]:
     """The same list, derived from C1's calendar instead of the event ledger.
 
@@ -475,7 +475,7 @@ def occurrences_from_calendar(
             if already_done(connection, occurrence["window"], occurrence):
                 continue
             out.append(occurrence)
-            if len(out) >= limit:
+            if limit is not None and len(out) >= limit:
                 return out
     return out
 
