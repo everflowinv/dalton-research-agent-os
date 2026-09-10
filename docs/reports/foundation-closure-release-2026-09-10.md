@@ -35,3 +35,12 @@ unchanged, and repeated current identities remain idempotent.
 Deployment was in progress when this report was written. This report records
 accepted code and offline evidence only; it does not claim deployment or
 product acceptance is complete.
+
+
+## Runtime verification after installation
+
+The installed d297c0f runtime now matches all 553 reviewed package files. The retained source archive matches all 1,806 tracked files, and the three managed host repair artifacts match their reviewed hashes. All 12 model selections/budget blocks and effective selected credentials survived installation; mission v14 retains its original signed hash.
+
+Installer health initially failed with ENOSPC during SQLite projection and heartbeat writes. Completed temporary rehearsal state was removed while reports and all deployment backups were retained. No database rollback or reinstall occurred. PID17146 recovered, and a four-sample health receipt subsequently passed every check; receipt SHA-256 `47f546068e337f9fad28c46a206e5af60c35bca51fbfe6c2a7d5ce4a58c45d5c`.
+
+Runtime acceptance is complete; research product acceptance is not. The snapshot has one current bound ACN DebateMap out of 15 target products, and no published forecast model. Nineteen exact host-failure recovery authorities were appended with conservative cost corrections, but that does not prove they were consumed: the upper coordinator's global failure holds can prevent re-entry. Per-company/per-event scheduling and exact failure traces are being repaired. Genuine content and human-governance refusals remain in force.
