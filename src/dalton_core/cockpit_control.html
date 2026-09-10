@@ -802,6 +802,9 @@ function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运�
     const ul=node("ul",null,"latest");
     dep.items.forEach(it=>ul.append(node("li",`${it.lane_label}：${it.item_key} — ${it.reason}`)));
     s.append(ul);sheet.append(s)});
+  if(r.permission_count){const s=node("section");s.append(node("h3",`待授权 · ${r.permission_count} 件`),
+    node("div","权限或治理配置改变后继续；等待期间不重复调用。","hint"));const ul=node("ul",null,"latest");
+    (r.permission_items||[]).forEach(it=>ul.append(node("li",`${it.lane_label}：${it.reason}`)));s.append(ul);sheet.append(s)}
   if(r.terminal_count){const s=node("section");
     s.append(node("h3",`读到了但用不了 · ${r.terminal_count} 件`),
              node("div","这些不会再重试；内容本身读不出来，再试一次读到的还是同样的字节。","hint"));

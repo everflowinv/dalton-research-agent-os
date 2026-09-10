@@ -99,7 +99,7 @@ def flat_universe(
 
 def add_judgement(
     store: Any, *, judgement_id: str, company_ref: str, decision: str, action: str,
-    created_at: str, event_ref: str | None = None,
+    created_at: str, event_ref: str | None = None, effect: dict | None = None,
 ) -> dict[str, Any]:
     """One row in the real ``event_judgements`` table, through its triggers."""
 
@@ -109,6 +109,8 @@ def add_judgement(
         "company_ref": company_ref, "decision": decision, "action": action,
         "verdict": "pass", "created_at": created_at,
     }
+    if effect is not None:
+        record["effect"] = effect
     record["content_hash"] = content_hash(
         {key: value for key, value in record.items() if key != "content_hash"}
     )

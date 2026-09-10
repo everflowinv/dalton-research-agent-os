@@ -285,6 +285,17 @@ class OutcomeAuthorityTests(unittest.TestCase):
         self.assertEqual((second["fresh"], second["duplicate"]), (0, 1))
         self.assertEqual(len(self.outcomes.versions(checks[0]["check_ref"])), 1)
 
+    def test_monthly_attribution_alias_is_not_a_second_outcome(self) -> None:
+        add_judgement(
+            self.store, judgement_id="event-judgement:alias", company_ref="company:ACN",
+            decision="NO_CHANGE", action="no_change", created_at=at(DAYS[0]),
+            effect={"kind": "grouped_judgement", "status": "recorded",
+                    "primary_event_ref": "research-event:event-judgement:one"},
+        )
+        checks = self.build()
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["judgement_ref"], "event-judgement:one")
+
     def test_a_pending_check_that_settles_becomes_a_second_version(self) -> None:
         short = flat_universe(
             DAYS[:3], subject="company:ACN", subject_closes=[100.0, 98.0, 96.0],

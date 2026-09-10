@@ -389,7 +389,7 @@ def gradable_judgements(
     if not _table_exists(connection, "event_judgements"):
         return []
     query = (
-        "SELECT judgement_id, event_ref, company_ref, decision, action, created_at "
+        "SELECT judgement_id, event_ref, company_ref, decision, action, created_at, record_json "
         "FROM event_judgements"
     )
     params: list[Any] = []
@@ -400,6 +400,9 @@ def gradable_judgements(
     rows = connection.execute(query, params).fetchall()
     graded = []
     for row in rows:
+        record = json.loads(row["record_json"])
+        if (record.get("effect") or {}).get("kind") == "grouped_judgement":
+            continue  # Attribution aliases are not independent decisions.
         kind = check_kind_for(row["action"])
         if kind is None:
             continue
