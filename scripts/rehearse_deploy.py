@@ -661,6 +661,9 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     # discovered-document rows the debate map's independence ladder reads --
     # so it belongs here and not among the sidecars.
     MigrationSpec("extraction_backlog_schema.sql", "dalton_core.extraction_backlog", "DocumentProvenanceStore", "core"),
+    # P14b / P14d: the revision loop's two decision ledgers, both on the shared store.
+    MigrationSpec("thesis_revision_schema.sql", "dalton_core.thesis_revision", "ThesisRevisionAuthority", "core"),
+    MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
 )
 
 SIDECAR_MIGRATIONS: tuple[MigrationSpec, ...] = (
