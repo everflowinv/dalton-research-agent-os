@@ -120,7 +120,7 @@ def build_company_model_state(
             "WHERE i.evidence_kind='market_proxy' AND i.version_number=(SELECT "
             "MAX(ix.version_number) FROM claim_index_entry_versions ix WHERE "
             "ix.entry_ref=i.entry_ref) AND "
-            "p.target_subject_ref=? AND p.created_at=(SELECT MAX(x.created_at) "
+            "p.target_subject_ref=? AND p.version_number=(SELECT MAX(x.version_number) "
             "FROM market_proxy_claim_versions x WHERE x.mapping_ref=p.mapping_ref) "
             "ORDER BY p.mapping_ref", (company_ref,)).fetchall()
         proxies = [json.loads(row["record_json"]) for row in rows]

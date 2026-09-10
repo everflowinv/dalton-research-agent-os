@@ -305,8 +305,6 @@ def validate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = content_hash(body)
     if wire["content_hash"] != expected:
         raise ClaimIndexConflict("ClaimIndexEntryVersion content hash drifted")
-    if legacy:
-        wire["evidence_kind"] = "statement"
     return wire
 
 
@@ -334,9 +332,10 @@ def _decode(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
         "is_canonical": int(entry["is_canonical"]),
         "actor_ref": entry["actor_ref"],
         "created_at": entry["created_at"],
-        "evidence_kind": entry["evidence_kind"],
     }
     keys = set(row.keys())
+    if "evidence_kind" in entry:
+        columns["evidence_kind"] = entry["evidence_kind"]
     for column, expected in columns.items():
         if column in keys and row[column] != expected:
             raise ClaimIndexConflict(f"{name} column {column} drifted")

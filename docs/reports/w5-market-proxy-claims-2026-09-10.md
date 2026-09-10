@@ -32,6 +32,33 @@ It does not mutate the mission, and rejects mappings whose target is outside
 the active mission. Empty or absent mappings do nothing. The proposed
 deployment config is empty and therefore cannot activate collection.
 
+The installer seeds that empty file once as `market-proxy-mappings.json`, and
+the lane launch fragment passes it only when the approved yfinance governance
+record is also present. Editing the runtime mapping is therefore a concrete
+owner action; installation itself selects no proxy.
+
+## Review corrections
+
+The mapping itself is now part of immutable identity. Each `mapping_ref` has a
+monotonic version chain; the uniqueness key binds `mapping_hash` and source
+series version, so changing target, gap, aspect, metric, or ticker against the
+same source creates a new record rather than replaying stale metadata. The
+authority migrates the earlier pre-binding table shape on startup. Model state
+chooses the greatest mapping version, avoiding timestamp ties.
+
+Price acquisition still requires only `market_price`. Deriving proxy Evidence,
+Claim and ClaimIndex records additionally requires all three explicit mission
+scopes: `evidence`, `claim`, and `claim_index`. Missing scopes report
+`not_permitted` while price collection continues. A failure in one mapping is
+reported on that mapping and does not stop another mapping or the ordinary
+company-price lane. Config loading rejects one source-series identity paired
+with inconsistent tickers.
+
+Legacy ClaimIndex records remain their original closed wire. Decoding does not
+inject `evidence_kind` into old JSON; the physical column carries the
+`statement` compatibility default, while a legacy wire can be validated again
+against its unchanged content hash.
+
 The model-spec consumer joins current proxy authority records through current
 ClaimIndex entries. It carries them into the hashed company state and prompt,
 including the source version/hash and mandatory gap. A refreshed source series
@@ -46,7 +73,7 @@ No new lane or model purpose was added; derivation itself has zero model cost.
 Focused ClaimIndex suite: **137 tests passed in 1.005s**.
 
 Combined runtime, migration, ClaimIndex, service, market-price, model-state and
-model-spec suite: **364 tests passed in 3.537s**.
+model-spec suite after review repairs: **368 tests passed in 3.453s**.
 
 The dedicated seven tests cover empty config, closed mappings, settled and
 provisional series, immutable provenance, ClaimIndex kind, actual exclusion,

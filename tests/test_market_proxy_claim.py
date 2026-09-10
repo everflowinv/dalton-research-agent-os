@@ -13,6 +13,8 @@ from dalton_core.market_proxy_claim import (
     MarketProxyClaimAuthority, MarketProxyClaimError, load_mappings,
 )
 from dalton_core.mission_market_price_lane import MissionMarketPriceLaneCoordinator
+from dalton_core.mission_market_price_lane import argv_fragment
+from dalton_core.lane_registry import LaunchAgentContext
 from dalton_core.store import DaltonStore, canonical_json, content_hash
 from tests.test_claim_index_entries import LedgerFixture, entry_args
 
@@ -75,6 +77,32 @@ class MarketProxyClaimTests(unittest.TestCase):
         self.assertEqual(self.store.list_claim_challenges(), [])
         self.assertEqual(MarketProxyClaimAuthority(self.store).refresh(MAPPING)["status"],
                          "duplicate")
+
+    def test_changed_mapping_versions_same_source_instead_of_reusing_old_record(self):
+        self.publish()
+        authority = MarketProxyClaimAuthority(self.store)
+        first = authority.refresh(MAPPING)
+        changed = {**MAPPING, "proxy_gap": "A newly reviewed and materially different gap."}
+        second = authority.refresh(changed)
+        self.assertEqual((first["version"], second["version"]), (1, 2))
+        self.assertNotEqual(first["mapping_hash"], second["mapping_hash"])
+        self.assertEqual(authority.for_subject(TARGET)[0]["id"], second["id"])
+
+    def test_refresh_all_isolates_one_bad_mapping(self):
+        self.publish()
+        bad = {**MAPPING, "mapping_ref": "proxy-map:bad", "source_ticker": "WRONG"}
+        good = {**MAPPING, "mapping_ref": "proxy-map:good"}
+        result = MarketProxyClaimAuthority(self.store).refresh_all([bad, good])
+        self.assertEqual([item["status"] for item in result["results"]],
+                         ["failed", "fresh"])
+
+    def test_one_source_cannot_silently_select_two_tickers(self):
+        path = Path(self.tmp.name) / "proxy.json"
+        path.write_text(json.dumps({"schema_version": "0.1", "mappings": [
+            MAPPING, {**MAPPING, "mapping_ref": "proxy-map:other", "source_ticker": "XOP"}]}),
+            encoding="utf-8")
+        with self.assertRaisesRegex(MarketProxyClaimError, "multiple tickers"):
+            load_mappings(path)
 
     def test_provisional_bar_is_refused_until_settled(self):
         self.publish(captured="2026-09-01T18:00:00+00:00")
@@ -140,7 +168,10 @@ class LegacyClaimIndexMigrationTests(unittest.TestCase):
         self.assertEqual(row["record_json"], encoded)
         self.assertEqual(row["content_hash"], legacy["content_hash"])
         self.assertEqual(row["evidence_kind"], "statement")
-        self.assertEqual(decoded["evidence_kind"], "statement")
+        self.assertNotIn("evidence_kind", decoded)
+        # The legacy wire remains re-validatable with its original hash.
+        from dalton_core.claim_index_authority import validate_entry
+        self.assertEqual(validate_entry(decoded), decoded)
 
 
 class ProxyAcquisitionWiringTests(unittest.TestCase):
@@ -152,19 +183,35 @@ class ProxyAcquisitionWiringTests(unittest.TestCase):
             def start(self, **kwargs):
                 self.started.append(kwargs); return {"id": "ticket:proxy"}
         class Proxies:
+            calls = 0
             def refresh_all(self, mappings):
+                self.calls += 1
                 return {"status": "settled", "results": [{"status": "waiting_for_series"}]}
         mission = {"autonomy": {"may_write": ["market_price"]},
                    "universe": [{"company_ref": TARGET}]}
         launcher = Launcher()
+        proxies = Proxies()
         lane = MissionMarketPriceLaneCoordinator(
             authority=Prices(), launcher=launcher, mission=lambda: mission,
-            proxy_mappings=[MAPPING], proxy_authority=Proxies())
+            proxy_mappings=[MAPPING], proxy_authority=proxies)
         result = lane.dispatch_once()
         self.assertEqual(result["status"], "launched")
         self.assertEqual(result["company_ref"], SOURCE)
         self.assertEqual(result["ticker"], "XLE")
         self.assertEqual(mission["universe"], [{"company_ref": TARGET}])
+        self.assertEqual(result["market_proxies"]["status"], "not_permitted")
+        self.assertEqual(proxies.calls, 0)
+
+    def test_launch_fragment_passes_seeded_mapping_with_governance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            governance = state / "connector-governance" / "yfinance-daily-prices-v1.json"
+            governance.parent.mkdir()
+            governance.write_text("{}", encoding="utf-8")
+            config = state / "market-proxy-mappings.json"
+            config.write_text('{"schema_version":"0.1","mappings":[]}', encoding="utf-8")
+            fragment = argv_fragment(LaunchAgentContext(state=state))
+            self.assertEqual(fragment[-2:], ["--market-proxy-config", str(config)])
 
     def test_mapping_cannot_expand_research_universe(self):
         class Launcher: pass

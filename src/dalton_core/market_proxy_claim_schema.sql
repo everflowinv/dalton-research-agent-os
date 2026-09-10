@@ -1,16 +1,20 @@
 CREATE TABLE IF NOT EXISTS market_proxy_claim_versions (
     version_id TEXT PRIMARY KEY,
     mapping_ref TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    mapping_hash TEXT NOT NULL,
     target_subject_ref TEXT NOT NULL,
     source_series_company_ref TEXT NOT NULL,
     source_series_version_ref TEXT NOT NULL,
     source_series_version_hash TEXT NOT NULL,
+    source_series_version_number INTEGER NOT NULL,
     claim_version_ref TEXT NOT NULL,
     proxy_gap TEXT NOT NULL,
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(mapping_ref, source_series_version_ref)
+    UNIQUE(mapping_ref, version_number),
+    UNIQUE(mapping_ref, mapping_hash, source_series_version_ref)
 );
 
 CREATE TRIGGER IF NOT EXISTS market_proxy_claim_insert_guard

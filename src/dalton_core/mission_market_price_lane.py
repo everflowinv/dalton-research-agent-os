@@ -34,6 +34,7 @@ from .lane_registry import LaneSpec, register_lane
 from .market_price import provisional_bar_date
 
 WRITE_SCOPE = "market_price"
+PROXY_WRITE_SCOPES = frozenset({"claim", "evidence", "claim_index"})
 # How far back a company with no stored history is fetched. Three years is the
 # blueprint's own acceptance bar -- a valuation percentile computed over six
 # months is a number about this year's mood, not about the company.
@@ -340,7 +341,15 @@ class MissionMarketPriceLaneCoordinator:
                     known.add(source_ref)
             mission["universe"] = universe
         if self.proxy_authority is not None:
-            proxy_results = self.proxy_authority.refresh_all(self.proxy_mappings)
+            scopes = set((mission.get("autonomy") or {}).get("may_write") or ())
+            if self.proxy_mappings and not PROXY_WRITE_SCOPES.issubset(scopes):
+                proxy_results = {
+                    "status": "not_permitted", "results": [],
+                    "reason": "market proxy derivation requires claim, evidence, and "
+                              "claim_index write scopes",
+                }
+            else:
+                proxy_results = self.proxy_authority.refresh_all(self.proxy_mappings)
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
@@ -496,7 +505,11 @@ def argv_fragment(context: Any) -> list[str]:
     governance = context.state / "connector-governance" / MARKET_PRICE_GOVERNANCE
     if not governance.is_file():
         return []
-    return ["--market-price-governance", str(governance)]
+    fragment = ["--market-price-governance", str(governance)]
+    proxy_config = context.state / "market-proxy-mappings.json"
+    if proxy_config.is_file():
+        fragment += ["--market-proxy-config", str(proxy_config)]
+    return fragment
 
 
 LANE = register_lane(LaneSpec(

@@ -51,6 +51,13 @@ def load_mappings(path: str | Path | None) -> list[dict[str, str]]:
     refs = [item["mapping_ref"] for item in mappings]
     if len(refs) != len(set(refs)):
         raise MarketProxyClaimError("market proxy mapping_ref values must be unique")
+    source_tickers: dict[str, str] = {}
+    for item in mappings:
+        previous = source_tickers.setdefault(
+            item["source_series_company_ref"], item["source_ticker"])
+        if previous != item["source_ticker"]:
+            raise MarketProxyClaimError(
+                "one source_series_company_ref cannot map to multiple tickers")
     return mappings
 
 
@@ -58,7 +65,53 @@ class MarketProxyClaimAuthority:
     def __init__(self, store: Any) -> None:
         self.store = store
         self.connection = store.connection
+        self._migrate_binding_identity()
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    def _migrate_binding_identity(self) -> None:
+        table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND "
+            "name='market_proxy_claim_versions'").fetchone()
+        if table is None:
+            return
+        columns = {row["name"] for row in self.connection.execute(
+            "PRAGMA table_info(market_proxy_claim_versions)")}
+        if {"mapping_hash", "version_number", "source_series_version_number"} <= columns:
+            return
+        rows = self.connection.execute(
+            "SELECT rowid,* FROM market_proxy_claim_versions ORDER BY created_at,rowid"
+        ).fetchall()
+        self.connection.executescript(
+            "DROP TRIGGER IF EXISTS market_proxy_claim_insert_guard;"
+            "DROP TRIGGER IF EXISTS market_proxy_claim_no_update;"
+            "DROP TRIGGER IF EXISTS market_proxy_claim_no_delete;"
+            "ALTER TABLE market_proxy_claim_versions RENAME TO market_proxy_claim_versions_legacy;")
+        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        versions: dict[str, int] = {}
+        with self.store._transaction() as cur:
+            for row in rows:
+                record = json.loads(row["record_json"])
+                mapping = {key: record[key] for key in _FIELDS}
+                mapping_hash = content_hash(mapping)
+                mapping_ref = record["mapping_ref"]
+                versions[mapping_ref] = versions.get(mapping_ref, 0) + 1
+                source_row = cur.execute(
+                    "SELECT version_number FROM market_price_series_versions "
+                    "WHERE version_id=?", (record["source_series_version_ref"],)).fetchone()
+                source_version = int(source_row[0]) if source_row is not None else 1
+                record.update({"mapping_hash": mapping_hash,
+                               "version": versions[mapping_ref],
+                               "source_series_version": source_version})
+                record["content_hash"] = content_hash({
+                    key: value for key, value in record.items() if key != "content_hash"})
+                cur.execute(
+                    "INSERT INTO market_proxy_claim_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (record["id"], mapping_ref, record["version"], mapping_hash,
+                     record["target_subject_ref"], record["source_series_company_ref"],
+                     record["source_series_version_ref"], record["source_series_version_hash"],
+                     source_version, record["claim_version_ref"], record["proxy_gap"],
+                     canonical_json(record), record["content_hash"], record["created_at"]))
+            cur.execute("DROP TABLE market_proxy_claim_versions_legacy")
 
     def refresh(self, mapping: Mapping[str, Any]) -> dict[str, Any]:
         spec = validate_mapping(mapping)
@@ -72,14 +125,14 @@ class MarketProxyClaimAuthority:
             return {"status": "waiting_for_settlement", "mapping_ref": spec["mapping_ref"]}
         existing = self.connection.execute(
             "SELECT record_json FROM market_proxy_claim_versions "
-            "WHERE mapping_ref=? AND source_series_version_ref=?",
-            (spec["mapping_ref"], source["id"]),).fetchone()
+            "WHERE mapping_ref=? AND mapping_hash=? AND source_series_version_ref=?",
+            (spec["mapping_ref"], content_hash(spec), source["id"]),).fetchone()
         if existing is not None:
             return {"status": "duplicate", **json.loads(existing["record_json"])}
 
         bar = source["bars"][-1]
         created_at = source["created_at"]
-        identity = {"mapping_ref": spec["mapping_ref"],
+        identity = {"mapping": spec,
                     "source_series_version_ref": source["id"],
                     "source_series_version_hash": source["content_hash"]}
         digest = content_hash(identity)
@@ -141,23 +194,38 @@ class MarketProxyClaimAuthority:
                   "value": bar["adj_close"], "unit": source["currency"],
                   "claim_version_ref": claim["claim_version_id"],
                   "claim_index_entry_ref": indexed["id"]}
+        record["mapping_hash"] = content_hash(spec)
+        record["version"] = 1 + int(self.connection.execute(
+            "SELECT COALESCE(MAX(version_number),0) FROM market_proxy_claim_versions "
+            "WHERE mapping_ref=?", (spec["mapping_ref"],)).fetchone()[0])
+        record["source_series_version"] = source["version"]
         record["content_hash"] = content_hash(record)
         with self.store._transaction() as cur:
-            cur.execute("INSERT INTO market_proxy_claim_versions VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
-                record["id"], spec["mapping_ref"], spec["target_subject_ref"],
-                spec["source_series_company_ref"], source["id"], source["content_hash"],
+            cur.execute("INSERT INTO market_proxy_claim_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                record["id"], spec["mapping_ref"], record["version"], record["mapping_hash"],
+                spec["target_subject_ref"], spec["source_series_company_ref"],
+                source["id"], source["content_hash"], source["version"],
                 claim["claim_version_id"], spec["proxy_gap"], canonical_json(record),
                 record["content_hash"], created_at))
         return {"status": "fresh", **record}
 
     def refresh_all(self, mappings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        results = [self.refresh(item) for item in mappings]
+        results = []
+        for item in mappings:
+            try:
+                results.append(self.refresh(item))
+            except Exception as exc:  # one bad mapping must not block the rest
+                results.append({"status": "failed", "mapping_ref": item.get("mapping_ref"),
+                                "failure_reason": f"{type(exc).__name__}: {exc}"})
         return {"status": "idle" if not mappings else "settled", "results": results}
 
     def for_subject(self, subject_ref: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT record_json FROM market_proxy_claim_versions WHERE target_subject_ref=? "
-            "ORDER BY created_at, version_id", (subject_ref,)).fetchall()
+            "AND version_number=(SELECT MAX(x.version_number) FROM "
+            "market_proxy_claim_versions x WHERE x.mapping_ref="
+            "market_proxy_claim_versions.mapping_ref) ORDER BY mapping_ref",
+            (subject_ref,)).fetchall()
         return [json.loads(row["record_json"]) for row in rows]
 
 

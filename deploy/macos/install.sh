@@ -56,6 +56,15 @@ fi
 
 "$venv_dir/bin/dalton-bootstrap" --state-dir "$state_dir" --config "$config_path"
 
+# F10: an empty, proposed mapping set wires the deterministic market-proxy
+# path without selecting a ticker or expanding research coverage. Operators
+# replace it only after reviewing the explicit source-to-subject mappings.
+market_proxy_config="$state_dir/market-proxy-mappings.json"
+if [[ ! -f "$market_proxy_config" ]]; then
+  cp "$repo_root/deploy/phase9/proposed-market-proxy-mappings-v1.json" "$market_proxy_config"
+  chmod 600 "$market_proxy_config"
+fi
+
 # INT3: the governance records this repository ships and this script
 # deliberately does *not* copy into connector-governance/. Every other
 # committed record is seeded below as part of its lane's all-or-nothing block,
