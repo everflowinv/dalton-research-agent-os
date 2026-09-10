@@ -1,7 +1,7 @@
 # P13-M3 敏感性与 consensus bridge v1.0
 
 日期：2026-09-09
-分支：`w3-sensitivity`（worktree `dalton-w3-sensitivity-worktree`），基线 main `62b54fd`，已并入 main `427f684`（stage-ladder / S5 / ask v2 / P14f 之后）
+分支：`w3-sensitivity`（worktree `dalton-w3-sensitivity-worktree`），基线 main `62b54fd`，已并入 main（stage-ladder / S5 / ask v2 / P14f / **P11b consensus** 之后）
 作者：Wave 3 Agent「sensitivity」（Opus 5）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节、[能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.2 Phase 13 P13-M3、[P13-M2 预测行 v1.0](p13-m2-forecast-lines-v1.0-2026-09-09.md)（尤其 §9 开放问题 5）、[P15d 高 conviction call v1.0](p15d-conviction-call-v1.0-2026-09-09.md)、playbook `model_discipline`
 
@@ -28,7 +28,7 @@ driver 模型（P13-M2）把每条假设摆得一样重，但真实公司里一�
 | `bootstrap.SCHEMA_DATABASES` | 改（一行） | `forecast_sensitivity_schema.sql` |
 | `scripts/rehearse_deploy.CORE_MIGRATIONS` | 改（一行） | 同上的 `MigrationSpec` |
 | `pyproject.toml` `[project.scripts]` | 改（一行） | `dalton-forecast-sensitivity` |
-| `tests/test_forecast_sensitivity.py`、`tests/test_consensus_bridge.py`、`tests/test_mission_sensitivity_lane.py` | 新增 | 107 项（49 / 33 / 25） |
+| `tests/test_forecast_sensitivity.py`、`tests/test_consensus_bridge.py`、`tests/test_mission_sensitivity_lane.py` | 新增 | 112 项（49 / 38 / 25） |
 | `src/dalton_core/research_event.py` | 改（**不是本片的文件**，见 §9） | 补回 main `427f684` 合并时丢掉的一个 `}),` |
 
 **没有碰**：`writer_server.py`、`coverage_mission.py`（及其 schema）、`bounded_planner_driver.py`、`macos_launchagent.py`、`install.sh`、`cockpit_control.html`、`PROJECT_STATUS.md`、`tests/test_service.py`、`tests/test_lane_registry.py` 的字面量、`model_forecast_driver.py`（一个字没改——`compute_results` / `chain_base` 就是接缝）、其他 agent 的模块。
@@ -92,11 +92,16 @@ CTSH  D&A    份额 +1pp → 净利润 -312,533,819.07133687
 
 三条设计：
 
-- **读者按名字解析**（`latest_consensus`、`report_consensus`），不 import。P11b 在 `w2-consensus` 分支上还没并。今天 live 上如实报 `unavailable: this Core has no consensus authority (P11b is not built yet)`；那个模块落地当天这条桥自己就开始工作，这边一个字不用改。签名**按 `inspect.signature` 读**，两种写法（`(store, company_ref)` 与 `(company_ref)`）都能用。原来是先调一次、`TypeError` 了再换个调法——但读者内部抛出的 `TypeError`（比如拿字符串和 Decimal 比大小）和「参数个数不对」长得一模一样，于是一个本来能用的读者会被用错的参数再调一次，报出来的是第二次的失败。签名是事实，调用抛出的异常是猜测（`test_a_type_error_from_inside_the_reader_is_not_read_as_an_arity_mismatch`）。P11b 已确认是 `latest_consensus(store, company_ref)` 与 `report_consensus(store, company)`。
+- **读者按名字解析**（`latest_consensus`、`report_consensus`），不 import。P11b 在 `w2-consensus` 分支上还没并。P11b 已经并进来了，这条桥当天就接上了——本模块**一个字没改**就从「没有 consensus 模块」变成「读到了、这家公司还没有估计」（见 §5）。签名**按 `inspect.signature` 读**，两种写法（`(store, company_ref)` 与 `(company_ref)`）都能用。原来是先调一次、`TypeError` 了再换个调法——但读者内部抛出的 `TypeError`（比如拿字符串和 Decimal 比大小）和「参数个数不对」长得一模一样，于是一个本来能用的读者会被用错的参数再调一次，报出来的是第二次的失败。签名是事实，调用抛出的异常是猜测（`test_a_type_error_from_inside_the_reader_is_not_read_as_an_arity_mismatch`）。P11b 已确认是 `latest_consensus(store, company_ref)` 与 `report_consensus(store, company)`。
 - **两家券商，否则不算 consensus**。vendor 那一行没数字时 `report_consensus` 可以顶上，但必须来自 ≥2 家**不同**券商，给区间与中点、带两家的 refs。一份 note 是一个分析师，把它叫作「街上」正是 variant view 被凭空造出来的方式。**计数只在「既有券商名、又有数字」的行上做**：review 抓到的 blocker 是这里原本分两次数——券商名在所有行上数、数字在有值的行上数——于是「Alpha 两份 note + Beta 一份没数字」同时满足两个条件，发出一个两端都是 Alpha 的区间，还叫作 consensus。现在只有一份名单，`test_two_notes_from_one_house_plus_a_valueless_second_is_one_house` 钉住那个确切形状。
 - **缺就是缺，从不编**。整段消失会被读成「我们和 street 一致」，那是这个对象唯一绝不能不小心说出口的话。
 
-**EPS 今天桥不了**，而且说明理由而不是悄悄跳过：driver 模型没有稀释股数（M2 §9 开放问题 5c）。目标价要 P11a 的估值快照里真有一条 target price 才桥；没有就说「没有估值快照绑到这家公司」。
+**P11b 并入后发现的两处形状差异，都已对齐（第三轮）：**
+
+1. **`latest_consensus` 返回的已经是算完的 gap 行**，不是「街上的数」。它的 `ours` 读的是 `ForecastModelAuthority.latest`——和这份 projection 所投影的**同一个 driver 模型**。所以这里**原样透传**（校验后），不自己再算一遍：再算一遍就是同一个数的第二份实现，正是本文件对校验器坚决不肯做的事，对算术也没有理由破例。透传时**不拿本模块的 `BRIDGE_METRICS` 再筛一次**——P11b 用模型 result 的 label 作 metric 名（`Revenue` 而不是 `revenue`），再筛一遍会在 live 上把每一行都悄悄丢掉。旧的 `{metric, period, value}` 形状仍然认得，`ours` 仍由这边补上；两种形状按「每一行是否已经两边都有」区分。
+2. **`report_consensus(store, company_ref, *, as_of)` 只发目标价**，签名里没有 metric / period。已改成按它的写法调用；`metric` / `period` 变成**本模块自己的检查**：问它要收入而它只发目标价时，回答是「它不发这个」，而不是把一个目标价换个名字递回去（`test_the_broker_reader_does_not_stand_in_for_a_metric_it_never_publishes`）。P11b 底下 `street_estimate.report_consensus` 也按「不同券商家数」计数，所以两家券商这条规则现在两层各锁一道——对于「我们到底有没有 variant view」这个数，两道锁是对的。
+
+**EPS 今天由 P11b 桥**（它自己有 EPS 行）；本模块自己算 `ours` 的那条旧路径仍然桥不了 EPS，并说明理由而不是悄悄跳过：driver 模型没有稀释股数（M2 §9 开放问题 5c）。目标价要 P11a 的估值快照里真有一条 target price 才桥；没有就说「没有估值快照绑到这家公司」。
 
 ## 4. lane
 
@@ -120,7 +125,9 @@ company:sec-cik:001688568 published drivers 5 bands 5 bridge unavailable
 None nothing_to_project
 ```
 
-第五次静默——正是设计的静止态。IBM 没有 driver 模型（M2 已如实拒绝），所以这里也没有它。consensus 四家都是 `this Core has no consensus authority (P11b is not built yet), so there is nothing to bridge to`。
+第五次静默——正是设计的静止态。IBM 没有 driver 模型（M2 已如实拒绝），所以这里也没有它。
+
+consensus：**并入 P11b 之前**四家都是 `this Core carries no consensus authority module`；**并入之后**，同一段代码一个字没改，四家变成 `no consensus estimate is held for <company>`——读者真的被调用到了，只是 live 副本上 consensus lane 还没跑过。这正是「按名字解析」这个设计要证明的事。
 
 带与排序（数字来自记录，每个极值在记录里都带 accession；下表的季度就是 accession 所在的季度）：
 
@@ -183,7 +190,7 @@ Ran 4905 tests in 681.099s
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `427f684` 之后的本分支。并入前、基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`，其中本片 +107：`test_forecast_sensitivity` 49、`test_consensus_bridge` 33、`test_mission_sensitivity_lane` 25。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `427f684` 之后的本分支。并入前、基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`，其中本片 +112：`test_forecast_sensitivity` 49、`test_consensus_bridge` 38、`test_mission_sensitivity_lane` 25。）
 
 fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，成本份额按 80% / 82% / 78% 循环，**SG&A 恰好是收入的十分之一、税恰好是营业利润的四分之一**——后两条是故意的：两条历史带宽度为零的 driver，逼排序去破平局，而且必须在每台机器上以同样方式破（按 driver ref）。带的期望值都是手算出来写全的。
 
@@ -247,3 +254,14 @@ fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，�
 | nit | `open_periods` 去掉 realised 过滤 | `actualize_model` 会把已实现季度移出 `forecast_periods`，`validate_forecast_model` 也拒绝同时出现在两边的记录——那个过滤只会在一个存不进去的记录上生效。**顺带发现我原来的两条测试就是建在那种非法形状上的**，已改成 authority 真会产生的形状，并加一条断言证明重叠的记录会被 `publish` 拒绝 |
 
 这些改动都动了 `SELECTION_RULE_HASH`，因此也动了每条 projection 的 `content_hash`——今天不要紧，live 上一条都还没发。
+
+## 11. 第三轮：P11b 并入后的对齐
+
+`git merge main` 把 P11b（`consensus_estimate.py` / `street_estimate.py`）带了进来，两处形状与我并入前的假设不同，都已对齐并补了测试：
+
+| 差异 | 我原来的假设 | P11b 实际 | 处理 |
+| --- | --- | --- | --- |
+| `latest_consensus` 返回 | `{metric, period, value, unit, refs}`，`ours` 由我算 | 已经是算完的 gap 行，`ours` 来自同一个 `ForecastModelAuthority` | 透传（校验后），不重算；不再用本模块词表二次过滤 |
+| `report_consensus` 签名 | `(store, company, metric, period)` | `(store, company_ref, *, as_of)`，只发目标价 | 按它的写法调用；metric 检查移到本模块，问非目标价时如实拒绝 |
+
+两处如果不改都不会报错，只会**安静地退化成「桥不了」**——第一处每一行都因为「没有 value」被跳过，第二处每次调用都 `TypeError` 被吞成 unavailable。这正是「缺就是缺」的降级策略最危险的地方：它让接错线看起来和没有数据一模一样。所以补了 `test_the_real_p11b_readers_are_called_the_way_they_are_written`，直接对**树里真实的函数**断言签名，而不是只对 fake 断言。

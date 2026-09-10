@@ -9,12 +9,19 @@ the street" -- which is the one thing this object must never accidentally say.
 
 Three things follow from that rule and they are the whole design:
 
-* **The reader is resolved by name, not imported.** P11b's consensus authority
-  is a different slice on a different branch. ``latest_consensus`` and
-  ``consensus_for_period`` are looked up on ``consensus_estimate`` at call
-  time, so this bridge starts working the day that module lands and reports an
-  honest ``unavailable`` until then. The same trick P15d already plays, for the
-  same reason.
+* **The reader is resolved by name, not imported.** ``latest_consensus`` and
+  ``report_consensus`` are looked up on ``consensus_estimate`` at call time.
+  That was written while P11b was on another branch; it has since landed, and
+  the lookup is still the right shape -- an older Core without the module gets
+  an honest ``unavailable`` rather than an ImportError at start-up, and this
+  module does not need to be edited when that one changes its internals. The
+  same trick P15d already plays, for the same reason.
+* **Where the authority has already done the comparison, it is not done
+  twice.** P11b's ``latest_consensus`` returns the finished gap row with
+  ``ours`` on it, read from the same ``ForecastModelAuthority`` this projection
+  is a projection of. Those rows are validated and passed through. Computing
+  ``ours`` again here would be a second implementation of one number that
+  agrees today -- exactly what this file refuses to do about the validator.
 * **The shape is P15d's, exactly.** ``conviction_call.validate_consensus_gap``
   is the validator, imported rather than re-implemented, so there is one
   definition of what a bridge is. A second validator that agreed today would
@@ -38,7 +45,7 @@ from __future__ import annotations
 
 import inspect
 from decimal import Decimal, ROUND_HALF_UP, localcontext
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .conviction_call import (
     ConvictionCallValidationError,
@@ -148,8 +155,8 @@ def read_consensus(store: Any, company_ref: str) -> dict[str, Any]:
     module = _module()
     if module is None:
         return {"status": "unavailable", "payload": None,
-                "reason": "this Core has no consensus authority (P11b is not "
-                          "built yet), so there is nothing to bridge to"}
+                "reason": "this Core carries no consensus authority module, "
+                          "so there is nothing to bridge to"}
     reader = getattr(module, "latest_consensus", None)
     if reader is None:
         return {"status": "unavailable", "payload": None,
@@ -178,7 +185,17 @@ def report_consensus(store: Any, company_ref: str, metric: str,
     A range and its midpoint, with both brokers' refs. Fewer than
     ``MIN_BROKERS`` distinct brokers is refused: one note is not the street,
     and a variant view built against one analyst is a disagreement with a
-    person rather than with a market.
+    person rather than with a market. P11b enforces the same rule one layer
+    down -- ``street_estimate.report_consensus`` counts distinct houses, never
+    notes -- so this is a second lock on the same door rather than the only
+    one, which is how it should be for the number that decides whether we hold
+    a variant view.
+
+    ``metric`` and ``period`` are the caller's question, not the reader's
+    arguments: P11b's reader is ``report_consensus(store, company_ref, *,
+    as_of)`` and answers for target price only. So the question is checked
+    here, and a caller asking about anything else is told this reader cannot
+    answer it rather than being handed a target price under another name.
     """
 
     module = _module()
@@ -186,9 +203,14 @@ def report_consensus(store: Any, company_ref: str, metric: str,
     if reader is None:
         return {"status": "unavailable", "value": None, "refs": [],
                 "reason": "no broker-note consensus reader is installed on this Core"}
+    if metric != "target_price":
+        return {"status": "unavailable", "value": None, "refs": [],
+                "reason": f"the broker-note reader publishes target prices, not "
+                          f"{metric}, so it cannot stand in for the missing "
+                          f"{metric} number"}
     try:
-        points = (reader(store, company_ref, metric, period)
-                  if _wants_store(reader) else reader(company_ref, metric, period))
+        points = (reader(store, company_ref) if _wants_store(reader)
+                  else reader(company_ref))
     except Exception as exc:  # noqa: BLE001
         return {"status": "unavailable", "value": None, "refs": [],
                 "reason": f"the broker-note reader could not be read: "
@@ -279,6 +301,65 @@ def _rows_of(payload: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in rows if isinstance(item, Mapping)]
 
 
+def _already_gap_rows(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the authority already did the comparison.
+
+    P11b's ``latest_consensus`` does not return "the street's number"; it
+    returns the finished gap row, ``ours`` included, and its ``ours`` comes
+    from ``ForecastModelAuthority.latest`` -- the same driver model this
+    projection is a projection of. There is nothing left for this module to
+    compute, and recomputing it would be a second implementation of one number
+    that agrees today: precisely the thing this file refuses to do about the
+    validator, and there is no reason to do it about the arithmetic either.
+
+    A pre-P11b feed that hands over ``{metric, period, value}`` is still
+    understood and still gets ``ours`` attached here. The two shapes are told
+    apart by whether every row already carries both sides.
+    """
+
+    return bool(rows) and all(
+        row.get("ours") is not None and row.get("gap_percent") is not None
+        for row in rows)
+
+
+def _pass_through(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The authority's own gap rows, validated and given their absolute gaps.
+
+    Validated rather than trusted, because the shape arrives across a name
+    lookup from a module this one does not import; a bad row discovered here is
+    an ``unavailable`` with a reason, and discovered later is a conviction call
+    refused after two model calls were paid for.
+    """
+
+    kept = [{"metric": str(row.get("metric")), "period": str(row.get("period")),
+             "ours": str(row.get("ours")), "consensus": str(row.get("consensus")),
+             "unit": str(row.get("unit") or "unit"),
+             "gap_percent": str(row.get("gap_percent")),
+             "refs": [str(item) for item in (row.get("refs") or [])]}
+            for row in rows][:MAX_METRICS]
+    try:
+        bridge = validate_bridge({"status": "available", "reason": None,
+                                  "metrics": kept})
+    except ConsensusBridgeError as exc:
+        return {"bridge": unavailable(
+            f"the consensus authority returned a shape this Core cannot read: "
+            f"{exc}"), "detail": []}
+    detail = []
+    for row in bridge["metrics"]:
+        try:
+            with localcontext() as ctx:
+                ctx.prec = _PRECISION
+                absolute = Decimal(row["ours"]) - Decimal(row["consensus"])
+            gap_abs = format(absolute, "f")
+        except Exception:  # noqa: BLE001 - a row we cannot subtract keeps no gap_abs
+            gap_abs = None
+        detail.append({**{key: row[key] for key in
+                          ("metric", "period", "ours", "consensus", "unit",
+                           "gap_percent", "refs")},
+                       "basis": "consensus_authority", "gap_abs": gap_abs})
+    return {"bridge": bridge, "detail": detail}
+
+
 def _gap(ours: Decimal, theirs: Decimal) -> tuple[Decimal, Decimal | None]:
     with localcontext() as ctx:
         ctx.prec = _PRECISION
@@ -313,6 +394,8 @@ def build_bridge(
         return {"bridge": unavailable(
             f"the consensus authority holds no metric rows for "
             f"{record.get('company_ref')}"), "detail": detail}
+    if _already_gap_rows(rows):
+        return _pass_through(rows)
 
     ours_revenue = _ours_revenue(record)
     model_ref = str(record.get("id"))

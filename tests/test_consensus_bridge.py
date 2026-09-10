@@ -14,6 +14,8 @@ surface as a refused conviction call after two model calls had been paid for.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import sys
 import types
 import unittest
@@ -51,11 +53,32 @@ def install(**functions):
 
 
 def uninstall():
+    """Put the real P11b module back, whatever a test swapped in."""
+
     sys.modules.pop(MODULE, None)
     import dalton_core
 
     if hasattr(dalton_core, "consensus_estimate"):
         delattr(dalton_core, "consensus_estimate")
+    importlib.import_module(MODULE)
+
+
+class NoModule:
+    """A Core that carries no consensus authority at all.
+
+    P11b is in the tree now, so "absent" cannot be staged by emptying
+    ``sys.modules`` -- the import would simply succeed again. It is staged
+    where the absence is actually decided, which is the resolver.
+    """
+
+    def __enter__(self):
+        self._real = cb._module
+        cb._module = lambda: None
+        return self
+
+    def __exit__(self, *exc):
+        cb._module = self._real
+        return False
 
 
 class FakeConsensus(unittest.TestCase):
@@ -69,10 +92,10 @@ def revenue_periods(record):
 
 class ReadingTests(FakeConsensus):
     def test_no_module_is_an_honest_unavailable_rather_than_a_crash(self):
-        uninstall()
-        found = cb.read_consensus(FakeStore(), "company:x")
+        with NoModule():
+            found = cb.read_consensus(FakeStore(), "company:x")
         self.assertEqual(found["status"], "unavailable")
-        self.assertIn("P11b is not built yet", found["reason"])
+        self.assertIn("no consensus authority module", found["reason"])
         self.assertIsNone(found["payload"])
 
     def test_a_module_with_no_reader_says_which_reader_is_missing(self):
@@ -105,8 +128,8 @@ class ReadingTests(FakeConsensus):
         self.assertIn("company:acme", found["reason"])
 
     def test_the_fingerprint_is_none_when_there_is_no_street(self):
-        uninstall()
-        found = cb.read_consensus(FakeStore(), "company:x")
+        with NoModule():
+            found = cb.read_consensus(FakeStore(), "company:x")
         self.assertIsNone(cb.consensus_fingerprint(found))
 
     def test_the_fingerprint_moves_only_when_the_street_does(self):
@@ -124,11 +147,11 @@ class ReadingTests(FakeConsensus):
 class ReportConsensusTests(FakeConsensus):
     def test_two_brokers_make_a_range_with_its_midpoint(self):
         install(latest_consensus=lambda *a: None,
-                report_consensus=lambda store, company, metric, period: [
+                report_consensus=lambda store, company_ref: [
                     {"broker": "TD", "value": "100", "refs": ["claim:td"]},
                     {"broker": "Wolfe", "value": "120", "refs": ["claim:wolfe"]},
                 ])
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "available")
         self.assertEqual(found["low"], "100")
         self.assertEqual(found["high"], "120")
@@ -139,19 +162,19 @@ class ReportConsensusTests(FakeConsensus):
 
     def test_one_broker_is_not_consensus(self):
         install(latest_consensus=lambda *a: None,
-                report_consensus=lambda *a: [
+                report_consensus=lambda store, company_ref: [
                     {"broker": "TD", "value": "100", "refs": ["claim:td"]}])
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("1 broker", found["reason"])
         self.assertIsNone(found["value"])
 
     def test_two_notes_from_one_broker_are_still_one_broker(self):
         install(latest_consensus=lambda *a: None,
-                report_consensus=lambda *a: [
+                report_consensus=lambda store, company_ref: [
                     {"broker": "TD", "value": "100", "refs": ["claim:td-1"]},
                     {"broker": "TD", "value": "120", "refs": ["claim:td-2"]}])
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "unavailable")
 
     def test_two_notes_from_one_house_plus_a_valueless_second_is_one_house(self):
@@ -161,34 +184,34 @@ class ReportConsensusTests(FakeConsensus):
         # published a range whose ends were both Alpha's, under the word
         # consensus. Only rows carrying a house *and* a number count.
         install(latest_consensus=lambda store, company_ref: None,
-                report_consensus=lambda store, company, metric, period: [
+                report_consensus=lambda store, company_ref: [
                     {"broker": "Alpha", "value": "100", "refs": ["claim:a1"]},
                     {"broker": "Alpha", "value": "110", "refs": ["claim:a2"]},
                     {"broker": "Beta", "value": None, "refs": ["claim:b1"]},
                 ])
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("1 broker", found["reason"])
         self.assertIsNone(found["value"])
 
     def test_a_row_with_a_number_but_no_house_does_not_count_either(self):
         install(latest_consensus=lambda store, company_ref: None,
-                report_consensus=lambda store, company, metric, period: [
+                report_consensus=lambda store, company_ref: [
                     {"broker": "Alpha", "value": "100", "refs": ["claim:a1"]},
                     {"broker": None, "value": "140", "refs": ["claim:anon"]},
                 ])
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("1 broker", found["reason"])
 
     def test_the_range_is_taken_only_over_rows_that_counted(self):
         install(latest_consensus=lambda store, company_ref: None,
-                report_consensus=lambda store, company, metric, period: [
+                report_consensus=lambda store, company_ref: [
                     {"broker": "Alpha", "value": "100", "refs": ["claim:a1"]},
                     {"broker": "Beta", "value": "140", "refs": ["claim:b1"]},
                     {"broker": None, "value": "9999", "refs": ["claim:anon"]},
                 ])
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "available")
         self.assertEqual((found["low"], found["high"], found["value"]),
                          ("100", "140", "120"))
@@ -197,7 +220,7 @@ class ReportConsensusTests(FakeConsensus):
 
     def test_no_broker_reader_at_all_is_a_reason_not_a_crash(self):
         install(latest_consensus=lambda *a: None)
-        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        found = cb.report_consensus(FakeStore(), "company:x", "target_price", "2027-06-30")
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("no broker-note consensus reader", found["reason"])
 
@@ -241,11 +264,11 @@ class BridgeTests(FakeConsensus):
         return cell["value"]
 
     def test_no_street_is_an_unavailable_bridge_with_the_reason_carried_through(self):
-        uninstall()
-        built = cb.build_bridge(
-            self.record, cb.read_consensus(FakeStore(), "company:x"))
+        with NoModule():
+            found = cb.read_consensus(FakeStore(), "company:x")
+        built = cb.build_bridge(self.record, found)
         self.assertEqual(built["bridge"]["status"], "unavailable")
-        self.assertIn("P11b is not built yet", built["bridge"]["reason"])
+        self.assertIn("no consensus authority module", built["bridge"]["reason"])
         self.assertEqual(built["detail"], [])
 
     def test_ours_against_theirs_per_metric_and_period(self):
@@ -334,37 +357,61 @@ class BridgeTests(FakeConsensus):
         self.assertEqual(built["bridge"]["status"], "unavailable")
         self.assertIn("2019-03-31", built["bridge"]["reason"])
 
-    def test_a_vendor_row_with_no_number_falls_back_to_two_brokers(self):
-        period = self.periods[0]
+    #: What a valuation snapshot with a price target looks like.
+    VALUATION = {"id": "valuation-snapshot-version:1", "currency": "USD",
+                 "metrics": [{"metric": "target_price", "value": "440",
+                              "unit": "USD", "status": "computed"}]}
+
+    def test_a_target_price_row_with_no_number_falls_back_to_two_houses(self):
+        # The one metric the broker-note reader can stand in for: P11b's
+        # ``report_consensus`` publishes target prices and nothing else.
         install(
             latest_consensus=lambda store, company_ref: {"metrics": [
-                {"metric": "revenue", "period": period, "value": None,
+                {"metric": "target_price", "period": "2027-06-30", "value": None,
                  "unit": "USD", "refs": []}]},
-            report_consensus=lambda store, company, metric, p: [
-                {"broker": "TD", "value": "1000000000", "refs": ["claim:td"]},
-                {"broker": "Wolfe", "value": "1400000000", "refs": ["claim:wolfe"]}])
+            report_consensus=lambda store, company_ref: [
+                {"broker": "TD", "value": "400", "refs": ["claim:td"]},
+                {"broker": "Wolfe", "value": "440", "refs": ["claim:wolfe"]}])
         built = cb.build_bridge(self.record,
                                 cb.read_consensus(FakeStore(), "company:x"),
-                                store=FakeStore())
+                                store=FakeStore(), valuation=self.VALUATION)
         self.assertEqual(built["bridge"]["status"], "available")
-        self.assertEqual(built["bridge"]["metrics"][0]["consensus"], "1200000000")
+        self.assertEqual(built["bridge"]["metrics"][0]["consensus"], "420")
         self.assertEqual(built["detail"][0]["basis"], "report_consensus")
         self.assertIn("claim:td", built["bridge"]["metrics"][0]["refs"])
 
-    def test_a_vendor_row_with_no_number_and_one_broker_is_not_bridged(self):
+    def test_a_target_price_row_with_no_number_and_one_house_is_not_bridged(self):
+        install(
+            latest_consensus=lambda store, company_ref: {"metrics": [
+                {"metric": "target_price", "period": "2027-06-30", "value": None,
+                 "unit": "USD", "refs": []}]},
+            report_consensus=lambda store, company_ref: [
+                {"broker": "TD", "value": "400", "refs": ["claim:td"]}])
+        built = cb.build_bridge(self.record,
+                                cb.read_consensus(FakeStore(), "company:x"),
+                                store=FakeStore(), valuation=self.VALUATION)
+        self.assertEqual(built["bridge"]["status"], "unavailable")
+        self.assertIn("before a range may be called consensus",
+                      built["bridge"]["reason"])
+
+    def test_the_broker_reader_does_not_stand_in_for_a_metric_it_never_publishes(self):
+        # A revenue row with no number is a missing revenue number. Handing
+        # back a target price under the word "revenue" would be worse than the
+        # gap the fallback exists to close.
         period = self.periods[0]
         install(
             latest_consensus=lambda store, company_ref: {"metrics": [
                 {"metric": "revenue", "period": period, "value": None,
                  "unit": "USD", "refs": []}]},
-            report_consensus=lambda *a: [
-                {"broker": "TD", "value": "1000000000", "refs": ["claim:td"]}])
+            report_consensus=lambda store, company_ref: [
+                {"broker": "TD", "value": "400", "refs": ["claim:td"]},
+                {"broker": "Wolfe", "value": "440", "refs": ["claim:wolfe"]}])
         built = cb.build_bridge(self.record,
                                 cb.read_consensus(FakeStore(), "company:x"),
                                 store=FakeStore())
         self.assertEqual(built["bridge"]["status"], "unavailable")
-        self.assertIn("before a range may be called consensus",
-                      built["bridge"]["reason"])
+        self.assertIn("target prices, not revenue", built["bridge"]["reason"])
+
 
     def test_the_rows_are_capped_at_what_the_conviction_call_accepts(self):
         install(latest_consensus=lambda store, company_ref: {"metrics": [
@@ -375,6 +422,66 @@ class BridgeTests(FakeConsensus):
                                 cb.read_consensus(FakeStore(), "company:x"))
         self.assertLessEqual(len(built["bridge"]["metrics"]), cb.MAX_METRICS)
         self.assertEqual(len(built["detail"]), len(built["bridge"]["metrics"]))
+
+
+class PassThroughTests(FakeConsensus):
+    """P11b hands back the finished gap row, not the street's number alone."""
+
+    def setUp(self):
+        self.record = model()
+        self.period = self.record["forecast_periods"][0]["end"]
+
+    def rows(self):
+        return [{"metric": "Revenue", "period": self.period,
+                 "ours": "1000000000", "consensus": "1200000000", "unit": "USD",
+                 "gap_percent": "-16.67",
+                 "refs": ["consensus-estimate-version:1", self.record["id"]]}]
+
+    def test_the_authoritys_own_gap_rows_are_used_rather_than_recomputed(self):
+        # Its ``ours`` comes from ForecastModelAuthority.latest -- the same
+        # driver model this projection is of -- so recomputing it here would be
+        # a second implementation of one number that agrees today.
+        install(latest_consensus=lambda store, company_ref: {"metrics": self.rows()})
+        built = cb.build_bridge(self.record, cb.read_consensus(FakeStore(), "c"))
+        self.assertEqual(built["bridge"]["status"], "available")
+        row = built["bridge"]["metrics"][0]
+        self.assertEqual(row["ours"], "1000000000")
+        self.assertEqual(row["consensus"], "1200000000")
+        self.assertEqual(row["gap_percent"], "-16.67")
+        # Its metric vocabulary is its own -- P11b names the row after the
+        # model's result label -- and re-filtering it against ours would
+        # silently drop every row on the live Core.
+        self.assertEqual(row["metric"], "Revenue")
+
+    def test_a_passed_through_row_still_gets_its_absolute_gap(self):
+        install(latest_consensus=lambda store, company_ref: {"metrics": self.rows()})
+        built = cb.build_bridge(self.record, cb.read_consensus(FakeStore(), "c"))
+        detail = built["detail"][0]
+        self.assertEqual(detail["basis"], "consensus_authority")
+        self.assertEqual(detail["gap_abs"], "-200000000")
+
+    def test_a_passed_through_row_is_validated_not_trusted(self):
+        broken = [dict(self.rows()[0], refs=[])]
+        install(latest_consensus=lambda store, company_ref: {"metrics": broken})
+        built = cb.build_bridge(self.record, cb.read_consensus(FakeStore(), "c"))
+        self.assertEqual(built["bridge"]["status"], "unavailable")
+        self.assertIn("a shape this Core cannot read", built["bridge"]["reason"])
+        self.assertEqual(built["detail"], [])
+
+    def test_the_real_p11b_readers_are_called_the_way_they_are_written(self):
+        # Not a fake: the signatures this module resolves against are the ones
+        # in the tree, and a mismatch would look exactly like "no consensus".
+        from dalton_core import consensus_estimate
+
+        self.assertTrue(cb._wants_store(consensus_estimate.latest_consensus))
+        self.assertTrue(cb._wants_store(consensus_estimate.report_consensus))
+        self.assertEqual(
+            list(inspect.signature(consensus_estimate.latest_consensus).parameters),
+            ["store", "company_ref"])
+        self.assertEqual(
+            list(inspect.signature(
+                consensus_estimate.report_consensus).parameters)[:2],
+            ["store", "company_ref"])
 
 
 class ShapeTests(FakeConsensus):
@@ -395,8 +502,9 @@ class ShapeTests(FakeConsensus):
         self.assertEqual(validate_consensus_gap(built["bridge"]), built["bridge"])
 
     def test_an_unavailable_bridge_passes_it_too(self):
-        uninstall()
-        built = cb.build_bridge(model(), cb.read_consensus(FakeStore(), "c"))
+        with NoModule():
+            found = cb.read_consensus(FakeStore(), "c")
+        built = cb.build_bridge(model(), found)
         self.assertEqual(validate_consensus_gap(built["bridge"]), built["bridge"])
 
     def test_the_projection_carries_a_bridge_p15d_can_read(self):
