@@ -2897,12 +2897,13 @@ class CockpitPlane:
             for row in memo_rows:
                 record = json.loads(row["record_json"])
                 histories = self._rows(core,
-                    "SELECT stage_ref,status FROM coverage_mission_stage_records r "
+                    "SELECT stage_ref,status,r.record_json FROM coverage_mission_stage_records r "
                     "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
                     "WHERE v.mission_ref=? AND r.company_ref=? ORDER BY r.created_at,r.record_id",
                     (mission["mission_ref"], record["subject_ref"]))
                 decided = any(item["stage_ref"] == "investment_memo"
                               and item["status"] in {"gate_passed", "gate_failed"}
+                              and record["id"] in (json.loads(item["record_json"]).get("evidence_refs") or [])
                               for item in histories)
                 if decided:
                     continue
@@ -2911,9 +2912,19 @@ class CockpitPlane:
                            {"decision": "reject", "label": "拒绝"}]
                 try:
                     from .investment_memo_contract import validate_memo_gate, verified_body_hash
+                    playbook_rows = self._rows(core,
+                        "SELECT record_json,content_hash FROM research_playbook_versions "
+                        "WHERE playbook_version_id=?", (record["playbook_version_ref"],))
+                    playbook_row = playbook_rows[0] if playbook_rows else None
+                    if playbook_row is None or playbook_row["content_hash"] != record.get("playbook_version_hash"):
+                        raise ValueError("bound Playbook is missing or changed")
+                    playbook = json.loads(playbook_row["record_json"])
+                    questions = [{"question_ref": f"memo_q{index:02d}", "question": question}
+                                 for index, question in enumerate(playbook.get("key_questions") or [], 1)]
                     validate_memo_gate(record.get("gate") or {},
-                                       material_hash=verified_body_hash(record))
-                except (ValueError, KeyError, TypeError) as exc:
+                                       material_hash=verified_body_hash(record),
+                                       expected_questions=questions)
+                except (ValueError, KeyError, TypeError, sqlite3.OperationalError) as exc:
                     actions = []
                     note = f"暂时不能裁决：memo verification contract failed: {exc}"
                 gate = record.get("gate") or {}

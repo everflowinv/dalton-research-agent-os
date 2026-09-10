@@ -2939,6 +2939,7 @@ class WriterServer:
         from .investment_memo_contract import (
             model_work_order_refs, validate_memo_gate, verified_body_hash,
         )
+        from .cockpit_model import unwrap_json_object
         from .model_fallback_chain import served_family
         from .model_router import ModelRouter
 
@@ -2980,27 +2981,48 @@ class WriterServer:
         if mission["content_hash"] != memo["mission_version_hash"]:
             raise WriterServerError("Investment Memo mission hash binding failed")
 
-        gate = validate_memo_gate(memo.get("gate") or {}, material_hash=verified_body_hash(memo))
+        playbook = self.research_playbook.playbook(str(memo["playbook_version_ref"]))
+        if playbook.get("content_hash") != memo.get("playbook_version_hash"):
+            raise WriterServerError("Investment Memo playbook hash binding failed")
+        questions = [{"question_ref": f"memo_q{index:02d}", "question": question}
+                     for index, question in enumerate(playbook.get("key_questions") or [], 1)]
+        gate = validate_memo_gate(
+            memo.get("gate") or {}, material_hash=verified_body_hash(memo),
+            expected_questions=questions)
         if list(memo.get("model_invocation_refs") or []) != model_work_order_refs(gate):
             raise WriterServerError("Investment Memo model work-order provenance drifted")
         producers = list(gate["producer_calls"])
         verifier = gate["verifier"]
+        if self._scheduler is None:
+            raise WriterServerError("Investment Memo decision needs the Scheduler authority")
         with ModelRouter(self._model_router_db()) as router:
             producer_families = set()
             for call in producers:
                 route = router.get_decision(str(call["route_decision_ref"]))
-                if route.get("outcome") != "selected" or route.get("work_order_id") != call["work_order_ref"]:
+                if route.get("outcome") != "selected" or route.get("work_order_ref") != call["work_order_ref"]:
                     raise WriterServerError("Investment Memo producer route/work-order binding failed")
+                self._verify_memo_formal_call(call, route)
                 family = served_family(router, str(call["route_decision_ref"]))
                 if not family:
                     raise WriterServerError("Investment Memo producer family is unresolved")
                 producer_families.add(family)
             route = router.get_decision(str(verifier["route_decision_ref"]))
-            if route.get("outcome") != "selected" or route.get("work_order_id") != verifier["work_order_ref"]:
+            if route.get("outcome") != "selected" or route.get("work_order_ref") != verifier["work_order_ref"]:
                 raise WriterServerError("Investment Memo verifier route/work-order binding failed")
+            verifier_envelope = self._verify_memo_formal_call(verifier, route)
             verifier_family = served_family(router, str(verifier["route_decision_ref"]))
             if not verifier_family or verifier_family in producer_families:
                 raise WriterServerError("Investment Memo verifier is not independent")
+        try:
+            output = unwrap_json_object(verifier_envelope["outputs"]["text"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise WriterServerError("Investment Memo verifier formal output is invalid") from exc
+        if set(output) != {"verdict", "verified_body_hash", "finding_codes"} or output != {
+            "verdict": gate["verifier"]["verdict"],
+            "verified_body_hash": gate["verified_body_hash"],
+            "finding_codes": gate["verifier"]["finding_codes"],
+        }:
+            raise WriterServerError("Investment Memo gate does not match verifier formal output")
 
         company_ref = str(memo["subject_ref"])
         records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
@@ -3009,7 +3031,16 @@ class WriterServer:
             raise WriterServerError("company_model has not passed")
         requested_status = "gate_passed" if decision == "approve" else "gate_failed"
         opposite_status = "gate_failed" if decision == "approve" else "gate_passed"
-        if ("investment_memo", opposite_status) in states:
+        exact_decisions = [item for item in records
+                           if item["stage_ref"] == "investment_memo"
+                           and ref in item.get("evidence_refs", [])
+                           and item["status"] in {"gate_passed", "gate_failed"}]
+        current_memo_state = self.coverage_mission.current_stage_state(
+            mission["mission_ref"], company_ref).get("stages", {}).get("investment_memo", {})
+        if current_memo_state.get("status") == "gate_passed" and not exact_decisions:
+            raise WriterServerError(
+                "the prior Investment Memo gate must be reopened before deciding a new memo")
+        if any(item["status"] == opposite_status for item in exact_decisions):
             raise WriterServerError("the Investment Memo already has the opposite human decision")
         if ("investment_memo", "entered") not in states:
             self.coverage_mission.record_stage(
@@ -3020,14 +3051,15 @@ class WriterServer:
             records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
             states = {(item["stage_ref"], item["status"]): item for item in records}
         status = requested_status
-        if ("investment_memo", status) not in states:
+        exact = next((item for item in exact_decisions if item["status"] == status), None)
+        if exact is None:
             memo_stage = self.coverage_mission.record_stage(
                 mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
                 company_ref=company_ref, stage_ref="investment_memo", status=status,
                 evidence_refs=[ref], rationale=reason, actor_ref=actor,
                 idempotency_key=f"investment-memo:{ref}:{decision}")
         else:
-            memo_stage = states[("investment_memo", status)]
+            memo_stage = exact
         active_stage = states.get(("active_coverage", "entered"))
         if decision == "approve" and active_stage is None:
             active_stage = self.coverage_mission.record_stage(
@@ -3039,6 +3071,25 @@ class WriterServer:
         return {"status": "decided", "decision": decision, "memo_version_ref": ref,
                 "memo_stage_record_ref": memo_stage["id"],
                 "active_coverage_record_ref": None if active_stage is None else active_stage["id"]}
+
+    def _verify_memo_formal_call(
+        self, call: Mapping[str, Any], route: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Resolve one claimed memo model call through Scheduler's formal authority."""
+        if self._scheduler is None:
+            raise WriterServerError("Investment Memo decision needs the Scheduler authority")
+        formal = self._scheduler.formal_result(str(call["work_order_ref"]))
+        if formal is None or formal.get("terminal_state") != "succeeded":
+            raise WriterServerError("Investment Memo model work has no successful formal result")
+        envelope = formal.get("result_envelope") or {}
+        if (formal.get("result_envelope_id") != call["result_envelope_ref"]
+                or envelope.get("id") != call["result_envelope_ref"]
+                or envelope.get("work_order_ref") != call["work_order_ref"]
+                or envelope.get("invocation_ref") != call["invocation_ref"]
+                or envelope.get("status") != "succeeded"
+                or (envelope.get("metadata") or {}).get("route_decision_ref") != route.get("id")):
+            raise WriterServerError("Investment Memo formal result provenance is inconsistent")
+        return envelope
 
     def _op_deep_insight_gate_draft(self, p: Mapping[str, Any]) -> Any:
         """One gate draft in full, so the owner can read what they are deciding."""

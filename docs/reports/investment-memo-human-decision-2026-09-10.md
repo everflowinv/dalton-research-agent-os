@@ -28,14 +28,19 @@ decision it verifies:
   orders and verifier work order;
 - every model route decision exists, selected that exact work order, resolves
   to a family, and the verifier family differs from every producer family;
+- Scheduler has the exact successful formal result, result envelope,
+  invocation, and route for all five calls; the verifier's persisted output is
+  an exact pass over the memo's verified body hash with no findings;
 - `company_model` has passed in the mission's folded stage ledger.
 
 Approval appends `investment_memo: entered`, then `gate_passed`, then
 `active_coverage: entered`. Each write has a stable idempotency key, so a crash
 after the memo verdict can resume the final transition without another human
 decision. Rejection appends `gate_failed` and never enters active coverage. A
-settled opposite verdict is refused rather than creating contradictory stage
-history.
+settled opposite verdict for the exact memo is refused rather than creating
+contradictory stage history. An older memo failure does not settle a new head;
+an older pass requires the existing reopen mechanism before another memo can
+be decided.
 
 Cockpit lists only current active-mission memo heads that have no terminal memo
 decision. It displays the authored sections, all 12 question answers, and the
@@ -47,7 +52,7 @@ draft consumes.
 
 - `python3 -m py_compile` passed for the shared contract, writer, and Cockpit
   modules.
-- 85 focused contract/decision/writer/Cockpit tests passed, with one existing
+- 89 focused contract/decision/writer/Cockpit tests passed, with one existing
   skip, across `test_investment_memo_contract`,
   `test_investment_memo_decision`, `test_writer_service`,
   `test_cockpit_plane`, and `test_cockpit_int2`.
@@ -55,7 +60,9 @@ draft consumes.
 - The recovery test injects a crash after the memo pass and proves retry adds
   active coverage without duplicating earlier records. Refusal tests cover
   nonhuman actors, hash drift, producer/verifier family collision, and an
-  attempted reversal of a settled human verdict.
+  attempted reversal of a settled human verdict. Further regressions cover a
+  selected but unexecuted route, a formal verifier body-hash mismatch, and an
+  older failed memo followed by a new head.
 
 ## Remaining boundary
 
