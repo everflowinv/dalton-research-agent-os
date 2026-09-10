@@ -850,23 +850,31 @@ class DaltonService:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    from .controller_singleton import ControllerConflict, ControllerOwnership
+
     parser = argparse.ArgumentParser(description="Run the persistent Dalton controller")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--once", action="store_true", help="run one forced maintenance cycle")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    config = ServiceConfig.from_file(args.config)
-    service = DaltonService(config)
-    if args.once:
-        try:
-            result = service.run_once(force_projection=True)
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-            return 0 if result["state"] == "running" else 1
-        finally:
-            service.close()
-    signal.signal(signal.SIGTERM, lambda _signum, _frame: service.stop())
-    signal.signal(signal.SIGINT, lambda _signum, _frame: service.stop())
-    service.serve_forever()
-    return 0
+    try:
+        with ControllerOwnership(args.config):
+            config = ServiceConfig.from_file(args.config)
+            service = DaltonService(config)
+            if args.once:
+                try:
+                    result = service.run_once(force_projection=True)
+                    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+                    return 0 if result["state"] == "running" else 1
+                finally:
+                    service.close()
+            signal.signal(signal.SIGTERM, lambda _signum, _frame: service.stop())
+            signal.signal(signal.SIGINT, lambda _signum, _frame: service.stop())
+            service.serve_forever()
+            return 0
+    except ControllerConflict as exc:
+        print(json.dumps({"status": "refused", "reason": exc.reason,
+                          "controller_pids": exc.pids}, sort_keys=True), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
