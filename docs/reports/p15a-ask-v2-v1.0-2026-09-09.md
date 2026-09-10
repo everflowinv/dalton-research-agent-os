@@ -236,7 +236,9 @@ OK (skipped=1)
 本分支：
 
 ```
-<FULL_RUN>
+Ran 3988 tests in 623.792s
+
+OK (skipped=1)
 ```
 
 新增测试：`tests/test_ask_v2.py` 56 项（问题判定、旧 Core、全表 Core、预算、答案形状、
