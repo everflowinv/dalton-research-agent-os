@@ -92,6 +92,13 @@ consensus P11b（财年末从「从不交 10-Q 的季度」推导；页首抽取
 模型目录随 openclaw 自动登记 + 模型被移除时自动回退并在 cockpit 通知（agent 开发中）。在修 review：prior-research。
 第二次部署复演（当前 main 对 live 副本）与最终版 owner 步骤清单 v2.0 进行中。
 
+**09-10 晚**：prior-research 合入（5,381 项通过，已 push）；model-selection 合入（作者侧 5,445 项通过；主线全量在跑，绿即 push）：
+cockpit 按环节选模型、模型目录每小时随 openclaw 自动登记、模型被移除时按 tier 链自动回退并写 cockpit 通知（通知按当前状态算，
+不靠 delta，`UNIQUE(profile_id, purpose)` 去重；未定价模型按声明上限 25 / 100 美元每百万入账，不再是 0）。
+Chem 复盘对照分析写入 `docs/reports/chem-retrospective-implications-v1.0-2026-09-10.md`；由此派出 W4 六条切片：按分类的 driver 模板 +
+`market_proxy`、经济不变量层、ZeroBaseReview + 判断事后验证、失败分类 + cockpit 四格、美股 insider / buyback tracking、港股 hkex-filings。
+owner 09-10：部署与授权随时可做，时点由主 agent 定——复演 2 fail-closed 通过即部署。
+
 **方法上的两次事故**：用量上限两次打断十余个 agent，全部从上下文恢复；一次误判「静默 = 死亡」造成同一 worktree 双写，
 已裁决归属并写成规则。
 

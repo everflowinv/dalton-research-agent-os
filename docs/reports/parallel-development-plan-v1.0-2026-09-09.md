@@ -291,6 +291,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-10 下午 | authority 标志统一合入（5,055 项通过，已 push）。派出模型选择与自动登记（cockpit 按环节选模型 → 新 policy 版本；每小时目录 lane；一键放行写 broker 子树）。在修：P12e、prior-research、P13-M3 | 进行中 |
 | 09-10 下午 | P13-M3 敏感性合入（5,167 项通过，已 push；按历史峰谷摆幅排 driver，bridge 单券商不再能冒充共识）；合入 P12e 行业框架（deliverable 数字可引用有 accession / 模型版本支撑的计算格）。在修：prior-research；开发中：model-selection（含模型被移除时的自动回退与 cockpit 通知） | 进行中 |
 | 09-10 下午 | P12e 合入（5,313 项通过，已 push）；prior-research 与 P12e 在 `mission_deliverable.py` 冲突，作者调和后合入（既有资料作 `internal_prior` 来源；旧 screen 为 v0；`PriorModelVersion`）+ 集成：`DISCOVERY_SOURCES` 行、`[prior-models]` extra、撤 S1 针脚。复演 2 因脚本 fail-open 碰到 live 目录，唯一实际写入（tick 账本文件）已隔离，规则 13 已记；复演 agent 加固后重跑。model-selection 开发中 | 进行中 |
+| 09-10 晚 | prior-research 合入（5,381 项，已 push）；Chem 复盘对照分析 + 规则 14；model-selection 修 B1/B2/S1–S4 后合入（主线全量在跑）；W4 六条切片派出（见 6b）；owner 定：部署与授权随时可做，复演 2 通过即部署 | 进行中 |
 
 ---
 
