@@ -103,7 +103,7 @@ Next: freeze final integrated code, full suite + wheel + copied-state rehearsal,
 
 Owner confirmed that long-term business understanding, moat and industry knowledge remain foundational. New <=12-month earnings/revision/rerating analysis is an incremental bridge from that knowledge to investment advice, updated with prices/news through explicit prior/evidence/alternative-explanation/revision records. Initial Screen and the six-stage research process stay intact. Three read-only reviews/design documents are committed; they are not represented as implemented runtime capability. Frozen runtime acceptance continues independently.
 
-## 20:00 UTC — foundation acceptance rejected before deployment
+## 19:57 UTC — foundation acceptance rejected before deployment
 
 Frozen `811d8cd0786b7327c4206d281249bb2b30a2ca8f`: 6,551 tests / 460.112s, 2 failures + 70 errors (1 skip). It was not accepted/deployed. The dominant shared cause is new shared-capacity journal keys being rejected by the strict source authority resolver, affecting SEC acquisition, research execution/review and thesis-impact setup. The repair must preserve legacy journal shape and explicitly validate shared reservation bindings, not weaken arbitrary payload validation. The second cause is old providerControls fixtures; updated exact-schema fixture plus downstream consumers now pass 125 tests.
 
