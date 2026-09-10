@@ -29,7 +29,8 @@ from dalton_core.company_dossier import (
     VARIANT_SLOTS, CompanyDossierAuthority, causal_chain_hash, validate_policy,
 )
 from dalton_core.company_dossier_cli import (
-    build_parser, dossier_freshness, granted_scope, reconstruct_dossier_input, run_dossier,
+    build_parser, claim_material, dossier_freshness, granted_scope,
+    reconstruct_dossier_input, run_dossier,
     screened_companies, stale_units,
 )
 from dalton_core.company_dossier_launcher import CompanyDossierLauncher, run_digest
@@ -641,6 +642,57 @@ class GateTests(unittest.TestCase):
         self.harness = Harness()
         self.addCleanup(self.harness.close)
         self.authority = CompanyDossierAuthority(self.harness.store)
+
+    def retire(self, claim_ref):
+        from dalton_core.claim_retirement import ClaimRetirementAuthority
+
+        row = self.harness.store.connection.execute(
+            "SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+            (claim_ref,),
+        ).fetchone()
+        authority = ClaimRetirementAuthority(self.harness.store)
+        challenge = authority.challenge(
+            claim_version_ref=claim_ref, claim_version_hash=row["content_hash"],
+            reason_code="human_judgment", rationale="fixture",
+            actor_ref="human:coverage-owner")
+        authority.decide(
+            challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
+            decision="retired", actor_ref="human:coverage-owner",
+            rationale="fixture")
+
+    def test_retired_canonical_claim_is_removed_before_prompt_material_is_bounded(self):
+        live = self.harness.tag(
+            "d-live", "business_model",
+            statement="The company retained its live recurring-revenue contract.")
+        retired = self.harness.tag(
+            "d-retired", "business_model",
+            statement="This canonical row was later retired.", importance="filing")
+        self.retire(retired["claim_version_id"])
+
+        rows = claim_material(self.harness.store, ACN, "business_model")
+
+        refs = {row["ref"] for row in rows}
+        self.assertIn(live["claim_version_id"], refs)
+        self.assertNotIn(retired["claim_version_id"], refs)
+
+    def test_all_retired_canonical_claims_are_idle_without_a_model_call(self):
+        refs = [row[0] for row in self.harness.store.connection.execute(
+            "SELECT claim_version_id FROM claim_versions"
+        ).fetchall()]
+        for ref in refs:
+            self.retire(ref)
+        producer = FakeModel()
+        verifier = FakeModel(route="route:verify")
+
+        summary = self.harness.run(
+            model_factory=lambda: producer,
+            verifier_model_factory=lambda: verifier)
+
+        self.assertEqual((summary["status"], summary["dossier_status"]),
+                         ("idle", "nothing_new"))
+        self.assertEqual(producer.prompts, [])
+        self.assertEqual(verifier.prompts, [])
+        self.assertEqual(summary["cost_micros"], 0)
 
     def test_without_a_verifier_configuration_nothing_is_drafted_at_all(self):
         # One configuration routes both calls the same way, so the verdict
