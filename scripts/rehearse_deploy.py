@@ -694,6 +694,14 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
         "research_plan", "research-planner-model-config.json", None, False,
         "written only when DALTON_PLANNER_MODEL_PROFILE/TIER is set",
     ),
+    LaneSwitch(
+        "industry_framework (P12e)", "p12e-industry-framework-policy-v1.json",
+        "deploy/phase9/p12e-industry-framework-policy-v1.json", False,
+        "declared, not yet seeded: install.sh does not copy it. The P12e branch "
+        "does not touch install.sh, so the seed line is an integration item and "
+        "this switch reports missing until it is added. The lane is on with the "
+        "policy alone -- the comparison table needs no model.",
+    ),
 )
 
 
@@ -722,6 +730,7 @@ REQUIRED_WRITE_SCOPES: tuple[tuple[str, str], ...] = (
     ("forecast_revision_proposal", "P14a: forecast revisions proposed by an event"),
     ("thesis_revision_candidate", "P14a / ADR-0007: also needs a human_checkpoint"),
     ("conviction_call", "W3: conviction calls"),
+    ("deliverable", "P12e: the industry framework publishes as a deliverable; without it the lane holds not_authorized and spends nothing"),
 )
 
 
@@ -768,6 +777,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("agenda_schema.sql", "dalton_core.agenda", "AgendaStore", "core"),
     MigrationSpec("model_input_schema.sql", "dalton_core.model_input", "ModelInputLedger", "core"),
     MigrationSpec("industry_research_schema.sql", "dalton_core.industry_research", "IndustryResearchAuthority", "core"),
+    MigrationSpec("industry_framework_schema.sql", "dalton_core.industry_framework", "IndustryFrameworkAuthority", "core"),
     MigrationSpec("analyst_journal_schema.sql", "dalton_core.analyst_journal", "AnalystJournalAuthority", "core"),
     MigrationSpec("bounded_planner_loop_schema.sql", "dalton_core.bounded_planner_loop", "BoundedPlannerAuthority", "core"),
     MigrationSpec("capability_schema.sql", "dalton_core.capability_registry", "CapabilityRegistry", "core"),
