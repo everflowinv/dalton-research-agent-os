@@ -215,6 +215,11 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 6. 不改 live 状态目录、不部署、不发 mission 版本；测试里用 `p9a_fixtures.mission_params` 就地放宽 `may_write`。
 7. 提交信息沿用 `P1xx: <小写一句话>` 与正文散文，末尾 `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`。
 8. 交付物 = 分支 + `docs/reports/<slug>-v1.0-<date>.md`（做了什么、没做什么、集成时要接的线、验收结果）。
+9. **加一条 lane 或一个 schema 的四处登记**（从 09-10 起测试强制）：`LANE_MODULES` 一行、`cockpit_plane.REGISTRY_LANE_LABELS` 一条中文名、
+   `bootstrap.py` schema 表一行、`scripts/rehearse_deploy.py` 一条 `MigrationSpec`；新治理记录必须在 `install.sh` 里播种或列入
+   `DELIBERATELY_UNSEEDED`。这四处对 lane agent 开放，不再算越界。
+10. **重派前先看 worktree**：agent 静默不等于死亡；查改动时间与 dirty 状态，避免两个 agent 写同一棵树。
+11. **主线只在全量绿时 push**；合并后若发现冲突标记或加载失败，先修再推。
 
 ## 5. 主 agent 的集成流程
 
