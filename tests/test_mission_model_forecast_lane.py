@@ -36,6 +36,7 @@ from dalton_core.mission_model_forecast_lane import (
     argv_fragment,
     build_launcher,
 )
+from dalton_core.store import content_hash
 from dalton_core.model_forecast_driver import ForecastModelAuthority, build_forecast_model
 from dalton_core.model_forecast_launcher import ModelForecastLauncher
 from dalton_core.store import DaltonStore
@@ -217,22 +218,24 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(len(self.launcher.started), 1)
 
     def test_a_new_validator_contract_releases_only_the_old_refusal_identity(self):
-        first = self.lane.dispatch_once()
-        self.launcher.finish(first["ticket_ref"], summary={
-            "forecast_status": "unavailable:economic_invariants",
-            "failure_reason": "segment_sum: old lossy axis classification"})
-        self.assertEqual(self.lane.dispatch_once()["status"], "held")
-
-        replacement_hash = "b" * 64
+        old_contract = dict(FORECAST_INVARIANT_CONTRACT)
+        old_contract.pop("driver_wire")
+        old_contract_hash = content_hash(old_contract)
+        self.assertNotEqual(old_contract_hash, FORECAST_INVARIANT_CONTRACT_HASH)
         with patch(
             "dalton_core.mission_model_forecast_lane."
-            "FORECAST_INVARIANT_CONTRACT_HASH", replacement_hash,
+            "FORECAST_INVARIANT_CONTRACT_HASH", old_contract_hash,
         ):
-            resumed = self.lane.dispatch_once()
-            self.assertEqual(resumed["status"], "launched")
-            self.assertEqual(resumed["model_digest"], first["model_digest"])
-            self.assertEqual(resumed["validator_contract_hash"], replacement_hash)
-            self.assertEqual(len(self.launcher.started), 2)
+            first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "forecast_status": "unavailable:economic_invariants",
+            "failure_reason": "driver wire refused cost_driver_slots"})
+        resumed = self.lane.dispatch_once()
+        self.assertEqual(resumed["status"], "launched")
+        self.assertEqual(resumed["model_digest"], first["model_digest"])
+        self.assertEqual(resumed["validator_contract_hash"],
+                         FORECAST_INVARIANT_CONTRACT_HASH)
+        self.assertEqual(len(self.launcher.started), 2)
 
     def test_a_refused_old_spec_does_not_hold_a_new_spec_identity(self):
         first = self.lane.dispatch_once()

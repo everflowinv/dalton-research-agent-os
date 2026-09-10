@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .company_model_series import INSTANT, QUARTER, period_kind
+from .driver_template import COST_REGISTRY_HASH
 from .store import (
     DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
 )
@@ -124,6 +125,14 @@ FORECAST_INVARIANT_CONTRACT = {
         "additive_axes": sorted(ADDITIVE_SEGMENT_AXES),
         "required_dimension_count": 1,
         "members_must_be_unique": True,
+    },
+    # The model validator is part of admission just as the economic checks
+    # are. Version the optional cost-slot wire here so a run refused by the
+    # former closed shape receives a bounded retry without changing the
+    # successful forecast generator or model digest.
+    "driver_wire": {
+        "cost_driver_slots": "optional_nonempty_unique_frozen_registry_slots:v1",
+        "cost_registry_hash": COST_REGISTRY_HASH,
     },
 }
 FORECAST_INVARIANT_CONTRACT_HASH = content_hash(FORECAST_INVARIANT_CONTRACT)

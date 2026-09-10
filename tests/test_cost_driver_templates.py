@@ -9,9 +9,10 @@ from dalton_core.driver_template import (
     cost_slot_ids, cost_template_gaps,
 )
 from dalton_core.model_forecast_driver import (
-    ForecastModelAuthority, ForecastModelValidationError, build_drivers,
+    GENERATOR_REF, ForecastModelAuthority, ForecastModelValidationError, build_drivers,
     build_forecast_model, validate_forecast_model,
 )
+from dalton_core.economic_invariants import FORECAST_INVARIANT_CONTRACT
 from dalton_core.store import canonical_json
 from dalton_core.store import DaltonStore
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -54,6 +55,15 @@ class CostSpecToForecastTests(unittest.TestCase):
         self.assertIn("COST DRIVER TEMPLATE (contract_compounder)", prompt)
         self.assertIn("delivery_cost", prompt)
         self.assertNotIn("raw_material_spread\t", prompt)
+
+    def test_slot_wire_moves_validator_contract_not_generator_identity(self):
+        self.assertEqual(GENERATOR_REF, "rule:trailing-carry-forward:1")
+        self.assertEqual(
+            FORECAST_INVARIANT_CONTRACT["driver_wire"], {
+                "cost_driver_slots":
+                    "optional_nonempty_unique_frozen_registry_slots:v1",
+                "cost_registry_hash": COST_REGISTRY_HASH,
+            })
 
     def test_cross_class_cost_slot_is_refused(self):
         body = _spec()
@@ -139,7 +149,8 @@ class CostSpecToForecastTests(unittest.TestCase):
         stored = ForecastModelAuthority(store).publish(forecast)
         driver = next(item for item in stored["drivers"]
                       if item.get("cost_driver_slots"))
-        for invalid in (["not-a-cost-slot"], ["delivery_cost", "delivery_cost"]):
+        for invalid in (None, [], "delivery_cost", ["not-a-cost-slot"],
+                        ["delivery_cost", "delivery_cost"]):
             changed = json.loads(json.dumps(stored))
             changed.pop("status", None)
             changed_driver = next(item for item in changed["drivers"]

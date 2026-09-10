@@ -64,7 +64,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .claim_index_authority import MARKET_PROXY
 from .company_model_inputs import AMBIGUOUS, ESTIMATED, FILED, NOT_FOUND, SHARED
-from .driver_template import cost_slot_ids
+from .driver_template import COST_DRIVER_TEMPLATES
 from .model_forecast import (
     DRIVER_FORMULA_HASH,
     DRIVER_FORMULA_REF,
@@ -78,10 +78,7 @@ from .store import (
 SCHEMA_VERSION = "0.1"
 FORMULA_REF = DRIVER_FORMULA_REF
 FORMULA_HASH = DRIVER_FORMULA_HASH
-# Version 2 closes the driver wire over the cost-template slots emitted by
-# ``build_drivers``.  The generator ref participates in ``model_digest`` so a
-# run refused by the older closed shape gets one new, bounded identity.
-GENERATOR_REF = "rule:trailing-carry-forward:2"
+GENERATOR_REF = "rule:trailing-carry-forward:1"
 AUTOMATION_ACTOR = "automation:driver-model"
 
 # How many trailing quarters the default generator averages. Four, so a full
@@ -1898,8 +1895,8 @@ def _normalize_driver(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(wire["spec_rows"], list) or not wire["spec_rows"]:
         raise ForecastModelValidationError(f"{name}.spec_rows must name a specification row")
     wire["spec_rows"] = [_text(item, f"{name}.spec_rows[]") for item in wire["spec_rows"]]
-    slots = wire.get("cost_driver_slots")
-    if slots is not None:
+    if "cost_driver_slots" in wire:
+        slots = wire["cost_driver_slots"]
         if not isinstance(slots, list) or not slots:
             raise ForecastModelValidationError(
                 f"{name}.cost_driver_slots must be a non-empty list")
@@ -1911,10 +1908,9 @@ def _normalize_driver(value: Any, name: str) -> dict[str, Any]:
             raise ForecastModelValidationError(
                 f"{name}.cost_driver_slots must be unique")
         known_slots = {
-            slot for classification in (
-                "commodity_cycle", "capital_cycle", "contract_compounder",
-                "structural_growth", "turnaround", "generic",
-            ) for slot in cost_slot_ids(classification)
+            str(slot["slot_id"])
+            for template in COST_DRIVER_TEMPLATES["templates"]
+            for slot in template["cost_slots"]
         }
         unknown_slots = sorted(set(normalized_slots) - known_slots)
         if unknown_slots:
