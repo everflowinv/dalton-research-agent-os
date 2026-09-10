@@ -3,7 +3,7 @@
 日期：2026-09-09
 分支：`w2-consensus`（worktree `~/Projects/dalton-w2-consensus-worktree`）
 分叉基线：worktree HEAD `eaf48f0`（已含 main `7708d43` 与 `6da8f82`）；交付前 `git merge main`
-全量测试：`Ran 4521 tests in 585.006s` / `OK (skipped=1)`（合并 main `eb8e5fb` 之后；逐字见 §7）
+全量测试：`Ran 4529 tests in 755.116s` / `OK (skipped=1)`（合并 main `eb8e5fb`、含 owner 的标签别名裁决之后；逐字见 §7）
 
 ---
 
@@ -29,6 +29,7 @@ Dalton 现在知道街上怎么想：一条 append-only 的 `ConsensusEstimateVe
 | `a862929` | lane 的两项登记：`MigrationSpec` + cockpit lane 标签 |
 | `c24310a` | `git merge main`（迁移清单已按字母序，两条 spec 就位；`bootstrap.py` 同样两行） |
 | `181cd73` | P15d 的 consensus reader 现在能解析到东西（模块级 `latest_consensus`） |
+| （本次）| owner 裁决：按 grade 划定的标签别名表，产出 9 → 15 条 |
 
 未推送。未部署。未写 live 状态。未发布 mission 版本。未做任何真实模型调用。
 
@@ -156,7 +157,7 @@ ACN 那一行由 fixture 独立佐证：`earnings_estimate["0y"].avg == ["+1y"].
 | `broker_unknown` | metadata 与首页正文都认不出券商 |
 | `no_target_price` | 首页没有带货币符号的目标价 |
 | `ambiguous_target` | 首页给出两个不同的**在生效**目标价 |
-| `label_does_not_name_a_line` | 研报只写了「$270 PT」，标签只有两个字母 |
+| `label_does_not_name_a_line` | 标签没有命名一条线（owner 裁决后，`PT/TP/price target/target price` 不再落入此项，见 §4.3） |
 | `no_currency` / `digits_not_in_citation` | 没有币种 / 数字不在所引原文里 |
 
 三条正则对应实盘的三种版式：行首标注（`\nPrice Target: $11.00`）、行内正向（`PT to $97`）、行内反向
@@ -180,25 +181,27 @@ domesticReport / sellSideReport / researchReport`，首页窗口 4,000 字符，
 ```
 spool 里的研报对象：227 份（名下 0 家公司 26、1 家 171、2 家 14、5 家以上 16）
 提到覆盖池内公司的研报：68 份（单一发行人 50、多公司 18）
-记录的 StreetEstimate：9 条
-拒绝：no_target_price 20、multi_company_report 18、subject_not_named 17、
-      label_does_not_name_a_line 4
+记录的 StreetEstimate：15 条
+拒绝：multi_company_report 18、no_target_price 18、subject_not_named 17
 ```
 
 | 公司 | 记录数 | 独立券商 | 券商 | 带评级 | report_consensus |
 | --- | --- | --- | --- | --- | --- |
-| ACN | 2 | 2 | td, wells-fargo | 2 | **成立**：low 173.00 / high 194.00 / mean 183.5 USD |
-| EPAM | 4 | 2 | jpmorgan ×2, td ×2 | 4 | **成立**：low 120.00 / high 131.00 / mean 125.5 USD |
+| ACN | 4 | 4 | td, ubs, citi, wells-fargo | 4 | **成立**：low 173.00 / high 275 / mean 208 USD |
+| EPAM | 7 | 5 | jpmorgan ×2, td ×2, morgan-stanley, citi, guggenheim | 7 | **成立**：low 97 / high 165 / mean 122.6 USD |
 | CTSH | 1 | 1 | wells-fargo | 1 | 不成立（只有一家） |
 | DXC | 2 | 1 | td ×2 | 2 | **不成立**（两份都是 TD Cowen）——互证规则存在的理由 |
-| IBM | 0 | 0 | — | 0 | 不成立 |
+| IBM | 1 | 1 | rbc | 1 | 不成立（只有一家） |
 
-版式分布：`labelled` 8、`inline_forward` 1。标签一律是 "price target"。券商来源一律来自 metadata
-（`document_metadata` 9/9），从未需要解析正文。9 份中 7 份带分析师姓名。
+版式分布：`labelled` 8、`inline_reverse` 4、`inline_forward` 3。标签：`price target` 9、`PT` 4、`TP` 2
+（后 6 条**只因为 owner 的别名裁决才读得出来**，见 §4.3）。券商来源一律来自 metadata
+（`document_metadata` 15/15），从未需要解析正文。
 
-**精度：目标价 9/9 正确，评级 9/9 正确（人工逐条核对所抽 quote，样本量 9）。** 另有一次更宽松的口径
-（不做单一发行人限制、口径同 §2 计划表的 6k 字符扫描）取得 13 条，同样人工核对为 13/13 目标价正确、
-12/13 带评级且全部正确——但那 13 条里含 4 条 bare-PT，进不了逐字核对。
+**精度：目标价 15/15 正确，评级 15/15 正确（人工逐条核对所抽 quote，样本量 15）。** 6 条别名新增的全部
+逐条看过 quote：RBC「Maintain our OP rating and $270 PT」、Morgan Stanley「Remain EW, PT to $97」、
+Guggenheim「we reiterate our Buy rating and $165 PT」、UBS「Valuation: $275 PT—based on ~16x 2028E EPS」、
+Citi「We reiterate our Neutral rating and $100 TP」、Citi「TP: US$190.00; Recomm: Neutral」——最后一条的
+同一行还独立印着「Fiscal year end 31-Aug」，与 §3 里从申报算出的 ACN 财年端点相符。
 
 **召回是被刻意牺牲的。** 计划书 §2 的口径（首 6k 字符有目标价数字）数出 ACN 8 / EPAM 8 / CTSH 5 / DXC 4 /
 IBM 3 共 28 份；本片只记 9 条。差额几乎全在两条规则上：
@@ -212,7 +215,35 @@ IBM 3 共 28 份；本片只记 9 条。差额几乎全在两条规则上：
    **这条不绕过**：绕过的唯一办法是把研报没印过的词（"price target"）递给核对器，而核对器存在的全部意义
    就是拦住这件事。见 §6 待决问题。
 
-### 4.3 互证规则
+### 4.3 标签别名（owner 裁决，2026-09-10）
+
+owner 的裁决：`PT` / `TP` / `price target` / `target price` 在研报首页是**普遍公认的目标价行名**，可以满足
+`_names_a_line`——**但只对 `broker-research-report` 这一个 grade**，走一张按 grade 划定的封闭别名表；申报与
+纪要那两条路一字不改。
+
+落地（`document_numeric_claim.py`，additive）：
+
+```python
+LABEL_ALIASES_BY_GRADE: Mapping[str, frozenset[str]] = {
+    "broker-research-report": frozenset({"pt", "tp", "price target", "target price"}),
+}
+```
+
+`validate_numeric_candidate` / `verify_numeric_candidate` / `verify_numeric_candidates` 各多一个
+**关键字参数** `grade=None`。不传 grade 的调用方（全部现有调用方）逐字节地走原来的路；只有传了 grade 的
+figure 才会在 wire 上多一个 `label_grade` 字段——**有条件地加**，否则每一条已入库 figure 的 `content_hash`
+都会移动。三条测试钉住这一点：10-K grade 下的 `PT` 仍被拒、纪要 grade 下同样被拒、不传 grade 时哈希不变。
+
+别名表**不**豁免逐字核对：标签仍必须出现在所引原文里。研报写 `PT` 而候选说 `TP`，照拒（有测试）。
+
+正则同时加了 `TP` 并补上词边界：没有 `\b`，`PT` 是 `adopt` 的子串、`TP` 是 `output` 的子串，两者都会愉快地
+和行内下一个美元数字配对（有测试）。
+
+**产出变化：9 → 15 条，其中 6 条只因这条裁决才读得出来**；`label_does_not_name_a_line` 归零，
+`no_target_price` 从 20 降到 18（两份用 `TP` 的研报现在被正则匹配到）。ACN 的独立券商从 2 家变成 4 家，
+EPAM 从 2 家变成 5 家，IBM 从 0 条变成 1 条（RBC）。
+
+### 4.4 互证规则
 
 `street_estimate.report_consensus(estimates, as_of=..., window_days=90)`：
 
@@ -317,13 +348,16 @@ consensus」——同一个答案、同一个理由；另外两个把假模块�
 
 ## 6. 待决问题
 
-1. **AlphaEngine 配额（owner）。** 素材确实薄：五家公司里只有两家能凑出两家独立券商的目标价，IBM 一条也
-   没有（唯一那条是 bare-PT，见下）。如果 owner 想让 consensus 双路里的研报侧真正有用，130/24h 的上限需要
-   放开，且检索要偏向**单一发行人**的公司更新（industry recap 对本片零产出）。本片没有动配额。
-2. **bare-PT 的两个字母。** 4/13 的实盘目标价写作 `$270 PT`，被 `_names_a_line` 拒绝。绕过它需要修改一条
-   **共享**的护栏（比如给 `document_numeric_claim` 一张按领域的缩写白名单，让 "PT" 在
-   `metric:price-target` 这个 slot 下算作命名了一条线）。这是 ADR 级的决定，不该由本片单方面做。代价已量化：
-   约四分之一的可读目标价，其中包括 IBM 的唯一一条。
+1. **AlphaEngine 配额（owner，一句话的问题）：** 在现行 130 篇/24h 下，五家里只有 ACN（4 家独立券商）与
+   EPAM（5 家）越过「两家独立券商」这条线，CTSH / DXC / IBM 各只有 1 家（分别是 Wells Fargo、TD Cowen 两篇、
+   RBC）——**要把这三家也抬过线，配额该提到多少，以及是否同意把检索明确偏向「单一发行人的公司更新」？**
+
+   支持这个问题的实测：spool 里 227 篇研报，只有 68 篇名下有覆盖池内的公司，其中 50 篇是单一发行人；多公司
+   的行业回顾（16 篇名下 5 家以上）对本片**零产出**且必然零产出，所以配额里花在它们身上的份额是纯损耗。
+   CTSH / DXC / IBM 的缺口不是抽取率问题（这三家的单一发行人研报里，凡有目标价的都抽出来了），是**素材里
+   就只有那一家券商**。
+2. ~~**bare-PT 的两个字母。**~~ **已由 owner 裁决（2026-09-10）并实现**，见 §4.3：按 grade 划定的封闭别名
+   表，只对研报生效。产出从 9 条升到 15 条。
 3. **正文被截在 30,000 字符的 172 份。** 目标价与评级在首页，不受影响（烟测证实）；受影响的是 EPS/收入
    估计表。若模型路径接线，需要先确认被截的那些文档的表格是否还在窗口内。
 4. **空格分隔的表格打败 `numbers_in`。** 写测试时发现的：`document_numeric_claim._NUMBER_RE` 的
@@ -344,8 +378,8 @@ consensus」——同一个答案、同一个理由；另外两个把假模块�
 
 ```
 tests/test_consensus_estimate.py           34 项
-tests/test_street_estimate.py              31 项
-tests/test_street_estimate_extraction.py   28 项
+tests/test_street_estimate.py              37 项
+tests/test_street_estimate_extraction.py   30 项
 tests/test_mission_consensus_lane.py       23 项
 tests/test_consensus_estimate_cli.py       11 项
 ```
@@ -371,7 +405,7 @@ tests/test_consensus_estimate_cli.py       11 项
 全量：
 
 ```
-Ran 4521 tests in 585.006s
+Ran 4529 tests in 755.116s
 
 OK (skipped=1)
 ```

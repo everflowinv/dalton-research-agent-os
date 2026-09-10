@@ -487,6 +487,16 @@ def _validate_figure(
         "unit", "currency", "period", "basis", "scale", "schema_version",
         "claim_kind", "citation_text", "citation_hash", "content_hash",
     }
+    # Present only when the label leant on this grade's alias table -- "PT"
+    # rather than "Price Target". Optional, so a figure whose label names a
+    # line on its own is unchanged, and checked when present, so a figure
+    # cannot claim a concession granted to some other grade.
+    if figure.get("label_grade") is not None:
+        if figure["label_grade"] != SOURCE_GRADE:
+            raise StreetEstimateValidationError(
+                f"{name}.label_grade must be {SOURCE_GRADE!r}"
+            )
+        required = required | {"label_grade"}
     if set(figure) != required:
         raise StreetEstimateValidationError(
             f"{name} is not the output of verify_numeric_candidate; "

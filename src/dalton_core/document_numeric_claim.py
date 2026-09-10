@@ -90,14 +90,47 @@ _PERIOD_MARKER_RE = re.compile(r"\b(?:(?:q[1-4]|[1-4]q|h[12]|[12]h)\d{0,2}|fy\d{
 _METRIC_REF_RE = re.compile(r"metric:[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
 
-def _names_a_line(label: str) -> str | bool:
+# P11b: labels that name a line only because of the kind of document that
+# printed them, keyed by that kind's figure grade.
+#
+# On a broker note's first page "PT" is not an abbreviation a reader has to
+# work out; it is the name of the line, printed that way by every house on the
+# street for thirty years, and "we cannot read a target written the way targets
+# are written" is not a defensible refusal. Live, it costs about a quarter of
+# the readable targets, including the only one held for IBM.
+#
+# Scoped by grade rather than added to the general rule, and that is the whole
+# design. A 10-K does not print "PT", so admitting it there buys nothing and
+# gives up the guard that stops a label being the amount in disguise. Filings
+# and transcripts pass no grade and are checked byte-for-byte as before; a
+# caller must name the grade to get the concession, and the only grade that has
+# one is the one whose figures can never become quantitative Claims anyway.
+LABEL_ALIASES_BY_GRADE: Mapping[str, frozenset[str]] = {
+    "broker-research-report": frozenset({
+        "pt", "tp", "price target", "target price",
+    }),
+}
+
+
+def _folded_label(label: str) -> str:
+    return " ".join(_LETTERS_RE.findall(label.lower()))
+
+
+def _names_a_line(label: str, *, grade: Any = None) -> str | bool:
     """Whether this label names a line item rather than restating the amount.
 
     "Net revenues" names a line; "$5 billion" is the figure wearing the label's
     clothes, and it makes the label check vacuous -- of course the amount
     appears in the quote the amount came from.
+
+    ``grade`` opens the closed alias table above and nothing else. Absent -- the
+    default, and what every existing caller passes -- this is the rule it has
+    always been.
     """
 
+    aliases = LABEL_ALIASES_BY_GRADE.get(grade) if isinstance(grade, str) else None
+    if aliases is not None and _folded_label(label) in aliases:
+        return True
     words = [w for w in _LETTERS_RE.findall(label.lower()) if w not in _AMOUNT_WORDS]
     return sum(len(w) for w in words) >= 3
 
@@ -146,8 +179,15 @@ def _decimal(value: Any, name: str) -> Decimal:
     return parsed
 
 
-def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
-    """The closed shape a numeric suggestion must have before verification."""
+def validate_numeric_candidate(
+    value: Mapping[str, Any], *, grade: Any = None
+) -> dict[str, Any]:
+    """The closed shape a numeric suggestion must have before verification.
+
+    ``grade`` is the figure grade of the document this candidate was read from,
+    and it is consulted for one thing only: whether the reported label names a
+    line. See :data:`LABEL_ALIASES_BY_GRADE`.
+    """
 
     if not isinstance(value, Mapping) or set(value) != {
         "quote_id", "metric_ref", "subject_as_named", "as_reported_label", "value",
@@ -176,7 +216,7 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     if _METRIC_REF_RE.fullmatch(metric_ref) is None:
         raise NumericCandidateError("metric_ref must be the slot that was requested")
     label = _text(value["as_reported_label"], "as_reported_label", maximum=MAX_METRIC_CHARS)
-    if not _names_a_line(label):
+    if not _names_a_line(label, grade=grade):
         raise NumericCandidateError(
             "as_reported_label must name the line, not restate the amount: "
             f"{label!r} carries no line name"
@@ -260,7 +300,7 @@ def _candidate_values(candidate: Mapping[str, Any]) -> set[Decimal]:
 
 
 def verify_numeric_candidate(
-    candidate: Mapping[str, Any], quotes: Mapping[str, str]
+    candidate: Mapping[str, Any], quotes: Mapping[str, str], *, grade: Any = None
 ) -> dict[str, Any]:
     """Refuse any candidate whose number is not in the bytes it cited.
 
@@ -270,7 +310,7 @@ def verify_numeric_candidate(
     contains it at all is not a matter of opinion.
     """
 
-    wire = validate_numeric_candidate(candidate)
+    wire = validate_numeric_candidate(candidate, grade=grade)
     quote = quotes.get(wire["quote_id"])
     if not isinstance(quote, str) or not quote:
         raise NumericCandidateError("numeric candidate cites a quote that was not supplied")
@@ -292,12 +332,18 @@ def verify_numeric_candidate(
         "citation_text": quote,
         "citation_hash": content_hash({"quote_id": wire["quote_id"], "raw_text": quote}),
     }
+    if grade is not None:
+        # Only when a grade was actually used. A figure verified without one
+        # hashes exactly as it always has, so nothing already stored moves.
+        # And a figure that leant on the alias table says so, rather than
+        # failing a later re-verification that did not know to ask.
+        verified["label_grade"] = grade
     verified["content_hash"] = content_hash(verified)
     return verified
 
 
 def verify_numeric_candidates(
-    candidates: Any, quotes: Mapping[str, str]
+    candidates: Any, quotes: Mapping[str, str], *, grade: Any = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split a model's numeric suggestions into verified ones and refusals.
 
@@ -313,7 +359,7 @@ def verify_numeric_candidates(
     refused: list[dict[str, Any]] = []
     for item in candidates:
         try:
-            verified.append(verify_numeric_candidate(item, quotes))
+            verified.append(verify_numeric_candidate(item, quotes, grade=grade))
         except NumericCandidateError as exc:
             refused.append({
                 "reason": str(exc),
@@ -326,6 +372,7 @@ def verify_numeric_candidates(
 __all__ = [
     "ALLOWED_BASES",
     "ALLOWED_UNITS",
+    "LABEL_ALIASES_BY_GRADE",
     "CANDIDATE_KIND",
     "NumericCandidateError",
     "numbers_in",

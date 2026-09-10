@@ -18,11 +18,17 @@ from dalton_core.document_figure_grade import (
     GRADES,
     GRADE_BY_SPEC,
     basis_for,
+    FILED,
+    SPOKEN,
     figure_worthy,
     grade_for,
     qualify,
 )
-from dalton_core.document_numeric_claim import verify_numeric_candidate
+from dalton_core.document_numeric_claim import (
+    LABEL_ALIASES_BY_GRADE,
+    NumericCandidateError,
+    verify_numeric_candidate,
+)
 from dalton_core.research_verification import FIGURE_ADMISSIBLE_GRADES
 from dalton_core.store import DaltonStore
 from dalton_core.street_estimate import (
@@ -111,6 +117,71 @@ class GradeTests(unittest.TestCase):
         qualified = qualify("Accenture price target is 173.00 USD", BROKER_RESEARCH)
         self.assertIn("that broker's estimate", qualified)
         self.assertIn("not a figure the company published", qualified)
+
+
+class LabelAliasTests(unittest.TestCase):
+    """"PT" names a line on a broker note and nowhere else."""
+
+    QUOTE = "Maintain our OP rating and $270 PT."
+
+    def candidate(self, label="PT", basis=BASIS):
+        return {
+            "quote_id": "q", "metric_ref": TARGET_METRIC,
+            "subject_as_named": "IBM", "as_reported_label": label,
+            "value": "270", "unit": "currency", "currency": "USD",
+            "period": "12 months from 2026-08-19", "basis": basis, "scale": None,
+        }
+
+    def test_the_broker_grade_opens_the_alias_table(self):
+        verified = verify_numeric_candidate(
+            self.candidate(), {"q": self.QUOTE}, grade=BROKER_RESEARCH
+        )
+        # The document's own word is what is stored; nothing is substituted in.
+        self.assertEqual(verified["as_reported_label"], "PT")
+        self.assertEqual(verified["label_grade"], BROKER_RESEARCH)
+
+    def test_a_filing_that_said_PT_is_still_refused(self):
+        # The owner's ruling is about broker notes. A 10-K does not print "PT",
+        # so admitting it there would buy nothing and give up the guard that
+        # stops a label being the amount in disguise.
+        for grade in (FILED, SPOKEN):
+            with self.subTest(grade=grade):
+                with self.assertRaises(NumericCandidateError) as caught:
+                    verify_numeric_candidate(
+                        self.candidate(basis="management-reported"),
+                        {"q": self.QUOTE}, grade=grade,
+                    )
+                self.assertIn("must name the line", str(caught.exception))
+
+    def test_a_caller_that_names_no_grade_is_checked_as_it_always_was(self):
+        with self.assertRaises(NumericCandidateError):
+            verify_numeric_candidate(
+                self.candidate(basis="management-reported"), {"q": self.QUOTE}
+            )
+
+    def test_a_figure_verified_without_a_grade_hashes_as_it_always_has(self):
+        # Adding the key unconditionally would move the content hash of every
+        # figure already stored.
+        verified = verify_numeric_candidate({
+            **self.candidate(label="Price Target", basis="management-reported"),
+        }, {"q": "Price Target: $270.00 per share"})
+        self.assertNotIn("label_grade", verified)
+
+    def test_the_table_is_closed_and_names_only_the_broker_grade(self):
+        self.assertEqual(set(LABEL_ALIASES_BY_GRADE), {BROKER_RESEARCH})
+        self.assertEqual(
+            LABEL_ALIASES_BY_GRADE[BROKER_RESEARCH],
+            frozenset({"pt", "tp", "price target", "target price"}),
+        )
+
+    def test_an_alias_still_has_to_appear_in_the_quote(self):
+        # The alias table decides whether a label names a line. It does not
+        # excuse a label the document never printed.
+        with self.assertRaises(NumericCandidateError):
+            verify_numeric_candidate(
+                self.candidate(label="TP"), {"q": self.QUOTE},
+                grade=BROKER_RESEARCH,
+            )
 
 
 class VocabularyTests(unittest.TestCase):

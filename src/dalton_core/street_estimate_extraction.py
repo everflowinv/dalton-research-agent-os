@@ -39,12 +39,17 @@ Hence the refusals, which are most of this module:
     wrong.
 
 ``label_does_not_name_a_line``
-    The note wrote "$270 PT" and nothing longer. ``document_numeric_claim``
-    requires the reported label to name a line rather than restate the amount,
-    and "PT" is two letters. This is a real yield cost -- it is a quarter of
-    the live hits -- and it is accepted rather than worked around: the way to
-    get past it would be to hand the verifier a label the document did not
-    print, which is the one thing the verifier exists to stop.
+    The reported label does not name a line. This used to fire on every note
+    that wrote "$270 PT" and nothing longer -- a quarter of the live hits,
+    including the only readable target held for IBM -- because
+    ``document_numeric_claim`` requires a label to name a line rather than
+    restate the amount, and "PT" is two letters. The owner has since ruled that
+    "PT", "TP", "price target" and "target price" *are* the name of that line on
+    a broker note, so they are admitted through a closed alias table scoped to
+    this grade alone: a filing that printed "PT" is still refused, byte for
+    byte as before. The refusal stays here for any label the alias table does
+    not cover; the way it must never be got past is by handing the verifier a
+    label the document did not print.
 
 What is *not* deterministic is the estimates table. Guggenheim's EPAM note
 prints a quarter-by-quarter revenue and EPS grid with an ``E`` suffix on the
@@ -67,6 +72,7 @@ from .document_numeric_claim import (
     verify_numeric_candidate,
 )
 from .store import content_hash
+from .document_figure_grade import BROKER_RESEARCH
 from .street_estimate import (
     BASIS,
     EPS_METRIC,
@@ -119,7 +125,11 @@ REFUSALS: tuple[str, ...] = (
 _SYMBOL_CURRENCY = {"$": "USD", "US$": "USD", "€": "EUR", "£": "GBP"}
 _SYM = r"(US\$|\$|€|£)"
 _NUM = r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)"
-_LABEL = r"(Price Target|Target Price|PT)"
+# Word-bounded, because "PT" without them is a substring of "adopt" and "TP"
+# of "output", and either would pair happily with the next dollar figure on the
+# line. The two-letter forms are admitted as labels at all only under the
+# broker grade's alias table -- see ``document_numeric_claim``.
+_LABEL = r"\b(Price Target|Target Price|PT|TP)\b"
 # Ordered. The labelled masthead first, because it is the layout that says
 # unambiguously "this is the target"; the prose forms after it.
 _TARGET_PATTERNS: tuple[tuple[str, Any, tuple[int, int, int]], ...] = (
@@ -391,7 +401,10 @@ def extract(context: Mapping[str, Any]) -> dict[str, Any]:
         "scale": None,
     }
     try:
-        figure = verify_numeric_candidate(candidate, quotes)
+        # The grade is what lets "PT" be read as the name of a line. It opens
+        # a closed alias table for this grade and nothing else; a filing that
+        # said "PT" would still be refused.
+        figure = verify_numeric_candidate(candidate, quotes, grade=BROKER_RESEARCH)
     except NumericCandidateError as exc:
         message = str(exc)
         if "does not contain" in message:

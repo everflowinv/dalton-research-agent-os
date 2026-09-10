@@ -149,15 +149,16 @@ class RevisionTests(unittest.TestCase):
     def test_the_stranded_label_never_yields_the_superseded_target(self):
         # "Price Target" with both numbers on their own lines matches nothing,
         # because the label and the figure are not on one line. What is left is
-        # the prose form, whose only label is "PT" -- so the note is refused.
-        # The point of the test is the number that is *not* stored: $100.00 is
-        # the target this house has just moved away from.
+        # the prose form, "PT to $97". The point of the test is the number that
+        # is *not* stored: $100.00 is the target this house has just moved away
+        # from, and it is the one a label-first match would take.
         result = extract(context(
             REVISION, subject_names=["EPAM"], document_companies=["EPAM Systems, Inc."],
             sources=["Morgan Stanley & Co. LLC"],
         ))
-        self.assertEqual(result["refusal"], "label_does_not_name_a_line")
-        self.assertIsNone(result["estimate"])
+        self.assertIsNone(result["refusal"])
+        self.assertEqual(result["estimate"]["target_price"]["value"], "97")
+        self.assertEqual(result["estimate"]["rating"]["as_named"], "EW")
 
     def test_a_house_this_system_does_not_know_is_not_attributable(self):
         text = (
@@ -219,17 +220,46 @@ class ProseTests(unittest.TestCase):
         self.assertEqual(estimate["rating"]["code"], "buy")
         self.assertEqual(estimate["rating"]["as_named"], "OP")
 
-    def test_a_bare_PT_is_refused_rather_than_relabelled(self):
-        # The note wrote "$270 PT" and nothing longer. The verifier requires a
-        # label that names a line; handing it "price target" instead would be
-        # handing it words the document did not print.
+    def test_a_bare_PT_names_the_line_and_keeps_the_word_the_note_used(self):
+        # The note wrote "$270 PT" and nothing longer. On a broker note that is
+        # the name of the line, so it is read -- and the label stored is the
+        # document's own two letters, never "price target" substituted in.
         text = PROSE.replace("a price target of $270", "$270 PT")
+        result = extract(context(
+            text, subject_names=["IBM"], document_companies=["IBM"],
+            sources=["RBC Capital Markets"], published_on="2026-08-19",
+        ))
+        self.assertIsNone(result["refusal"])
+        figure = result["estimate"]["figures"][0]
+        self.assertEqual(figure["as_reported_label"], "PT")
+        self.assertEqual(figure["value"], "270")
+        self.assertEqual(figure["label_grade"], "broker-research-report")
+
+    def test_the_other_spellings_of_the_same_line_are_read_too(self):
+        for label in ("PT", "TP", "price target", "target price"):
+            with self.subTest(label=label):
+                text = PROSE.replace(
+                    "a price target of $270", f"a {label} of $270")
+                result = extract(context(
+                    text, subject_names=["IBM"], document_companies=["IBM"],
+                    sources=["RBC Capital Markets"], published_on="2026-08-19",
+                ))
+                self.assertIsNone(result["refusal"], label)
+                self.assertEqual(result["estimate"]["target_price"]["value"], "270")
+
+    def test_a_two_letter_label_inside_a_word_is_not_a_label(self):
+        # Without word boundaries "PT" is a substring of "adopt" and "TP" of
+        # "output", and either would pair happily with the next figure on the
+        # line.
+        text = (
+            "IBM\nRBC Capital Markets\n"
+            "Management expects clients to adopt $270 million of capacity.\n"
+        )
         result = extract(context(
             text, subject_names=["IBM"], document_companies=["IBM"],
             sources=["RBC Capital Markets"],
         ))
-        self.assertEqual(result["refusal"], "label_does_not_name_a_line")
-        self.assertEqual(result["label"], "PT")
+        self.assertEqual(result["refusal"], "no_target_price")
 
     def test_an_abbreviation_needs_a_cue_to_be_a_rating(self):
         # "UP" is Underperform at RBC and the most common two-letter string in
