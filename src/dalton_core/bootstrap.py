@@ -448,6 +448,8 @@ def bootstrap(
         "model_router_db": str(paths["model_router_db"]),
         "writer_socket": str(paths["writer_socket"]),
         "token_config": str(paths["token_config"]),
+        **({"workspace_manifest": str(workspace.manifest_path),
+            "cockpit_port": str(workspace.cockpit_port)} if workspace is not None else {}),
         "schemas_applied": str(schemas["schemas_applied"]),
         "schemas_applied_to_scratch": str(schemas["schemas_applied_to_scratch"]),
     }

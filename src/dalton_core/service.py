@@ -446,6 +446,9 @@ class ServiceConfig:
                     or workspace.state_dir / "run" / "heartbeat.json" != parsed.heartbeat_path):
                 raise ServiceConfigError(
                     "service config paths do not match the bound workspace manifest")
+            if parsed.control is not None and parsed.control.port != workspace.cockpit_port:
+                raise ServiceConfigError(
+                    "Cockpit port does not match the bound workspace manifest")
             try:
                 validate_service_mapping_paths(raw, workspace)
             except WorkspaceError as exc:

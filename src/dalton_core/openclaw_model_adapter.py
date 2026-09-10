@@ -24,8 +24,8 @@ import socket
 import stat
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_CEILING
 from importlib import resources
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -1184,6 +1184,15 @@ class OpenClawModelAdapter:
             "work_order_ref": work.id,
             "profile_version_ref": profile["profile_version_ref"],
         }
+        workspace = None
+        workspace_manifest = os.environ.get("DALTON_WORKSPACE_MANIFEST")
+        if workspace_manifest:
+            from .workspace import WorkspaceError, load_workspace_manifest
+            try:
+                workspace = load_workspace_manifest(workspace_manifest)
+            except WorkspaceError as exc:
+                raise ModelAdmissionError("workspace manifest is invalid") from exc
+            invocation_identity["workspace_id"] = workspace.workspace_id
         if required_controls is not None:
             invocation_identity["required_provider_controls_hash"] = _dalton_hash(
                 required_controls
@@ -1220,10 +1229,58 @@ class OpenClawModelAdapter:
         if set(request) != expected_request_keys:  # defensive assertion
             raise AssertionError("internal authenticated broker request shape drift")
         started_at = _timestamp(now_dt)
-        response = self._exchange(request, timeout)
-        usage, cost = self._validate_response(
-            response, core_request, profile, self._expected_agent_id
-        )
+        capacity = reservation = None
+        if workspace is not None and workspace.shared_capacity is not None:
+            from .shared_capacity import SharedCapacityAuthority, SharedCapacityError
+            binding = workspace.shared_capacity
+            try:
+                capacity = SharedCapacityAuthority(
+                    binding["database"], policy_ref=binding["policy_ref"],
+                    policy_hash=binding["policy_hash"], clock=self._clock)
+                maximum_cost_micros = int(
+                    (Decimal(str(work.budget["max_cost_usd"])) * Decimal(1_000_000))
+                    .to_integral_value(rounding=ROUND_CEILING)
+                )
+                reservation = capacity.reserve(
+                    workspace_id=workspace.workspace_id,
+                    invocation_ref=invocation_id, provider=profile["provider"],
+                    credential_slot_ref=profile["credential_slot_ref"],
+                    maximum_cost_micros=maximum_cost_micros,
+                    expires_at=now_dt + timedelta(seconds=timeout + 30),
+                )
+                capacity.mark_dispatched(reservation["reservation_ref"])
+            except SharedCapacityError as exc:
+                if capacity is not None:
+                    capacity.close()
+                raise ModelAdmissionError(f"shared model capacity refused: {exc}") from exc
+        try:
+            response = self._exchange(request, timeout)
+            usage, cost = self._validate_response(
+                response, core_request, profile, self._expected_agent_id
+            )
+            if capacity is not None and reservation is not None:
+                actual = (
+                    int((Decimal(str(cost["usd"])) * Decimal(1_000_000))
+                        .to_integral_value(rounding=ROUND_CEILING))
+                    if cost["available"] else None
+                )
+                capacity.settle(
+                    reservation["reservation_ref"], actual_cost_micros=actual,
+                    outcome="broker_succeeded" if response["ok"] else "broker_failed",
+                )
+        except Exception:
+            if capacity is not None and reservation is not None:
+                try:
+                    capacity.settle(
+                        reservation["reservation_ref"], actual_cost_micros=None,
+                        outcome="transport_or_protocol_unknown",
+                    )
+                except SharedCapacityError:
+                    pass
+            raise
+        finally:
+            if capacity is not None:
+                capacity.close()
         if (
             replay_only
             and response["ok"] is True
