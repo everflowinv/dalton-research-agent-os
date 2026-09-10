@@ -35,6 +35,13 @@ market-data = ["yfinance>=0.2.31"]
 # name. A floor would let a `pip install -U` silently change what a number
 # means. This is the version the OpenClaw skill runs.
 cn-hk-data = ["akshare==1.18.94"]
+# W3: reading a prior human Excel model. Optional for the same reason every
+# parser here is: without it the workbook is refused with its reason rather
+# than guessed at, and the renderer identity names the library so swapping it
+# is a different capability. It arrives transitively with `cn-hk-data` today,
+# which is not a dependency -- an install that does not take that extra has no
+# openpyxl at all, and the lane must say so rather than crash.
+prior-models = ["openpyxl>=3.1,<4"]
 
 [project.scripts]
 dalton-bootstrap = "dalton_core.bootstrap:main"
@@ -66,6 +73,7 @@ dalton-research-quality = "dalton_core.research_quality_cli:main"
 dalton-research-reflection = "dalton_core.research_cycle_reflection_cli:main"
 dalton-sales-notes = "dalton_core.sales_notes_cli:main"
 dalton-company-wiki = "dalton_core.company_wiki_cli:main"
+dalton-prior-research = "dalton_core.prior_research_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

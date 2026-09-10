@@ -53,6 +53,7 @@ from .mission_deliverable import (
     WRITE_SCOPE,
     unsourced_numbers,
 )
+from .prior_screen_import import build_delta_vs_prior, prior_reference
 from .research_quality_score import residual_citation_artefacts
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory
 from .store import DaltonStore
@@ -151,6 +152,14 @@ def _target(
             })
             continue
         published = deliverables.get(company_ref)
+        # W3: an imported prior screen is version 0 and is not a screen this
+        # system wrote. It is the head of the chain until Dalton drafts, so
+        # the staleness test below would read it as "we already have one" and
+        # the company would never be written up -- which is the exact opposite
+        # of what importing it was for. Treated as no screen yet, deliberately
+        # and by version number rather than by date.
+        if published is not None and published.get("version") == 0:
+            published = None
         if (
             reopen is None
             and published is not None
@@ -160,6 +169,56 @@ def _target(
             continue
         return {**entry, "reopen": reopen}, skipped
     return None, skipped
+
+
+def _filings_since(store: Any, company_ref: str) -> list[dict[str, Any]]:
+    """The company's filings, newest last, or nothing if the lane never ran.
+
+    A read that fails is an absence, not an exception: "what changed since the
+    last version" is a reported block, and a Core with no statements lane must
+    say it does not know rather than take the gate down with it.
+    """
+
+    try:
+        rows = store.connection.execute(
+            "SELECT accession, form, filed_at FROM coverage_mission_statement_filings "
+            "WHERE company_ref=? ORDER BY filed_at",
+            (company_ref,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - reported, never a trigger
+        return []
+    return [
+        {"ref": row["accession"], "form": row["form"], "filed_at": str(row["filed_at"])[:10]}
+        for row in rows
+    ]
+
+
+def _shifted_debates(
+    store: Any, company_ref: str, since: str | None
+) -> list[dict[str, Any]]:
+    """Debates that are moving, or that opened after the prior version.
+
+    Read off the current map rather than diffed against a stored version,
+    because the prior version this compares to is a *date* -- an imported v0
+    carries a manifest date and no map version at all -- and a debate's
+    ``first_seen_at`` is the field that answers "is this argument newer than
+    what we last wrote".
+    """
+
+    try:
+        from .debate_map import DebateMapAuthority
+
+        authority = DebateMapAuthority(store)
+        current = authority.current(company_ref)
+    except Exception:  # noqa: BLE001 - reported, never a trigger
+        return []
+    if current is None:
+        return []
+    return [
+        dict(debate) for debate in current["debates"]
+        if debate.get("status") == "shifting"
+        or (since and str(debate.get("first_seen_at") or "")[:10] > since)
+    ]
 
 
 def reopen_revision(reopen: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -356,6 +415,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 scheduler_db=args.scheduler_db or str(state / "scheduler.sqlite"),
                 max_output_tokens=1800, timeout_seconds=args.timeout_seconds,
             )
+        # W3: what this fund said about this company last time, if anything.
+        # ``published`` was cleared by the selection rule when the head is an
+        # imported v0, so the block is read from the chain rather than from
+        # that variable.
+        prior_block = prior_reference(
+            deliverable_authority.latest(f"mission-deliverable:{KIND}:"
+                                         f"{company_ref.rsplit(':', 1)[-1]}")
+        )
+        summary["prior_reference"] = None if prior_block is None else {
+            "version_ref": prior_block["version_ref"],
+            "version": prior_block["version"],
+            "as_of": prior_block["as_of"],
+            "age_months": prior_block["age_months"],
+            "imported": prior_block["imported"],
+        }
         sections: list[dict[str, Any]] = []
         invocations: list[str] = []
         for index, title in enumerate(titles):
@@ -369,6 +443,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 title=title, guidance=guidance,
                 company={"ticker": entry["ticker"], "company_ref": company_ref},
                 mission=mission, context=context, checklist=entry["items"],
+                prior_reference=prior_block,
             )
             if model is None:
                 sections.append({"title": title, "body": "", "claim_refs": [], "numbers": [],
@@ -467,7 +542,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "version_ref": record["id"], "status": record["status"],
         }
         summary["formal_authority_writes"] = 1 if record["status"] == "fresh" else 0
-        gate = assess_exit_gate(playbook=playbook, checklist_entry=entry, sections=record["sections"])
+        gate = assess_exit_gate(
+            playbook=playbook, checklist_entry=entry, sections=record["sections"],
+            delta_vs_prior=build_delta_vs_prior(
+                prior=prior_block,
+                filings=_filings_since(store, company_ref),
+                shifted_debates=_shifted_debates(store, company_ref,
+                                                 (prior_block or {}).get("as_of")),
+            ),
+        )
         summary["gate"] = gate
         try:
             stage = missions.record_stage(

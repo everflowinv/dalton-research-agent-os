@@ -65,6 +65,16 @@ SPOKEN = "earnings-call-transcript"
 # where the broker, the rating and the horizon can live.
 BROKER_RESEARCH = "broker-research-report"
 
+# W3: a fourth grade, and the same shape of exclusion for a different reason.
+# A document this fund wrote itself, earlier -- an old Initial Screen, a memo,
+# a maintained Excel model. Graded so that a reader of one claim is told what
+# the claim is a claim of, and graded *out* of every figure path: our own
+# model's revenue estimate for FY26 is not a figure about Accenture, it is a
+# figure about what we assumed in 2024. Absent from ``GRADE_BY_SPEC`` and from
+# ``GRADES`` for exactly the reasons spelled out above; see
+# ``NON_FIGURE_GRADES`` for how the two exclusions are named together.
+INTERNAL_PRIOR = "internal-prior-document"
+
 # The document kinds a figure may be taken from, and what taking one means.
 # Anything absent is not read for figures; see the module docstring for why
 # sell-side research in particular is absent on purpose.
@@ -83,6 +93,7 @@ BASIS_BY_GRADE: Mapping[str, str] = {
     FILED: "company-filed-document",
     SPOKEN: "earnings-call-transcript-spoken",
     BROKER_RESEARCH: "broker-research-report-estimate",
+    INTERNAL_PRIOR: "internal-prior-document",
 }
 
 # The sentence a claim adds about itself. Short, because it is appended to a
@@ -94,15 +105,27 @@ QUALIFIER_BY_GRADE: Mapping[str, str] = {
     BROKER_RESEARCH: "as stated by this broker in its own research note; it is "
                      "that broker's estimate of the company, not a figure the "
                      "company published or management spoke",
+    INTERNAL_PRIOR: "as written in this fund's own earlier work on the date "
+                    "that document carries; not a figure the company published",
 }
 
 # The grades a *mission document figure* may be recorded under. Unchanged by
-# P11b on purpose: see BROKER_RESEARCH above for why the third grade is not a
-# member of this tuple.
+# P11b or W3 on purpose: see BROKER_RESEARCH and INTERNAL_PRIOR above for why
+# neither is a member of this tuple. It is also the enforcement --
+# ``record_document_figures`` refuses a ``source_grade`` outside it, and the
+# figure table's SQL CHECK names the same two words.
 GRADES: tuple[str, ...] = (FILED, SPOKEN)
-# Every grade this module can describe -- the two above plus the broker note.
-# What ``basis_for`` and ``qualify`` accept.
-ALL_GRADES: tuple[str, ...] = (FILED, SPOKEN, BROKER_RESEARCH)
+# Every grade this module can describe. What ``basis_for`` and ``qualify``
+# accept.
+ALL_GRADES: tuple[str, ...] = (FILED, SPOKEN, BROKER_RESEARCH, INTERNAL_PRIOR)
+
+#: Graded, and graded as not-a-figure-source. Derived rather than written out,
+#: so that a grade added to ``ALL_GRADES`` and forgotten here cannot pretend to
+#: be figure-bearing; a separate name at all so that "is this excluded on
+#: purpose or did someone forget" has an answer a test can read.
+NON_FIGURE_GRADES: tuple[str, ...] = tuple(
+    grade for grade in ALL_GRADES if grade not in GRADES
+)
 
 # P12h: whether the document is *known to be about the company* it was filed
 # under, and how.
@@ -212,7 +235,10 @@ __all__ = [
     "ALL_GRADES",
     "ATTRIBUTED_BY_SPEC",
     "BASIS_BY_GRADE",
+    "ALL_GRADES",
     "BROKER_RESEARCH",
+    "INTERNAL_PRIOR",
+    "NON_FIGURE_GRADES",
     "FILED",
     "GRADES",
     "GRADE_BY_SPEC",

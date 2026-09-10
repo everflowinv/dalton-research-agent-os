@@ -94,7 +94,7 @@ import dalton_core.company_wiki_cli as wiki_cli
 import dalton_core.sales_notes_cli as notes_cli
 
 REPO = Path(__file__).resolve().parents[1]
-PLAN_PATH = REPO / "deploy" / "phase9" / "p9-us-it-services-feeds-v1.json"
+PLAN_PATH = REPO / "deploy" / "phase9" / "p9-us-it-services-feeds-v2.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "s1_feeds"
 ACN = "company:sec-cik:0001467373"
 CTSH = "company:sec-cik:0001058290"
@@ -1461,12 +1461,25 @@ class AuthoritySeamTests(unittest.TestCase):
                      "register_document_review"):
             self.assertTrue(hasattr(RecordingMissions, name))
 
+    #: Feeds whose row `coverage_mission.DISCOVERY_SOURCES` does not carry yet,
+    #: because the branch that added the feed may not touch that file. Named
+    #: rather than inferred: adding a feed without integrating it has to be a
+    #: visible edit here, and integrating it has to be a second visible edit
+    #: removing the name. The lane itself already refuses with
+    #: "not registered in coverage_mission.DISCOVERY_SOURCES" until then, so
+    #: an un-integrated feed is absent rather than half-wired.
+    AWAITING_AUTHORITY_ROW = frozenset({"source:prior-research"})
+
     def test_the_feed_sources_are_shaped_like_the_ones_already_registered(self) -> None:
         existing = next(iter(coverage_mission_module.DISCOVERY_SOURCES.values()))
         for source_ref, entry in FEED_DISCOVERY_SOURCES.items():
             with self.subTest(source_ref=source_ref):
                 self.assertEqual(set(entry), set(existing))
                 self.assertEqual(entry["connector_source_ref"], source_ref)
+                if source_ref in self.AWAITING_AUTHORITY_ROW:
+                    self.assertNotIn(source_ref, coverage_mission_module.DISCOVERY_SOURCES,
+                                     "integrated: take it out of AWAITING_AUTHORITY_ROW")
+                    continue
                 # Integration added the rows to the authority's own table; the
                 # lane's copy and the authority's must never drift.
                 self.assertEqual(

@@ -97,6 +97,17 @@ COMPANY_WIKI_LIST_CAPABILITY_ID = (
     "capability:dalton:connector:company-wiki-list-documents"
 )
 COMPANY_WIKI_GET_CAPABILITY_ID = "capability:dalton:connector:company-wiki-get-document"
+# W3: the fund's own prior work on a company. Split the same way and for the
+# same reason: listing what we already wrote about a name and opening one of
+# those documents are two permissions.
+PRIOR_RESEARCH_LIST_KIND = "prior-research-list-documents"
+PRIOR_RESEARCH_GET_KIND = "prior-research-get-document"
+PRIOR_RESEARCH_LIST_CAPABILITY_ID = (
+    "capability:dalton:connector:prior-research-list-documents"
+)
+PRIOR_RESEARCH_GET_CAPABILITY_ID = (
+    "capability:dalton:connector:prior-research-get-document"
+)
 
 # S3 crowd sources. Grouped rather than named one by one at the call site,
 # because "which of these seven is it" is the only question the dispatcher asks.
@@ -548,6 +559,36 @@ def _company_wiki_get_schema_hash() -> str:
     return company_wiki_schema_hash(GET_OPERATION)
 
 
+def _prior_research_source_hash() -> str:
+    from .prior_research_core import prior_research_source_hash
+
+    return prior_research_source_hash()
+
+
+def _prior_research_permissions() -> dict[str, Any]:
+    from .prior_research_core import prior_research_permissions
+
+    return prior_research_permissions()
+
+
+def _prior_research_fixture_hash() -> str:
+    from .prior_research_core import prior_research_fixture_hash
+
+    return prior_research_fixture_hash()
+
+
+def _prior_research_list_schema_hash() -> str:
+    from .prior_research_core import LIST_OPERATION, prior_research_schema_hash
+
+    return prior_research_schema_hash(LIST_OPERATION)
+
+
+def _prior_research_get_schema_hash() -> str:
+    from .prior_research_core import GET_OPERATION, prior_research_schema_hash
+
+    return prior_research_schema_hash(GET_OPERATION)
+
+
 # Capability id is deliberately the dispatch key at load time because it is
 # the only kind identity present in the closed governance record.
 GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
@@ -770,6 +811,22 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_company_wiki_get_schema_hash,
         permissions=_company_wiki_permissions,
         fixture_hash=_company_wiki_fixture_hash,
+    ),
+    PRIOR_RESEARCH_LIST_KIND: _KindSpec(
+        capability_id=PRIOR_RESEARCH_LIST_CAPABILITY_ID,
+        template_key="prior-research",
+        source_hash=_prior_research_source_hash,
+        schema_hash=_prior_research_list_schema_hash,
+        permissions=_prior_research_permissions,
+        fixture_hash=_prior_research_fixture_hash,
+    ),
+    PRIOR_RESEARCH_GET_KIND: _KindSpec(
+        capability_id=PRIOR_RESEARCH_GET_CAPABILITY_ID,
+        template_key="prior-research",
+        source_hash=_prior_research_source_hash,
+        schema_hash=_prior_research_get_schema_hash,
+        permissions=_prior_research_permissions,
+        fixture_hash=_prior_research_fixture_hash,
     ),
 }
 
@@ -1187,6 +1244,24 @@ def build_governance_record(
 
         operation = next(op for op, name in COMPANY_WIKI_KINDS.items() if name == kind)
         return build_company_wiki_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (PRIOR_RESEARCH_LIST_KIND, PRIOR_RESEARCH_GET_KIND):
+        from .prior_research_core import (
+            KIND_BY_OPERATION as PRIOR_RESEARCH_KINDS,
+            build_prior_research_governance_record,
+        )
+
+        operation = next(
+            op for op, name in PRIOR_RESEARCH_KINDS.items() if name == kind
+        )
+        return build_prior_research_governance_record(
             operation=operation,
             approved_by=approved_by,
             status=status,

@@ -39,7 +39,7 @@ import json
 import re
 import sqlite3
 import unicodedata
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Iterable, Mapping, Sequence
 
 from .claim_aspect_vocabulary import (
@@ -111,6 +111,10 @@ SPEC_IMPORTANCE: Mapping[str, str] = {
     "management-changes": "news",
     "industry-demand": "news",
     "competitive-landscape": "news",
+    # W3: this fund's own earlier work on the company.  Above a broker note
+    # and below management, and it is the one tier that can be downgraded for
+    # age -- see ``STALE_AFTER_DAYS``.
+    "prior-research": "internal_prior",
 }
 
 # The fallback when the provenance chain does not reach a discovery spec --
@@ -149,6 +153,99 @@ _COMPILED_RULES = tuple(
     (re.compile(pattern), aspect) for pattern, aspect in QUANTITATIVE_ASPECT_RULES
 )
 
+# -- staleness -------------------------------------------------------------
+
+#: How old a prior view may be before it stops counting as current thinking.
+#: The owner's number, and a policy rather than a law: it is on the tagger hash
+#: so that changing it re-versions every entry it touched instead of silently
+#: re-reading old answers under new rules.
+#:
+#: Six months is not arbitrary. Two quarters is two filings and two calls; a
+#: view that has not been revisited across two reporting cycles is a view
+#: nobody has checked against what the company has since said.
+STALE_AFTER_DAYS = 180
+
+#: What a tier becomes once it is stale. One rung, and named in a table rather
+#: than computed from the ordering, because "downgrade by one" is an
+#: implementation and "a stale internal view ranks with the sell side" is a
+#: decision somebody should be able to argue with.
+#:
+#: Only ``internal_prior`` is in here, and deliberately. A 10-K from 2023 is
+#: still the company publishing that number for that period -- it does not
+#: become less filed with age. A prior *view* is the only kind of claim whose
+#: whole content is "this is what we thought", and it is the only one for
+#: which the passage of time is itself evidence against.
+STALE_DOWNGRADE: Mapping[str, str] = {"internal_prior": "sell_side"}
+
+#: The word appended to ``importance_basis`` when the downgrade fires. There is
+#: no boolean column for it: ``importance_basis`` is already the field that
+#: says why a claim has the weight it has, and the entry contract's field set
+#: is closed, so a flag would be a schema change to say something the reason
+#: string already says.
+STALE_MARK = "may_be_stale"
+
+
+def stale_due_at(as_of: str | None, *, stale_after_days: int = STALE_AFTER_DAYS) -> str | None:
+    """The day a claim with this ``as_of`` becomes stale, or ``None``.
+
+    Exists so the limitation below is answerable rather than merely admitted:
+    ``SELECT ... FROM claim_index_entry_versions WHERE importance='internal_prior'
+    AND date(as_of, '+180 days') <= date('now')`` is the sweep that would
+    re-tag, and this is the same arithmetic in Python for a caller that has
+    the entry in hand.
+    """
+
+    if as_of is None:
+        return None
+    try:
+        return (date.fromisoformat(as_of) + timedelta(days=stale_after_days)).isoformat()
+    except ValueError:
+        return None
+
+
+def stale_importance(
+    importance: str,
+    importance_basis: str,
+    *,
+    as_of: str | None,
+    as_of_basis: str,
+    now: date,
+    stale_after_days: int = STALE_AFTER_DAYS,
+) -> tuple[str, str]:
+    """``(importance, importance_basis)`` after the age rule has had its say.
+
+    A claim with no usable date is not aged -- it is already at the bottom of
+    every ordering that matters, and inventing an age for it would be the same
+    mistake the prior-research feed refuses to make at the other end.
+
+    **This is decided at tag time and is not re-decided on its own.** The index
+    lane tags claims that have no current entry; a claim tagged the week it was
+    read keeps ``internal_prior`` after it crosses the threshold, because
+    nothing re-reads it. That is a real gap and it is deliberate rather than
+    overlooked: a sweep that re-versions entries on a clock would make the
+    index change with no evidence behind the change, which is the one thing
+    ADR-0008 refuses. The fix belongs in the judgement layer -- a tick that
+    decides to re-tag and says why -- and ``stale_due_at`` above is the date it
+    would key on. Until then a reader of a tag reads it as of ``as_of``, and
+    the age is recoverable from the entry itself.
+    """
+
+    if importance not in STALE_DOWNGRADE or as_of is None:
+        return importance, importance_basis
+    if as_of_basis == "unknown":
+        return importance, importance_basis
+    try:
+        age = (now - date.fromisoformat(as_of)).days
+    except ValueError:
+        return importance, importance_basis
+    if age < stale_after_days:
+        return importance, importance_basis
+    return (
+        STALE_DOWNGRADE[importance],
+        f"{importance_basis};{STALE_MARK}:{age}d>{stale_after_days}d:{importance}",
+    )
+
+
 RULE_TAGGER_REF = "rule:claim-index-deterministic:0.1"
 # The hash of the rules themselves, so that changing a rule changes the tagger
 # and every claim it touched gets a new entry version rather than silently
@@ -159,6 +256,8 @@ RULE_TAGGER_HASH = content_hash({
     "source_type_importance": dict(SOURCE_TYPE_IMPORTANCE),
     "quantitative_aspects": [list(item) for item in QUANTITATIVE_ASPECT_RULES],
     "importance_tiers": list(IMPORTANCE_TIERS),
+    "stale_after_days": STALE_AFTER_DAYS,
+    "stale_downgrade": dict(STALE_DOWNGRADE),
 })
 
 TASK_HASH = content_hash({
@@ -568,12 +667,21 @@ def dedupe_group_key(claim: Mapping[str, Any]) -> str:
 
 
 def rule_tags(
-    claim: Mapping[str, Any], provenance: Mapping[str, Any]
+    claim: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    *,
+    now: date | None = None,
+    stale_after_days: int = STALE_AFTER_DAYS,
 ) -> dict[str, Any]:
     """Everything the rules can decide about one claim.
 
     ``aspect`` is ``None`` when only a model can answer -- a qualitative claim
     about a company.  Every other field is always decided here.
+
+    ``now`` is the day the age rule is measured against.  It defaults to today
+    rather than being required, so that every existing caller keeps working;
+    it is a parameter at all so that a test can stand on a fixed date and so
+    that a backfill can age a claim against the day it is re-tagging for.
     """
 
     as_of, as_of_basis = period_as_of(claim.get("period"))
@@ -599,13 +707,21 @@ def rule_tags(
         aspect, aspect_source = quantitative_aspect(claim.get("metric_or_aspect")), "rule"
     else:
         aspect, aspect_source = None, None
+    importance, importance_basis = stale_importance(
+        provenance.get("importance", "other"),
+        provenance.get("importance_basis", "unknown"),
+        as_of=as_of,
+        as_of_basis=as_of_basis,
+        now=now or date.today(),
+        stale_after_days=stale_after_days,
+    )
     return {
         "aspect": aspect,
         "aspect_source": aspect_source,
         "as_of": as_of,
         "as_of_basis": as_of_basis,
-        "importance": provenance.get("importance", "other"),
-        "importance_basis": provenance.get("importance_basis", "unknown"),
+        "importance": importance,
+        "importance_basis": importance_basis,
         "dedupe_group_key": dedupe_group_key(claim),
         "period_key": period_key(claim.get("period")) or "-",
         "tagger_ref": RULE_TAGGER_REF,
