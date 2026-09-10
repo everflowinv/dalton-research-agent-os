@@ -21,3 +21,9 @@ Next: inspect functional behavior in all five views and model/budget dialogs aft
 The owner explicitly requested that incremental visual fixes stop for now. After functional development and deployment/acceptance, redesign the complete Cockpit, including its page logic if useful. The requested direction is a polished, expressive, fancy light interface inspired by Apple, with the quality of a leading web designer. Research workflow must be clear and creatively presented: the objective, stages, current understanding, evidence, blockers, decisions and next actions should form a coherent product rather than a stack of operational tables.
 
 This is a final whole-product design phase, not permission to conceal research failures or invent completed outputs. Functional repairs such as preserving rationale drafts continue now. The responsive patch and browser measurements are retained as diagnostic evidence for the later redesign, not as the visual direction to ship.
+
+## Ask continuity repair
+
+The question submitter retained a reference to its answer node, while returning to the Ask tab unconditionally replaced that node with history. The eventual answer then rendered into a detached node. A page refresh also showed a persisted running job without resuming polling.
+
+History refresh now preserves the active submission and rejects late history responses while a new answer is running. Persisted running history resumes bounded polling while the Ask view is visible. Browser checks passed navigation during an active answer, visible completion, resumed history polling, and eventual result display. The page-local fixture check is `scripts/check_cockpit_ask_recovery.js`; no model or live POST was called.
