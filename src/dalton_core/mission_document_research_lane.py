@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -348,10 +348,23 @@ class MissionDocumentResearchCoordinator:
             item["recovery"]["status"]: item for item in observations
             if isinstance(item.get("recovery"), Mapping)
         }
-        selected = next(
-            (by_status[key] for key in ("stopped", "eligible", "waiting")
-             if key in by_status),
-            None,
+        stopped = [
+            item for item in observations
+            if isinstance(item.get("recovery"), Mapping)
+            and item["recovery"].get("status") == "stopped"
+        ]
+        # A current-contract terminal observation supersedes an immutable
+        # legacy deadline row regardless of their content-addressed ID order.
+        current_stopped = [
+            item for item in stopped
+            if item["recovery"].get("reason")
+            != "fresh_work_recovery_deadline_exceeded"
+        ]
+        selected = (
+            current_stopped[-1] if current_stopped else
+            stopped[-1] if stopped else
+            next((by_status[key] for key in ("eligible", "waiting")
+                  if key in by_status), None)
         )
         if selected is None:
             raise MissionDocumentResearchLaneError(
@@ -374,25 +387,81 @@ class MissionDocumentResearchCoordinator:
             )
             if legacy_day_wait:
                 retry_at = recovery.get("retry_at")
-                if not isinstance(retry_at, str) or not retry_at:
+                old_deadline = recovery.get("deadline")
+                if (not isinstance(retry_at, str) or not retry_at
+                        or not isinstance(old_deadline, str) or not old_deadline):
                     raise MissionDocumentResearchLaneError(
-                        "document research daily-budget recovery lacks retry_at"
+                        "document research daily-budget recovery lacks its time bounds"
                     )
                 try:
                     parsed = datetime.fromisoformat(retry_at)
+                    parsed_old_deadline = datetime.fromisoformat(old_deadline)
                 except ValueError as exc:
                     raise MissionDocumentResearchLaneError(
-                        "document research daily-budget retry_at is invalid"
+                        "document research daily-budget time bound is invalid"
                     ) from exc
-                if parsed.tzinfo is None:
+                if parsed.tzinfo is None or parsed_old_deadline.tzinfo is None:
                     raise MissionDocumentResearchLaneError(
-                        "document research daily-budget retry_at lacks timezone"
+                        "document research daily-budget time bound lacks timezone"
                     )
                 due = parsed.astimezone(timezone.utc)
-                if self.clock().astimezone(timezone.utc) < due:
+                prior_deadline = parsed_old_deadline.astimezone(timezone.utc)
+                from .mission_document_research_executor import _recovery_policy
+                stage_index = {
+                    "qualitative_model_draft": 1,
+                    "independent_qualitative_verifier": 2,
+                }.get(selected.get("stage"))
+                if stage_index is None:
+                    raise MissionDocumentResearchLaneError(
+                        "document research daily-budget recovery stage is invalid"
+                    )
+                policy = _recovery_policy(admission, stage_index)
+                try:
+                    failed_at = datetime.fromisoformat(
+                        str(proof.get("failed_at")).replace("Z", "+00:00")
+                    )
+                    refusal_reset = datetime.fromisoformat(
+                        str(proof.get("refusal_day"))
+                    ).replace(tzinfo=timezone.utc) + timedelta(days=1)
+                except (TypeError, ValueError) as exc:
+                    raise MissionDocumentResearchLaneError(
+                        "document research daily-budget proof time is invalid"
+                    ) from exc
+                if failed_at.tzinfo is None:
+                    raise MissionDocumentResearchLaneError(
+                        "document research daily-budget proof time lacks timezone"
+                    )
+                failed_at = failed_at.astimezone(timezone.utc)
+                expected_due = max(
+                    failed_at + timedelta(seconds=policy["retry_backoff_seconds"]),
+                    refusal_reset,
+                )
+                expected_old_deadline = failed_at + timedelta(
+                    seconds=policy["max_elapsed_seconds"],
+                )
+                # A current-contract stopped row has a deadline at or beyond
+                # its eligible instant.  Only the exact old cross-UTC shape is
+                # eligible for this compatibility path.
+                if (due != expected_due or prior_deadline != expected_old_deadline
+                        or prior_deadline >= due):
+                    return {
+                        "action": "recovery_required", "reason": recovery["reason"],
+                        "work_order_ref": work_ref,
+                    }
+                extended_deadline = due + timedelta(
+                    seconds=policy["max_elapsed_seconds"],
+                )
+                now = self.clock().astimezone(timezone.utc)
+                if now < due:
                     return {
                         "action": "waiting", "reason": "fresh_work_recovery_backoff",
                         "retry_at": retry_at, "work_order_ref": work_ref,
+                    }
+                if now >= extended_deadline:
+                    return {
+                        "action": "recovery_required",
+                        "reason": "fresh_work_recovery_day_window_exceeded",
+                        "work_order_ref": work_ref,
                     }
                 return {
                     "action": "resume", "reason": "typed_day_budget_recovery_due",

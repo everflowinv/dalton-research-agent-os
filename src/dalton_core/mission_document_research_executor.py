@@ -511,6 +511,19 @@ def _day_budget_recovery_deadline(
     )
 
 
+def _has_day_budget_recovery_anchor(
+    proof: Mapping[str, Any], links: Sequence[Mapping[str, Any]],
+) -> bool:
+    return any(
+        isinstance(item, Mapping)
+        and item.get("classification") == "atomic_day_budget_refusal"
+        for item in [
+            *(link.get("failure_proof") for link in links),
+            proof,
+        ]
+    )
+
+
 def _parse_time(value: Any, name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -1551,7 +1564,12 @@ class MissionDocumentResearchExecutor:
             elif len(links) >= policy["max_fresh_work_orders"]:
                 state, reason = "stopped", "fresh_work_recovery_exhausted"
             elif now >= deadline or eligible_at >= deadline:
-                state, reason = "stopped", "fresh_work_recovery_deadline_exceeded"
+                state = "stopped"
+                reason = (
+                    "fresh_work_recovery_day_window_exceeded"
+                    if _has_day_budget_recovery_anchor(proof, links)
+                    else "fresh_work_recovery_deadline_exceeded"
+                )
             elif now < eligible_at:
                 state, reason = "waiting", "fresh_work_recovery_backoff"
             else:

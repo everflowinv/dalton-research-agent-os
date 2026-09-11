@@ -716,7 +716,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
     def test_stage_claim_precedes_candidate_side_effect(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
-        executor, _draft, _verifier = self._executor(fixture, authority)
+        executor, draft, verifier = self._executor(fixture, authority)
         for _ in range(7):
             executor.run_once(admission["id"])
         work = executor._derive_work(admission, executor._blueprints(admission), 3)
@@ -772,7 +772,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             **args, "plan_ref": stored["plan_id"],
             "inquiry_ref": inquiry_ref_for(inquiry_content_hash(inquiry)),
         })
-        executor, _draft, _verifier = self._executor(fixture, authority)
+        executor, draft, verifier = self._executor(fixture, authority)
         for _ in range(3):
             executor.run_once(admission["id"])
         row = fixture.store.connection.execute(
@@ -1111,7 +1111,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             reserved_micros=9_500_000,
         )
         fixture.budget.settle(consumed["admission_id"], actual_micros=9_500_000)
-        executor, _draft, _verifier = self._executor(fixture, authority)
+        executor, draft, verifier = self._executor(fixture, authority)
         for _ in range(4):
             failed = executor.run_once(admission["id"])
         self.assertEqual(failed["status"], "failed")
@@ -1140,6 +1140,38 @@ class MissionDocumentResearchTests(unittest.TestCase):
         )
         self.assertEqual(
             lane._typed_recovery_state(admission, work["id"])["action"], "resume",
+        )
+        fixture.harness.clock.value = datetime(
+            2026, 9, 12, 1, 59, 59, tzinfo=timezone.utc,
+        )
+        self.assertEqual(
+            lane._typed_recovery_state(admission, work["id"])["action"], "resume",
+        )
+        fixture.harness.clock.value = datetime(
+            2026, 9, 12, 2, 1, tzinfo=timezone.utc,
+        )
+        expired = lane._typed_recovery_state(admission, work["id"])
+        self.assertEqual(expired, {
+            "action": "recovery_required",
+            "reason": "fresh_work_recovery_day_window_exceeded",
+            "work_order_ref": work["id"],
+        })
+        # A direct/restarted child at the same late instant converges to a new
+        # immutable terminal observation instead of conflicting with the old
+        # stopped record or creating a fresh Work.
+        for _ in range(2):
+            stopped = executor.run_once(admission["id"])
+            self.assertEqual(
+                stopped["reason"], "fresh_work_recovery_day_window_exceeded",
+            )
+        self.assertEqual((draft.calls, verifier.calls), (0, 0))
+        observations = read_mission_document_research_observations(
+            fixture.store.connection, mission_version_ref=fixture.mission["id"],
+        )
+        self.assertEqual(len(observations), 2)
+        self.assertEqual(
+            lane._typed_recovery_state(admission, work["id"])["action"],
+            "recovery_required",
         )
 
     def test_daily_budget_window_is_anchored_once_across_recovery_chain(self):
