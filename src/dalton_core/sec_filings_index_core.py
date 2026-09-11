@@ -110,6 +110,52 @@ class SecFilingsIndexCoreError(RuntimeError):
     """The governed filings-index call could not be run or bound."""
 
 
+def _existing_stricter_v1(connectors: ConnectorStore, desired: Mapping[str, Any], *, now: str) -> dict[str, Any] | None:
+    """Reuse an active historical v1 only when it is exactly compatible and tighter."""
+
+    row = connectors.connection.execute(
+        "SELECT record_json,content_hash FROM connector_rate_policy_versions "
+        "WHERE policy_version_id=?", (desired["id"],),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        stored = json.loads(row["record_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise SecFilingsIndexCoreError("stored filings-index rate policy is unreadable") from exc
+    if not isinstance(stored, dict) or stored.get("content_hash") != row["content_hash"]:
+        raise SecFilingsIndexCoreError("stored filings-index rate policy hash projection drifted")
+    unhashed = dict(stored); asserted = unhashed.pop("content_hash", None)
+    if content_hash(unhashed) != asserted:
+        raise SecFilingsIndexCoreError("stored filings-index rate policy content hash drifted")
+    wanted = dict(desired)
+    stored_limits = unhashed.pop("limits", None)
+    wanted_limits = wanted.pop("limits", None)
+    if unhashed != wanted:
+        raise SecFilingsIndexCoreError("stored filings-index rate policy differs outside limits")
+    if not isinstance(stored_limits, dict) or set(stored_limits) != set(wanted_limits):
+        raise SecFilingsIndexCoreError("stored filings-index rate policy limit shape drifted")
+    if any(type(stored_limits[key]) is not int or stored_limits[key] > wanted_limits[key]
+           for key in wanted_limits):
+        raise SecFilingsIndexCoreError("stored filings-index rate policy exceeds governed ceiling")
+    active = connectors.connection.execute(
+        "SELECT policy_version_ref,policy_version_hash,record_json,content_hash FROM "
+        "connector_rate_policy_activation_events WHERE policy_ref=? AND effective_at<=? "
+        "ORDER BY effective_at DESC,rowid DESC LIMIT 1", (desired["policy_ref"], now),
+    ).fetchone()
+    if active is None or active["policy_version_ref"] != desired["id"] or active["policy_version_hash"] != asserted:
+        raise SecFilingsIndexCoreError("stored filings-index rate policy is not the exact active policy")
+    activation = json.loads(active["record_json"])
+    activation_hash = activation.pop("content_hash", None) if isinstance(activation, dict) else None
+    if active["content_hash"] != activation_hash or content_hash(activation) != activation_hash:
+        raise SecFilingsIndexCoreError("filings-index rate policy activation hash drifted")
+    if now < stored["effective_from"] or (
+        stored["effective_until"] is not None and now >= stored["effective_until"]
+    ):
+        raise SecFilingsIndexCoreError("stored filings-index rate policy is outside its active interval")
+    return {**stored, "write_status": "existing_stricter"}
+
+
 def _wire_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
@@ -385,8 +431,7 @@ class SecFilingsIndexCore:
         )
         quota = governed_daily_quota(TEMPLATE_KEY, OPERATION)
         price_book = {"price_rate_refs": [price["id"]], "required_price_meters": ["calls"]}
-        rate_policy = self.connectors.register_rate_policy(
-            {
+        desired_rate_policy = {
                 "schema_version": "0.1",
                 "id": f"{rate_policy_ref}:v1",
                 "created_at": self.governance.effective_from,
@@ -409,12 +454,25 @@ class SecFilingsIndexCore:
                 "effective_from": self.governance.effective_from,
                 "effective_until": None,
                 "actor_ref": self.governance.approved_by,
-            },
-            idempotency_key=f"{LANE_SLUG}:rate-policy:v1",
+            }
+        rate_policy = _existing_stricter_v1(
+            self.connectors, desired_rate_policy,
+            now=_wire_time(self.clock()),
         )
+        compatibility = None
+        if rate_policy is None:
+            rate_policy = self.connectors.register_rate_policy(
+                desired_rate_policy, idempotency_key=f"{LANE_SLUG}:rate-policy:v1")
+        elif rate_policy["limits"] != desired_rate_policy["limits"]:
+            compatibility = {
+                "status": "configured_ceiling_not_activated",
+                "active_limits": dict(rate_policy["limits"]),
+                "configured_ceiling": dict(desired_rate_policy["limits"]),
+            }
         self._authorities = {
             "descriptor": descriptor, "binding": binding, "manifest": manifest,
             "profile": profile, "price": price, "rate_policy": rate_policy,
+            "rate_policy_compatibility": compatibility,
         }
         return self._authorities
 

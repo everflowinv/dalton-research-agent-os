@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.capability_catalog import CapabilityCatalog
 from dalton_core.connector import ConnectorStore
@@ -146,6 +147,8 @@ class SecFilingsIndexCoreTests(unittest.TestCase):
 
         self.assertEqual(receipt["outcome"], "succeeded")
         self.assertEqual(receipt["provider_calls"], 1)
+        self.assertEqual(index.ensure_authorities()["rate_policy"]["limits"]["calls"], 200)
+        self.assertIsNone(index.ensure_authorities()["rate_policy_compatibility"])
         # Authority actually persisted, not just an in-memory answer.
         self.assertTrue(receipt["connector_invocation_ref"])
         self.assertTrue(receipt["source_envelope_ref"])
@@ -188,6 +191,38 @@ class SecFilingsIndexCoreTests(unittest.TestCase):
             second["source_envelope_ref"], first["source_envelope_ref"]
         )
         self.assertEqual(second["document_refs"], first["document_refs"])
+
+    def test_existing_stricter_v1_is_reused_without_widening(self) -> None:
+        from dalton_core.connector_quota_policy import governed_daily_quota
+        lower = dict(governed_daily_quota("sec", "list_filings")); lower["daily_unit_limit"] = 50
+        with patch("dalton_core.sec_filings_index_core.governed_daily_quota", return_value=lower):
+            first = self.harness.index.ensure_authorities()
+        self.assertEqual(first["rate_policy"]["limits"]["calls"], 50)
+        replacement = SecFilingsIndexCore(
+            store=self.harness.core, connectors=self.harness.connectors,
+            observability=self.harness.observability, journal=self.harness.journal,
+            scheduler=self.harness.scheduler, catalog=self.harness.catalog,
+            spool=self.harness.spool, governance=self.harness.governance,
+            adapter=self.harness.adapter, clock=self.harness.clock)
+        recovered = replacement.ensure_authorities()
+        self.assertEqual(recovered["rate_policy"]["limits"]["calls"], 50)
+        self.assertEqual(recovered["rate_policy_compatibility"]["status"],
+                         "configured_ceiling_not_activated")
+        self.assertEqual(replacement.ensure_authorities(), recovered)
+
+    def test_existing_policy_wider_than_current_ceiling_is_rejected(self) -> None:
+        self.harness.index.ensure_authorities()
+        from dalton_core.connector_quota_policy import governed_daily_quota
+        lower = dict(governed_daily_quota("sec", "list_filings")); lower["daily_unit_limit"] = 50
+        replacement = SecFilingsIndexCore(
+            store=self.harness.core, connectors=self.harness.connectors,
+            observability=self.harness.observability, journal=self.harness.journal,
+            scheduler=self.harness.scheduler, catalog=self.harness.catalog,
+            spool=self.harness.spool, governance=self.harness.governance,
+            adapter=self.harness.adapter, clock=self.harness.clock)
+        with patch("dalton_core.sec_filings_index_core.governed_daily_quota", return_value=lower):
+            with self.assertRaisesRegex(SecFilingsIndexCoreError, "exceeds governed ceiling"):
+                replacement.ensure_authorities()
 
     def test_it_refuses_a_governance_record_for_another_capability(self) -> None:
         other = ConnectorGovernance(
