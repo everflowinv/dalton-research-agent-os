@@ -2907,13 +2907,17 @@ class CoverageMissionAuthority:
                                as_of: datetime,
                                recovery: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         source_ref = _text(source_ref, "source_ref")
-        for value, name, maximum in ((minimum_distinct_urls, "minimum_distinct_urls", 100),
-                                     (window_seconds, "window_seconds", 2592000),
-                                     (cooldown_seconds, "cooldown_seconds", 2592000)):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
-                raise CoverageMissionValidationError(f"{name} must be an integer 1..{maximum}")
+        from .host_recovery import validate_cooldown_policy
+        try:
+            validate_cooldown_policy({"minimum_distinct_urls": minimum_distinct_urls,
+                                      "window_seconds": window_seconds,
+                                      "cooldown_seconds": cooldown_seconds,
+                                      **({"recovery": recovery} if recovery is not None else {})})
+        except ValueError as exc:
+            raise CoverageMissionValidationError(str(exc)) from exc
         if not isinstance(as_of, datetime) or as_of.tzinfo is None:
             raise CoverageMissionValidationError("as_of must be timezone-aware")
+        as_of = as_of.astimezone(timezone.utc)
         if recovery is not None:
             from .host_recovery import host_recovery_states, validate_recovery_policy
             policy = validate_recovery_policy(recovery, initial_seconds=cooldown_seconds)

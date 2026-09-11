@@ -8,7 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
-from dalton_core.host_recovery import host_recovery_states, validate_recovery_policy
+from dalton_core.host_recovery import (
+    host_recovery_states, validate_cooldown_policy, validate_recovery_policy,
+)
 from dalton_core.mission_source_discovery import (
     DiscoveryPlanError, MissionSourceDiscoveryCoordinator, build_discovery_plan,
     validate_discovery_plan,
@@ -30,6 +32,23 @@ POLICY = {"minimum_distinct_urls": 3, "window_seconds": 86400,
 
 
 class HostRecoveryFoldTests(unittest.TestCase):
+    def test_operational_limits_are_owner_configurable(self):
+        policy = {"minimum_distinct_urls": 101, "window_seconds": 60 * 86400,
+                  "cooldown_seconds": 40 * 86400}
+        self.assertEqual(validate_cooldown_policy(policy), policy)
+        old = web_plan_for_tests(acquisition={"preferred_hosts": [], "skip_hosts": []})
+        plan = {**old, "schema_version": "0.5",
+                "acquisition": {**old["acquisition"], "failure_cooldown": policy}}
+        plan["content_hash"] = content_hash({k: v for k, v in plan.items() if k != "content_hash"})
+        self.assertEqual(validate_discovery_plan(plan)["acquisition"]["failure_cooldown"], policy)
+        for key in policy:
+            for invalid in (True, 0, -1, 1.5):
+                with self.subTest(key=key, value=invalid), self.assertRaises(ValueError):
+                    validate_cooldown_policy({**policy, key: invalid})
+        for key in ("window_seconds", "cooldown_seconds"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_cooldown_policy({**policy, key: 10 ** 30})
+
     def test_window_expiry_does_not_release_quarantine_and_failures_back_off(self):
         now = datetime(2026, 9, 11, tzinfo=timezone.utc)
         events = [{"host": "blocked.example", "created_at": (now + timedelta(seconds=i)).isoformat(),
@@ -138,6 +157,21 @@ class HostRecoveryCoordinatorTests(unittest.TestCase):
                 ref, status="acquisition_failed", reason="forbidden", failure_retryable=False,
                 transport_code="HTTP_403", transport_evidence_ref=self.discovery["connector_invocation_ref"],
                 transport_evidence_hash=self.evidence_hash)
+
+    def test_same_instant_in_other_timezones_has_identical_quarantine(self):
+        for policy in (POLICY, {key: value for key, value in POLICY.items() if key != "recovery"}):
+            baseline = self.missions.host_failure_cooldowns(
+                source_ref="source:web-search", as_of=self.clock(), **policy)
+            self.assertEqual(len(baseline), 1)
+            for hours in (-7, 8):
+                with self.subTest(policy=policy, offset=hours):
+                    observed = self.missions.host_failure_cooldowns(
+                        source_ref="source:web-search",
+                        as_of=self.clock().astimezone(timezone(timedelta(hours=hours))), **policy)
+                    self.assertEqual(observed, baseline)
+        self.assertEqual(self.missions.host_failure_cooldowns(
+            source_ref="source:web-search", as_of=self.clock(), minimum_distinct_urls=101,
+            window_seconds=60 * 86400, cooldown_seconds=40 * 86400), [])
 
     def test_other_host_runs_first_and_only_one_probe_returns_after_window_expiry(self):
         self.clock.advance(days=2)  # The initial rolling window has expired.

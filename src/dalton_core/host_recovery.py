@@ -9,8 +9,32 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+
+def validate_cooldown_policy(value: Any) -> dict[str, Any]:
+    fields = {"minimum_distinct_urls", "window_seconds", "cooldown_seconds"}
+    if not isinstance(value, Mapping) or set(value) not in (fields, fields | {"recovery"}):
+        raise ValueError("failure_cooldown has an invalid closed shape")
+    result = {}
+    for name in sorted(fields):
+        item = value[name]
+        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
+            raise ValueError(f"{name} must be a positive integer")
+        result[name] = item
+    # Storage can represent finite calendar intervals. This is not an
+    # operational ceiling: the owner chooses the count and wait durations.
+    now = datetime.now(timezone.utc)
+    try:
+        now - timedelta(seconds=result["window_seconds"])
+        now + timedelta(seconds=result["cooldown_seconds"])
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("host cooldown duration cannot be represented") from exc
+    if "recovery" in value:
+        result["recovery"] = validate_recovery_policy(
+            value["recovery"], initial_seconds=result["cooldown_seconds"])
+    return result
 
 
 def validate_recovery_policy(value: Any, *, initial_seconds: int) -> dict[str, Any]:

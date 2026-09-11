@@ -208,22 +208,11 @@ def _plan_acquisition(value: Any, *, cooldown: bool = False) -> dict[str, Any]:
         raise DiscoveryPlanError(f"acquisition hosts cannot be both preferred and skipped: {overlap}")
     result: dict[str, Any] = {"preferred_hosts": preferred, "skip_hosts": skipped}
     if cooldown:
-        raw = value["failure_cooldown"]
-        fields = {"minimum_distinct_urls", "window_seconds", "cooldown_seconds"}
-        if not isinstance(raw, Mapping) or set(raw) not in (fields, fields | {"recovery"}):
-            raise DiscoveryPlanError("failure_cooldown has an invalid closed shape")
-        result["failure_cooldown"] = {
-            "minimum_distinct_urls": _positive_int(raw["minimum_distinct_urls"], "minimum_distinct_urls", maximum=100),
-            "window_seconds": _positive_int(raw["window_seconds"], "window_seconds", maximum=2592000),
-            "cooldown_seconds": _positive_int(raw["cooldown_seconds"], "cooldown_seconds", maximum=2592000),
-        }
-        if "recovery" in raw:
-            from .host_recovery import validate_recovery_policy
-            try:
-                result["failure_cooldown"]["recovery"] = validate_recovery_policy(
-                    raw["recovery"], initial_seconds=raw["cooldown_seconds"])
-            except ValueError as exc:
-                raise DiscoveryPlanError(str(exc)) from exc
+        from .host_recovery import validate_cooldown_policy
+        try:
+            result["failure_cooldown"] = validate_cooldown_policy(value["failure_cooldown"])
+        except ValueError as exc:
+            raise DiscoveryPlanError(str(exc)) from exc
     return result
 _COMPANY_FIELDS = frozenset({"search_terms"})
 _COMPANY_FIELDS_V6 = frozenset({"name", "ticker", "aliases"})

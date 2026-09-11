@@ -452,7 +452,7 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
             source_ref="source:alphaengine", minimum_distinct_urls=2,
             window_seconds=86400, cooldown_seconds=1,
             as_of=now + timedelta(minutes=1)), [])
-        for bad in (True, 0, 101):
+        for bad in (True, 0, -1):
             with self.assertRaises(CoverageMissionValidationError):
                 self.missions.host_failure_cooldowns(
                     source_ref="source:alphaengine", minimum_distinct_urls=bad,
