@@ -77,6 +77,7 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
             "deleted_snapshot_ids": [],
         }
         artifacts = {}
+        suite_log = b"test output\nRan 370 tests in 1.000s\n\nOK (skipped=1)\n"
         for name in ARTIFACT_NAMES:
             if name == "final_activated_model_config_snapshot":
                 artifacts[name] = self._write("final-model-configs.json", snapshot_bytes)
@@ -107,6 +108,28 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
                     },
                 }
                 artifacts[name] = self._write(name + ".json", (json.dumps(service) + "\n").encode())
+            elif name == "full_suite_log":
+                artifacts[name] = self._write("full-suite.log", suite_log)
+            elif name == "full_suite_receipt":
+                receipt = {
+                    "status": "passed",
+                    "source_root": str(self.source),
+                    "code_commit": self.commit,
+                    "final_commit": self.commit,
+                    "clean": True,
+                    "command": ["/runtime/python", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                    "elapsed_seconds": 1.0,
+                    "exit_code": 0,
+                    "tests": 370,
+                    "skipped": 1,
+                    "failures": 0,
+                    "errors": 0,
+                    "log": "/tmp/original-full-suite.log",
+                    "log_sha256": hashlib.sha256(suite_log).hexdigest(),
+                }
+                artifacts[name] = self._write(
+                    "full-suite-receipt.json", (json.dumps(receipt) + "\n").encode()
+                )
             else:
                 artifacts[name] = self._write(f"{name}.artifact", f"{name}\n".encode())
         document["artifacts"] = artifacts
@@ -133,6 +156,7 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
         self.assertEqual(candidate["deployment_state"], "not_started")
         self.assertEqual(candidate["packet_root"], str(self.packet.resolve()))
         self.assertEqual(candidate["runtime_configuration"]["model_config_count"], 15)
+        self.assertEqual(candidate["full_suite"]["tests"], 370)
         self.assertEqual(candidate["latest_backup"]["snapshot_id"], "20260911T103234.044991Z")
         self.assertEqual(
             candidate["deployment_operations"]["backup_retention"]["phase"],
@@ -147,6 +171,29 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
         document = self._complete(count=14)
         document["runtime_configuration"]["model_config_count"] = 15
         with self.assertRaisesRegex(CandidateError, "count differs"):
+            build_candidate(document)
+
+    def test_hashed_failure_receipt_cannot_be_called_a_full_suite_pass(self) -> None:
+        document = self._complete()
+        row = document["artifacts"]["full_suite_receipt"]
+        path = self.packet / row["path"]
+        receipt = json.loads(path.read_text())
+        receipt["status"] = "failed"
+        receipt["exit_code"] = 1
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+        row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(CandidateError, "did not pass cleanly"):
+            build_candidate(document)
+
+    def test_suite_count_must_match_the_bound_log(self) -> None:
+        document = self._complete()
+        row = document["artifacts"]["full_suite_receipt"]
+        path = self.packet / row["path"]
+        receipt = json.loads(path.read_text())
+        receipt["tests"] = 371
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+        row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(CandidateError, "counts differ"):
             build_candidate(document)
 
     def test_service_config_candidate_cannot_hide_an_unrelated_change(self) -> None:

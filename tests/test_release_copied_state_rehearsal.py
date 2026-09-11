@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError,
     _canonical_sha256,
+    _verify_frozen_source,
     validate_final_snapshots,
 )
 
@@ -94,6 +96,28 @@ class ReleaseCopiedStateRehearsalTests(unittest.TestCase):
                 expected_models=models,
                 expected_service=self.service,
             )
+
+    def test_source_mutated_during_fake_run_is_rejected_before_binding(self) -> None:
+        source = self.root / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        tracked = source / "tracked.txt"
+        tracked.write_text("frozen\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(source), "-c", "user.name=Dalton Test",
+                "-c", "user.email=dalton@example.invalid", "commit", "-qm", "freeze",
+            ],
+            check=True,
+        )
+        commit = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+        ).strip()
+        _verify_frozen_source(source, commit)  # fake pre-run preflight
+        tracked.write_text("mutated while rehearsal ran\n", encoding="utf-8")
+        with self.assertRaisesRegex(RehearsalBindingError, "source checkout is not clean"):
+            _verify_frozen_source(source, commit)  # fake pre-binding check
 
 
 if __name__ == "__main__":
