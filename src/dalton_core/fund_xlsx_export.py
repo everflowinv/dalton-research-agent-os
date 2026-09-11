@@ -164,7 +164,8 @@ def _formula_for(
     if any(ref is None for ref in assumptions):
         return None
     formula = result["formula"]
-    if (formula == "revenue[k] = revenue[k-1] * (1 + growth[k])"
+    if ((formula == "revenue[k] = revenue[k-1] * (1 + growth[k])"
+         or formula.endswith("[k-1] * (1 + growth[k])"))
             and len(refs) <= 1 and len(assumptions) == 1):
         prior_refs = list(cell.get("result_refs") or [])
         prior = refs[0] if refs else None
@@ -177,7 +178,8 @@ def _formula_for(
             "income_tax_expense[k] = operating_income[k] * share[k]",
             "operating_cash_flow[k] = revenue[k] * share[k]",
             "capital_expenditure[k] = revenue[k] * share[k]",
-            } or _is_operating_expense_share_formula(result, formula)) \
+            } or _is_operating_expense_share_formula(result, formula)
+              or formula.endswith("[k] * share[k]")) \
             and len(refs) == 1 and len(assumptions) == 1:
         return f"={refs[0]}*{assumptions[0]}"
     if (formula in {
@@ -187,6 +189,22 @@ def _formula_for(
             "free_cash_flow[k] = operating_cash_flow[k] - capital_expenditure[k]",
             } and len(refs) >= 2 and not assumptions):
         return f"={refs[0]}-SUM({','.join(refs[1:])})"
+    if not assumptions:
+        try:
+            contract = json.loads(formula)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            contract = None
+        if isinstance(contract, Mapping) and contract.get("operator") == "sum":
+            terms = contract.get("terms") or []
+            if len(terms) == len(refs):
+                expression = "".join(
+                    (("+" if index and term.get("coefficient") == "1" else "")
+                     + ("-" if term.get("coefficient") == "-1" else "") + refs[index])
+                    for index, term in enumerate(terms))
+                return "=" + expression
+        if (isinstance(contract, Mapping) and contract.get("operator") == "divide"
+                and len(refs) == 2):
+            return f"={refs[0]}/{refs[1]}"
     return None
 
 
@@ -202,7 +220,8 @@ def _verify_translated_value(
                    for item in cell.get("assumption_refs") or []]
     formula = result["formula"]
     expected: Decimal | None = None
-    if formula == "revenue[k] = revenue[k-1] * (1 + growth[k])" and assumptions:
+    if (formula == "revenue[k] = revenue[k-1] * (1 + growth[k])"
+            or formula.endswith("[k-1] * (1 + growth[k])")) and assumptions:
         prior = refs[0] if refs else None
         if prior is None and cell.get("input_cell_refs"):
             source = cell["input_cell_refs"][0]
@@ -214,7 +233,8 @@ def _verify_translated_value(
             "income_tax_expense[k] = operating_income[k] * share[k]",
             "operating_cash_flow[k] = revenue[k] * share[k]",
             "capital_expenditure[k] = revenue[k] * share[k]",
-            } or _is_operating_expense_share_formula(result, formula)):
+            } or _is_operating_expense_share_formula(result, formula)
+              or formula.endswith("[k] * share[k]")):
         if refs and assumptions:
             expected = refs[0] * assumptions[0]
     elif formula in {
@@ -224,6 +244,21 @@ def _verify_translated_value(
             "free_cash_flow[k] = operating_cash_flow[k] - capital_expenditure[k]",
             } and refs and all(item is not None for item in refs):
         expected = refs[0] - sum(refs[1:], Decimal(0))
+    if expected is None and not assumptions:
+        try:
+            contract = json.loads(formula)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            contract = None
+        if (isinstance(contract, Mapping) and contract.get("operator") == "sum"
+                and len(contract.get("terms") or []) == len(refs)
+                and all(item is not None for item in refs)):
+            expected = sum(
+                (Decimal(str(term["coefficient"])) * refs[index]
+                 for index, term in enumerate(contract["terms"])), Decimal(0))
+        elif (isinstance(contract, Mapping) and contract.get("operator") == "divide"
+              and len(refs) == 2 and all(item is not None for item in refs)
+              and refs[1] != 0):
+            expected = refs[0] / refs[1]
     if expected is None or "value" not in cell:
         return
     actual = Decimal(str(cell["value"]))
@@ -424,6 +459,19 @@ def export_fund_workbook(
     for ci, value in enumerate(headers, 1):
         financials.cell(4, ci, value)
     result_rows = {item["ref"]: 5 + i for i, item in enumerate(model["results"])}
+    structured_lines: dict[str, Mapping[str, Any]] = {}
+    structured_formulas: dict[str, Mapping[str, Any]] = {}
+    if model.get("schema_version") == "0.3":
+        from .model_forecast_driver import _structure_result_refs
+        structure = model.get("financial_statement_structure") or {}
+        refs_by_line = _structure_result_refs(structure)
+        structured_lines = {
+            refs_by_line[str(line["ref"])]: line for line in structure.get("lines") or []
+        }
+        structured_formulas = {
+            refs_by_line[str(formula["output_ref"])]: formula
+            for formula in structure.get("formulas") or []
+        }
     result_cells: dict[tuple[str, str], str] = {}
     result_flow_periods: set[tuple[str, str]] = set()
     result_values = {
@@ -457,7 +505,43 @@ def export_fund_workbook(
                         result_flow_periods.add((result["ref"], period))
             elif period in history:
                 components: list[str] = []
-                if result["ref"] == "result:gross_profit":
+                structured_formula = structured_formulas.get(result["ref"])
+                component_refs: list[str] = []
+                if structured_formula is not None:
+                    if structured_formula["operator"] == "sum":
+                        line_refs = [item["line_ref"] for item in structured_formula["terms"]]
+                        from .model_forecast_driver import _structure_result_refs
+                        refs_by_line = _structure_result_refs(
+                            model["financial_statement_structure"])
+                        component_refs = [refs_by_line[item] for item in line_refs]
+                        components = [result_cells.get((ref, period))
+                                      for ref in component_refs]
+                        if components and all(components):
+                            pieces = []
+                            for index, (term, coordinate) in enumerate(zip(
+                                    structured_formula["terms"], components)):
+                                prefix = ("-" if term["coefficient"] == "-1"
+                                          else "+" if index else "")
+                                pieces.append(prefix + coordinate)
+                            formula = "=" + "".join(pieces)
+                    else:
+                        from .model_forecast_driver import _structure_result_refs
+                        refs_by_line = _structure_result_refs(
+                            model["financial_statement_structure"])
+                        component_refs = [
+                            refs_by_line[structured_formula["numerator_ref"]],
+                            refs_by_line[structured_formula["denominator_ref"]],
+                        ]
+                        components = [result_cells.get((ref, period))
+                                      for ref in component_refs]
+                        if all(components):
+                            formula = f"={components[0]}/{components[1]}"
+                    if formula is not None:
+                        model_cell_ref = "historical-structured-derived"
+                        if all((ref, period) in result_flow_periods
+                               for ref in component_refs):
+                            result_flow_periods.add((result["ref"], period))
+                elif result["ref"] == "result:gross_profit":
                     components = [result_cells.get(("result:revenue", period)),
                                   result_cells.get(("result:cost_of_revenue", period))]
                 elif result["ref"] == "result:operating_income":
@@ -468,7 +552,7 @@ def export_fund_workbook(
                 elif result["ref"] == "result:net_income":
                     components = [result_cells.get(("result:operating_income", period)),
                                   result_cells.get(("result:income_tax_expense", period))]
-                if components and all(components):
+                if structured_formula is None and components and all(components):
                     formula = f"={components[0]}-SUM({','.join(components[1:])})"
                     model_cell_ref = "historical-derived"
                     component_refs = (
@@ -514,10 +598,15 @@ def export_fund_workbook(
             flow_proven = all(
                 (result["ref"], period) in result_flow_periods for period in group
             )
+            structured_line = structured_lines.get(result["ref"])
+            annual_semantic_ok = (
+                structured_line.get("annual_semantics") == "sum_quarters"
+                if structured_line is not None else result["unit"] != "ratio"
+            )
             if (
                 flow_proven
                 and len(quarter_cols) == 4
-                and result["unit"] != "ratio"
+                and annual_semantic_ok
             ):
                 target.value = f"=SUM({_col(quarter_cols[0])}{rr}:{_col(quarter_cols[-1])}{rr})"
                 target.font = Font(name="Arial", color="000000")
@@ -532,7 +621,12 @@ def export_fund_workbook(
             else:
                 target.value = None
                 target.comment = None
-                if result["unit"] == "ratio":
+                if structured_line is not None and not annual_semantic_ok:
+                    reason = (
+                        f"structure annual semantics "
+                        f"{structured_line.get('annual_semantics')} is not sum_quarters"
+                    )
+                elif result["unit"] == "ratio":
                     reason = (
                         "ratio lacks an explicit frozen numerator/denominator "
                         "formula contract"

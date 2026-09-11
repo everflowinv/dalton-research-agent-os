@@ -2002,7 +2002,7 @@ def _structure_definition(value: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         key: value for key, value in value.items()
-        if key not in {"content_hash", "financial_input_hash"}
+        if key not in {"content_hash", "financial_input_hash", "structure_ref"}
     }
 
 

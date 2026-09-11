@@ -31,7 +31,8 @@ from dalton_core.model_forecast import (
     STRUCTURED_DRIVER_FORMULA_HASH,
     STRUCTURED_DRIVER_FORMULA_REF,
 )
-from dalton_core.store import DaltonStore
+from dalton_core.fund_xlsx_export import export_fund_workbook
+from dalton_core.store import DaltonStore, content_hash
 from tests.test_company_financial_statement_structure import (
     ACCESSION,
     company_spec,
@@ -339,6 +340,47 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertEqual(held["formula_hash"], STRUCTURED_DRIVER_FORMULA_HASH)
         self.assertEqual(held["scenario_version_ref"], record["id"])
         self.assertEqual(held["scenario_version_hash"], record["content_hash"])
+
+    def test_v03_workbook_translates_company_dag_and_refuses_eps_annual_sum(self):
+        from openpyxl import load_workbook
+
+        inputs, structure = self.authority()
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"]
+                            if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            record = ForecastModelAuthority(store).publish(body)
+            path = Path(temporary) / "structured.xlsx"
+            calendar = {
+                "calendar_ref": "calendar:test", "source_hash": "c" * 64,
+                "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+            }
+            calendar["content_hash"] = content_hash(calendar)
+            export_fund_workbook(
+                path, model=record, spec=company_spec(), inputs=inputs,
+                calendar_binding=calendar)
+            book = load_workbook(path, data_only=False)
+        financials = book["Financials"]
+        pretax_row = next(row for row in range(5, financials.max_row + 1)
+                          if str(financials.cell(row, 1).value).startswith("Pretax"))
+        formulas = [financials.cell(pretax_row, column).value
+                    for column in range(2, financials.max_column + 1)]
+        self.assertTrue(any(isinstance(value, str) and "+" in value and "-" in value
+                            for value in formulas), formulas)
+        eps_row = 5 + next(index for index, result in enumerate(record["results"])
+                           if result["role"] == "diluted_eps")
+        # No annual EPS is made by summing per-share quarters.
+        self.assertIsNone(financials.cell(eps_row, 2).value)
 
 
 if __name__ == "__main__":
