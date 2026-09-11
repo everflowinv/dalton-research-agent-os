@@ -74,11 +74,23 @@ class CoordinatorTests(unittest.TestCase):
         class Missions:
             class connection:
                 @staticmethod
-                def execute(*_args):
+                def execute(sql, *_args):
                     class Row:
                         @staticmethod
                         def fetchone():
                             return [1]
+
+                        @staticmethod
+                        def fetchall():
+                            if "coverage_mission_document_reviews" in sql:
+                                return [[
+                                    "document-review:test",
+                                    "2026-09-11T00:00:00+00:00",
+                                    "succeeded",
+                                    "document-acquisition:test",
+                                    "2026-09-11T00:00:00+00:00",
+                                ]]
+                            return []
                     return Row()
 
         with tempfile.TemporaryDirectory() as name:
