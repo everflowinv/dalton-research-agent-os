@@ -13,6 +13,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.analyst_journal import AnalystJournalAuthority
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -129,6 +130,63 @@ class ScoreCommandTests(CliHarness):
         self.assertEqual(summary["rubric_hash"], rubric("initial_screen").content_hash)
         self.assertEqual(summary["recorded"]["status"], "fresh")
         self.assertIsNone(summary["judge"])
+        self.assertIsNone(summary["verifier"])
+        self.assertFalse(summary["verified"])
+
+    def test_explicit_verifier_config_wires_a_second_bounded_model(self):
+        judge_path = self.state / "judge.json"
+        verifier_path = self.state / "verifier.json"
+        judge_path.write_text(json.dumps({"purpose_call_budgets": {
+            "quality": {"max_cost_usd": 0.21}}}))
+        verifier_path.write_text(json.dumps({"purpose_call_budgets": {
+            "quality_verifier": {"max_cost_usd": 0.09}}}))
+        made = []
+
+        class Model:
+            def __init__(self, config, **kwargs):
+                made.append((config, kwargs))
+
+        scored = {
+            "deterministic": {"passed": True, "checks": []},
+            "judge": {"status": "scored", "scores": [], "summary": {},
+                      "model": {"route_decision_ref": "route:judge"}},
+            "verifier": {"status": "verified", "verdict": "pass", "findings": [],
+                         "model": {"route_decision_ref": "route:verifier",
+                                   "purpose": "quality_verifier"}},
+        }
+        with patch("dalton_core.cockpit_model.CockpitModel", Model), \
+                patch("dalton_core.research_quality_cli.score_artefact",
+                      return_value=scored) as call:
+            code, summary = self.scored(
+                "--dry-run", "--model-config", str(judge_path),
+                "--verifier-model-config", str(verifier_path))
+        self.assertEqual(code, 0)
+        self.assertEqual([row[1]["max_cost_usd"] for row in made], [0.21, 0.09])
+        self.assertIs(call.call_args.kwargs["model"].__class__, Model)
+        self.assertIs(call.call_args.kwargs["verifier_model"].__class__, Model)
+        self.assertTrue(summary["verified"])
+        self.assertEqual(summary["verifier"]["model"]["route_decision_ref"],
+                         "route:verifier")
+
+    def test_a_verifier_config_without_a_judge_config_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self.run_cli("score", "--state-dir", str(self.state),
+                         "--rubric", "initial_screen", "--target", self.deliverable,
+                         "--verifier-model-config", str(self.state / "verifier.json"))
+
+    def test_a_malformed_verifier_config_fails_without_a_model_call(self):
+        judge_path = self.state / "judge.json"
+        verifier_path = self.state / "verifier.json"
+        judge_path.write_text("{}")
+        verifier_path.write_text("[]")
+        with patch("dalton_core.cockpit_model.CockpitModel") as model:
+            code, _, error = self.run_cli(
+                "score", "--state-dir", str(self.state), "--rubric", "initial_screen",
+                "--target", self.deliverable, "--model-config", str(judge_path),
+                "--verifier-model-config", str(verifier_path))
+        self.assertEqual(code, 1)
+        self.assertIn("quality_verifier model configuration is invalid", error)
+        self.assertEqual(model.return_value.call.call_count, 0)
 
     def test_the_claim_refs_check_runs_for_real_against_the_core(self):
         _, summary = self.scored()

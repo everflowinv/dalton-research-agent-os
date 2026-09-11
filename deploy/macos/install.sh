@@ -88,6 +88,17 @@ validate_model_pair "DALTON_DOSSIER" \
 validate_model_pair "DALTON_EARNINGS" \
   "${DALTON_EARNINGS_MODEL_PROFILE:-}" "${DALTON_EARNINGS_MODEL_TIER:-}" \
   "${DALTON_EARNINGS_VERIFIER_MODEL_PROFILE:-}" "${DALTON_EARNINGS_VERIFIER_MODEL_TIER:-}"
+if [[ -n "${DALTON_QUALITY_VERIFIER_MODEL_PROFILE:-}" && -n "${DALTON_QUALITY_VERIFIER_MODEL_TIER:-}" ]]; then
+  print -u2 "error: DALTON_QUALITY_VERIFIER must set a profile or tier, not both"
+  exit 2
+fi
+if [[ -n "${DALTON_QUALITY_VERIFIER_MODEL_TIER:-}" && \
+      "${DALTON_QUALITY_VERIFIER_MODEL_TIER}" != cheap && \
+      "${DALTON_QUALITY_VERIFIER_MODEL_TIER}" != brain && \
+      "${DALTON_QUALITY_VERIFIER_MODEL_TIER}" != verifier ]]; then
+  print -u2 "error: DALTON_QUALITY_VERIFIER names unknown model tier ${DALTON_QUALITY_VERIFIER_MODEL_TIER}"
+  exit 2
+fi
 
 if [[ ! -x "$python_source" ]]; then
   print -u2 "Python 3.11+ not found at $python_source; set PYTHON_SOURCE to an absolute executable."
@@ -914,6 +925,16 @@ if [[ -n "${DALTON_CLAIM_INDEX_MODEL_PROFILE:-}" || -n "${DALTON_CLAIM_INDEX_MOD
     "${DALTON_CLAIM_INDEX_MODEL_PROFILE:-}" "${DALTON_CLAIM_INDEX_MODEL_TIER:-}"
 else
   print "note: set DALTON_CLAIM_INDEX_MODEL_TIER to install the claim-index lane."
+fi
+# Quality scoring remains explicitly operator-invoked. Installing this file
+# enables the optional second verifier call but does not schedule one.
+if [[ -n "${DALTON_QUALITY_VERIFIER_MODEL_PROFILE:-}" || -n "${DALTON_QUALITY_VERIFIER_MODEL_TIER:-}" ]]; then
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-quality-verifier" \
+    "quality-verifier-model-config.json" \
+    "${DALTON_QUALITY_VERIFIER_MODEL_PROFILE:-}" "${DALTON_QUALITY_VERIFIER_MODEL_TIER:-}"
+else
+  print "note: set DALTON_QUALITY_VERIFIER_MODEL_TIER to install optional independent quality verification."
 fi
 # P9d-18 / ADR-0006: point the cockpit at the Core (read-only), the state
 # directory, the heartbeat, the scheduler and the extraction model config so

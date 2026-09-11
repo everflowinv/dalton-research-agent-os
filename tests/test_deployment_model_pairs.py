@@ -132,6 +132,8 @@ class DeploymentModelPairTests(unittest.TestCase):
                         script.index('mkdir -p "$config_dir"'))
         self.assertIn("unknown model tier", script)
         self.assertIn("must set a profile or tier per role, not both", script)
+        self.assertIn("DALTON_QUALITY_VERIFIER_MODEL_TIER", script)
+        self.assertIn('"quality-verifier-model-config.json"', script)
 
     @unittest.skipUnless(Path("/bin/zsh").is_file(), "macOS installer requires zsh")
     def test_actual_shell_preflight_refuses_invalid_pairs_before_side_effects(self) -> None:
@@ -146,6 +148,9 @@ class DeploymentModelPairTests(unittest.TestCase):
             {"DALTON_EVENT_JUDGEMENT_MODEL_PROFILE": "profile:one",
              "DALTON_EVENT_JUDGEMENT_MODEL_TIER": "brain",
              "DALTON_EVENT_VERIFIER_MODEL_TIER": "verifier"},
+            {"DALTON_QUALITY_VERIFIER_MODEL_PROFILE": "profile:one",
+             "DALTON_QUALITY_VERIFIER_MODEL_TIER": "verifier"},
+            {"DALTON_QUALITY_VERIFIER_MODEL_TIER": "unknown"},
         ]
         for settings in cases:
             with self.subTest(settings=settings):

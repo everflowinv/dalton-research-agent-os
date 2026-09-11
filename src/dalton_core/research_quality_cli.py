@@ -34,6 +34,7 @@ from .analyst_journal import (
     journal_context,
 )
 from .research_quality_rubrics import RUBRIC_ALIASES, rubric as get_rubric
+from .research_verification import ResearchVerificationError
 from .research_quality_score import (
     MAX_COST_USD,
     MAX_INPUT_TOKENS,
@@ -46,9 +47,25 @@ from .research_quality_score import (
     run_deterministic,
     score_artefact,
 )
+from .call_budget import CallBudgetError, resolve_call_budget
 from .store import DaltonStore
 
 SUMMARY_SCHEMA_VERSION = "0.1"
+
+
+def _configured_model(path: str, state: Path, scheduler_db: str | None, purpose: str,
+                      defaults: dict[str, Any]) -> Any:
+    from .cockpit_model import CockpitModel
+
+    try:
+        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        budget = resolve_call_budget(config, purpose, defaults=defaults)
+        return CockpitModel(
+            config, scheduler_db=scheduler_db or str(state / "scheduler.sqlite"), **budget)
+    except (OSError, json.JSONDecodeError, CallBudgetError, ResearchVerificationError,
+            TypeError, ValueError) as exc:
+        raise ResearchQualityError(
+            f"{purpose} model configuration is invalid: {exc}") from exc
 
 
 def _default_golden_dir() -> Path:
@@ -148,20 +165,24 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
         else:
             art = artefact_from_deliverable(_resolve_deliverable(core, args.target))
         model = None
+        verifier_model = None
         mission = None
         if args.model_config:
-            from .cockpit_model import CockpitModel
-
-            config = json.loads(Path(args.model_config).expanduser().read_text(encoding="utf-8"))
             mission = _mission(store)
-            model = CockpitModel(
-                config, scheduler_db=args.scheduler_db or str(state / "scheduler.sqlite"),
-                max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
-                max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
-            )
+            defaults = {
+                "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
+                "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS,
+            }
+            model = _configured_model(
+                args.model_config, state, args.scheduler_db, "quality", defaults)
+            if args.verifier_model_config:
+                verifier_model = _configured_model(
+                    args.verifier_model_config, state, args.scheduler_db,
+                    "quality_verifier", defaults)
         scored = score_artefact(
             art, args.rubric, core=core, model=model, mission=mission,
             request_id=f"quality:{rubric.rubric_ref}:{art['ref']}:{art['hash'][:16]}",
+            verifier_model=verifier_model,
         )
         summary: dict[str, Any] = {
             "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -181,6 +202,10 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
                 "scores": scored["judge"].get("scores"),
                 "summary": scored["judge"].get("summary"),
             },
+            "verified": bool(scored["verifier"] and
+                             scored["verifier"].get("status") == "verified" and
+                             scored["verifier"].get("verdict") == "pass"),
+            "verifier": scored["verifier"],
             "recorded": None,
         }
         if not args.dry_run:
@@ -305,6 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="a deliverable or weekly-brief-issue version id, "
                             "or a deliverable / brief ref for its latest version")
     score.add_argument("--model-config", help="run the judge layer too; without it, deterministic only")
+    score.add_argument("--verifier-model-config",
+                       help="independently verify the judge result; requires --model-config")
     score.add_argument("--scheduler-db")
     score.add_argument("--actor-ref", default="automation:coverage-mission")
     score.add_argument("--dry-run", action="store_true", help="score but record nothing")
@@ -344,6 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if (args.command == "score" and args.verifier_model_config
+            and not args.model_config):
+        parser.error("--verifier-model-config requires --model-config")
     if args.command == "journal" and args.journal_command == "show" and not (args.target or args.company_ref):
         parser.error("journal show needs --target or --company-ref")
     try:

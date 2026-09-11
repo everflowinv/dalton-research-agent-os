@@ -678,12 +678,22 @@ class QualityScoreAuthorityTests(unittest.TestCase):
     def test_a_verifier_verdict_must_be_bound_to_these_scores(self):
         judged = self.judged()
         good = {"status": "verified", "verdict": "pass", "findings": [],
-                "judged_scores_hash": content_hash(judged["scores"])}
+                "judged_scores_hash": content_hash(judged["scores"]),
+                "model": {"route_decision_ref": "route:verifier",
+                          "purpose": "quality_verifier"}}
         self.assertEqual(self.record(judge_layer=judged, verifier_layer=good)["status"], "fresh")
         stray = {**good, "judged_scores_hash": "0" * 64}
         with self.assertRaises(ResearchQualityConflict) as caught:
             self.record(judge_layer=self.judged(route="route:two"), verifier_layer=stray)
         self.assertIn("bound to different scores", str(caught.exception))
+
+    def test_a_claimed_verified_result_without_route_provenance_is_refused(self):
+        judged = self.judged()
+        verifier = {"status": "verified", "verdict": "pass", "findings": [],
+                    "judged_scores_hash": content_hash(judged["scores"])}
+        with self.assertRaises(ResearchQualityConflict) as caught:
+            self.record(judge_layer=judged, verifier_layer=verifier)
+        self.assertIn("verifier route", str(caught.exception))
 
     def test_a_verdict_without_a_judgement_is_refused(self):
         with self.assertRaises(ResearchQualityConflict):
@@ -773,6 +783,18 @@ class ScoreArtefactTests(unittest.TestCase):
         # judgement supersede a refusal as a new version of the same score.
         self.assertEqual(judge_fingerprint(scored),
                          judge_fingerprint({**scored, "status": "refused"}))
+
+    def test_verifier_route_extends_identity_without_changing_legacy_scores(self):
+        from dalton_core.research_quality_score import scoring_fingerprint
+        judged = {"status": "scored", "model": {
+            "route_decision_ref": "route:judge", "purpose": "quality"}}
+        self.assertEqual(scoring_fingerprint(judged, None), judge_fingerprint(judged))
+        first = {"status": "verified", "model": {
+            "route_decision_ref": "route:verify-a", "purpose": "quality_verifier"}}
+        second = {"status": "verified", "model": {
+            "route_decision_ref": "route:verify-b", "purpose": "quality_verifier"}}
+        self.assertNotEqual(scoring_fingerprint(judged, first),
+                            scoring_fingerprint(judged, second))
 
 
 class DeliverableAdapterTests(unittest.TestCase):

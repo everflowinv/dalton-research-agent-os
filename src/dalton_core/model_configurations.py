@@ -35,6 +35,7 @@ _SEED_NAMES = (
     "research-planner-model-config.json",
     "initial-screen-model-config.json",
     "claim-index-model-config.json",
+    "quality-verifier-model-config.json",
     "dossier-model-config.json",
     "company-dossier-verifier-model-config.json",
     "dossier-verifier-model-config.json",

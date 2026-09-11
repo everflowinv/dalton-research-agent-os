@@ -60,6 +60,7 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "draft": ("initial-screen-model-config.json",),
     "document_extraction": ("document-extraction-model-config.json",),
     "claim_index": ("claim-index-model-config.json",),
+    "quality_verifier": ("quality-verifier-model-config.json",),
     "quality": ("initial-screen-model-config.json",),
     "model_spec": ("initial-screen-model-config.json",),
     "debate_map": ("initial-screen-model-config.json",),
@@ -226,11 +227,6 @@ def purpose_policy_bindings(
         file_binding("plan", (directory / "research-planner-model-config.json",))
     # These consumers receive a path at launch time.  No installed path in the
     # cockpit contract means there is no truthful resident pin to display.
-    for purpose in ("quality_verifier",):
-        result.setdefault(purpose, {
-            "status": "unconfigured", "source": "dynamic launch argument",
-            "policy_version_ref": None, "model_router_db": None,
-        })
     # The installed consensus lane parses broker notes deterministically.  A
     # registered future model purpose must not make that look like a missing,
     # selectable runtime model today.

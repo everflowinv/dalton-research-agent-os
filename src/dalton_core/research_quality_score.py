@@ -61,6 +61,7 @@ from .research_quality_rubrics import (
     Rubric,
     rubric as get_rubric,
 )
+from .model_configurations import register_model_config_name
 from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -88,6 +89,8 @@ ARTEFACT_KINDS: tuple[str, ...] = (
 # that is not registered.
 JUDGE_PURPOSE = register_purpose("quality")
 VERIFIER_PURPOSE = register_purpose("quality_verifier")
+VERIFIER_MODEL_CONFIG_NAME = "quality-verifier-model-config.json"
+register_model_config_name(VERIFIER_MODEL_CONFIG_NAME)
 # The judge runs on the deliverable-drafting configuration, which is already in
 # the registry: it is the same route, the same broker and the same day ledger
 # as the drafting it grades, and a separate configuration would only be worth
@@ -1248,6 +1251,24 @@ def judge_fingerprint(judge_layer: Mapping[str, Any] | None) -> str:
     })
 
 
+def scoring_fingerprint(
+    judge_layer: Mapping[str, Any] | None,
+    verifier_layer: Mapping[str, Any] | None,
+) -> str:
+    """Bind verified scores to both actual routes; preserve judge-only IDs."""
+
+    judge_hash = judge_fingerprint(judge_layer)
+    verifier_model = ((verifier_layer or {}).get("model") or {})
+    verifier_route = verifier_model.get("route_decision_ref")
+    if not isinstance(verifier_route, str) or not verifier_route:
+        return judge_hash
+    return content_hash({
+        "judge_fingerprint": judge_hash,
+        "verifier_route_decision_ref": verifier_route,
+        "verifier_purpose": verifier_model.get("purpose") or VERIFIER_PURPOSE,
+    })
+
+
 def judge(
     art: Mapping[str, Any],
     rubric: Rubric,
@@ -1577,7 +1598,13 @@ class QualityScoreAuthority:
                 raise ResearchQualityConflict(
                     "the verifier verdict is bound to different scores than the judge layer"
                 )
-        fingerprint = judge_fingerprint(judge_layer)
+            verifier_provenance = verifier_layer.get("model") or {}
+            if (not isinstance(verifier_provenance.get("route_decision_ref"), str)
+                    or verifier_provenance.get("purpose") != VERIFIER_PURPOSE):
+                raise ResearchQualityConflict(
+                    "a verified quality score must name its verifier route and purpose"
+                )
+        fingerprint = scoring_fingerprint(judge_layer, verifier_layer)
         identity = ScoringIdentity(
             target_ref=target_ref, target_hash=target_hash,
             rubric_ref=rubric.rubric_ref, rubric_hash=rubric.content_hash,
@@ -1730,6 +1757,7 @@ __all__ = [
     "INITIAL_SCREEN_SECTIONS",
     "JUDGE_MODEL_CONFIG_NAME",
     "VERIFIER_PURPOSE",
+    "VERIFIER_MODEL_CONFIG_NAME",
     "JUDGE_PURPOSE",
     "MAX_ARTEFACT_CHARS",
     "MAX_COST_USD",
@@ -1756,6 +1784,7 @@ __all__ = [
     "residual_citation_artefacts",
     "run_deterministic",
     "score_artefact",
+    "scoring_fingerprint",
     "summarise_scores",
     "validate_judge_output",
     "validate_verifier_output",

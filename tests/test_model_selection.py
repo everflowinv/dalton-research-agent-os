@@ -48,6 +48,7 @@ from dalton_core.model_selection import (
     ModelSelectionError,
     current_selection,
     model_configs,
+    purpose_policy_bindings,
     publish_selection,
     record_retirement_notices,
     retirement_fallbacks,
@@ -618,6 +619,7 @@ class SetSelectionTests(StateDirectoryCase):
             "research-planner-model-config.json",
             "initial-screen-model-config.json",
             "claim-index-model-config.json",
+            "quality-verifier-model-config.json",
             "dossier-model-config.json",
             "company-dossier-verifier-model-config.json",
             "dossier-verifier-model-config.json",
@@ -628,6 +630,15 @@ class SetSelectionTests(StateDirectoryCase):
             "zero-base-review-model-config.json",
             "zero-base-review-verifier-model-config.json",
         })
+
+    def test_quality_verifier_binding_reads_its_actual_optional_config(self) -> None:
+        path = self.root / "quality-verifier-model-config.json"
+        path.write_text(json.dumps(self.model_config), encoding="utf-8")
+        binding = purpose_policy_bindings(self.root)["quality_verifier"]
+        self.assertEqual(binding["status"], "configured")
+        self.assertEqual(Path(binding["source"]), path.resolve())
+        self.assertEqual(binding["policy_version_ref"], self.policies["brain"])
+        self.assertTrue(binding["editable"])
 
     def test_a_selection_repoints_two_real_role_configs_together(self) -> None:
         verifier = self.root / "event-verifier-model-config.json"
