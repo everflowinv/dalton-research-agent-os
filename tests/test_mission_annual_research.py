@@ -78,6 +78,7 @@ class MissionAnnualFixture:
             {**active.policy, "research_budget": outer},
             policy_version_id="governance-policy-version:mission-annual:2",
             version_number=2, prior_version_ref=active.id,
+            effective_from=NOW.isoformat(),
             actor_ref="human:test-owner", change_reason="test exact research budget",
             activate=True,
         )
@@ -414,6 +415,11 @@ class MissionAnnualResearchTests(unittest.TestCase):
             outcomes,
         )
         self.assertEqual(len(fixture.router.list_decisions()), 2)
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions "
+            "WHERE work_order_ref LIKE 'work:mission-annual-research:%'"
+        ).fetchone()[0], 2)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_annual_research_starts"
         ).fetchone()[0], 1)
@@ -423,6 +429,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
         self.assertIsNotNone(outcome)
         self.assertEqual(outcome["repair_target_ref"], admission["repair_target_ref"])
         self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
+        self.assertEqual(outcomes[-2]["outcome_ref"], outcomes[-1]["outcome_ref"])
         self.assertEqual(fixture.harness.staging.counts(), {
             "candidate_source_materials": 1, "candidate_verifications": 1,
             "candidate_numeric_specs": 0, "candidate_evidence_versions": 1,

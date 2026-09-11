@@ -417,8 +417,11 @@ class MissionAnnualResearchExecutor:
         )
         if completed["status"] != "fresh":
             raise MissionAnnualResearchExecutorError("staging completion did not converge")
-        self._store_outcome(admission, records)
-        return {"status": "complete", **records}
+        outcome = self._store_outcome(admission, records)
+        return {
+            "status": "complete", **records,
+            "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"],
+        }
 
     def _store_outcome(self, admission: Mapping[str, Any], records: Mapping[str, Any]) -> dict[str, Any]:
         start_ref = _ref("mission-annual-research-start", self._run_id(admission))
