@@ -150,6 +150,9 @@ class MissionAnnualFixture:
 
         self.source = AnnualSourceHarness(self.harness.planner)
         case.addCleanup(self.source.close)
+        # Use the production ticket namespace so the same fixture can cross
+        # PublicWebFetchLauncher rather than only its in-process reader.
+        self.source.ticket_ref = "public-web-fetch:" + "a" * 24
         self.registration = seed_core_registration(self.harness.planner, self.source)
         self._write_feedback()
 
