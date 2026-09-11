@@ -589,9 +589,12 @@ class DaltonService:
                 **({"model-router": config.model_router_db} if config.model_router_db else {}),
             },
         )
+        self._backup_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._backup_future: concurrent.futures.Future[dict[str, Any]] | None = None
         self._last_backup_monotonic = 0.0
         self._backup_state: dict[str, Any] = {
             "state": "disabled" if self._backup is None else "pending",
+            "last_started_at": None, "last_completed_at": None,
             "last_success_at": None, "last_snapshot_id": None,
             "last_retention": None, "last_error": None,
         }
@@ -638,12 +641,23 @@ class DaltonService:
         self._projection_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dalton-dashboard-projection"
         )
+        if self._backup is not None:
+            self._backup_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dalton-backup"
+            )
         self._write_heartbeat("starting")
 
     def stop(self) -> None:
         self._stop.set()
 
     def close(self) -> None:
+        backup_executor, self._backup_executor = self._backup_executor, None
+        if backup_executor is not None:
+            # An interrupted SQLite backup is not useful. A controlled stop
+            # therefore drains the one admitted backup before the controller
+            # closes its own authority connections.
+            backup_executor.shutdown(wait=True, cancel_futures=True)
+            self._poll_backup(allow_launch=False)
         projection_executor, self._projection_executor = self._projection_executor, None
         if projection_executor is not None:
             projection_executor.shutdown(wait=True, cancel_futures=True)
@@ -794,31 +808,67 @@ class DaltonService:
                     self._bounded_planner.run_once
                 )
 
-    def _run_backup(self) -> None:
-        if self._backup is None or self.config.backup_interval_seconds is None:
-            return
-        elapsed = time.monotonic() - self._last_backup_monotonic
-        if self._last_backup_monotonic != 0.0 and elapsed < self.config.backup_interval_seconds:
-            return
-        try:
-            manifest = self._backup.snapshot()
-        except Exception as exc:
-            self._backup_state.update(state="error", last_error=f"{type(exc).__name__}: {exc}")
-            return
-        self._last_backup_monotonic = time.monotonic()
-        self._backup_state.update(
-            state="ready", last_success_at=_utc_now(),
-            last_snapshot_id=manifest["snapshot_id"], last_error=None,
-        )
+    def _perform_backup(self) -> dict[str, Any]:
+        """Run one snapshot and its ordered retention pass off the tick thread."""
+
+        assert self._backup is not None
+        manifest = self._backup.snapshot()
+        retention = None
+        retention_error = None
         if self.config.backup_keep_latest is not None:
             try:
                 retention = self._backup.prune_verified(
                     keep_latest=self.config.backup_keep_latest)
+            except Exception as exc:  # harvested and reported by the tick thread
+                retention_error = f"{type(exc).__name__}: {exc}"
+        return {"manifest": manifest, "retention": retention,
+                "retention_error": retention_error}
+
+    def _poll_backup(self, *, allow_launch: bool = True) -> None:
+        if self._backup is None or self.config.backup_interval_seconds is None:
+            return
+        future = self._backup_future
+        if future is not None and future.done():
+            self._backup_future = None
+            self._backup_state["last_completed_at"] = _utc_now()
+            try:
+                result = future.result()
             except Exception as exc:
+                self._last_backup_monotonic = time.monotonic()
                 self._backup_state.update(
-                    state="error", last_error=f"retention {type(exc).__name__}: {exc}")
+                    state="error", last_error=f"{type(exc).__name__}: {exc}")
                 return
-            self._backup_state["last_retention"] = retention
+            manifest = result["manifest"]
+            self._last_backup_monotonic = time.monotonic()
+            self._backup_state.update(
+                state="ready", last_success_at=_utc_now(),
+                last_snapshot_id=manifest["snapshot_id"], last_error=None,
+                last_retention=result["retention"],
+            )
+            if result["retention_error"] is not None:
+                self._backup_state.update(
+                    state="error",
+                    last_error="retention " + result["retention_error"])
+            # Make completion or failure observable for this heartbeat. A
+            # failed cycle can retry on the following tick.
+            return
+        if future is not None or not allow_launch:
+            return
+        elapsed = time.monotonic() - self._last_backup_monotonic
+        if (self._last_backup_monotonic != 0.0
+                and elapsed < self.config.backup_interval_seconds):
+            return
+        executor = self._backup_executor
+        if executor is None:
+            raise RuntimeError("backup executor is unavailable")
+        self._backup_state.update(
+            state="running", last_started_at=_utc_now(), last_error=None)
+        self._backup_future = executor.submit(self._perform_backup)
+
+    def _run_backup(self) -> None:
+        """Compatibility entry point for the controller's backup poll."""
+
+        self._poll_backup()
 
     def _build_projection(
         self, source_signature: tuple[Any, ...]
@@ -924,7 +974,7 @@ class DaltonService:
         self._poll_weekly_brief()
         self._poll_bounded_planner()
         self._poll_outbox()
-        self._run_backup()
+        self._poll_backup()
         self._poll_projection()
         self._poll_plugins()
         current_signature = self._sources()
@@ -951,13 +1001,21 @@ class DaltonService:
             if plugin_futures:
                 concurrent.futures.wait(plugin_futures)
             self._poll_plugins()
+            # ``--once`` is a maintenance cycle and historically returned
+            # only after its backup finished. Persistent ticks take the
+            # non-waiting path above and keep heartbeats moving.
+            backup_future = self._backup_future
+            if backup_future is not None:
+                concurrent.futures.wait((backup_future,))
+                self._poll_backup(allow_launch=False)
         self._last_tick_at = _utc_now()
         self._last_error = self._projection_error
         degraded = self._projection_error is not None or any(
             plugin["state"] == "error" for plugin in self._plugin_states.values()
         ) or self._agenda_state["state"] == "error" or self._weekly_brief_state[
             "state"
-        ] == "error" or self._outbox_state["state"] in {"error", "degraded"}
+        ] == "error" or self._outbox_state["state"] in {"error", "degraded"} \
+            or self._backup_state["state"] == "error"
         state = "degraded" if degraded else "running"
         return self._write_heartbeat(state)
 

@@ -742,11 +742,133 @@ class ServiceTests(unittest.TestCase):
                                    return_value={"snapshot_id": "snapshot-new"}) as snapshot, \
                     mock.patch.object(service._backup, "prune_verified",
                                       return_value=retention) as prune:
+                service.start()
                 service._run_backup()
+                service._backup_future.result(timeout=2)
+                service._poll_backup(allow_launch=False)
             snapshot.assert_called_once_with()
             prune.assert_called_once_with(keep_latest=3)
             self.assertEqual(service._backup_state["last_retention"], retention)
             self.assertEqual(service._backup_state["state"], "ready")
+            service.close()
+
+    def test_persistent_tick_keeps_heartbeating_with_one_backup_in_flight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            with DaltonStore(core) as store:
+                ObservabilityStore(store)
+            raw = {
+                "schema_version": "0.1", "core_db": str(core),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"), "tick_seconds": 1,
+                "projection_min_interval_seconds": 1, "plugin_retry_seconds": 1,
+                "plugins": [], "backup": {"enabled": True,
+                    "root": str(root / "backups"), "interval_seconds": 86400},
+            }
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            started, release = threading.Event(), threading.Event()
+            calls = []
+
+            def blocked_snapshot():
+                calls.append("snapshot")
+                started.set()
+                self.assertTrue(release.wait(3))
+                return {"snapshot_id": "snapshot-new"}
+
+            with mock.patch.object(service._backup, "snapshot",
+                                   side_effect=blocked_snapshot):
+                try:
+                    before = time.monotonic()
+                    first = service.run_once()
+                    self.assertLess(time.monotonic() - before, 1)
+                    self.assertTrue(started.wait(1))
+                    self.assertEqual(first["backup"]["state"], "running")
+                    second = service.run_once()
+                    self.assertEqual(second["backup"]["state"], "running")
+                    self.assertEqual(calls, ["snapshot"])
+
+                    def delayed_release():
+                        time.sleep(0.1)
+                        release.set()
+
+                    releaser = threading.Thread(target=delayed_release)
+                    releaser.start()
+                    before_close = time.monotonic()
+                    service.close()
+                    releaser.join(1)
+                    self.assertGreaterEqual(time.monotonic() - before_close, 0.09)
+                finally:
+                    release.set()
+                    service.close()
+            self.assertEqual(service._backup_state["state"], "ready")
+            self.assertEqual(service._backup_state["last_snapshot_id"],
+                             "snapshot-new")
+
+    def test_once_waits_for_backup_and_reports_background_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            with DaltonStore(core) as store:
+                ObservabilityStore(store)
+            raw = {
+                "schema_version": "0.1", "core_db": str(core),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"), "tick_seconds": 1,
+                "projection_min_interval_seconds": 1, "plugin_retry_seconds": 1,
+                "plugins": [], "backup": {"enabled": True,
+                    "root": str(root / "backups"), "interval_seconds": 86400},
+            }
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            started, release = threading.Event(), threading.Event()
+
+            def failed_snapshot():
+                started.set()
+                self.assertTrue(release.wait(3))
+                raise RuntimeError("integrity failed")
+
+            def delayed_release():
+                self.assertTrue(started.wait(1))
+                time.sleep(0.1)
+                release.set()
+
+            releaser = threading.Thread(target=delayed_release)
+            releaser.start()
+            with mock.patch.object(
+                service._backup, "snapshot", side_effect=failed_snapshot
+            ) as snapshot:
+                before = time.monotonic()
+                result = service.run_once(
+                    force_projection=True, wait_for_projection=True)
+                releaser.join(1)
+                self.assertGreaterEqual(time.monotonic() - before, 0.09)
+                self.assertEqual(result["state"], "degraded")
+                self.assertEqual(result["backup"]["state"], "error")
+                self.assertIn("integrity failed", result["backup"]["last_error"])
+                self.assertIsNone(service._backup_future)
+
+                # A failed multi-database integrity pass is still an attempt.
+                # Do not spend another one on every five-second controller tick.
+                service._poll_backup()
+                self.assertIsNone(service._backup_future)
+                self.assertEqual(snapshot.call_count, 1)
+                with mock.patch(
+                    "dalton_core.service.time.monotonic",
+                    return_value=(service._last_backup_monotonic + 86401),
+                ):
+                    service._poll_backup()
+                retry = service._backup_future
+                self.assertIsNotNone(retry)
+                retry.exception(timeout=2)
+                service._poll_backup(allow_launch=False)
+                self.assertEqual(snapshot.call_count, 2)
+            service.close()
 
     def test_one_cycle_sweeps_projects_and_renders_without_an_llm(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
