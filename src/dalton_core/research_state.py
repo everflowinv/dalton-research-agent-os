@@ -44,6 +44,7 @@ def company_state(
     entry: Mapping[str, Any],
     *,
     figures: Mapping[str, Any] | None = None,
+    financial_model: Mapping[str, Any] | None = None,
     metrics: Sequence[Mapping[str, Any]] = (),
     contested: Sequence[Mapping[str, Any]] = (),
     acquisition: Mapping[str, Any] | None = None,
@@ -94,6 +95,7 @@ def company_state(
             "total": _int(held.get("total")),
             "by_grade": dict(held.get("by_grade") or {}),
         },
+        "financial_model": dict(financial_model or {"status": "unavailable", "reason": "not_projected"}),
         # Measures the market was seen citing for this company, most-cited
         # first. A requirement needs two documents; the uncorroborated ones are
         # shown because they are the strongest hint about what to go looking
@@ -184,6 +186,7 @@ def build_research_state(
     checklist: Sequence[Mapping[str, Any]],
     industry: Mapping[str, Any] | None = None,
     figures_by_company: Mapping[str, Any] | None = None,
+    financial_models_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     metrics_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     contested_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     acquisition_by_company: Mapping[str, Mapping[str, Any]] | None = None,
@@ -205,6 +208,7 @@ def build_research_state(
     """
 
     figures_by_company = figures_by_company or {}
+    financial_models_by_company = financial_models_by_company or {}
     metrics_by_company = metrics_by_company or {}
     contested_by_company = contested_by_company or {}
     acquisition_by_company = acquisition_by_company or {}
@@ -216,6 +220,7 @@ def build_research_state(
         company_state(
             entry,
             figures=figures_by_company.get(entry.get("company_ref")),
+            financial_model=financial_models_by_company.get(entry.get("company_ref")),
             metrics=metrics_by_company.get(entry.get("company_ref"), ()),
             contested=contested_by_company.get(entry.get("company_ref"), ()),
             acquisition=acquisition_by_company.get(entry.get("company_ref")),

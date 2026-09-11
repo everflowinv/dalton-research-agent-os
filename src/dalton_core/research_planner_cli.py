@@ -151,12 +151,16 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     industry = evaluate_industry(store.connection, mission, planned_specs=planned)
     from .metric_discovery import contested, establish_requirements, uncorroborated
 
+    from .research_financial_state import financial_state
+
+    financial_models: dict[str, Any] = {}
     figures: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
     disputed: dict[str, Any] = {}
     acquisition: dict[str, Any] = {}
     for entry in checklist:
         company_ref = entry["company_ref"]
+        financial_models[company_ref] = financial_state(store.connection, company_ref, mission)
         acquisition[company_ref] = missions.sec_dispatch_outcomes(company_ref)
         held = missions.document_figures(company_ref)
         figures[company_ref] = {
@@ -187,7 +191,8 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
 
     return build_research_state(
         mission=mission, checklist=checklist, industry=industry,
-        figures_by_company=figures, metrics_by_company=metrics,
+        figures_by_company=figures, financial_models_by_company=financial_models,
+        metrics_by_company=metrics,
         contested_by_company=disputed, acquisition_by_company=acquisition,
         dossier_feedback_by_company=read_dossier_repair_feedback(
             Path(store.path).parent),
