@@ -288,18 +288,17 @@
           "properties": {
             "minimum_distinct_urls": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 100
+              "minimum": 1
             },
             "window_seconds": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 2592000
+              "description": "Owner-configured rolling window; the runtime requires a representable calendar duration."
             },
             "cooldown_seconds": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 2592000
+              "description": "Owner-configured initial pause; the runtime requires a representable calendar duration."
             },
             "recovery": {
               "type": "object",

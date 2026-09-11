@@ -41,6 +41,13 @@ class HostRecoveryFoldTests(unittest.TestCase):
                 "acquisition": {**old["acquisition"], "failure_cooldown": policy}}
         plan["content_hash"] = content_hash({k: v for k, v in plan.items() if k != "content_hash"})
         self.assertEqual(validate_discovery_plan(plan)["acquisition"]["failure_cooldown"], policy)
+        schema = json.loads((Path(__file__).parents[1] / "contracts" /
+                             "mission-discovery-plan.schema.json").read_text())
+        fields = schema["properties"]["acquisition"]["properties"]["failure_cooldown"]["properties"]
+        for key in policy:
+            self.assertEqual(fields[key]["type"], "integer")
+            self.assertEqual(fields[key]["minimum"], 1)
+            self.assertNotIn("maximum", fields[key])
         for key in policy:
             for invalid in (True, 0, -1, 1.5):
                 with self.subTest(key=key, value=invalid), self.assertRaises(ValueError):
