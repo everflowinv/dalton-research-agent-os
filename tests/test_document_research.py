@@ -12,6 +12,7 @@ from dalton_core.document_research import (
     DocumentResearchError,
     DocumentResearchRegistry,
     AlphaEngineDocumentSourceAdapter,
+    CoreAcquiredDocumentSourceAdapter,
     FeedDocumentSourceAdapter,
     PublicWebDocumentSourceAdapter,
     READ_OPERATION,
@@ -127,6 +128,23 @@ class FakeLauncher:
             "ticket_ref": self.ticket_ref,
             "manifest": self.locate_completed_manifest(document_ref),
         }
+
+
+class FakeCoreRows:
+    def __init__(self, *rows: dict):
+        self.rows = {row["record_id"]: dict(row) for row in rows}
+        self.connection = self
+
+    def execute(self, query: str, params: tuple):
+        if "coverage_mission_discovered_documents" not in query or len(params) != 1:
+            raise AssertionError("unexpected Core acquired-document query")
+        row = self.rows.get(params[0])
+
+        class Result:
+            def fetchall(self):
+                return [] if row is None else [dict(row)]
+
+        return Result()
 
 
 class FakeSpool:
@@ -405,6 +423,55 @@ class DocumentResearchTests(unittest.TestCase):
             "policy_hash": self.policy["content_hash"],
         })
         self.assertEqual(proof["text"], "Old version says backlog improved.")
+
+    def test_core_acquired_feed_registration_binds_mission_company_and_ticket(self):
+        document_ref = "sales-note:fixture-core-row"
+        ticket_ref = "feed-run:core-row"
+        adapter, _, _ = self._source(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            text="The channel expects a two-quarter conversion window.",
+            ticket_ref=ticket_ref,
+            doc_kind="broker_note",
+        )
+        record_id = "mission-discovered-document:sales-note-fixture"
+        core = FakeCoreRows({
+            "record_id": record_id,
+            "mission_version_ref": "coverage-mission-version:fixture",
+            "company_ref": "company:fixture",
+            "source_ref": SALES_NOTES_SOURCE_REF,
+            "document_ref": document_ref,
+            "ticket_ref": ticket_ref,
+            "status": "acquired",
+        })
+        registry = DocumentResearchRegistry(
+            adapters={SALES_NOTES_SOURCE_REF: adapter},
+            policy=self.policy,
+            acquired_document_adapter=CoreAcquiredDocumentSourceAdapter(
+                core=core, adapters={SALES_NOTES_SOURCE_REF: adapter}
+            ),
+        )
+        registration = registry.register_acquired_document(
+            record_id=record_id, purpose="qualitative_research"
+        )
+        authority = registration["source_authority"]
+        self.assertEqual(authority["kind"], "coverage-mission-acquired-document")
+        self.assertEqual(authority["ref"], record_id)
+        self.assertRegex(authority["hash"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            authority["mission_version_ref"], "coverage-mission-version:fixture"
+        )
+        self.assertEqual(authority["company_ref"], "company:fixture")
+        self.assertEqual(registration["acquisition_ticket_ref"], ticket_ref)
+        self.assertTrue(registry.inspect_acquired_document(
+            record_id=record_id, purpose="qualitative_research"
+        )["available"])
+        core.rows[record_id]["source_ref"] = COMPANY_WIKI_SOURCE_REF
+        unavailable = registry.inspect_acquired_document(
+            record_id=record_id, purpose="qualitative_research"
+        )
+        self.assertFalse(unavailable["available"])
+        self.assertEqual(unavailable["reason"], "source_not_readable")
 
     def test_search_stops_consuming_matches_at_the_result_bound(self):
         document_ref = "sales-note:fixture-many-matches"
@@ -836,12 +903,39 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
             registration["normalized_text"]["text_sha256"],
             hashlib.sha256(ORIGINAL.encode("utf-8")).hexdigest(),
         )
-        proof = registry.search({
+        acquired_ref = "mission-discovered-document:alphaengine-fixture"
+        acquired_core = FakeCoreRows({
+            "record_id": acquired_ref,
+            "mission_version_ref": "coverage-mission-version:alpha-fixture",
+            "company_ref": "company:alpha-fixture",
+            "source_ref": "source:alphaengine",
+            "document_ref": NEW_DOC,
+            "ticket_ref": ALPHA_TICKET,
+            "status": "acquired",
+        })
+        acquired_registry = DocumentResearchRegistry(
+            adapters={"source:alphaengine": adapter},
+            policy=policy,
+            acquired_document_adapter=CoreAcquiredDocumentSourceAdapter(
+                core=acquired_core, adapters={"source:alphaengine": adapter}
+            ),
+        )
+        acquired_registration = acquired_registry.register_acquired_document(
+            record_id=acquired_ref, purpose="qualitative_research"
+        )
+        self.assertEqual(
+            acquired_registration["source_authority"]["company_ref"],
+            "company:alpha-fixture",
+        )
+        self.assertEqual(
+            acquired_registration["acquisition_ticket_ref"], ALPHA_TICKET
+        )
+        proof = acquired_registry.search({
             "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
             "operation": SEARCH_OPERATION,
             "purpose": "qualitative_research",
             "research_question": "What did management say about client decisions?",
-            "registration": registration,
+            "registration": acquired_registration,
             "query_terms": ["client decisions remain cautious"],
             "limits": {
                 "max_results": 2,
@@ -852,7 +946,7 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
             "policy_hash": policy["content_hash"],
         })
         self.assertEqual(len(proof["matches"]), 2)
-        self.assertEqual(registry.verify_search_proof(proof), proof)
+        self.assertEqual(acquired_registry.verify_search_proof(proof), proof)
 
     def test_core_acquired_nonannual_sec_filing_keeps_core_source_and_body_version(self):
         temp = tempfile.TemporaryDirectory()

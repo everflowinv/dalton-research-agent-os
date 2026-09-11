@@ -646,27 +646,20 @@ class PublicWebDocumentSourceAdapter:
         }), text
 
 
-class CoreAcquiredFetchedDocumentSourceAdapter:
-    """Bridge a logical mission document to its exact fetched body version."""
+class CoreAcquiredDocumentSourceAdapter:
+    """Bind one mission/company row to a source adapter's exact acquisition."""
 
-    _SOURCE_REFS = frozenset({
-        "source:sec-edgar", "source:web-search", "source:public-web",
-    })
-
-    def __init__(
-        self, *, core: Any, launcher: Any, spool: Any, receipt_reader: Any,
-        max_source_chars: int, max_pdf_pages: int, max_decompressed_bytes: int,
-    ) -> None:
+    def __init__(self, *, core: Any, adapters: Mapping[str, Any]) -> None:
         connection = getattr(core, "connection", None)
         if connection is None or not callable(getattr(connection, "execute", None)):
             raise TypeError("core must expose a database connection")
+        if not isinstance(adapters, Mapping) or not adapters:
+            raise TypeError("Core acquired documents require source adapters")
+        configured = dict(adapters)
+        if any(key != adapter.source_ref for key, adapter in configured.items()):
+            raise TypeError("Core adapter map keys must equal adapter source_ref")
         self.core = core
-        self.fetch = PublicWebDocumentSourceAdapter(
-            source_ref=None, launcher=launcher, core=core, spool=spool,
-            receipt_reader=receipt_reader, max_source_chars=max_source_chars,
-            max_pdf_pages=max_pdf_pages,
-            max_decompressed_bytes=max_decompressed_bytes,
-        )
+        self.adapters = configured
 
     @staticmethod
     def _authority(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -699,15 +692,28 @@ class CoreAcquiredFetchedDocumentSourceAdapter:
             row.get("status") != "acquired"
             or not isinstance(row.get("ticket_ref"), str)
             or not row["ticket_ref"]
-            or row.get("source_ref") not in self._SOURCE_REFS
         ):
             raise DocumentResearchConflict(
-                "Core row is not a readable acquired fetched document"
+                "Core row is not a readable acquired document"
             )
-        registration, text = self.fetch.materialize(
+        try:
+            adapter = self.adapters[row["source_ref"]]
+        except KeyError as exc:
+            raise DocumentResearchConflict(
+                "Core acquired-document source has no configured adapter"
+            ) from exc
+        registration, text = adapter.materialize(
             document_ref=row["document_ref"],
             acquisition_ticket_ref=row["ticket_ref"],
         )
+        if (
+            registration.get("source_ref") != row["source_ref"]
+            or registration.get("document_ref") != row["document_ref"]
+            or registration.get("acquisition_ticket_ref") != row["ticket_ref"]
+        ):
+            raise DocumentResearchConflict(
+                "Core acquired row and source acquisition authority disagree"
+            )
         authority = self._authority(row)
         body = {
             key: item for key, item in registration.items()
@@ -728,6 +734,27 @@ class CoreAcquiredFetchedDocumentSourceAdapter:
         return _record({
             **body, "id": f"registered-document:sha256:{digest}"
         }), text
+
+
+class CoreAcquiredFetchedDocumentSourceAdapter(
+    CoreAcquiredDocumentSourceAdapter
+):
+    """Compatibility wrapper for the former fetched-only adapter."""
+
+    def __init__(
+        self, *, core: Any, launcher: Any, spool: Any, receipt_reader: Any,
+        max_source_chars: int, max_pdf_pages: int, max_decompressed_bytes: int,
+    ) -> None:
+        adapters = {
+            source_ref: PublicWebDocumentSourceAdapter(
+                source_ref=source_ref, launcher=launcher, core=core, spool=spool,
+                receipt_reader=receipt_reader, max_source_chars=max_source_chars,
+                max_pdf_pages=max_pdf_pages,
+                max_decompressed_bytes=max_decompressed_bytes,
+            )
+            for source_ref in SUPPORTED_FETCH_DISCOVERY_SOURCE_REFS
+        }
+        super().__init__(core=core, adapters=adapters)
 
 
 def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -781,9 +808,12 @@ def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
             )
     authority_kind = wire["authority_kind"]
     allowed_source_authorities = {
-        "feed-acquisition-manifest": {"feed-acquisition-manifest"},
+        "feed-acquisition-manifest": {
+            "feed-acquisition-manifest", "coverage-mission-acquired-document"
+        },
         "alphaengine-document-acquisition-manifest": {
-            "alphaengine-document-acquisition-manifest"
+            "alphaengine-document-acquisition-manifest",
+            "coverage-mission-acquired-document",
         },
         "public-web-fetch-manifest": {
             "discovery-source-envelope", "coverage-mission-acquired-document"
@@ -795,7 +825,8 @@ def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
         raise DocumentResearchError(
             "registration source authority does not match its manifest authority"
         )
-    if authority_kind in {
+    if source_authority["kind"] != "coverage-mission-acquired-document" \
+            and authority_kind in {
         "feed-acquisition-manifest", "alphaengine-document-acquisition-manifest"
     } and (
         source_authority["ref"] != wire["manifest_ref"]
@@ -924,17 +955,27 @@ class DocumentResearchRegistry:
 
     def __init__(
         self, *, adapters: Mapping[str, Any], policy: Mapping[str, Any],
+        acquired_document_adapter: CoreAcquiredDocumentSourceAdapter | None = None,
         acquired_fetched_adapter: CoreAcquiredFetchedDocumentSourceAdapter | None = None,
     ) -> None:
         self.policy = validate_document_research_policy(policy)
+        if (
+            acquired_document_adapter is not None
+            and acquired_fetched_adapter is not None
+            and acquired_document_adapter is not acquired_fetched_adapter
+        ):
+            raise TypeError("only one Core acquired-document adapter may be configured")
+        core_adapter = acquired_document_adapter or acquired_fetched_adapter
         if not isinstance(adapters, Mapping) or (
-            not adapters and acquired_fetched_adapter is None
+            not adapters and core_adapter is None
         ):
             raise TypeError("at least one document research adapter is required")
         self.adapters = dict(adapters)
         if any(key != adapter.source_ref for key, adapter in self.adapters.items()):
             raise TypeError("adapter map keys must equal adapter source_ref")
-        self.acquired_fetched_adapter = acquired_fetched_adapter
+        self.acquired_document_adapter = core_adapter
+        # Read-only compatibility for callers that inspected the old member.
+        self.acquired_fetched_adapter = core_adapter
 
     def _authorize(self, purpose: Any, registration: Mapping[str, Any]) -> str:
         purpose = _text(purpose, "purpose")
@@ -1007,11 +1048,11 @@ class DocumentResearchRegistry:
     ) -> dict[str, Any]:
         """Register one exact acquired Core row; source labels come from Core."""
 
-        if self.acquired_fetched_adapter is None:
+        if self.acquired_document_adapter is None:
             raise DocumentResearchError(
-                "Core-acquired fetched-document adapter is not configured"
+                "Core acquired-document adapter is not configured"
             )
-        registration, _ = self.acquired_fetched_adapter.materialize_record(
+        registration, _ = self.acquired_document_adapter.materialize_record(
             record_id=record_id
         )
         self._authorize(purpose, registration)
@@ -1053,11 +1094,11 @@ class DocumentResearchRegistry:
     ) -> tuple[dict[str, Any], str]:
         expected = validate_registration(registration)
         if expected["source_authority"]["kind"] == "coverage-mission-acquired-document":
-            if self.acquired_fetched_adapter is None:
+            if self.acquired_document_adapter is None:
                 raise DocumentResearchError(
-                    "Core-acquired fetched-document adapter is not configured"
+                    "Core acquired-document adapter is not configured"
                 )
-            actual, text = self.acquired_fetched_adapter.materialize_record(
+            actual, text = self.acquired_document_adapter.materialize_record(
                 record_id=expected["source_authority"]["ref"]
             )
             if actual != expected:
@@ -1333,22 +1374,31 @@ def build_document_research_registry(
                     "public_web_max_decompressed_bytes"
                 ],
             )
-    if not adapters and public_web_launcher is None:
-        raise DocumentResearchError("no document research source is configured")
-    acquired_fetched_adapter = None
+    core_adapters = dict(adapters)
     if public_web_launcher is not None:
-        acquired_fetched_adapter = CoreAcquiredFetchedDocumentSourceAdapter(
-            core=core, launcher=public_web_launcher, spool=spool,
-            receipt_reader=receipt_reader,
-            max_source_chars=source_reading_limits["public_web_max_source_chars"],
-            max_pdf_pages=source_reading_limits["public_web_max_pdf_pages"],
-            max_decompressed_bytes=source_reading_limits[
-                "public_web_max_decompressed_bytes"
-            ],
+        for source_ref in SUPPORTED_FETCH_DISCOVERY_SOURCE_REFS:
+            if source_ref in core_adapters:
+                continue
+            core_adapters[source_ref] = PublicWebDocumentSourceAdapter(
+                source_ref=source_ref, launcher=public_web_launcher, core=core,
+                spool=spool, receipt_reader=receipt_reader,
+                max_source_chars=source_reading_limits["public_web_max_source_chars"],
+                max_pdf_pages=source_reading_limits["public_web_max_pdf_pages"],
+                max_decompressed_bytes=source_reading_limits[
+                    "public_web_max_decompressed_bytes"
+                ],
+            )
+    if not core_adapters:
+        raise DocumentResearchError("no document research source is configured")
+    acquired_document_adapter = None
+    connection = getattr(core, "connection", None)
+    if connection is not None and callable(getattr(connection, "execute", None)):
+        acquired_document_adapter = CoreAcquiredDocumentSourceAdapter(
+            core=core, adapters=core_adapters,
         )
     return DocumentResearchRegistry(
         adapters=adapters, policy=policy,
-        acquired_fetched_adapter=acquired_fetched_adapter,
+        acquired_document_adapter=acquired_document_adapter,
     )
 
 
@@ -1394,6 +1444,7 @@ __all__ = [
     "DocumentResearchError",
     "DocumentResearchRegistry",
     "AlphaEngineDocumentSourceAdapter",
+    "CoreAcquiredDocumentSourceAdapter",
     "CoreAcquiredFetchedDocumentSourceAdapter",
     "FeedDocumentSourceAdapter",
     "PublicWebDocumentSourceAdapter",

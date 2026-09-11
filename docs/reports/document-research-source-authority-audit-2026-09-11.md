@@ -112,11 +112,13 @@ policy outside that configured grant is refused.
    registration/search/read/replay/availability contracts. The
    `register_acquired_document(record_id=...)` path first reads the exact
    `coverage_mission_discovered_documents` row and pins its mission, company,
-   source, logical document ref, and acquisition ticket. Thus an acquired SEC
-   8-K stays `source:sec-edgar` because Core says so; the public-web profile
-   proves only how the body was fetched and cannot relabel an arbitrary URL as
-   SEC. Ordinary web registrations retain the source from their actual
-   discovery envelope. The production factory consumes injected, already-open
+   source, logical document ref, and acquisition ticket before dispatching to
+   the matching sales-note, wiki, AlphaEngine, or fetched-document adapter.
+   The adapter must independently return that same source, document, and
+   ticket. Thus an acquired SEC 8-K stays `source:sec-edgar` because Core says
+   so; the public-web profile proves only how the body was fetched and cannot
+   relabel an arbitrary URL as SEC. Ordinary web registrations retain the
+   source from their actual discovery envelope. The production factory consumes injected, already-open
    Core/spool/receipt/launcher authorities and verifies every launcher belongs
    to one state directory; it does not open or migrate authority on a read
    path. Dedicated AlphaEngine, public-web, and feed manifest readers reopen
