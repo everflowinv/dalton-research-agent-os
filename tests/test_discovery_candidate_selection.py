@@ -3,7 +3,7 @@ import json
 import unittest
 
 from dalton_core.discovery_candidate_selection import (
-    CandidateSelectionError, CockpitDiscoveryCandidateSelector, PURPOSE,
+    CandidateSelectionError, CockpitDiscoveryCandidateSelector, CONTRACT_REF, PURPOSE,
     candidate_view, selection_prompt, validate_selection,
 )
 from dalton_core.store import canonical_json, content_hash
@@ -86,6 +86,20 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
         self.assertEqual(model.kwargs["purpose"], PURPOSE)
         self.assertEqual(result["selected"], [])
         self.assertEqual(result["work_order_ref"], "work:select")
+
+    def test_twenty_maximum_metadata_candidates_fit_installed_selection_budget(self):
+        candidate={"document_ref":"alphaengine-doc:"+"x"*100,"rank":1,"title":"T"*240,
+                   "snippet":"S"*800,"snippet_truncated":True,"snippet_hash":"a"*64,
+                   "companies":["C"*120],"industries":["I"*120],
+                   "markets":["M"*120],"sources":["R"*120]}
+        rows=[{**candidate,"document_ref":f"alphaengine-doc:{index}","rank":index+1}
+              for index in range(20)]
+        base={"schema_version":"0.1","contract_ref":CONTRACT_REF,
+              "source_envelope_ref":"source-envelope:max","source_envelope_hash":"b"*64,
+              "candidates":rows}; view={**base,"content_hash":content_hash(base)}
+        prompt=selection_prompt(view,company={"company_ref":"company:test","name":"N"*120,
+            "ticker":"T"*20,"aliases":["A"*80]*10},missing_periods=["2026-Q2"])
+        self.assertLess(len(prompt.encode()),120000)
 
 
 if __name__ == "__main__": unittest.main()

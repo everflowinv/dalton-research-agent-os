@@ -50,7 +50,7 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.runner_journal import RunnerJournal
 from dalton_core.scheduler import Scheduler
-from dalton_core.store import DaltonStore, canonical_json
+from dalton_core.store import DaltonStore, canonical_json, content_hash
 from tests.p9a_fixtures import ROOT, bootstrap_method_authorities, mission_params
 from tests.test_alphaengine_core_acquisition import FakeDocumentHandle
 
@@ -590,6 +590,9 @@ class CoordinatorTests(unittest.TestCase):
         legacy=plan_for_tests(); before=canonical_json(legacy)
         validate_discovery_plan(legacy)
         self.assertEqual(canonical_json(legacy),before)
+        broken=json.loads(canonical_json(plan)); broken['specs'][0]['query_variants'][0]['query_template']='{name!r}'
+        broken['content_hash']=content_hash({k:v for k,v in broken.items() if k!='content_hash'})
+        with self.assertRaises(DiscoveryPlanError): validate_discovery_plan(broken)
 
     def test_v06_consumed_empty_page_advances_to_next_query_variant(self):
         v1=self.create_mission(); mission=self.mission_v2(v1)
