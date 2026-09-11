@@ -749,12 +749,23 @@ class RegisteredAnnualReportRegistry:
         ):
             raise RegisteredAnnualReportError("coverage mission budget authority is invalid")
         mission_budget = mission["budget"]
+        def physical_call_bound(stage: str) -> int:
+            execution = request["model_execution"][stage]
+            recovery = (execution.get("provider_retry") or {}).get(
+                "unknown_recovery"
+            )
+            fresh = 0 if recovery is None else recovery["max_fresh_work_orders"]
+            # Every fresh WorkOrder retains the exact same per-Work Scheduler
+            # attempt bound.  Count that full physical-call envelope before a
+            # plan can be admitted; the recovery policy must not create spend
+            # hidden outside the approved mission aggregate.
+            return execution["max_attempts"] * (1 + fresh)
+
         paid_calls = sum(
-            request["model_execution"][stage]["max_attempts"]
-            for stage in ("draft", "verifier")
+            physical_call_bound(stage) for stage in ("draft", "verifier")
         )
         paid_cost = sum(
-            request["model_execution"][stage]["max_attempts"]
+            physical_call_bound(stage)
             * request["model_execution"][stage]["max_cost_usd"]
             for stage in ("draft", "verifier")
         )

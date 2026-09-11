@@ -112,10 +112,40 @@ CREATE TABLE IF NOT EXISTS research_plan_idempotency (
     created_at TEXT NOT NULL
 );
 
+-- A paid model result whose actual cost remains unknown is terminal on its
+-- original WorkOrder.  An explicitly approved provider policy may derive a
+-- fresh physical WorkOrder (and the remaining qualitative suffix) without
+-- rewriting the approved ResearchPlanVersion or its original WorkOrderLink
+-- tree.  These rows are the append-only bridge between those two immutable
+-- graphs.  ``record_json`` carries the exact failed formal result, budget
+-- admission, original approval and provider-policy hashes rechecked by the
+-- executor before every downstream read.
+CREATE TABLE IF NOT EXISTS research_plan_recovery_links (
+    recovery_link_id TEXT PRIMARY KEY,
+    plan_version_ref TEXT NOT NULL REFERENCES research_plan_versions(version_id),
+    version_number INTEGER NOT NULL CHECK(version_number > 0),
+    prior_recovery_link_ref TEXT REFERENCES research_plan_recovery_links(recovery_link_id),
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 2 AND 4),
+    link_kind TEXT NOT NULL CHECK(link_kind IN ('unknown_recovery','recovery_suffix')),
+    failed_work_order_ref TEXT,
+    upstream_work_order_ref TEXT NOT NULL,
+    recovery_work_order_ref TEXT NOT NULL,
+    recovery_work_order_hash TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(plan_version_ref, version_number),
+    UNIQUE(recovery_work_order_ref),
+    CHECK((link_kind='unknown_recovery' AND failed_work_order_ref IS NOT NULL)
+       OR (link_kind='recovery_suffix' AND failed_work_order_ref IS NULL))
+);
+
 CREATE INDEX IF NOT EXISTS idx_research_plan_events_plan
 ON research_plan_events(plan_version_ref, event_seq);
 CREATE INDEX IF NOT EXISTS idx_research_plan_versions_question
 ON research_plan_versions(question_ref, version_number);
+CREATE INDEX IF NOT EXISTS idx_research_plan_recovery_plan
+ON research_plan_recovery_links(plan_version_ref, version_number);
 
 CREATE TRIGGER IF NOT EXISTS research_plan_versions_authorized_insert
 BEFORE INSERT ON research_plan_versions WHEN dalton_authorized() = 0 BEGIN
@@ -141,6 +171,10 @@ CREATE TRIGGER IF NOT EXISTS research_plan_idempotency_authorized_insert
 BEFORE INSERT ON research_plan_idempotency WHEN dalton_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'research plan idempotency insert requires DaltonStore');
 END;
+CREATE TRIGGER IF NOT EXISTS research_plan_recovery_links_authorized_insert
+BEFORE INSERT ON research_plan_recovery_links WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'research plan recovery link insert requires DaltonStore');
+END;
 
 CREATE TRIGGER IF NOT EXISTS research_plan_versions_no_update
 BEFORE UPDATE ON research_plan_versions BEGIN SELECT RAISE(ABORT, 'research plan versions are immutable'); END;
@@ -154,6 +188,8 @@ CREATE TRIGGER IF NOT EXISTS research_plan_starts_no_update
 BEFORE UPDATE ON research_plan_starts BEGIN SELECT RAISE(ABORT, 'research plan starts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_idempotency_no_update
 BEFORE UPDATE ON research_plan_idempotency BEGIN SELECT RAISE(ABORT, 'research plan idempotency rows are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_plan_recovery_links_no_update
+BEFORE UPDATE ON research_plan_recovery_links BEGIN SELECT RAISE(ABORT, 'research plan recovery links are immutable'); END;
 
 CREATE TRIGGER IF NOT EXISTS research_plan_versions_no_delete
 BEFORE DELETE ON research_plan_versions BEGIN SELECT RAISE(ABORT, 'research plan versions are immutable'); END;
@@ -167,3 +203,5 @@ CREATE TRIGGER IF NOT EXISTS research_plan_starts_no_delete
 BEFORE DELETE ON research_plan_starts BEGIN SELECT RAISE(ABORT, 'research plan starts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_idempotency_no_delete
 BEFORE DELETE ON research_plan_idempotency BEGIN SELECT RAISE(ABORT, 'research plan idempotency rows are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_plan_recovery_links_no_delete
+BEFORE DELETE ON research_plan_recovery_links BEGIN SELECT RAISE(ABORT, 'research plan recovery links are immutable'); END;

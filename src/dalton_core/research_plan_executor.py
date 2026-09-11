@@ -123,6 +123,8 @@ from .annual_report_qualitative import (
 from .research_plan_coordinator import (
     ResearchPlanCoordinator,
     _stage_output_ref,
+    _reverify_stage_output,
+    _upstream_outcome,
 )
 from .research_verification import (
     CandidateStagingStore,
@@ -626,6 +628,16 @@ class ResearchPlanExecutor:
                 raise TypeError(f"annual report {label} worker must share Scheduler")
         self.annual_report_draft_worker = annual_report_draft_worker
         self.annual_report_verifier_worker = annual_report_verifier_worker
+        self.annual_report_recovery = None
+        if annual_report_draft_worker is not None and annual_report_verifier_worker is not None:
+            from .annual_report_recovery import AnnualReportUnknownRecovery
+
+            self.annual_report_recovery = AnnualReportUnknownRecovery(
+                plan=self.plan, scheduler=self.scheduler,
+                draft_worker=annual_report_draft_worker,
+                verifier_worker=annual_report_verifier_worker,
+                clock=self.clock, actor_ref=self.actor_ref,
+            )
         self.capability_policy_ref = _text(
             capability_policy_ref, "capability_policy_ref"
         )
@@ -695,11 +707,30 @@ class ResearchPlanExecutor:
         # Requirement: exact accepted + started SEC public plan.  The start
         # reader re-validates the accepted approval, the WorkflowRunVersion,
         # the WorkOrderLink rows and the admitted root WorkOrder.
-        read_exact_research_plan_start(
+        start_wire = read_exact_research_plan_start(
             cursor, plan_start_ref_for(plan_version_ref)
         )
-        work_orders = self._work_orders(plan_wire)
         steps = _plan_steps(plan_wire)
+        recovery_links: list[dict[str, Any]] = []
+        if (
+            plan_wire["execution_scope"]["operation"]
+            == REGISTERED_ANNUAL_REPORT_OPERATION
+            and self.annual_report_recovery is not None
+        ):
+            try:
+                work_orders, recovery_links = (
+                    self.annual_report_recovery.effective_work_orders(
+                        plan_wire, start_wire
+                    )
+                )
+            except Exception as exc:
+                from .annual_report_recovery import AnnualReportRecoveryError
+
+                if isinstance(exc, AnnualReportRecoveryError):
+                    raise ResearchPlanExecutorConflict(str(exc)) from exc
+                raise
+        else:
+            work_orders = self._work_orders(plan_wire)
 
         current_index: int | None = None
         for index, work_order in enumerate(work_orders):
@@ -708,6 +739,38 @@ class ResearchPlanExecutor:
                 current_index = index
                 break
             if formal["terminal_state"] != "succeeded":
+                if (
+                    self.annual_report_recovery is not None
+                    and plan_wire["execution_scope"]["operation"]
+                    == REGISTERED_ANNUAL_REPORT_OPERATION
+                    and index in (1, 2)
+                ):
+                    try:
+                        refusal = self.annual_report_recovery.budget_refusal_reason(
+                            work_order, index
+                        )
+                    except Exception as exc:
+                        from .annual_report_recovery import AnnualReportRecoveryError
+
+                        if isinstance(exc, AnnualReportRecoveryError):
+                            raise ResearchPlanExecutorConflict(str(exc)) from exc
+                        raise
+                    if refusal is not None:
+                        return {
+                            "status": "blocked", "reason": refusal,
+                            "plan_version_ref": plan_wire["id"],
+                            "work_order_ref": work_order["id"],
+                            "stage": steps[index]["stage"],
+                        }
+                    recovered = self.annual_report_recovery.recover(
+                        plan_wire=plan_wire, start_wire=start_wire,
+                        effective=work_orders, links=recovery_links, index=index,
+                    )
+                    return {
+                        **recovered, "plan_version_ref": plan_wire["id"],
+                        "failed_work_order_ref": work_order["id"],
+                        "stage": steps[index]["stage"],
+                    }
                 return {
                     "status": "blocked",
                     "plan_version_ref": plan_wire["id"],
@@ -716,6 +779,13 @@ class ResearchPlanExecutor:
                     "reason": "node terminated unsuccessfully",
                 }
         if current_index is None:
+            if recovery_links and len(work_orders) < len(steps):
+                admitted = self.annual_report_recovery.admit_suffix(
+                    plan_wire=plan_wire, start_wire=start_wire,
+                    effective=work_orders, links=recovery_links,
+                    index=len(work_orders),
+                )
+                return {**admitted, "plan_version_ref": plan_wire["id"]}
             self._audit_completed_tree(plan_wire, steps, work_orders)
             return {
                 "status": "complete",
@@ -735,6 +805,13 @@ class ResearchPlanExecutor:
                 )
             # Crash between upstream completion and admission: replay the
             # admission only; the upstream node is already terminal.
+            if recovery_links:
+                recovered = self.annual_report_recovery.admit_suffix(
+                    plan_wire=plan_wire, start_wire=start_wire,
+                    effective=work_orders[:current_index], links=recovery_links,
+                    index=current_index,
+                )
+                return {**recovered, "plan_version_ref": plan_wire["id"]}
             return self._admit(plan_wire, current_index - 1)
 
         if current_index == 0:
@@ -755,7 +832,7 @@ class ResearchPlanExecutor:
         if (
             plan_wire["execution_scope"]["operation"]
             == REGISTERED_ANNUAL_REPORT_OPERATION
-            and current_index == len(work_orders) - 1
+            and current_index == len(steps) - 1
         ):
             self._audit_completed_tree(plan_wire, steps, work_orders)
             return {
@@ -767,6 +844,13 @@ class ResearchPlanExecutor:
                     "retrieval_proof_hash": outcome["retrieval_proof_hash"],
                 } if "retrieval_proof_ref" in outcome else {}),
             }
+        if recovery_links:
+            admitted = self.annual_report_recovery.admit_suffix(
+                plan_wire=plan_wire, start_wire=start_wire,
+                effective=work_orders[:current_index + 1], links=recovery_links,
+                index=current_index + 1,
+            )
+            return {**admitted, "plan_version_ref": plan_wire["id"]}
         return self._admit(plan_wire, current_index)
 
     # ------------------------------------------------------------------ #
@@ -2220,6 +2304,23 @@ class ResearchPlanExecutor:
                         "model_proof_ref": proof["id"],
                         "model_proof_hash": proof["content_hash"],
                     }
+                if self.annual_report_recovery is not None:
+                    try:
+                        refusal = self.annual_report_recovery.budget_refusal_reason(
+                            work_order, index
+                        )
+                    except Exception as exc:
+                        from .annual_report_recovery import AnnualReportRecoveryError
+
+                        if isinstance(exc, AnnualReportRecoveryError):
+                            raise ResearchPlanExecutorConflict(str(exc)) from exc
+                        raise
+                    if refusal is not None:
+                        return {
+                            "status": "blocked", "reason": refusal,
+                            "plan_version_ref": plan_wire["id"],
+                            "work_order_ref": work_order["id"],
+                        }
                 return {
                     "status": outcome.get("status", "pending"),
                     "plan_version_ref": plan_wire["id"],
@@ -2316,14 +2417,39 @@ class ResearchPlanExecutor:
                 raise ResearchPlanExecutorConflict(
                     "registered annual-report retrieval is not complete"
                 )
-            coordinator_outcome = self.coordinator.admit_next_work_order(
-                plan_version_ref=plan_wire["id"],
-                upstream_work_order_ref=work_orders[-1]["id"],
+            recovered = any(
+                work.get("metadata", {}).get("unknown_recovery_derivation")
+                is not None for work in work_orders
             )
-            if coordinator_outcome.get("status") != "complete":
-                raise ResearchPlanExecutorConflict(
-                    "qualitative candidate tree did not re-verify as complete"
+            if recovered:
+                cursor = self.plan.connection.cursor()
+                upstream_outcome = _upstream_outcome(
+                    cursor, work_orders[0]["id"], work_orders[0]
                 )
+                for index in range(1, len(work_orders)):
+                    outcome = _upstream_outcome(
+                        cursor, work_orders[index]["id"], work_orders[index]
+                    )
+                    if outcome["state"] != "succeeded":
+                        raise ResearchPlanExecutorConflict(
+                            "effective qualitative recovery tree is incomplete"
+                        )
+                    _reverify_stage_output(
+                        plan_wire, steps[index], outcome,
+                        current_work_order=work_orders[index],
+                        upstream_work_order=work_orders[index - 1],
+                        upstream_outcome=upstream_outcome,
+                    )
+                    upstream_outcome = outcome
+            else:
+                coordinator_outcome = self.coordinator.admit_next_work_order(
+                    plan_version_ref=plan_wire["id"],
+                    upstream_work_order_ref=work_orders[-1]["id"],
+                )
+                if coordinator_outcome.get("status") != "complete":
+                    raise ResearchPlanExecutorConflict(
+                        "qualitative candidate tree did not re-verify as complete"
+                    )
             for index, stage in ((1, "qualitative_model_draft"),
                                  (2, "independent_qualitative_verifier")):
                 formal = self.scheduler.formal_result(work_orders[index]["id"])
