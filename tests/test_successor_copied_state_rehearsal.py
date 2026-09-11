@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import tempfile
 import unittest
@@ -11,8 +12,11 @@ from unittest.mock import patch
 
 from scripts.run_release_copied_state_rehearsal import RehearsalBindingError
 from scripts.run_successor_copied_state_rehearsal import (
-    derive_confined_transition, replay_preserved_production_setup,
-    stage_preserved_runtime_configs, validate_successor_snapshots,
+    capture_external_market_digest_preservation, derive_confined_transition,
+    replay_preserved_production_setup,
+    stage_existing_install_authorities, stage_preserved_runtime_configs,
+    validate_external_market_digest_preservation,
+    validate_existing_install_authorities, validate_successor_snapshots,
 )
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
@@ -49,9 +53,27 @@ class PathModule(IdentityModule):
         if isinstance(value, list):
             return [PathModule.rewrite_paths(item, replacements) for item in value]
         if isinstance(value, str):
-            for old, new in replacements.items():
+            for old, new in sorted(replacements.items(), key=lambda item: -len(item[0])):
                 if value.startswith(old): return new + value[len(old):]
         return value
+
+    @staticmethod
+    def foreign_paths(value, root):
+        found = []
+
+        def visit(item):
+            if isinstance(item, dict):
+                for child in item.values():
+                    visit(child)
+            elif isinstance(item, list):
+                for child in item:
+                    visit(child)
+            elif isinstance(item, str) and item.startswith("/") \
+                    and not Path(item).is_relative_to(root):
+                found.append(item)
+
+        visit(value)
+        return found
 
 
 class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
@@ -134,6 +156,166 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         self.assertEqual(result["document_research_config_sha256"],
                          __import__('hashlib').sha256(path.read_bytes()).hexdigest())
         self.assertEqual(json.loads(path.read_text()), confined)
+
+    def _install_authority_fixture(self):
+        root = self.state.parent
+        live_root = root / "live"
+        live_state = live_root / "state/dalton-core"
+        (live_state / "phase8").mkdir(parents=True)
+        phase8 = live_state / "phase8/p14e-adhoc-probe-templates-v1.json"
+        phase8.write_bytes(b"owner-published-bytes-differ-from-repo\n")
+        openclaw_live = root / "host/.openclaw/openclaw.json"
+        catalog = live_state / "model-catalog-sync.json"
+        catalog.write_text(json.dumps({
+            "model_router_db": str(live_state / "model-router.sqlite"),
+            "openclaw_config_path": str(openclaw_live),
+        }), encoding="utf-8")
+        snapshot = root / "packet/openclaw-config.before.json"
+        snapshot.parent.mkdir()
+        snapshot.write_bytes(b'{"models":{"providers":{}}}\n')
+        scratch = root / "scratch"
+        rehearsal = SimpleNamespace(
+            live_root=live_root, temp_root=scratch,
+            temp_state=scratch / "state/dalton-core",
+            real_home=root / "home",
+            replacements={str(live_root): str(scratch),
+                          str(openclaw_live.parent): str(scratch / "broker")},
+        )
+        rehearsal.temp_state.mkdir(parents=True)
+        return rehearsal, snapshot, phase8, catalog
+
+    def _market_digest_fixture(self, rehearsal):
+        target = (
+            rehearsal.real_home
+            / ".openclaw/workspace/skills/market-digest/output"
+        )
+        target.mkdir(parents=True)
+        target.joinpath("large-external-corpus.json").write_text(
+            '{"must_not_be_copied":true}', encoding="utf-8")
+        link = rehearsal.live_root / PathModule.STATE_SUBDIR \
+            / "feeds/market-digest-output"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        installer = self.state.parent / "source/deploy/macos/install.sh"
+        installer.parent.mkdir(parents=True)
+        installer.write_text(
+            'digest_source="$openclaw_workspace/skills/market-digest/output"\n'
+            'if [[ ! -e "$feeds_dir/market-digest-output" ]]; then\n'
+            '  ln -s "$digest_source" "$feeds_dir/market-digest-output"\n'
+            'fi\n',
+            encoding="utf-8",
+        )
+        return link, target, installer
+
+    def test_present_install_authorities_are_preserved_and_confined(self):
+        rehearsal, snapshot, phase8, catalog = self._install_authority_fixture()
+        digest = __import__('hashlib').sha256
+        proof = stage_existing_install_authorities(
+            PathModule, rehearsal, openclaw_snapshot=snapshot,
+            openclaw_snapshot_sha256=digest(snapshot.read_bytes()).hexdigest(),
+        )
+        result = validate_existing_install_authorities(
+            PathModule, rehearsal, proof)
+        self.assertEqual(
+            (rehearsal.temp_state /
+             "phase8/p14e-adhoc-probe-templates-v1.json").read_bytes(),
+            phase8.read_bytes(),
+        )
+        self.assertEqual(
+            result["phase8_template_sha256"],
+            digest(phase8.read_bytes()).hexdigest(),
+        )
+        confined = json.loads((
+            rehearsal.temp_state / "model-catalog-sync.json"
+        ).read_text(encoding="utf-8"))
+        self.assertTrue(Path(confined["model_router_db"]).is_relative_to(
+            rehearsal.temp_root))
+        self.assertTrue(Path(confined["openclaw_config_path"]).is_relative_to(
+            rehearsal.temp_root))
+        self.assertEqual(
+            Path(confined["openclaw_config_path"]).read_bytes(),
+            snapshot.read_bytes(),
+        )
+        self.assertEqual(proof["model-catalog-sync.json"]["source_sha256"],
+                         digest(catalog.read_bytes()).hexdigest())
+        self.assertEqual(result["model_catalog_source_sha256"],
+                         digest(catalog.read_bytes()).hexdigest())
+        self.assertEqual(
+            result["model_catalog_source_semantic_sha256"],
+            proof["model-catalog-sync.json"]["source_semantic_sha256"],
+        )
+
+    def test_present_install_authority_symlink_and_tamper_are_refused(self):
+        rehearsal, snapshot, phase8, _catalog = self._install_authority_fixture()
+        digest = __import__('hashlib').sha256(snapshot.read_bytes()).hexdigest()
+        phase8.unlink()
+        outside = self.state.parent / "foreign.json"
+        outside.write_text("{}", encoding="utf-8")
+        phase8.symlink_to(outside)
+        with self.assertRaisesRegex(RehearsalBindingError, "regular owned file"):
+            stage_existing_install_authorities(
+                PathModule, rehearsal, openclaw_snapshot=snapshot,
+                openclaw_snapshot_sha256=digest,
+            )
+
+        phase8.unlink()
+        phase8.write_bytes(b"owner\n")
+        proof = stage_existing_install_authorities(
+            PathModule, rehearsal, openclaw_snapshot=snapshot,
+            openclaw_snapshot_sha256=digest,
+        )
+        target = rehearsal.temp_state / "phase8/p14e-adhoc-probe-templates-v1.json"
+        target.write_bytes(b"tampered\n")
+        with self.assertRaisesRegex(RehearsalBindingError, "phase8 owner authority drifted"):
+            validate_existing_install_authorities(PathModule, rehearsal, proof)
+
+    def test_install_authority_swap_to_symlink_during_open_is_refused(self):
+        rehearsal, snapshot, phase8, _catalog = self._install_authority_fixture()
+        outside = self.state.parent / "foreign.json"
+        outside.write_text('{"foreign":true}', encoding="utf-8")
+        real_open = os.open
+
+        def swap_then_open(path, flags, *args, **kwargs):
+            if Path(path) == phase8:
+                phase8.unlink()
+                phase8.symlink_to(outside)
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch(
+            "scripts.run_successor_copied_state_rehearsal.os.open",
+            side_effect=swap_then_open,
+        ), self.assertRaisesRegex(RehearsalBindingError, "regular owned file"):
+            stage_existing_install_authorities(
+                PathModule, rehearsal, openclaw_snapshot=snapshot,
+                openclaw_snapshot_sha256=(
+                    __import__('hashlib').sha256(snapshot.read_bytes()).hexdigest()
+                ),
+            )
+
+    def test_external_market_digest_link_is_proven_but_corpus_is_not_copied(self):
+        rehearsal, _snapshot, _phase8, _catalog = (
+            self._install_authority_fixture())
+        link, target, installer = self._market_digest_fixture(rehearsal)
+        link_text = os.readlink(link)
+        proof = capture_external_market_digest_preservation(
+            PathModule, rehearsal, installer=installer)
+        result = validate_external_market_digest_preservation(
+            PathModule, rehearsal, proof, installer=installer)
+        self.assertEqual(os.readlink(link), link_text)
+        self.assertEqual(result["resolved_external_target"], str(target.resolve()))
+        self.assertTrue(result["install_preserves_existing_link"])
+        self.assertFalse(result["external_corpus_copied"])
+        self.assertFalse((rehearsal.temp_state / "feeds").exists())
+
+    def test_external_market_digest_dangling_link_is_refused(self):
+        rehearsal, _snapshot, _phase8, _catalog = (
+            self._install_authority_fixture())
+        link, target, installer = self._market_digest_fixture(rehearsal)
+        target.joinpath("large-external-corpus.json").unlink()
+        target.rmdir()
+        with self.assertRaises((FileNotFoundError, RehearsalBindingError)):
+            capture_external_market_digest_preservation(
+                PathModule, rehearsal, installer=installer)
 
     def test_preserved_setup_replays_actual_entrypoints_twice_without_byte_drift(self):
         router = self.state / "model-router.sqlite"; router.touch()

@@ -43,6 +43,200 @@ def _sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+MODEL_CATALOG_CONFIG = "model-catalog-sync.json"
+PHASE8_TEMPLATE = "phase8/p14e-adhoc-probe-templates-v1.json"
+MARKET_DIGEST_LINK = "feeds/market-digest-output"
+_MARKET_DIGEST_INSTALL_CONTRACT = (
+    'digest_source="$openclaw_workspace/skills/market-digest/output"',
+    'if [[ ! -e "$feeds_dir/market-digest-output" ]]; then',
+    'ln -s "$digest_source" "$feeds_dir/market-digest-output"',
+)
+
+
+def _stable_regular_bytes(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+    """Read one present install authority without following a replacement."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    _need(bool(nofollow), "this host cannot open install authorities no-follow")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except OSError as exc:
+        raise RehearsalBindingError(
+            f"{label} is not a regular owned file") from exc
+    try:
+        before = os.fstat(descriptor)
+        _need(stat.S_ISREG(before.st_mode),
+              f"{label} is not a regular owned file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            value = stream.read()
+        after_open = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after_path = path.lstat()
+    identity = lambda row: (
+        row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns)
+    _need(identity(before) == identity(after_open) == identity(after_path),
+          f"{label} changed while copied")
+    return value, before
+
+
+def stage_existing_install_authorities(
+    module: Any, rehearsal: Any, *, openclaw_snapshot: Path,
+    openclaw_snapshot_sha256: str,
+) -> dict[str, Any]:
+    """Preserve present seed-once/dynamic install inputs in confined state."""
+
+    live_state = rehearsal.live_root / module.STATE_SUBDIR
+    _need(live_state.is_dir() and not live_state.is_symlink(),
+          "live state root for install authorities is unsafe")
+    proof: dict[str, Any] = {}
+    for name in (PHASE8_TEMPLATE, MODEL_CATALOG_CONFIG):
+        source = live_state / name
+        source_bytes, source_stat = _stable_regular_bytes(
+            source, f"live install authority {name}")
+        target = rehearsal.temp_state / name
+        _need(not target.exists() and not target.is_symlink(),
+              f"copied install authority target is occupied: {name}")
+        installed = source_bytes
+        semantic_hash = None
+        if name == MODEL_CATALOG_CONFIG:
+            try:
+                raw = json.loads(source_bytes.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise RehearsalBindingError(
+                    "live model catalog sync config is invalid JSON") from exc
+            _need(isinstance(raw, dict),
+                  "live model catalog sync config is not an object")
+            semantic_hash = _canonical_sha256(raw)
+            confined = module.rewrite_paths(raw, rehearsal.replacements)
+            stray = module.foreign_paths(confined, rehearsal.temp_root)
+            _need(not stray,
+                  "confined model catalog sync config retains live paths")
+            installed = _json_bytes(confined)
+            catalog_input = Path(confined.get("openclaw_config_path", ""))
+            _need(catalog_input.is_absolute()
+                  and catalog_input.is_relative_to(rehearsal.temp_root),
+                  "confined model catalog input escapes scratch")
+            snapshot = _artifact(
+                openclaw_snapshot, openclaw_snapshot_sha256,
+                "reviewed OpenClaw config snapshot")
+            _need(not catalog_input.exists() and not catalog_input.is_symlink(),
+                  "confined model catalog input target is occupied")
+            catalog_input.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _write_exclusive(catalog_input, snapshot)
+            proof["openclaw_snapshot"] = {
+                "source_sha256": openclaw_snapshot_sha256,
+                "confined_path": str(catalog_input),
+                "confined_sha256": _sha(catalog_input),
+            }
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _write_exclusive(target, installed)
+        proof[name] = {
+            "source": str(source),
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "source_stat": {
+                "device": source_stat.st_dev, "inode": source_stat.st_ino,
+                "size": source_stat.st_size, "mtime_ns": source_stat.st_mtime_ns,
+            },
+            "source_semantic_sha256": semantic_hash,
+            "confined_path": str(target),
+            "confined_sha256": _sha(target),
+        }
+    return proof
+
+
+def validate_existing_install_authorities(
+    module: Any, rehearsal: Any, proof: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recheck the staged authorities and their confined path semantics."""
+
+    phase8 = rehearsal.temp_state / PHASE8_TEMPLATE
+    catalog = rehearsal.temp_state / MODEL_CATALOG_CONFIG
+    _need(phase8.is_file() and not phase8.is_symlink()
+          and _sha(phase8) == proof[PHASE8_TEMPLATE]["source_sha256"],
+          "copied phase8 owner authority drifted")
+    _need(catalog.is_file() and not catalog.is_symlink(),
+          "copied model catalog sync config is unavailable")
+    raw = json.loads(catalog.read_text(encoding="utf-8"))
+    _need(not module.foreign_paths(raw, rehearsal.temp_root),
+          "copied model catalog sync config escapes scratch")
+    normalized = module.rewrite_paths(raw, module.invert(rehearsal.replacements))
+    _need(_canonical_sha256(normalized)
+          == proof[MODEL_CATALOG_CONFIG]["source_semantic_sha256"],
+          "copied model catalog sync config changed production semantics")
+    catalog_input = Path(raw["openclaw_config_path"])
+    _need(catalog_input.is_file() and not catalog_input.is_symlink()
+          and _sha(catalog_input)
+          == proof["openclaw_snapshot"]["source_sha256"],
+          "confined model catalog input drifted")
+    return {
+        "model_catalog_config_sha256": _sha(catalog),
+        "model_catalog_source_sha256": proof[MODEL_CATALOG_CONFIG][
+            "source_sha256"],
+        "model_catalog_source_semantic_sha256": proof[MODEL_CATALOG_CONFIG][
+            "source_semantic_sha256"],
+        "phase8_template_sha256": _sha(phase8),
+        "openclaw_snapshot_sha256": _sha(catalog_input),
+    }
+
+
+def capture_external_market_digest_preservation(
+    module: Any, rehearsal: Any, *, installer: Path,
+) -> dict[str, Any]:
+    """Prove install preserves the live feed link without copying its corpus."""
+
+    installer_bytes, _ = _stable_regular_bytes(installer, "frozen installer")
+    installer_text = installer_bytes.decode("utf-8")
+    _need(all(fragment in installer_text
+              for fragment in _MARKET_DIGEST_INSTALL_CONTRACT),
+          "frozen installer market-digest preservation contract differs")
+    link = rehearsal.live_root / module.STATE_SUBDIR / MARKET_DIGEST_LINK
+    before = link.lstat()
+    _need(stat.S_ISLNK(before.st_mode),
+          "live market-digest authority is not an owned symlink")
+    link_text = os.readlink(link)
+    after = link.lstat()
+    identity = lambda row: (
+        row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns)
+    _need(identity(before) == identity(after),
+          "live market-digest authority changed while inspected")
+    expected = (
+        rehearsal.real_home
+        / ".openclaw/workspace/skills/market-digest/output"
+    ).resolve(strict=True)
+    target = (link.parent / link_text).resolve(strict=True)
+    _need(target == expected and target.is_dir(),
+          "live market-digest authority does not name the installed source")
+    confined = rehearsal.temp_state / MARKET_DIGEST_LINK
+    _need(not confined.exists() and not confined.is_symlink(),
+          "external market-digest corpus was copied into rehearsal state")
+    return {
+        "live_link": str(link),
+        "link_text_sha256": hashlib.sha256(os.fsencode(link_text)).hexdigest(),
+        "resolved_external_target": str(target),
+        "installer_sha256": hashlib.sha256(installer_bytes).hexdigest(),
+        "install_preserves_existing_link": True,
+        "external_corpus_copied": False,
+        "source_stat": {
+            "device": before.st_dev, "inode": before.st_ino,
+            "size": before.st_size, "mtime_ns": before.st_mtime_ns,
+        },
+    }
+
+
+def validate_external_market_digest_preservation(
+    module: Any, rehearsal: Any, proof: Mapping[str, Any], *, installer: Path,
+) -> dict[str, Any]:
+    """Recheck the owner link and confirm the confined run never copied it."""
+
+    current = capture_external_market_digest_preservation(
+        module, rehearsal, installer=installer)
+    _need(current["link_text_sha256"] == proof["link_text_sha256"]
+          and current["source_stat"] == proof["source_stat"],
+          "live market-digest authority drifted during rehearsal")
+    return current
+
+
 def stage_preserved_runtime_configs(
     module: Any, rehearsal: Any, *, packet_root: Path,
     manifest: Mapping[str, Any],
@@ -414,6 +608,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     class SuccessorRehearsal(module.Rehearsal):
+        def copy_state(self):
+            detail, findings = super().copy_state()
+            self.existing_install_authorities = None
+            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+                self.existing_install_authorities = (
+                    stage_existing_install_authorities(
+                        module, self,
+                        openclaw_snapshot=args.openclaw_config_snapshot,
+                        openclaw_snapshot_sha256=(
+                            args.openclaw_config_snapshot_sha256),
+                    )
+                )
+                self.external_market_digest = (
+                    capture_external_market_digest_preservation(
+                        module, self,
+                        installer=source_root / "deploy/macos/install.sh",
+                    )
+                )
+                findings.append(
+                    "live feeds/market-digest-output is an external symlink; "
+                    "the installer preserves it, but its corpus is deliberately "
+                    "not copied, so sales-note content availability is outside "
+                    "this confined rehearsal"
+                )
+                detail += "; 2 present install authorities preserved"
+            return detail, findings
+
         def post_catalog_sync_steps(self):
             steps = [("apply successor configuration in scratch",
                       self._apply_successor)]
@@ -488,6 +709,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         module, rehearsal, expected_models=expected_models,
         expected_document=expected_document, expected_lane=expected_lane,
         expected_service=expected_service)
+    if rehearsal.existing_install_authorities is not None:
+        final["existing_install_authorities"] = (
+            validate_existing_install_authorities(
+                module, rehearsal, rehearsal.existing_install_authorities))
+        final["external_market_digest"] = (
+            validate_external_market_digest_preservation(
+                module, rehearsal, rehearsal.external_market_digest,
+                installer=source_root / "deploy/macos/install.sh"))
     _verify_frozen_source(source_root, args.code_commit)
     binding = {
         "schema_version": "successor-copied-state-rehearsal-binding-0.1",
