@@ -11,6 +11,7 @@ steps against a temporary root instead:
       -> bootstrap / open every authority, which is where migrations run
       -> seed the governance records and discovery plans install.sh seeds
       -> sync the model catalog against a *copy* of model-router.sqlite
+      -> optionally run the reviewed model setup against that copy twice
       -> render the LaunchAgent plists into the temp dir and diff them
       -> start the writer against the temp Core with the broker stubbed
       -> drive exactly one BoundedPlannerDriver.run_once tick
@@ -30,6 +31,7 @@ cover.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -51,6 +53,177 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATE_SUBDIR = Path("state") / "dalton-core"
 CONFIG_SUBDIR = Path("config")
+
+# The exact installed role inventory reviewed for the 12 -> 14 model-config
+# transition.  The optional setup rehearsal below calls the same Python
+# entrypoints as install.sh, but only for roles that already have an owner
+# configuration on disk.  Adding or removing a role is therefore a reviewable
+# code change rather than a wildcard over whatever files happen to exist.
+REVIEWED_MODEL_SETUP_ROLES: tuple[tuple[str, str, str], ...] = (
+    ("research-planner-model-config.json", "dalton-openclaw-planner-decisions", "brain"),
+    ("initial-screen-model-config.json", "dalton-openclaw-deliverable-drafting", "brain"),
+    ("claim-index-model-config.json", "dalton-openclaw-claim-index", "cheap"),
+    ("event-judgement-model-config.json", "dalton-openclaw-event-judgement", "brain"),
+    ("event-verifier-model-config.json", "dalton-openclaw-event-verifier", "verifier"),
+    ("zero-base-review-model-config.json", "dalton-openclaw-zero-base-review", "brain"),
+    (
+        "zero-base-review-verifier-model-config.json",
+        "dalton-openclaw-zero-base-review-verifier",
+        "verifier",
+    ),
+    ("dossier-model-config.json", "dalton-openclaw-company-dossier", "brain"),
+    (
+        "company-dossier-verifier-model-config.json",
+        "dalton-openclaw-dossier-verifier",
+        "verifier",
+    ),
+    ("earnings-season-model-config.json", "dalton-openclaw-earnings-season", "brain"),
+    (
+        "earnings-season-verifier-model-config.json",
+        "dalton-openclaw-earnings-season-verifier",
+        "verifier",
+    ),
+)
+REVIEWED_DOCUMENT_CONFIG = "document-extraction-model-config.json"
+REVIEWED_ANNUAL_CONFIGS = frozenset({
+    "registered-annual-report-draft-model-config.json",
+    "registered-annual-report-verifier-model-config.json",
+})
+REVIEWED_EXISTING_CONFIGS = frozenset(
+    {REVIEWED_DOCUMENT_CONFIG} | {row[0] for row in REVIEWED_MODEL_SETUP_ROLES}
+)
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def model_config_inventory(state_dir: Path) -> dict[str, Any]:
+    """Read the closed model-config inventory from one state directory."""
+
+    return {
+        path.name: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(state_dir.glob("*-model-config.json"))
+    }
+
+
+def validate_reviewed_model_setup_transition(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> dict[str, list[str]]:
+    """Validate preservation semantics for the reviewed 12 -> 14 transition.
+
+    This explains the allowed delta and prevents a generated after snapshot
+    from concealing a changed owner field.
+    """
+
+    before_names = set(before)
+    if before_names != REVIEWED_EXISTING_CONFIGS:
+        raise RuntimeError(
+            "reviewed model setup requires the exact 12-config input inventory; "
+            f"missing={sorted(REVIEWED_EXISTING_CONFIGS - before_names)} "
+            f"extra={sorted(before_names - REVIEWED_EXISTING_CONFIGS)}"
+        )
+    expected_after = REVIEWED_EXISTING_CONFIGS | REVIEWED_ANNUAL_CONFIGS
+    after_names = set(after)
+    if after_names != expected_after:
+        raise RuntimeError(
+            "reviewed model setup must produce the exact 14-config inventory; "
+            f"missing={sorted(expected_after - after_names)} "
+            f"extra={sorted(after_names - expected_after)}"
+        )
+
+    from dalton_core.provider_retry import DEFAULT_RETURNED_PROVIDER_RETRY
+    from dalton_core.research_planner_setup import DEFAULT_PLANNER_TRANSPORT_RETRY
+
+    role_names = {row[0] for row in REVIEWED_MODEL_SETUP_ROLES}
+    deltas: dict[str, list[str]] = {}
+    missing = object()
+    for name in sorted(REVIEWED_EXISTING_CONFIGS):
+        old = before[name]
+        new = after[name]
+        if not isinstance(old, Mapping) or not isinstance(new, Mapping):
+            raise RuntimeError(f"{name} is not a model-config object")
+        changed = sorted(
+            key for key in set(old) | set(new)
+            if old.get(key, missing) != new.get(key, missing)
+        )
+        allowed = {"provider_retry"}
+        if name in role_names:
+            allowed.add("transport_retry")
+        unexpected = set(changed) - allowed
+        if unexpected:
+            raise RuntimeError(
+                f"reviewed model setup changed owner fields in {name}: "
+                + ", ".join(sorted(unexpected))
+            )
+        if "provider_retry" in changed:
+            if "provider_retry" in old:
+                raise RuntimeError(f"reviewed model setup replaced owner provider_retry in {name}")
+            if new.get("provider_retry") != DEFAULT_RETURNED_PROVIDER_RETRY:
+                raise RuntimeError(f"reviewed model setup added an unexpected provider_retry in {name}")
+        if "transport_retry" in changed:
+            if "transport_retry" in old:
+                raise RuntimeError(f"reviewed model setup replaced owner transport_retry in {name}")
+            if new.get("transport_retry") != DEFAULT_PLANNER_TRANSPORT_RETRY:
+                raise RuntimeError(f"reviewed model setup added an unexpected transport_retry in {name}")
+        deltas[name] = changed
+
+    from dalton_core.annual_report_setup import (
+        DEFAULT_PROVIDER_RETRY as ANNUAL_PROVIDER_RETRY,
+        DEFAULT_TRANSPORT_RETRY as ANNUAL_TRANSPORT_RETRY,
+    )
+
+    annual_sources = {
+        "registered-annual-report-draft-model-config.json": "dossier-model-config.json",
+        "registered-annual-report-verifier-model-config.json":
+            "company-dossier-verifier-model-config.json",
+    }
+    for target, source in annual_sources.items():
+        derived = dict(after[source])
+        retry = dict(derived.get("provider_retry") or ANNUAL_PROVIDER_RETRY)
+        if "unknown_recovery" not in retry:
+            retry["unknown_recovery"] = dict(
+                ANNUAL_PROVIDER_RETRY["unknown_recovery"]
+            )
+        derived["provider_retry"] = retry
+        if derived.get("transport_retry") is None:
+            derived["transport_retry"] = dict(ANNUAL_TRANSPORT_RETRY)
+        if after[target] != derived:
+            raise RuntimeError(
+                f"{target} is not the exact reviewed derivation of {source}"
+            )
+    return deltas
+
+
+@contextmanager
+def configuration_setup_guard(router_db: Path) -> Iterable[None]:
+    """Let setup open only the copied Router and forbid every socket."""
+
+    allowed_router = router_db.expanduser().resolve()
+    original_connect = sqlite3.connect
+    original_socket = socket.socket
+
+    def guarded_connect(database: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            candidate = Path(os.fspath(database)).expanduser().resolve()
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("model setup attempted a non-path SQLite connection") from exc
+        if candidate != allowed_router:
+            raise RuntimeError(
+                f"model setup attempted SQLite outside its copied Router: {candidate}"
+            )
+        return original_connect(database, *args, **kwargs)
+
+    def refusing_socket(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("model setup attempted a socket")
+
+    sqlite3.connect = guarded_connect
+    socket.socket = refusing_socket
+    try:
+        yield
+    finally:
+        socket.socket = original_socket
+        sqlite3.connect = original_connect
 
 # ---------------------------------------------------------------------------
 # pure: what gets copied
@@ -1299,6 +1472,7 @@ class Rehearsal:
         *,
         openclaw_config: Path,
         source_root: Path | None = None,
+        rehearse_reviewed_model_setup: bool = False,
         log: Callable[[str], None] = print,
     ) -> None:
         self.live_root = live_root.expanduser().resolve()
@@ -1314,6 +1488,7 @@ class Rehearsal:
         self.source_root = (source_root or live_root).expanduser().resolve()
         self.temp_root = temp_root.expanduser().resolve()
         self.openclaw_config = openclaw_config.expanduser()
+        self.rehearse_reviewed_model_setup = rehearse_reviewed_model_setup
         # Resolved once, before anything reassigns ``HOME``.  Three steps have
         # a legitimate need for the real home -- the OpenClaw catalog, the
         # installed LaunchAgents to diff against, the seed gates -- and all
@@ -1539,6 +1714,100 @@ class Rehearsal:
 
         result = bootstrap(self.temp_state, self.temp_config)
         return f"core={Path(result['core_db']).name} tokens={Path(result['token_config']).name}", []
+
+    def run_reviewed_model_setup(self) -> tuple[str, list[str]]:
+        """Run the reviewed 12 -> 14 setup on the confined state copy only."""
+
+        if not self.confined:
+            raise RuntimeError(
+                "refusing model setup before the temp-root confinement check"
+            )
+        from dalton_core import (
+            annual_report_setup,
+            document_extraction_setup,
+            research_planner_setup,
+        )
+
+        before_raw = model_config_inventory(self.temp_state)
+        before = rewrite_paths(before_raw, invert(self.replacements))
+        # Fail before any installer runs if this is not the exact reviewed
+        # starting inventory.
+        before_names = set(before)
+        if before_names != REVIEWED_EXISTING_CONFIGS:
+            raise RuntimeError(
+                "reviewed model setup requires the exact 12-config input inventory; "
+                f"missing={sorted(REVIEWED_EXISTING_CONFIGS - before_names)} "
+                f"extra={sorted(before_names - REVIEWED_EXISTING_CONFIGS)}"
+            )
+        service_before = self.temp_config.read_bytes()
+        live_paths = [self.live_root / CONFIG_SUBDIR / "service.json"]
+        live_paths.extend(
+            self.live_root / STATE_SUBDIR / name
+            for name in sorted(REVIEWED_EXISTING_CONFIGS)
+        )
+        live_snapshot = {
+            path: (path.read_bytes(), path.stat().st_mode & 0o777)
+            for path in live_paths if path.is_file()
+        }
+        router_db = Path(
+            json.loads(service_before)["model_router_db"]
+        ).expanduser().resolve()
+        if not router_db.is_relative_to(self.temp_root):
+            raise RuntimeError("reviewed model setup Router is outside the temp root")
+
+        def setup_once() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            results = [document_extraction_setup.install(self.temp_config, tier="cheap")]
+            for name, policy_slug, tier in REVIEWED_MODEL_SETUP_ROLES:
+                results.append(research_planner_setup.install(
+                    self.temp_config,
+                    tier=tier,
+                    policy_id=f"model-routing-policy:{policy_slug}",
+                    config_file_name=name,
+                ))
+            return results, annual_report_setup.install(self.temp_config)
+
+        with configuration_setup_guard(router_db):
+            first_roles, _first_annual = setup_once()
+            first_hashes = {
+                path.name: sha256_bytes(path.read_bytes())
+                for path in self.temp_state.glob("*-model-config.json")
+            }
+            second_roles, second_annual = setup_once()
+
+        if any(result["policy"].get("status") != "duplicate"
+               for result in first_roles + second_roles):
+            raise RuntimeError(
+                "reviewed model setup would append a routing policy version"
+            )
+        second_hashes = {
+            path.name: sha256_bytes(path.read_bytes())
+            for path in self.temp_state.glob("*-model-config.json")
+        }
+        if first_hashes != second_hashes or second_annual.get("created") != []:
+            raise RuntimeError("second reviewed model setup changed configuration bytes")
+        if self.temp_config.read_bytes() != service_before:
+            raise RuntimeError("reviewed model setup changed service.json metadata")
+        current_live = {
+            path: (path.read_bytes(), path.stat().st_mode & 0o777)
+            for path in live_snapshot
+        }
+        if current_live != live_snapshot:
+            raise RuntimeError("reviewed model setup changed copied-state source metadata")
+
+        self.validate_model_config_confinement()
+        after_raw = model_config_inventory(self.temp_state)
+        after = rewrite_paths(after_raw, invert(self.replacements))
+        deltas = validate_reviewed_model_setup_transition(before, after)
+        additions = sum(len(fields) for fields in deltas.values())
+        normalized_hash = sha256_bytes(json.dumps(
+            after, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8"))
+        return (
+            f"12 -> 14 configs; {additions} reviewed field additions; "
+            "second install byte-identical; source metadata unchanged; "
+            f"normalized_after_sha256={normalized_hash}",
+            [],
+        )
 
     # -- 4. migrations ------------------------------------------------------
 
@@ -2098,6 +2367,12 @@ class Rehearsal:
             # deploy were at fault.
             self.step("governance seeds", self.run_seeds)
             self.step("model catalog sync (copy of model-router.sqlite)", self.run_catalog_sync)
+            if self.rehearse_reviewed_model_setup:
+                self.step(
+                    "reviewed model setup (actual entrypoints, 12 -> 14)",
+                    self.run_reviewed_model_setup,
+                    fatal=True,
+                )
             for name, operation in self.post_catalog_sync_steps():
                 self.step(name, operation, fatal=True)
             self.step("render LaunchAgent plists and diff", self.render_plists)
@@ -2454,6 +2729,15 @@ def main(argv: list[str] | None = None) -> int:
         "--openclaw-config", type=Path, default=Path.home() / ".openclaw" / "openclaw.json",
         help="read-only source of the broker's model catalog",
     )
+    parser.add_argument(
+        "--rehearse-reviewed-model-setup",
+        action="store_true",
+        help=(
+            "run extraction, the closed 11-role setup list, and annual setup "
+            "twice against the confined copied state; require the reviewed "
+            "12-to-14 preservation delta"
+        ),
+    )
     parser.add_argument("--report", type=Path, default=None, help="also write the summary here")
     args = parser.parse_args(argv)
     temp_root = args.temp_root or Path("/tmp") / (
@@ -2469,6 +2753,7 @@ def main(argv: list[str] | None = None) -> int:
         args.live_root, temp_root,
         openclaw_config=args.openclaw_config,
         source_root=args.source_root,
+        rehearse_reviewed_model_setup=args.rehearse_reviewed_model_setup,
     )
     code = rehearsal.run()
     summary = rehearsal.report()
