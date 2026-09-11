@@ -169,8 +169,55 @@ class FundXlsxCashFlowCompanionTests(unittest.TestCase):
         self.assertEqual(
             rows,
             {result["ref"]: 3 + index
-             for index, result in enumerate(body["results"])},
+            for index, result in enumerate(body["results"])},
         )
+
+    def test_uppercase_single_currency_cash_authority_exports_annual_and_ratio(self):
+        inputs, spec, _structure, _replay, _binding = authorities(unit="eur")
+        for source in inputs["cash_flow_inputs"]:
+            source["unit"] = "EUR"
+            for quarter in source["series"]["quarters"]:
+                quarter["unit"] = "EUR"
+        structure, replay = materialize_financial_statement_structure(spec, inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            spec, inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            model = ForecastModelAuthority(store).publish(body)
+            calendar = {
+                "calendar_ref": "statement-filing:test", "source_hash": "a" * 64,
+                "as_of": "2025-12-31", "fiscal_year_end_month": 12,
+            }
+            calendar["content_hash"] = content_hash(calendar)
+            annual = build_annual_projection(
+                model=model, inputs=inputs, calendar_binding=calendar)
+            path = Path(temporary) / "eur-cash-flow.xlsx"
+            export_fund_workbook(
+                path, model=model, spec=spec, inputs=inputs,
+                calendar_binding=calendar, annual_projection=annual,
+            )
+            book = load_workbook(path, data_only=False)
+        financials, driver = book["Financials"], book["Driver"]
+        rows, _section = _financial_result_layout(model)
+        headers = {
+            financials.cell(1, column).value: column
+            for column in range(1, financials.max_column + 1)
+        }
+        self.assertEqual(financials["A1"].value, "(EUR MM)")
+        annual_cell = financials.cell(
+            rows["result:operating_cash_flow"], headers["2025"])
+        self.assertTrue(str(annual_cell.value).startswith("=SUM("))
+        self.assertNotIn("$", annual_cell.number_format)
+        ratio_row = next(
+            row for row in range(1, driver.max_row + 1)
+            if driver.cell(row, 3).value
+            == "Operating cash flow — Share of line (ratio)"
+        )
+        forecast_cell = driver.cell(ratio_row, headers["1Q26E"])
+        self.assertIsInstance(forecast_cell.value, (int, float))
+        self.assertEqual(forecast_cell.font.color.rgb[-6:], "0000FF")
 
     def test_cash_actual_ratio_formulas_reference_relocated_financial_rows(self):
         inputs, spec, structure, replay, binding = authorities()
