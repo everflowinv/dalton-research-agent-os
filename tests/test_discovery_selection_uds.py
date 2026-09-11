@@ -119,6 +119,13 @@ class DiscoverySelectionUDSTests(unittest.TestCase):
             self.assertEqual(outcome["status"], "launched", outcome)
             self.assertEqual([chosen], [call["document_ref"] for call in acquisition.calls])
             self.assertNotIn(other, [call["document_ref"] for call in acquisition.calls])
+            acquisition.finish()
+            coordinator.settle_documents()
+            next_tick = coordinator.launch_acquisition()
+            self.assertEqual(next_tick["status"], "completed_selected")
+            self.assertEqual([chosen], [call["document_ref"] for call in acquisition.calls])
+            final = coordinator.launch_acquisition()
+            self.assertEqual(final["status"], "idle", final)
 
 
 if __name__ == "__main__":

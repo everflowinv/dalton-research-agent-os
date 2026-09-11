@@ -2029,9 +2029,9 @@ class CoverageMissionAuthority:
         preferred_needs: Sequence[Mapping[str, str]] = (),
         excluded_needs: Sequence[Mapping[str, str]] = (),
         excluded_mission_version_ref: str | None = None,
+        included_document_refs: Sequence[str] | None = None,
         included_discovery_ref: str | None = None,
         excluded_discovery_refs: Sequence[str] = (),
-        included_document_refs: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -2646,6 +2646,7 @@ class CoverageMissionAuthority:
         source_ref: str | None = None, skip_hosts: Sequence[str] = (),
         excluded_needs: Sequence[Mapping[str, str]] = (),
         excluded_mission_version_ref: str | None = None,
+        included_document_refs: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -2665,6 +2666,12 @@ class CoverageMissionAuthority:
             "AND d.failure_retryable IS NOT 0"
         )
         params: list[Any] = [cutoff]
+        if included_document_refs is not None:
+            included=tuple(dict.fromkeys(_text(ref,"included_document_ref") for ref in included_document_refs))
+            if not included:
+                return None
+            query += " AND d.document_ref IN (%s)" % ",".join("?"*len(included))
+            params.extend(included)
         if source_ref is not None:
             query += " AND d.source_ref=?"
             params.append(_text(source_ref, "source_ref"))

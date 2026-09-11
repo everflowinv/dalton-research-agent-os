@@ -1714,23 +1714,22 @@ class MissionSourceDiscoveryCoordinator:
             "count": len(needs), "error": needs_error,
             "first": needs[0] if needs else None,
         }
-        empty_discoveries = (
-            self.selection_launcher.completed_empty_discoveries()
-            if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF
-            else ())
+        empty_discoveries = ()
+        current_selection_refs = None
         if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF:
-            completed=list(empty_discoveries)
-            for discovery_ref, selected_refs in self.selection_launcher.successful_selections().items():
-                if not selected_refs:
-                    continue
-                placeholders=','.join('?' for _ in selected_refs)
-                remaining=self.store.connection.execute(
-                    f"SELECT 1 FROM coverage_mission_discovered_documents WHERE discovery_ref=? "
-                    f"AND status='discovered' AND document_ref IN ({placeholders}) LIMIT 1",
-                    (discovery_ref,*selected_refs)).fetchone()
-                if remaining is None:
-                    completed.append(discovery_ref)
-            empty_discoveries=tuple(sorted(set(completed)))
+            from .mission_stage import evaluate_mission
+            periods_by_company={}
+            if mission is not None:
+                for company_stage in evaluate_mission(self.store.connection,mission):
+                    calls=next((item for item in company_stage['items']
+                                if item['item_ref']=='earnings_calls'),None)
+                    periods_by_company[company_stage['company_ref']]=list(
+                        (calls or {}).get('missing_periods') or ())
+            empty_discoveries=tuple(self.selection_launcher.currently_consumed(
+                mission_ref=mission['id'],missing_periods_by_company=periods_by_company)) if mission else ()
+            current_selection_refs=tuple(ref for refs in self.selection_launcher.current_selections(
+                mission_ref=mission['id'],missing_periods_by_company=periods_by_company).values()
+                for ref in refs) if mission else ()
         document = self.missions.next_discovered_document(
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts,
@@ -1772,12 +1771,14 @@ class MissionSourceDiscoveryCoordinator:
                     return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"]}
                 selected=[x["document_ref"] for x in ticket["summary"]["selection"]["selected"]]
                 if not selected:
+                    self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
                 document=self.missions.next_discovered_document(source_ref=self.source_ref,
                     preferred_hosts=self.preferred_hosts,skip_hosts=tuple(dict.fromkeys((*self.skip_hosts,*cooldown_hosts))),
                     preferred_needs=needs,excluded_needs=stopped_needs,excluded_mission_version_ref=mission["id"],
                     included_document_refs=selected,included_discovery_ref=document["discovery_ref"])
                 if document is None:
+                    self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_selected","ticket_ref":ticket["id"],
                             "discovery_ref":discovery["id"]}
         if document is not None and self._document_in_authority(
@@ -1814,6 +1815,7 @@ class MissionSourceDiscoveryCoordinator:
                 skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
                 excluded_needs=stopped_needs,
                 excluded_mission_version_ref=None if mission is None else mission["id"],
+                included_document_refs=current_selection_refs,
             )
             retry = document is not None
         if document is None:

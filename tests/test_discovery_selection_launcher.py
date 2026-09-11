@@ -47,6 +47,15 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
             process.code=0
             self.assertEqual(launcher.status(ticket['id'])['status'],'succeeded')
             self.assertEqual(launcher.completed_empty_discoveries(),['discovery:one'])
+            settled=launcher.status(ticket['id']); launcher.mark_consumed(settled)
+            periods={"c":[]}
+            self.assertEqual(launcher.currently_consumed(
+                mission_ref='mission:v1',missing_periods_by_company=periods),['discovery:one'])
+            self.assertEqual(launcher.currently_consumed(
+                mission_ref='mission:v1',missing_periods_by_company={"c":["2026-Q2"]}),[])
+            config.write_text('{"call_budget":{"max_input_tokens":1}}')
+            self.assertEqual(launcher.currently_consumed(
+                mission_ref='mission:v1',missing_periods_by_company=periods),[])
 
     def test_failed_selection_has_bounded_cooldown_and_new_identity(self):
         with tempfile.TemporaryDirectory() as d:

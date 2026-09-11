@@ -104,6 +104,51 @@ class DiscoverySelectionLauncher:
             except (OSError,ValueError,KeyError,TypeError):
                 continue
         return result
+    def mark_consumed(self, ticket: Mapping[str, Any]) -> None:
+        if ticket.get('status') != 'succeeded':
+            raise ValueError('only a successful selection may be consumed')
+        path=self.root/str(ticket['id']).split(':',1)[1]/'consumed.json'
+        _write(path,{"schema_version":"0.1","ticket_ref":ticket['id'],
+                     "identity_hash":ticket['identity_hash'],"consumed_at":_now()})
+
+    def currently_consumed(self, *, mission_ref: str,
+                           missing_periods_by_company: Mapping[str,list[str]]) -> list[str]:
+        result=[]; config_hash=hashlib.sha256(self.config.read_bytes()).hexdigest()
+        for marker_path in self.root.glob('*/consumed.json'):
+            try:
+                marker=json.loads(marker_path.read_text()); directory=marker_path.parent
+                ticket=json.loads((directory/'ticket.json').read_text())
+                source=json.loads((directory/'input.json').read_text())
+                company_ref=source['company']['company_ref']
+                current={"view_hash":source['view']['content_hash'],"mission_ref":mission_ref,
+                         "company":source['company'],
+                         "missing_periods":missing_periods_by_company[company_ref],
+                         "config_hash":config_hash}
+                if (marker.get('ticket_ref') == ticket.get('id')
+                        and marker.get('identity_hash') == ticket.get('identity_hash')
+                        and ticket.get('base_identity_hash') == content_hash(current)):
+                    result.append(ticket['discovery_ref'])
+            except (OSError,ValueError,KeyError,TypeError):
+                continue
+        return sorted(set(result))
+    def current_selections(self, *, mission_ref: str,
+                           missing_periods_by_company: Mapping[str,list[str]]) -> dict[str,tuple[str,...]]:
+        result={}; config_hash=hashlib.sha256(self.config.read_bytes()).hexdigest()
+        for ticket_path in self.root.glob('*/ticket.json'):
+            try:
+                ticket=self.status(json.loads(ticket_path.read_text())['id'])
+                source=json.loads(ticket_path.with_name('input.json').read_text())
+                current={"view_hash":source['view']['content_hash'],"mission_ref":mission_ref,
+                         "company":source['company'],
+                         "missing_periods":missing_periods_by_company[source['company']['company_ref']],
+                         "config_hash":config_hash}
+                if (ticket['status']=='succeeded'
+                        and ticket.get('base_identity_hash')==content_hash(current)):
+                    result[ticket['discovery_ref']]=tuple(
+                        row['document_ref'] for row in ticket['summary']['selection']['selected'])
+            except (OSError,ValueError,KeyError,TypeError):
+                continue
+        return result
     def start(self,*,discovery_ref:str,view:Mapping[str,Any],mission_ref:str,
               company:Mapping[str,Any],missing_periods:list[str]):
         identity={"view_hash":view['content_hash'],"mission_ref":mission_ref,"company":dict(company),
