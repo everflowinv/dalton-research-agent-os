@@ -629,6 +629,35 @@ class CoordinatorTests(unittest.TestCase):
         self.assertIn(tick["discovery"]["company_ref"], {ACN, CTSH})
         self.assertIsNone(self.search_launcher.starts[-1]["cursor"])
 
+    def test_plan_stop_holds_queued_acquisition_until_plan_changes(self) -> None:
+        v1 = self.create_mission()
+        mission = self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.coordinator.dispatch_once()  # ACN search queues NEW_DOC.
+
+        original = self.coordinator._plan_decision
+        def stopped(current_mission, company_ref, spec_ref):
+            if company_ref == ACN and spec_ref == "earnings-call-transcripts":
+                return "the plan says stop: enough queued material", None
+            return original(current_mission, company_ref, spec_ref)
+
+        with patch.object(self.coordinator, "_plan_decision", side_effect=stopped):
+            held = self.coordinator.launch_acquisition()
+        self.assertEqual(held["status"], "idle")
+        self.assertIn(
+            {"company_ref": ACN, "spec_ref": "earnings-call-transcripts"},
+            held["plan_stopped_needs"],
+        )
+        self.assertEqual(self.acquisition_launcher.calls, [])
+        queued = self.missions.discovered_documents(
+            mission["id"], company_ref=ACN, status="discovered"
+        )
+        self.assertEqual([row["document_ref"] for row in queued], [NEW_DOC])
+
+        launched = self.coordinator.launch_acquisition()
+        self.assertEqual((launched["status"], launched["document_ref"]),
+                         ("launched", NEW_DOC))
+
     def test_continuation_rejects_plan_change_and_repeated_cursor(self) -> None:
         discovery = {
             "discovery_plan_ref": self.plan["id"],
@@ -760,9 +789,14 @@ class CoordinatorTests(unittest.TestCase):
         # Once the interval passes the document is retried under a new ticket.
         self.acquisition_launcher.outcome = "succeeded"
         self.clock.advance(days=2)
-        tick = self.coordinator.dispatch_once()
-        self.assertEqual(tick["acquisition"]["status"], "launched")
-        self.assertTrue(tick["acquisition"]["retry"])
+        # Exercise the acquisition lane directly: after the cadence repair the
+        # same combined tick also starts a new discovery, while this fake
+        # search transport deliberately reuses one source-envelope identity.
+        # A real connector produces a new invocation/envelope per request; that
+        # unrelated fake collision must not obscure the retry assertion.
+        acquisition = self.coordinator.launch_acquisition()
+        self.assertEqual(acquisition["status"], "launched")
+        self.assertTrue(acquisition["retry"])
         self.acquisition_launcher.finish()
         tick = self.coordinator.dispatch_once()
         self.assertEqual([item["status"] for item in tick["settled_documents"]], ["acquired"])

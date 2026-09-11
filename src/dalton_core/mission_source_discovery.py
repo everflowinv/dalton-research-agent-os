@@ -1667,6 +1667,17 @@ class MissionSourceDiscoveryCoordinator:
         if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False
+        try:
+            mission = self.missions.active_mission(self.plan["mission_ref"])
+        except CoverageMissionNotFound:
+            mission = None
+        stopped_needs = [
+            {"company_ref": member["company_ref"], "spec_ref": spec["spec_ref"]}
+            for member in (() if mission is None else mission["universe"])
+            for spec in self.plan["specs"]
+            if self._plan_decision(mission, member["company_ref"], spec["spec_ref"])[0]
+            is not None
+        ]
         needs, needs_error = self._stage_needs()
         stage_order = {
             "count": len(needs), "error": needs_error,
@@ -1676,6 +1687,7 @@ class MissionSourceDiscoveryCoordinator:
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts, skip_hosts=self.skip_hosts,
             preferred_needs=needs,
+            excluded_needs=stopped_needs,
         )
         if document is not None and self._document_in_authority(
             document["document_ref"], document.get("discovery_ref")
@@ -1708,10 +1720,14 @@ class MissionSourceDiscoveryCoordinator:
                 ),
                 as_of=self.clock(),
                 source_ref=self.source_ref, skip_hosts=self.skip_hosts,
+                excluded_needs=stopped_needs,
             )
             retry = document is not None
         if document is None:
-            idle: dict[str, Any] = {"status": "idle", "stage_order": stage_order}
+            idle: dict[str, Any] = {
+                "status": "idle", "stage_order": stage_order,
+                "plan_stopped_needs": stopped_needs,
+            }
             if self.skip_hosts:
                 idle["held_by_skip_hosts"] = self.missions.discovered_documents_held_by_skip(
                     source_ref=self.source_ref, skip_hosts=self.skip_hosts

@@ -1990,6 +1990,7 @@ class CoverageMissionAuthority:
         preferred_hosts: Sequence[str] = (),
         skip_hosts: Sequence[str] = (),
         preferred_needs: Sequence[Mapping[str, str]] = (),
+        excluded_needs: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -2014,6 +2015,7 @@ class CoverageMissionAuthority:
         preferred = _host_list(preferred_hosts, "preferred_hosts")
         skipped = _host_list(skip_hosts, "skip_hosts")
         needs = _needs(preferred_needs, "preferred_needs")
+        excluded = _needs(excluded_needs, "excluded_needs")
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
@@ -2027,6 +2029,9 @@ class CoverageMissionAuthority:
         if skipped:
             query += " AND (d.host IS NULL OR d.host NOT IN (%s))" % ",".join("?" * len(skipped))
             params.extend(skipped)
+        for need in excluded:
+            query += " AND NOT (d.company_ref=? AND s.spec_ref=?)"
+            params.extend((need["company_ref"], need["spec_ref"]))
         query += " ORDER BY"
         if needs:
             clauses = " ".join(
@@ -2576,6 +2581,7 @@ class CoverageMissionAuthority:
     def retryable_failed_document(
         self, *, older_than: timedelta, as_of: datetime | None = None,
         source_ref: str | None = None, skip_hosts: Sequence[str] = (),
+        excluded_needs: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -2603,6 +2609,16 @@ class CoverageMissionAuthority:
             # A host the plan skips is not retried either; it would only fail again.
             query += " AND (d.host IS NULL OR d.host NOT IN (%s))" % ",".join("?" * len(skipped))
             params.extend(skipped)
+        excluded = _needs(excluded_needs, "excluded_needs")
+        if excluded:
+            query = query.replace(
+                "WHERE d.status='acquisition_failed'",
+                "LEFT JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+                "WHERE d.status='acquisition_failed'",
+            )
+            for need in excluded:
+                query += " AND NOT (d.company_ref=? AND s.spec_ref=?)"
+                params.extend((need["company_ref"], need["spec_ref"]))
         query += " ORDER BY d.updated_at,d.record_id LIMIT 1"
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
