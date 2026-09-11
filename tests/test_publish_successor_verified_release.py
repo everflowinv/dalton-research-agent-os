@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,57 @@ def write(path: Path, value: object) -> None:
 
 
 class SuccessorPublisherTests(unittest.TestCase):
+    @contextmanager
+    def verified_context(self, fixture):
+        packet, _, state, manifest, artifacts, accepted, _ = fixture
+        models = json.loads((packet / "models.after.json").read_text())
+        with ExitStack() as stack:
+            for target in (
+                patch.object(publish.execute, "packet_preflight", return_value=(manifest, artifacts)),
+                patch.object(publish.finalizer, "finalize", return_value=accepted),
+                patch.object(publish, "expected_transition_state", return_value=(models,
+                    {"policy": "active"}, {"schema_version": "0.1", "enabled": True})),
+                patch.object(publish.execute.r11, "STATE", state),
+                patch.object(publish.execute.r11, "current_models", return_value=models),
+            ):
+                stack.enter_context(target)
+            yield
+
+    def test_partial_predecessor_snapshot_creation_is_resumable(self):
+        fixture = self.fixture()
+        packet, owner, *_, args = fixture
+        (packet / "previous-current-release.json").write_bytes((owner / "current-release.json").read_bytes())
+        with self.verified_context(fixture):
+            self.assertEqual(publish.publish(**args)["status"], "published_verified")
+
+    def test_next_release_accepts_exact_v02_predecessor_pair(self):
+        fixture = self.fixture()
+        packet, owner, *_, args = fixture
+        runtime = {"schema_version": "dalton-runtime-config-pointer-0.2", "base_release_commit": "a" * 40}
+        write(owner / "current-runtime-config.json", runtime)
+        current = {"schema_version": "dalton-current-release-0.2", "status": "deployed_verified",
+                   "source_commit": "a" * 40, "release_ref": "previous-successor",
+                   "current_runtime_config_sha256": publish.sha(owner / "current-runtime-config.json")}
+        write(owner / "current-release.json", current)
+        args.update(expected_current_release_sha256=publish.sha(owner / "current-release.json"),
+                    expected_current_runtime_config_sha256=publish.sha(owner / "current-runtime-config.json"))
+        with self.verified_context(fixture):
+            self.assertEqual(publish.publish(**args)["status"], "published_verified")
+
+    def test_final_runtime_drift_preserves_external_bytes_and_rolls_back_owned_release(self):
+        fixture = self.fixture()
+        packet, owner, *_, args = fixture
+        before = (owner / "current-release.json").read_bytes()
+        def external_edit(seam):
+            if seam == "after_release_pointer":
+                (owner / "current-runtime-config.json").write_bytes(b'{"external":"update"}\n')
+        with self.verified_context(fixture):
+            with self.assertRaisesRegex(publish.SuccessorPublicationError, "pointer pair changed"):
+                publish.publish(**args, fault_hook=external_edit)
+        self.assertEqual((owner / "current-release.json").read_bytes(), before)
+        self.assertEqual((owner / "current-runtime-config.json").read_bytes(), b'{"external":"update"}\n')
+        self.assertFalse(args["receipt_path"].exists())
+
     def fixture(self):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         root = Path(temporary.name); packet = root / "packet"; owner = root / "owner"

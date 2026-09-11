@@ -165,31 +165,34 @@ def publish(
     current_runtime = owner / "current-runtime-config.json"
     release_snapshot = packet / "previous-current-release.json"
     runtime_snapshot = packet / "previous-current-runtime-config.json"
-    if release_snapshot.exists() or runtime_snapshot.exists():
-        need(release_snapshot.exists() and runtime_snapshot.exists(),
-             "publication predecessor snapshot set is incomplete")
-        release_before = exact_file(release_snapshot, expected_current_release_sha256,
-                                    "previous current release snapshot")
-        runtime_before = exact_file(runtime_snapshot,
-                                    expected_current_runtime_config_sha256,
-                                    "previous runtime config snapshot")
-        regular_bytes(current_release, "current release pointer")
-        regular_bytes(current_runtime, "current runtime config pointer")
-    else:
-        release_before = exact_file(current_release, expected_current_release_sha256,
-                                    "current release pointer")
-        runtime_before = exact_file(current_runtime,
-                                    expected_current_runtime_config_sha256,
-                                    "current runtime config pointer")
-        exclusive_or_exact(release_snapshot, release_before)
-        exclusive_or_exact(runtime_snapshot, runtime_before)
+    # Each predecessor can be recovered independently if the process died
+    # while creating the pair, before either live pointer was changed.
+    predecessors = []
+    for snapshot, current, expected, label in (
+        (release_snapshot, current_release, expected_current_release_sha256, "current release"),
+        (runtime_snapshot, current_runtime, expected_current_runtime_config_sha256, "current runtime config"),
+    ):
+        if snapshot.exists() or snapshot.is_symlink():
+            value = exact_file(snapshot, expected, "previous " + label + " snapshot")
+            regular_bytes(current, label + " pointer")
+        else:
+            value = exact_file(current, expected, label + " pointer")
+            exclusive_or_exact(snapshot, value)
+        predecessors.append(value)
+    release_before, runtime_before = predecessors
     previous_release = load_json_bytes(release_before, "current release pointer")
     previous_runtime = load_json_bytes(runtime_before, "current runtime config pointer")
     need(previous_release.get("status") == "deployed_verified"
          and previous_runtime.get("base_release_commit")
              == previous_release.get("source_commit")
-         and previous_runtime.get("base_release_pointer_sha256")
-             == expected_current_release_sha256,
+         and (
+             (previous_runtime.get("schema_version") == "dalton-runtime-config-pointer-0.1"
+              and previous_runtime.get("base_release_pointer_sha256") == expected_current_release_sha256)
+             or (previous_runtime.get("schema_version") == "dalton-runtime-config-pointer-0.2"
+                 and previous_release.get("schema_version") == "dalton-current-release-0.2"
+                 and previous_release.get("current_runtime_config_sha256")
+                     == expected_current_runtime_config_sha256)
+         ),
          "current release/runtime predecessor binding differs")
 
     with tempfile.TemporaryDirectory(prefix=".successor-publish-check-", dir=packet) as raw:
@@ -332,6 +335,9 @@ def publish(
             os.replace(release_draft, current_release); published_release = True
             fsync_directory(owner)
             if fault_hook is not None: fault_hook("after_release_pointer")
+            need(regular_bytes(current_release, "current release pointer") == release_after
+                 and regular_bytes(current_runtime, "current runtime config pointer") == runtime_after,
+                 "published pointer pair changed before verification")
         except Exception:
             if published_release and regular_bytes(
                     current_release, "current release pointer") == release_after:
