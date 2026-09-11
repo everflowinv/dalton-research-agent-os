@@ -127,6 +127,9 @@ class CockpitPlaneTests(unittest.TestCase):
         # base the Playbook's Initial Screen requires, counted per company.
         company = next(c for c in view["companies"] if c["progress"]["found"])
         self.assertEqual(company["stage"], "还没开始")
+        self.assertEqual(company["gate_decision"]["status"], None)
+        self.assertEqual(company["source_readiness"]["scope"], "initial_screen")
+        self.assertIn("当前资料", company["journey_status"])
         self.assertEqual([i["item_ref"] for i in company["checklist"]],
                          ["quarterly_financials", "earnings_calls", "annual_report", "broker_research"])
         self.assertTrue(all(i["status"] in {"complete", "partial", "missing", "not_planned", "source_unavailable"}
@@ -137,6 +140,7 @@ class CockpitPlaneTests(unittest.TestCase):
         after = next(c for c in self.c.plane.overview()["companies"] if c["company_ref"] == company["company_ref"])
         self.assertEqual((after["stage"], after["stage_status"], after["stage_ref"]),
                          ("初步筛选", "进行中", "initial_screen"))
+        self.assertEqual(after["gate_decision"]["status"], "entered")
         self.assertEqual(view["totals"]["found"], sum(c["progress"]["found"] for c in view["companies"]))
         self.assertEqual(view["activity"]["service_state"], "running")
         lane_keys = [l["key"] for l in view["activity"]["lanes"]]

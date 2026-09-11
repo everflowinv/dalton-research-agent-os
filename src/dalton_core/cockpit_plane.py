@@ -58,6 +58,31 @@ SOURCE_LABELS = {
     "source:sec-edgar": "SEC 财报数据", "source:alphaengine": "卖方研报与电话会",
     "source:company-ir": "公司投资者关系", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
 }
+
+
+def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep an immutable gate decision separate from today's source base."""
+
+    source_ready = bool(entry.get("source_base_ready"))
+    gate_status = entry.get("stage_status")
+    gate_label = {
+        None: "尚无历史裁决", "entered": "历史裁决进行中",
+        "gate_passed": "历史裁决已通过", "gate_failed": "历史裁决未通过",
+    }.get(gate_status, f"历史裁决：{entry.get('stage_status_label') or gate_status}")
+    readiness_label = "当前资料已齐" if source_ready else "当前资料待补齐"
+    return {
+        "journey_status": (f"{gate_label} · {readiness_label}"
+                           if entry.get("stage") in {None, "initial_screen"}
+                           else gate_label),
+        "gate_decision": {"stage_ref": entry.get("stage"),
+                          "status": gate_status, "label": gate_label},
+        "source_readiness": {
+            "scope": "initial_screen", "ready": source_ready,
+            "status": "ready" if source_ready else "needs_material",
+            "label": readiness_label, "gaps": list(entry.get("gaps") or ()),
+            "blocked_on": list(entry.get("blocked_on") or ()),
+        },
+    }
 # P11x: what a figure is worth, in the owner's language. A number the company
 # filed is its published figure; a number said on a call is a record of the
 # saying. Both are kept; the label is how the difference stays visible.
@@ -1836,6 +1861,7 @@ class CockpitPlane:
             done = [i for i in countable if i["status"] == "complete"]
             missing = [i for i in entry["items"] if i["status"] in {"partial", "missing"}]
             blocked = [i for i in entry["items"] if i["status"] in {"not_planned", "source_unavailable"}]
+            stage_readiness = _stage_readiness_labels(entry)
             if entry["stage"] is None:
                 note = "还没有开始"
             elif missing:
@@ -1872,6 +1898,7 @@ class CockpitPlane:
                 "priority": member.get("bootstrap_priority"), "tier": member.get("coverage_tier"),
                 "stage": entry["stage_label"], "stage_ref": entry["stage"],
                 "stage_status": entry["stage_status_label"], "note": note,
+                **stage_readiness,
                 "checklist": entry["items"],
                 "document": deliverable,
                 "progress": {"found": found, "held": held, "read": read, "waiting": waiting,
