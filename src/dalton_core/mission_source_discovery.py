@@ -1732,7 +1732,7 @@ class MissionSourceDiscoveryCoordinator:
             if mission is None or self.spool_dir is None:
                 return {"status":"selection_pending","reason":"selection authority unavailable"}
             ticket = self.selection_launcher.latest(document["discovery_ref"])
-            if ticket is None:
+            if ticket is None or ticket.get("status") in {"failed", "orphaned", "cooldown"}:
                 try:
                     from .discovery_candidate_selection import candidate_view
                     discovery=self.missions.discovery_record(document["discovery_ref"])
