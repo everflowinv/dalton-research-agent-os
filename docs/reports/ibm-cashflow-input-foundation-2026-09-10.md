@@ -50,3 +50,16 @@ PYTHONPATH=src /Users/everflow/Projects/dalton-research-agent-os/.venv/bin/pytho
 
 Result: 214 tests passed in 8.760 seconds. One pre-existing test emitted an
 unclosed SQLite `ResourceWarning`; it did not fail the run.
+
+
+Root integration additionally checks a model whose two operands are real
+immutable database rows and whose arithmetic is exact, but which falsely
+labels FY minus Q1 as Q4. Publication rejects it specifically because the
+period chain does not replay. The integrated input, series, driver, mission
+forecast and XLSX regression passes 164 tests in 9.306 seconds. An earlier
+command used the nonexistent test_company_model_forecast_lane name and was
+corrected to test_mission_model_forecast_lane; it was a test command error,
+not a product failure. Independent review also replayed one actual live
+schema-0.1 model through old and new validators: all 183,423 canonical bytes
+remain identical (SHA-256
+681b88a7ba59c1b151ba2e24452d93db25b259b786537620b4411759d0a52f47).

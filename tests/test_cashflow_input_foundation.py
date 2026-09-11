@@ -123,6 +123,24 @@ class CashFlowAuthorityRoundTripTests(unittest.TestCase):
             ForecastModelAuthority(self.store).publish(
                 wrong_statement, statement_rows=statement_rows)
 
+        # Both operands exist in immutable authority, and their subtraction is
+        # exact, but FY minus Q1 is nine months rather than the claimed Q4.
+        nonadjacent = deepcopy(draft)
+        cash = next(item for item in nonadjacent["drivers"]
+                    if item["role"] == "operating_cash_flow")
+        q2 = next(item for item in cash["history"]
+                  if item["period_end"] == ends[1])
+        q4 = next(item for item in cash["history"]
+                  if item["period_end"] == ends[-1])
+        q4["derived_from"][0] = deepcopy(q2["derived_from"][0])
+        q4["accessions"] = sorted([accessions[0], accessions[3]])
+        q4["value"] = "480"
+        nonadjacent["source_version_ref"] = published["id"]
+        with self.assertRaisesRegex(ForecastModelValidationError,
+                                    "derived periods do not replay"):
+            ForecastModelAuthority(self.store).publish(
+                nonadjacent, statement_rows=statement_rows)
+
 
 if __name__ == "__main__":
     unittest.main()

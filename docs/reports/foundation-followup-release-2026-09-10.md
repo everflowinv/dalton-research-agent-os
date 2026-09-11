@@ -131,3 +131,29 @@ R4 full acceptance ran 6,809 tests in 577.922 seconds, with one failure and one 
 New clean freeze `c0295d89fbf165b7814c16eab459aa862578eb29` is running full acceptance. R4a wheel SHA-256 `a2df61c6d32d7763c78bbdb2785faa093211a7f546fd5f1297eb3ce91374d20f` matches 556 files with three JavaScript checks. Its deployment packet remains pending acceptance. The staging helper now binds the exact accepted rehearsal report and prepares all artifacts before atomically committing its manifest, with exception rollback.
 
 The live read-only product audit now finds five formal EventJudgements with exact producer/verifier task/result/route, mission/event hashes and independent families. ACN Dossier remains absent and EPAM final units incomplete. All five companies are eligible for default annual acquisition once the new installer/runtime is applied. Separately, real IBM OCF/CapEx authority rows exist; their missing typed input path is a foundation consumer defect under isolated implementation and cross-review, not a reason to invent cashflow values or declare a complete model.
+
+
+## R4a accepted but refused before install, 2026-09-11 01:17 UTC
+
+Same clean R4a passed 6,810 tests (one skip) in 583.880 wall-clock seconds;
+full log SHA-256 `88d9eb103b02e219df5f20d72527fd20bbd5833041a30aa0b92efd77f2f62eb3`.
+Exact wheel and 67/40/0 rehearsal passed; final rehearsal report SHA-256
+`ba928bd86b990a67c7a9840f2f990714858f88e104ac8fc88654177eb721bbd0`.
+The R4a rehearsal removed its entire own temporary root after no-handle
+checks; its structured report was retained, but no separate raw log or temp
+config was retained. This differs from the earlier R4 cleanup, which retained
+those ancillary files.
+
+Deployment preflight passed with 3,696,339,595 bytes required and
+6,179,794,944 available. The drain then found an old 17:36 research-plan ticket
+whose PID had been reused by an unrelated Apple geod process. Root recorded
+the exact ticket/process proof and terminated only the task's read-only drain
+poller; the deployment wrapper restored pre-install services and exited 143.
+No runtime install, database backup, ticket/journal rewrite or gateway change
+occurred. The original runtime 2e94acd is healthy again (controller PID 48378).
+The reused system process was not signalled.
+
+The drain's PID-only liveness test is now being fixed independently. Cashflow
+inputs and exact cumulative operand authority proof have completed independent
+review and integration; 164 integrated tests pass. They will join the next
+foundation freeze after the process identity repair is accepted.
