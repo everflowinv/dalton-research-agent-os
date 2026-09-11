@@ -323,7 +323,7 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute(
             'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],1)
 
-    def test_chain_capacity_envelope_releases_reservation_and_never_falls_back(self):
+    def test_capacity_error_code_without_dispatch_proof_cannot_release_paid_usage(self):
         backup=copy.deepcopy(self.pr);backup.update({
             'profile_version_ref':'model-profile-version:test-capacity-backup:1',
             'id':'profile:test-capacity-backup','model':'capacity-backup',
@@ -349,11 +349,11 @@ class BrokerAdmissionTests(unittest.TestCase):
         with patch.object(OpenClawModelAdapter,'execute',autospec=True,
                           side_effect=capacity):
             result=self.h.generate()
-        self.assertEqual(result['status'],'pending',result)
+        self.assertEqual(result['status'],'failed',result)
         self.assertEqual(self.calls,2)  # wrapper plus fixture construction, first profile only
         settlement=self.b.connection.execute(
             'SELECT actual_micros FROM thesis_impact_day_settlements').fetchone()
-        self.assertEqual(settlement['actual_micros'],0)
+        self.assertEqual(settlement['actual_micros'],1000)
         self.assertEqual(len(self.router.chain_links()),1)
 
     def test_configured_same_model_retry_precedes_fallback(self):
@@ -377,6 +377,31 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(calls, [self.pr['id'], self.pr['id']])
         self.assertEqual(self.b.connection.execute(
             'SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0], 1)
+
+    def test_owner_can_configure_more_than_three_definitely_not_sent_retries(self):
+        self.h.writer._document_extraction_model_config['transport_retry'] = {
+            'max_definitely_not_sent_retries': 5,
+            'queue_wait_seconds': 0, 'retry_backoff_seconds': 0,
+        }
+        original = self.execute
+        attempted = []
+
+        def refused_then_success(adapter, work, route, profile, *, before_send=None):
+            attempted.append(profile['id'])
+            if len(attempted) <= 5:
+                raise BrokerDefinitelyNotSent('proven pre-send refusal')
+            return original(adapter, work, route, profile, before_send=before_send)
+
+        with patch.object(OpenClawModelAdapter, 'execute', autospec=True,
+                          side_effect=refused_then_success):
+            result = self.h.generate()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(attempted, [self.pr['id']] * 6)
+        # Unsent attempts consume no additional paid-call authority.
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0], 1)
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0], 1)
 
     def test_invalid_provider_output_accounts_failure_and_never_retries(self):
         self.invalid=True
@@ -445,7 +470,7 @@ class BrokerAdmissionTests(unittest.TestCase):
             'SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],
             expected)
 
-    def test_queue_timeout_defers_same_work_without_fallback(self):
+    def test_queue_timeout_code_without_dispatch_proof_cannot_redrive_paid_work(self):
         def queued(adapter, work, route, profile, *, before_send=None):
             invocation, result = self.execute(
                 adapter, work, route, profile, before_send=before_send)
@@ -457,13 +482,13 @@ class BrokerAdmissionTests(unittest.TestCase):
         with patch.object(OpenClawModelAdapter, 'execute', autospec=True,
                           side_effect=queued):
             result = self.h.generate()
-        self.assertEqual(result['status'], 'pending', result)
+        self.assertEqual(result['status'], 'failed', result)
         status = self.h.h.scheduler.status(result['work_order_ref'])
-        self.assertEqual(status['state'], 'ready')
+        self.assertEqual(status['state'], 'failed')
         self.assertEqual(self.calls, 1)
         self.assertEqual(self.b.connection.execute(
             'SELECT actual_micros FROM thesis_impact_day_settlements'
-        ).fetchone()[0], 0)
+        ).fetchone()[0], 1000)
 
     def test_owner_budget_exhausted_blocks_before_adapter(self):
         self.b.admit(policy_version_id='budget:owner:1',day=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).date().isoformat(),

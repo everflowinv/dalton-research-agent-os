@@ -11,7 +11,7 @@ import json
 import re
 import sqlite3
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from collections.abc import Mapping
@@ -82,19 +82,20 @@ TASK_HASH = content_hash({"task": TASK_REF, "prompt_contract": PROMPT_CONTRACT_R
 
 
 def validate_transport_retry(value):
-    if (not isinstance(value, Mapping)
-            or set(value) != {"max_definitely_not_sent_retries", "queue_wait_seconds",
-                              "retry_backoff_seconds"}
-            or isinstance(value["max_definitely_not_sent_retries"], bool)
-            or not isinstance(value["max_definitely_not_sent_retries"], int)
-            or not 0 <= value["max_definitely_not_sent_retries"] <= 3
-            or isinstance(value["queue_wait_seconds"], bool)
-            or not isinstance(value["queue_wait_seconds"], int)
-            or not 0 <= value["queue_wait_seconds"] <= 3600
-            or isinstance(value["retry_backoff_seconds"], bool)
-            or not isinstance(value["retry_backoff_seconds"], int)
-            or not 0 <= value["retry_backoff_seconds"] <= 60):
+    fields = {"max_definitely_not_sent_retries", "queue_wait_seconds",
+              "retry_backoff_seconds"}
+    if (not isinstance(value, Mapping) or set(value) != fields
+            or any(isinstance(value[name], bool)
+                   or not isinstance(value[name], int) or value[name] < 0
+                   for name in fields)):
         raise ResearchVerificationError("invalid transport retry configuration")
+    # These are owner-selected operating bounds, not protocol constants. Keep
+    # only the clock's representability requirement for configured waits.
+    try:
+        for name in ("queue_wait_seconds", "retry_backoff_seconds"):
+            datetime.now(timezone.utc) + timedelta(seconds=value[name])
+    except (OverflowError, ValueError) as exc:
+        raise ResearchVerificationError("transport retry wait cannot be represented") from exc
     return dict(value)
 
 
@@ -604,7 +605,7 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         self._admission_identity = None
         if (isinstance(max_definitely_not_sent_retries, bool)
                 or not isinstance(max_definitely_not_sent_retries, int)
-                or not 0 <= max_definitely_not_sent_retries <= 3):
+                or max_definitely_not_sent_retries < 0):
             raise ResearchVerificationError("invalid definitely-not-sent retry bound")
         self.max_definitely_not_sent_retries = max_definitely_not_sent_retries
         self.retry_backoff_seconds = retry_backoff_seconds

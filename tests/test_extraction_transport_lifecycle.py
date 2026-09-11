@@ -4,7 +4,7 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from dalton_core.document_extraction import extraction_scheduler_policy
+from dalton_core.document_extraction import extraction_scheduler_policy, validate_transport_retry
 from dalton_core.model_router import ModelRouter
 from tests.test_transcript_polish_model_worker import profile, policy
 
@@ -35,6 +35,20 @@ class ExtractionTransportLifecycleTests(unittest.TestCase):
         self.assertEqual(policy["max_lease_seconds"], 2 * 3 * (600 + 90) + 2 * 2 * 7 + 30)
         self.assertEqual(policy["max_total_lease_seconds"], 2 * policy["max_lease_seconds"])
         self.assertIn(str(policy["max_lease_seconds"]), policy["policy_version_id"])
+
+    def test_long_configured_queue_and_backoff_are_bound_into_scheduler_authority(self):
+        retry = validate_transport_retry({"max_definitely_not_sent_retries": 5,
+                                          "queue_wait_seconds": 7200,
+                                          "retry_backoff_seconds": 120})
+        bound = extraction_scheduler_policy({"transport_retry": retry})
+        self.assertEqual(bound["max_lease_seconds"], 6 * (600 + 7200) + 5 * 120 + 30)
+        self.assertIn(str(bound["max_lease_seconds"]), bound["policy_version_id"])
+        for field in retry:
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    validate_transport_retry({**retry, field: True})
+        with self.assertRaises(ValueError):
+            validate_transport_retry({**retry, "queue_wait_seconds": 10 ** 100})
 
     def test_longest_extraction_purpose_sizes_shared_scheduler(self) -> None:
         config = {

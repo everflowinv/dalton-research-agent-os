@@ -8,12 +8,16 @@ from dalton_core.annual_report_runtime import plan_model_execution
 class AnnualReportOperatingDefaultsTests(unittest.TestCase):
     def test_unconfigured_seed_has_long_call_and_retry_headroom_for_both_roles(self):
         config = {"routing_policy_ref": "policy:operator-choice:1",
+                  "budget_db": "/tmp/owner-budget.sqlite",
+                  "budget_policy_ref": "budget-policy:owner:1",
                   "credential_slot_refs": ["credential-slot:operator-choice"]}
         for role in ("draft", "verifier"):
             with self.subTest(role=role):
                 execution = plan_model_execution(
                     config, "registered_annual_report_" + role)
                 self.assertEqual(execution["routing_policy_ref"], config["routing_policy_ref"])
+                self.assertEqual(execution["budget_policy_ref"], config["budget_policy_ref"])
+                self.assertEqual(execution["budget_db"], config["budget_db"])
                 self.assertEqual(execution["credential_slot_refs"], config["credential_slot_refs"])
                 self.assertGreaterEqual(execution["max_seconds"], 600)
                 self.assertGreater(execution["max_attempts"], 1)
@@ -22,6 +26,8 @@ class AnnualReportOperatingDefaultsTests(unittest.TestCase):
 
     def test_owner_can_raise_all_default_bounds_and_keep_role_specific_authority(self):
         config = {"routing_policy_ref": "policy:operator-choice:2",
+                  "budget_db": "/tmp/owner-budget.sqlite",
+                  "budget_policy_ref": "budget-policy:owner:2",
                   "credential_slot_refs": ["credential-slot:operator-choice"],
                   "purpose_call_budgets": {"registered_annual_report_draft": {
                       "max_input_tokens": 240000, "max_output_tokens": 16000,
