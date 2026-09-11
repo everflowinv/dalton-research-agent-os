@@ -121,7 +121,7 @@ def derived(ref, role, *, unit="usd", annual="sum_quarters"):
     }
 
 
-def typed_note(*, kind="annual", periods=None):
+def typed_note(*, kind="annual", periods=None, form="10-K"):
     return {
         "schema_version": "financial-note-evidence-binding-0.1",
         "ref": "financial-note-evidence:acn-eps",
@@ -131,7 +131,7 @@ def typed_note(*, kind="annual", periods=None):
         "statement_ingest_ref": "statement-ingest:test",
         "statement_filing_hash": "d" * 64,
         "accession": ACCESSION,
-        "form": "10-K",
+        "form": form,
         "applicability_kind": kind,
         "periods": periods or [{
             "period_start": "2024-01-01", "period_end": "2024-12-31",
@@ -253,6 +253,14 @@ class FinancialStatementStructureTests(unittest.TestCase):
     def test_note_backed_annual_eps_numerator_ties_indirectly_without_quarter_readiness(self):
         inputs, candidate = note_backed_eps_inputs_and_proposal()
         note = typed_note()
+        adjustment = next(item for item in inputs["filed_lines"]
+                          if item["concept"] == "canada-nci")
+        adjustment["cells"].update({
+            end: {"period_start": start, "value": "1", "unit": "usd",
+                  "basis": "reported", "source_accessions": [ACCESSION]}
+            for start, end in QUARTERS
+        })
+        candidate["financial_input_hash"] = financial_input_authority(inputs)["content_hash"]
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs, note_evidence=[note],
             note_evidence_resolver=lambda ref: note if ref == note["ref"] else None,
@@ -328,6 +336,48 @@ class FinancialStatementStructureTests(unittest.TestCase):
             note_evidence_resolver=lambda _ref: note,
         )
         self.assertEqual(replay["note_formula_periods"][0]["status"], "unavailable")
+
+    def test_one_note_quarter_does_not_authorize_other_operand_quarters(self):
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        for concept in ("parent", "canada-nci", "shares", "eps"):
+            line = next(item for item in inputs["filed_lines"]
+                        if item["concept"] == concept)
+            values = {
+                "parent": (145, 160, 175, 190),
+                "canada-nci": (0, 0, 0, 0),
+                "shares": (100, 100, 100, 100),
+                "eps": ("1.45", "1.60", "1.75", "1.90"),
+            }[concept]
+            unit = "shares" if concept == "shares" else (
+                "usd_per_share" if concept == "eps" else "usd"
+            )
+            line["cells"].update({
+                end: {"period_start": start, "value": str(value), "unit": unit,
+                      "basis": "reported", "source_accessions": [ACCESSION]}
+                for (start, end), value in zip(QUARTERS, values)
+            })
+            line["duration_facts"].extend([
+                {"period_start": start, "period_end": end, "period_kind": "quarter",
+                 "value": str(value), "unit": unit,
+                 "source_accessions": [ACCESSION], "source_forms": ["10-Q"]}
+                for (start, end), value in zip(QUARTERS, values)
+            ])
+        candidate["financial_input_hash"] = financial_input_authority(inputs)["content_hash"]
+        note = typed_note(
+            kind="quarter", form="10-Q",
+            periods=[{"period_start": QUARTERS[0][0], "period_end": QUARTERS[0][1]}],
+        )
+        _structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs, note_evidence=[note],
+            note_evidence_resolver=lambda _ref: note,
+        )
+        numerator = next(item for item in replay["formulas"]
+                         if item["output_ref"] == "eps-numerator")
+        self.assertEqual(numerator["status"], "unavailable")
+        self.assertEqual(numerator["tested_periods"], [{
+            "period_start": QUARTERS[0][0], "period_end": QUARTERS[0][1],
+        }])
+        self.assertFalse(replay["ready_for_forecast"])
 
     def test_typed_note_binding_refuses_foreign_company_period_and_resolver_drift(self):
         inputs, candidate = note_backed_eps_inputs_and_proposal()

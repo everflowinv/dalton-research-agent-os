@@ -1161,10 +1161,7 @@ def replay_historical_structure(
                     if divisor == 0:
                         continue
                     calculated[period] = values[formula["numerator_ref"]][period] / divisor
-            values[output] = calculated
-            tie = formula["tie_out_concept"]
-            tied = {} if tie is None else _period_cells(filed[tie])
-            tested = sorted(set(calculated) & set(tied), key=lambda item: item[1])
+            candidate_periods = set(calculated)
             note_report = note_reports_by_output.get(output)
             note_quarters = {
                 (item["period_start"], item["period_end"])
@@ -1172,7 +1169,24 @@ def replay_historical_structure(
                 if item["applicability_kind"] == "quarter"
                 and item["status"] == "validated"
             }
-            note_validated = bool(calculated) and set(calculated) == note_quarters
+            if formula.get("tie_out_concept") is None:
+                # An annual note may prove the annual numerator, but it does
+                # not authorize applying that relationship to a quarter.  A
+                # dependent formula can see only independently validated note
+                # quarter windows.
+                calculated = {
+                    period: value for period, value in calculated.items()
+                    if period in note_quarters
+                }
+            values[output] = calculated
+            tie = formula["tie_out_concept"]
+            tied = {} if tie is None else _period_cells(filed[tie])
+            tested = sorted(set(calculated) & set(tied), key=lambda item: item[1])
+            note_validated = (
+                bool(candidate_periods)
+                and candidate_periods == note_quarters
+                and set(calculated) == note_quarters
+            )
             def matches(period: tuple[str | None, str]) -> bool:
                 if formula["operator"] != "divide":
                     return calculated[period] == tied[period]
@@ -1198,7 +1212,9 @@ def replay_historical_structure(
                     for period in (tested or sorted(note_quarters, key=lambda item: item[1]))
                 ],
                 "reason": None if tested or note_validated else (
-                    "no complete historical period has every formula term and filed tie-out"
+                    "typed note evidence does not authorize every complete operand period"
+                    if note_report is not None
+                    else "no complete historical period has every formula term and filed tie-out"
                 ),
             })
             del pending[output]
