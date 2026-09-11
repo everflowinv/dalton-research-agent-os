@@ -22,7 +22,7 @@ from dalton_core.research_quality_rubrics import (
     RUBRICS,
     SCALE,
     WEEKLY_BRIEF,
-    WEEKLY_BRIEF_SECTIONS,
+    WEEKLY_BRIEF_SECTIONS, INITIAL_SCREEN_V1,
     UnknownRubric,
     rubric,
     rubric_hashes,
@@ -30,7 +30,7 @@ from dalton_core.research_quality_rubrics import (
 from dalton_core.research_quality_score import CHECKS
 
 PINNED = {
-    "rubric:initial-screen": "334c9aee0ffebfc3816ee8f367d9304c225f1a05d29cfb3dbf405247260e2d64",
+    "rubric:initial-screen": "f5645dc5bc0513a6dfdfefe573979b6c150b7f60c6206dca23826aad4ec36f0c",
     "rubric:ask-answer": "7fe91c6057b145c7d7f23e5697a6e097c487a9905dfce0c5fa1ae4e6e9146e37",
     "rubric:company-dossier": "0b1718d165bad133ce66fc5ca2cfb5ac3d5fb5d67dc61ff30d8bc54f8519ee51",
     # Q2. The three above did not move when this one was added, and they must
@@ -62,6 +62,12 @@ class FrozenRubricTests(unittest.TestCase):
         self.assertNotEqual(content_hash(body), before)
         # And the rubric itself did not move: body() returns a copy.
         self.assertEqual(INITIAL_SCREEN.content_hash, before)
+
+    def test_initial_screen_v1_remains_available_as_exact_history(self):
+        self.assertEqual(INITIAL_SCREEN_V1.version, 1)
+        self.assertEqual(INITIAL_SCREEN_V1.content_hash,
+                         "334c9aee0ffebfc3816ee8f367d9304c225f1a05d29cfb3dbf405247260e2d64")
+        self.assertEqual(INITIAL_SCREEN.version, 2)
 
     def test_a_rubric_can_be_looked_up_by_short_name_or_ref(self):
         self.assertIs(rubric("initial_screen"), INITIAL_SCREEN)

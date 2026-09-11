@@ -1,0 +1,14 @@
+# Model prompt and capability audit — 2026-09-11
+
+| Call path | Authority context and allowed action | Verification and identity | Finding |
+|---|---|---|---|
+| `research_planner.py` | Current mission checklist, actual `have/read/deficit`, blocked reasons, spend, figures, observed market measures; proposes only enumerated directives and inquiries | Closed output; company/item refs must exist; WorkOrder binds task hash and state hash | Already distinguishes document counts from material sufficiency and asks what evidence would answer a gap. No change. |
+| `llm_research_planner.py` | Frozen loop, directives, outcomes and admitted probe catalog | Can select one exact admitted probe or a closed terminal reason; context/task hashes bind WorkOrder | Correctly cannot invent tools, parameters or sources. No change. |
+| `human_intent.py` | Exact visible context and verbatim owner utterance | Closed taxonomy, exact span/binding checks, calibration corpus, content-bound WorkOrder | Correctly translates intent without executing or inventing capabilities. No change. |
+| `agenda_coordinator.py` | Authority-rendered perception context and exact source catalog | Parser validates refs/features; prompt hash is in WorkOrder metadata and changed bytes conflict with an old cycle | Fixed forced 3–6 output. It now permits an empty set when no decision-useful unanswered question exists, preventing padding from being treated as research. |
+| `claim_index_tagging.py` | Existing Claim rows plus frozen aspect vocabulary | Every row exactly once; only vocabulary labels; prompt bytes participate in tagger identity | Correctly performs filing/classification only. It must not form an investment view. No change. |
+| `research_quality_score.py` | Artefact, deterministic checks, rubric and cited Claims | Separate judge/verifier purposes and route provenance; score and verifier hashes bind publication | Fixed verifier evidence blindness: the verifier now receives the same bounded cited Claims and declared gaps needed to check the judge's support. |
+
+The current Initial Screen quality rubric is now version 2. Version 1 remains byte-identical and exported as `INITIAL_SCREEN_V1`. Version 2 changes only `key_driver_thesis`: a top-quality screen must state the currently supported main-versus-alternative leaning, evidence boundary, conditions, impacts, falsifier/change conditions and observable tracking points. It does not require a Street blind spot unless the artefact itself asserts an expectations gap; it does not require a <=12-month recommendation, valuation call or invented probability. The six-stage gate and signed playbook are unchanged.
+
+This audit does not infer a missing capability from an empty context. Prompts may use only the capabilities and authority records actually included in their context; unavailable evidence remains an explicit gap.

@@ -49,7 +49,7 @@ module only says what the standard is.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -192,7 +192,7 @@ def _anchors(zero: str, two: str, four: str) -> Mapping[str, str]:
 # documents carry that no structural check looks for.
 # --------------------------------------------------------------------------
 
-INITIAL_SCREEN = Rubric(
+INITIAL_SCREEN_V1 = Rubric(
     rubric_ref="rubric:initial-screen",
     version=1,
     title="Initial Screen 质量评分表",
@@ -312,6 +312,34 @@ INITIAL_SCREEN = Rubric(
         "五类 authority 尚未接入，写任何倍数都会是无来源的数字。",
         "「证据不足以支撑一个 thesis，直说不足在哪里」是满分行为，不是失败。",
         "不要因为文档没有回答你想问的问题而扣分；只按下面的标准打分。",
+    ),
+)
+
+# Version 2 keeps the Initial Screen's evidence and structure standard intact,
+# while removing an obsolete assumption that every strong fundamental view
+# must identify a Street blind spot.  The holding-period method is applied
+# later; this screen only owes a responsible, testable current judgement.
+_INITIAL_SCREEN_V2_DRIVER = Criterion(
+    criterion_id="key_driver_thesis",
+    question=("核心判断是否识别关键 driver，明确当前更倾向主情形还是替代情形，并说明"
+              "各自成立条件、影响与什么观察会改变判断？"),
+    evidence_required=("thesis / anti-thesis 与数据跟踪中可以指认：具名 driver、当前倾向及证据边界、"
+                       "主情形和替代情形的触发条件与影响、证伪或改变判断的可观察读数；"
+                       "只有在文档主张预期差时才要求市场预期来源"),
+    anchors=_anchors(
+        "只有事实复述或『两者皆有可能』，没有当前倾向、条件、影响或改变判断的观察点",
+        "给出当前倾向和关键 driver，但主/替代条件、影响或改变判断条件至少一项不完整",
+        "当前倾向由已展示证据支持且明确证据边界；主/替代条件与影响可检验，证伪和跟踪点具体；"
+        "不靠虚构概率，也不在未主张预期差时强求 Street 分歧",
+    ),
+    layer="judge",
+)
+INITIAL_SCREEN = replace(
+    INITIAL_SCREEN_V1,
+    version=2,
+    criteria=tuple(
+        _INITIAL_SCREEN_V2_DRIVER if item.criterion_id == "key_driver_thesis" else item
+        for item in INITIAL_SCREEN_V1.criteria
     ),
 )
 
@@ -1065,6 +1093,7 @@ __all__ = [
     "DOSSIER_SECTIONS",
     "INDUSTRY_FRAMEWORK",
     "INITIAL_SCREEN",
+    "INITIAL_SCREEN_V1",
     "PASSING_SCORE",
     "RUBRICS",
     "RUBRIC_ALIASES",
