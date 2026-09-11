@@ -978,12 +978,10 @@ class AlphaEngineSearchLauncher(_SearchLauncherBase):
 
 
 class WebSearchLauncher(_SearchLauncherBase):
-    """Launch the Gemini ``search_web`` child (P9d-4a).
+    """Launch a governed search using the host's current provider selection.
 
-    Only the rehearsal transport exists in this slice.  A networked launch
-    would need the OpenClaw gateway to hand the child a host-owned
-    ``web_search`` handle; until that bridge is wired the launcher refuses
-    before any process starts, and the coordinator reports the reason.
+    New network children read OpenClaw configuration at execution time. An
+    explicit provider pin remains available for compatibility and rehearsals.
     """
 
     SOURCE_REF = WEB_SEARCH_SOURCE_REF
@@ -998,7 +996,8 @@ class WebSearchLauncher(_SearchLauncherBase):
         broker_auth_key: str | Path | None = None,
         broker_client_id: str = "client:dalton-core",
         broker_profile_id: str = "profile:web-search",
-        expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER,
+        expected_provider: str | None = None,
+        openclaw_config_path: str | Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -1006,7 +1005,9 @@ class WebSearchLauncher(_SearchLauncherBase):
         self.broker_auth_key = None if broker_auth_key is None else str(Path(broker_auth_key).expanduser())
         self.broker_client_id = broker_client_id
         self.broker_profile_id = broker_profile_id
-        self.expected_provider = validate_web_search_provider(expected_provider)
+        self.expected_provider = (None if expected_provider is None
+                                  else validate_web_search_provider(expected_provider))
+        self.openclaw_config_path = openclaw_config_path
 
     def _load_governance_record(self) -> WebSearchConnectorGovernance:
         return WebSearchConnectorGovernance.load(self.governance_path)
@@ -1023,9 +1024,11 @@ class WebSearchLauncher(_SearchLauncherBase):
 
     def _extra_command_args(self) -> list[str]:
         provider_args = (
-            [] if self.expected_provider == LEGACY_WEB_SEARCH_PROVIDER
+            [] if self.expected_provider is None
             else ["--expected-provider", self.expected_provider]
         )
+        if self.openclaw_config_path is not None:
+            provider_args += ["--openclaw-config", str(self.openclaw_config_path)]
         if not self.networked or not self.broker_socket or not self.broker_auth_key:
             return provider_args
         return [

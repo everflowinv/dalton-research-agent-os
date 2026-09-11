@@ -197,6 +197,13 @@ class BrokerClientTests(unittest.TestCase):
         self.invoke(self.handle(broker))
         self.assertNotEqual(broker.requests[0]["auth"]["nonce"], broker.requests[1]["auth"]["nonce"])
 
+    def test_provider_guard_is_signed_without_becoming_a_tool_argument(self) -> None:
+        broker = self.broker()
+        self.invoke(self.handle(broker, expected_provider="gemini"))
+        self.assertEqual(broker.requests[0]["expectedProvider"], "gemini")
+        self.assertNotIn("provider", broker.requests[0])
+        # FakeBroker verified the HMAC over the entire request, including guard.
+
     def test_broker_failures_map_to_bridge_errors(self) -> None:
         cases = {
             "PROVIDER_RATE_LIMITED": BridgeRateLimited,

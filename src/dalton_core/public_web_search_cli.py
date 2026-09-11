@@ -127,6 +127,7 @@ def run_discovery(
         "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         "source_ref": WEB_SEARCH_SOURCE_REF,
         "transport": transport,
+        "expected_provider": expected_provider,
         "governance_ref": governance.id,
         "governance_hash": governance.content_hash,
         "governance_status": governance.status,
@@ -269,10 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--broker-client-id", default="client:dalton-core")
     parser.add_argument("--broker-profile-id", default="profile:web-search")
     parser.add_argument(
-        "--expected-provider", default=LEGACY_WEB_SEARCH_PROVIDER,
+        "--expected-provider", default=None,
         type=validate_web_search_provider,
-        help="exact provider id configured on the host web-search broker",
+        help="optional compatibility pin; live searches follow OpenClaw when omitted",
     )
+    parser.add_argument("--openclaw-config", type=Path, help="host config; defaults beside broker socket")
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument(
         "--catalog-db", type=Path,
@@ -331,18 +333,30 @@ def main(argv: list[str] | None = None) -> int:
             if not args.quiet:
                 print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
             return 1
+        from .web_search_provider import (
+            WebSearchProviderConfigurationError, resolve_web_search_provider,
+        )
+        try:
+            expected_provider = resolve_web_search_provider(
+                networked=True, expected_provider=args.expected_provider,
+                openclaw_config_path=args.openclaw_config, broker_socket=args.broker_socket,
+            )
+        except WebSearchProviderConfigurationError as exc:
+            parser.error(str(exc))
         handle: Any = WebSearchBrokerHandle(
             socket_path=args.broker_socket,
             auth_key_path=args.broker_auth_key,
             client_id=args.broker_client_id,
             profile_id=args.broker_profile_id,
+            expected_provider=expected_provider,
         )
         transport_label = "openclaw-search-broker"
     else:
         citations = json.loads(args.fake_citations_file.read_text(encoding="utf-8"))
         if not isinstance(citations, list):
             parser.error("--fake-citations-file must hold a JSON array of citations")
-        handle = FakeWebSearchHandle(citations, provider=args.expected_provider)
+        expected_provider = args.expected_provider or LEGACY_WEB_SEARCH_PROVIDER
+        handle = FakeWebSearchHandle(citations, provider=expected_provider)
         transport_label = "fake"
     summary = run_discovery(
         state_dir=args.state_dir,
@@ -357,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         handle=handle,
         transport=transport_label,
         summary_dir=summary_dir,
-        expected_provider=args.expected_provider,
+        expected_provider=expected_provider,
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
     )

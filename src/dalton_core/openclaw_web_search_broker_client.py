@@ -115,6 +115,7 @@ class WebSearchBrokerHandle:
         auth_key_path: str | Path,
         client_id: str = DEFAULT_CLIENT_ID,
         profile_id: str = DEFAULT_PROFILE_ID,
+        expected_provider: str | None = None,
         retry_after_ms: int = DEFAULT_RETRY_AFTER_MS,
         max_timeout_ms: int = DEFAULT_MAX_TIMEOUT_MS,
         connect_timeout_seconds: float = 10.0,
@@ -131,6 +132,10 @@ class WebSearchBrokerHandle:
         self.auth_key_path = Path(auth_key_path).expanduser()
         self.client_id = client_id
         self.profile_id = profile_id
+        if expected_provider is not None:
+            from .public_web_connector import validate_web_search_provider
+            expected_provider = validate_web_search_provider(expected_provider)
+        self.expected_provider = expected_provider
         self.retry_after_ms = int(retry_after_ms)
         self.max_timeout_ms = int(max_timeout_ms)
         self.connect_timeout_seconds = float(connect_timeout_seconds)
@@ -161,6 +166,8 @@ class WebSearchBrokerHandle:
             "count": count,
             "timeoutMs": timeout_ms,
         }
+        if self.expected_provider is not None:
+            request["expectedProvider"] = self.expected_provider
         after, before = arguments.get("date_after"), arguments.get("date_before")
         if (after is None) != (before is None):
             raise BridgeRequestRejected("web search date bounds must be supplied together")
