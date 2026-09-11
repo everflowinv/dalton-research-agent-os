@@ -17,6 +17,7 @@ connector's JSON response is the original document.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -190,7 +191,10 @@ class FeedDocumentSourceAdapter:
             raise DocumentResearchError(
                 "feed document research supports sales notes and company wiki in v0.1"
             )
-        for method in ("read_completed_manifest", "locate_completed_manifest"):
+        for method in (
+            "read_completed_manifest", "locate_completed_manifest",
+            "locate_completed_manifest_binding",
+        ):
             if not callable(getattr(launcher, method, None)):
                 raise TypeError(f"launcher must expose {method}")
         if not callable(getattr(spool, "read_object", None)):
@@ -209,7 +213,18 @@ class FeedDocumentSourceAdapter:
     ) -> tuple[dict[str, Any], str]:
         document_ref = _text(document_ref, "document_ref")
         if acquisition_ticket_ref is None:
-            manifest = self.launcher.locate_completed_manifest(document_ref)
+            binding = self.launcher.locate_completed_manifest_binding(document_ref)
+            if (
+                not isinstance(binding, Mapping)
+                or set(binding) != {"ticket_ref", "manifest"}
+            ):
+                raise DocumentResearchConflict(
+                    "completed acquisition locator did not return an exact ticket binding"
+                )
+            acquisition_ticket_ref = _text(
+                binding["ticket_ref"], "located acquisition ticket ref"
+            )
+            manifest = binding["manifest"]
         else:
             manifest = self.launcher.read_completed_manifest(
                 _text(acquisition_ticket_ref, "acquisition_ticket_ref"), document_ref
@@ -489,18 +504,23 @@ class DocumentResearchRegistry:
         registration, text = self._reresolve(
             wire["registration"], purpose=wire["purpose"]
         )
-        candidates: list[tuple[int, int, int, str]] = []
-        for term_order, term in enumerate(terms):
+        def term_matches(term_order: int, term: str):
             pattern = re.compile(
                 re.escape(term).replace(r"\ ", r"\s+"), re.IGNORECASE
             )
             for match in pattern.finditer(text):
-                candidates.append((match.start(), term_order, match.end(), term))
-        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+                yield match.start(), term_order, match.end(), term
+
+        candidates = heapq.merge(*(
+            term_matches(term_order, term)
+            for term_order, term in enumerate(terms)
+        ))
         matches: list[dict[str, Any]] = []
         seen_spans: set[tuple[int, int]] = set()
-        for match_start, _order, match_end, term in candidates:
-            if len(matches) >= limits["max_results"]:
+        while len(matches) < limits["max_results"]:
+            try:
+                match_start, _order, match_end, term = next(candidates)
+            except StopIteration:
                 break
             span = (match_start, match_end)
             if span in seen_spans:

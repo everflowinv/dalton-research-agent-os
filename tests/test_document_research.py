@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dalton_core.document_research import (
     DocumentResearchAccessDenied,
@@ -65,18 +66,37 @@ class FakeReceiptReader:
 
 class FakeLauncher:
     def __init__(self, manifest: dict, ticket_ref: str):
-        self.manifest = manifest
         self.ticket_ref = ticket_ref
+        self.manifests = {ticket_ref: manifest}
+
+    @property
+    def manifest(self):
+        return self.manifests[self.ticket_ref]
+
+    @manifest.setter
+    def manifest(self, value):
+        self.manifests[self.ticket_ref] = value
+
+    def add_version(self, ticket_ref: str, manifest: dict):
+        self.ticket_ref = ticket_ref
+        self.manifests[ticket_ref] = manifest
 
     def read_completed_manifest(self, ticket_ref: str, document_ref: str):
-        if ticket_ref != self.ticket_ref or document_ref != self.manifest["document_ref"]:
+        manifest = self.manifests.get(ticket_ref)
+        if manifest is None or document_ref != manifest["document_ref"]:
             raise DocumentResearchConflict("ticket does not bind document")
-        return self.manifest
+        return manifest
 
     def locate_completed_manifest(self, document_ref: str):
         if document_ref != self.manifest["document_ref"]:
             raise DocumentResearchConflict("document has no complete acquisition")
         return self.manifest
+
+    def locate_completed_manifest_binding(self, document_ref: str):
+        return {
+            "ticket_ref": self.ticket_ref,
+            "manifest": self.locate_completed_manifest(document_ref),
+        }
 
 
 class FakeSpool:
@@ -296,6 +316,105 @@ class DocumentResearchTests(unittest.TestCase):
                 "policy_ref": self.policy["policy_ref"],
                 "policy_hash": self.policy["content_hash"],
             })
+
+    def test_registration_pins_located_ticket_when_a_newer_acquisition_arrives(self):
+        document_ref = "sales-note:fixture-versioned"
+        adapter, launcher, receipts = self._source(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            text="Old version says backlog improved.",
+            ticket_ref="feed-run:old",
+            doc_kind="broker_note",
+        )
+        registry = self._registry({SALES_NOTES_SOURCE_REF: adapter})
+        registration = registry.register(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            purpose="qualitative_research",
+        )
+        self.assertEqual(registration["acquisition_ticket_ref"], "feed-run:old")
+
+        sink = self.spool.open_sink("raw-sink:" + "7" * 64, max_response_bytes=1000)
+        sink.write(b"New version says backlog declined.")
+        assembled = sink.finalize().to_dict()
+        newer = build_feed_acquisition_manifest(
+            created_at="2026-09-11T13:00:00.000000+00:00",
+            source_ref=SALES_NOTES_SOURCE_REF,
+            operation="get_note",
+            document_ref=document_ref,
+            target_ref="host-tool:sales-notes",
+            governance_ref="connector-governance:sales-notes:get:approved",
+            governance_hash="1" * 64,
+            doc_kind="broker_note",
+            evidence_tier="sell_side",
+            doc_date="2026-09-10",
+            origin_ref="fixture:sales-notes",
+            subject_tickers=["ACN"],
+            text="New version says backlog declined.",
+            assembled_object=assembled,
+            connector_invocation_ref=receipts.invocation["id"],
+            connector_invocation_hash=receipts.invocation["content_hash"],
+        )
+        launcher.add_version("feed-run:new", newer)
+        proof = registry.read({
+            "schema_version": READ_REQUEST_SCHEMA_VERSION,
+            "operation": READ_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "What did the earlier note say?",
+            "registration": registration,
+            "source_start": 0,
+            "source_end": registration["normalized_text"]["characters"],
+            "policy_ref": self.policy["policy_ref"],
+            "policy_hash": self.policy["content_hash"],
+        })
+        self.assertEqual(proof["text"], "Old version says backlog improved.")
+
+    def test_search_stops_consuming_matches_at_the_result_bound(self):
+        document_ref = "sales-note:fixture-many-matches"
+        adapter, _, _ = self._source(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            text="term " * 10_000,
+            ticket_ref="feed-run:many-matches",
+            doc_kind="broker_note",
+        )
+        registry = self._registry({SALES_NOTES_SOURCE_REF: adapter})
+        registration = self._registration(
+            registry, SALES_NOTES_SOURCE_REF, document_ref, "feed-run:many-matches"
+        )
+
+        class Match:
+            def __init__(self, start):
+                self._start = start
+
+            def start(self):
+                return self._start
+
+            def end(self):
+                return self._start + 4
+
+        class BoundedPattern:
+            def finditer(self, _text):
+                yield Match(0)
+                raise AssertionError("search consumed a match after max_results")
+
+        with mock.patch("dalton_core.document_research.re.compile", return_value=BoundedPattern()):
+            proof = registry.search({
+                "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
+                "operation": SEARCH_OPERATION,
+                "purpose": "qualitative_research",
+                "research_question": "Where is the first term?",
+                "registration": registration,
+                "query_terms": ["term"],
+                "limits": {
+                    "max_results": 1,
+                    "context_before_chars": 0,
+                    "context_after_chars": 0,
+                },
+                "policy_ref": self.policy["policy_ref"],
+                "policy_hash": self.policy["content_hash"],
+            })
+        self.assertEqual(len(proof["matches"]), 1)
 
     def test_access_policy_is_checked_without_per_question_signature(self):
         adapter, _, _ = self._source(

@@ -340,6 +340,17 @@ class FeedChildLauncher(LaneChildLauncher):
         searched rather than trusted from the ledger.
         """
 
+        return self.locate_completed_manifest_binding(document_ref)["manifest"]
+
+    def locate_completed_manifest_binding(self, document_ref: str) -> dict[str, Any]:
+        """Return the durable ticket ref together with its verified manifest.
+
+        A caller creating immutable downstream authority must pin the ticket
+        selected here.  Returning only the manifest is sufficient for an
+        immediate read, but would make a later replay silently follow a newer
+        acquisition of the same document ref.
+        """
+
         if not isinstance(document_ref, str) or not document_ref:
             raise FeedLaunchRejected("document_ref is required")
         best: tuple[str, str] | None = None
@@ -356,7 +367,10 @@ class FeedChildLauncher(LaneChildLauncher):
                 best = key
         if best is None:
             raise FeedLaunchRejected("no completed acquisition ticket for this document")
-        return self.read_completed_manifest(best[1], document_ref)
+        return {
+            "ticket_ref": best[1],
+            "manifest": self.read_completed_manifest(best[1], document_ref),
+        }
 
     def running(self) -> bool:
         with self._lock:
