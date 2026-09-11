@@ -50,6 +50,7 @@ def company_state(
     dossier_feedback: Mapping[str, Any] | None = None,
     readable_documents: Sequence[Mapping[str, Any]] = (),
     unavailable_documents: Sequence[Mapping[str, Any]] = (),
+    document_research_feedback: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """One company's position, as a planner needs to see it.
 
@@ -134,6 +135,7 @@ def company_state(
         },
         "readable_documents": [dict(document) for document in readable_documents],
         "unavailable_documents": [dict(document) for document in unavailable_documents],
+        "document_research_feedback": [dict(item) for item in document_research_feedback],
     }
 
 
@@ -190,6 +192,7 @@ def build_research_state(
     unavailable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     document_research_policy: Mapping[str, Any] | None = None,
     document_research_availability: Mapping[str, Any] | None = None,
+    document_research_feedback: Mapping[str, Any] | None = None,
     budget: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     as_of: str,
@@ -208,6 +211,7 @@ def build_research_state(
     dossier_feedback_by_company = dossier_feedback_by_company or {}
     readable_documents_by_company = readable_documents_by_company or {}
     unavailable_documents_by_company = unavailable_documents_by_company or {}
+    document_research_feedback = document_research_feedback or {}
     companies = [
         company_state(
             entry,
@@ -218,6 +222,7 @@ def build_research_state(
             dossier_feedback=dossier_feedback_by_company.get(entry.get("company_ref")),
             readable_documents=readable_documents_by_company.get(entry.get("company_ref"), ()),
             unavailable_documents=unavailable_documents_by_company.get(entry.get("company_ref"), ()),
+            document_research_feedback=document_research_feedback.get("by_company", {}).get(entry.get("company_ref"), ()),
         )
         for entry in checklist
     ]
@@ -232,6 +237,10 @@ def build_research_state(
         "document_research_contract_ref": "directed-document:0.1",
         "document_research_policy": None if document_research_policy is None else dict(document_research_policy),
         "document_research_availability": dict(document_research_availability or {}),
+        "document_research_feedback_status": {
+            key: document_research_feedback[key] for key in ("status", "reason", "content_hash")
+            if key in document_research_feedback
+        },
         "as_of": as_of,
         "goal": {
             "mission_ref": mission.get("mission_ref"),

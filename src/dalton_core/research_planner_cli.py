@@ -176,6 +176,7 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         disputed[company_ref] = contested(observations)
     from .dossier_repair_feedback import read_dossier_repair_feedback
     from .document_research_inventory import load_document_inventory
+    from .document_research_feedback import read_document_research_feedback
 
     if document_inventory is None:
         try:
@@ -197,6 +198,7 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
             key: document_inventory[key] for key in ("status", "reason", "config_hash", "unavailable_sources")
             if key in document_inventory
         },
+        document_research_feedback=read_document_research_feedback(store, mission),
         budget=mission["budget"],
         spend=read_spend(store, mission, budget_db=budget_db,
                          as_of=datetime.fromisoformat(as_of)),
