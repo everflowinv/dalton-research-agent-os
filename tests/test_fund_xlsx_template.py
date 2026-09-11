@@ -166,6 +166,8 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertEqual(self.plan()["row_styles"]["driver"][1]["label_column"], 3)
 
         self.assertEqual(financials["A1"].fill.fgColor.rgb, "FF3366FF")
+        self.assertIsNone(financials["A1"].alignment.horizontal)
+        self.assertEqual(financials["E1"].alignment.horizontal, "right")
         self.assertEqual(financials["E1"].font.color.rgb, "FFFFFFFF")
         self.assertEqual(financials["E3"].font.color.rgb, "FF008000")
         self.assertEqual(financials["J3"].font.color.rgb, "FF000000")

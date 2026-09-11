@@ -17,7 +17,7 @@ STYLE_SCHEMA_VERSION = "fund-xlsx-template-style-0.1"
 PLAN_SCHEMA_VERSION = "fund-xlsx-template-apply-plan-0.1"
 STYLE_RESOURCE = "fund_xlsx_template_style.json"
 # Updated only when a new source-reviewed style contract is versioned.
-STYLE_RESOURCE_SHA256 = "13054dc88ccab6f572c4c4882ef9d16a4e850053d0d0a4b2c8dc6849b545922a"
+STYLE_RESOURCE_SHA256 = "673062d7ebe25980743e5db82727f7c25d6de81281cdd22e90ae887aa580b1b1"
 
 _SHEET_ROLES = ("valuation", "financials", "driver")
 _MODEL_ROLES = frozenset({"financials", "driver"})
@@ -79,7 +79,9 @@ def load_fund_xlsx_template_style() -> dict[str, Any]:
     } and all(isinstance(value, str) and _HEX64.fullmatch(value)
               for value in proof.values()),
           "fund XLSX template source proof differs")
-    _need(set(style["styles"]) == _ROW_STYLES | _CELL_STYLES | {"period_header"},
+    _need(set(style["styles"]) == _ROW_STYLES | _CELL_STYLES | {
+        "unit_header", "period_header",
+    },
           "fund XLSX template style vocabulary differs")
     _need(set(style["number_formats"]) == _NUMBER_KINDS,
           "fund XLSX template number formats differ")
@@ -318,7 +320,8 @@ def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
             sheet.cell(1, item["column"], item["label"])
         for cell in next(sheet.iter_rows(min_row=1, max_row=1,
                                          min_col=1, max_col=last_column)):
-            _apply_style(cell, style["styles"]["period_header"], Font=Font,
+            header_style = "unit_header" if cell.column == 1 else "period_header"
+            _apply_style(cell, style["styles"][header_style], Font=Font,
                          PatternFill=PatternFill, Border=Border, Side=Side,
                          Alignment=Alignment)
         for row in plan["row_styles"].get(role, []):

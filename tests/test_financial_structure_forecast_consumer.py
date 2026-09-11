@@ -448,16 +448,19 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 calendar_binding=calendar)
             book = load_workbook(path, data_only=False)
         financials = book["Financials"]
-        pretax_row = next(row for row in range(5, financials.max_row + 1)
-                          if str(financials.cell(row, 1).value).startswith("Pretax"))
+        pretax_row = next(
+            row for row in range(3, financials.max_row + 1)
+            if any(str(financials.cell(row, column).value).startswith("Pretax")
+                   for column in range(1, 5))
+        )
         formulas = [financials.cell(pretax_row, column).value
                     for column in range(2, financials.max_column + 1)]
         self.assertTrue(any(isinstance(value, str) and "+" in value and "-" in value
                             for value in formulas), formulas)
-        eps_row = 5 + next(index for index, result in enumerate(record["results"])
+        eps_row = 3 + next(index for index, result in enumerate(record["results"])
                            if result["role"] == "diluted_eps")
         # No annual EPS is made by summing per-share quarters.
-        self.assertIsNone(financials.cell(eps_row, 2).value)
+        self.assertIsNone(financials.cell(eps_row, 5).value)
         self.assertIn(",,", _number_format("usd"))
         self.assertEqual(_display_unit("usd"), "USD millions")
         self.assertEqual(_display_unit("eur_per_share"), "EUR per share")
@@ -488,16 +491,23 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 calendar_binding=calendar)
             book = load_workbook(path, data_only=False)
         financials = book["Financials"]
-        rows = {result["role"]: 5 + index
+        rows = {result["role"]: 3 + index
                 for index, result in enumerate(record["results"])}
-        self.assertEqual(financials.cell(rows["diluted_eps_numerator"], 2).value, 670)
         self.assertEqual(
-            financials.cell(rows["diluted_weighted_average_shares"], 2).value, 100)
+            financials.cell(rows["diluted_eps_numerator"], 5).value, 0.00067)
         self.assertEqual(
-            financials.cell(rows["diluted_eps"], 2).value,
-            f"='Financials'!B{rows['diluted_eps_numerator']}/"
-            f"'Financials'!B{rows['diluted_weighted_average_shares']}",
+            financials.cell(
+                rows["diluted_weighted_average_shares"], 5).value, 0.0001)
+        self.assertEqual(
+            financials.cell(rows["diluted_eps"], 5).value,
+            f"='Financials'!E{rows['diluted_eps_numerator']}/"
+            f"'Financials'!E{rows['diluted_weighted_average_shares']}",
         )
+        self.assertTrue(any(
+            "shares millions" in str(financials.cell(
+                rows["diluted_weighted_average_shares"], column).value)
+            for column in range(1, 5)
+        ))
         self.assertIn(
             "historical-structured-annual-diluted-eps",
             [book["Formula Map"].cell(row, 2).value
@@ -530,17 +540,17 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 calendar_binding=calendar)
             book = load_workbook(path, data_only=False)
         financials = book["Financials"]
-        rows = {result["role"]: 5 + index
+        rows = {result["role"]: 3 + index
                 for index, result in enumerate(record["results"])}
         share_formula = financials.cell(
-            rows["diluted_weighted_average_shares"], 3).value
+            rows["diluted_weighted_average_shares"], 6).value
         self.assertIsInstance(share_formula, str)
         self.assertIn("*90", share_formula)
         self.assertIn("*92", share_formula)
         self.assertEqual(
-            financials.cell(rows["diluted_eps"], 3).value,
-            f"='Financials'!C{rows['diluted_eps_numerator']}/"
-            f"'Financials'!C{rows['diluted_weighted_average_shares']}",
+            financials.cell(rows["diluted_eps"], 6).value,
+            f"='Financials'!F{rows['diluted_eps_numerator']}/"
+            f"'Financials'!F{rows['diluted_weighted_average_shares']}",
         )
 
         no_authority_candidate = annual_forecastable_proposal(inputs)
@@ -567,12 +577,12 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 calendar_binding=calendar)
             unavailable = load_workbook(path, data_only=False)["Financials"]
         unavailable_rows = {
-            result["role"]: 5 + index
+            result["role"]: 3 + index
             for index, result in enumerate(no_authority_record["results"])
         }
         self.assertIsNone(unavailable.cell(
-            unavailable_rows["diluted_weighted_average_shares"], 3).value)
-        self.assertIsNone(unavailable.cell(unavailable_rows["diluted_eps"], 3).value)
+            unavailable_rows["diluted_weighted_average_shares"], 6).value)
+        self.assertIsNone(unavailable.cell(unavailable_rows["diluted_eps"], 6).value)
 
 
 if __name__ == "__main__":

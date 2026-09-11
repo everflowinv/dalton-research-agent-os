@@ -63,6 +63,15 @@
     }
   },
   "styles": {
+    "unit_header": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": true,
+        "color": "FFFFFFFF"
+      },
+      "fill": "FF3366FF"
+    },
     "period_header": {
       "font": {
         "name": "Arial",

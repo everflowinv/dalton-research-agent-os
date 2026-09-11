@@ -23,8 +23,9 @@ roles. `build_fund_xlsx_template_plan` converts those inputs into a closed plan.
   levels to caller-selected rows;
 - applies the source Arial 8 typography, blue/brown section fills, blue inputs,
   green cross-sheet formulas, black local formulas, yellow hair-border
-  assumptions, exact number formats, column widths, row height, hidden selected
-  periods, hidden gridlines, and an E2 freeze pane; and
+  assumptions, a left-aligned unit header distinct from right-aligned periods,
+  exact number formats, column widths, row height, hidden selected periods,
+  hidden gridlines, and an E2 freeze pane; and
 - preserves existing line-item values and formulas.
 
 The caller must explicitly name hidden periods and every styled row or cell.
@@ -36,4 +37,15 @@ Validation:
 - `PYTHONPATH=/Users/everflow/Projects/dalton-fund-xlsx-template/src /Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_fund_xlsx_template -v`
 - Four tests pass, covering the source/hash binding, JSON tamper refusal,
   company-specific row application with value/formula preservation, and closed
-  mapping refusal.
+mapping refusal.
+
+The production exporter consumes this plan as `fund-xlsx-layout:0.4`. It writes
+Valuation, Financials, and Driver in the reviewed order, places dynamic company
+rows in the A/B/C hierarchy, and keeps the immutable Sources and Formula Map
+audit sheets after the model sheets. ISO-currency inputs are converted to
+displayed millions before formulas are written. Diluted-share inputs used by
+EPS are likewise displayed in millions of shares, so currency-per-share
+formulas remain dimensionally exact. The raw governed records remain bound by
+their immutable references and hashes in the audit sheets, and Formula Map
+records the display transform. Missing annual authority stays blank and is
+reported as a gap.
