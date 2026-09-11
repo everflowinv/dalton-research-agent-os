@@ -508,6 +508,34 @@ def _unit_provenance(value: Any) -> dict[str, Any]:
                 or not isinstance(parse_input["market_view_available"], bool)):
             raise CompanyDossierValidationError(
                 f"unit_provenance.{unit}.producer_input.parse_input has an invalid closed shape")
+        structure = []
+        for index, slot in enumerate(parse_input["structure"]):
+            if not isinstance(slot, Mapping) or set(slot) != {"slot_id", "prompt"}:
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit}.producer_input.parse_input.structure[{index}] "
+                    "has an invalid closed shape")
+            structure.append({
+                "slot_id": _text(slot["slot_id"], "slot_id", maximum=256),
+                "prompt": _text(slot["prompt"], "prompt", maximum=2000),
+            })
+        from .company_dossier_draft import material_rows
+        claims = [row for row in parse_input["material"]
+                  if isinstance(row, Mapping) and row.get("kind") == "claim"]
+        numbers = [row for row in parse_input["material"]
+                   if not (isinstance(row, Mapping) and row.get("kind") == "claim")]
+        normalized_material = material_rows(claims, numbers)
+        if structure != parse_input["structure"] or normalized_material != parse_input["material"]:
+            raise CompanyDossierValidationError(
+                f"unit_provenance.{unit}.producer_input.parse_input is not canonical")
+        classification = parse_input["classification"]
+        if classification is not None:
+            _one_of(classification, INDUSTRY_CLASSIFICATIONS, "classification")
+        profile = parse_input["profile"]
+        if profile is not None:
+            from .guidance_profile import validate_profile
+            if validate_profile(profile) != profile:
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit}.producer_input.parse_input.profile is not canonical")
         company = producer_input["company"]
         if (not isinstance(company, Mapping)
                 or set(company) != {"company_ref", "ticker"}
@@ -1403,6 +1431,19 @@ class CompanyDossierAuthority:
             return self.publish(body)
         from .company_dossier_cli import validate_formal_unit_provenance
         mission_ref = ((body.get("bindings") or {}).get("mission_version_ref"))
+        mission_row = self.connection.execute(
+            "SELECT record_json,content_hash FROM coverage_mission_versions "
+            "WHERE mission_version_id=?", (mission_ref,),
+        ).fetchone()
+        if mission_row is None:
+            raise CompanyDossierValidationError(
+                "the dossier mission binding does not resolve")
+        mission_record = json.loads(mission_row["record_json"])
+        if (mission_record.get("id") != mission_ref
+                or content_hash({key: value for key, value in mission_record.items()
+                         if key != "content_hash"}) != mission_row["content_hash"]
+                or mission_record.get("content_hash") != mission_row["content_hash"]):
+            raise CompanyDossierValidationError("the dossier mission authority drifted")
         prior_ref = body.get(SOURCE_VERSION_KEY)
         prior = None if prior_ref is None else self.dossier(prior_ref)
 
@@ -1445,6 +1486,7 @@ class CompanyDossierAuthority:
             company_ref=body.get("company_ref"), current_units=changed_units,
             current_blocks=changed_blocks,
             current_bindings=body.get("bindings"),
+            current_mission_hash=mission_row["content_hash"],
             scheduler_db=scheduler_db, router_db=router_db,
         )
         return self.publish(body, _provenance_verified=True)

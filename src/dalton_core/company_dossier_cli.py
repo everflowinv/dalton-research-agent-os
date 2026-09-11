@@ -772,6 +772,7 @@ def validate_formal_unit_provenance(
     company_ref: str | None = None, current_units: set[str] | None = None,
     current_blocks: Mapping[str, Any] | None = None,
     current_bindings: Mapping[str, Any] | None = None,
+    current_mission_hash: str | None = None,
     scheduler_db: str | Path, router_db: str | Path,
 ) -> None:
     """Resolve every claimed producer/verifier ref against formal authorities."""
@@ -798,7 +799,9 @@ def validate_formal_unit_provenance(
                     and (producer_input.get("company") or {}).get("company_ref") != company_ref):
                 raise ValueError(f"unit_provenance.{unit} company binding drifted")
             if (is_current and (item["producer_prior_version_ref"] != current_prior_ref
-                    or bound_mission.get("ref") != mission_ref)):
+                    or bound_mission.get("ref") != mission_ref
+                    or (current_mission_hash is not None
+                        and bound_mission.get("hash") != current_mission_hash))):
                 raise ValueError(f"unit_provenance.{unit} current producer mission drifted")
             if is_current and current_bindings is not None:
                 expected_constitution = current_bindings.get("constitution_version") or {}
