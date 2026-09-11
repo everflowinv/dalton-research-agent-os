@@ -18,10 +18,10 @@ ELIGIBLE_RETURNED_CODES = frozenset({
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
-def validate_provider_retry(value: Any) -> dict[str, int]:
-    if not isinstance(value, Mapping) or set(value) != {
-        "max_same_profile_retries", "retry_backoff_seconds",
-    }:
+def validate_provider_retry(value: Any) -> dict[str, Any]:
+    required = {"max_same_profile_retries", "retry_backoff_seconds"}
+    if (not isinstance(value, Mapping) or not required.issubset(value)
+            or set(value) - required != ({"unknown_recovery"} if "unknown_recovery" in value else set())):
         raise ProviderRetryError("provider_retry has an invalid shape")
     retries = value["max_same_profile_retries"]
     backoff = value["retry_backoff_seconds"]
@@ -29,8 +29,23 @@ def validate_provider_retry(value: Any) -> dict[str, int]:
         raise ProviderRetryError("max_same_profile_retries must be a non-negative integer")
     if isinstance(backoff, bool) or not isinstance(backoff, int) or backoff < 0:
         raise ProviderRetryError("retry_backoff_seconds must be a non-negative integer")
-    return {"max_same_profile_retries": retries,
-            "retry_backoff_seconds": backoff}
+    result: dict[str, Any] = {"max_same_profile_retries": retries,
+                              "retry_backoff_seconds": backoff}
+    if "unknown_recovery" in value:
+        recovery = value["unknown_recovery"]
+        if not isinstance(recovery, Mapping) or set(recovery) != {
+            "max_fresh_work_orders", "retry_backoff_seconds", "max_elapsed_seconds",
+        }:
+            raise ProviderRetryError("unknown_recovery has an invalid shape")
+        parsed = {}
+        for key in ("max_fresh_work_orders", "retry_backoff_seconds", "max_elapsed_seconds"):
+            item = recovery[key]
+            minimum = 1 if key != "retry_backoff_seconds" else 0
+            if isinstance(item, bool) or not isinstance(item, int) or item < minimum:
+                raise ProviderRetryError(f"unknown_recovery.{key} is invalid")
+            parsed[key] = item
+        result["unknown_recovery"] = parsed
+    return result
 
 
 def returned_provider_failure_proof(invocation: Any, result: Any) -> dict[str, str] | None:

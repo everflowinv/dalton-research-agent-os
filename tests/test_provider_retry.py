@@ -23,6 +23,21 @@ class ProviderRetryContractTests(unittest.TestCase):
         self.assertEqual(validate_provider_retry({
             "max_same_profile_retries": 4, "retry_backoff_seconds": 0,
         })["max_same_profile_retries"], 4)
+        policy = validate_provider_retry({
+            "max_same_profile_retries": 1, "retry_backoff_seconds": 2,
+            "unknown_recovery": {"max_fresh_work_orders": 2,
+                                 "retry_backoff_seconds": 30,
+                                 "max_elapsed_seconds": 600},
+        })
+        self.assertEqual(policy["unknown_recovery"]["max_fresh_work_orders"], 2)
+        for recovery in ({}, {"max_fresh_work_orders": 0,
+                              "retry_backoff_seconds": 0,
+                              "max_elapsed_seconds": 60}):
+            with self.assertRaises(ProviderRetryError):
+                validate_provider_retry({
+                    "max_same_profile_retries": 1, "retry_backoff_seconds": 2,
+                    "unknown_recovery": recovery,
+                })
 
     def test_only_exact_completed_broker_failure_is_eligible(self):
         work = WorkOrder(
