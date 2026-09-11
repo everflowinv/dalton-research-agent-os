@@ -6,11 +6,11 @@
 
 **下一基础修复冻结为 2e94acd；live 仍为已运行核验的 b5ee132。** 实际 IBM 发布暴露了生成器已有 `cost_driver_slots`、正式校验器却拒绝该字段的缺口。已将字段纳入严格可选合同：字段缺省兼容旧记录，出现时必须是冻结词表中的非空、不重复列表；null/标量/未知值均拒绝。恢复身份使用明确版本 3 的 admission contract，成功模型的 generator 和 digest 不变。
 
-同一冻结的真实 IBM/CTSH 只读资料 → 隔离 authority 完整发布验收通过：IBM 12 条、CTSH 8 条预测线，economic invariants 无拒绝、filing proof 可回放，spec/input/model 哈希均一致。隔离目标只种入所需 filing/statement 行，省略无关祖先，不将此结果算作 live 正式模型。合并回归 388 项通过；wheel 556 文件逐字一致、3 处 JS 通过；当前副本演练 67 schemas / 40 entries / 0 escaped；完整测试运行中。
+同一冻结的真实 IBM/CTSH 只读资料 → 隔离 authority 完整发布验收通过：IBM 12 条、CTSH 8 条预测线，economic invariants 无拒绝、filing proof 可回放，spec/input/model 哈希均一致。隔离目标只种入所需 filing/statement 行，省略无关祖先，不将此结果算作 live 正式模型。合并回归 388 项通过；wheel 556 文件逐字一致、3 处 JS 通过；当前副本演练 67 schemas / 40 entries / 0 escaped；同一干净冻结完整测试 6,785 项 / 585.477s / 1 skip 已通过。
 
 模型规格逐公司公平性、显式子任务 input/task 校验、与已发表 Dossier 一致的分类读取，以及价格/预期/日历来源受阻状态误报修复均在此冻结。正式 host 模型 broker 仅 2 并发，连续两轮被先启动的规格/规划调用占满，后续工作反复 BUSY；正在复核仅将现有容量配置 2→8 的停服窗口操作，保留全部模型与 mission/单次/pool 预算。
 
-**Next step：** 等同版完整测试和停服操作审查完成，部署一次，并继续正式 Dossier/event/forecast 产品验收。人类来源与研究裁决仍保留，高阶投资能力不抢占基础工作。
+**Next step：** 同版完整测试已完成，待停服操作审查完成后部署一次，并继续正式 Dossier/event/forecast 产品验收。人类来源与研究裁决仍保留，高阶投资能力不抢占基础工作。
 
 ## 前一检查点（2026-09-10，23:42 UTC）
 
