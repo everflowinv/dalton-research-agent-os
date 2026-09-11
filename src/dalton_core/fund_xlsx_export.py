@@ -653,7 +653,8 @@ def export_fund_workbook(
                 template_cell_styles["driver"].append({
                     "range": driver.cell(row, ci).coordinate,
                     "style": (
-                        "local_formula" if assumption.get("kind") == "actual"
+                        "cross_sheet_formula" if actual_share_formula is not None
+                        else "local_formula" if assumption.get("kind") == "actual"
                         else "assumption_input"
                     ),
                     "number_kind": _template_number_kind(unit),

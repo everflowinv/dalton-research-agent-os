@@ -771,7 +771,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         )
         self.assertEqual(
             driver.cell(cost_ratio_row, actual_column).font.color.rgb[-6:],
-            "000000",
+            "008000",
         )
         self.assertIsInstance(
             driver.cell(cost_ratio_row, forecast_column).value, (int, float),
