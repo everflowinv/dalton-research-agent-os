@@ -752,7 +752,7 @@ async function openModels(){const sheet=prepareReader("研究详情");
   try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
   catch(e){sheet.replaceChildren(readerClose(),node("div",e.message,"empty"))}}
 function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
-  node("div","第一行是主选，后面的是它答不上时接手的。改了以后不用重启：下一次调用就按新的走；想回到原来的，把原来的再选一次。","meta"));
+  node("div","每个环节会说明当前使用的是模型顺序还是候选集。可热加载的环节在下一次调用生效；标为需重启的环节按行内提示生效。想回到原来的，把原来的再选一次。","meta"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   (r.notices||[]).filter(n=>!n.acknowledged).forEach(n=>{
     const d=node("div",null,"gap");d.append(node("b","模型变动"),node("div",n.message,"raw"));
@@ -791,7 +791,7 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     if(budget&&budget.editable){
       const section=node("details"),summary=node("summary",kind==="call"?"调用预算":"每轮任务预算");section.append(summary);
       section.append(node("small","留空沿用默认值。日预算和预算池仍会限制实际开销。","meta"));
-      const fields=kind==="call"?[["max_cost_usd","单次费用上限（美元）","any"],["max_input_tokens","输入额度（按 UTF-8 字节预估）","1"],
+      const fields=kind==="call"?[["max_cost_usd","单次费用上限（美元）","any"],["max_input_tokens","输入额度（token，系统按文本估算）","1"],
         ["max_output_tokens","输出额度（token）","1"],["timeout_seconds","单次超时（秒）","1"]]:
         [["max_cost_usd","每轮费用上限（美元）","any"],["max_units","每轮处理单元数","1"],
          ["max_events","每轮事件数","1"],["max_events_per_company","每家公司事件数","1"],
@@ -962,10 +962,13 @@ function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运�
     node("div","权限或治理配置改变后继续；等待期间不重复调用。","hint"));const ul=node("ul",null,"latest");
     (r.permission_items||[]).forEach(it=>ul.append(node("li",`${it.lane_label}：${it.reason}`)));s.append(ul);sheet.append(s)}
   if(r.terminal_count){const s=node("section");
-    s.append(node("h3",`读到了但用不了 · ${r.terminal_count} 件`),
-             node("div","这些不会再重试；内容本身读不出来，再试一次读到的还是同样的字节。","hint"));
+    s.append(node("h3",`当前产出未通过校验 · ${r.terminal_count} 件`),
+             node("div","这些产出没有通过内容或证据校验，不会原样重试。","hint"));
     const ul=node("ul",null,"latest");
-    r.terminal_items.forEach(it=>ul.append(node("li",`${it.lane_label}：${it.item_key} — ${it.reason}`)));
+    const grouped=new Map();r.terminal_items.forEach(it=>{const reason=it.display_reason||"当前产出未通过内容或证据校验";
+      const key=`${it.lane_label}\u0000${reason}`,found=grouped.get(key);if(found)found.count+=1;
+      else grouped.set(key,{lane_label:it.lane_label,reason,count:1})});
+    grouped.forEach(it=>ul.append(node("li",`${it.lane_label}：${it.reason}${it.count>1?`（${it.count} 件）`:""}`)));
     s.append(ul);sheet.append(s)}}
 function laneStatus(s){return{launched:"运行中",busy:"运行中",running:"运行中",idle:"待命",ready:"就绪",held:"暂停等待",failed:"出错",budget_exhausted:"今日额度用完",paused:"已暂停",ungranted:"缺授权，一次也没跑",unconfigured:"还没装上",unapproved:"等你批准数据源",unstarted:"这台机器上还没跑过",rejected:"被拒绝",unavailable:"暂时读不到",current:"已经是最新"}[s]||s||"待命"}
 function svc(state,tick){const d=$("svc-dot"),t=$("svc-text");const stale=tick&&(Date.now()-new Date(tick).getTime())>10*60*1000;if(state==="running"&&!stale){d.className="dot";t.textContent=`系统运行中 · 最近活动 ${ago(tick)}`}else if(state){d.className="dot warn";t.textContent=`系统${stale?"可能停了":state} · 最近活动 ${ago(tick)}`}else{d.className="dot off";t.textContent="读不到系统状态"}}

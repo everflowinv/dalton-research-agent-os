@@ -201,14 +201,20 @@ REGISTRY_LANE_LABELS = {
     "mission_catalyst_calendar": "记下公司下次开口的日子",
     "mission_consensus": "看街上预期什么",
     "company_model_spec": "写公司模型的规格",
+    "mission_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
+    "mission_model_forecast": "算预测行",
     "forecast_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
+    "mission_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
     "claim_index": "给结论建索引",
+    "mission_claim_index": "给结论建索引",
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",
     "event_judgement": "判断新发生的事要不要动",
+    "mission_event_judgement": "判断新发生的事要不要动",
     "earnings_season": "业绩前写前瞻、业绩后对账",
     "debate_map": "整理市场在吵什么、我们站哪边",
+    "mission_debate_map": "整理市场在吵什么、我们站哪边",
     "debate_map_verifier": "独立核验市场争议图",
     "mission_crowd_sources": "看散户与员工在说什么",
     "mission_stage": "记录研究阶段",
@@ -225,6 +231,7 @@ REGISTRY_LANE_LABELS = {
     "mission_ownership": "看谁在买卖这家公司",
     "mission_hkex_filings": "看港股公司每天回购了多少、董事有没有增减持",
     "conviction_call": "提出值得下注的判断，等你裁决",
+    "mission_conviction": "提出值得下注的判断，等你裁决",
     "conviction_call_verifier": "独立核验投资判断",
     "mission_reopen": "看已过闸的公司够不够重写一版",
     "catalog_sync": "跟住网关有哪些模型可用",
@@ -278,10 +285,36 @@ DEPENDENCY_LABELS: dict[str, str] = {
 }
 FAILURE_CLASS_LABELS: dict[str, str] = {
     "dependency_unavailable": "依赖不可用：等它回来，不算重试次数",
-    "content_refused": "内容不可用：读到了但用不了，不再重试",
+    "content_refused": "产出未通过内容或证据校验：不原样重试",
     "not_permitted": "待授权：权限或治理配置改变后再继续",
     "transient": "临时失败：有限次重试",
 }
+
+
+def _terminal_display_reason(reason: Any) -> str:
+    """Translate a terminal ledger reason without changing its audit record.
+
+    These matches describe closed validator outcomes already emitted by the
+    product.  They are display-only: an unknown sentence gets the generic
+    explanation and never acquires a new failure classification.
+    """
+
+    text = str(reason or "").casefold()
+    if "numbers_without_refs" in text or "number_not_in_source" in text:
+        return "数字缺少可核验来源"
+    if any(marker in text for marker in (
+        "longer than", "must be at most", "must be exactly", "got keys",
+    )):
+        return "输出格式或长度不符合要求"
+    if any(marker in text for marker in (
+        "cites nothing", "no reference", "not in any of the cited sources",
+    )):
+        return "现有证据不支持这份产出"
+    if text.strip() == "verification_failed":
+        return "产出未通过独立核验"
+    if "segment_sum:" in text or "rate_domain:" in text:
+        return "历史数字未通过勾稽或单位校验"
+    return "当前产出未通过内容或证据校验"
 
 OUTCOME_LABELS = {
     "should_have_moved": "当时该动没动（候选）",
@@ -2360,7 +2393,9 @@ class CockpitPlane:
                 ],
             })
         terminal = [
-            {**row, "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"])}
+            {**row,
+             "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"]),
+             "display_reason": _terminal_display_reason(row.get("reason"))}
             for row in backlog["terminal_items"]
         ]
         permissions = [
@@ -2378,7 +2413,8 @@ class CockpitPlane:
             "permission_count": backlog["permission_count"],
             "class_labels": dict(FAILURE_CLASS_LABELS),
             "note": ("挂起 = 依赖不可用，等依赖回来自动重试，不消耗重试预算；"
-                     "待授权 = 权限或治理配置改变后再继续；终态 = 内容读到了但用不了，不会再试"),
+                     "待授权 = 权限或治理配置改变后再继续；终态 = 当前产出未通过内容或证据校验，"
+                     "不会原样重试"),
         }
 
     def _panel_lanes(self, lanes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

@@ -98,7 +98,41 @@ class OpsBacklogTests(PanelCase):
         self.assertEqual(backlog["parked_items"], 0)
         self.assertEqual(backlog["terminal_count"], 1)
         self.assertEqual(backlog["terminal_items"][0]["item_key"], "doc:9")
+        self.assertEqual(
+            backlog["terminal_items"][0]["display_reason"],
+            "当前产出未通过内容或证据校验",
+        )
         self.assertEqual(set(backlog["class_labels"]), set(FAILURE_CLASS_LABELS))
+
+    def test_terminal_validator_reasons_are_translated_without_losing_raw_audit(self) -> None:
+        reasons = {
+            "doc:number": ("number_not_in_source", "数字缺少可核验来源"),
+            "doc:length": ("assessment is longer than 1200 characters", "输出格式或长度不符合要求"),
+            "doc:evidence": ("this draft cites nothing new", "现有证据不支持这份产出"),
+        }
+        moment = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)
+        with LaneFailureLedger(default_path(self.root), clock=lambda: moment) as ledger:
+            for item, (reason, _) in reasons.items():
+                ledger.append_event(
+                    lane="company_dossier", item_key=item, event="terminal",
+                    failure_class="content_refused", dependency=None,
+                    reason=reason, rule="content_refused", status=None,
+                )
+        rows = {row["item_key"]: row for row in self.plane.ops_backlog()["terminal_items"]}
+        for item, (raw, display) in reasons.items():
+            with self.subTest(item=item):
+                self.assertEqual(rows[item]["reason"], raw)
+                self.assertEqual(rows[item]["display_reason"], display)
+
+    def test_historical_mission_lane_keys_have_owner_labels(self) -> None:
+        for lane in (
+            "mission_event_judgement", "mission_debate_map", "mission_model_spec",
+            "mission_model_forecast", "mission_sensitivity", "mission_claim_index",
+            "mission_conviction",
+        ):
+            with self.subTest(lane=lane):
+                self.assertIn(lane, REGISTRY_LANE_LABELS)
+                self.assertNotEqual(REGISTRY_LANE_LABELS[lane], lane)
 
     def test_permission_items_have_their_own_authorization_bucket(self) -> None:
         self.park(item="doc:permission",
@@ -266,6 +300,19 @@ class PageTests(unittest.TestCase):
                      "上周产物验收", "运维待办"):
             with self.subTest(word=word):
                 self.assertIn(word, self.page)
+
+    def test_terminal_copy_does_not_claim_every_failure_is_unreadable_bytes(self) -> None:
+        self.assertIn("当前产出未通过校验", self.page)
+        self.assertIn("没有通过内容或证据校验", self.page)
+        self.assertNotIn("内容本身读不出来，再试一次读到的还是同样的字节", self.page)
+        self.assertIn("const grouped=new Map()", self.page)
+        self.assertIn("it.count>1", self.page)
+
+    def test_model_copy_distinguishes_reload_and_token_budget(self) -> None:
+        self.assertIn("可热加载的环节在下一次调用生效", self.page)
+        self.assertIn("标为需重启的环节按行内提示生效", self.page)
+        self.assertIn("输入额度（token，系统按文本估算）", self.page)
+        self.assertNotIn("输入额度（按 UTF-8 字节预估）", self.page)
 
 
 if __name__ == "__main__":  # pragma: no cover
