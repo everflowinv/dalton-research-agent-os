@@ -16,7 +16,7 @@ STYLE_SCHEMA_VERSION = "fund-xlsx-template-style-0.1"
 PLAN_SCHEMA_VERSION = "fund-xlsx-template-apply-plan-0.1"
 STYLE_RESOURCE = "fund_xlsx_template_style.json"
 # Updated only when a new source-reviewed style contract is versioned.
-STYLE_RESOURCE_SHA256 = "d5610bc12649b029fda3ba856792c137cffcd7bb343db7ee2f74cdb931b02c0b"
+STYLE_RESOURCE_SHA256 = "9b1bdbb11320c1766f6e3dce870260f9cb7b29e4b2e009e6437ce84e4097690c"
 
 _SHEET_ROLES = ("valuation", "financials", "driver")
 _MODEL_ROLES = frozenset({"financials", "driver"})
@@ -152,6 +152,7 @@ def build_fund_xlsx_template_plan(
     annual_periods: Sequence[str],
     quarterly_periods: Sequence[str],
     unit_labels: Mapping[str, str],
+    annual_support_headers: Sequence[str] = ("CAGR",),
     hidden_periods: Sequence[str] = (),
     row_styles: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     cell_styles: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
@@ -175,18 +176,27 @@ def build_fund_xlsx_template_plan(
           "unit labels must bind the two model sheets")
     annual = _text_list(annual_periods, "annual periods")
     quarterly = _text_list(quarterly_periods, "quarterly periods")
+    support = _text_list(annual_support_headers, "annual support headers")
     _need(not set(annual).intersection(quarterly), "annual and quarterly periods overlap")
+    _need(not (set(support) & (set(annual) | set(quarterly))),
+          "annual support headers overlap periods")
     hidden = list(hidden_periods)
     _need(len(hidden) == len(set(hidden)) and set(hidden).issubset(set(annual) | set(quarterly)),
           "hidden periods must be unique selected periods")
     first_annual = 5
-    first_quarter = first_annual + len(annual) + 1
+    first_support_gutter = first_annual + len(annual)
+    first_support = first_support_gutter + 1
+    second_support_gutter = first_support + len(support)
+    first_quarter = second_support_gutter + 1
     columns = {
         "period_row": 1,
         "label_column": 4,
         "annual": [{"label": label, "column": first_annual + index}
                    for index, label in enumerate(annual)],
-        "separator_column": first_quarter - 1,
+        "annual_support_gutter_before": first_support_gutter,
+        "annual_support": [{"label": label, "column": first_support + index}
+                           for index, label in enumerate(support)],
+        "annual_support_gutter_after": second_support_gutter,
         "quarterly": [{"label": label, "column": first_quarter + index}
                       for index, label in enumerate(quarterly)],
         "hidden_columns": sorted(
@@ -264,7 +274,7 @@ def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
     for index, sheet in enumerate(desired):
         workbook.move_sheet(sheet, offset=index - workbook.index(sheet))
     columns = plan["columns"]
-    all_periods = columns["annual"] + columns["quarterly"]
+    all_periods = columns["annual"] + columns["annual_support"] + columns["quarterly"]
     _need(all_periods and columns["annual"] and columns["quarterly"],
           "fund XLSX template plan needs annual and quarterly periods")
     last_column = max(item["column"] for item in all_periods)
@@ -282,8 +292,13 @@ def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
         sheet.column_dimensions["D"].width = widths[f"{role}_label"]
         for item in all_periods:
             sheet.column_dimensions[get_column_letter(item["column"])].width = model_grid["period_column_width"]
-        separator = get_column_letter(columns["separator_column"])
-        sheet.column_dimensions[separator].width = model_grid["period_separator_width"]
+        support = model_grid["annual_support"]
+        before_gutter = get_column_letter(columns["annual_support_gutter_before"])
+        after_gutter = get_column_letter(columns["annual_support_gutter_after"])
+        sheet.column_dimensions[before_gutter].width = support[f"{role}_gutter_before_width"]
+        sheet.column_dimensions[after_gutter].width = support[f"{role}_gutter_after_width"]
+        for item in columns["annual_support"]:
+            sheet.column_dimensions[get_column_letter(item["column"])].width = support[f"{role}_width"]
         for column in columns["hidden_columns"]:
             sheet.column_dimensions[get_column_letter(column)].hidden = True
         max_row = max(sheet.max_row, 1)

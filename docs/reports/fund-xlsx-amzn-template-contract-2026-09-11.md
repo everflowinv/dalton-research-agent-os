@@ -15,8 +15,9 @@ roles. `build_fund_xlsx_template_plan` converts those inputs into a closed plan.
 `apply_fund_xlsx_template` then:
 
 - orders Valuation before Financials and Driver while retaining other sheets;
-- puts periods on row 1, with annual columns beginning at E and the quarterly
-  block to the right of one separator column;
+- puts periods on row 1, with annual columns beginning at E, then a gutter,
+  explicit annual-support columns such as CAGR, a second gutter, and the
+  quarterly block; support labels and period counts remain company inputs;
 - reserves A:C for hierarchy, D for company-specific labels, and binds outline
   levels to caller-selected rows;
 - applies the source Arial 8 typography, blue/brown section fills, blue inputs,

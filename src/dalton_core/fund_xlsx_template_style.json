@@ -21,7 +21,17 @@
     ],
     "label_column": 4,
     "period_column_width": 7.125,
-    "period_separator_width": 1.375,
+    "annual_support": {
+      "default_headers": [
+        "CAGR"
+      ],
+      "financials_width": 6.375,
+      "driver_width": 6.625,
+      "financials_gutter_before_width": 1.375,
+      "financials_gutter_after_width": 1.125,
+      "driver_gutter_before_width": 1.125,
+      "driver_gutter_after_width": 0.875
+    },
     "default_row_height": 11.25,
     "freeze_cell": "E2",
     "show_grid_lines": false,

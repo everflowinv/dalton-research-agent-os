@@ -22,6 +22,7 @@ class FundXlsxTemplateTests(unittest.TestCase):
             },
             annual_periods=["FY2025A", "FY2026E"],
             quarterly_periods=["Q1 FY2026A", "Q2 FY2026E", "Q3 FY2026E"],
+            annual_support_headers=["CAGR FY2024–FY2026E"],
             hidden_periods=["FY2025A"],
             unit_labels={"financials": "(USD MM)", "driver": "(USD MM)"},
             row_styles={
@@ -42,13 +43,13 @@ class FundXlsxTemplateTests(unittest.TestCase):
                 "financials": [
                     {"range": "E3:F3", "style": "cross_sheet_formula",
                      "number_kind": "amount"},
-                    {"range": "H3:J3", "style": "local_formula",
+                    {"range": "J3:L3", "style": "local_formula",
                      "number_kind": "amount_one_decimal"},
                 ],
                 "driver": [
                     {"range": "F3:F3", "style": "hardcoded_input",
                      "number_kind": "percentage"},
-                    {"range": "H3:J3", "style": "assumption_input",
+                    {"range": "J3:L3", "style": "assumption_input",
                      "number_kind": "percentage"},
                 ],
                 "valuation": [
@@ -75,6 +76,22 @@ class FundXlsxTemplateTests(unittest.TestCase):
             with self.assertRaisesRegex(FundXlsxTemplateError, "bytes differ"):
                 load_fund_xlsx_template_style()
 
+    def test_reference_period_geometry_keeps_cagr_between_two_gutters(self):
+        plan = build_fund_xlsx_template_plan(
+            sheet_names={"valuation": "Valuation", "financials": "Financials",
+                         "driver": "Driver"},
+            annual_periods=[str(year) for year in range(2013, 2027)],
+            quarterly_periods=["1Q17"],
+            unit_labels={"financials": "(USD MM)", "driver": "(USD MM)"},
+        )
+        columns = plan["columns"]
+        self.assertEqual((columns["annual"][0]["column"],
+                          columns["annual"][-1]["column"]), (5, 18))
+        self.assertEqual(columns["annual_support_gutter_before"], 19)
+        self.assertEqual(columns["annual_support"], [{"label": "CAGR", "column": 20}])
+        self.assertEqual(columns["annual_support_gutter_after"], 21)
+        self.assertEqual(columns["quarterly"], [{"label": "1Q17", "column": 22}])
+
     def test_dynamic_apply_plan_preserves_values_formulas_and_applies_source_geometry(self):
         from openpyxl import Workbook
 
@@ -90,21 +107,21 @@ class FundXlsxTemplateTests(unittest.TestCase):
         financials["D4"] = "Revenue"
         financials["E3"] = "='Driver - DXC'!E3"
         financials["F3"] = "='Driver - DXC'!F3"
-        financials["H3"] = "=E3+1"
-        financials["I3"] = "=F3+1"
-        financials["J3"] = "=I3+1"
+        financials["J3"] = "=E3+1"
+        financials["K3"] = "=F3+1"
+        financials["L3"] = "=K3+1"
         driver["D2"] = "Operating drivers"
         driver["D3"] = "Subscription growth"
         driver["F3"] = 0.08
-        driver["H3"] = 0.09
-        driver["I3"] = 0.10
-        driver["J3"] = 0.11
+        driver["J3"] = 0.09
+        driver["K3"] = 0.10
+        driver["L3"] = 0.11
         valuation["A2"] = "Valuation"
         valuation["A3"] = "Target price"
         valuation["B3"] = 98.25
         originals = {
-            "financials": tuple(financials.cell(3, column).value for column in range(4, 11)),
-            "driver": tuple(driver.cell(3, column).value for column in range(4, 11)),
+            "financials": tuple(financials.cell(3, column).value for column in range(4, 13)),
+            "driver": tuple(driver.cell(3, column).value for column in range(4, 13)),
             "valuation": (valuation["A3"].value, valuation["B3"].value),
         }
 
@@ -112,15 +129,16 @@ class FundXlsxTemplateTests(unittest.TestCase):
 
         self.assertEqual(book.sheetnames,
                          ["Valuation - DXC", "Financials - DXC", "Driver - DXC", "Sources"])
-        self.assertEqual(tuple(financials.cell(3, column).value for column in range(4, 11)),
+        self.assertEqual(tuple(financials.cell(3, column).value for column in range(4, 13)),
                          originals["financials"])
-        self.assertEqual(tuple(driver.cell(3, column).value for column in range(4, 11)),
+        self.assertEqual(tuple(driver.cell(3, column).value for column in range(4, 13)),
                          originals["driver"])
         self.assertEqual((valuation["A3"].value, valuation["B3"].value),
                          originals["valuation"])
 
-        self.assertEqual([financials.cell(1, column).value for column in (5, 6, 7, 8, 9, 10)],
-                         ["FY2025A", "FY2026E", None,
+        self.assertEqual([financials.cell(1, column).value
+                          for column in (5, 6, 7, 8, 9, 10, 11, 12)],
+                         ["FY2025A", "FY2026E", None, "CAGR FY2024–FY2026E", None,
                           "Q1 FY2026A", "Q2 FY2026E", "Q3 FY2026E"])
         self.assertEqual(financials.freeze_panes, "E2")
         self.assertFalse(financials.sheet_view.showGridLines)
@@ -130,6 +148,11 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertEqual(financials.column_dimensions["C"].width, 2.125)
         self.assertEqual(financials.column_dimensions["D"].width, 25.125)
         self.assertEqual(financials.column_dimensions["G"].width, 1.375)
+        self.assertEqual(financials.column_dimensions["H"].width, 6.375)
+        self.assertEqual(financials.column_dimensions["I"].width, 1.125)
+        self.assertEqual(driver.column_dimensions["G"].width, 1.125)
+        self.assertEqual(driver.column_dimensions["H"].width, 6.625)
+        self.assertEqual(driver.column_dimensions["I"].width, 0.875)
         self.assertTrue(financials.column_dimensions["E"].hidden)
         self.assertEqual(financials.row_dimensions[3].outlineLevel, 1)
         self.assertEqual(driver.row_dimensions[3].outlineLevel, 2)
@@ -139,11 +162,11 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertEqual(financials["A1"].fill.fgColor.rgb, "FF3366FF")
         self.assertEqual(financials["E1"].font.color.rgb, "FFFFFFFF")
         self.assertEqual(financials["E3"].font.color.rgb, "FF008000")
-        self.assertEqual(financials["H3"].font.color.rgb, "FF000000")
+        self.assertEqual(financials["J3"].font.color.rgb, "FF000000")
         self.assertEqual(driver["F3"].font.color.rgb, "FF0000FF")
-        self.assertEqual(driver["H3"].fill.fgColor.rgb, "FFFFFFC8")
-        self.assertEqual(driver["H3"].border.top.style, "hair")
-        self.assertEqual(driver["H3"].number_format, "0.0%")
+        self.assertEqual(driver["J3"].fill.fgColor.rgb, "FFFFFFC8")
+        self.assertEqual(driver["J3"].border.top.style, "hair")
+        self.assertEqual(driver["J3"].number_format, "0.0%")
         self.assertEqual(financials["E3"].number_format,
                          "_(#,##0_);\\(#,##0\\);_(?\\-?_);@")
         self.assertEqual(valuation.column_dimensions["A"].width, 14.625)
