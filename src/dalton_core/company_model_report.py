@@ -159,6 +159,7 @@ def _row(label: str, history: Sequence[str], forecast: Sequence[str]) -> str:
 def render_forecast_model(
     record: Mapping[str, Any], *, entity_name: str | None = None,
     history_columns: int = HISTORY_COLUMNS,
+    annual_projection: Mapping[str, Any] | None = None,
 ) -> str:
     """Print one ForecastModelVersion so a person can argue with it.
 
@@ -265,6 +266,31 @@ def render_forecast_model(
                        f"{result.get('reason') or 'no reason recorded'}")
         else:
             out.append(f"        {result.get('formula')}")
+    if annual_projection is not None:
+        from .company_model_annual_projection import validate_projection_record
+
+        projection = validate_projection_record(annual_projection, model=record)
+        out.append("")
+        out.append("ANNUAL DILUTED EPS")
+        out.append("-" * DRIVER_LABEL_WIDTH)
+        out.append(f"  authority {projection['projection_ref']}  "
+                   f"{projection['content_hash']}")
+        rows = [item for item in projection["periods"]
+                if item.get("historical_eps") is not None
+                or item.get("forecast_eps") is not None]
+        if not rows:
+            out.append("  unavailable: no complete fiscal year is bound")
+        for item in rows:
+            outcome = item.get("historical_eps") or item.get("forecast_eps") or {}
+            if outcome.get("status") == "computed":
+                try:
+                    shown = format(Decimal(str(outcome["value"])), ",.2f")
+                except (InvalidOperation, ValueError, TypeError):
+                    shown = "?"
+                out.append(f"  {item['label']:16} {shown:>12}  {outcome.get('unit')}")
+            else:
+                out.append(f"  {item['label']:16} unavailable: "
+                           f"{outcome.get('reason') or 'no reason recorded'}")
     # What the chain does not account for, named. A reader looking at operating
     # income has to be able to see which filed lines are not inside it; the
     # formula above says what was subtracted, and this says what was not.
@@ -579,7 +605,8 @@ def main(argv: list[str] | None = None) -> int:
                 if index:
                     print("\n")
                 print(render_forecast_model(
-                    record, entity_name=held[-1]["entity_name"] if held else None))
+                    record, entity_name=held[-1]["entity_name"] if held else None,
+                    annual_projection=models.annual_projection(record["id"])))
             return 0
         for index, ref in enumerate(refs):
             spec = missions.latest_company_model_spec(ref)

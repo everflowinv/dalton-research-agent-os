@@ -252,6 +252,38 @@ def publish_forecast_lines(
     return published
 
 
+def _annual_projection(
+    missions: Any, models: ForecastModelAuthority,
+    record: Mapping[str, Any], table: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Persist the model's annual view from one exact annual filing calendar."""
+
+    if record.get("schema_version") != "0.3":
+        return None
+    annual = [item for item in missions.statement_filings(record["company_ref"])
+              if item.get("form") == "10-K"]
+    if not annual:
+        return None
+    filing = max(annual, key=lambda item: (
+        str(item.get("report_date") or ""), str(item.get("accession") or "")))
+    # statement_filings() is a useful read API but its row mapping alone is
+    # not the content authority. Rebuild the filing hash over the stored lines
+    # before its report date becomes the projection's fiscal calendar.
+    from .fund_xlsx_export import _verify_statement_filing
+
+    _verify_statement_filing(models.connection, filing)
+    from .company_model_annual_projection import (
+        build_annual_projection, calendar_binding_from_annual_filing,
+    )
+
+    calendar = calendar_binding_from_annual_filing(
+        filing, company_ref=str(record["company_ref"]))
+    projection = build_annual_projection(
+        model=record, inputs=table, calendar_binding=calendar)
+    return models.publish_annual_projection(
+        projection, inputs=table, calendar_binding=calendar)
+
+
 def run_company_forecast(
     missions: Any,
     spec: Mapping[str, Any],
@@ -280,9 +312,27 @@ def run_company_forecast(
         and models.filing_proof(prior["id"]) is None
     )
     if action is None and not backfill_proof:
+        annual_projection = models.annual_projection(prior["id"])
+        if annual_projection is None:
+            annual_projection = _annual_projection(missions, models, prior, table)
+            if annual_projection is not None:
+                return {
+                    "company_ref": company_ref,
+                    "status": "annual_projection_backfilled",
+                    "action": "annual_projection_backfill",
+                    "model_version_ref": prior["id"],
+                    "model_version": prior["version"],
+                    "prior_version_ref": prior["prior_version_ref"],
+                    "change_reason": prior["change_reason"],
+                    "evidence_refs": prior["evidence_refs"],
+                    "spec_ref": prior["spec_ref"],
+                    "readiness": model_readiness(prior),
+                    "lines": [], "lines_refused": None,
+                    "record": prior, "annual_projection": annual_projection,
+                }
         return {"company_ref": company_ref, "status": "nothing_to_do",
                 "action": None, "lines": [], "lines_refused": None,
-                "record": prior}
+                "record": prior, "annual_projection": annual_projection}
     if backfill_proof:
         body = prior
         action = "filing_proof_backfill"
@@ -324,10 +374,11 @@ def run_company_forecast(
                 chosen[key] = (filed, rows)
     statement_rows = [line for _filed, rows in chosen.values() for line in rows]
     stored = models.publish(body, statement_rows=statement_rows)
+    annual_projection = _annual_projection(missions, models, stored, table)
     if backfill_proof:
         return {"company_ref": company_ref, "status": "proof_backfilled",
                 "action": action, "lines": [], "lines_refused": None,
-                "record": stored}
+                "record": stored, "annual_projection": annual_projection}
     published: list[dict[str, Any]] = []
     refused: str | None = None
     if lines is not None:
@@ -349,6 +400,7 @@ def run_company_forecast(
         "lines": published,
         "lines_refused": refused,
         "record": stored,
+        "annual_projection": annual_projection,
     }
 
 

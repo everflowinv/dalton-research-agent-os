@@ -725,6 +725,14 @@ def _structure_historical_values(
     return values, refs
 
 
+def structure_historical_values(
+    drivers: Sequence[Mapping[str, Any]], structure: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Decimal]], dict[str, dict[str, list[dict[str, Any]]]]]:
+    """Public pure replay used by model projections and the forecast builder."""
+
+    return _structure_historical_values(drivers, structure)
+
+
 def default_structure_assumptions(
     drivers: Sequence[Mapping[str, Any]], periods: Sequence[Mapping[str, Any]],
     structure: Mapping[str, Any], *, decided_by: str = AUTOMATION_ACTOR,
@@ -3483,6 +3491,84 @@ class ForecastModelAuthority:
             solver_results=wire.get("solver_results") or [])
         if replay.as_dict() != wire["invariant_report"]:
             raise ForecastModelConflict("forecast model filing proof does not replay")
+        return wire
+
+    def publish_annual_projection(
+        self, projection: Mapping[str, Any], *, inputs: Mapping[str, Any],
+        calendar_binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one exact deterministic annual view beside its model version."""
+
+        from .company_model_annual_projection import validate_annual_projection
+
+        version_ref = _text(projection.get("model_version_ref"), "model_version_ref")
+        model = self.model(version_ref)
+        try:
+            wire = validate_annual_projection(
+                projection, model=model, inputs=inputs,
+                calendar_binding=calendar_binding)
+        except Exception as exc:
+            raise ForecastModelValidationError(
+                "annual model projection authority differs") from exc
+        existing = self.connection.execute(
+            "SELECT record_json FROM forecast_model_annual_projections "
+            "WHERE model_version_id=?", (version_ref,),
+        ).fetchone()
+        if existing is not None:
+            held = json.loads(existing["record_json"])
+            if held != wire:
+                raise ForecastModelConflict(
+                    "this model version already has another annual projection")
+            return {**self.annual_projection(version_ref), "status": "duplicate"}
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO forecast_model_annual_projections"
+                "(model_version_id,company_ref,model_content_hash,inputs_hash,"
+                "calendar_hash,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (version_ref, model["company_ref"], model["content_hash"],
+                 model["inputs_hash"], wire["calendar_binding"]["content_hash"],
+                 canonical_json(wire), wire["content_hash"], model["created_at"]),
+            )
+        return {**self.annual_projection(version_ref), "status": "fresh"}
+
+    def annual_projection(self, version_ref: str) -> dict[str, Any] | None:
+        """Read one immutable annual projection and replay its stored bindings."""
+
+        model = self.model(version_ref)
+        row = self.connection.execute(
+            "SELECT * FROM forecast_model_annual_projections WHERE model_version_id=?",
+            (version_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            wire = json.loads(row["record_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ForecastModelConflict("annual projection record_json is invalid") from exc
+        base = dict(wire)
+        asserted = base.pop("content_hash", None)
+        binding = wire.get("calendar_binding") or {}
+        if (
+            canonical_json(wire) != row["record_json"]
+            or asserted != content_hash(base)
+            or asserted != row["content_hash"]
+            or wire.get("model_version_ref") != row["model_version_id"]
+            or wire.get("company_ref") != row["company_ref"]
+            or wire.get("model_version_hash") != row["model_content_hash"]
+            or wire.get("inputs_hash") != row["inputs_hash"]
+            or binding.get("content_hash") != row["calendar_hash"]
+            or wire.get("model_version_ref") != model["id"]
+            or wire.get("model_version_hash") != model["content_hash"]
+            or wire.get("inputs_hash") != model["inputs_hash"]
+            or wire.get("structure_hash")
+                != (model.get("financial_statement_structure") or {}).get("content_hash")
+            or wire.get("structure_replay_hash")
+                != content_hash(model.get("financial_statement_structure_replay") or {})
+            or wire.get("forecast_structure_binding_hash")
+                != (model.get("forecast_structure_binding") or {}).get("content_hash")
+        ):
+            raise ForecastModelConflict("annual model projection authority drifted")
         return wire
 
     def model(self, version_ref: str) -> dict[str, Any]:

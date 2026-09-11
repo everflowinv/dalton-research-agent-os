@@ -138,7 +138,15 @@ def pending_companies(
                 raise
             blocked.append(f"{ref}: {exc}")
             continue
-        if needs_model(models.latest(ref), spec, table) is not None:
+        latest = models.latest(ref)
+        pending = needs_model(latest, spec, table)
+        if (pending is None and latest is not None
+                and latest.get("schema_version") == "0.3"
+                and models.annual_projection(latest["id"]) is None
+                and any(item.get("form") == "10-K"
+                        for item in missions.statement_filings(ref))):
+            pending = "annual_projection_backfill"
+        if pending is not None:
             out.append((ref, spec, table))
     if not out and blocked:
         raise ForecastModelUnavailable(
@@ -190,6 +198,8 @@ def run_model_forecast(
         "results_computed": [],
         "results_unavailable": [],
         "forecast_lines_written": 0,
+        "annual_projection_ref": None,
+        "annual_projection_hash": None,
         "failure_reason": None,
         "cost_micros": 0,
         "formal_authority_writes": 0,
@@ -259,6 +269,7 @@ def run_model_forecast(
             summary.update({"status": "idle", "forecast_status": "nothing_to_model"})
             return summary
         readiness = outcome["readiness"]
+        annual_projection = outcome.get("annual_projection") or {}
         summary.update({
             "status": "succeeded",
             "action": outcome["action"],
@@ -276,6 +287,8 @@ def run_model_forecast(
             "results_computed": readiness["results_computed"],
             "results_unavailable": readiness["results_unavailable"],
             "forecast_lines_written": len(outcome["lines"]),
+            "annual_projection_ref": annual_projection.get("projection_ref"),
+            "annual_projection_hash": annual_projection.get("content_hash"),
             "failure_reason": outcome["lines_refused"],
         })
         return summary

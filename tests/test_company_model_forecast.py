@@ -243,12 +243,12 @@ class LaneStateTests(unittest.TestCase):
         self.mission_ref = self.params.pop("mission_ref")
         self.mission = self.missions.create_mission(self.mission_ref, **self.params)
         self._filed = 0
-        self.file_quarters(QUARTERS, SERIES)
+        self.file_quarters(QUARTERS, SERIES, form="10-K")
         self.record_spec()
 
     # -- fixture plumbing --------------------------------------------------
 
-    def file_quarters(self, quarters, series) -> None:
+    def file_quarters(self, quarters, series, *, form="10-Q") -> None:
         self._filed += 1
         accession = f"0001467373-26-0000{self._filed:02d}"
         authorization = self.missions.authorize_sec_lane(
@@ -256,7 +256,7 @@ class LaneStateTests(unittest.TestCase):
             mission_version_ref=self.mission["id"],
             mission_version_hash=self.mission["content_hash"])
         dispatch = self.missions.queue_statement_dispatch(
-            authorization=authorization, attempt=self._filed - 1)
+            authorization=authorization, form=form, attempt=self._filed - 1)
         self.missions.mark_statement_dispatch_launched(
             dispatch["dispatch_id"], f"sec-financials-run:{self._filed:024d}")
         series = dict(series)
@@ -290,7 +290,7 @@ class LaneStateTests(unittest.TestCase):
                 "schema_version": "0.1", "cik": "0001467373",
                 "entity_name": "Accenture plc",
                 "filings": [{
-                    "accession": accession, "form": "10-Q",
+                    "accession": accession, "form": form,
                     "filed": f"2026-0{self._filed}-25",
                     "report_date": quarters[-1][1], "lines": lines,
                 }],
@@ -354,6 +354,34 @@ class LaneStateTests(unittest.TestCase):
         written = json.loads(
             (self.state_dir / "summary" / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(written["model_version_ref"], summary["model_version_ref"])
+
+    def test_runtime_persists_annual_projection_beside_exact_model(self):
+        summary = self.child()
+        authority = ForecastModelAuthority(self.store)
+        record = authority.latest(ACN)
+        projection = authority.annual_projection(summary["model_version_ref"])
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection["model_version_hash"],
+                         record["content_hash"])
+        self.assertEqual(projection["inputs_hash"], record["inputs_hash"])
+        self.assertEqual(projection["calendar_binding"]["calendar_ref"],
+                         self.missions.statement_filings(ACN)[-1]["ingest_id"])
+        self.assertEqual(summary["annual_projection_ref"], projection["projection_ref"])
+        self.assertEqual(summary["annual_projection_hash"], projection["content_hash"])
+
+        authority.connection.execute(
+            "DROP TRIGGER forecast_model_annual_projection_no_delete")
+        authority.connection.execute(
+            "DELETE FROM forecast_model_annual_projections WHERE model_version_id=?",
+            (record["id"],),
+        )
+        second = self.child()
+        self.assertEqual(second["forecast_status"], "annual_projection_backfilled")
+        self.assertEqual(authority.connection.execute(
+            "SELECT COUNT(*) AS n FROM forecast_model_annual_projections"
+        ).fetchone()["n"], 1)
+        third = self.child()
+        self.assertEqual(third["forecast_status"], "nothing_to_model")
 
     def test_mismatched_filed_segments_refuse_the_model_end_to_end(self):
         filing = self.missions.statement_filings(ACN)[0]

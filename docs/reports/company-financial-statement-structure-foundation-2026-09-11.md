@@ -102,11 +102,25 @@ Structure 0.2 adds a separate `annual_forecast_method` on diluted weighted-
 average shares. `quarterly_growth` does not authorize an annual average. The
 only executable method, `day_weighted_quarters`, first has to reproduce a
 direct annual filed share value from four positive contiguous filed quarter
-averages at the precision the company reported. Export then applies the same
-inclusive-day weighting to four quarters bound to the current fiscal calendar
-and structure-line definition. Without this explicit method and historical
-tie, forecast annual shares and annual EPS stay unavailable. Structure 0.1
-bytes and replay identity do not gain the new field.
+averages at the precision the company reported.
+
+`company_model_annual_projection.py` executes that method outside the workbook.
+It binds the exact forecast model version and hash, model-input hash, structure,
+historical replay, forecast-structure binding, and the verified annual filing's
+fiscal-calendar authority. It combines filed and forecast quarters only when
+the four source windows are contiguous, calculates the company-specific
+diluted-EPS numerator through the held DAG, day-weights the four diluted-share
+quarters, and emits a self-hashed projection with each source model cell or
+filed input ref. A missing quarter or invalid denominator remains unavailable.
+
+The forecast runtime persists one immutable projection beside the model version
+and backfills it idempotently when an unchanged structured model predates the
+table. The human-readable model report and the workbook consume that same
+projection. Excel translates the bound source cells into visible formulas and
+records the projection ref/hash; it no longer creates annual share or EPS math
+that exists nowhere in the internal model. Without the explicit annual method
+and historical tie, forecast annual shares and annual EPS stay unavailable.
+Structure 0.1 bytes and replay identity do not gain the new field.
 
 The current structure-0.2 test request is 17,012 prompt characters and its
 provider schema is 9,520 characters. The earlier complete representative

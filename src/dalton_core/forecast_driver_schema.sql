@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS forecast_model_filing_proofs (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS forecast_model_annual_projections (
+    model_version_id TEXT PRIMARY KEY REFERENCES forecast_model_versions(version_id),
+    company_ref TEXT NOT NULL,
+    model_content_hash TEXT NOT NULL,
+    inputs_hash TEXT NOT NULL,
+    calendar_hash TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TRIGGER IF NOT EXISTS forecast_model_authorized_insert
 BEFORE INSERT ON forecast_model_versions WHEN dalton_forecast_model_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'forecast model insert requires ForecastModelAuthority'); END;
@@ -54,3 +65,14 @@ SELECT RAISE(ABORT, 'forecast model filing proofs are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS forecast_model_filing_proof_no_delete
 BEFORE DELETE ON forecast_model_filing_proofs BEGIN
 SELECT RAISE(ABORT, 'forecast model filing proofs are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS forecast_model_annual_projection_authorized_insert
+BEFORE INSERT ON forecast_model_annual_projections
+WHEN dalton_forecast_model_authorized() = 0 BEGIN
+SELECT RAISE(ABORT, 'forecast model annual projection insert requires ForecastModelAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS forecast_model_annual_projection_no_update
+BEFORE UPDATE ON forecast_model_annual_projections BEGIN
+SELECT RAISE(ABORT, 'forecast model annual projections are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS forecast_model_annual_projection_no_delete
+BEFORE DELETE ON forecast_model_annual_projections BEGIN
+SELECT RAISE(ABORT, 'forecast model annual projections are immutable'); END;
