@@ -109,6 +109,7 @@ class DocumentInventoryTests(unittest.TestCase):
 
     def test_all_source_read_limits_are_explicit_config(self):
         value = {"schema_version": "document-research-config-0.1", "purpose": "directed_research",
+                 "inventory_preview_chars": 600,
                  "spool_dir": str(self.state), "enabled_sources": ["source:sales-notes"], "policy": policy(),
                  "source_reading_limits": {"alphaengine_max_document_chars": 10000000,
                      "public_web_max_source_chars": 9000000, "public_web_max_pdf_pages": 2000,

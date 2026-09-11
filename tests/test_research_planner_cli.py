@@ -121,11 +121,12 @@ class PlannerChildTests(unittest.TestCase):
         # five-minute tick is only affordable if an unchanged world is free.
         mission = self.publish_mission()
         first = self.plan()
+        from dalton_core.store import content_hash
+        plan = {"mission_version_ref": mission["id"], "state_hash": first["state_hash"],
+                "assessment": "steady", "directives": [], "inquiries": []}
         self.missions.record_research_plan(
-            {"mission_version_ref": mission["id"], "state_hash": first["state_hash"],
-             "assessment": "steady", "directives": [], "inquiries": [],
-             "content_hash": "a" * 64},
-            decided_by="automation:x")
+            {**plan, "content_hash": content_hash(plan)},
+            decided_by=mission["autonomy"]["automation_principal"])
         # The model config is never read: an unchanged state short-circuits
         # before anything is opened, which is the property under test.
         config = self.root / "never-read.json"

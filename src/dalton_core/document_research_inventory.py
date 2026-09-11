@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .document_research import (
+    READ_OPERATION, READ_REQUEST_SCHEMA_VERSION,
     build_document_research_registry, validate_document_research_policy,
 )
 from .document_research_strategy import inventory_document
@@ -28,10 +29,14 @@ _LIMITS = frozenset({"alphaengine_max_document_chars", "public_web_max_source_ch
 def validate_inventory_config(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
         "schema_version", "purpose", "spool_dir", "enabled_sources", "policy",
-        "source_reading_limits",
+        "source_reading_limits", "inventory_preview_chars",
     } or value.get("schema_version") != CONFIG_SCHEMA:
         raise ValueError("document research configuration has an invalid shape")
     policy = validate_document_research_policy(value["policy"])
+    preview = value["inventory_preview_chars"]
+    if (isinstance(preview, bool) or not isinstance(preview, int)
+            or not 1 <= preview <= policy["max_read_chars"]):
+        raise ValueError("inventory preview must fit the explicit original read policy")
     if value["purpose"] not in policy["allowed_purposes"]:
         raise ValueError("document research purpose is not granted by policy")
     spool = value["spool_dir"]
@@ -51,7 +56,8 @@ def validate_inventory_config(value: Any) -> dict[str, Any]:
 
 
 def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
-                            registry: Any, purpose: str) -> dict[str, Any]:
+                            registry: Any, purpose: str,
+                            preview_chars: int = 0) -> dict[str, Any]:
     """Verify every acquired row in the active mission without a hidden cap."""
     companies = {entry["company_ref"] for entry in mission["universe"]}
     readable: dict[str, list[dict[str, Any]]] = {ref: [] for ref in sorted(companies)}
@@ -90,6 +96,28 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"],
                           "doc_date": registration["doc_date"]})
+        if preview_chars:
+            end = min(preview_chars, registration["normalized_text"]["characters"])
+            if end:
+                preview = registry.read({
+                    "schema_version": READ_REQUEST_SCHEMA_VERSION, "operation": READ_OPERATION,
+                    "purpose": purpose, "research_question": "Identify this document's subject and contents.",
+                    "registration": registration, "source_start": 0, "source_end": end,
+                    "policy_ref": registry.policy["policy_ref"], "policy_hash": registry.policy["content_hash"],
+                })
+                projected.update({"original_preview": preview["text"],
+                                  "preview_proof_ref": preview["id"],
+                                  "preview_proof_hash": preview["content_hash"]})
+        # Review disposition is a useful warning, not an original-text source
+        # and not permission to mutate/reopen a human review.
+        if core.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coverage_mission_document_reviews'").fetchone():
+            review = core.connection.execute(
+                "SELECT review_id,state,rationale FROM coverage_mission_document_reviews "
+                "WHERE discovered_document_ref=? ORDER BY updated_at DESC,review_id DESC LIMIT 1",
+                (row["record_id"],)).fetchone()
+            if review is not None:
+                projected["prior_review"] = dict(review)
         key = (company, projected["document_ref"], projected["document_version_hash"])
         if key not in seen:
             readable[company].append(projected)
@@ -157,7 +185,7 @@ def load_document_inventory_authority(*, core: Any, mission: Mapping[str, Any],
         source_reading_limits=config["source_reading_limits"],
     )
     result = inventory_with_registry(core=core, mission=mission, registry=registry,
-                                     purpose=config["purpose"])
+                                     purpose=config["purpose"], preview_chars=config["inventory_preview_chars"])
     return {**result, "status": "configured", "config_hash": content_hash(config),
             "unavailable_sources": missing, "registry": registry}
 
