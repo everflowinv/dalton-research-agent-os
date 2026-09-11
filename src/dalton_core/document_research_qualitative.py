@@ -108,6 +108,59 @@ def verifier_prompt(*, question: str, search_proof: Mapping[str, Any],
 class MissionDocumentModelWorker(RegisteredAnnualReportModelWorker):
     """Use the routed/accounted worker while enforcing generic admission authority."""
 
+    def _execute_model(self, work, route, profile):
+        from .openclaw_model_adapter import BrokerDefinitelyNotSent
+
+        try:
+            return super()._execute_model(work, route, profile)
+        except BrokerDefinitelyNotSent:
+            self._mission_document_no_send = {
+                "schema_version": "0.1", "kind": "typed_transport_exception",
+                "authority": "mission-document-model-worker",
+                "state": "definitely_not_sent",
+                "work_order_ref": work.id, "route_decision_ref": route["id"],
+                "transport_error_type": "BrokerDefinitelyNotSent",
+            }
+            if self.budget_store is not None and self.admission is not None:
+                exact = self.budget_store.admission(
+                    work_order_ref=work.id, attempt_number=route["attempt_number"],
+                    phase=("verification" if work.metadata["stage"]
+                           == "independent_qualitative_verifier" else "assessment"))
+                if exact is not None and exact["settlement"] is None:
+                    self.budget_store.settle(
+                        self.admission["admission_id"], actual_micros=0)
+            raise
+
+    def _after_capacity_deferred(self, work, route, adapter_result):
+        wire = adapter_result.to_dict()
+        if self._capacity_code(adapter_result) is None:
+            raise AnnualReportQualitativeError("capacity result lacks no-send authority")
+        self._mission_document_no_send = {
+            "schema_version": "0.1", "kind": "adapter_result",
+            "authority": "openclaw-model-adapter", "state": "definitely_not_sent",
+            "work_order_ref": work.id, "route_decision_ref": route["id"],
+            "adapter_result": wire, "adapter_result_hash": content_hash(wire),
+        }
+        return super()._after_capacity_deferred(work, route, adapter_result)
+
+    def _control_result(self, *args, **kwargs):
+        control = super()._control_result(*args, **kwargs)
+        receipt = getattr(self, "_mission_document_no_send", None)
+        if receipt is None:
+            return control
+        self._mission_document_no_send = None
+        receipt = dict(receipt)
+        receipt["content_hash"] = content_hash(receipt)
+        return ResultEnvelope(
+            schema_version=control.schema_version, id=control.id,
+            created_at=control.created_at, work_order_ref=control.work_order_ref,
+            invocation_ref=control.invocation_ref, status=control.status,
+            outputs=control.outputs, actual_side_effects=control.actual_side_effects,
+            usage_refs=control.usage_refs, artifact_refs=control.artifact_refs,
+            error=control.error,
+            metadata={**dict(control.metadata), "mission_document_no_send": receipt},
+        )
+
     def _work(self, value: WorkOrder | Mapping[str, Any]) -> WorkOrder:
         work = super()._work(value)
         if work.metadata.get("authority_kind") != "mission_document_research_admission":
@@ -117,7 +170,8 @@ class MissionDocumentModelWorker(RegisteredAnnualReportModelWorker):
             raise AnnualReportQualitativeError("model worker lacks directed-document resolver")
         try:
             from .mission_document_research_executor import validate_mission_document_work_authority
-            validate_mission_document_work_authority(authority, self.scheduler, work)
+            validate_mission_document_work_authority(
+                authority, self.scheduler, work, worker=self)
         except Exception as exc:
             raise AnnualReportQualitativeError(
                 "directed-document WorkOrder authority is invalid"
@@ -131,6 +185,7 @@ class MissionDocumentModelWorker(RegisteredAnnualReportModelWorker):
             if stage == "qualitative_model_draft"
             else parse_verifier_text(candidate_text, draft=work.metadata["draft"])
         )
+
         body = {
             "schema_version": "0.1",
             "id": "document-research-model-proof:" + content_hash({
@@ -174,7 +229,7 @@ class MissionDocumentVerifierWorker(MissionDocumentModelWorker):
     expected_stage = "independent_qualitative_verifier"
 
 
-class MissionDocumentCandidateAuthority:
+class _MissionDocumentCandidateAuthority:
     def __init__(self, *, question: str, proof: Mapping[str, Any],
                  draft_proof: Mapping[str, Any], verifier_proof: Mapping[str, Any],
                  admission: Mapping[str, Any]):
@@ -302,15 +357,15 @@ def _claim(evidence, source_verification, *, admission, candidate, actor_ref, cr
     return validate_candidate_claim(base)
 
 
-def build_candidate_bundle(*, admission, proof, draft_proof, verifier_proof,
-                           draft_work, verifier_work, created_at):
+def _build_candidate_bundle(*, admission, proof, draft_proof, verifier_proof,
+                            draft_work, verifier_work, created_at):
     draft_proof = validate_model_proof(
         draft_proof, stage="qualitative_model_draft", work=draft_work)
     verifier_proof = validate_model_proof(
         verifier_proof, stage="independent_qualitative_verifier", work=verifier_work)
     if verifier_proof["output"]["verdict"] != "pass":
         raise VerificationRejected("independent qualitative verifier rejected the draft")
-    authority = MissionDocumentCandidateAuthority(
+    authority = _MissionDocumentCandidateAuthority(
         question=admission["planner_inquiry"]["question"], proof=proof,
         draft_proof=draft_proof, verifier_proof=verifier_proof, admission=admission)
     material = authority.build_material(created_at)
@@ -331,29 +386,7 @@ def build_candidate_bundle(*, admission, proof, draft_proof, verifier_proof,
             "evidence": evidence, "claim": claim}
 
 
-def stage_candidate(staging, *, admission, proof, draft_proof, verifier_proof,
-                    draft_work, verifier_work, created_at, idempotency_key):
-    bundle = build_candidate_bundle(
-        admission=admission, proof=proof, draft_proof=draft_proof,
-        verifier_proof=verifier_proof, draft_work=draft_work,
-        verifier_work=verifier_work, created_at=created_at)
-    authority = MissionDocumentCandidateAuthority(
-        question=admission["planner_inquiry"]["question"], proof=proof,
-        draft_proof=bundle["material"]["normalized_payload"]["draft_proof"],
-        verifier_proof=bundle["material"]["normalized_payload"]["verifier_proof"],
-        admission=admission)
-    staged = staging.stage(
-        material=bundle["material"], source_verification=bundle["source_verification"],
-        evidence=bundle["evidence"], claim=bundle["claim"],
-        idempotency_key=idempotency_key,
-        verification_mode=MISSION_DOCUMENT_AUTHORITY_MODE,
-        authority_resolver=authority,
-    )
-    return {"staging": staged, **bundle}
-
-
 __all__ = [
     "DRAFT_PURPOSE", "VERIFIER_PURPOSE", "MissionDocumentDraftWorker",
-    "MissionDocumentVerifierWorker", "MissionDocumentCandidateAuthority",
-    "build_candidate_bundle", "stage_candidate", "draft_prompt", "verifier_prompt",
+    "MissionDocumentVerifierWorker", "draft_prompt", "verifier_prompt",
 ]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from dalton_core.contracts import ResultEnvelope, WorkOrder
@@ -23,9 +25,13 @@ from dalton_core.document_research_qualitative import (
     MissionDocumentDraftWorker, MissionDocumentVerifierWorker,
 )
 from dalton_core.mission_document_research_executor import (
-    MissionDocumentResearchExecutor, read_mission_document_research_observations,
+    MissionDocumentResearchExecutor, MissionDocumentResearchExecutorError,
+    effective_mission_document_work_orders, read_mission_document_research_observations,
 )
 from dalton_core.annual_report_qualitative import AnnualReportQualitativeError
+from dalton_core.annual_report_runtime import (
+    DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME,
+)
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_question_backlog import ResearchQuestionBacklog
 from dalton_core.research_task import inquiry_content_hash, inquiry_ref_for
@@ -36,17 +42,62 @@ from tests.test_mission_annual_research import (
 )
 
 
+class CapacityOnceAdapter(CountingFakeAdapter):
+    failed_work_id = None
+
+    def execute(self, work, route, selected):
+        invocation, result = super().execute(work, route, selected)
+        if self.failed_work_id is None:
+            self.failed_work_id = work.id
+        if work.id != self.failed_work_id:
+            return invocation, result
+        return invocation, ResultEnvelope(
+            schema_version="0.1", id="result:capacity:" + work.id.rsplit("-", 1)[-1],
+            created_at=NOW.isoformat(), work_order_ref=work.id,
+            invocation_ref=invocation.id, status="failed", outputs={},
+            actual_side_effects=(), usage_refs=(), artifact_refs=(),
+            error={"code": "BUSY", "message": "capacity unavailable"},
+            metadata={
+                "route_decision_ref": route["id"],
+                "dispatch_proof": {"authority": "openclaw-model-adapter",
+                                   "state": "definitely_not_sent", "version": "0.1"},
+            },
+        )
+
+
+class AlwaysCapacityAdapter(CapacityOnceAdapter):
+    def execute(self, work, route, selected):
+        self.failed_work_id = work.id
+        return super().execute(work, route, selected)
+
+
+class DefinitelyNotSentFirstWorkAdapter(CountingFakeAdapter):
+    failed_work_id = None
+
+    def execute(self, work, route, selected):
+        from dalton_core.openclaw_model_adapter import BrokerDefinitelyNotSent
+        self.calls += 1
+        if self.failed_work_id is None:
+            self.failed_work_id = work.id
+        if work.id == self.failed_work_id:
+            raise BrokerDefinitelyNotSent("connect failed before send")
+        # Avoid CountingFakeAdapter's second increment on successful recovery.
+        from tests.test_transcript_polish_model_worker import FakeAdapter
+        return FakeAdapter.execute(self, work, route, selected)
+
+
 class MissionDocumentResearchTests(unittest.TestCase):
-    def _executor(self, fixture, authority):
+    def _executor(self, fixture, authority, *, draft_adapter=None,
+                  verifier_adapter=None, fault_injector=None):
         statement = "Managed services revenue is recognized over time."
-        draft_adapter = CountingFakeAdapter({
+        draft_adapter = draft_adapter or CountingFakeAdapter({
             "schema_version": "0.1", "status": "answered", "answer": statement,
             "candidate": {"normalized_statement": statement,
                           "metric_or_aspect": "managed services revenue recognition",
                           "period": "current policy", "basis": "reported",
                           "cited_match_indexes": [0]}, "missing": [],
         })
-        verifier_adapter = CountingFakeAdapter({
+        verifier_adapter = verifier_adapter or CountingFakeAdapter({
             "schema_version": "0.1", "verdict": "pass",
             "verified_statement": statement, "findings": [],
         })
@@ -75,9 +126,23 @@ class MissionDocumentResearchTests(unittest.TestCase):
             authority=authority, scheduler=scheduler, registry=authority.registry,
             draft_worker=draft, verifier_worker=verifier,
             staging=fixture.harness.staging, actor_ref="automation:test",
-            clock=fixture.harness.clock,
+            clock=fixture.harness.clock, fault_injector=fault_injector,
         ), draft_adapter, verifier_adapter
 
+    @staticmethod
+    def _enable_recovery(fixture, *, maximum=2, backoff=0, elapsed=3600):
+        recovery = {"max_fresh_work_orders": maximum,
+                    "retry_backoff_seconds": backoff,
+                    "max_elapsed_seconds": elapsed}
+        for name in (DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME):
+            path = fixture.state / name
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["provider_retry"] = {
+                "max_same_profile_retries": 0, "retry_backoff_seconds": 0,
+                "unknown_recovery": recovery,
+            }
+            path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+                            encoding="utf-8")
     def _record_plan(self, fixture, plan):
         raw = {
             "schema_version": "0.1", "assessment": plan["assessment"],
@@ -465,6 +530,77 @@ class MissionDocumentResearchTests(unittest.TestCase):
             fixture.harness.staging.counts()["candidate_stage_requests"], 0
         )
 
+    def test_expired_stage_lease_is_revalidated_before_candidate_side_effect(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        expired = []
+        holder = {}
+
+        def expire_at_seam(seam):
+            if seam == "before_staging_lease_validation":
+                expired.append(seam)
+                fixture.harness.clock.value += timedelta(seconds=31)
+                stage = holder["executor"]._derive_work(
+                    admission, holder["executor"]._blueprints(admission), 3)
+                self.assertIsNotNone(holder["executor"].scheduler.claim(
+                    "worker:foreign", work_order_id=stage["id"]))
+
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, fault_injector=expire_at_seam)
+        holder["executor"] = executor
+        for _ in range(7):
+            executor.run_once(admission["id"])
+        result = executor.run_once(admission["id"])
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(expired, ["before_staging_lease_validation"])
+        self.assertEqual(
+            fixture.harness.staging.counts()["candidate_stage_requests"], 0
+        )
+        stage = executor._derive_work(admission, executor._blueprints(admission), 3)
+        self.assertEqual(executor.scheduler.status(stage["id"])["state"], "leased")
+
+    def test_observation_reader_rejects_self_consistent_semantic_relabel(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        original = json.loads(fixture.store.connection.execute(
+            "SELECT plan_json FROM coverage_mission_research_plans WHERE plan_id=?",
+            (args["plan_ref"],),
+        ).fetchone()[0])
+        plan = {key: value for key, value in original.items() if key != "content_hash"}
+        plan["state_hash"] = "8" * 64
+        plan["inquiries"][0]["directed_document"]["query_terms"] = ["unobtainium"]
+        plan["content_hash"] = content_hash(plan)
+        stored = self._record_plan(fixture, plan)
+        inquiry = plan["inquiries"][0]
+        admission = authority.admit_from_plan(**{
+            **args, "plan_ref": stored["plan_id"],
+            "inquiry_ref": inquiry_ref_for(inquiry_content_hash(inquiry)),
+        })
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        row = fixture.store.connection.execute(
+            "SELECT observation_id,record_json FROM mission_document_research_observations"
+        ).fetchone()
+        forged = json.loads(row["record_json"])
+        forged["question"] = "A different company's unrelated question"
+        forged["tried_query_terms"] = ["different", "terms"]
+        body = dict(forged)
+        body.pop("content_hash")
+        forged["content_hash"] = content_hash(body)
+        fixture.store.connection.execute(
+            "DROP TRIGGER mission_document_research_observations_no_update")
+        fixture.store.connection.execute(
+            "UPDATE mission_document_research_observations SET record_json=?,content_hash=? "
+            "WHERE observation_id=?",
+            (json.dumps(forged, sort_keys=True, separators=(",", ":")),
+             forged["content_hash"], row["observation_id"]),
+        )
+        fixture.store.connection.commit()
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "execution drifted"
+        ):
+            read_mission_document_research_observations(fixture.store.connection)
+
     def test_query_miss_is_typed_feedback_and_does_not_claim_no_answer(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         original = json.loads(fixture.store.connection.execute(
@@ -519,6 +655,362 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "the contract clause that defines the service period"
         ])
         self.assertIsNotNone(observations[0]["draft_proof_ref"])
+
+    def test_zero_cost_capacity_failure_uses_fresh_work_and_completes(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        draft = CapacityOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "managed services revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        })
+        executor, draft, verifier = self._executor(
+            fixture, authority, draft_adapter=draft)
+        results = []
+        original_authority = None
+        for _ in range(14):
+            results.append(executor.run_once(admission["id"]))
+            if len(results) == 3:
+                original_authority = executor.scheduler.work_order_authority(
+                    results[-1]["work_order_ref"])
+            if results[-1].get("research_status") == "candidate_staged":
+                break
+        self.assertEqual(results[-1]["research_status"], "candidate_staged")
+        self.assertEqual((draft.calls, verifier.calls), (4, 1))
+        links = fixture.store.connection.execute(
+            "SELECT * FROM mission_document_research_recovery_links").fetchall()
+        self.assertEqual(len(links), 1)
+        original = executor._blueprints(admission)[1]
+        self.assertEqual(executor.scheduler.status(original["id"])["state"], "failed")
+        self.assertEqual(executor.scheduler.work_order_authority(original["id"]),
+                         original_authority)
+        self.assertNotEqual(links[0]["recovery_work_order_ref"], original["id"])
+        effective = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=executor.verifier_worker)
+        self.assertEqual(effective[1]["id"], links[0]["recovery_work_order_ref"])
+        self.assertEqual(effective[2]["metadata"]["upstream_work_order_ref"], effective[1]["id"])
+        settlements = fixture.budget.connection.execute(
+            "SELECT actual_micros FROM thesis_impact_day_settlements ORDER BY created_at"
+        ).fetchall()
+        self.assertEqual(sorted(row[0] for row in settlements), [0, 0, 0, 2000, 2000])
+        observation = next(item for item in read_mission_document_research_observations(
+            fixture.store.connection) if item["outcome"] == "recovery_required")
+        self.assertEqual(observation["recovery"]["proof"]["classification"],
+                         "proved_zero_cost_no_send")
+
+    def test_recovery_enqueue_crash_restarts_without_second_work_or_charge(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = CapacityOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement, "metric_or_aspect": "revenue",
+                          "period": "current", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        })
+        fired = []
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter,
+            fault_injector=lambda seam: (fired.append(seam),
+                                         (_ for _ in ()).throw(RuntimeError("crash")))[1])
+        for _ in range(6):
+            executor.run_once(admission["id"])
+        with self.assertRaisesRegex(RuntimeError, "crash"):
+            executor.run_once(admission["id"])
+        self.assertEqual(fired, ["after_recovery_enqueue"])
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 0)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 3)
+        restarted, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        result = restarted.run_once(admission["id"])
+        self.assertEqual(result["reason"], "fresh_work_recovery")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 1)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 3)
+
+    def test_zero_policy_and_unknown_send_state_do_not_create_recovery_work(self):
+        from dalton_core.openclaw_model_adapter import BrokerConnectionError
+
+        class UnknownAdapter(CountingFakeAdapter):
+            def execute(self, work, route, selected):
+                self.calls += 1
+                raise BrokerConnectionError("socket failed after an unknown boundary")
+
+        for maximum, expected_reason in ((0, "fresh_work_recovery_disabled"),
+                                         (2, "send_state_unproved")):
+            with self.subTest(maximum=maximum):
+                fixture, authority, args, _registration, _launcher = self._fixture()
+                self._enable_recovery(fixture, maximum=maximum)
+                admission = authority.admit_from_plan(**args)
+                adapter = (CapacityOnceAdapter({"unused": True}) if maximum == 0
+                           else UnknownAdapter({"unused": True}))
+                executor, _draft, _verifier = self._executor(
+                    fixture, authority, draft_adapter=adapter)
+                while True:
+                    current = executor.run_once(admission["id"])
+                    if current["status"] == "failed":
+                        break
+                result = executor.run_once(admission["id"])
+                self.assertEqual(result["reason"], expected_reason)
+                self.assertEqual(fixture.store.connection.execute(
+                    "SELECT count(*) FROM mission_document_research_recovery_links"
+                ).fetchone()[0], 0)
+                self.assertEqual(read_mission_document_research_observations(
+                    fixture.store.connection)[0]["outcome"], "recovery_required")
+
+    def test_foreign_self_consistent_model_proof_is_not_formal_model_authority(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, verifier = self._executor(fixture, authority)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        claim = executor.scheduler.claim("worker:foreign", work_order_id=work["id"])
+        candidate = {
+            "schema_version": "0.1", "status": "answered", "answer": "forged",
+            "candidate": {"normalized_statement": "forged", "metric_or_aspect": "revenue",
+                          "period": "current", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        }
+        proof = {
+            "schema_version": "0.1", "id": "document-research-model-proof:foreign",
+            "stage": "qualitative_model_draft", "work_order_ref": work["id"],
+            "work_order_hash": content_hash(work), "prompt_hash": content_hash(work["question"]),
+            "request_binding_hash": work["metadata"]["model_request_binding_hash"],
+            "route_decision_ref": "route-decision:foreign",
+            "model_invocation_ref": "invocation:foreign", "model_family": "foreign",
+            "output": candidate, "output_hash": content_hash(candidate),
+        }
+        proof["content_hash"] = content_hash(proof)
+        envelope = ResultEnvelope(
+            schema_version="0.1", id="result-envelope:foreign",
+            created_at=NOW.isoformat(), work_order_ref=work["id"],
+            invocation_ref="invocation:foreign", status="succeeded", outputs=proof,
+            actual_side_effects=(), usage_refs=(), artifact_refs=(), error=None,
+            metadata={"route_decision_ref": "route-decision:foreign"},
+        ).to_dict()
+        executor.scheduler.complete(
+            work["id"], claim["attempt"]["attempt_number"], "worker:foreign",
+            claim["lease_token"], envelope, idempotency_key="foreign:model-proof",
+            result_envelope_hash=content_hash(envelope))
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "model formal authority is invalid"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual(verifier.calls, 0)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions WHERE phase='verification'"
+        ).fetchone()[0], 0)
+
+    def test_observation_and_recovery_tables_refuse_untrusted_sql_writes(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        with self.assertRaises(sqlite3.DatabaseError):
+            fixture.store.connection.execute(
+                "INSERT INTO mission_document_research_observations VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("forged", admission["id"], admission["content_hash"],
+                 admission["mission_version_ref"], admission["company_ref"],
+                 admission["inquiry_ref"], admission["inquiry_hash"], "query_miss",
+                 "{}", "0" * 64, NOW.isoformat()),
+            )
+        fixture.store.connection.rollback()
+        self.assertFalse(hasattr(__import__(
+            "dalton_core.document_research_qualitative", fromlist=["stage_candidate"]
+        ), "stage_candidate"))
+
+    def test_recovery_deadline_stops_without_enqueuing_fresh_work(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2, elapsed=1)
+        admission = authority.admit_from_plan(**args)
+        adapter = CapacityOnceAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        while True:
+            result = executor.run_once(admission["id"])
+            if result["status"] == "failed":
+                break
+        fixture.harness.clock.value += timedelta(seconds=2)
+        stopped = executor.run_once(admission["id"])
+        self.assertEqual(stopped["reason"], "fresh_work_recovery_deadline_exceeded")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 0)
+
+    def test_recovery_fresh_work_limit_stops_repeated_capacity_failure(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        executor, adapter, _verifier = self._executor(
+            fixture, authority, draft_adapter=AlwaysCapacityAdapter({"unused": True}))
+        stopped = None
+        for _ in range(20):
+            result = executor.run_once(admission["id"])
+            if result.get("reason") == "fresh_work_recovery_exhausted":
+                stopped = result
+                break
+        self.assertIsNotNone(stopped)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 1)
+        self.assertEqual(adapter.calls, 6)
+
+    def test_atomic_day_budget_refusal_waits_for_refill_then_uses_fresh_work(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1, elapsed=172800)
+        admission = authority.admit_from_plan(**args)
+        other = fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=NOW.date().isoformat(), work_order_ref="work:other-settled-consumer",
+            attempt_number=1, phase="assessment", route_decision_ref="route:other",
+            reserved_micros=9_500_000,
+        )
+        fixture.budget.settle(other["admission_id"], actual_micros=9_500_000)
+        executor, draft, verifier = self._executor(fixture, authority)
+        for _ in range(4):
+            failed = executor.run_once(admission["id"])
+        self.assertEqual(failed["status"], "failed")
+        waiting = executor.run_once(admission["id"])
+        self.assertEqual(waiting["reason"], "fresh_work_recovery_backoff")
+        self.assertEqual((draft.calls, verifier.calls), (0, 0))
+        fixture.harness.clock.value += timedelta(days=1)
+        recovered = executor.run_once(admission["id"])
+        self.assertEqual(recovered["reason"], "fresh_work_recovery")
+        final = None
+        for _ in range(10):
+            final = executor.run_once(admission["id"])
+            if final.get("research_status") == "candidate_staged":
+                break
+        self.assertEqual(final["research_status"], "candidate_staged")
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        link = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchone()[0])
+        self.assertEqual(link["failure_proof"]["classification"],
+                         "atomic_day_budget_refusal")
+
+    def test_adapter_proved_pre_send_failure_recovers_with_new_budget_identity(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = DefinitelyNotSentFirstWorkAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement, "metric_or_aspect": "revenue",
+                          "period": "current", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        })
+        executor, _adapter, verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        original = executor._derive_work(admission, executor._blueprints(admission), 1)
+        admit = executor.draft_worker._before_model_call
+        executor.draft_worker._before_model_call = (
+            lambda work, route, profile, replayed:
+            None if work.id == original["id"] else admit(work, route, profile, replayed)
+        )
+        final = None
+        for _ in range(16):
+            final = executor.run_once(admission["id"])
+            if final.get("research_status") == "candidate_staged":
+                break
+        self.assertEqual(final["research_status"], "candidate_staged")
+        self.assertEqual((adapter.calls, verifier.calls), (4, 1))
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions WHERE work_order_ref=?",
+            (original["id"],)).fetchone()[0], 0)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 2)
+        link = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchone()[0])
+        self.assertEqual(link["failure_proof"]["classification"],
+                         "adapter_proved_definitely_not_sent")
+
+    def test_foreign_failed_claim_cannot_forge_no_send_recovery(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture)
+        admission = authority.admit_from_plan(**args)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        claim = executor.scheduler.claim("worker:foreign", work_order_id=work["id"])
+        receipt = {
+            "schema_version": "0.1", "kind": "typed_transport_exception",
+            "authority": "mission-document-model-worker", "state": "definitely_not_sent",
+            "work_order_ref": work["id"], "route_decision_ref": "route:foreign",
+            "transport_error_type": "BrokerDefinitelyNotSent",
+        }
+        receipt["content_hash"] = content_hash(receipt)
+        envelope = ResultEnvelope(
+            schema_version="0.1", id="result-envelope:foreign-no-send",
+            created_at=NOW.isoformat(), work_order_ref=work["id"],
+            invocation_ref="execution:foreign", status="failed", outputs={},
+            actual_side_effects=(), usage_refs=(), artifact_refs=(),
+            error={"code": "MODEL_ADAPTER_UNAVAILABLE", "message": "forged"},
+            metadata={"route_decision_ref": "route:foreign",
+                      "mission_document_no_send": receipt},
+        ).to_dict()
+        executor.scheduler.complete(
+            work["id"], claim["attempt"]["attempt_number"], "worker:foreign",
+            claim["lease_token"], envelope, idempotency_key="foreign:no-send",
+            result_envelope_hash=content_hash(envelope))
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "execution authority is foreign"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual(draft.calls, 0)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 0)
+
+    def test_self_consistent_model_completion_without_budget_cannot_advance(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft_adapter, verifier = self._executor(fixture, authority)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        work_wire = executor._derive_work(admission, executor._blueprints(admission), 1)
+        work = WorkOrder.from_dict(work_wire)
+        claim = executor.scheduler.claim(
+            executor.draft_worker.worker_ref, work_order_id=work.id)
+        estimated_input = executor.draft_worker.token_counter(work.question)
+        route = fixture.router.route(
+            work, attempt_number=claim["attempt"]["attempt_number"],
+            capability="research",
+            policy_version_ref=fixture.draft_policy["policy_version_ref"],
+            credential_slot_refs=[fixture.draft_profile["credential_slot_ref"]],
+            required_modalities=["text"],
+            required_context_tokens=estimated_input + work.budget["max_output_tokens"],
+            estimated_input_tokens=estimated_input,
+            estimated_output_tokens=work.budget["max_output_tokens"],
+            idempotency_key="foreign:route-without-budget",
+            purpose=executor.draft_worker.purpose, tier="brain",
+        )["decision"]
+        profile = fixture.router.get_profile(route["selected_profile_version_ref"])
+        invocation, result = draft_adapter.execute(work, route, profile)
+        fixture.store.register_invocation(invocation.to_dict())
+        formal_envelope = executor.draft_worker._successful_result(
+            work, route, invocation, result, result.outputs["text"])
+        executor.scheduler.complete(
+            work.id, claim["attempt"]["attempt_number"], executor.draft_worker.worker_ref,
+            claim["lease_token"], formal_envelope,
+            idempotency_key="foreign:self-consistent-without-budget",
+            result_envelope_hash=content_hash(formal_envelope.to_dict()))
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "model budget binding drifted"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual(verifier.calls, 0)
+        self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 0)
 
 
 if __name__ == "__main__":
