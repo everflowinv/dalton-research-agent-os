@@ -459,6 +459,7 @@ class ThesisImpactProductionRunner:
             verifier_transport_retry=self.config.verifier_transport_retry,
             assessment_timeout_seconds=self.config.timeout_seconds,
             verifier_timeout_seconds=self.config.timeout_seconds,
+            broker_max_frame_bytes=self.config.broker_max_frame_bytes,
             lease_seconds=lease_seconds,
         )
 

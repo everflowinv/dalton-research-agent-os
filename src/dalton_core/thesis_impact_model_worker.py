@@ -31,6 +31,11 @@ from typing import Any
 
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .model_router import ModelRouter, RoutingPolicyNotFound
+from .model_transport import (
+    DEFAULT_BROKER_MAX_FRAME_BYTES,
+    broker_frame_execution_binding,
+    resolve_broker_max_frame_bytes,
+)
 from .observability import ObservabilityStore
 from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
@@ -119,6 +124,7 @@ class ThesisImpactModelWorker:
         verifier_transport_retry: Mapping[str, Any] | None = None,
         assessment_timeout_seconds: float | None = None,
         verifier_timeout_seconds: float | None = None,
+        broker_max_frame_bytes: int = DEFAULT_BROKER_MAX_FRAME_BYTES,
     ) -> None:
         if impact.scheduler is not scheduler:
             raise TypeError("worker and impact must share one Scheduler authority")
@@ -162,6 +168,12 @@ class ThesisImpactModelWorker:
             raise ValueError("lease_seconds must be a positive finite number")
         if fault_hook is not None and not callable(fault_hook):
             raise TypeError("fault_hook must be callable")
+        try:
+            self.broker_max_frame_bytes = resolve_broker_max_frame_bytes({
+                "broker_max_frame_bytes": broker_max_frame_bytes,
+            })
+        except Exception as exc:
+            raise ValueError("broker_max_frame_bytes is invalid") from exc
         self.scheduler = scheduler
         self.router = router
         self.adapter = adapter
@@ -307,6 +319,9 @@ class ThesisImpactModelWorker:
             "adapter_timeout_seconds": self.phase_timeout_seconds[phase],
             "transport_retry": self.phase_transport_retry[phase],
             "provider_retry": self.phase_provider_retry[phase],
+            "broker_frame_policy": broker_frame_execution_binding({
+                "broker_max_frame_bytes": self.broker_max_frame_bytes,
+            }),
         }
 
     def _validate_execution_binding(
@@ -319,6 +334,14 @@ class ThesisImpactModelWorker:
         ):
             # Compatibility for already-admitted pre-binding WorkOrders. New
             # production Work carries the full phase execution object.
+            return expected
+        legacy_expected = {
+            key: value for key, value in expected.items()
+            if key != "broker_frame_policy"
+        }
+        if actual == legacy_expected:
+            # Historical Work admitted before the frame policy became part of
+            # immutable execution identity retains its original bytes.
             return expected
         if actual != expected:
             raise ThesisImpactModelWorkerRejected(

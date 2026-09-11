@@ -1434,6 +1434,10 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             token_counter=lambda _text: 800,
             clock=lambda: fixed_now,
         )
+        self.assertEqual(
+            bindings["assessment"],
+            worker._execution_binding("assessment", "research"),
+        )
         runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
         first = runtime.run_once(
             plan_version_ref=self.harness.plan_wire["id"],
@@ -1555,6 +1559,10 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             assessment_timeout_seconds=config.timeout_seconds,
             verifier_timeout_seconds=config.timeout_seconds,
             token_counter=lambda _text: 800, clock=lambda: fixed_now,
+        )
+        self.assertEqual(
+            bindings["assessment"],
+            worker._execution_binding("assessment", "research"),
         )
         result = worker.run_once(work)
         self.assertEqual(result["status"], "failed")
