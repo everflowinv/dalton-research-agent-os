@@ -121,9 +121,11 @@ class DiscoverySelectionLauncher:
                 ticket=json.loads((directory/'ticket.json').read_text())
                 source=json.loads((directory/'input.json').read_text())
                 company_ref=source['company']['company_ref']
+                current_periods=([] if source.get('selection_context',{}).get('research_purpose')=='sell_side_research'
+                                 else missing_periods_by_company[company_ref])
                 current={"view_hash":source['view']['content_hash'],"mission_ref":mission_ref,
                          "company":source['company'],
-                         "missing_periods":missing_periods_by_company[company_ref],
+                         "missing_periods":current_periods,
                          "config_hash":config_hash}
                 if source.get('selection_context') is not None:
                     current['selection_context']=source['selection_context']
@@ -141,9 +143,11 @@ class DiscoverySelectionLauncher:
             try:
                 ticket=self.status(json.loads(ticket_path.read_text())['id'])
                 source=json.loads(ticket_path.with_name('input.json').read_text())
+                current_periods=([] if source.get('selection_context',{}).get('research_purpose')=='sell_side_research'
+                                 else missing_periods_by_company[source['company']['company_ref']])
                 current={"view_hash":source['view']['content_hash'],"mission_ref":mission_ref,
                          "company":source['company'],
-                         "missing_periods":missing_periods_by_company[source['company']['company_ref']],
+                         "missing_periods":current_periods,
                          "config_hash":config_hash}
                 if source.get('selection_context') is not None:
                     current['selection_context']=source['selection_context']

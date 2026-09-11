@@ -86,6 +86,33 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
             launcher.status(retry['id'])
             self.assertEqual(launcher.start(**args)['status'],'exhausted')
 
+    def test_sell_side_consumption_does_not_inherit_earnings_period_gaps(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);config=root/'model.json';config.write_text('{}');process=Process()
+            launcher=DiscoverySelectionLauncher(state_dir=root,model_config_path=config,
+                                                  scheduler_db=root/'scheduler.sqlite')
+            base={"schema_version":"0.1","contract_ref":CONTRACT_REF,
+                  "source_envelope_ref":"e","source_envelope_hash":"a"*64,"candidates":[]}
+            view={**base,"content_hash":content_hash(base)}
+            context={"research_purpose":"sell_side_research",
+                     "research_question":"Assess IBM demand and competitive positioning."}
+            with patch('dalton_core.discovery_selection_launcher.subprocess.Popen',return_value=process):
+                ticket=launcher.start(discovery_ref='discovery:sell-side',view=view,
+                    mission_ref='mission:v1',company={"company_ref":"c","name":"IBM",
+                    "ticker":"IBM","aliases":[]},missing_periods=[],selection_context=context)
+            selection_base={"schema_version":"0.1","contract_ref":CONTRACT_REF,
+                            "candidate_view_hash":view["content_hash"],"selected":[]}
+            selection={**selection_base,"content_hash":content_hash(selection_base),
+                       "work_order_ref":"work-order:test","replayed":False,
+                       "result_envelope_ref":"result-envelope:test","invocation_ref":"invocation:test",
+                       "route_decision_ref":"route:test","config_hash":"a"*64,"recovery_epoch":0}
+            directory=launcher.root/ticket['id'].split(':')[1]
+            (directory/'summary.json').write_text(json.dumps({"status":"succeeded",
+                "identity_hash":ticket["identity_hash"],"selection":selection}));process.code=0
+            settled=launcher.status(ticket['id']);launcher.mark_consumed(settled)
+            self.assertEqual(launcher.currently_consumed(mission_ref='mission:v1',
+                missing_periods_by_company={"c":["2026-Q2"]}),['discovery:sell-side'])
+
     def test_tampered_success_summary_is_failed_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); config=root/'model.json'; config.write_text('{}')
