@@ -356,6 +356,39 @@ class RegisteredAnnualReportPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(RegisteredAnnualReportError, "max_cost_usd"):
             normalize_request(configurable)
 
+    def test_new_capability_identity_preserves_historical_work_declarations(self) -> None:
+        from dalton_core.research_plan import build_research_plan_steps, plan_version_ref_for
+
+        fixture = self.planner()
+        created = self.create_plan(fixture)
+        current = fixture.plans.plan_version(created["plan_version_ref"])
+        legacy = json.loads(json.dumps(current))
+        request = legacy["execution_scope"]["parameters"]
+        for stage in ("draft", "verifier"):
+            request["model_execution"][stage].pop("router_capability")
+        self.assertEqual(normalize_request(request), request)
+        legacy["id"] = plan_version_ref_for(
+            question_ref=legacy["question_ref"], question_version_ref=legacy["question_version_ref"],
+            decision_ref=legacy["agenda_binding"]["decision_ref"], sec_request=request,
+            operation=REGISTERED_ANNUAL_REPORT_OPERATION)
+        self.assertNotEqual(legacy["id"], current["id"])
+        legacy["execution_scope"]["steps"] = build_research_plan_steps(
+            plan_version_ref=legacy["id"], sec_request=request, max_attempts=1,
+            operation=REGISTERED_ANNUAL_REPORT_OPERATION)
+        for i, semantic in ((1, "research"), (2, "verify")):
+            old_work = _plan_work_orders(legacy)[i]
+            new_work = _plan_work_orders(current)[i]
+            self.assertEqual(len(old_work["requested_capabilities"]), 1)
+            self.assertEqual(old_work["requested_capabilities"],
+                             legacy["execution_scope"]["steps"][i]["requested_capabilities"])
+            self.assertEqual(new_work["requested_capabilities"],
+                             current["execution_scope"]["steps"][i]["requested_capabilities"])
+            self.assertEqual(new_work["requested_capabilities"][-1], semantic)
+            self.assertNotEqual(old_work["id"], new_work["id"])
+        request["model_execution"]["draft"]["router_capability"] = "verify"
+        with self.assertRaisesRegex(RegisteredAnnualReportError, "router_capability"):
+            normalize_request(request)
+
     def test_annual_model_purposes_are_tiered_and_cockpit_selectable(self) -> None:
         expected = {
             "registered_annual_report_draft": "brain",

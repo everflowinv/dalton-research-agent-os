@@ -128,8 +128,13 @@ def normalize_request(value: Any) -> dict[str, Any]:
     }
     for stage in ("draft", "verifier"):
         config = raw_model.get(stage)
-        if not isinstance(config, Mapping) or set(config) != model_fields:
+        if not isinstance(config, Mapping) or set(config) not in (
+            model_fields, model_fields | {"router_capability"}
+        ):
             raise RegisteredAnnualReportError(f"model_execution.{stage} has an invalid closed shape")
+        if ("router_capability" in config
+                and config["router_capability"] != {"draft": "research", "verifier": "verify"}[stage]):
+            raise RegisteredAnnualReportError(f"model_execution.{stage}.router_capability is invalid")
         slots = config.get("credential_slot_refs")
         if (not isinstance(slots, (list, tuple)) or not slots
                 or any(
@@ -195,6 +200,8 @@ def normalize_request(value: Any) -> dict[str, Any]:
             "max_cost_usd": float(cost),
             "provider_retry": provider_retry,
             "transport_retry": transport_retry,
+            **({"router_capability": config["router_capability"]}
+               if "router_capability" in config else {}),
         }
     proof_ref = _optional_text(value.get("document_read_proof_ref"), "document_read_proof_ref")
     proof_hash = _optional_sha256(
