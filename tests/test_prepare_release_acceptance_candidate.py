@@ -49,6 +49,7 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
     def _complete(self, count: int = 15) -> dict[str, object]:
         document = template()
         document.update(
+            release_ref="R11a",
             status="candidate_inputs_complete",
             packet_root=str(self.packet),
             source={"root": str(self.source), "commit": self.commit},
@@ -122,7 +123,7 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
         self.assertEqual(document["deployment_state"], "not_started")
         self.assertFalse(any(row["sha256"] for row in document["artifacts"].values()))
         self.assertIsNone(document["runtime_configuration"]["model_config_count"])
-        with self.assertRaisesRegex(CandidateError, "not marked complete"):
+        with self.assertRaisesRegex(CandidateError, "release ref is unresolved"):
             build_candidate(document)
 
     def test_complete_final_snapshot_builds_only_an_unaccepted_candidate(self) -> None:

@@ -93,7 +93,7 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
 
 
-def template(release_ref: str = "R11") -> dict[str, Any]:
+def template(release_ref: str | None = None) -> dict[str, Any]:
     """Return the closed, deliberately incomplete review input."""
 
     return {

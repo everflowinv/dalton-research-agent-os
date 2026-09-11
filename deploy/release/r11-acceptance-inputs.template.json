@@ -1,13 +1,13 @@
 {
   "schema_version": "dalton-release-acceptance-candidate-input-0.1",
-  "release_ref": "R11",
+  "release_ref": null,
   "status": "candidate_inputs_incomplete",
   "acceptance_state": "pending",
   "deployment_state": "not_started",
   "packet_root": null,
   "source": {
-    "root": "/Users/everflow/Projects/dalton-foundation-followup-r11-acceptance-worktree",
-    "commit": "62f35597b2ca3c57d02bc06e688a2484829c1309"
+    "root": null,
+    "commit": null
   },
   "artifacts": {
     "wheel": {"path": null, "sha256": null},
