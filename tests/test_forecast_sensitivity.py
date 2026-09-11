@@ -367,6 +367,10 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(SELECTION_RULE["unit_move"], "0.01")
         self.assertEqual(SELECTION_RULE["metric_precedence"][0],
                          "result:free_cash_flow")
+        self.assertEqual(
+            SELECTION_RULE["consensus_gap_rule_ref"],
+            "rule:consensus-fiscal-period-join:1",
+        )
         self.assertEqual(SELECTION_RULE["scenarios"], list(SCENARIOS))
         # The rule states that every column is a flat hold, not a path, and
         # that a driver without a band is demoted rather than dropped.

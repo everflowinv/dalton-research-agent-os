@@ -45,7 +45,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -677,6 +677,7 @@ class ConsensusEstimateAuthority:
                 None if latest["report_consensus"] is None
                 else dict(latest["report_consensus"])
             ),
+            "fiscal_calendar": dict(latest["fiscal_calendar"]),
             "invocation_ref": fetch.get("invocation_ref"),
             "artifact_hash": fetch.get("artifact_hash"),
         }
@@ -985,10 +986,20 @@ class ConsensusEstimateAuthority:
 _EPS_WORDS = ("eps", "earnings per share")
 _REVENUE_WORDS = ("revenue", "revenues", "net revenue", "sales")
 MAX_GAP_METRICS = 12
+# Changing the join changes the answer even when neither source version did.
+# It is returned beside every gap and folded into the sensitivity rule hash,
+# so projections made by the old end-date-only join become visibly stale.
+CONSENSUS_GAP_RULE_REF = "rule:consensus-fiscal-period-join:1"
 
 
-def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[str, Any], str | None]:
-    """Our own estimate per period end, for the two lines the street quotes."""
+def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[Any, Any], str | None]:
+    """Our quarterly estimates keyed by metric and exact fiscal window.
+
+    A fiscal Q4 and its fiscal year end on the same day. End date alone loses
+    the fact that prevents a quarterly value from being compared with an
+    annual consensus value, so cells without a typed company-fiscal quarter
+    identity are unavailable to this join.
+    """
 
     try:
         from .model_forecast_driver import ForecastModelAuthority
@@ -1023,12 +1034,27 @@ def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[str, Any], str |
             if cell.get("superseded_by"):
                 continue
             period = cell.get("period")
-            end = period.get("end") if isinstance(period, Mapping) else None
+            if not isinstance(period, Mapping):
+                continue
+            start = period.get("start")
+            end = period.get("end")
             value = cell.get("value")
             kind = cell.get("kind")
-            if not isinstance(end, str) or value is None or kind not in CELL_KINDS:
+            if (
+                period.get("calendar") != "company:fiscal"
+                or period.get("kind") != "quarter"
+                or not isinstance(start, str)
+                or not isinstance(end, str)
+                or value is None
+                or kind not in CELL_KINDS
+            ):
                 continue
-            key = (metric, end)
+            try:
+                if date.fromisoformat(start) > date.fromisoformat(end):
+                    continue
+            except ValueError:
+                continue
+            key = (metric, "quarter", start, end)
             standing = found.get(key)
             # D: prefer the actualised cell. Once a period has been reported,
             # our number for it is what happened, not what we expected -- and
@@ -1043,6 +1069,7 @@ def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[str, Any], str |
                 "unit": str(line.get("unit") or ""),
                 "label": str(line.get("label") or metric),
                 "kind": kind,
+                "period": dict(period),
             }
     return found, str(latest.get("id") or latest.get("version_ref") or "") or None
 
@@ -1062,6 +1089,77 @@ def _gap_percent(ours: str, street: str) -> str | None:
     return f"{gap:f}"
 
 
+def _quarter_window(cal: Mapping[str, Any], end: date) -> tuple[str, str]:
+    """Return the exact company-fiscal quarter ending on ``end``."""
+
+    year, month = _shift(end.year, end.month, -3)
+    previous_end = _period_end(cal, year, month)
+    return (previous_end + timedelta(days=1)).isoformat(), end.isoformat()
+
+
+def _ours_for_street_period(
+    ours: Mapping[Any, Any], metric: str, street: Mapping[str, Any],
+    cal: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve one street period without crossing quarter/year boundaries."""
+
+    try:
+        mapped = map_estimate_period(str(street["vendor_period"]), cal)
+    except (KeyError, FiscalMappingError, ValueError):
+        return None, "street_period_mapping_unavailable"
+    for field in ("period_kind", "fiscal_year", "fiscal_quarter", "period_end", "label"):
+        if street.get(field) != mapped[field]:
+            return None, "street_period_mapping_drifted"
+    try:
+        end = date.fromisoformat(str(mapped["period_end"]))
+    except ValueError:
+        return None, "street_period_end_invalid"
+
+    if mapped["period_kind"] == "quarter":
+        start, end_text = _quarter_window(cal, end)
+        found = ours.get((metric, "quarter", start, end_text))
+        return (None, "forecast_quarter_unavailable") if found is None else (dict(found), None)
+
+    # The workbook's established annual-model convention is a sum of four
+    # typed duration quarters for non-ratio flow lines. The current formal
+    # model has such a line for revenue but has no share-count/EPS formula;
+    # quarterly EPS can be compared directly, while annual EPS remains
+    # unavailable until that exact definition exists. A single Q4 is never an
+    # annual proxy.
+    if metric != "revenue":
+        return None, "forecast_fiscal_year_aggregation_unavailable"
+    quarter_ends = _quarter_ends_of(cal, end)
+    quarters: list[dict[str, Any]] = []
+    for quarter_end in quarter_ends:
+        start, end_text = _quarter_window(cal, quarter_end)
+        found = ours.get((metric, "quarter", start, end_text))
+        if found is None:
+            return None, "forecast_fiscal_year_incomplete"
+        quarters.append(dict(found))
+    units = {str(item.get("unit") or "") for item in quarters}
+    labels = {str(item.get("label") or metric) for item in quarters}
+    if len(units) != 1 or len(labels) != 1:
+        return None, "forecast_fiscal_year_components_conflict"
+    unit = next(iter(units))
+    if unit == "ratio":
+        return None, "forecast_fiscal_year_ratio_unavailable"
+    try:
+        total = sum((Decimal(str(item["value"])) for item in quarters), Decimal(0))
+    except (InvalidOperation, ValueError):
+        return None, "forecast_fiscal_year_value_invalid"
+    if not total.is_finite():
+        return None, "forecast_fiscal_year_value_invalid"
+    return {
+        "value": format(total, "f"), "unit": unit,
+        "label": next(iter(labels)), "kind": "fiscal_year_sum",
+        "period": {
+            "calendar": "company:fiscal", "kind": "fiscal_year",
+            "start": _quarter_window(cal, quarter_ends[0])[0],
+            "end": end.isoformat(),
+        },
+    }, None
+
+
 def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
     """Our forecast against the street's, for one company. See the note above."""
 
@@ -1076,10 +1174,24 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
         return {"metrics": []}
     refs = [held["version_ref"]] + ([forecast_ref] if forecast_ref else [])
     rows: list[dict[str, Any]] = []
+    unavailable: list[dict[str, Any]] = []
+    cal = held["fiscal_calendar"]
     for metric, key in (("eps", "eps_estimates"), ("revenue", "revenue_estimates")):
         for street in held[key]:
-            mine = ours.get((metric, street["period_end"]))
-            if mine is None or street["avg"] is None:
+            mine, reason = _ours_for_street_period(ours, metric, street, cal)
+            if mine is None:
+                unavailable.append({
+                    "metric": metric, "period": street["label"],
+                    "period_kind": street["period_kind"], "reason": reason,
+                    "refs": list(refs),
+                })
+                continue
+            if street["avg"] is None:
+                unavailable.append({
+                    "metric": metric, "period": street["label"],
+                    "period_kind": street["period_kind"],
+                    "reason": "street_estimate_unavailable", "refs": list(refs),
+                })
                 continue
             percent = _gap_percent(mine["value"], street["avg"])
             if percent is None:
@@ -1094,7 +1206,12 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
                 "refs": list(refs),
             })
     rows.sort(key=lambda row: (row["period"], row["metric"]))
-    return {"metrics": rows[:MAX_GAP_METRICS]}
+    unavailable.sort(key=lambda row: (row["period"], row["metric"]))
+    return {
+        "rule_ref": CONSENSUS_GAP_RULE_REF,
+        "metrics": rows[:MAX_GAP_METRICS],
+        "unavailable_periods": unavailable,
+    }
 
 
 def report_consensus(

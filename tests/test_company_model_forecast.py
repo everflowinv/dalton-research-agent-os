@@ -583,10 +583,13 @@ class LaneStateTests(unittest.TestCase):
 
         from tests.test_consensus_estimate import (
             ACN_CALENDAR, ARTIFACT, CAPTURED, GOVERNANCE, GOVERNANCE_HASH,
-            INVOCATION, wire,
+            INVOCATION, estimate_row, wire,
         )
         ConsensusEstimateAuthority(self.store).publish_consensus(
-            company_ref=ACN, wire=wire(), **ACN_CALENDAR,
+            company_ref=ACN, wire=wire(
+                eps_estimates=[],
+                revenue_estimates=[estimate_row("0q", "1000000000")],
+            ), **ACN_CALENDAR,
             invocation_ref=INVOCATION, artifact_hash=ARTIFACT,
             governance_ref=GOVERNANCE, governance_hash=GOVERNANCE_HASH,
             captured_at=CAPTURED)

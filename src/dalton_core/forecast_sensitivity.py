@@ -64,6 +64,7 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .consensus_estimate import CONSENSUS_GAP_RULE_REF
 from .model_forecast_driver import (
     ForecastModelUnavailable,
     chain_base,
@@ -176,6 +177,7 @@ SELECTION_RULE: dict[str, Any] = {
     "excluded": "a driver with no live assumption over the horizon, and a "
                 "driver whose move leaves the metric unavailable",
     "band_ref": BAND_RULE_REF,
+    "consensus_gap_rule_ref": CONSENSUS_GAP_RULE_REF,
     "band_window": "every quarter of filed history the model input table holds",
     "band_min_points": MIN_BAND_POINTS,
     "band_statistics": ["trough", "mean", "peak", "latest"],
