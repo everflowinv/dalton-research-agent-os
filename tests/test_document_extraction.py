@@ -332,6 +332,12 @@ class DocumentExtractionTests(unittest.TestCase):
         h.enable_fixture({'schema_version': '0.1', 'suggestions': [{'actor_ref':'human:owner'}]})
         result = h.generate()
         self.assertEqual((result['status'], result['suggestions']), ('succeeded', []))
+        receipt = h.service.read_completion_receipt(
+            review_id=h.review['review_id'], source_review_hash=h.params['expected_review_hash'],
+            offset=0, actor_ref=OWNER)
+        self.assertEqual(receipt, result['completion_receipt'])
+        self.assertEqual(receipt['result_envelope_hash'],
+                         h.h.scheduler.formal_result(receipt['work_order_ref'])['result_envelope_hash'])
         self.assertEqual([d['index'] for d in result['dropped']], [0])
         self.assertIn('fields are invalid', result['dropped'][0]['reason'])
         self.assertEqual(h.generate()['suggestions'], [])

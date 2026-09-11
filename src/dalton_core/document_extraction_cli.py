@@ -39,6 +39,7 @@ from .document_extraction import (
     HermeticExtractionAdapter,
     validate_model_config,
 )
+from .document_read_completion import DocumentReadCompletionAuthority
 from .observability import ObservabilityStore
 from .public_web_fetch_launcher import PublicWebFetchLauncher
 from .raw_spool import RawSpool
@@ -736,6 +737,19 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
             continue
         if gated is not None:
             summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "held", "reason": gated})
+            continue
+        try:
+            receipts = [service.read_completion_receipt(
+                review_id=review["review_id"], source_review_hash=review_hash,
+                offset=offset, actor_ref=actor) for offset in offsets]
+            DocumentReadCompletionAuthority(host.store.connection).record(
+                review_id=review["review_id"], source_review_hash=review_hash,
+                actor_ref=actor, windows=receipts, receipt_reader=service)
+        except Exception as exc:  # a proof failure must leave the review open
+            summary["resolved_reviews"].append({
+                "review_id": review["review_id"], "status": "held",
+                "reason": f"completion proof failed: {type(exc).__name__}: {exc}",
+            })
             continue
         fresh = [o for o in outcomes if o["status"] == "admitted"]
         carried = [o for o in outcomes if o["status"] in ("admitted", "duplicate")]

@@ -141,6 +141,17 @@ class StageHarness(unittest.TestCase):
 
 
 class SourceBaseTests(StageHarness):
+    def test_successful_read_proof_does_not_override_wrong_issuer_resolution(self) -> None:
+        document_ref = self.document(ACN, TRANSCRIPTS, "acquired", read=True)
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_document_reviews SET rationale=? "
+                "WHERE company_ref=? AND document_ref=?",
+                ("P13i: document concerns a different issuer", ACN, document_ref),
+            )
+        item = self.item(self.evaluate(), ACN, "earnings_calls")
+        self.assertEqual((item["have"], item["read"]), (0, 0))
+
     def test_wrong_issuer_quarters_never_count_for_the_search_target(self) -> None:
         for title, issuer in (
             ("Nordic Semiconductor Q2 2026 Post Call", "Nordic Semiconductor"),

@@ -273,15 +273,15 @@ def _document_counts(
         )
         review_params = (row["mission_ref"],)
 
-    latest_reviews: dict[tuple[str, str], tuple[str, str]] = {}
+    latest_reviews: dict[tuple[str, str], tuple[str, str, str | None]] = {}
     for review in connection.execute(
-        "SELECT company_ref, document_ref, state, updated_at, review_id "
+        "SELECT company_ref, document_ref, state, rationale, updated_at, review_id "
         "FROM coverage_mission_document_reviews "
         f"WHERE {review_scope.replace('r.', '')} ORDER BY updated_at, review_id",
         review_params,
     ).fetchall():
         latest_reviews[(review["company_ref"], review["document_ref"])] = (
-            review["state"], review["review_id"]
+            review["state"], review["review_id"], review["rationale"]
         )
 
     completed_reviews: set[str] = set()
@@ -347,14 +347,16 @@ def _document_counts(
         params,
     ).fetchall():
         document_ref, status = entry["document_ref"], entry["status"]
-        dismissed = latest_reviews.get((entry["company_ref"], document_ref), (None, None))[0] == "dismissed"
+        latest_review = latest_reviews.get((entry["company_ref"], document_ref), (None, None, None))
+        dismissed = latest_review[0] == "dismissed"
+        wrong_issuer = dismissed and isinstance(latest_review[2], str) and latest_review[2].startswith("P13i:")
         issuer_authoritative_annual = (
             entry["spec_ref"] == "annual-report-10k"
             and entry["source_ref"] == "source:sec-edgar"
             and (entry["company_ref"], document_ref) in authoritative_annuals
         )
-        completed = latest_reviews.get((entry["company_ref"], document_ref), (None, None))[1] in completed_reviews
-        if dismissed and not issuer_authoritative_annual and not completed:
+        completed = latest_review[1] in completed_reviews
+        if dismissed and (wrong_issuer or (not issuer_authoritative_annual and not completed)):
             continue
         key = (entry["company_ref"], entry["spec_ref"], document_ref)
         rank = _STATUS_RANK.get(status, 0)
@@ -422,7 +424,9 @@ def _document_counts(
     ).fetchall():
         key = (entry["company_ref"], entry["document_ref"])
         latest = latest_reviews.get(key)
-        if latest is not None and latest[1] in completed_reviews:
+        if (latest is not None and latest[1] in completed_reviews
+                and not (latest[0] == "dismissed" and isinstance(latest[2], str)
+                         and latest[2].startswith("P13i:"))):
             read_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
     read_periods: dict[tuple[str, str], set[str]] = {}
     for company_ref, spec_ref, _document_ref in read_docs:

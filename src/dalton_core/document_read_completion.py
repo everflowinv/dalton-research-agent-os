@@ -87,6 +87,15 @@ class DocumentReadCompletionAuthority:
             raise DocumentReadCompletionError("source review hash is invalid")
         if not windows:
             raise DocumentReadCompletionError("completion requires at least one window")
+        if existing is not None:
+            saved = json.loads(existing["record_json"])
+            saved_body = {key: value for key, value in saved.items() if key != "content_hash"}
+            if (content_hash(saved_body) != saved.get("content_hash")
+                    or saved.get("source_review_hash") != source_review_hash
+                    or saved.get("actor_ref") != actor_ref
+                    or saved.get("windows") != list(windows)):
+                raise DocumentReadCompletionError("review already has a different completion proof")
+            return {"status": "duplicate", **saved}
         verified = []
         expected_offset = 0
         source_hash = None
@@ -112,13 +121,6 @@ class DocumentReadCompletionAuthority:
             verified.append(normalized)
         if expected_offset is not None:
             raise DocumentReadCompletionError("window chain is incomplete")
-        if existing is not None:
-            saved = json.loads(existing["record_json"])
-            if (saved.get("source_review_hash") != source_review_hash
-                    or saved.get("actor_ref") != actor_ref
-                    or saved.get("windows") != verified):
-                raise DocumentReadCompletionError("review already has a different completion proof")
-            return {"status": "duplicate", **saved}
         at = created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds")
         body = {"schema_version": "0.1", "review_id": review_id,
                 "source_review_hash": source_review_hash,
@@ -130,11 +132,20 @@ class DocumentReadCompletionAuthority:
         wire["content_hash"] = content_hash(wire)
         self._authorization.authorized = True
         try:
-            with self.connection:
-                self.connection.execute(
+            self.connection.execute("BEGIN IMMEDIATE")
+            current = self.connection.execute(
+                "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+            if current is None or review_wire(current) != source_review:
+                raise DocumentReadCompletionError("source review changed before proof commit")
+            self.connection.execute(
                     "INSERT INTO document_read_completion_proofs(proof_id,review_id,source_review_hash,document_ref,company_ref,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
                     (wire["proof_id"], review_id, source_review_hash, source_review["document_ref"],
                      source_review["company_ref"], canonical_json(wire), wire["content_hash"], at))
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
         finally:
             self._authorization.authorized = False
         return {"status": "fresh", **wire}

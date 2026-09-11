@@ -40,7 +40,15 @@ class DocumentReadCompletionTests(StageHarness):
         self.missions.resolve_document_review(
             self.review["review_id"], resolution="dismissed", actor_ref=AUTOMATION,
             rationale="ADR-0005: no new qualitative claim", expected_review_hash=self.source_hash)
-        self.assertEqual(self.record([self.window(0, 1), self.window(1, None)])["status"], "duplicate")
+        class MustNotReconstructResolvedContext:
+            def read_completion_receipt(_self, **_kwargs):
+                raise AssertionError("resolved review context cannot be reconstructed")
+        duplicate = self.authority.record(
+            review_id=self.review["review_id"], source_review_hash=self.source_hash,
+            actor_ref=AUTOMATION, windows=[self.window(0, 1), self.window(1, None)],
+            receipt_reader=MustNotReconstructResolvedContext(),
+            created_at="2026-09-11T00:00:00+00:00")
+        self.assertEqual(duplicate["status"], "duplicate")
         item = self.item(self.evaluate(), ACN, "broker_research")
         self.assertEqual((item["have"], item["read"]), (1, 1))
 
@@ -80,6 +88,26 @@ class DocumentReadCompletionTests(StageHarness):
             rationale="fixture", expected_review_hash=self.source_hash)
         with self.assertRaisesRegex(DocumentReadCompletionError, "must precede"):
             self.record([self.window()])
+
+    def test_review_resolution_racing_receipt_validation_prevents_insert(self):
+        authority = self.authority
+        review = self.review
+        missions = self.missions
+        window = self.window()
+
+        class RacingReader:
+            def read_completion_receipt(_self, **_kwargs):
+                missions.resolve_document_review(
+                    review["review_id"], resolution="dismissed", actor_ref=AUTOMATION,
+                    rationale="concurrent resolution", expected_review_hash=self.source_hash)
+                return window
+
+        with self.assertRaisesRegex(DocumentReadCompletionError, "changed before proof commit"):
+            authority.record(
+                review_id=review["review_id"], source_review_hash=self.source_hash,
+                actor_ref=AUTOMATION, windows=[window], receipt_reader=RacingReader())
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM document_read_completion_proofs").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

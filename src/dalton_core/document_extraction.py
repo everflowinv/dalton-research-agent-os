@@ -1008,8 +1008,26 @@ class DocumentExtractionService:
                     "route_ref": result.metadata["route_decision_ref"], "profile_ref": result.metadata["profile_version_ref"],
                     "hermetic_fixture": not bool(context.get("model_binding"))}
             suggestions.append(_record({"id": "document-extraction-suggestion:" + content_hash(base)[:32], **base}))
+        completion_receipt = {
+            "offset": context["offset"], "context_ref": context["id"],
+            "context_hash": context["content_hash"], "next_offset": context["next_offset"],
+            "source_content_hash": context["source_content_hash"],
+            "source_review_hash": context["review_hash"], "work_order_ref": work.id,
+            "result_envelope_ref": result.id,
+            "result_envelope_hash": formal["result_envelope_hash"], "status": "succeeded",
+        }
         return {"status": "succeeded", "suggestions": suggestions, "work_order_ref": work.id,
+                "completion_receipt": completion_receipt,
                 "hermetic_fixture": not bool(context.get("model_binding")), "dropped": wire["dropped"]}
+
+    def read_completion_receipt(self, *, review_id, source_review_hash, offset, actor_ref):
+        """Return a receipt only after replaying every formal window check."""
+        context = self.context(review_id, source_review_hash, offset, actor_ref)
+        result = self._suggestions(context)
+        receipt = result.get("completion_receipt")
+        if result.get("status") != "succeeded" or not isinstance(receipt, Mapping):
+            raise ResearchVerificationConflict("document window has no successful formal result")
+        return dict(receipt)
 
     def budget_status(self, context):
         config = getattr(self.writer, "_document_extraction_model_config", None)
