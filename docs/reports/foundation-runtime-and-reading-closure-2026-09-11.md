@@ -637,7 +637,7 @@ To keep room for release acceptance, root verified no open handles and hashed th
 
 Company-specific financial structure foundation `5292ae71` passed 123 tests but remains outside this urgent runtime freeze. A reviewed structure alone is not a working model. Two Sol lanes now connect the existing model-spec producer/persistence to a sourced statement DAG and the forecast consumer to its actual company equations. Root review requires EPS to use the disclosed diluted-EPS earnings numerator (including applicable attribution/adjustments), not a blanket parent-net-income shortcut; typed currencies, duration/weighted-share semantics and exact annual windows must be checked without a short hardcoded currency list.
 
-### 2026-09-11 18:35 UTC — R14 failed acceptance retained; R14a running and AMZN parity clarified
+### 2026-09-11 18:33 UTC — R14 failed acceptance retained; R14a running and AMZN parity clarified
 
 R14 completed 7,462 tests in 696.947 seconds with one failure, two errors and one skip. It was not deployed. Log SHA `962453c9b0ea81b200d425403a22668a09990078e1dc79f3617522d8f8ebdf22` and native-result SHA `043cece30eb9ecbb8119d4c99a5fac47dd86c92134a1417023ca339dfe5f6641` preserve the failed evidence. The isolation guard now explicitly recognizes the host-search bridge and asserts offline/no-host calls cannot read a home config. The two actual UDS failures exposed a production mismatch: Thesis Impact WorkOrders bound the new frame policy, but the worker reconstructed an execution identity without it. The worker now binds the same configured frame limit, with exact legacy compatibility for older WorkOrders lacking this field. New real socket assertions compare both sides directly.
 
