@@ -1017,6 +1017,7 @@ class MissionSourceDiscoveryCoordinator:
         acquisitions_per_tick: int = ACQUISITIONS_PER_TICK,
         acquisition_wait_seconds: float = ACQUISITION_WAIT_SECONDS,
         tick_budget_seconds: float = TICK_BUDGET_SECONDS,
+        selection_launcher: Any | None = None,
     ) -> None:
         self.store = store
         self.missions = missions
@@ -1035,6 +1036,7 @@ class MissionSourceDiscoveryCoordinator:
         self.acquisition_launcher = acquisition_launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.owner_call_cap = int(owner_call_cap)
+        self.selection_launcher = selection_launcher
         # P9d-13: the connector spool, read only, is the sole route from a
         # public-web ref back to its host for rows recorded before the ledger
         # carried one.  Optional: without it the backfill reports "no_spool".
@@ -1712,6 +1714,10 @@ class MissionSourceDiscoveryCoordinator:
             "count": len(needs), "error": needs_error,
             "first": needs[0] if needs else None,
         }
+        empty_discoveries = (
+            self.selection_launcher.completed_empty_discoveries()
+            if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF
+            else ())
         document = self.missions.next_discovered_document(
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts,
@@ -1719,7 +1725,42 @@ class MissionSourceDiscoveryCoordinator:
             preferred_needs=needs,
             excluded_needs=stopped_needs,
             excluded_mission_version_ref=None if mission is None else mission["id"],
+            excluded_discovery_refs=empty_discoveries,
         )
+        if (document is not None and self.selection_launcher is not None
+                and self.source_ref == ALPHAENGINE_SOURCE_REF):
+            if mission is None or self.spool_dir is None:
+                return {"status":"selection_pending","reason":"selection authority unavailable"}
+            ticket = self.selection_launcher.latest(document["discovery_ref"])
+            if ticket is None:
+                try:
+                    from .discovery_candidate_selection import candidate_view
+                    discovery=self.missions.discovery_record(document["discovery_ref"])
+                    row=self.store.connection.execute("SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",(discovery["source_envelope_ref"],)).fetchone()
+                    if row is None: raise ValueError("source envelope missing")
+                    envelope=json.loads(row["record_json"])
+                    if envelope.get("content_hash") != row["content_hash"]: raise ValueError("source envelope drifted")
+                    if self._spool is None: self._spool=RawSpool(str(self.spool_dir),max_total_bytes=1_000_000_000)
+                    view=candidate_view(self._spool.read_object(envelope["raw_response_hash"]),envelope)
+                    member=next(x for x in mission["universe"] if x["company_ref"]==document["company_ref"])
+                    terms=self.plan["companies"][document["company_ref"]]["search_terms"]
+                    from .mission_stage import evaluate_mission
+                    stage=next(x for x in evaluate_mission(self.store.connection,mission) if x["company_ref"]==document["company_ref"])
+                    item=next(x for x in stage["items"] if x["item_ref"]=="earnings_calls")
+                    ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
+                        mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,"ticker":member["ticker"],"aliases":[member["ticker"]]},missing_periods=list(item.get("missing_periods") or ()))
+                except Exception as exc:
+                    return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
+                return {"status":"selection_pending","ticket_ref":ticket.get("id")}
+            if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
+                return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"]}
+            selected=[x["document_ref"] for x in ticket["summary"]["selection"]["selected"]]
+            if not selected:
+                return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
+            document=self.missions.next_discovered_document(source_ref=self.source_ref,
+                preferred_hosts=self.preferred_hosts,skip_hosts=tuple(dict.fromkeys((*self.skip_hosts,*cooldown_hosts))),
+                preferred_needs=needs,excluded_needs=stopped_needs,excluded_mission_version_ref=mission["id"],
+                included_document_refs=selected,included_discovery_ref=document["discovery_ref"])
         if document is not None and self._document_in_authority(
             document["document_ref"], document.get("discovery_ref")
         ):

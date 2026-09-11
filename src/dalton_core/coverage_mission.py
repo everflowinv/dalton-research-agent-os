@@ -2029,6 +2029,8 @@ class CoverageMissionAuthority:
         preferred_needs: Sequence[Mapping[str, str]] = (),
         excluded_needs: Sequence[Mapping[str, str]] = (),
         excluded_mission_version_ref: str | None = None,
+        included_discovery_ref: str | None = None,
+        excluded_discovery_refs: Sequence[str] = (),
         included_document_refs: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
@@ -2070,13 +2072,16 @@ class CoverageMissionAuthority:
             "WHERE d.status='discovered'"
         )
         params: list[Any] = []
+        excluded_discoveries = tuple(dict.fromkeys(
+            _text(ref, "excluded_discovery_ref") for ref in excluded_discovery_refs))
+        if excluded_discoveries:
+            query += " AND d.discovery_ref NOT IN (%s)" % ",".join("?"*len(excluded_discoveries)); params.extend(excluded_discoveries)
         if included_document_refs is not None:
-            included = tuple(dict.fromkeys(
-                _text(ref, "included_document_ref") for ref in included_document_refs))
-            if not included:
-                return None
-            query += " AND d.document_ref IN (%s)" % ",".join("?" * len(included))
-            params.extend(included)
+            included=tuple(dict.fromkeys(_text(ref,"included_document_ref") for ref in included_document_refs))
+            if not included: return None
+            if included_discovery_ref is None: raise CoverageMissionValidationError("included discovery is required")
+            query += " AND d.document_ref IN (%s) AND d.discovery_ref=?" % ",".join("?"*len(included))
+            params.extend((*included,_text(included_discovery_ref,"included_discovery_ref")))
         if source_ref is not None:
             query += " AND d.source_ref=?"
             params.append(_text(source_ref, "source_ref"))

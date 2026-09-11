@@ -152,6 +152,7 @@ def render(
     # staging and those ops answer ``rejected``.
     candidate_staging_path: str | None = None
     extraction_config_path: str | None = None
+    selection_config_path: str | None = None
     if (
         service_config is not None
         and service_config.control is not None
@@ -162,6 +163,10 @@ def render(
         )
         if service_config.control.research_review.document_extraction_model_config_path is not None:
             extraction_config_path = str(service_config.control.research_review.document_extraction_model_config_path)
+            selection_candidate = Path(extraction_config_path).with_name(
+                "discovery-selection-model-config.json")
+            if selection_candidate.is_file():
+                selection_config_path = str(selection_candidate)
     # P10h: an explicit argument wins, but the config is what makes the setting
     # survive the next plain re-install.
     if extraction_max_windows is None and service_config is not None:
@@ -344,6 +349,10 @@ def render(
             writer["ProgramArguments"].extend(
                 ["--alphaengine-owner-call-cap", str(int(alphaengine_owner_call_cap))]
             )
+    if selection_config_path is not None:
+        writer["ProgramArguments"].extend(
+            ["--discovery-selection-model-config", selection_config_path]
+        )
     controller = common | {
         "Label": labels["controller"],
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],

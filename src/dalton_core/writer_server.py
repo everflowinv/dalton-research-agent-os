@@ -1279,6 +1279,7 @@ class WriterServer:
         alphaengine_owner_call_cap: int | None = None,
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
+        discovery_selection_launcher: Any | None = None,
         **lane_launchers: Any,
     ):
         try:
@@ -1320,6 +1321,7 @@ class WriterServer:
         # P9d-1: out-of-process AlphaEngine search discovery; the plan is the
         # human-authored, hash-bound list of queries the mission may run.
         self._search_launcher = search_launcher
+        self._discovery_selection_launcher = discovery_selection_launcher
         self._discovery_plan_path = (
             None if discovery_plan_path is None
             else str(Path(discovery_plan_path).expanduser().resolve())
@@ -1745,6 +1747,8 @@ class WriterServer:
                     plan=plan,
                     search_launcher=self._search_launcher,
                     acquisition_launcher=self._acquisition_launcher,
+                    selection_launcher=self._discovery_selection_launcher,
+                    spool_dir=self._transcript_spool_dir,
                     **({} if self._alphaengine_owner_call_cap is None
                        else {"owner_call_cap": self._alphaengine_owner_call_cap}),
                 )
@@ -4807,6 +4811,8 @@ def main(argv: list[str] | None = None) -> int:
         help="hash-bound discovery plan manifest (deploy/phase9/*discovery-plan*.json); "
              "enables the mission source discovery coordinator",
     )
+    parser.add_argument("--discovery-selection-model-config",
+                        help="model config enabling asynchronous ranked-candidate selection")
     parser.add_argument(
         "--search-rehearsal-results",
         help="rehearsal only: JSON array of search results served instead of the network (tests)",
@@ -5081,6 +5087,15 @@ def main(argv: list[str] | None = None) -> int:
                 web_fetch_governance=args.web_fetch_governance,
                 candidate_staging=args.candidate_staging,
             )
+        discovery_selection_launcher = None
+        if args.discovery_selection_model_config is not None:
+            if args.alphaengine_discovery_plan is None or args.scheduler is None:
+                raise WriterServerError("discovery selection requires AlphaEngine plan and scheduler")
+            from .discovery_selection_launcher import DiscoverySelectionLauncher
+            discovery_selection_launcher = DiscoverySelectionLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                model_config_path=args.discovery_selection_model_config,
+                scheduler_db=args.scheduler)
         server = WriterServer(
             args.db,
             args.socket,
@@ -5106,6 +5121,7 @@ def main(argv: list[str] | None = None) -> int:
             web_search_plan_path=args.web_search_discovery_plan,
             web_fetch_launcher=web_fetch_launcher,
             document_extraction_launcher=document_extraction_launcher,
+            discovery_selection_launcher=discovery_selection_launcher,
             **lane_launchers,
         )
         server.start()

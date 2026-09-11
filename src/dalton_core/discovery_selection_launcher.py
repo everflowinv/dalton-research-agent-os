@@ -26,6 +26,15 @@ class DiscoverySelectionLauncher:
             except (OSError,ValueError): continue
             if row.get('discovery_ref')==discovery_ref: found.append(row)
         return None if not found else self.status(sorted(found,key=lambda x:x['started_at'])[-1]['id'])
+    def completed_empty_discoveries(self)->list[str]:
+        result=[]
+        for path in self.root.glob('*/ticket.json'):
+            try:
+                ticket=self.status(json.loads(path.read_text())['id']); summary=ticket.get('summary') or {}
+                if ticket['status']=='succeeded' and summary.get('status')=='succeeded' and not summary.get('selection',{}).get('selected'):
+                    result.append(ticket['discovery_ref'])
+            except (OSError,ValueError,KeyError): continue
+        return sorted(set(result))
     def start(self,*,discovery_ref:str,view:Mapping[str,Any],mission_ref:str,
               company:Mapping[str,Any],missing_periods:list[str]):
         identity={"view_hash":view['content_hash'],"mission_ref":mission_ref,"company":dict(company),
