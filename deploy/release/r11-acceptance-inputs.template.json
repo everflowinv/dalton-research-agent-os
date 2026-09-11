@@ -14,6 +14,8 @@
     "wheel_verification": {"path": null, "sha256": null},
     "full_suite_log": {"path": null, "sha256": null},
     "full_suite_receipt": {"path": null, "sha256": null},
+    "full_suite_runner": {"path": null, "sha256": null},
+    "full_suite_native_result": {"path": null, "sha256": null},
     "rehearsal_binding": {"path": null, "sha256": null},
     "rehearsal_report": {"path": null, "sha256": null},
     "release_helper_manifest": {"path": null, "sha256": null},
