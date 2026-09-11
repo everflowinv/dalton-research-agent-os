@@ -12,8 +12,9 @@ requires-python = ">=3.11"
 deploy = ["cos-python-sdk-v5==1.9.44"]
 # P9d-7: rendering a fetched PDF for human review.  Kept optional so the core
 # stays dependency-free; without it a PDF is refused with its reason instead
-# of being guessed at.  pypdf needs no runtime dependencies on Python 3.11+.
-pdf = ["pypdf>=6.0,<7"]
+# of being guessed at. Public PDFs that open with an empty password can use
+# AES encryption; explicitly install its backend instead of relying on COS.
+pdf = ["pypdf[crypto]>=6.0,<7"]
 # P13ag: the SEC statements parser. Optional and pinned to a floor, because it
 # is the thing the owner agreed to trust in place of Dalton verifying the bytes
 # itself: without it the lane refuses rather than guessing, and the identity's

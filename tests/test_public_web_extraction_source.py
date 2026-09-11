@@ -237,10 +237,11 @@ class PdfRenderTests(unittest.TestCase):
     def test_empty_password_pdf_is_readable_but_real_password_stays_required(self):
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(minimal_pdf(["Annual revenue increased by 12 percent."])))
-        for password in ("", "required-secret"):
+        for password, algorithm in (("", "RC4-128"), ("required-secret", "RC4-128"),
+                                    ("", "AES-256"), ("required-secret", "AES-256")):
             writer = pypdf.PdfWriter()
             writer.add_page(reader.pages[0])
-            writer.encrypt(password, owner_password="owner-edit-password")
+            writer.encrypt(password, owner_password="owner-edit-password", algorithm=algorithm)
             out = io.BytesIO()
             writer.write(out)
             raw = out.getvalue()
