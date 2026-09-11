@@ -257,7 +257,8 @@ class ActivationReadinessTests(unittest.TestCase):
         standard_policy = harness.state_dir / "p12a-dossier-policy-v1.json"
         standard_policy.write_bytes(harness.policy_path.read_bytes())
         result = harness.run(max_units=12)
-        self.assertEqual(result["dossier_status"], "published")
+        self.assertEqual(result["dossier_status"], "partial_published")
+        self.assertFalse(result["rubric"]["passed"])
         report = audit(core_db=harness.state_dir / "core.sqlite", state_dir=harness.state_dir)
         company = next(row for row in report["companies"]
                        if row["company_ref"] == harness.mission["universe"][0]["company_ref"])
