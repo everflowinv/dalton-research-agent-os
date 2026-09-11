@@ -132,19 +132,44 @@ class ModelInputTests(unittest.TestCase):
                         "forecast_method": "share_of_line",
                         "forecast_base_ref": "revenue",
                     },
+                    {
+                        "ref": "operating", "role": "operating_income",
+                        "label": "Operating income", "kind": "derived",
+                        "concept": None, "statement": "income", "unit": "usd",
+                        "period_kind": "duration", "annual_semantics": "sum_quarters",
+                        "forecast_method": "formula", "forecast_base_ref": None,
+                    },
                 ],
-                "formulas": [],
+                "formulas": [{
+                    "output_ref": "operating", "operator": "sum",
+                    "terms": [
+                        {"line_ref": "revenue", "coefficient": "1"},
+                        {"line_ref": "delivery", "coefficient": "-1"},
+                    ],
+                    "tie_out_concept": "us-gaap:OperatingIncomeLoss",
+                    "evidence_refs": ["0001467373-26-000032"],
+                }],
             },
         }
         spec["content_hash"] = content_hash(spec)
-        table = build_model_inputs(self.ledger(), spec)
+        ledger = FakeMissions(self.ledger().lines + [
+            _line("us-gaap:OperatingIncomeLoss",
+                  "2026-03-01", "2026-05-31", "6718144000"),
+        ])
+        table = build_model_inputs(ledger, spec)
+        # This concept is used only as a formula tie-out. It must still be in
+        # the exact current financial authority, without becoming a model row.
+        self.assertIn("us-gaap:OperatingIncomeLoss",
+                      {line["concept"] for line in table["filed_lines"]})
+        self.assertNotIn("operating", {row["ref"] for row in table["rows"]})
         structure, replay = materialize_financial_statement_structure(spec, table)
         binding = forecast_structure_binding(structure, replay, table)
         self.assertEqual(binding["financial_input_hash"],
                          financial_input_authority(table)["content_hash"])
         self.assertEqual(
             {item["line_ref"]: item["status"] for item in replay["forecast_methods"]},
-            {"delivery": "validated", "revenue": "validated"},
+            {"delivery": "validated", "operating": "validated",
+             "revenue": "validated"},
         )
 
     def test_cash_input_refuses_ambiguous_frozen_operating_cash_concepts(self):

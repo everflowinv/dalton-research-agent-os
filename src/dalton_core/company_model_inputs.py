@@ -113,6 +113,40 @@ def _rows_of(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _statement_structure_concepts(spec: Mapping[str, Any]) -> set[str]:
+    """Exact filed/tie concepts the persisted structure needs for replay."""
+
+    structure = spec.get("financial_statement_structure")
+    if structure is None:
+        return set()
+    if not isinstance(structure, Mapping):
+        raise ModelInputError("financial statement structure is not an object")
+    lines = structure.get("lines")
+    formulas = structure.get("formulas")
+    if not isinstance(lines, list) or not isinstance(formulas, list):
+        raise ModelInputError("financial statement structure has invalid lines or formulas")
+    concepts: set[str] = set()
+    for line in lines:
+        if not isinstance(line, Mapping):
+            raise ModelInputError("financial statement structure line is not an object")
+        concept = line.get("concept")
+        if line.get("kind") == "filed":
+            if not isinstance(concept, str) or not concept:
+                raise ModelInputError("filed statement structure line has no concept")
+            concepts.add(concept)
+        elif concept is not None:
+            raise ModelInputError("derived statement structure line claims a filed concept")
+    for formula in formulas:
+        if not isinstance(formula, Mapping):
+            raise ModelInputError("financial statement structure formula is not an object")
+        tie = formula.get("tie_out_concept")
+        if tie is not None:
+            if not isinstance(tie, str) or not tie:
+                raise ModelInputError("statement structure tie-out concept is invalid")
+            concepts.add(tie)
+    return concepts
+
+
 def _series_for(missions: Any, company_ref: str, concept: str) -> dict[str, Any]:
     """The filed series for one concept, and which statement it came from.
 
@@ -292,6 +326,13 @@ def build_model_inputs(
         concept = row.get("basis_concept")
         if concept:
             concepts.setdefault(str(concept), []).append(row["ref"])
+    # The spec's economic rows are only a subset of the filed arithmetic. A
+    # company-specific net-income/EPS bridge also needs non-operating, tax,
+    # attribution, share and filed subtotal concepts even when none is a
+    # revenue driver or expense row. Keep them as source authority lines; do
+    # not manufacture economic model rows for them.
+    for concept in _statement_structure_concepts(spec):
+        concepts.setdefault(concept, [])
 
     filed: dict[str, dict[str, Any]] = {}
     for concept in sorted(concepts):
