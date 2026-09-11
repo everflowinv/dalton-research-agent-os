@@ -31,7 +31,9 @@ from dalton_core.model_forecast import (
     STRUCTURED_DRIVER_FORMULA_HASH,
     STRUCTURED_DRIVER_FORMULA_REF,
 )
-from dalton_core.fund_xlsx_export import export_fund_workbook
+from dalton_core.fund_xlsx_export import (
+    _display_unit, _number_format, export_fund_workbook,
+)
 from dalton_core.store import DaltonStore, content_hash
 from tests.test_company_financial_statement_structure import (
     ACCESSION,
@@ -122,6 +124,61 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertIn("interest-income", pretax["reason"])
         self.assertEqual(by_cell[("net_income", end)]["status"], "unavailable")
         self.assertEqual(by_cell[("diluted_eps", end)]["status"], "unavailable")
+
+    def test_growth_does_not_jump_a_missing_or_stale_quarter(self):
+        inputs, structure = self.authority()
+        drivers = build_structure_drivers(inputs, structure)
+        periods = forecast_periods(revenue_anchor(drivers), 2)
+        assumptions = default_structure_assumptions(drivers, periods, structure)
+        revenue = next(item for item in drivers if item["structure_line_ref"] == "revenue")
+        assumptions = [item for item in assumptions if not (
+            item["driver_ref"] == revenue["ref"]
+            and item["period"]["end"] == periods[0]["end"])]
+        output = cells(compute_structure_results(
+            drivers, assumptions, periods, structure))
+        self.assertEqual(output[("revenue", periods[0]["end"])]["status"], "unavailable")
+        self.assertIn("adjacent prior quarter",
+                      output[("revenue", periods[1]["end"])]["reason"])
+
+        stale_structure = copy.deepcopy(structure)
+        next(item for item in stale_structure["lines"]
+             if item["ref"] == "interest-income")["forecast_method"] = "quarterly_growth"
+        next(item for item in stale_structure["lines"]
+             if item["ref"] == "interest-income")["forecast_base_ref"] = None
+        stale = build_structure_drivers(inputs, stale_structure)
+        interest = next(item for item in stale
+                        if item["structure_line_ref"] == "interest-income")
+        interest["history"] = interest["history"][:-1]
+        stale_assumptions = default_structure_assumptions(
+            stale, periods, stale_structure)
+        stale_output = cells(compute_structure_results(
+            stale, stale_assumptions, periods, stale_structure))
+        self.assertEqual(
+            stale_output[("interest_income", periods[0]["end"])]["status"],
+            "unavailable")
+        self.assertIn("adjacent prior quarter",
+                      stale_output[("interest_income", periods[0]["end"])]["reason"])
+
+    def test_nonpositive_forecast_shares_make_eps_unavailable(self):
+        inputs, structure = self.authority()
+        changed = copy.deepcopy(structure)
+        shares_line = next(item for item in changed["lines"] if item["ref"] == "shares")
+        shares_line["forecast_method"] = "quarterly_growth"
+        drivers = build_structure_drivers(inputs, changed)
+        shares_driver = next(item for item in drivers
+                             if item["structure_line_ref"] == "shares")
+        periods = forecast_periods(revenue_anchor(drivers), 1)
+        assumptions = default_structure_assumptions(drivers, periods, changed)
+        for item in assumptions:
+            if item["driver_ref"] == shares_driver["ref"]:
+                item["value"] = "-2"
+        output = cells(compute_structure_results(drivers, assumptions, periods, changed))
+        end = periods[0]["end"]
+        self.assertEqual(
+            output[("diluted_weighted_average_shares", end)]["status"], "unavailable")
+        self.assertIn("not positive",
+                      output[("diluted_weighted_average_shares", end)]["reason"])
+        self.assertEqual(output[("diluted_eps", end)]["status"], "unavailable")
 
     def test_v03_model_freezes_structure_replay_and_binding(self):
         inputs, structure = self.authority()
@@ -381,6 +438,9 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                            if result["role"] == "diluted_eps")
         # No annual EPS is made by summing per-share quarters.
         self.assertIsNone(financials.cell(eps_row, 2).value)
+        self.assertIn(",,", _number_format("usd"))
+        self.assertEqual(_display_unit("usd"), "USD millions")
+        self.assertEqual(_display_unit("eur_per_share"), "EUR per share")
 
 
 if __name__ == "__main__":

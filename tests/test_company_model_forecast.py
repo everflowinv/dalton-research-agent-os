@@ -106,24 +106,15 @@ def statement_structure(*, full=False):
         {"line_ref": "revenue", "coefficient": "1"},
         {"line_ref": "cost", "coefficient": "-1"},
     ]
-    if full:
-        lines.append(filed("sga", "operating_expense", SGA_CONCEPT,
-                           "share_of_line", "revenue"))
-        operating_terms.append({"line_ref": "sga", "coefficient": "-1"})
+    lines.append(filed("sga", "operating_expense", SGA_CONCEPT,
+                       "share_of_line", "revenue"))
+    operating_terms.append({"line_ref": "sga", "coefficient": "-1"})
     lines.append(derived("operating", "operating_income"))
     formulas = [{"output_ref": "operating", "operator": "sum",
                  "terms": operating_terms, "tie_out_concept": OPERATING_CONCEPT,
                  "evidence_refs": [accession]}]
-    if full:
-        lines.extend([
-            filed("tax", "income_tax_expense", TAX_CONCEPT,
-                  "share_of_line", "operating"),
-            derived("net", "net_income"),
-        ])
-        formulas.append({"output_ref": "net", "operator": "sum", "terms": [
-            {"line_ref": "operating", "coefficient": "1"},
-            {"line_ref": "tax", "coefficient": "-1"},
-        ], "tie_out_concept": NET_CONCEPT, "evidence_refs": [accession]})
+    lines.append(filed("tax", "income_tax_expense", TAX_CONCEPT,
+                       "unavailable"))
     return {"schema_version": "0.1", "lines": lines, "formulas": formulas}
 
 
@@ -319,7 +310,7 @@ class LaneStateTests(unittest.TestCase):
             "operating_metrics": [],
             "horizon": {"historical_quarters": 12, "forecast_quarters": 4,
                         "because": "Three years spans the cycle."},
-            "financial_statement_structure": statement_structure(),
+            "financial_statement_structure": statement_structure(full=True),
         }
         return self.missions.record_company_model_spec(
             spec_from_response(state, body, decided_by="automation:coverage-mission"),
@@ -339,7 +330,7 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(summary["change_reason"], "evidence_thicker")
         self.assertEqual(summary["company_ref"], ACN)
         self.assertEqual(summary["model_version"], 1)
-        self.assertEqual(summary["drivers"], 2)
+        self.assertEqual(summary["drivers"], 4)
         self.assertEqual(summary["forecast_quarters"], 4)
         self.assertEqual(summary["forecast_lines_written"], 4)
         self.assertEqual(summary["formal_authority_writes"], 0)
@@ -807,7 +798,7 @@ class LaneStateTests(unittest.TestCase):
             {**spec_row["revenue_drivers"][0], "basis_concept": None}]}
         with self.assertRaises(Exception) as caught:
             run_company_forecast(missions, broken, models=models)
-        self.assertIn("no revenue driver", str(caught.exception))
+        self.assertIn("structure revenue", str(caught.exception))
 
 
 if __name__ == "__main__":

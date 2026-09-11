@@ -1679,6 +1679,11 @@ def compute_structure_results(
                         continue
                     assumption = assumptions_by_driver_period.get((driver_ref, end))
                     if assumption is None:
+                        if method == "quarterly_growth":
+                            # A later growth rate cannot jump over a missing
+                            # quarter and pretend the stale value was k-1.
+                            prior_growth_values.pop(line_ref, None)
+                            prior_growth_refs.pop(line_ref, None)
                         result["cells"].append(_unavailable_cell(
                             ref, period,
                             f"statement line {line_ref} has no forecast assumption for this quarter"))
@@ -1686,15 +1691,21 @@ def compute_structure_results(
                     rate = _decimal(assumption["value"], "assumption value")
                     if method == "quarterly_growth":
                         base = prior_growth_values.get(line_ref)
-                        if base is None:
+                        prior_result = prior_growth_refs.get(line_ref)
+                        prior_end = (None if prior_result is None
+                                     else prior_result.get("period_end"))
+                        if (base is None or not isinstance(prior_end, str)
+                                or not QUARTER_GAP_MIN_DAYS <= _days(prior_end, end) <=
+                                QUARTER_GAP_MAX_DAYS):
+                            prior_growth_values.pop(line_ref, None)
+                            prior_growth_refs.pop(line_ref, None)
                             result["cells"].append(_unavailable_cell(
                                 ref, period,
-                                f"statement line {line_ref} has no prior quarter value"))
+                                f"statement line {line_ref} has no adjacent prior quarter value"))
                             continue
                         value = base * (Decimal(1) + rate)
                         result_refs_for_cell = []
                         inputs = []
-                        prior_result = prior_growth_refs.get(line_ref)
                         if prior_result and prior_result.get("kind") == "input_cell":
                             inputs = [prior_result]
                         elif prior_result:
@@ -1713,6 +1724,15 @@ def compute_structure_results(
                         inputs = []
                         result_refs_for_cell = [{"ref": result_refs[base_ref],
                                                  "period_end": end}]
+                    if (line.get("role") == "diluted_weighted_average_shares"
+                            and value <= 0):
+                        result["cells"].append(_unavailable_cell(
+                            ref, period,
+                            "forecast diluted weighted-average shares are not positive"))
+                        if method == "quarterly_growth":
+                            prior_growth_values.pop(line_ref, None)
+                            prior_growth_refs.pop(line_ref, None)
+                        continue
                     values[line_ref][end] = value
                     result["cells"].append(_computed_cell(
                         ref, period, value,
@@ -1734,9 +1754,10 @@ def compute_structure_results(
                          for term in formula["terms"]), Decimal(0))
                 else:
                     denominator = values[str(formula["denominator_ref"])][end]
-                    if denominator == 0:
+                    if denominator <= 0:
                         result["cells"].append(_unavailable_cell(
-                            ref, period, "formula denominator is zero for this quarter"))
+                            ref, period,
+                            "formula denominator is not positive for this quarter"))
                         continue
                     value = (values[str(formula["numerator_ref"])][end]
                              / denominator)
@@ -3276,7 +3297,12 @@ class ForecastModelAuthority:
                         row for row in matches
                         if str(row.get("concept")) == str(cell.get("concept"))
                         and str(row.get("statement")) == str(driver.get("statement"))
-                        and str(row.get("unit")) == str(driver.get("unit"))
+                        and (
+                            str(row.get("unit")).casefold()
+                            == str(driver.get("unit")).casefold()
+                            if wire.get("schema_version") == STRUCTURED_SCHEMA_VERSION
+                            else str(row.get("unit")) == str(driver.get("unit"))
+                        )
                         and row.get("dimension_axis") is None
                         and row.get("dimension_member") is None
                     ]

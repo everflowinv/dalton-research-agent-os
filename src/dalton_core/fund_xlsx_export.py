@@ -87,20 +87,25 @@ def _quarter_label(
 
 
 def _number_format(unit: str, *, per_share: bool = False) -> str:
-    if unit == "ratio":
+    normalized = str(unit).casefold()
+    if normalized == "ratio":
         return "0.0%;(0.0%);-"
-    if per_share:
+    if per_share or normalized.endswith("_per_share"):
         return '"$"#,##0.00;[Red]("$"#,##0.00);-'
-    if unit == "USD":
+    if normalized == "usd":
         return '"$"#,##0.0,,;[Red]("$"#,##0.0,,);-'
-    if re.fullmatch(r"[A-Z]{3}", unit):
+    if re.fullmatch(r"[a-z]{3}", normalized):
         return "#,##0.0,,;[Red](#,##0.0,,);-"
     return "#,##0;[Red](#,##0);-"
 
 
 def _display_unit(unit: str) -> str:
-    if re.fullmatch(r"[A-Z]{3}", unit):
-        return f"{unit} millions"
+    normalized = str(unit).casefold()
+    if re.fullmatch(r"[a-z]{3}", normalized):
+        return f"{normalized.upper()} millions"
+    matched = re.fullmatch(r"([a-z]{3})_per_share", normalized)
+    if matched:
+        return f"{matched.group(1).upper()} per share"
     return unit
 
 
