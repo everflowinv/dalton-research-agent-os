@@ -48,6 +48,8 @@ _SEED_NAMES = (
     "zero-base-review-verifier-model-config.json",
     "registered-annual-report-draft-model-config.json",
     "registered-annual-report-verifier-model-config.json",
+    "mission-document-draft-model-config.json",
+    "mission-document-verifier-model-config.json",
 )
 _NAMES: list[str] = list(_SEED_NAMES)
 

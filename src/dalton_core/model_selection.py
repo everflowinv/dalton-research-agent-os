@@ -66,6 +66,12 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "registered_annual_report_verifier": (
         "registered-annual-report-verifier-model-config.json",
     ),
+    "mission_directed_document_draft": (
+        "mission-document-draft-model-config.json",
+    ),
+    "mission_directed_document_verifier": (
+        "mission-document-verifier-model-config.json",
+    ),
     "claim_index": ("claim-index-model-config.json",),
     "quality_verifier": ("quality-verifier-model-config.json",),
     "quality": ("initial-screen-model-config.json",),
@@ -119,6 +125,8 @@ PURPOSE_LABELS: dict[str, str] = {
     "discovery_selection": "从搜索结果选择研究资料",
     "registered_annual_report_draft": "从已登记年报起草定向回答",
     "registered_annual_report_verifier": "独立核验年报定向回答",
+    "mission_directed_document_draft": "从已登记原文起草定向回答",
+    "mission_directed_document_verifier": "独立核验原文定向回答",
     "human_intent": "把自然语言翻译成受限意图",
     "agenda_planning": "旧议程规划",
     "thesis_impact_assessment": "评估新事实对论点的影响",
