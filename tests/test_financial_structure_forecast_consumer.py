@@ -50,19 +50,34 @@ def cells(results):
     }
 
 
+def forecastable_proposal(inputs):
+    """Fixture topology with an explicitly derived diluted-EPS numerator."""
+
+    candidate = proposal(inputs)
+    for line in candidate["lines"]:
+        if line["ref"] in {"interest-income", "interest-expense"}:
+            line.update(forecast_method="share_of_line", forecast_base_ref="revenue")
+        elif line["ref"] == "tax":
+            line.update(forecast_method="share_of_line", forecast_base_ref="pretax")
+        elif line["ref"] == "nci":
+            line.update(forecast_method="share_of_line", forecast_base_ref="net")
+        elif line["ref"] == "eps-numerator":
+            line.update(
+                kind="derived", concept=None, forecast_method="formula",
+                forecast_base_ref=None,
+            )
+    candidate["formulas"].insert(-1, {
+        "output_ref": "eps-numerator", "operator": "sum",
+        "terms": [{"line_ref": "parent", "coefficient": "1"}],
+        "tie_out_concept": "eps_numerator", "evidence_refs": [ACCESSION],
+    })
+    return candidate
+
+
 class FinancialStructureForecastConsumerTests(unittest.TestCase):
     def authority(self):
         inputs = financial_inputs()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            if line["ref"] in {"interest-income", "interest-expense"}:
-                line.update(forecast_method="share_of_line", forecast_base_ref="revenue")
-            elif line["ref"] == "tax":
-                line.update(forecast_method="share_of_line", forecast_base_ref="pretax")
-            elif line["ref"] == "nci":
-                line.update(forecast_method="share_of_line", forecast_base_ref="net")
-            elif line["ref"] == "eps-numerator":
-                line.update(forecast_method="share_of_line", forecast_base_ref="parent")
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         self.assertTrue(replay["ready_for_forecast"])
@@ -182,12 +197,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def test_v03_model_freezes_structure_replay_and_binding(self):
         inputs, structure = self.authority()
-        # Recreate the public replay from the exact proposal authority.
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"] if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
@@ -203,12 +213,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def test_v03_actualization_replays_exact_dag_and_eps_inputs(self):
         inputs, structure = self.authority()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"]
-                            if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         spec = {**company_spec(), "decided_by": "automation:test",
                 "financial_statement_structure": {
                     "schema_version": "0.1", "lines": candidate["lines"],
@@ -267,12 +272,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def test_v03_actualization_refuses_changed_formula_topology(self):
         inputs, structure = self.authority()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"]
-                            if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
@@ -297,12 +297,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def test_v03_sensitivity_recomputes_the_frozen_dag_and_exact_share_base(self):
         inputs, structure = self.authority()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"]
-                            if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
@@ -337,12 +332,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def test_v03_revision_recomputes_same_structure_and_preserves_authority(self):
         inputs, structure = self.authority()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"]
-                            if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
@@ -375,12 +365,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def test_v03_published_line_keeps_exact_structure_formula_authority(self):
         inputs, structure = self.authority()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"]
-                            if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
@@ -402,12 +387,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         from openpyxl import load_workbook
 
         inputs, structure = self.authority()
-        candidate = proposal(inputs)
-        for line in candidate["lines"]:
-            original = next(item for item in structure["lines"]
-                            if item["ref"] == line["ref"])
-            line["forecast_method"] = original["forecast_method"]
-            line["forecast_base_ref"] = original["forecast_base_ref"]
+        candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
