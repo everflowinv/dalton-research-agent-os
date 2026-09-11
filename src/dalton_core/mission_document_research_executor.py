@@ -322,6 +322,8 @@ def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "budget_policy_ref": execution["budget_policy_ref"],
                 "provider_retry": execution["provider_retry"],
                 "transport_retry": execution["transport_retry"],
+                **({"broker_frame_policy": execution["broker_frame_policy"]}
+                   if "broker_frame_policy" in execution else {}),
             })
             budget = {
                 "max_attempts": execution["max_attempts"],

@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .call_budget import resolve_call_budget, resolve_run_budget
+from .model_transport import (
+    broker_frame_execution_binding,
+)
 from .document_extraction import validate_model_config
 from .model_configurations import register_model_config_name
 from .provider_retry import validate_provider_retry
@@ -155,6 +158,7 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
         "max_attempts": attempts,
         "provider_retry": retry,
         "transport_retry": config.get("transport_retry"),
+        "broker_frame_policy": broker_frame_execution_binding(config),
     }
     # With provider retry enabled the shared worker routes one candidate per
     # Scheduler attempt. Refuse a plan that cannot fit even that single
@@ -169,8 +173,26 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
     return execution
 
 
-def adapter_for_config(config: Mapping[str, Any], *, router: Any, purpose: str) -> Any:
+def adapter_for_config(
+    config: Mapping[str, Any], *, router: Any, purpose: str,
+    model_execution: Mapping[str, Any] | None = None,
+) -> Any:
     from .openclaw_model_adapter import OpenClawModelAdapter
+    from .model_transport import (
+        LEGACY_BROKER_MAX_FRAME_BYTES,
+        resolve_broker_max_frame_bytes,
+    )
+
+    if model_execution is None:
+        frame_bytes = resolve_broker_max_frame_bytes(config)
+    elif model_execution.get("broker_frame_policy") is None:
+        # Executions persisted before broker-frame-policy-0.1 keep their
+        # original client bound rather than silently changing on replay.
+        frame_bytes = LEGACY_BROKER_MAX_FRAME_BYTES
+    else:
+        frame_bytes = resolve_broker_max_frame_bytes(
+            model_execution["broker_frame_policy"]
+        )
 
     return OpenClawModelAdapter(
         config["broker_socket"],
@@ -186,6 +208,7 @@ def adapter_for_config(config: Mapping[str, Any], *, router: Any, purpose: str) 
         queue_wait_seconds=float((config.get("transport_retry") or {}).get(
             "queue_wait_seconds", 0
         )),
+        max_frame_bytes=frame_bytes,
     )
 
 

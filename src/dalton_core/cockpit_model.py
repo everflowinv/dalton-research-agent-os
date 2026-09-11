@@ -29,6 +29,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import ResultEnvelope, WorkOrder
 from .call_budget import budget_fingerprint, resolve_call_budget
+from .model_transport import (
+    broker_frame_execution_binding,
+    resolve_broker_max_frame_bytes,
+)
 from .document_extraction import validate_model_config
 from .model_accounting import ModelAccountingError, _route_estimate_micros
 from .model_router import ModelRouter, RoutingPolicyNotFound, independent_families
@@ -437,6 +441,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                model_spec_request_identity: Mapping[str, Any] | None = None,
                structured_output_repair: Mapping[str, Any] | None = None,
                provider_retry: Mapping[str, Any] | None = None,
+               broker_frame_policy: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
@@ -474,6 +479,11 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         from .provider_retry import validate_provider_retry
         provider_retry = validate_provider_retry(provider_retry)
         identity["provider_retry"] = content_hash(provider_retry)
+    if broker_frame_policy is not None:
+        expected_frame = broker_frame_execution_binding(broker_frame_policy)
+        if dict(broker_frame_policy) != expected_frame:
+            raise CockpitModelError("broker frame policy is invalid")
+        identity["broker_frame_policy"] = content_hash(expected_frame)
     digest = content_hash(identity)
     at = created_at or _now()
     capability = (
@@ -498,6 +508,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "producer_route_decision_refs": list(producer_route_decision_refs)}),
                                  **({} if request_identity is None else {
                                      "request_identity": dict(request_identity)}),
+                                 **({} if broker_frame_policy is None else {
+                                     "broker_frame_policy": dict(broker_frame_policy)}),
                                  **({} if model_spec_request_identity is None else {
                                      "model_spec_request_identity": dict(
                                          model_spec_request_identity)}),
@@ -677,12 +689,12 @@ def _validate_model_spec_request_namespace(
         decorated += ":transport-policy:" + content_hash(
             config["transport_retry"]
         )[:16]
-    remainder = request_id.removeprefix(decorated)
     recovery = (
         r"(?::operator-recovery:[0-9a-f]{16}"
         r"|:route-admission:[0-9a-f]{64}"
         r"|:capacity-recovery:[0-9]+:[0-9a-f]{16})?"
     )
+    remainder = request_id.removeprefix(decorated)
     if not request_id.startswith(decorated) or re.fullmatch(recovery, remainder) is None:
         raise CockpitModelError("model specification request namespace is invalid")
 
@@ -699,6 +711,11 @@ def dossier_request_identity(
     producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
     exact_config = {
         "capacity_retry": _capacity_retry(config),
+        **(
+            {"broker_max_frame_bytes": resolve_broker_max_frame_bytes(config)}
+            if "broker_max_frame_bytes" in config
+            else {}
+        ),
         **(
             {"transport_retry": dict(config["transport_retry"])}
             if "transport_retry" in config
@@ -749,9 +766,17 @@ def validate_dossier_request_identity(
         raise ValueError("Dossier request identity semantic binding drifted")
     exact = copied["exact_config"]
     if not isinstance(exact, Mapping) or set(exact) - {
-        "capacity_retry", "transport_retry", "provider_retry"
+        "capacity_retry", "transport_retry", "provider_retry",
+        "broker_max_frame_bytes",
     }:
         raise ValueError("Dossier request identity config is invalid")
+    if "broker_max_frame_bytes" in exact:
+        try:
+            frame_bytes = resolve_broker_max_frame_bytes(exact)
+        except Exception as exc:
+            raise ValueError("Dossier broker frame identity is invalid") from exc
+        if exact["broker_max_frame_bytes"] != frame_bytes:
+            raise ValueError("Dossier broker frame identity is invalid")
     if "transport_retry" in exact:
         from .document_extraction import validate_transport_retry
 
@@ -1123,6 +1148,7 @@ class CockpitModel:
             expected_agent_id=config["expected_agent_id"], timeout_seconds=float(timeout_seconds),
             queue_wait_seconds=float((config.get("transport_retry") or {}).get(
                 "queue_wait_seconds", 0)),
+            max_frame_bytes=resolve_broker_max_frame_bytes(config),
         )
 
     def _execute_with_safe_retry(self, adapter: Any, work: WorkOrder,
@@ -1373,6 +1399,7 @@ class CockpitModel:
                 "capacity_retry" in self.config
                 or "transport_retry" in self.config
                 or "provider_retry" in self.config
+                or "broker_max_frame_bytes" in self.config
                 or _dossier_recovery_parent is not None
             )
         ):
@@ -1467,6 +1494,7 @@ class CockpitModel:
             ),
             "producer_route_decision_refs": producer_refs,
             "provider_retry": self.config.get("provider_retry"),
+            "broker_frame_policy": broker_frame_execution_binding(self.config),
             "model_spec_request_identity": _model_spec_request_identity,
             "structured_output_repair": _structured_output_repair,
         }

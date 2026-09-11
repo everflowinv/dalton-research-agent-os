@@ -3993,6 +3993,7 @@ class WriterServer:
         binding = self._planner_budget_binding(pool)
         from .model_router import ModelRouter
         from .openclaw_model_adapter import OpenClawModelAdapter
+        from .model_transport import resolve_broker_max_frame_bytes
 
         with ExitStack() as stack:
             router = stack.enter_context(ModelRouter(config["model_router_db"]))
@@ -4011,6 +4012,7 @@ class WriterServer:
                         "queue_wait_seconds", 0
                     )
                 ),
+                max_frame_bytes=resolve_broker_max_frame_bytes(config),
             )
             worker = LLMResearchPlannerModelWorker(
                 scheduler=self._planner_scheduler,

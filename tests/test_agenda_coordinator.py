@@ -1030,7 +1030,13 @@ class AgendaCoordinatorTests(unittest.TestCase):
                 scheduler_connection.close()
                 self.assertEqual(
                     "work:agenda-"
-                    + content_hash({"cycle_ref": first["cycle_id"]})[:32],
+                    + content_hash({
+                        "cycle_ref": first["cycle_id"],
+                        "broker_frame_policy": content_hash({
+                            "schema_version": "broker-frame-policy-0.1",
+                            "broker_max_frame_bytes": 1_048_576,
+                        }),
+                    })[:32],
                     saved_work_id,
                 )
                 conn = sqlite3.connect(core)

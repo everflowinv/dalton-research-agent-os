@@ -22,6 +22,11 @@ from typing import Any, Iterator, Protocol
 
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .model_router import ModelRouter
+from .model_transport import (
+    DEFAULT_BROKER_MAX_FRAME_BYTES,
+    broker_frame_execution_binding,
+    resolve_broker_max_frame_bytes,
+)
 from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
@@ -553,6 +558,7 @@ class IntentComposerConfig:
     max_input_tokens: int
     max_output_tokens: int
     max_cost_usd: float
+    broker_max_frame_bytes: int = DEFAULT_BROKER_MAX_FRAME_BYTES
     transport_retry: Mapping[str, int] | None = None
     provider_retry: Mapping[str, Any] | None = None
     max_scheduler_attempts: int | None = None
@@ -565,7 +571,10 @@ class IntentComposerConfig:
             "broker_client_id", "expected_agent_id", "timeout_seconds",
             "max_input_tokens", "max_output_tokens", "max_cost_usd",
         }
-        optional = {"transport_retry", "provider_retry", "max_scheduler_attempts"}
+        optional = {
+            "transport_retry", "provider_retry", "max_scheduler_attempts",
+            "broker_max_frame_bytes",
+        }
         if not isinstance(raw, Mapping) or set(raw) - optional != required:
             raise HumanIntentValidationError(
                 "intent_composer config has an invalid closed shape"
@@ -613,6 +622,12 @@ class IntentComposerConfig:
                 raise HumanIntentValidationError(
                     "intent provider retry does not support unknown-result recovery"
                 )
+        try:
+            broker_max_frame_bytes = resolve_broker_max_frame_bytes(value)
+        except Exception as exc:
+            raise HumanIntentValidationError(
+                "invalid intent broker frame configuration"
+            ) from exc
         return cls(
             staging_path=_path(value["staging_path"], "staging_path"),
             scheduler_db=_path(value["scheduler_db"], "scheduler_db"),
@@ -639,6 +654,7 @@ class IntentComposerConfig:
                 value["max_output_tokens"], "max_output_tokens", maximum=8_000
             ),
             max_cost_usd=float(cost),
+            broker_max_frame_bytes=broker_max_frame_bytes,
             transport_retry=transport_retry,
             provider_retry=provider_retry,
             max_scheduler_attempts=(
@@ -1350,6 +1366,7 @@ def intent_scheduler_policy(config: IntentComposerConfig) -> dict[str, Any]:
         "transport_retry": config.transport_retry,
         "max_attempts": max_attempts,
         "lease_seconds": lease_seconds,
+        "broker_max_frame_bytes": config.broker_max_frame_bytes,
     })[:16]
     return {
         "policy_version_id": (
@@ -1470,6 +1487,7 @@ class OpenClawIntentInterpreter:
             timeout_seconds=self.config.timeout_seconds,
             queue_wait_seconds=float(transport.get("queue_wait_seconds", 0)),
             expected_agent_id=self.config.expected_agent_id,
+            max_frame_bytes=self.config.broker_max_frame_bytes,
         )
 
     def _scheduler(self) -> Scheduler:
@@ -1492,6 +1510,9 @@ class OpenClawIntentInterpreter:
             "routing_policy_ref": self.config.routing_policy_ref,
             "routing_policy_hash": policy["content_hash"],
             "credential_slot_refs": list(self.config.credential_slot_refs),
+            "broker_frame_policy": broker_frame_execution_binding({
+                "broker_max_frame_bytes": self.config.broker_max_frame_bytes,
+            }),
         }
 
     def _execute_with_safe_retry(

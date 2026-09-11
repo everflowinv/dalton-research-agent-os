@@ -172,6 +172,7 @@ class MissionDocumentResearchRuntime:
                 **common,
                 adapter=adapter_for_config(
                     configs[0], router=router, purpose=DRAFT_PURPOSE,
+                    model_execution=draft_execution,
                 ),
                 routing_policy_ref=draft_execution["routing_policy_ref"],
                 credential_slot_refs=draft_execution["credential_slot_refs"],
@@ -185,6 +186,7 @@ class MissionDocumentResearchRuntime:
                 **common,
                 adapter=adapter_for_config(
                     configs[1], router=router, purpose=VERIFIER_PURPOSE,
+                    model_execution=verifier_execution,
                 ),
                 routing_policy_ref=verifier_execution["routing_policy_ref"],
                 credential_slot_refs=verifier_execution["credential_slot_refs"],

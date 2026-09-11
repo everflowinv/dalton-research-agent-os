@@ -124,12 +124,14 @@ def normalize_request(value: Any) -> dict[str, Any]:
         "routing_policy_ref", "credential_slot_refs", "max_input_tokens",
         "max_output_tokens", "max_cost_usd", "max_seconds", "max_attempts",
         "max_elapsed_seconds", "provider_retry", "transport_retry",
-        "budget_db", "budget_policy_ref",
+        "budget_db", "budget_policy_ref", "broker_frame_policy",
     }
     for stage in ("draft", "verifier"):
         config = raw_model.get(stage)
+        legacy_fields = model_fields - {"broker_frame_policy"}
         if not isinstance(config, Mapping) or set(config) not in (
-            model_fields, model_fields | {"router_capability"}
+            legacy_fields, legacy_fields | {"router_capability"},
+            model_fields, model_fields | {"router_capability"},
         ):
             raise RegisteredAnnualReportError(f"model_execution.{stage} has an invalid closed shape")
         if ("router_capability" in config
@@ -184,6 +186,22 @@ def normalize_request(value: Any) -> dict[str, Any]:
                 raise RegisteredAnnualReportError(
                     f"model_execution.{stage}.transport_retry is invalid"
                 ) from exc
+        frame_binding = None
+        if "broker_frame_policy" in config:
+            try:
+                from .model_transport import broker_frame_execution_binding
+
+                frame_binding = dict(config["broker_frame_policy"])
+                if frame_binding != broker_frame_execution_binding({
+                    "broker_max_frame_bytes": frame_binding.get(
+                        "broker_max_frame_bytes"
+                    )
+                }):
+                    raise ValueError("broker frame policy drifted")
+            except Exception as exc:
+                raise RegisteredAnnualReportError(
+                    f"model_execution.{stage}.broker_frame_policy is invalid"
+                ) from exc
         model_execution[stage] = {
             "routing_policy_ref": _nonempty_text(
                 config.get("routing_policy_ref"), f"model_execution.{stage}.routing_policy_ref"
@@ -200,6 +218,8 @@ def normalize_request(value: Any) -> dict[str, Any]:
             "max_cost_usd": float(cost),
             "provider_retry": provider_retry,
             "transport_retry": transport_retry,
+            **({"broker_frame_policy": frame_binding}
+               if frame_binding is not None else {}),
             **({"router_capability": config["router_capability"]}
                if "router_capability" in config else {}),
         }

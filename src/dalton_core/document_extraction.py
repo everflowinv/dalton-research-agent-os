@@ -40,6 +40,10 @@ WINDOW_CHARS = 12000
 QUOTE_CHARS = 1200
 MAX_DOCUMENT_CHARS = 600000
 GATE_REASON = "document_extraction_model_config_not_installed"
+from .model_transport import (
+    broker_frame_execution_binding,
+    resolve_broker_max_frame_bytes,
+)
 # P9d-15: a fetched public-web page is a verified, deterministically rendered
 # original (public_web_extraction_source), so the same budgeted, human-triggered
 # drafting that AlphaEngine documents get applies to it: suggestions only,
@@ -105,7 +109,7 @@ def validate_model_config(value):
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
                 "capacity_retry", "reading_limits", "transport_retry", "provider_retry",
-                "structured_output_repair"}
+                "structured_output_repair", "broker_max_frame_bytes"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -119,6 +123,12 @@ def validate_model_config(value):
         raise ResearchVerificationError("invalid broker client or dedicated agent identity syntax")
     if any(not Path(config[k]).is_absolute() for k in ("model_router_db", "budget_db", "broker_socket", "broker_auth_key")):
         raise ResearchVerificationError("document extraction authority and broker paths must be absolute")
+    try:
+        resolve_broker_max_frame_bytes(config)
+    except Exception as exc:
+        raise ResearchVerificationError(
+            "invalid broker_max_frame_bytes"
+        ) from exc
     from .call_budget import (CallBudgetError, resolve_call_budget,
                               resolve_run_budget)
     try:
@@ -422,6 +432,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
     explicit = explicit or resolved != LEGACY_CALL_BUDGET
     transport_retry = dict(configured.get("transport_retry") or {})
     provider_retry = dict(configured.get("provider_retry") or {})
+    frame_binding = broker_frame_execution_binding(configured)
     prompt = build_prompt(context)
     # The installed extraction worker and ModelRouter deliberately use this
     # conservative counter too.  Refuse before enqueue when a full canonical
@@ -438,6 +449,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
         )
     budget_hash = budget_fingerprint(resolved)
     identity = {"task": TASK_HASH, "context": context["content_hash"]}
+    identity["broker_frame_policy"] = content_hash(frame_binding)
     if explicit:
         identity["call_budget"] = budget_hash
     if transport_retry:
@@ -463,6 +475,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
                      if explicit else {}),
                   **({"transport_retry": transport_retry} if transport_retry else {}),
                   **({"provider_retry": provider_retry} if provider_retry else {}),
+                  "broker_frame_policy": frame_binding,
                   "execution_mode": "broker" if context.get("model_binding") else "hermetic_fixture", "candidate_only": True},
     )
 
@@ -829,9 +842,18 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
 
         retry_config = {
             key: work.metadata[key]
-            for key in ("transport_retry", "provider_retry")
+            for key in (
+                "transport_retry", "provider_retry", "broker_max_frame_bytes"
+            )
             if work.metadata.get(key) is not None
         } or None
+
+        frame = work.metadata.get("broker_frame_policy")
+        if isinstance(frame, Mapping):
+            retry_config = dict(retry_config or {})
+            retry_config["broker_max_frame_bytes"] = frame.get(
+                "broker_max_frame_bytes"
+            )
 
         if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
             return build_numeric_work(current, work.metadata.get("requests") or (),
@@ -1760,7 +1782,8 @@ class DocumentExtractionService:
                 timeout_seconds=float((work.metadata.get("call_budget") or {}).get(
                     "timeout_seconds", work.budget["max_seconds"])),
                 queue_wait_seconds=float((config.get("transport_retry") or {}).get(
-                    "queue_wait_seconds", 0)))
+                    "queue_wait_seconds", 0)),
+                max_frame_bytes=resolve_broker_max_frame_bytes(config))
             worker = DocumentExtractionModelWorker(scheduler=self.writer._scheduler, router=router, adapter=adapter,
                 store=self.writer.store, observability=self.writer.observability,
                 context_resolver=lambda c: self.reread(c, actor_ref),

@@ -207,6 +207,7 @@ def build_work(
 
     from .contracts import WorkOrder
     from .call_budget import budget_fingerprint, resolve_call_budget
+    from .model_transport import broker_frame_execution_binding
 
     request = build_request(context, requests)
     explicit = call_budget is not None or any(
@@ -218,11 +219,13 @@ def build_work(
     explicit = explicit or resolved != LEGACY_CALL_BUDGET
     transport_retry = dict((model_config or {}).get("transport_retry") or {})
     provider_retry = dict((model_config or {}).get("provider_retry") or {})
+    frame_binding = broker_frame_execution_binding(model_config or {})
     budget_hash = budget_fingerprint(resolved)
     identity = {
         "task": TASK_HASH,
         "context": context["content_hash"],
         "slots": [slot["metric_ref"] for slot in request["slots"]],
+        "broker_frame_policy": content_hash(frame_binding),
     }
     if explicit:
         identity["call_budget"] = budget_hash
@@ -273,6 +276,7 @@ def build_work(
                if explicit else {}),
             **({"transport_retry": transport_retry} if transport_retry else {}),
             **({"provider_retry": provider_retry} if provider_retry else {}),
+            "broker_frame_policy": frame_binding,
             # The same fixture guard the prose pass carries: a fixture
             # adapter may only run an order that declared itself one, so a
             # test model cannot answer where the broker was expected.

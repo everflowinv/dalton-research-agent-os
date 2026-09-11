@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .model_router import ModelRouter
+from .model_transport import (
+    DEFAULT_BROKER_MAX_FRAME_BYTES,
+    broker_frame_execution_binding,
+    resolve_broker_max_frame_bytes,
+)
 from .observability import ObservabilityStore
 from .openclaw_model_adapter import OpenClawModelAdapter
 from .scheduler import Scheduler
@@ -72,6 +77,7 @@ class ThesisImpactProductionConfig:
     company_thesis_refs: Mapping[str, str]
     max_targets: int
     timeout_seconds: float
+    broker_max_frame_bytes: int = DEFAULT_BROKER_MAX_FRAME_BYTES
     assessment_transport_retry: Mapping[str, int] | None = None
     verifier_transport_retry: Mapping[str, int] | None = None
     assessment_provider_retry: Mapping[str, Any] | None = None
@@ -102,6 +108,7 @@ class ThesisImpactProductionConfig:
         optional = {
             "assessment_transport_retry", "verifier_transport_retry",
             "assessment_provider_retry", "verifier_provider_retry",
+            "broker_max_frame_bytes",
         }
         if set(raw) - optional != required:
             raise ThesisImpactProductionError(
@@ -177,6 +184,12 @@ class ThesisImpactProductionConfig:
                     )
             retries[transport_key] = transport
             retries[provider_key] = provider
+        try:
+            broker_max_frame_bytes = resolve_broker_max_frame_bytes(raw)
+        except Exception as exc:
+            raise ThesisImpactProductionError(
+                "broker_max_frame_bytes is invalid"
+            ) from exc
         return cls(
             scheduler_db=_path(raw["scheduler_db"], "scheduler_db"),
             model_router_db=_path(raw["model_router_db"], "model_router_db"),
@@ -203,6 +216,7 @@ class ThesisImpactProductionConfig:
             company_thesis_refs=dict(bindings),
             max_targets=maximum,
             timeout_seconds=float(timeout),
+            broker_max_frame_bytes=broker_max_frame_bytes,
             **retries,
         )
 
@@ -251,6 +265,9 @@ def thesis_impact_execution_bindings(
             "provider_retry": config.provider_retry(
                 "assessment" if phase == "assessment" else "verifier"
             ),
+            "broker_frame_policy": broker_frame_execution_binding({
+                "broker_max_frame_bytes": config.broker_max_frame_bytes,
+            }),
         }
     return result
 
@@ -417,6 +434,7 @@ class ThesisImpactProductionRunner:
                 timeout_seconds=self.config.timeout_seconds,
                 queue_wait_seconds=float(transport.get("queue_wait_seconds", 0)),
                 expected_agent_id=self.config.expected_agent_id,
+                max_frame_bytes=self.config.broker_max_frame_bytes,
             )
 
         assessment_adapter = adapter("assessment")

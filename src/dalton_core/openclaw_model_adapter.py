@@ -44,6 +44,7 @@ from .model_router import (
     canonical_hash as _dalton_hash,
     canonical_json as _dalton_json,
 )
+from .model_transport import DEFAULT_BROKER_MAX_FRAME_BYTES
 from .thesis_impact import (
     VERIFIER_BINDING_MODE,
     VERIFIER_DECISION_SCHEMA_VERSION,
@@ -803,7 +804,7 @@ class OpenClawModelAdapter:
         auth_key_provider: Callable[[], bytes],
         timeout_seconds: float = 5.0,
         queue_wait_seconds: float = 0.0,
-        max_frame_bytes: int = 262_144,
+        max_frame_bytes: int = DEFAULT_BROKER_MAX_FRAME_BYTES,
         expected_agent_id: str = BROKER_AGENT_ID,
         provider_control_mode: ProviderControlMode = PROVIDER_CONTROL_MODE_REQUIRED,
         clock: Callable[[], datetime] | None = None,

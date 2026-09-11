@@ -17,6 +17,11 @@ from typing import Any, Iterable, Mapping, Sequence
 from .contracts import ResultEnvelope, WorkOrder
 from .context_materializer import AGENDA_RENDERER_REF
 from .model_router import ModelRouter
+from .model_transport import (
+    DEFAULT_BROKER_MAX_FRAME_BYTES,
+    broker_frame_execution_binding,
+    resolve_broker_max_frame_bytes,
+)
 from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
@@ -79,6 +84,7 @@ class AgendaCoordinatorConfig:
     broker_client_id: str
     expected_agent_id: str
     timeout_seconds: float = 180.0
+    broker_max_frame_bytes: int = DEFAULT_BROKER_MAX_FRAME_BYTES
     transport_retry: Mapping[str, int] | None = None
     max_scheduler_attempts: int | None = None
 
@@ -91,7 +97,9 @@ class AgendaCoordinatorConfig:
             "credential_slot_refs", "broker_client_id", "expected_agent_id",
             "timeout_seconds",
         }
-        optional = {"transport_retry", "max_scheduler_attempts"}
+        optional = {
+            "transport_retry", "max_scheduler_attempts", "broker_max_frame_bytes"
+        }
         if not isinstance(value, Mapping) or set(value) - optional != required:
             raise CoordinatorError("agenda coordinator config has an invalid closed shape")
         def path(name: str) -> Path:
@@ -131,6 +139,12 @@ class AgendaCoordinatorConfig:
                     "max_scheduler_attempts must be an integer from 1 through 10"
                 )
             max_scheduler_attempts = raw_attempts
+        try:
+            broker_max_frame_bytes = resolve_broker_max_frame_bytes(value)
+        except Exception as exc:
+            raise CoordinatorError(
+                "invalid agenda broker frame configuration"
+            ) from exc
         return cls(
             scheduler_db=path("scheduler_db"),
             model_router_db=path("model_router_db"),
@@ -146,6 +160,7 @@ class AgendaCoordinatorConfig:
             broker_client_id=strings["broker_client_id"],
             expected_agent_id=strings["expected_agent_id"],
             timeout_seconds=float(timeout),
+            broker_max_frame_bytes=broker_max_frame_bytes,
             transport_retry=transport_retry,
             max_scheduler_attempts=max_scheduler_attempts,
         )
@@ -183,6 +198,7 @@ def agenda_scheduler_policy(config: AgendaCoordinatorConfig) -> dict[str, Any]:
             "routing_policy_hash": routing_policy["content_hash"],
             "max_attempts": max_attempts,
             "lease_seconds": lease_seconds,
+            "broker_max_frame_bytes": config.broker_max_frame_bytes,
         }
     )[:16]
     return {
@@ -340,6 +356,7 @@ class AgendaCoordinator:
             timeout_seconds=self.config.timeout_seconds,
             queue_wait_seconds=float(transport.get("queue_wait_seconds", 0)),
             expected_agent_id=self.config.expected_agent_id,
+            max_frame_bytes=self.config.broker_max_frame_bytes,
         )
 
     def _scheduler(self) -> Scheduler:
@@ -1149,6 +1166,10 @@ class AgendaCoordinator:
                 identity["transport_retry"] = content_hash(
                     self.config.transport_retry
                 )
+            frame_binding = broker_frame_execution_binding({
+                "broker_max_frame_bytes": self.config.broker_max_frame_bytes,
+            })
+            identity["broker_frame_policy"] = content_hash(frame_binding)
             if self.config.max_scheduler_attempts is not None:
                 identity["max_scheduler_attempts"] = (
                     self.config.max_scheduler_attempts
@@ -1183,6 +1204,8 @@ class AgendaCoordinator:
                         if self.config.max_scheduler_attempts is not None
                         else ""
                     )
+                    + ":frame-policy:"
+                    + content_hash(frame_binding)[:16]
                 ),
                 declared_side_effects=(),
                 status="ready",
@@ -1207,6 +1230,7 @@ class AgendaCoordinator:
                         if self.config.max_scheduler_attempts is not None
                         else {}
                     ),
+                    "broker_frame_policy": frame_binding,
                 },
             )
             self._workflow(client, work, cycle_id, context["policy_version_ref"])
