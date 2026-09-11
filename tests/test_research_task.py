@@ -11,6 +11,7 @@ terminal gate.
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -863,6 +864,27 @@ class ChildTests(ResearchTaskFixture):
         self.assertEqual(summary["pool"]["reserved_micros"], 1_000_000)
         written = json.loads((self.state_dir / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(written["tasks"][0]["loop_ref"], summary["tasks"][0]["loop_ref"])
+
+    def test_directed_only_child_does_not_enable_ordinary_adhoc_research(self) -> None:
+        from dalton_core.research_task_cli import run_admissions
+
+        self.record_plan([inquiry(question="Do ACN's revenue definitions reconcile?")])
+        self.store.close()
+        summary = run_admissions(
+            state_dir=self.state_dir, summary_dir=self.state_dir,
+            directed_only=True,
+        )
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["admitted"], 0)
+        self.assertEqual(summary["tasks"], [])
+        self.assertEqual(
+            [item["reason"] for item in summary["refused"]],
+            ["not_selected_by_directed_document_producer"],
+        )
+        with sqlite3.connect(self.state_dir / "core.sqlite") as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM bounded_planner_loop_versions"
+            ).fetchone()[0], 0)
 
 
 class UngrantedChildTests(ResearchTaskFixture):

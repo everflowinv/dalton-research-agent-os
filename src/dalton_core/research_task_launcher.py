@@ -32,7 +32,7 @@ TICKETS_DIRNAME = "research-tasks"
 
 
 class ResearchTaskLauncher(LaneChildLauncher):
-    """Run one ad-hoc research admission pass."""
+    """Run one configured ad-hoc or directed-only admission pass."""
 
     TICKET_PREFIX = TICKET_PREFIX
     TICKETS_DIRNAME = TICKETS_DIRNAME
@@ -49,6 +49,7 @@ class ResearchTaskLauncher(LaneChildLauncher):
         planner_model_config_path: str | Path | None = None,
         document_draft_model_config_path: str | Path | None = None,
         document_verifier_model_config_path: str | Path | None = None,
+        directed_only: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -62,6 +63,9 @@ class ResearchTaskLauncher(LaneChildLauncher):
         self.max_admissions_per_tick = max_admissions_per_tick
         from .research_task import validate_task_budget
         self.task_budget = validate_task_budget({} if task_budget is None else task_budget)
+        if not isinstance(directed_only, bool):
+            raise LaneChildRejected("directed_only must be boolean")
+        self.directed_only = directed_only
         self.config_path = None if config_path is None else Path(config_path)
         self.planner_scheduler_db = (
             None if planner_scheduler_db is None
@@ -123,6 +127,7 @@ class ResearchTaskLauncher(LaneChildLauncher):
         }
         return {
             **settings,
+            "directed_only": self.directed_only,
             "planner_cost_usd": str(default_planner_cost_usd(self.state_dir)),
             "document_authority": authority,
         }
@@ -154,6 +159,8 @@ class ResearchTaskLauncher(LaneChildLauncher):
             "--mission-document-verifier-model-config",
             str(self.document_verifier_model_config_path),
         ]
+        if self.directed_only:
+            command.append("--directed-only")
         return command
 
     def start(self, *, plan_ref: str, signature: str) -> dict[str, Any]:

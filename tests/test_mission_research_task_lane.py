@@ -269,6 +269,44 @@ class UngrantedLaneTests(ResearchTaskFixture):
         self.assertEqual(result["status"], "launched")
         self.assertEqual(len(launcher.started), 1)
 
+    def test_implicit_directed_producer_stays_idle_for_an_ordinary_plan(self) -> None:
+        launcher = FakeLauncher(self.state_dir / "research-tasks")
+        launcher.configuration = lambda: {
+            "directed_only": True, "retired_templates": (),
+        }
+        coordinator = ResearchTaskCoordinator(store=self.store, launcher=launcher)
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["reason"],
+                         "current plan has no directed document inquiry")
+        self.assertEqual(launcher.started, [])
+
+
+class MissingDirectedPermissionLaneTests(ResearchTaskFixture):
+    grants_word = False
+    publishes = ()
+
+    def test_implicit_producer_does_not_bypass_mission_research_grant(self) -> None:
+        launcher = FakeLauncher(self.state_dir / "research-tasks")
+        launcher.configuration = lambda: {
+            "directed_only": True, "retired_templates": (),
+        }
+        wire = inquiry(question="What does the selected original say?")
+        wire["directed_document"] = {
+            "strategy_version": "directed-document:0.1",
+            "document_ref": "document:1", "document_version_hash": "a" * 64,
+            "query_terms": ["selected original"],
+            "query_rationale": "Read the exact selected document.",
+        }
+        self.record_plan([wire])
+        result = ResearchTaskCoordinator(
+            store=self.store, launcher=launcher,
+        ).dispatch_once()
+        self.assertEqual(result["status"], "not_granted")
+        self.assertIn("mission_missing_research_task", result["reasons"])
+        self.assertEqual(launcher.started, [])
+
 
 class WiringTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -305,6 +343,28 @@ class WiringTests(unittest.TestCase):
         self.addCleanup(launcher.close)
         self.assertIsInstance(launcher, ResearchTaskLauncher)
         self.assertEqual(launcher.max_admissions_per_tick, 2)
+        self.assertFalse(launcher.directed_only)
+
+    def test_document_execution_config_implicitly_builds_a_directed_only_producer(self):
+        document_lane = self.state / "mission-document-research-lane.json"
+        document_lane.write_text(json.dumps({
+            "schema_version": "0.1", "enabled": True,
+        }), encoding="utf-8")
+        planner = self.state / "research-planner-model-config.json"
+        planner.write_text("{}\n", encoding="utf-8")
+
+        class Args:
+            db = str(self.state / "core.sqlite")
+            scheduler = str(self.state / "scheduler.sqlite")
+            research_planner_model_config = str(planner)
+            research_task_lane = None
+            mission_document_research_lane = document_lane
+
+        launcher = build_launcher(Args())
+        self.addCleanup(launcher.close)
+        self.assertTrue(launcher.directed_only)
+        self.assertIsNone(launcher.config_path)
+        self.assertIn("--directed-only", launcher._command(ticket_dir=self.state / "t"))
 
     def test_the_child_command_names_this_state_and_this_ticket(self) -> None:
         planner = self.state / "research-planner-model-config.json"

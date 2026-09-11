@@ -9,9 +9,11 @@ the ranking, admits the best inquiry that is not already a task, and stops.
 Three things it refuses to do, and they are the owner's boundary rather than
 an implementation detail:
 
-* it admits nothing when the mission does not grant ``research_task`` or no
-  ad-hoc ProbeTemplate has been published -- the two versioned owner acts that
-  replace the hard-coded ``adhoc_research_enabled = False``;
+* ordinary ad-hoc research is absent until its own config and an executable
+  ProbeTemplate exist. A configured directed-document executor implicitly
+  enables only the producer for planner-selected registered originals; it
+  cannot admit an ordinary inquiry and still requires the mission's exact
+  research/model/staging grants;
 * it admits nothing more once the day's ad-hoc pool -- 25% of the mission's
   ``max_daily_cost_usd`` -- is reserved, and says ``skipped:pool_exhausted``
   rather than borrowing from the extraction the mission actually exists for;
@@ -47,9 +49,10 @@ from .lane_permission_control import (
 )
 from .store import canonical_json
 
-# The lane exists where its own configuration does.  A research task spends the
-# mission's money on questions nobody wrote down in advance, so it is opt-in at
-# install time and absent everywhere the owner has not asked for it.
+# Ordinary ad-hoc work exists where its own configuration does. Directed
+# document execution has a separate closed switch and implicitly supplies a
+# directed-only producer, because an executor without an admission producer is
+# inert. That mode cannot create an ad-hoc probe loop.
 LANE_CONFIG = "research-task-lane.json"
 LAUNCHER_KWARG = "research_task_launcher"
 IDLE_HOLD = timedelta(hours=1)
@@ -200,20 +203,33 @@ class ResearchTaskCoordinator:
             isinstance(inquiry, Mapping) and "directed_document" in inquiry
             for inquiry in plan.get("inquiries", ())
         )
+        directed_only = configuration.get("directed_only") is True
+        if directed_only and not has_directed:
+            return {
+                "status": "idle",
+                "reason": "current plan has no directed document inquiry",
+                **settled,
+            }
         directed_granted = has_directed and {
             "research_task", "model_run", "stage_record",
         }.issubset(set(mission["autonomy"]["may_write"]))
         top_permission = permission_key(
             "permission|research_task", mission, self.launcher, connection=self.store.connection)
         clear_obsolete_permissions(self.failure_budget, top_permission, scope_prefix="permission|")
-        if not decision["granted"] and not directed_granted:
+        if (directed_only or not decision["granted"]) and not directed_granted:
             # The switch, stated rather than hidden: the reasons are the two
             # owner acts that are missing.
+            missing = sorted(
+                {"research_task", "model_run", "stage_record"}
+                - set(mission["autonomy"]["may_write"])
+            )
+            reasons = list(decision["reasons"])
+            reasons.extend(f"mission_missing_{item}" for item in missing)
             permission = self.failure_budget.blocked(top_permission)
             if permission is None:
                 permission = self.failure_budget.record(
-                    top_permission, status="gated:not permitted " + ",".join(decision["reasons"]))
-            return {"status": "not_granted", "reasons": decision["reasons"],
+                    top_permission, status="gated:not permitted " + ",".join(reasons))
+            return {"status": "not_granted", "reasons": reasons,
                     "failure": permission.as_wire(), **settled}
         self.failure_budget.retire(
             top_permission,
@@ -346,9 +362,9 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
 def add_arguments(parser: Any) -> None:
     parser.add_argument(
         "--research-task-lane", type=Path, default=None,
-        help="Ad-hoc research lane configuration. Omit and the lane is absent: "
-             "a research task spends the mission's budget on a question the "
-             "checklist did not anticipate, so it is opt-in.",
+        help="Ad-hoc research lane configuration. Omit to keep ad-hoc work absent; "
+             "a separately configured document-research lane may still build its "
+             "directed-only admission producer.",
     )
 
 
@@ -389,19 +405,43 @@ def lane_configuration(path: Path) -> dict[str, Any]:
 
 
 def build_launcher(args: Any) -> Any | None:
-    if getattr(args, "research_task_lane", None) is None:
+    research_task_path = getattr(args, "research_task_lane", None)
+    document_lane_path = getattr(args, "mission_document_research_lane", None)
+    if research_task_path is None and document_lane_path is None:
         return None
     from .research_task_launcher import ResearchTaskLauncher
 
-    configuration = lane_configuration(args.research_task_lane)
+    directed_only = research_task_path is None
+    if directed_only:
+        # A configured directed-document executor also needs its admission
+        # producer.  This does not turn on ad-hoc probes: the child carries a
+        # closed directed-only mode and skips every ordinary inquiry.
+        from .mission_document_research_lane import (
+            lane_configuration as document_lane_configuration,
+        )
+
+        document_lane_configuration(document_lane_path)
+        from .call_budget import default_run_budget
+        from .research_task import validate_task_budget
+
+        configuration = {
+            "max_admissions_per_tick": default_run_budget(
+                "research_task"
+            )["max_admissions_per_tick"],
+            "retired_templates": (),
+            "task_budget": validate_task_budget({}),
+        }
+    else:
+        configuration = lane_configuration(research_task_path)
     return ResearchTaskLauncher(
         state_dir=Path(args.db).expanduser().resolve().parent,
         max_admissions_per_tick=configuration["max_admissions_per_tick"],
         retired_templates=configuration["retired_templates"],
         task_budget=configuration["task_budget"],
-        config_path=args.research_task_lane,
+        config_path=research_task_path,
         planner_scheduler_db=getattr(args, "scheduler", None),
         planner_model_config_path=getattr(args, "research_planner_model_config", None),
+        directed_only=directed_only,
     )
 
 
@@ -425,7 +465,8 @@ LANE = register_lane(LaneSpec(
     launcher_factory=build_launcher,
     argv_fragment=argv_fragment,
     note="P14e: a planner inquiry becomes a bounded loop with its own budget; "
-         "the bounded planner driver advances it like any other loop.",
+         "or, under the document lane's switch, an exact registered-original "
+         "admission. The bounded planner driver advances ordinary loops.",
 ))
 
 

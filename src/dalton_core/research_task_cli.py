@@ -2,10 +2,9 @@
 
 One run does three things and stops:
 
-1. read the active mission, the latest research plan and the published ad-hoc
-   ProbeTemplate catalogue, and decide whether ad-hoc research is granted at
-   all -- the mission's ``may_write`` must carry ``research_task`` and at least
-   one ad-hoc template must have an operation an executor can run;
+1. read the active mission and latest research plan; an explicitly configured
+   ad-hoc lane also reads the published ProbeTemplate catalogue, while the
+   directed-only producer admits only exact registered-original strategies;
 2. work down the plan's inquiries in the planner's own order, admitting at most
    ``--max-admissions`` of them, refusing each one that is already admitted,
    outside the universe or the mandate, unbindable, or past the day's ad-hoc
@@ -72,9 +71,12 @@ def run_admissions(
     planner_model_config_path: Path | None = None,
     document_draft_model_config_path: Path | None = None,
     document_verifier_model_config_path: Path | None = None,
+    directed_only: bool = False,
 ) -> dict[str, Any]:
     if isinstance(max_admissions, bool) or not isinstance(max_admissions, int) or max_admissions < 1:
         raise ResearchTaskError("max_admissions must be a positive integer")
+    if not isinstance(directed_only, bool):
+        raise ResearchTaskError("directed_only must be boolean")
     task_budget = validate_task_budget({} if task_budget is None else task_budget)
     state_dir = state_dir.expanduser().resolve()
     planner_cost = default_planner_cost_usd(state_dir)
@@ -85,6 +87,7 @@ def run_admissions(
         "created_at": now.isoformat(timespec="microseconds"),
         "status": "failed",
         "mode": "dry_run" if dry_run else "admit",
+        "scope": "directed_document_only" if directed_only else "configured_research_task",
         "grant": None,
         "plan_ref": None,
         "considered": 0,
@@ -193,6 +196,13 @@ def run_admissions(
                 # By ordinal, not by position: refused entries are in this list too.
                 inquiry = plan["inquiries"][entry["ordinal"]]
                 directed = "directed_document" in inquiry
+                if directed_only and not directed:
+                    summary["refused"].append({
+                        "inquiry_ref": entry.get("inquiry_ref"),
+                        "company_ref": entry.get("company_ref"),
+                        "reason": "not_selected_by_directed_document_producer",
+                    })
+                    continue
                 if not directed and not entry["admissible"]:
                     summary["refused"].append({
                         "inquiry_ref": entry.get("inquiry_ref"),
@@ -331,6 +341,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--planner-model-config", type=Path)
     parser.add_argument("--mission-document-draft-model-config", type=Path)
     parser.add_argument("--mission-document-verifier-model-config", type=Path)
+    parser.add_argument(
+        "--directed-only", action="store_true",
+        help="admit only planner-directed registered originals; keep ad-hoc research disabled",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="decide and stop; no authority writes")
     parser.add_argument("--quiet", action="store_true")
@@ -348,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         planner_model_config_path=args.planner_model_config,
         document_draft_model_config_path=args.mission_document_draft_model_config,
         document_verifier_model_config_path=args.mission_document_verifier_model_config,
+        directed_only=args.directed_only,
         retired_templates=tuple(args.retired_templates or ()),
         dry_run=args.dry_run,
     )

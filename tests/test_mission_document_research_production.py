@@ -28,6 +28,8 @@ from dalton_core.mission_document_research_launcher import MissionDocumentResear
 from dalton_core.mission_document_research_lane import MissionDocumentResearchCoordinator
 from dalton_core.mission_document_research_runtime import MissionDocumentResearchRuntime
 from dalton_core.research_question_backlog import ResearchQuestionBacklog
+from dalton_core.research_task_launcher import ResearchTaskLauncher
+from dalton_core.mission_research_task_lane import ResearchTaskCoordinator
 from dalton_core.research_verification import CandidateStagingStore
 from dalton_core.store import canonical_json, content_hash
 from tests.test_mission_annual_research import COMPANY, MissionAnnualFixture
@@ -145,7 +147,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
         os.chmod(document_config, 0o600)
         return document_config
 
-    def _admit(self, fixture, document_config):
+    def _record_directed_plan(self, fixture, document_config):
         inventory = load_document_inventory_authority(
             core=fixture.store, mission=fixture.mission, state_dir=fixture.state,
             config_path=document_config,
@@ -181,6 +183,10 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
         from tests.test_mission_document_research import MissionDocumentResearchTests
 
         stored = MissionDocumentResearchTests()._record_plan(fixture, plan)
+        return stored, inquiry
+
+    def _admit(self, fixture, document_config):
+        stored, inquiry = self._record_directed_plan(fixture, document_config)
         with open_mission_document_admission_authority(
             store=fixture.store, state_dir=fixture.state, mission=fixture.mission,
             planner_scheduler_db=fixture.state / "core.sqlite",
@@ -196,6 +202,89 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             )
             admission = authority.resolve_for_execution(result["admission_ref"])
         return admission
+
+    def test_enabled_document_lane_produces_admission_then_executes_over_unix_broker(self):
+        fixture = self._public_fixture()
+        statement = "The company serves varied customers and depends on outsourcing partners."
+        replies = iter((
+            (fixture.draft_profile, canonical_json({
+                "schema_version": "0.1", "status": "answered", "answer": statement,
+                "candidate": {
+                    "normalized_statement": statement,
+                    "metric_or_aspect": "customer and operating dependencies",
+                    "period": "FY2025 annual report", "basis": "reported",
+                    "cited_match_indexes": [0],
+                }, "missing": [],
+            })),
+            (fixture.verifier_profile, canonical_json({
+                "schema_version": "0.1", "verdict": "pass",
+                "verified_statement": statement, "findings": [],
+            })),
+        ))
+
+        def respond(request):
+            semantic = dict(request)
+            semantic.pop("queueWaitMs", None)
+            profile, text = next(replies)
+            response = success_response(semantic, text=text)
+            response.pop("contentHash")
+            response.update({
+                "provider": profile["provider"], "model": profile["model"],
+                "canonicalModel": f"{profile['provider']}/{profile['model']}",
+            })
+            return seal(response)
+
+        broker = FakeBroker(fixture.state, respond, connections=2)
+        self.addCleanup(broker.close)
+        document_config = self._install_runtime_authorities(fixture, broker)
+        self._record_directed_plan(fixture, document_config)
+        planner_config = fixture.state / "registered-annual-report-draft-model-config.json"
+        producer = ResearchTaskLauncher(
+            state_dir=fixture.state,
+            planner_scheduler_db=fixture.state / "core.sqlite",
+            planner_model_config_path=planner_config,
+            directed_only=True,
+            python_executable=sys.executable,
+        )
+        self.addCleanup(producer.close)
+        producer_lane = ResearchTaskCoordinator(store=fixture.store, launcher=producer)
+        python_path = os.pathsep.join((
+            str(Path(__file__).parents[1] / "src"), str(Path(__file__).parents[1]),
+        ))
+        with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
+            launched = producer_lane.dispatch_once()
+            self.assertEqual(launched["status"], "launched", launched)
+            self.assertEqual(producer.wait(timeout=60), 0)
+        producer_summary = producer.status(launched["ticket_ref"])["summary"]
+        self.assertEqual(producer_summary["admitted"], 1, producer_summary)
+        admission = fixture.store.connection.execute(
+            "SELECT admission_id,content_hash FROM mission_document_research_admissions"
+        ).fetchone()
+        self.assertIsNotNone(admission)
+
+        staging_path = fixture.state / "mission-document-produced-staging.sqlite"
+        CandidateStagingStore(staging_path).close()
+        executor = MissionDocumentResearchLauncher(
+            state_dir=fixture.state, staging_path=staging_path,
+            planner_scheduler_db=fixture.state / "core.sqlite",
+            planner_model_config_path=planner_config,
+            document_config_path=document_config,
+            python_executable=sys.executable,
+        )
+        self.addCleanup(executor.close)
+        execution_lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=executor,
+        )
+        with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
+            executed = execution_lane.dispatch_once()
+            self.assertEqual(executed["status"], "launched", executed)
+            self.assertEqual(executor.wait(timeout=60), 0)
+        self.assertEqual(
+            executor.status(executed["ticket_ref"])["summary"]["status"],
+            "complete",
+        )
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual(execution_lane.dispatch_once()["status"], "idle")
 
     def test_real_unix_broker_budget_staging_and_replay(self):
         fixture = self._public_fixture()
