@@ -269,8 +269,12 @@ class MissionZeroBaseLaneCoordinator:
             return {"status": holds[0].action, "mode": "review", "settled": settled,
                     "failure": holds[0].as_wire(), "blocked_reviews": len(holds)}
         else:
+            waiting = int(state.get("waiting_for_initial_screen_count") or 0)
+            reason = "已通过初筛的公司当前没有到期的重审任务，判断跟踪暂无新结果"
+            if waiting:
+                reason += f"；另有 {waiting} 家公司需先完成初筛"
             return {"status": "idle", "settled": settled, "checks_digest": digest,
-                    "reason": "每家公司这个月都已经从零重问过，判断结果台账也没有变动"}
+                    "waiting_for_initial_screen_count": waiting, "reason": reason}
         item = f"{mode}|{batch}"
         control = permission_key(item, mission, self.launcher, connection=self.connection)
         clear_obsolete_permissions(self.budget, control, scope_prefix=f"{mode}|")
@@ -360,7 +364,10 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
                 thresholds=policy["abnormal_move"],
                 stances=thesis_stances(server.store, policy, tracked=universe),
             )
-            return {"due": due, "checks_digest": checks_digest(checks)}
+            return {
+                "due": due, "checks_digest": checks_digest(checks),
+                "waiting_for_initial_screen_count": len(set(universe) - set(tracked)),
+            }
 
         coordinator = MissionZeroBaseLaneCoordinator(
             launcher=launcher, mission=mission, lane_state=lane_state,

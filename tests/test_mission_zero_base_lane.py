@@ -93,6 +93,19 @@ class DispatchTests(unittest.TestCase):
         lane.lane_state = lambda _m, _n: {"due": [], "checks_digest": "digest-2"}
         self.assertEqual(lane.dispatch_once()["status"], "launched")
 
+    def test_idle_does_not_claim_unreviewed_companies_are_complete(self) -> None:
+        launcher = FakeLauncher()
+        lane = coordinator(launcher, due=(), digest="")
+        lane.lane_state = lambda _m, _n: {
+            "due": [], "checks_digest": "", "waiting_for_initial_screen_count": 1,
+        }
+        result = lane.dispatch_once()
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["waiting_for_initial_screen_count"], 1)
+        self.assertIn("1 家公司需先完成初筛", result["reason"])
+        self.assertNotIn("每家公司", result["reason"])
+        self.assertEqual(launcher.started, [])
+
     def test_a_crashed_child_does_not_move_the_watermark(self) -> None:
         # The bug this guards: a child that wrote half the pass and then died
         # would otherwise make the lane believe the ledger was fresh, and the
