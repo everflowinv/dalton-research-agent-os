@@ -3224,6 +3224,18 @@ class CoverageMissionAuthority:
                 raise CoverageMissionConflict("document review changed; reload before reopening")
             if row["state"] != "dismissed":
                 raise CoverageMissionConflict("only a dismissed document review can be reopened")
+            if row["source_ref"] == "source:sec-edgar":
+                if not row["document_ref"].startswith("sec:filing:"):
+                    raise CoverageMissionConflict("SEC review lacks a filing accession")
+                accession = row["document_ref"].removeprefix("sec:filing:")
+                filing = cur.execute(
+                    "SELECT company_ref,form FROM coverage_mission_statement_filings "
+                    "WHERE company_ref=? AND accession=?",
+                    (row["company_ref"], accession),
+                ).fetchone()
+                if filing is None or filing["form"] != "10-K":
+                    raise CoverageMissionConflict(
+                        "supplemental annual reread lacks exact issuer 10-K authority")
             pointer = cur.execute(
                 "SELECT p.mission_version_id FROM coverage_mission_pointer p "
                 "JOIN coverage_mission_versions v ON v.mission_ref=p.mission_ref "
