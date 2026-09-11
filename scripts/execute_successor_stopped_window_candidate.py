@@ -23,11 +23,14 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from scripts import execute_r11a_stopped_window_candidate as r11
+from scripts import openclaw_broker_stopped_window as broker_window
 from scripts import prepare_release_acceptance_candidate as release_acceptance
 from scripts.prepare_successor_config_transition import (
-    DOCUMENT_CONFIG, LANE_CONFIG, PRESERVE_SCHEMA_VERSION, _json_bytes,
+    DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
+    PRESERVE_SCHEMA_VERSION, _json_bytes,
     apply_transition, expected_service_transition_state,
-    expected_transition_state, verify_preserved_state_authorities,
+    expected_openclaw_frame_transition_state, expected_transition_state,
+    verify_preserved_state_authorities,
 )
 
 
@@ -47,6 +50,9 @@ MANIFEST_FIELDS = frozenset({
     "schema_version", "release_ref", "status", "acceptance_state",
     "deployment_state", "source", "artifacts", "acceptance", "runtime",
     "health_acceptance", "boundaries", "content_hash",
+})
+PRESERVE_SCHEMA_VERSIONS = frozenset({
+    PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
 })
 
 
@@ -71,6 +77,34 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256((json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n").encode()).hexdigest()
+
+
+def verify_provider_plugin_for_config(snapshot_path: Path,
+                                      openclaw_sha256: str) -> str:
+    """Verify the existing provider tree against an explicit config state."""
+
+    snapshot = load_json(snapshot_path)
+    root = Path(snapshot.get("root", ""))
+    rows = snapshot.get("files")
+    need(snapshot.get("schema_version") == "r11a-provider-plugin-snapshot-0.1"
+         and snapshot.get("openclaw_config_sha256") == openclaw_sha256
+         and isinstance(rows, list) and rows
+         and canonical_hash(rows) == snapshot.get("tree_sha256")
+         and root.is_dir() and not root.is_symlink(),
+         "provider plugin authority differs")
+    expected = set()
+    for row in rows:
+        relative = Path(row.get("path", ""))
+        need(not relative.is_absolute() and ".." not in relative.parts,
+             "provider plugin path is unsafe")
+        path = root / relative; expected.add(relative.as_posix())
+        need(path.is_file() and not path.is_symlink()
+             and sha(path) == row.get("sha256"),
+             "provider plugin bytes changed")
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*")
+              if path.is_file() and "__pycache__" not in path.parts}
+    need(actual == expected, "provider plugin inventory changed")
+    return snapshot["tree_sha256"]
 
 
 def template() -> dict[str, Any]:
@@ -167,7 +201,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          and binding.get("transition_manifest_sha256")
          == artifacts["transition_manifest"]["sha256"],
          "copied-state rehearsal does not bind this successor")
-    if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+    if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         service_before, service_after = expected_service_transition_state(
             packet_root=packet, manifest=transition)
         results = binding.get("results", {})
@@ -179,6 +213,13 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
              and results.get("service_config_semantic_sha256")
                  == canonical_hash(service_after),
              "copied-state rehearsal does not prove the preserve-existing result")
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            _external_before, external_after, _row = (
+                expected_openclaw_frame_transition_state(
+                    packet_root=packet, manifest=transition))
+            need(results.get("openclaw_config_semantic_sha256")
+                 == canonical_hash(json.loads(external_after)),
+                 "copied-state rehearsal does not prove the OpenClaw result")
     suite = load_json(paths["full_suite_receipt"])
     try:
         release_acceptance._validate_full_suite(
@@ -277,7 +318,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(r11.OPENCLAW.read_bytes() == artifacts["openclaw_config_snapshot"].read_bytes(),
              "live OpenClaw config differs from successor baseline")
         transition = load_json(artifacts["transition_manifest"])
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             _models, expected_document, expected_lane = expected_transition_state(
                 packet_root=self.packet, manifest=transition)
             need(load_json(r11.STATE / DOCUMENT_CONFIG) == expected_document
@@ -301,7 +342,14 @@ class SuccessorOrchestrator(r11.Orchestrator):
         authority_artifacts["model_config_snapshot"] = artifacts["model_config_before_snapshot"]
         authority_artifacts["service_config_before"] = artifacts["service_config_snapshot"]
         authority = r11.verify_runtime_authorities(authority_artifacts)
-        plugin = r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"])
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            _before_bytes, after_bytes, _row = expected_openclaw_frame_transition_state(
+                packet_root=self.packet, manifest=transition)
+            plugin = verify_provider_plugin_for_config(
+                artifacts["provider_plugin_snapshot"],
+                hashlib.sha256(after_bytes).hexdigest())
+        else:
+            plugin = r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"])
         web = load_json(artifacts["web_v6_activation_receipt"])
         selected = web.get("selected_plan", {})
         selected_path = Path(selected.get("path", ""))
@@ -327,16 +375,17 @@ class SuccessorOrchestrator(r11.Orchestrator):
              "deployment executable is unavailable")
         result = {"source": source, "authority": authority,
                   "provider_plugin_tree_sha256": plugin}
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             result["preserved_state_authorities"] = state_authorities
         return result
 
     def install_successor(self, source: Path, manifest: Mapping[str, Any],
                           artifacts: Mapping[str, Path]) -> None:
+        self.successor_source = source
         self.artifacts = dict(artifacts)
         self.artifacts["service_config_before"] = artifacts["service_config_snapshot"]
         transition = load_json(artifacts["transition_manifest"])
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             service_before, service_after = expected_service_transition_state(
                 packet_root=self.packet, manifest=transition)
             need(service_before == load_json(artifacts["service_config_snapshot"]),
@@ -349,6 +398,17 @@ class SuccessorOrchestrator(r11.Orchestrator):
         else:
             self.artifacts["service_config_after"] = artifacts["service_config_snapshot"]
         self.mutations_started = True
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            self.openclaw_root = broker_window.managed_openclaw_root()
+            broker_window.apply_reviewed_transition(
+                packet_root=self.packet, transition=transition,
+                source_root=source, config_path=r11.OPENCLAW,
+                openclaw_root=self.openclaw_root,
+                state_dir=r11.STATE,
+                journal_path=(r11.HOME / ".openclaw/"
+                              "dalton-model-broker.sock.journal.json"),
+                receipt_dir=self.rollback_root / "openclaw-broker-transition",
+            )
         self.command([str(r11.VENV / "bin/python"), "-m", "pip", "install",
                       "--disable-pip-version-check", "--no-deps", "--force-reinstall",
                       str(artifacts["wheel"])])
@@ -358,6 +418,9 @@ class SuccessorOrchestrator(r11.Orchestrator):
             manifest_path=artifacts["transition_manifest"],
             expected_manifest_sha256=sha(artifacts["transition_manifest"]),
             receipt_path=transition_receipt, service_config_path=r11.SERVICE_CONFIG,
+            external_config_path=(
+                r11.OPENCLAW if transition.get("schema_version")
+                == EXTERNAL_CAS_SCHEMA_VERSION else None),
             accepted_evidence=manifest["acceptance"],
         )
         rendered = self.rollback_root / "reviewed-rendered-plists"
@@ -394,7 +457,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(load_json(r11.STATE / DOCUMENT_CONFIG) == expected_document
              and load_json(r11.STATE / LANE_CONFIG) == expected_lane,
              "installed successor document configuration differs")
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             need(self.rollback_root is not None,
                  "preserve-existing transition receipt is unavailable")
             transition_receipt = load_json(
@@ -414,7 +477,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                      f"installer changed preserved config bytes: {row['name']}")
             state_authorities = verify_preserved_state_authorities(
                 packet_root=self.packet, state_dir=r11.STATE, manifest=transition)
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             service_before, service_after = expected_service_transition_state(
                 packet_root=self.packet, manifest=transition)
             need(service_before == load_json(artifacts["service_config_snapshot"]),
@@ -422,8 +485,13 @@ class SuccessorOrchestrator(r11.Orchestrator):
             expected_service_bytes = _json_bytes(service_after)
         else:
             expected_service_bytes = artifacts["service_config_snapshot"].read_bytes()
+        expected_openclaw_bytes = artifacts["openclaw_config_snapshot"].read_bytes()
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            _before, expected_openclaw_bytes, _row = (
+                expected_openclaw_frame_transition_state(
+                    packet_root=self.packet, manifest=transition))
         need(r11.SERVICE_CONFIG.read_bytes() == expected_service_bytes
-             and r11.OPENCLAW.read_bytes() == artifacts["openclaw_config_snapshot"].read_bytes(),
+             and r11.OPENCLAW.read_bytes() == expected_openclaw_bytes,
              "installer changed reviewed service result or preserved OpenClaw config")
         need(load_json(r11.SERVICE_CONFIG).get("thesis_impact", {}).get("enabled") is False
              and not (r11.LAUNCH_AGENTS / "space.lumos.dalton.thesis-impact.plist").exists()
@@ -447,7 +515,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
              "installed successor runtime bytes differ from wheel")
         need(self.rollback_root is not None, "rollback authority is unavailable")
         initial = load_json(self.rollback_root / "initial-state.json")
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             need(r11.protected_state_hash(r11.STATE)
                  == initial.get("protected_state_sha256"),
                  "installer changed preserved owner metadata, credentials or signatures")
@@ -457,8 +525,13 @@ class SuccessorOrchestrator(r11.Orchestrator):
             target = r11.LAUNCH_AGENTS / f"{label}.plist"
             need(target.is_file() and not target.is_symlink() and sha(target) == expected,
                  f"installed LaunchAgent bytes differ: {label}")
-        need(r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"]),
-             "provider plugin authority differs")
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            verify_provider_plugin_for_config(
+                artifacts["provider_plugin_snapshot"],
+                hashlib.sha256(expected_openclaw_bytes).hexdigest())
+        else:
+            need(r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"]),
+                 "provider plugin authority differs")
         web = load_json(artifacts["web_v6_activation_receipt"])
         selected = web.get("selected_plan", {})
         selected_path = Path(selected.get("path", ""))
@@ -481,9 +554,12 @@ class SuccessorOrchestrator(r11.Orchestrator):
         result = {"model_config_count": len(expected_models), "runtime_files": len(files),
                   "authority": authority, "writer_lane_enabled": True,
                   "thesis_impact_enabled": False, "backup_keep_latest": 3}
-        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             result.update({
-                "configuration_mutations": 0, "service_config_mutations": 1,
+                "configuration_mutations": 0,
+                "service_config_mutations": (
+                    0 if transition.get("schema_version")
+                    == EXTERNAL_CAS_SCHEMA_VERSION else 1),
                 "service_config_sha256": sha(r11.SERVICE_CONFIG),
                 "preserved_state_authorities": state_authorities,
             })
@@ -495,6 +571,31 @@ class SuccessorOrchestrator(r11.Orchestrator):
         if not self.mutations_started or self.artifacts is None or self.rollback_root is None:
             return super().rollback()
         transition = load_json(self.artifacts["transition_manifest"])
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            broker_receipt = (self.rollback_root / "openclaw-broker-transition" /
+                              "receipt.json")
+            if broker_receipt.is_file() and not broker_receipt.is_symlink():
+                for label in reversed(r11.LABELS):
+                    self.stop(label)
+                need(self.source is not None,
+                     "rollback source is unavailable for broker drain")
+                self.command([
+                    "/opt/homebrew/bin/python3",
+                    str(self.source / "src/dalton_core/launch_drain.py"),
+                    "--state-dir", str(r11.STATE), "--timeout", "600",
+                ])
+                broker_window.rollback_reviewed_transition(
+                    packet_root=self.packet, transition=transition,
+                    source_root=self.successor_source,
+                    config_path=r11.OPENCLAW,
+                    openclaw_root=self.openclaw_root,
+                    state_dir=r11.STATE,
+                    journal_path=(r11.HOME / ".openclaw/"
+                                  "dalton-model-broker.sock.journal.json"),
+                    receipt_path=broker_receipt,
+                )
+            result = super().rollback()
+            return {**result, "preserved_concurrent_config_targets": []}
         if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
             result = super().rollback()
             return {**result, "preserved_concurrent_config_targets": []}

@@ -8,9 +8,11 @@ read-only audit config is supporting evidence only and is never installable.
 
 Schema 0.1 retains the original five-file activation behavior. Schema 0.2
 preserves an already-installed model/document/lane configuration and applies
-one separately reviewed planner service-budget CAS. ``--apply`` is intended
-for an already controlled stopped window and writes an exclusive receipt. It
-does not stop/start services, install code, call a model, or publish a release.
+one separately reviewed planner service-budget CAS. Schema 0.3 preserves those
+bytes and the service config while binding one reviewed external OpenClaw
+config transition. ``--apply`` is intended for an already controlled stopped
+window and writes an exclusive receipt. It does not stop/start services,
+install code, call a model, or publish a release.
 """
 from __future__ import annotations
 
@@ -52,6 +54,14 @@ OPENCLAW_FRAME_PATH = (
 )
 OPENCLAW_DEFAULT_MAX_FRAME_BYTES = 262_144
 OPENCLAW_TARGET_MAX_FRAME_BYTES = 1_048_576
+OPENCLAW_JOURNAL_SCHEMA_VERSION = "0.1"
+OPENCLAW_JOURNAL_MAX_BYTES = 8_388_608
+OPENCLAW_WEB_SEARCH_PLUGIN_ID = "dalton-openclaw-web-search-broker"
+OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE = "integrations/openclaw-web-search-broker"
+OPENCLAW_WEB_SEARCH_LEGACY_PATH = (
+    "/Users/everflow/Projects/dalton-research-agent-os/"
+    "integrations/openclaw-web-search-broker"
+)
 
 
 class ConfigTransitionError(RuntimeError):
@@ -308,8 +318,130 @@ def _set_leaf(value: Mapping[str, Any], path: Sequence[str], leaf: int) -> dict[
     return result
 
 
+def _plugin_tree(path: Path) -> dict[str, Any]:
+    _need(path.is_dir() and not path.is_symlink(),
+          "managed web-search plugin root is unsafe")
+    files = []
+    for item in sorted(path.rglob("*")):
+        _need(not item.is_symlink(), "managed web-search plugin contains a symlink")
+        if item.is_dir():
+            continue
+        _need(item.is_file(), "managed web-search plugin contains an unsafe entry")
+        files.append({"path": item.relative_to(path).as_posix(),
+                      "sha256": sha256_bytes(item.read_bytes())})
+    _need(bool(files), "managed web-search plugin is empty")
+    return {"files": files, "tree_sha256": canonical_hash(files)}
+
+
+def _validate_plugin_tree_manifest(value: Any) -> dict[str, Any]:
+    _need(isinstance(value, Mapping) and set(value) == {"files", "tree_sha256"}
+          and isinstance(value.get("files"), list) and bool(value["files"]),
+          "managed web-search plugin tree authority differs")
+    seen = set()
+    for row in value["files"]:
+        rel = Path(str(row.get("path", ""))) if isinstance(row, Mapping) else Path()
+        _need(isinstance(row, Mapping) and set(row) == {"path", "sha256"}
+              and not rel.is_absolute() and ".." not in rel.parts
+              and rel.as_posix() not in seen
+              and HEX64.fullmatch(str(row.get("sha256", ""))) is not None,
+              "managed web-search plugin tree row differs")
+        seen.add(rel.as_posix())
+    rows = [dict(row) for row in value["files"]]
+    _need(rows == sorted(rows, key=lambda row: row["path"])
+          and value["tree_sha256"] == canonical_hash(rows),
+          "managed web-search plugin tree hash differs")
+    return {"files": rows, "tree_sha256": value["tree_sha256"]}
+
+
+def _reviewed_historical_unresolved(path: Path) -> dict[str, Any]:
+    _need(path.is_file() and not path.is_symlink()
+          and path.stat().st_size <= OPENCLAW_JOURNAL_MAX_BYTES,
+          "OpenClaw broker journal is unavailable or too large")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigTransitionError("OpenClaw broker journal is invalid JSON") from exc
+    _need(isinstance(value, Mapping)
+          and set(value) == {"schemaVersion", "records"}
+          and value.get("schemaVersion") == OPENCLAW_JOURNAL_SCHEMA_VERSION
+          and isinstance(value.get("records"), list),
+          "OpenClaw broker journal shape differs")
+    pending = []
+    allowed = {"createdAtMs", "expiresAtMs", "invocationId",
+               "requestHash", "response", "state"}
+    for row in value["records"]:
+        _need(isinstance(row, Mapping) and set(row) == allowed
+              and row.get("state") in {"pending", "completed"}
+              and isinstance(row.get("createdAtMs"), int)
+              and isinstance(row.get("expiresAtMs"), int)
+              and row["expiresAtMs"] >= row["createdAtMs"]
+              and isinstance(row.get("invocationId"), str)
+              and isinstance(row.get("requestHash"), str),
+              "OpenClaw broker journal record differs")
+        if row["state"] == "pending":
+            _need(row.get("response") is None,
+                  "pending OpenClaw broker row has a response")
+            pending.append(dict(row))
+    return _validate_historical_unresolved({
+        "schema_version": "openclaw-broker-historical-unresolved-0.1",
+        "journal_schema_version": OPENCLAW_JOURNAL_SCHEMA_VERSION,
+        "records": pending,
+        "records_sha256": canonical_hash(pending),
+        "retry_authorized": False,
+        "refund_authorized": False,
+    })
+
+
+def _validate_historical_unresolved(value: Any) -> dict[str, Any]:
+    _need(isinstance(value, Mapping)
+          and set(value) == {
+              "schema_version", "journal_schema_version", "records",
+              "records_sha256", "retry_authorized", "refund_authorized",
+          }
+          and value.get("schema_version")
+              == "openclaw-broker-historical-unresolved-0.1"
+          and value.get("journal_schema_version")
+              == OPENCLAW_JOURNAL_SCHEMA_VERSION
+          and isinstance(value.get("records"), list)
+          and value.get("retry_authorized") is False
+          and value.get("refund_authorized") is False,
+          "historical unresolved broker authority differs")
+    records = []
+    seen = set()
+    allowed = {"createdAtMs", "expiresAtMs", "invocationId",
+               "requestHash", "response", "state"}
+    for raw in value["records"]:
+        key = ((raw.get("invocationId"), raw.get("requestHash"))
+               if isinstance(raw, Mapping) else None)
+        _need(isinstance(raw, Mapping) and set(raw) == allowed
+              and raw.get("state") == "pending" and raw.get("response") is None
+              and isinstance(raw.get("createdAtMs"), int)
+              and not isinstance(raw.get("createdAtMs"), bool)
+              and isinstance(raw.get("expiresAtMs"), int)
+              and not isinstance(raw.get("expiresAtMs"), bool)
+              and raw["expiresAtMs"] >= raw["createdAtMs"]
+              and isinstance(raw.get("invocationId"), str)
+              and bool(raw["invocationId"])
+              and HEX64.fullmatch(str(raw.get("requestHash", ""))) is not None
+              and key not in seen,
+              "historical unresolved broker record differs")
+        seen.add(key); records.append(dict(raw))
+    _need(value.get("records_sha256") == canonical_hash(records),
+          "historical unresolved broker record hash differs")
+    return {
+        "schema_version": value["schema_version"],
+        "journal_schema_version": value["journal_schema_version"],
+        "records": records,
+        "records_sha256": value["records_sha256"],
+        "retry_authorized": False,
+        "refund_authorized": False,
+    }
+
+
 def _validated_openclaw_frame_transition(
     *, before_path: Path, after_path: Path, packet_root: Path,
+    web_search_plugin: Mapping[str, Any] | None = None,
+    historical_unresolved: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     packet_root = packet_root.resolve()
     before, before_bytes = _read_json(before_path, "OpenClaw config before")
@@ -319,9 +451,41 @@ def _validated_openclaw_frame_transition(
         {"state": "absent", "effective_default": OPENCLAW_DEFAULT_MAX_FRAME_BYTES},
         {"state": "present", "value": OPENCLAW_DEFAULT_MAX_FRAME_BYTES},
     ), "OpenClaw maxFrameBytes baseline differs from reviewed default")
-    _need(after == _set_leaf(before, OPENCLAW_FRAME_PATH,
-                             OPENCLAW_TARGET_MAX_FRAME_BYTES),
-          "OpenClaw candidate changes more than maxFrameBytes")
+    expected = _set_leaf(before, OPENCLAW_FRAME_PATH,
+                         OPENCLAW_TARGET_MAX_FRAME_BYTES)
+    semantic_mutations = [{
+        "kind": "json_leaf_compare_and_patch",
+        "json_path": list(OPENCLAW_FRAME_PATH),
+        "before_presence": before_state,
+        "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
+    }]
+    managed_plugins: list[dict[str, Any]] = []
+    if web_search_plugin is not None:
+        plugin = dict(web_search_plugin)
+        _need(set(plugin) == {
+            "plugin_id", "source_relative_path", "destination",
+            "source_tree", "source_commit",
+        } and plugin.get("plugin_id") == OPENCLAW_WEB_SEARCH_PLUGIN_ID
+          and plugin.get("source_relative_path") == OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE
+          and HEX40.fullmatch(str(plugin.get("source_commit", ""))) is not None,
+          "managed web-search plugin authority differs")
+        plugin["source_tree"] = _validate_plugin_tree_manifest(
+            plugin["source_tree"])
+        paths = expected.get("plugins", {}).get("load", {}).get("paths")
+        _need(isinstance(paths, list)
+              and paths.count(OPENCLAW_WEB_SEARCH_LEGACY_PATH) == 1
+              and plugin["destination"] not in paths,
+              "OpenClaw web-search plugin path baseline differs")
+        paths[paths.index(OPENCLAW_WEB_SEARCH_LEGACY_PATH)] = plugin["destination"]
+        semantic_mutations.append({
+            "kind": "json_array_unique_replace",
+            "json_path": ["plugins", "load", "paths"],
+            "before_value": OPENCLAW_WEB_SEARCH_LEGACY_PATH,
+            "after_value": plugin["destination"],
+        })
+        managed_plugins.append(plugin)
+    _need(after == expected,
+          "OpenClaw candidate changes more than reviewed broker fields")
     _need(_leaf_state(after, OPENCLAW_FRAME_PATH)
           == {"state": "present", "value": OPENCLAW_TARGET_MAX_FRAME_BYTES},
           "OpenClaw candidate maxFrameBytes differs")
@@ -332,6 +496,10 @@ def _validated_openclaw_frame_transition(
         "json_path": list(OPENCLAW_FRAME_PATH),
         "before_presence": before_state,
         "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
+        "semantic_mutations": semantic_mutations,
+        "managed_plugins": managed_plugins,
+        "historical_unresolved": _validate_historical_unresolved(
+            historical_unresolved),
         "before": _artifact(before_path, packet_root),
         "after": _artifact(after_path, packet_root),
         "before_sha256": sha256_bytes(before_bytes),
@@ -352,11 +520,15 @@ def build_preserve_existing_transition(
     service_config_before_path: Path, service_delta_path: Path | None = None,
     openclaw_config_before_path: Path | None = None,
     openclaw_config_after_path: Path | None = None,
+    web_search_plugin_source_path: Path | None = None,
+    web_search_plugin_destination_path: Path | None = None,
+    openclaw_broker_journal_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build a 0.2 service delta or a 0.3 external broker-frame CAS.
 
     The 0.3 form preserves the service and every reviewed Dalton configuration
-    byte.  It changes only the fixed OpenClaw broker ``maxFrameBytes`` leaf.
+    byte. It changes the fixed OpenClaw broker ``maxFrameBytes`` leaf and may
+    replace the unique legacy web-search plugin path with one reviewed copy.
     """
 
     packet_root = packet_root.resolve()
@@ -443,12 +615,40 @@ def build_preserve_existing_transition(
     external_cas = service_delta_path is None
     if external_cas:
         _need(openclaw_config_before_path is not None
-              and openclaw_config_after_path is not None,
+              and openclaw_config_after_path is not None
+              and openclaw_broker_journal_path is not None,
               "0.3 requires exact OpenClaw before and after artifacts")
+        plugin_inputs = (web_search_plugin_source_path,
+                         web_search_plugin_destination_path)
+        _need(all(path is None for path in plugin_inputs)
+              or all(path is not None for path in plugin_inputs),
+              "managed web-search plugin inputs are incomplete")
+        managed_plugin = None
+        if web_search_plugin_source_path is not None:
+            source = web_search_plugin_source_path.resolve()
+            destination = web_search_plugin_destination_path.resolve()
+            _need(source.as_posix().endswith(OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE)
+                  and destination.is_relative_to(
+                      (packet_root / "managed-plugins").resolve())
+                  and source_commit in destination.name,
+                  "managed web-search plugin paths are outside reviewed scope")
+            source_tree = _plugin_tree(source)
+            _need(_plugin_tree(destination) == source_tree,
+                  "managed web-search plugin copy differs from frozen source")
+            managed_plugin = {
+                "plugin_id": OPENCLAW_WEB_SEARCH_PLUGIN_ID,
+                "source_relative_path": OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE,
+                "destination": str(destination),
+                "source_tree": source_tree,
+                "source_commit": source_commit,
+            }
         openclaw_transition = _validated_openclaw_frame_transition(
             before_path=openclaw_config_before_path,
             after_path=openclaw_config_after_path,
             packet_root=packet_root,
+            web_search_plugin=managed_plugin,
+            historical_unresolved=_reviewed_historical_unresolved(
+                openclaw_broker_journal_path),
         )
         schema_version = EXTERNAL_CAS_SCHEMA_VERSION
         service_transition = {
@@ -464,7 +664,10 @@ def build_preserve_existing_transition(
         }
     else:
         _need(openclaw_config_before_path is None
-              and openclaw_config_after_path is None,
+              and openclaw_config_after_path is None
+              and web_search_plugin_source_path is None
+              and web_search_plugin_destination_path is None
+              and openclaw_broker_journal_path is None,
               "0.2 cannot carry an external config transition")
         delta_value, _ = _read_json(
             service_delta_path, "planner service budget delta")
@@ -516,7 +719,9 @@ def build_preserve_existing_transition(
         "preserved_authorities": [
             "all_model_configs", "five_reviewed_runtime_configs",
             "cockpit_model_selection", "active_mission", "router_policies",
-            "openclaw_config", "host_external_configuration",
+            ("openclaw_config_outside_reviewed_deltas" if external_cas
+             else "openclaw_config"),
+            "host_external_configuration",
             "connector_governance", "owner_metadata", "credentials",
             "signatures", "disabled_thesis_impact", "backup_keep_latest_3",
         ],
@@ -657,7 +862,8 @@ def expected_openclaw_frame_transition_state(
     expected_keys = {
         "name", "kind", "mutation_count", "target", "json_path",
         "before_presence", "after_value", "before", "after",
-        "before_sha256", "after_sha256",
+        "before_sha256", "after_sha256", "semantic_mutations",
+        "managed_plugins", "historical_unresolved",
     }
     _need(set(row) == expected_keys
           and row.get("name") == "openclaw_model_broker_max_frame"
@@ -669,8 +875,24 @@ def expected_openclaw_frame_transition_state(
           "OpenClaw frame transition shape differs")
     before_path, before_bytes = _resolve_artifact(packet_root, row["before"])
     after_path, after_bytes = _resolve_artifact(packet_root, row["after"])
+    managed_plugins = row.get("managed_plugins")
+    _need(isinstance(managed_plugins, list) and len(managed_plugins) <= 1,
+          "managed plugin transition inventory differs")
+    if managed_plugins:
+        plugin = managed_plugins[0]
+        destination = Path(str(plugin.get("destination", "")))
+        _need(destination.is_absolute()
+              and destination.is_relative_to(
+                  (packet_root / "managed-plugins").resolve())
+              and plugin.get("source_commit") == manifest.get("source_commit")
+              and manifest["source_commit"] in destination.name,
+              "managed web-search plugin destination authority differs")
+    unresolved = _validate_historical_unresolved(
+        row.get("historical_unresolved"))
     validated = _validated_openclaw_frame_transition(
-        before_path=before_path, after_path=after_path, packet_root=packet_root)
+        before_path=before_path, after_path=after_path, packet_root=packet_root,
+        web_search_plugin=(managed_plugins[0] if managed_plugins else None),
+        historical_unresolved=unresolved)
     _need(row == validated
           and row["before_sha256"] == sha256_bytes(before_bytes)
           and row["after_sha256"] == sha256_bytes(after_bytes),
@@ -738,23 +960,60 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _publish_exclusive_json(path: Path, value: Mapping[str, Any]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".successor-receipt-", dir=path.parent)
+    temporary = Path(temporary_name)
+    published_identity: tuple[int, int] | None = None
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(_json_bytes(value)); stream.flush(); os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.link(temporary, path)
+        linked = temporary.lstat()
+        published_identity = (linked.st_dev, linked.st_ino)
+        _fsync_directory(path.parent)
+    except Exception:
+        if (published_identity is not None and path.is_file()
+                and not path.is_symlink()):
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) == published_identity:
+                path.unlink()
+                _fsync_directory(path.parent)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _apply_preserve_transition(
     *, packet_root: Path, state_dir: Path, service_config_path: Path,
+    external_config_path: Path | None,
     manifest: Mapping[str, Any], expected_manifest_sha256: str,
     receipt_path: Path, accepted_evidence: Mapping[str, Any] | None,
     fault_hook: Callable[[str], None] | None,
 ) -> dict[str, Any]:
-    _need(set(manifest) == {
+    version = manifest.get("schema_version")
+    expected_fields = {
         "schema_version", "transition_kind", "status", "release_ref",
         "source_commit", "acceptance", "model_inventory", "targets",
         "preserved_state_authorities", "service_transition",
         "supporting_evidence", "preserved_authorities",
         "boundaries", "content_hash",
-    } and manifest.get("boundaries") == {
-        "configuration_mutations": 0, "service_config_mutations": 1,
+    }
+    expected_boundaries = {
+        "configuration_mutations": 0,
+        "service_config_mutations": 1 if version == PRESERVE_SCHEMA_VERSION else 0,
+        **({} if version == PRESERVE_SCHEMA_VERSION
+           else {"external_config_mutations": 1}),
         "live_mutation": False, "manifest_publication": False,
         "service_lifecycle": False, "model_calls": False,
-    }, "preserve-existing transition boundary differs")
+    }
+    if version == EXTERNAL_CAS_SCHEMA_VERSION:
+        expected_fields.add("external_config_transitions")
+    _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}
+          and set(manifest) == expected_fields
+          and manifest.get("boundaries") == expected_boundaries,
+          "preserve-existing transition boundary differs")
     _need(manifest.get("transition_kind") == "preserve_existing",
           "preserve-existing transition kind differs")
     rows = manifest.get("targets")
@@ -822,6 +1081,57 @@ def _apply_preserve_transition(
 
     verified_state_authorities = verify_preserved_state_authorities(
         packet_root=packet_root, state_dir=state_dir, manifest=manifest)
+
+    if version == EXTERNAL_CAS_SCHEMA_VERSION:
+        service_before_value, service_after_value = expected_service_transition_state(
+            packet_root=packet_root, manifest=manifest)
+        _, service_before_bytes = _resolve_artifact(
+            packet_root, manifest["service_transition"]["before"])
+        _need(service_before_value == service_after_value
+              and service_config_path.is_file()
+              and not service_config_path.is_symlink()
+              and service_config_path.read_bytes() == service_before_bytes,
+              "service config differs from reviewed preserved bytes")
+        external_before, external_after, external_row = (
+            expected_openclaw_frame_transition_state(
+                packet_root=packet_root, manifest=manifest))
+        _need(external_config_path is not None
+              and external_config_path.is_file()
+              and not external_config_path.is_symlink()
+              and external_config_path.read_bytes() == external_after,
+              "OpenClaw config differs from reviewed applied bytes")
+        receipt = {
+            "schema_version": EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION,
+            "status": "configured_controller_start_pending",
+            "release_ref": manifest["release_ref"],
+            "source_commit": manifest["source_commit"],
+            "transition_manifest_sha256": expected_manifest_sha256,
+            "acceptance_evidence_hash": (
+                None if accepted_evidence is None
+                else canonical_hash(dict(accepted_evidence))),
+            "configuration_mutations": 0,
+            "model_config_byte_sha256": model_byte_hashes,
+            "preserved_targets": [
+                {"name": row["name"], "sha256": row["after_sha256"]}
+                for row in rows],
+            "preserved_state_authorities": verified_state_authorities,
+            "service_config_mutations": 0,
+            "service_config_before_sha256": sha256_bytes(service_before_bytes),
+            "service_config_after_sha256": sha256_bytes(service_before_bytes),
+            "external_config_mutations": 1,
+            "external_config_before_sha256": sha256_bytes(external_before),
+            "external_config_after_sha256": sha256_bytes(external_after),
+            "historical_unresolved_sha256": external_row[
+                "historical_unresolved"]["records_sha256"],
+            "retry_authorized": False, "refund_authorized": False,
+            "service_lifecycle_mutations": 0, "model_calls": 0,
+            "manifest_publication": False,
+        }
+        receipt["content_hash"] = canonical_hash(receipt)
+        if fault_hook is not None:
+            fault_hook("before_receipt")
+        _publish_exclusive_json(receipt_path, receipt)
+        return receipt
 
     service_row = manifest.get("service_transition")
     _need(isinstance(service_row, Mapping)
@@ -998,6 +1308,7 @@ def apply_transition(
     *, packet_root: Path, state_dir: Path, manifest_path: Path,
     expected_manifest_sha256: str, receipt_path: Path,
     service_config_path: Path | None = None,
+    external_config_path: Path | None = None,
     fault_hook: Callable[[str], None] | None = None,
     _require_accepted: bool = True,
     accepted_evidence: Mapping[str, Any] | None = None,
@@ -1013,7 +1324,8 @@ def apply_transition(
           "transition manifest bytes changed")
     asserted = dict(manifest).pop("content_hash", None)
     _need(asserted == canonical_hash({k: v for k, v in manifest.items() if k != "content_hash"})
-          and manifest.get("schema_version") in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION}
+          and manifest.get("schema_version") in {
+              SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -1031,12 +1343,14 @@ def apply_transition(
               and acceptance.get("health_acceptance_required") is True,
               "scratch rehearsal requires the inert pending transition")
 
-    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+    if manifest.get("schema_version") in {
+            PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}:
         _need(service_config_path is not None,
               "preserve-existing transition requires the service config path")
         return _apply_preserve_transition(
             packet_root=packet_root, state_dir=state_dir,
             service_config_path=service_config_path, manifest=manifest,
+            external_config_path=external_config_path,
             expected_manifest_sha256=expected_manifest_sha256,
             receipt_path=receipt_path, accepted_evidence=accepted_evidence,
             fault_hook=fault_hook,
@@ -1204,6 +1518,7 @@ def apply_transition_to_scratch(
     *, packet_root: Path, scratch_root: Path, state_dir: Path,
     manifest_path: Path, expected_manifest_sha256: str, receipt_path: Path,
     service_config_path: Path | None = None,
+    external_config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Apply a pending transition only under an explicit scratch root."""
 
@@ -1219,15 +1534,61 @@ def apply_transition_to_scratch(
         service_config_path = service_config_path.resolve()
         _need(service_config_path.is_relative_to(scratch_root),
               "scratch service config escapes scratch root")
-    receipt = apply_transition(
-        packet_root=packet_root, state_dir=state_dir,
-        manifest_path=manifest_path,
-        expected_manifest_sha256=expected_manifest_sha256,
-        receipt_path=receipt_path, service_config_path=service_config_path,
-        _require_accepted=False,
-    )
+    manifest, _ = _read_json(manifest_path, "scratch transition manifest")
+    external_before = external_after = None
+    if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+        _need(external_config_path is not None,
+              "schema 0.3 scratch requires an OpenClaw config path")
+        external_config_path = external_config_path.resolve()
+        _need(external_config_path.is_relative_to(scratch_root)
+              and external_config_path.is_file()
+              and not external_config_path.is_symlink(),
+              "scratch OpenClaw config escapes scratch root")
+        external_before, external_after, _ = expected_openclaw_frame_transition_state(
+            packet_root=packet_root, manifest=manifest)
+        _need(external_config_path.read_bytes() == external_before,
+              "scratch OpenClaw config differs from reviewed before bytes")
+        fd, name = tempfile.mkstemp(
+            prefix=".scratch-openclaw-", dir=external_config_path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(external_after); stream.flush(); os.fsync(stream.fileno())
+            os.chmod(temporary, stat.S_IMODE(external_config_path.stat().st_mode))
+            os.replace(temporary, external_config_path)
+            _fsync_directory(external_config_path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+    try:
+        receipt = apply_transition(
+            packet_root=packet_root, state_dir=state_dir,
+            manifest_path=manifest_path,
+            expected_manifest_sha256=expected_manifest_sha256,
+            receipt_path=receipt_path, service_config_path=service_config_path,
+            external_config_path=external_config_path,
+            _require_accepted=False,
+        )
+    except Exception:
+        if (external_config_path is not None and external_before is not None
+                and external_after is not None
+                and external_config_path.read_bytes() == external_after):
+            _atomic_json_bytes(external_config_path, external_before)
+        raise
     return {**receipt, "status": "scratch_configuration_applied",
             "live_mutation": False}
+
+
+def _atomic_json_bytes(path: Path, value: bytes) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=".scratch-config-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(value); stream.flush(); os.fsync(stream.fileno())
+        os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

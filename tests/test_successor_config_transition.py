@@ -14,6 +14,7 @@ from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVED_TARGETS, apply_transition,
     build_preserve_existing_transition, build_transition, canonical_hash,
+    apply_transition_to_scratch,
     expected_openclaw_frame_transition_state,
     expected_service_transition_state,
 )
@@ -370,14 +371,16 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         )
 
     def build_external(self, *, present: bool = True,
-                       change_owner_signature: bool = False):
+                       change_owner_signature: bool = False,
+                       managed_web_search: bool = False):
         service = json.loads(json.dumps(self.service_before))
         service["bounded_planner"]["config"]["planner_call_budget"] = self.budget
         write(self.packet / "service.installed.json", service)
         before = {
-            "plugins": {"entries": {"dalton-openclaw-model-broker": {
-                "config": {"maxConcurrent": 16},
-            }}},
+            "plugins": {"load": {"paths": []}, "entries": {
+                "dalton-openclaw-model-broker": {
+                    "config": {"maxConcurrent": 16},
+                }}},
             "owner": {"credential": "secret-ref", "signature": "owner:sig"},
         }
         if present:
@@ -386,10 +389,41 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         after = json.loads(json.dumps(before))
         after["plugins"]["entries"]["dalton-openclaw-model-broker"][
             "config"]["maxFrameBytes"] = OPENCLAW_TARGET_MAX_FRAME_BYTES
+        plugin_args = {}
+        if managed_web_search:
+            legacy = ("/Users/everflow/Projects/dalton-research-agent-os/"
+                      "integrations/openclaw-web-search-broker")
+            source = self.root / "source/integrations/openclaw-web-search-broker"
+            source.mkdir(parents=True)
+            (source / "index.mjs").write_text("export const version = 1;\n")
+            write(source / "openclaw.plugin.json", {
+                "id": "dalton-openclaw-web-search-broker",
+                "version": "0.1.0-spike.2",
+            })
+            destination = (self.packet / "managed-plugins" /
+                           ("openclaw-web-search-broker-" + "c" * 40))
+            destination.mkdir(parents=True)
+            for item in source.iterdir():
+                (destination / item.name).write_bytes(item.read_bytes())
+            before["plugins"]["load"]["paths"] = [legacy]
+            after["plugins"]["load"]["paths"] = [str(destination.resolve())]
+            plugin_args = {
+                "web_search_plugin_source_path": source,
+                "web_search_plugin_destination_path": destination,
+            }
         if change_owner_signature:
             after["owner"]["signature"] = "changed"
         write(self.packet / "openclaw.before.json", before)
         write(self.packet / "openclaw.after.json", after)
+        write(self.packet / "broker.journal.json", {
+            "schemaVersion": "0.1",
+            "records": [{
+                "createdAtMs": 10, "expiresAtMs": 20,
+                "invocationId": "invocation:historical",
+                "requestHash": "a" * 64, "response": None,
+                "state": "pending",
+            }],
+        })
         return build_preserve_existing_transition(
             packet_root=self.packet, release_ref="code-successor-frame",
             source_commit="c" * 40,
@@ -402,6 +436,8 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             service_config_before_path=self.packet / "service.installed.json",
             openclaw_config_before_path=self.packet / "openclaw.before.json",
             openclaw_config_after_path=self.packet / "openclaw.after.json",
+            openclaw_broker_journal_path=self.packet / "broker.journal.json",
+            **plugin_args,
         )
 
     def test_external_frame_transition_preserves_service_and_binds_one_leaf(self):
@@ -418,6 +454,9 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         self.assertEqual({"state": "present", "value": 262144},
                          row["before_presence"])
         self.assertEqual(1048576, row["after_value"])
+        self.assertEqual(1, len(row["historical_unresolved"]["records"]))
+        self.assertFalse(row["historical_unresolved"]["retry_authorized"])
+        self.assertFalse(row["historical_unresolved"]["refund_authorized"])
         self.assertEqual(0, manifest["boundaries"]["service_config_mutations"])
         self.assertEqual(1, manifest["boundaries"]["external_config_mutations"])
 
@@ -441,6 +480,70 @@ class PreserveExistingTransitionTests(unittest.TestCase):
     def test_external_frame_transition_rejects_any_second_semantic_change(self):
         with self.assertRaisesRegex(ConfigTransitionError, "changes more"):
             self.build_external(change_owner_signature=True)
+
+    def test_external_frame_transition_binds_reviewed_managed_web_search_plugin(self):
+        manifest = self.build_external(managed_web_search=True)
+        _before, _after, row = expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(2, len(row["semantic_mutations"]))
+        plugin = row["managed_plugins"][0]
+        self.assertEqual("dalton-openclaw-web-search-broker", plugin["plugin_id"])
+        self.assertEqual("c" * 40, plugin["source_commit"])
+        self.assertEqual(2, len(plugin["source_tree"]["files"]))
+
+    def test_external_transition_rejects_rehashed_invalid_pending_record(self):
+        manifest = self.build_external()
+        unresolved = manifest["external_config_transitions"][0][
+            "historical_unresolved"]
+        unresolved["records"][0]["requestHash"] = "not-a-request-hash"
+        unresolved["records_sha256"] = canonical_hash(unresolved["records"])
+        manifest["content_hash"] = canonical_hash({
+            key: value for key, value in manifest.items()
+            if key != "content_hash"})
+        with self.assertRaisesRegex(ConfigTransitionError,
+                                    "historical unresolved broker record"):
+            expected_openclaw_frame_transition_state(
+                packet_root=self.packet, manifest=manifest)
+
+    def test_external_transition_rejects_rehashed_plugin_destination_escape(self):
+        manifest = self.build_external(managed_web_search=True)
+        manifest["external_config_transitions"][0]["managed_plugins"][0][
+            "destination"] = str((self.root / "outside-plugin").resolve())
+        manifest["content_hash"] = canonical_hash({
+            key: value for key, value in manifest.items()
+            if key != "content_hash"})
+        with self.assertRaisesRegex(ConfigTransitionError,
+                                    "destination authority differs"):
+            expected_openclaw_frame_transition_state(
+                packet_root=self.packet, manifest=manifest)
+
+    def test_external_frame_scratch_apply_changes_only_openclaw_bytes(self):
+        manifest = self.build_external()
+        self.install_before()
+        self.service.write_bytes((self.packet / "service.installed.json").read_bytes())
+        openclaw = self.root / "scratch/openclaw.json"
+        openclaw.parent.mkdir()
+        openclaw.write_bytes((self.packet / "openclaw.before.json").read_bytes())
+        before_state = self.state_files()
+        service_before = self.service.read_bytes()
+        manifest_path = self.packet / "transition.external.json"
+        write(manifest_path, manifest)
+        receipt = apply_transition_to_scratch(
+            packet_root=self.packet, scratch_root=self.root,
+            state_dir=self.state, manifest_path=manifest_path,
+            expected_manifest_sha256=hashlib.sha256(
+                manifest_path.read_bytes()).hexdigest(),
+            receipt_path=self.root / "receipt.external.json",
+            service_config_path=self.service,
+            external_config_path=openclaw,
+        )
+        self.assertEqual("scratch_configuration_applied", receipt["status"])
+        self.assertEqual(0, receipt["service_config_mutations"])
+        self.assertEqual(1, receipt["external_config_mutations"])
+        self.assertEqual(service_before, self.service.read_bytes())
+        self.assertEqual(before_state, self.state_files())
+        self.assertEqual((self.packet / "openclaw.after.json").read_bytes(),
+                         openclaw.read_bytes())
 
     @staticmethod
     def accepted():

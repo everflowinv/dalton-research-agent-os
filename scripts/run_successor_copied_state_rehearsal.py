@@ -12,17 +12,26 @@ import hashlib
 import json
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from scripts.prepare_successor_config_transition import (
-    DOCUMENT_CONFIG, LANE_CONFIG, PRESERVE_SCHEMA_VERSION,
-    _json_bytes, _record_hash, _service_after, _validated_service_delta,
+    DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
+    OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
+    PRESERVE_SCHEMA_VERSION,
+    _json_bytes, _record_hash, _service_after, _set_leaf,
+    _validated_service_delta,
     apply_transition_to_scratch, canonical_hash,
+    expected_openclaw_frame_transition_state,
     expected_service_transition_state, expected_transition_state,
 )
+
+PRESERVE_SCHEMA_VERSIONS = {
+    PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
+}
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
     _load_frozen_rehearsal, _normalised_model_configs,
@@ -243,7 +252,7 @@ def stage_preserved_runtime_configs(
 ) -> dict[str, str]:
     """Copy the two v0.2 preserved configs into the confined state copy."""
 
-    _need(manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION,
+    _need(manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS,
           "preserved runtime config staging requires a 0.2 transition")
     rows = {row.get("name"): row for row in manifest.get("targets", [])
             if isinstance(row, Mapping)}
@@ -333,7 +342,7 @@ def derive_confined_transition(
     confined_model_hashes = {}
     original_model_artifacts = manifest["supporting_evidence"].get(
         "model_config_files")
-    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+    if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         _need(isinstance(original_model_artifacts, Mapping)
               and set(original_model_artifacts) == set(raw_models),
               "original full model artifact inventory differs")
@@ -351,7 +360,7 @@ def derive_confined_transition(
             }
             confined_model_hashes[name] = _sha(confined)
         supporting["model_config_files"] = confined_model_artifacts
-    if manifest.get("schema_version") != PRESERVE_SCHEMA_VERSION:
+    if manifest.get("schema_version") not in PRESERVE_SCHEMA_VERSIONS:
         original_audit = packet_root / manifest["supporting_evidence"][
             "document_research_readonly_audit"]["file"]
         _artifact(
@@ -393,7 +402,7 @@ def derive_confined_transition(
             target["before"] = {"file": before_path.name,
                                 "sha256": _sha(before_path)}
 
-    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+    if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         authority_root = derived_root / "preserved-state-authorities"
         authority_root.mkdir(mode=0o700)
         for index, (original, target) in enumerate(zip(
@@ -416,41 +425,93 @@ def derive_confined_transition(
             target["after_sha256"] = _sha(confined)
 
         service_row = derived["service_transition"]
-        original_delta_row = manifest["service_transition"]["delta"]
-        original_delta = packet_root / original_delta_row["file"]
-        _artifact(original_delta, original_delta_row["sha256"],
-                  "original planner service budget delta")
-        delta = _validated_service_delta(json.loads(original_delta.read_text()))
         service_before_path = derived_root / "service-config.before.json"
         _write_exclusive(service_before_path, rehearsal.temp_config.read_bytes())
         service_row["before"] = {
             "file": service_before_path.name, "sha256": _sha(service_before_path)}
-        delta["expected_before_sha256"] = _sha(service_before_path)
-        scratch_before = json.loads(service_before_path.read_text())
-        scratch_after = _json_bytes(_service_after(scratch_before, delta))
-        delta["expected_after_sha256"] = hashlib.sha256(scratch_after).hexdigest()
-        delta.pop("content_hash", None)
-        delta["content_hash"] = _record_hash(delta)
-        delta_path = derived_root / "planner-call-budget.delta.json"
-        _write_json(delta_path, delta)
-        service_row["delta"] = {"file": delta_path.name, "sha256": _sha(delta_path)}
-        service_row["after_sha256"] = delta["expected_after_sha256"]
+        if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            original_delta_row = manifest["service_transition"]["delta"]
+            original_delta = packet_root / original_delta_row["file"]
+            _artifact(original_delta, original_delta_row["sha256"],
+                      "original planner service budget delta")
+            delta = _validated_service_delta(json.loads(original_delta.read_text()))
+            delta["expected_before_sha256"] = _sha(service_before_path)
+            scratch_before = json.loads(service_before_path.read_text())
+            scratch_after = _json_bytes(_service_after(scratch_before, delta))
+            delta["expected_after_sha256"] = hashlib.sha256(scratch_after).hexdigest()
+            delta.pop("content_hash", None)
+            delta["content_hash"] = _record_hash(delta)
+            delta_path = derived_root / "planner-call-budget.delta.json"
+            _write_json(delta_path, delta)
+            service_row["delta"] = {
+                "file": delta_path.name, "sha256": _sha(delta_path)}
+            service_row["after_sha256"] = delta["expected_after_sha256"]
+        else:
+            service_row["after_sha256"] = _sha(service_before_path)
+
+            original_external = manifest["external_config_transitions"][0]
+            original_before = packet_root / original_external["before"]["file"]
+            original_after = packet_root / original_external["after"]["file"]
+            _artifact(original_before, original_external["before"]["sha256"],
+                      "original OpenClaw before")
+            _artifact(original_after, original_external["after"]["sha256"],
+                      "original OpenClaw after")
+            scratch_openclaw = rehearsal.temp_root / "openclaw/openclaw.json"
+            _need(scratch_openclaw.is_file() and not scratch_openclaw.is_symlink()
+                  and scratch_openclaw.read_bytes() == original_before.read_bytes(),
+                  "confined OpenClaw baseline differs from reviewed bytes")
+            confined_before = derived_root / "openclaw-config.before.json"
+            _write_exclusive(confined_before, scratch_openclaw.read_bytes())
+            before_value = json.loads(confined_before.read_text())
+            after_value = _set_leaf(
+                before_value, OPENCLAW_FRAME_PATH,
+                OPENCLAW_TARGET_MAX_FRAME_BYTES)
+            external = derived["external_config_transitions"][0]
+            if external["managed_plugins"]:
+                plugin = external["managed_plugins"][0]
+                original_destination = Path(plugin["destination"])
+                _need(original_destination.is_dir()
+                      and not original_destination.is_symlink(),
+                      "reviewed managed plugin destination is unavailable")
+                confined_destination = (derived_root / "managed-plugins" /
+                                        original_destination.name)
+                shutil.copytree(original_destination, confined_destination,
+                                symlinks=False)
+                plugin["destination"] = str(confined_destination.resolve())
+                paths = after_value["plugins"]["load"]["paths"]
+                old_path = external["semantic_mutations"][1]["before_value"]
+                _need(paths.count(old_path) == 1,
+                      "confined OpenClaw plugin baseline differs")
+                paths[paths.index(old_path)] = plugin["destination"]
+                external["semantic_mutations"][1]["after_value"] = plugin[
+                    "destination"]
+            confined_after = derived_root / "openclaw-config.after.json"
+            _write_json(confined_after, after_value)
+            external["before"] = {
+                "file": confined_before.name, "sha256": _sha(confined_before)}
+            external["after"] = {
+                "file": confined_after.name, "sha256": _sha(confined_after)}
+            external["before_sha256"] = _sha(confined_before)
+            external["after_sha256"] = _sha(confined_after)
 
     derived["model_inventory"] = {
         "before_count": len(raw_models), "after_count": len(final_models),
         "before_semantic_sha256": canonical_hash(raw_models),
         "after_semantic_sha256": canonical_hash(final_models),
     }
-    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+    if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         derived["model_inventory"]["file_sha256"] = confined_model_hashes
     derived.pop("content_hash", None)
     derived["content_hash"] = canonical_hash(derived)
     manifest_path = derived_root / "successor-config-transition.confined.json"
     _write_json(manifest_path, derived)
     proof = {
-        "schema_version": ("successor-confined-transition-derivation-0.2"
-                           if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION
-                           else "successor-confined-transition-derivation-0.1"),
+        "schema_version": (
+            "successor-confined-transition-derivation-0.3"
+            if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION
+            else "successor-confined-transition-derivation-0.2"
+            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION
+            else "successor-confined-transition-derivation-0.1"),
         "original_transition_manifest_sha256": original_manifest_sha256,
         "confined_transition_manifest_sha256": _sha(manifest_path),
         "replacement_map_sha256": canonical_hash(rehearsal.replacements),
@@ -592,7 +653,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     args.service_config_snapshot_sha256,
                     "preserved service config snapshot")
     expected_service = service
-    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+    if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         service_before, expected_service = expected_service_transition_state(
             packet_root=packet_root, manifest=manifest)
         _need(service_before == service,
@@ -611,7 +672,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         def copy_state(self):
             detail, findings = super().copy_state()
             self.existing_install_authorities = None
-            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
                 self.existing_install_authorities = (
                     stage_existing_install_authorities(
                         module, self,
@@ -633,12 +694,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "this confined rehearsal"
                 )
                 detail += "; 2 present install authorities preserved"
+            self.successor_openclaw = None
+            if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+                self.successor_openclaw = self.temp_root / "openclaw/openclaw.json"
+                self.successor_openclaw.parent.mkdir(mode=0o700)
+                _write_exclusive(
+                    self.successor_openclaw,
+                    args.openclaw_config_snapshot.read_bytes())
+                detail += "; reviewed OpenClaw before bytes staged in scratch"
             return detail, findings
 
         def post_catalog_sync_steps(self):
             steps = [("apply successor configuration in scratch",
                       self._apply_successor)]
-            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
                 steps.append(("replay production setup against preserved scratch config",
                               self._replay_preserved_setup))
             return tuple(steps)
@@ -647,7 +716,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return replay_preserved_production_setup(module, self)
 
         def _apply_successor(self):
-            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
                 stage_preserved_runtime_configs(
                     module, self, packet_root=packet_root, manifest=manifest)
             baseline_row = manifest["supporting_evidence"]["baseline_model_snapshot"]
@@ -657,7 +726,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                   "copied live model configs differ from successor baseline")
             _need(_normalised_service_config(module, self) == service,
                   "copied live service config differs from preserved baseline")
-            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
                 current_document = json.loads(
                     (self.temp_state / DOCUMENT_CONFIG).read_text(encoding="utf-8"))
                 current_document = module.rewrite_paths(
@@ -682,6 +751,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 expected_manifest_sha256=_sha(confined_manifest),
                 receipt_path=temp_root / "successor-config-transition-receipt.json",
                 service_config_path=self.temp_config,
+                external_config_path=self.successor_openclaw,
             )
             self.successor_derivation = {
                 **proof, "proof_path": str(proof_path),
@@ -717,6 +787,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             validate_external_market_digest_preservation(
                 module, rehearsal, rehearsal.external_market_digest,
                 installer=source_root / "deploy/macos/install.sh"))
+    if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+        _before, expected_openclaw, _row = expected_openclaw_frame_transition_state(
+            packet_root=packet_root, manifest=manifest)
+        _need(rehearsal.successor_openclaw.is_file()
+              and not rehearsal.successor_openclaw.is_symlink()
+              and rehearsal.successor_openclaw.read_bytes() != _before,
+              "confined OpenClaw transition did not apply")
+        actual_openclaw = json.loads(rehearsal.successor_openclaw.read_text())
+        expected_value = json.loads(expected_openclaw)
+        if _row["managed_plugins"]:
+            production_path = _row["managed_plugins"][0]["destination"]
+            paths = actual_openclaw["plugins"]["load"]["paths"]
+            confined_path = next(
+                mutation["after_value"] for mutation in
+                json.loads((Path(rehearsal.successor_derivation["proof_path"]).parent /
+                            "successor-config-transition.confined.json").read_text())
+                ["external_config_transitions"][0]["semantic_mutations"]
+                if mutation["kind"] == "json_array_unique_replace")
+            _need(paths.count(confined_path) == 1,
+                  "confined managed plugin path is not unique")
+            paths[paths.index(confined_path)] = production_path
+        _need(actual_openclaw == expected_value,
+              "confined OpenClaw result changes more than reviewed paths")
+        final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
     _verify_frozen_source(source_root, args.code_commit)
     binding = {
         "schema_version": "successor-copied-state-rehearsal-binding-0.1",
