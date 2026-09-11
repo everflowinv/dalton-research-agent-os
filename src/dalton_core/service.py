@@ -523,6 +523,9 @@ class DaltonService:
         self.config = config
         self._stop = threading.Event()
         self._scheduler: Scheduler | None = None
+        self._sweep_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._sweep_future: concurrent.futures.Future[list[dict[str, Any]]] | None = None
+        self._sweep_error: str | None = None
         self._started_at = _utc_now()
         self._last_tick_at: str | None = None
         self._last_sweep_at: str | None = None
@@ -624,10 +627,24 @@ class DaltonService:
         )
 
     def start(self) -> None:
-        if self._scheduler is not None:
+        if self._sweep_executor is not None:
             return
         self.config.scheduler_db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._scheduler = Scheduler(self.config.scheduler_db)
+        # SQLite connections stay on their creating thread.  Lease sweeping is
+        # global maintenance and can encounter cold pages in the append-only
+        # scheduler authority, so it must not stall the heartbeat thread.
+        self._sweep_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="dalton-lease-sweep"
+        )
+        try:
+            # Preserve the startup contract that the scheduler schema exists
+            # before the first projection, while creating the connection on
+            # the only thread that will ever use it.
+            self._sweep_executor.submit(self._ensure_sweep_scheduler).result()
+        except Exception:
+            self._sweep_executor.shutdown(wait=True, cancel_futures=True)
+            self._sweep_executor = None
+            raise
         if not self.config.legacy_agenda_plane:
             # ADR-0009: one line, once, at start. launchd captures stderr, so
             # the log says why no agenda cycle will ever appear again.
@@ -667,6 +684,15 @@ class DaltonService:
         self._stop.set()
 
     def close(self) -> None:
+        sweep_executor, self._sweep_executor = self._sweep_executor, None
+        if sweep_executor is not None:
+            # A sweep can append expiry/retry events.  Drain it, then close its
+            # thread-owned connection on that same thread before shutdown.
+            try:
+                sweep_executor.submit(self._close_sweep_scheduler).result()
+            finally:
+                sweep_executor.shutdown(wait=True, cancel_futures=True)
+        self._sweep_future = None
         backup_executor, self._backup_executor = self._backup_executor, None
         if backup_executor is not None:
             # An interrupted SQLite backup is not useful. A controlled stop
@@ -696,9 +722,39 @@ class DaltonService:
         executor, self._agenda_executor = self._agenda_executor, None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _ensure_sweep_scheduler(self) -> None:
+        if self._scheduler is None:
+            self._scheduler = Scheduler(self.config.scheduler_db)
+
+    def _perform_sweep(self) -> list[dict[str, Any]]:
+        self._ensure_sweep_scheduler()
+        assert self._scheduler is not None
+        return self._scheduler.sweep_expired()
+
+    def _close_sweep_scheduler(self) -> None:
         scheduler, self._scheduler = self._scheduler, None
         if scheduler is not None:
             scheduler.close()
+
+    def _poll_sweep(self, *, allow_launch: bool = True) -> None:
+        future = self._sweep_future
+        if future is not None and future.done():
+            self._sweep_future = None
+            self._last_sweep_at = _utc_now()
+            try:
+                expired = future.result()
+            except Exception as exc:
+                self._sweep_error = f"{type(exc).__name__}: {exc}"
+            else:
+                self._expired_lease_count += len(expired)
+                self._sweep_error = None
+        if self._sweep_future is not None or not allow_launch:
+            return
+        executor = self._sweep_executor
+        if executor is None:
+            raise RuntimeError("lease sweep executor is unavailable")
+        self._sweep_future = executor.submit(self._perform_sweep)
 
     def _poll_agenda(self) -> None:
         if self._agenda is None:
@@ -982,10 +1038,7 @@ class DaltonService:
         self, *, force_projection: bool = False, wait_for_projection: bool = False
     ) -> dict[str, Any]:
         self.start()
-        assert self._scheduler is not None
-        expired = self._scheduler.sweep_expired()
-        self._expired_lease_count += len(expired)
-        self._last_sweep_at = _utc_now()
+        self._poll_sweep()
         self._poll_agenda()
         self._poll_weekly_brief()
         self._poll_bounded_planner()
@@ -1009,6 +1062,10 @@ class DaltonService:
         elif self._projection_future is None:
             self._retry_plugins()
         if wait_for_projection:
+            sweep_future = self._sweep_future
+            if sweep_future is not None:
+                concurrent.futures.wait((sweep_future,))
+                self._poll_sweep(allow_launch=False)
             future = self._projection_future
             if future is not None:
                 concurrent.futures.wait((future,))
@@ -1025,10 +1082,11 @@ class DaltonService:
                 concurrent.futures.wait((backup_future,))
                 self._poll_backup(allow_launch=False)
         self._last_tick_at = _utc_now()
-        self._last_error = self._projection_error
-        degraded = self._projection_error is not None or any(
-            plugin["state"] == "error" for plugin in self._plugin_states.values()
-        ) or self._agenda_state["state"] == "error" or self._weekly_brief_state[
+        self._last_error = self._sweep_error or self._projection_error
+        degraded = self._sweep_error is not None \
+            or self._projection_error is not None or any(
+                plugin["state"] == "error" for plugin in self._plugin_states.values()
+            ) or self._agenda_state["state"] == "error" or self._weekly_brief_state[
             "state"
         ] == "error" or self._outbox_state["state"] in {"error", "degraded"} \
             or self._backup_state["state"] == "error"

@@ -29,6 +29,7 @@ from dalton_core.macos_launchagent import (
 )
 from dalton_core.health import check
 from dalton_core.agenda_coordinator import AgendaCoordinator
+from dalton_core.scheduler import Scheduler
 from dalton_core.service import DaltonService, ServiceConfig, ServiceConfigError
 from dalton_core.store import DaltonStore
 from dalton_core.writer_server import (
@@ -715,6 +716,148 @@ class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    @staticmethod
+    def _maintenance_config(root: Path) -> ServiceConfig:
+        core = root / "core.sqlite"
+        with DaltonStore(core) as store:
+            ObservabilityStore(store)
+        return ServiceConfig.from_mapping({
+            "schema_version": "0.1", "core_db": str(core),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "projection_db": str(root / "projection.sqlite"),
+            "model_router_db": None, "capability_catalog_db": None,
+            "heartbeat_path": str(root / "heartbeat.json"),
+            "writer_socket": str(root / "writer.sock"), "tick_seconds": 1,
+            "projection_min_interval_seconds": 1, "plugin_retry_seconds": 1,
+            "plugins": [],
+        })
+
+    def test_blocked_lease_sweep_does_not_block_persistent_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = DaltonService(self._maintenance_config(root))
+            entered, release = threading.Event(), threading.Event()
+
+            def blocked_sweep():
+                entered.set()
+                self.assertTrue(release.wait(3))
+                return []
+
+            try:
+                with mock.patch.object(service, "_perform_sweep", blocked_sweep):
+                    first = service.run_once()
+                    self.assertTrue(entered.wait(1))
+                    before = time.monotonic()
+                    second = service.run_once()
+                    self.assertLess(time.monotonic() - before, 1)
+                    self.assertNotEqual(first["last_tick_at"], second["last_tick_at"])
+                    self.assertIsNotNone(service._sweep_future)
+                    release.set()
+                    service._sweep_future.result(timeout=2)
+                    service._poll_sweep(allow_launch=False)
+                    self.assertIsNotNone(service._last_sweep_at)
+            finally:
+                release.set()
+                service.close()
+
+    def test_once_drains_lease_sweep_and_exposes_its_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = DaltonService(self._maintenance_config(root))
+            entered, release = threading.Event(), threading.Event()
+
+            def failed_sweep():
+                entered.set()
+                self.assertTrue(release.wait(3))
+                raise RuntimeError("sweep read failed")
+
+            def delayed_release():
+                self.assertTrue(entered.wait(1))
+                time.sleep(0.1)
+                release.set()
+
+            releaser = threading.Thread(target=delayed_release)
+            releaser.start()
+            try:
+                with mock.patch.object(service, "_perform_sweep", failed_sweep):
+                    before = time.monotonic()
+                    heartbeat = service.run_once(
+                        force_projection=True, wait_for_projection=True
+                    )
+                releaser.join(1)
+                self.assertGreaterEqual(time.monotonic() - before, 0.09)
+                self.assertEqual("degraded", heartbeat["state"])
+                self.assertEqual("RuntimeError: sweep read failed", heartbeat["last_error"])
+                self.assertIsNone(service._sweep_future)
+                self.assertIsNotNone(heartbeat["last_sweep_at"])
+            finally:
+                release.set()
+                service.close()
+
+    def test_scheduler_schema_indexes_only_leased_sweep_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scheduler.sqlite"
+            scheduler = Scheduler(path)
+            try:
+                plan = scheduler.connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT e.* FROM scheduler_attempt_events e "
+                    "WHERE e.state='leased' AND NOT EXISTS ("
+                    " SELECT 1 FROM scheduler_attempt_events newer "
+                    " WHERE newer.work_order_id=e.work_order_id "
+                    " AND newer.event_seq>e.event_seq) ORDER BY e.event_seq"
+                ).fetchall()
+            finally:
+                scheduler.close()
+            detail = "\n".join(str(row[3]) for row in plan)
+            self.assertIn("scheduler_attempt_leased_seq", detail)
+            self.assertNotIn("SCAN e\n", detail)
+
+    def test_once_harvests_one_real_expiry_without_repeating_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._maintenance_config(root)
+            scheduler = Scheduler(config.scheduler_db)
+            work = {
+                "schema_version": "0.1", "id": "work:expiry-service-test",
+                "created_at": "2026-09-11T00:00:00+00:00",
+                "updated_at": "2026-09-11T00:00:00+00:00",
+                "question": "expire this test lease",
+                "requested_capabilities": ["test"],
+                "runtime_profile_ref": "runtime:test",
+                "budget": {"max_seconds": 60},
+                "idempotency_key": "enqueue:expiry-service-test",
+                "declared_side_effects": [], "status": "ready",
+                "input_refs": ["fixture:expiry"], "metadata": {},
+            }
+            scheduler.enqueue(work)
+            self.assertIsNotNone(scheduler.claim(
+                "worker:test", work_order_id=work["id"], lease_seconds=0.001
+            ))
+            scheduler.close()
+            time.sleep(0.01)
+
+            service = DaltonService(config)
+            try:
+                first = service.run_once(
+                    force_projection=True, wait_for_projection=True
+                )
+                second = service.run_once(
+                    force_projection=True, wait_for_projection=True
+                )
+            finally:
+                service.close()
+            self.assertEqual(1, first["expired_lease_count"])
+            self.assertEqual(1, second["expired_lease_count"])
+
+            scheduler = Scheduler(config.scheduler_db)
+            try:
+                states = [
+                    row["state"] for row in scheduler.attempt_history(work["id"])
+                ]
+            finally:
+                scheduler.close()
+            self.assertEqual(["ready", "leased", "expired", "ready"], states)
+
     def test_backup_retention_is_explicit_and_runs_only_after_a_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS scheduler_attempt_events (
 CREATE INDEX IF NOT EXISTS scheduler_attempt_work_seq
 ON scheduler_attempt_events(work_order_id, event_seq);
 
+-- The controller checks current leases on every heartbeat tick.  Most leased
+-- events are historical, so keep that advisory scan off the full append-only
+-- event table.  The general work/event index above still proves that no newer
+-- event exists for each candidate.
+CREATE INDEX IF NOT EXISTS scheduler_attempt_leased_seq
+ON scheduler_attempt_events(event_seq, work_order_id) WHERE state='leased';
+
 CREATE TABLE IF NOT EXISTS scheduler_formal_results (
     result_record_id TEXT PRIMARY KEY,
     work_order_id TEXT NOT NULL UNIQUE REFERENCES scheduler_work_orders(work_order_id),
