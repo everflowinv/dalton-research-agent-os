@@ -66,7 +66,7 @@ def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
     source_ready = bool(entry.get("source_base_ready"))
     gate_status = entry.get("stage_status")
     gate_label = {
-        None: "尚无历史裁决", "entered": "历史裁决进行中",
+        None: "尚无历史裁决", "entered": "已进入，等待裁决",
         "gate_passed": "历史裁决已通过", "gate_failed": "历史裁决未通过",
     }.get(gate_status, f"历史裁决：{entry.get('stage_status_label') or gate_status}")
     readiness_label = "当前资料已齐" if source_ready else "当前资料待补齐"

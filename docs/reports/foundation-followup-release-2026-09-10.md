@@ -268,3 +268,14 @@ R8a 同一 controller PID 73209 / 03:40:40.013898Z 连续 45 次健康检查通�
 产品结果单独记录：正常 Dossier 调度恢复为明确的内容 hold，没有据此宣称完整研究已完成。实际 v4 只读验收仍 pending_no_v03_records，receipt SHA `b88224ba9dbb35ea38139a96692b274d5e7bf9e4e1c1a7172420ee38ed80d59c`。实际已安装 HTML reader 对 ACN schema0.2 / partial 3/12 / stale 的内容与权限、不可用单元展示核对通过，receipt SHA `8a9f02a4072efc4ae7f7e5ac86cc90f7643eca65b5aa237107415927fdfb4560`；这不是 schema0.3 产品通过证明。
 
 下一版已合入 variant prompt 与既有严格输出检查器的契约对齐 `1f5a1df`；保留旧 v0.2 精确 producer proof 验证，新输入使用 v0.3 契约。独立 177 tests 与集成 196 tests 通过，尚未部署。下一步冻结同版完整测试、wheel、当前状态副本演练，然后部署并重新核对真实 Dossier。用户反馈的 Cockpit 历史阶段通过与当前资料缺口展示混淆正在独立调查/修复，不改写历史裁决。8793 服务端及 Tailscale HTTPS 页面/API 核对均 HTTP200，用户确认更换客户端后恢复，因此停止网络排查。
+
+
+## R9 源码修复与用户反馈闭环（2026-09-11 04:13 UTC）
+
+本轮明确复现 Cockpit 的历史裁决/当前资料混淆、writer 误读 coordinator 计划导致所有来源显示未规划、分页改动遗失缺口短重试、研究计划 STOP 未约束 acquisition，以及终态失败被再次获取。上述修复已在独立提交集成；typed failure_retryable 保留 NULL 历史不明状态，明确 false 才停止重试，不通过失败文案猜测；STOP 绑定精确 mission version，不删除队列。初次集成测试记录保留：68 tests / 1 fail / 1 error / 1 skip；前者来自子进程使用相对 PYTHONPATH，改绝对路径后通过，后者来自重试测试同时触发新 discovery 重用 fake envelope，修正为单测 acquisition recovery。后续 60 tests / 1 skip 全部通过。
+
+原文已取得并完成窗口抽取但无新文字 Claim 的 review 不能与错误公司 dismiss 混为一谈。其计数修复正在独立审查，尤其核对真正的 resolver 身份，不能把 registered_by 当作 resolved_by。实际全文是否完整被阅读、模型产出/被拒绝原因由独立只读审计核对，尚未宣称年报内容理解通过。域名失败冷却名单为用户新明确要求，使用可配置的门槛/窗口/冷却时间和正式失败记录，不永久封禁域名；实现进行中。
+
+部署准备保留所有回滚字节：031747Z backup 已压缩并逐项核对，archive SHA `1f04adfcf4a6b635504f9a414979ece1e1407783cc4dc64a2a59438cade82871`；033958Z archive SHA `6ca548f0f4edf3697a0c5654d116629c35fe5bf9fafe8707c89e5285352e80fe`，两份原始 manifest / verification 仍在私有 packet。只清理已被后续演练取代的失败模拟 a 自有 scratch，先验 owner / path / 报告 hash / 无进程句柄，报告 SHA `464a22c75117ba4eb171b459ffdd0aad9e5f42101199d5c25cfcd3bb617cd241`；cleanup receipt 独立保留，未删 live state。可用约 4.3GB，正式冻结/副本演练/部署仍必须重新实测空间预检。
+
+Next：完成计数证明审查并冻结核心修复、完整测试/wheel/同版实际状态副本演练后部署；重新观察实际材料清单和调度、Dossier0.3、HTML。并行继续域名冷却与年报抽取质量定位。SEC index 的既有不可变 quota authority 与当前 template 不一致是另外已发现的基础阻塞，需兼容处理并保留现有授权/配额。高级投资能力、最终视觉重构与多 workspace 激活仍后排。

@@ -18,3 +18,6 @@ Validation covered passed-with-gaps, passed-and-ready, failed, not-entered, and
 later-stage cases; the Cockpit overview integration test also checks the new
 fields. Eighteen focused Python tests passed (one existing skip), and the
 embedded browser JavaScript passed `node --check`.
+
+
+Integration refinement: the checklist always distinguishes acquired document count from read count, including when acquisition is complete (for example EPAM annual acquired 1/read 0). Quantitative periods use quarter units. Entered-but-undecided stages say “已进入，等待裁决”; no historical decision is invented. Combined writer/discovery/fetch/Cockpit validation: 60 tests passed with one existing skip; embedded JavaScript syntax passes.
