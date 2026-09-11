@@ -347,6 +347,16 @@ class FinancialStatementStructureTests(unittest.TestCase):
                 candidate, company_spec(), inputs, note_evidence=[note],
                 note_evidence_resolver=lambda _ref: {**note, "content_hash": "e" * 64},
             )
+        state = presentation_state(inputs)
+        state["filings"][0]["content_hash"] = "e" * 64
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "statement filing differs"):
+            validate_structure_proposal(
+                {key: candidate[key] for key in ("schema_version", "lines", "formulas")},
+                state, revenue_anchor_concept="revenue",
+                expense_lines=company_spec()["expense_lines"],
+                note_evidence=[note], note_evidence_resolver=lambda _ref: note,
+            )
 
     def test_structure_0_2_replays_with_its_exact_prior_shape(self):
         inputs = financial_inputs()

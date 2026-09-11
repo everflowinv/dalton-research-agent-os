@@ -261,10 +261,13 @@ def _filed_index(inputs: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return indexed
 
 
-def _units(line: Mapping[str, Any]) -> set[str]:
+def _units(line: Mapping[str, Any], *, include_duration: bool = False) -> set[str]:
     return {
         str(cell.get("unit")).casefold()
-        for cell in (line.get("cells") or {}).values()
+        for cell in (
+            list((line.get("cells") or {}).values())
+            + (list(line.get("duration_facts") or []) if include_duration else [])
+        )
         if isinstance(cell, Mapping) and cell.get("unit")
     }
 
@@ -488,7 +491,7 @@ def _normalize_line(
             raise FinancialStatementStructureError("filed line statement differs from authority")
         if source.get("period_basis") != line["period_kind"]:
             raise FinancialStatementStructureError("filed line period kind differs from authority")
-        units = _units(source)
+        units = _units(source, include_duration=schema_version == SCHEMA_VERSION)
         if units != {line["unit"]}:
             raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
         line["concept"] = concept
@@ -604,7 +607,9 @@ def _normalize_formula(
             raise FinancialStatementStructureError("formula tie-out concept is not filed")
         if target.get("statement") != lines[output]["statement"]:
             raise FinancialStatementStructureError("formula tie-out statement differs")
-        if _units(target) != {lines[output]["unit"]}:
+        if _units(
+            target, include_duration=schema_version == SCHEMA_VERSION,
+        ) != {lines[output]["unit"]}:
             raise FinancialStatementStructureError("formula tie-out unit differs")
         if target.get("period_basis") != lines[output]["period_kind"]:
             raise FinancialStatementStructureError("formula tie-out period kind differs")
