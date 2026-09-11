@@ -717,7 +717,8 @@ class CockpitModel:
         retries = int(transport.get("max_definitely_not_sent_retries", 0))
         per_try = (float(effective["timeout_seconds"])
                    + float(transport.get("queue_wait_seconds", 0)))
-        lease_seconds = ((retries + 1) * per_try
+        candidates = max(1, len(self.config.get("credential_slot_refs") or ()))
+        lease_seconds = (candidates * (retries + 1) * per_try
                          + retries * int(transport.get("retry_backoff_seconds", 0))
                          + _LEASE_GRACE_SECONDS)
         # The lease bounds are a frozen versioned policy: the same

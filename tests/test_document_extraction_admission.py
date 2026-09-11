@@ -323,6 +323,39 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute(
             'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],1)
 
+    def test_chain_capacity_envelope_releases_reservation_and_never_falls_back(self):
+        backup=copy.deepcopy(self.pr);backup.update({
+            'profile_version_ref':'model-profile-version:test-capacity-backup:1',
+            'id':'profile:test-capacity-backup','model':'capacity-backup',
+            'family':'test-capacity-backup',
+            'credential_slot_ref':'credential-slot:openclaw:capacity-backup'})
+        self.router.register_profile(backup)
+        chain=policy();chain.update({
+            'policy_version_ref':'model-routing-policy-version:test-capacity-chain:1',
+            'id':'model-routing-policy:test-capacity-chain',
+            'purpose_overrides':{'document_extraction':{
+                'mode':'explicit','chain':[self.pr['id'],backup['id']]}}})
+        self.router.register_policy(chain)
+        config=self.h.writer._document_extraction_model_config
+        config['routing_policy_ref']=chain['policy_version_ref']
+        config['credential_slot_refs']=[self.pr['credential_slot_ref'],backup['credential_slot_ref']]
+
+        def capacity(adapter,work,route,pr,*,before_send=None):
+            self.calls += 1
+            inv,res=self.execute(adapter,work,route,pr,before_send=before_send)
+            return inv,replace(res,status='failed',outputs={},error={
+                'code':'BUSY','message':'synthetic capacity unavailable'})
+
+        with patch.object(OpenClawModelAdapter,'execute',autospec=True,
+                          side_effect=capacity):
+            result=self.h.generate()
+        self.assertEqual(result['status'],'pending',result)
+        self.assertEqual(self.calls,2)  # wrapper plus fixture construction, first profile only
+        settlement=self.b.connection.execute(
+            'SELECT actual_micros FROM thesis_impact_day_settlements').fetchone()
+        self.assertEqual(settlement['actual_micros'],0)
+        self.assertEqual(len(self.router.chain_links()),1)
+
     def test_configured_same_model_retry_precedes_fallback(self):
         self.h.writer._document_extraction_model_config['transport_retry'] = {
             'max_definitely_not_sent_retries': 1,

@@ -330,10 +330,18 @@ def extraction_scheduler_policy(config: Mapping[str, Any]) -> dict[str, Any]:
     from .call_budget import resolve_call_budget
 
     retry = config.get("transport_retry") or {}
-    budget = resolve_call_budget(config, "document_extraction", defaults=LEGACY_CALL_BUDGET)
+    from .document_numeric_extraction import LEGACY_CALL_BUDGET as NUMERIC_LEGACY
+    from .metric_discovery_extraction import LEGACY_CALL_BUDGET as DISCOVERY_LEGACY
+    budgets = [
+        resolve_call_budget(config, "document_extraction", defaults=LEGACY_CALL_BUDGET),
+        resolve_call_budget(config, "document_numeric_extraction", defaults=NUMERIC_LEGACY),
+        resolve_call_budget(config, "metric_discovery_extraction", defaults=DISCOVERY_LEGACY),
+    ]
     retries = int(retry.get("max_definitely_not_sent_retries", 0))
-    per_try = int(budget["timeout_seconds"]) + int(retry.get("queue_wait_seconds", 0))
-    lease_seconds = ((retries + 1) * per_try
+    per_try = max(int(item["timeout_seconds"]) for item in budgets) + int(
+        retry.get("queue_wait_seconds", 0))
+    candidates = max(1, len(config.get("credential_slot_refs") or ()))
+    lease_seconds = (candidates * (retries + 1) * per_try
                      + retries * int(retry.get("retry_backoff_seconds", 0)) + 30)
     attempts = int((config.get("capacity_retry") or {}).get("scheduler_max_attempts", 3))
     return {

@@ -452,6 +452,11 @@ class RoutedTranscriptPolishModelWorker:
                         "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
                         "QUEUE_TIMEOUT", "BROKER_CLOSED",
                     }:
+                        # This typed broker-local result is authoritative proof
+                        # that no provider request was made. Release the durable
+                        # reservation before execute_chain returns its deferred
+                        # outcome; the post-chain served path is unreachable.
+                        self._after_capacity_deferred(work, route, envelope)
                         return {
                             "outcome": "failed",
                             "failure_class": "capacity_busy",
