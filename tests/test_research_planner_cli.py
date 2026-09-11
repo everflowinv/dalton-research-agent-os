@@ -10,9 +10,11 @@ from unittest.mock import patch
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.company_dossier_launcher import run_digest
+from dalton_core.model_forecast_driver import ForecastModelAuthority
 from dalton_core.research_planner_cli import MAX_COST_USD, build_state, run_planner
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
+from tests.test_model_forecast_driver import ACN, model
 
 
 class PlannerChildTests(unittest.TestCase):
@@ -109,6 +111,37 @@ class PlannerChildTests(unittest.TestCase):
         self.assertEqual(feedback["repair_targets"][0]["unit"],
                          "kpi_dictionary")
         self.assertEqual(len(feedback["feedback_hash"]), 64)
+
+    def test_build_state_projects_existing_financial_history_separately(self):
+        mission = self.publish_mission()
+        before = build_state(
+            self.store, self.missions, mission,
+            plans_dir=self.state / "discovery-plans",
+            as_of="2026-09-11T12:00:00+00:00",
+        )
+        stored = ForecastModelAuthority(self.store).publish(
+            model(mission_version_ref=mission["id"])
+        )
+
+        after = build_state(
+            self.store, self.missions, mission,
+            plans_dir=self.state / "discovery-plans",
+            as_of="2026-09-11T12:01:00+00:00",
+        )
+        company = next(item for item in after["companies"]
+                       if item["company_ref"] == ACN)
+
+        self.assertEqual(company["figures"]["total"], 0)
+        self.assertEqual(company["financial_model"]["status"], "available")
+        self.assertEqual(company["financial_model"]["model_version_ref"], stored["id"])
+        self.assertEqual(company["financial_model"]["model_content_hash"],
+                         stored["content_hash"])
+        self.assertEqual(company["financial_model"]["history_quarters"], 4)
+        self.assertGreater(company["financial_model"]["drivers_with_history"], 0)
+        self.assertTrue(company["financial_model"]["current_mission"])
+        self.assertEqual(company["financial_model"]["stage_completion"],
+                         "not_assessed")
+        self.assertNotEqual(before["content_hash"], after["content_hash"])
 
     def test_no_model_configured_is_gated_and_says_so(self):
         self.publish_mission()
