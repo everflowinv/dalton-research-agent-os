@@ -67,9 +67,12 @@ from typing import Any, Iterator, Mapping, Sequence
 from .consensus_estimate import CONSENSUS_GAP_RULE_REF
 from .model_forecast_driver import (
     ForecastModelUnavailable,
+    STRUCTURED_SCHEMA_VERSION,
+    _structure_historical_values,
     chain_base,
     company_slug,
     compute_results,
+    compute_structure_results,
     quarterly_history,
     revenue_anchor,
 )
@@ -339,8 +342,39 @@ def measure_series(
                     "value": _rate(rate),
                     "refs": [_cell_ref(prior), _cell_ref(current)],
                 })
-        elif measure in ("revenue_share", "operating_income_share"):
-            if measure == "revenue_share":
+        elif measure in ("revenue_share", "operating_income_share", "share_of_line"):
+            if measure == "share_of_line":
+                structure = record.get("financial_statement_structure")
+                line_ref = driver.get("structure_line_ref")
+                line = next((item for item in (structure or {}).get("lines") or []
+                             if item.get("ref") == line_ref), None)
+                base_ref = None if line is None else line.get("forecast_base_ref")
+                if not isinstance(base_ref, str):
+                    return {"status": "unavailable", "measure": measure, "points": [],
+                            "reason": "the structure names no exact base for this share"}
+                historical, historical_refs = _structure_historical_values(
+                    drivers, structure)
+                base_values = historical.get(base_ref, {})
+                signs: set[bool] = set()
+                for cell in cells:
+                    end = str(cell["period_end"])
+                    divisor = base_values.get(end)
+                    if divisor is None or divisor == 0:
+                        continue
+                    signs.add(divisor > 0)
+                    points.append({
+                        "period_end": end,
+                        "value": _rate(_decimal(cell["value"], "history value") / divisor),
+                        "refs": ([_cell_ref(cell)]
+                                 + list(historical_refs.get(base_ref, {}).get(end, []))),
+                    })
+                if len(signs) > 1:
+                    return {"status": "unavailable", "measure": measure, "points": [],
+                            "reason": "the base of this share changes sign inside the "
+                                      "window, so its extremes describe the base rather "
+                                      "than the share"}
+                base_cells = None
+            elif measure == "revenue_share":
                 try:
                     base_cells = quarterly_history(revenue_anchor(drivers))
                 except ForecastModelUnavailable as exc:
@@ -348,35 +382,32 @@ def measure_series(
                             "reason": str(exc)}
             else:
                 base_cells = _operating_income_history(record)
-            if not base_cells:
+            if measure != "share_of_line" and not base_cells:
                 return {"status": "unavailable", "measure": measure, "points": [],
                         "reason": "the base line of this share has no filed history"}
-            by_period = {str(item["period_end"]): item for item in base_cells}
-            signs: set[bool] = set()
-            for cell in cells:
-                base = by_period.get(str(cell["period_end"]))
-                if base is None:
-                    continue
-                divisor = _decimal(base["value"], "history value")
-                if divisor == 0:
-                    continue
-                signs.add(divisor > 0)
-                share = _decimal(cell["value"], "history value") / divisor
-                points.append({
-                    "period_end": str(cell["period_end"]),
-                    "value": _rate(share),
-                    "refs": [_cell_ref(cell), _cell_ref(base)],
-                })
-            if len(signs) > 1:
-                # The same guard the generator makes, for the same reason: the
-                # peak of a ratio whose denominator crosses zero is not the
-                # peak of anything. A company that lost money and then made
-                # money has a tax "rate" of minus a lot and plus a lot, and the
-                # highest of those two numbers describes the loss, not the tax.
-                return {"status": "unavailable", "measure": measure, "points": [],
-                        "reason": "the base of this share changes sign inside the "
-                                  "window, so its extremes describe the base rather "
-                                  "than the share"}
+            if measure != "share_of_line":
+                by_period = {str(item["period_end"]): item for item in base_cells}
+                signs = set()
+                for cell in cells:
+                    base = by_period.get(str(cell["period_end"]))
+                    if base is None:
+                        continue
+                    divisor = _decimal(base["value"], "history value")
+                    if divisor == 0:
+                        continue
+                    signs.add(divisor > 0)
+                    share = _decimal(cell["value"], "history value") / divisor
+                    points.append({
+                        "period_end": str(cell["period_end"]),
+                        "value": _rate(share),
+                        "refs": [_cell_ref(cell), _cell_ref(base)],
+                    })
+                if len(signs) > 1:
+                    # A ratio whose base crosses zero has no comparable peak.
+                    return {"status": "unavailable", "measure": measure, "points": [],
+                            "reason": "the base of this share changes sign inside the "
+                                      "window, so its extremes describe the base rather "
+                                      "than the share"}
         else:
             return {"status": "unavailable", "measure": measure, "points": [],
                     "reason": f"no historical series is defined for the measure {measure}"}
@@ -531,10 +562,16 @@ def recompute(
             replaced.append(str(item["ref"]))
             item = {**item, "value": _rate(value)}
         assumptions.append(item)
-    base = chain_base(revenue_anchor(drivers), record, str(periods[0]["end"]))
-    results = compute_results(
-        drivers, assumptions, periods,
-        statements=record.get("statements") or {}, base=base)
+    if record.get("schema_version") == STRUCTURED_SCHEMA_VERSION:
+        structure = record.get("financial_statement_structure")
+        if not isinstance(structure, Mapping):
+            raise SensitivityUnavailable("structured model has no statement authority")
+        results = compute_structure_results(drivers, assumptions, periods, structure)
+    else:
+        base = chain_base(revenue_anchor(drivers), record, str(periods[0]["end"]))
+        results = compute_results(
+            drivers, assumptions, periods,
+            statements=record.get("statements") or {}, base=base)
     return results, sorted(set(replaced))
 
 

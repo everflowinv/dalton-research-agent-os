@@ -2436,12 +2436,18 @@ def revise_assumptions(
 
     forecast = [periods_by_end[end] for end in sorted(periods_by_end)]
     drivers = prior.get("drivers") or []
-    recomputed = compute_results(
-        drivers,
-        [item for item in assumptions
-         if str(item["period"]["end"]) in periods_by_end],
-        forecast, statements=prior.get("statements") or {},
-        base=chain_base(revenue_anchor(drivers), prior, str(forecast[0]["end"])))
+    live = [item for item in assumptions
+            if str(item["period"]["end"]) in periods_by_end]
+    if prior.get("schema_version") == STRUCTURED_SCHEMA_VERSION:
+        structure = prior.get("financial_statement_structure")
+        if not isinstance(structure, Mapping):
+            raise ForecastModelValidationError(
+                "structured model carries no statement authority")
+        recomputed = compute_structure_results(drivers, live, forecast, structure)
+    else:
+        recomputed = compute_results(
+            drivers, live, forecast, statements=prior.get("statements") or {},
+            base=chain_base(revenue_anchor(drivers), prior, str(forecast[0]["end"])))
     # Everything that is not a quarter being recomputed, not merely the
     # quarters still listed as realised. The realised list is capped, and a
     # cell whose quarter has aged out of it is still a cell: dropping it would
@@ -2470,7 +2476,8 @@ def revise_assumptions(
     return {
         SOURCE_VERSION_KEY: str(prior["id"]),
         **{key: value for key, value in prior.items()
-           if key in _RECORD_FIELDS and key not in _BODY_EXCLUDED},
+           if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS)
+           and key not in _BODY_EXCLUDED},
         "assumptions": sorted(assumptions, key=lambda item: (
             item["driver_ref"], item["period"]["end"], item["kind"])),
         "results": results,

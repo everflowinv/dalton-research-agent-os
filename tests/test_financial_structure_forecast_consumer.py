@@ -21,9 +21,12 @@ from dalton_core.model_forecast_driver import (
     default_structure_assumptions,
     forecast_periods,
     revenue_anchor,
+    revise_assumptions,
 )
+from dalton_core.forecast_sensitivity import build_projection, measure_series, recompute
 from dalton_core.store import DaltonStore
 from tests.test_company_financial_statement_structure import (
+    ACCESSION,
     company_spec,
     financial_inputs,
     proposal,
@@ -226,6 +229,84 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             actualize_model(
                 prior, inputs, structure=changed, replay=changed_replay,
                 binding=changed_binding)
+
+    def test_v03_sensitivity_recomputes_the_frozen_dag_and_exact_share_base(self):
+        inputs, structure = self.authority()
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"]
+                            if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            record = ForecastModelAuthority(store).publish(body)
+
+        tax_driver = next(item for item in record["drivers"]
+                          if item["structure_line_ref"] == "tax")
+        series = measure_series(record, tax_driver["ref"], "share_of_line")
+        self.assertEqual(series["status"], "available")
+        self.assertEqual(len(series["points"]), 4)
+        # The tax line is divided by the structure's pretax line, not revenue
+        # or the legacy operating-income shortcut.
+        self.assertEqual(Decimal(series["points"][-1]["value"]), Decimal(55) / 250)
+
+        interest_driver = next(item for item in record["drivers"]
+                               if item["structure_line_ref"] == "interest-income")
+        base_results, _ = recompute(record, None, None)
+        moved_results, replaced = recompute(record, interest_driver["ref"], Decimal("0.02"))
+        first = record["forecast_periods"][0]["end"]
+        base_pretax = Decimal(cells(base_results)[("pretax_income", first)]["value"])
+        moved_pretax = Decimal(cells(moved_results)[("pretax_income", first)]["value"])
+        self.assertGreater(moved_pretax, base_pretax)
+        self.assertEqual(len(replaced), len(record["forecast_periods"]))
+        projection = build_projection(record)
+        self.assertEqual(projection["formula_hash"], record["formula_hash"])
+        self.assertGreaterEqual(len(projection["drivers"]), 3)
+
+    def test_v03_revision_recomputes_same_structure_and_preserves_authority(self):
+        inputs, structure = self.authority()
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"]
+                            if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            authority = ForecastModelAuthority(store)
+            prior = authority.publish(body)
+            tax_driver = next(item for item in prior["drivers"]
+                              if item["structure_line_ref"] == "tax")
+            end = prior["forecast_periods"][0]["end"]
+            revised = revise_assumptions(
+                prior, [{"driver": tax_driver["ref"], "period": end,
+                         "value": "0.219", "because": "new filed tax guidance",
+                         "refs": [{"kind": "filing", "ref": None, "concept": "tax",
+                                   "period_end": "2025-12-31",
+                                   "accession": ACCESSION}]}],
+                change_reason="assumption_review",
+                evidence_refs=[{"kind": "filing", "ref": None, "concept": "tax",
+                                "period_end": "2025-12-31", "accession": ACCESSION}],
+                actor_ref="automation:test")
+            record = authority.publish(revised)
+        before = Decimal(cells(prior["results"])[("net_income", end)]["value"])
+        after = Decimal(cells(record["results"])[("net_income", end)]["value"])
+        self.assertLess(after, before)
+        self.assertEqual(record["financial_statement_structure"], structure)
+        self.assertEqual(record["formula_hash"], prior["formula_hash"])
 
 
 if __name__ == "__main__":
