@@ -375,6 +375,18 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 "service_lifecycle": False, "model_calls": False},
         }
         manifest["content_hash"] = canonical_hash(manifest)
+        exact_authority_bytes = scratch_authority.read_bytes()
+        scratch_authority.write_text(json.dumps(authority, indent=2) + "\n")
+        drift_rehearsal = SimpleNamespace(
+            temp_root=root / "drift-run", temp_state=scratch_state,
+            temp_config=scratch_config, replacements=replacements)
+        drift_rehearsal.temp_root.mkdir()
+        with self.assertRaisesRegex(RehearsalBindingError,
+                                    "authority bytes differ"):
+            derive_confined_transition(
+                PathModule, drift_rehearsal, packet_root=packet,
+                manifest=manifest, original_manifest_sha256="b" * 64)
+        scratch_authority.write_bytes(exact_authority_bytes)
         rehearsal = SimpleNamespace(temp_root=scratch, temp_state=scratch_state,
                                     temp_config=scratch_config, replacements=replacements)
         derived_path, _proof_path, proof = derive_confined_transition(
