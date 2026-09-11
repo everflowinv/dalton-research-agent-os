@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .coverage_mission import CoverageMissionError, STAGE_ORDER, fold_stage_status
+from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
 FIRST_STAGE = "initial_screen"
@@ -283,6 +284,40 @@ def _document_counts(
             review["state"], review["review_id"]
         )
 
+    completed_reviews: set[str] = set()
+    try:
+        from .document_read_completion import review_wire
+        rows = connection.execute(
+            "SELECT p.review_id,p.record_json,p.content_hash,"
+            "p.source_review_hash AS stored_source_review_hash,r.* "
+            "FROM document_read_completion_proofs p "
+            "JOIN coverage_mission_document_reviews r ON r.review_id=p.review_id"
+        ).fetchall()
+        for proof_row in rows:
+            proof = json.loads(proof_row["record_json"])
+            body = {key: value for key, value in proof.items() if key != "content_hash"}
+            source_review = proof.get("source_review")
+            current_review = review_wire(proof_row)
+            stable_fields = (
+                "review_id", "mission_version_ref", "company_ref", "source_ref",
+                "document_ref", "discovered_document_ref", "registered_by", "created_at",
+            )
+            if (content_hash(body) == proof.get("content_hash") == proof_row["content_hash"]
+                    and isinstance(source_review, dict)
+                    and proof.get("source_review_hash") == proof_row["stored_source_review_hash"]
+                    and proof.get("source_review_hash") == content_hash(source_review)
+                    and source_review.get("state") == "awaiting_human_extraction"
+                    and current_review.get("state") in {"dismissed", "extraction_staged"}
+                    and all(source_review.get(key) == current_review.get(key) for key in stable_fields)
+                    and proof.get("mission_version_ref") == source_review.get("mission_version_ref")
+                    and isinstance(proof.get("windows"), list) and bool(proof["windows"])
+                    and proof.get("review_id") == proof_row["review_id"]
+                    and proof.get("company_ref") == proof_row["company_ref"]
+                    and proof.get("document_ref") == proof_row["document_ref"]):
+                completed_reviews.add(proof_row["review_id"])
+    except (sqlite3.OperationalError, ValueError, TypeError, json.JSONDecodeError):
+        completed_reviews = set()
+
     # A source can return the same external document for several companies or
     # specs.  Those are separate attribution claims.  Deduplicating on the
     # external id alone made an equal-rank row belong to whichever company
@@ -290,14 +325,21 @@ def _document_counts(
     best: dict[tuple[str, str, str], str] = {}
     for entry in connection.execute(
         "SELECT d.document_ref AS document_ref, d.company_ref AS company_ref, "
-        "s.spec_ref AS spec_ref, d.status AS status "
+        "s.spec_ref AS spec_ref, d.source_ref AS source_ref, d.status AS status "
         "FROM coverage_mission_discovered_documents d "
         "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
         f"WHERE {scope}",
         params,
     ).fetchall():
         document_ref, status = entry["document_ref"], entry["status"]
-        if latest_reviews.get((entry["company_ref"], document_ref), (None, None))[0] == "dismissed":
+        dismissed = latest_reviews.get((entry["company_ref"], document_ref), (None, None))[0] == "dismissed"
+        issuer_authoritative_annual = (
+            entry["spec_ref"] == "annual-report-10k"
+            and entry["source_ref"] == "source:sec-edgar"
+            and document_ref.startswith("sec:filing:")
+        )
+        completed = latest_reviews.get((entry["company_ref"], document_ref), (None, None))[1] in completed_reviews
+        if dismissed and not issuer_authoritative_annual and not completed:
             continue
         key = (entry["company_ref"], entry["spec_ref"], document_ref)
         rank = _STATUS_RANK.get(status, 0)
@@ -361,11 +403,11 @@ def _document_counts(
         "s.spec_ref AS spec_ref FROM coverage_mission_document_reviews r "
         "JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
         "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
-        f"WHERE {review_scope} AND r.state=?",
-        (*review_params, READ_REVIEW_STATE),
+        f"WHERE {review_scope}", review_params,
     ).fetchall():
         key = (entry["company_ref"], entry["document_ref"])
-        if latest_reviews.get(key, (None, None))[0] == READ_REVIEW_STATE:
+        latest = latest_reviews.get(key)
+        if latest is not None and latest[1] in completed_reviews:
             read_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
     read_periods: dict[tuple[str, str], set[str]] = {}
     for company_ref, spec_ref, _document_ref in read_docs:

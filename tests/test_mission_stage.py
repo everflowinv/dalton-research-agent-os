@@ -18,6 +18,8 @@ from dalton_core.mission_stage import (
     review_sort_key,
 )
 from dalton_core.store import DaltonStore
+from dalton_core.document_read_completion import DocumentReadCompletionAuthority, review_wire
+from dalton_core.store import content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params, OWNER
 
 ACN = "company:sec-cik:0001467373"
@@ -105,8 +107,26 @@ class StageHarness(unittest.TestCase):
                     "source_ref,document_ref,discovered_document_ref,state,registered_by,created_at,updated_at) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (f"mission-document-review:{self._seq:032d}", self.mission["id"], company_ref, source_ref,
-                     document_ref, record_id, "extraction_staged", AUTOMATION, at, at),
+                     document_ref, record_id, "awaiting_human_extraction", AUTOMATION, at, at),
                 )
+        if read:
+            review = self.missions.document_reviews(self.mission["id"], company_ref=company_ref)[-1]
+            source_hash = content_hash(review)
+            window = {"offset": 0, "context_ref": f"context:{self._seq}",
+                      "context_hash": "5" * 64, "next_offset": None,
+                      "source_content_hash": "6" * 64,
+                      "source_review_hash": source_hash,
+                      "work_order_ref": f"work:{self._seq}",
+                      "result_envelope_ref": f"result:{self._seq}",
+                      "result_envelope_hash": "7" * 64, "status": "succeeded"}
+            DocumentReadCompletionAuthority(self.store.connection).record(
+                review_id=review["review_id"], source_review_hash=source_hash,
+                actor_ref=AUTOMATION,
+                windows=[window], receipt_reader=type("Reader", (), {"read_completion_receipt": staticmethod(lambda **kw: window)})(),
+                created_at=at)
+            with self.missions._transaction() as cur:
+                cur.execute("UPDATE coverage_mission_document_reviews SET state='dismissed', "
+                            "rationale='fixture resolved after proof' WHERE review_id=?", (review["review_id"],))
         return document_ref
 
     def evaluate(self, *, planned=PLANNED, state=None):
