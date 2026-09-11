@@ -166,6 +166,33 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
         self.assertTrue(self.config.is_symlink())
         self.assertEqual(str(destination), os.readlink(self.config))
 
+    def test_owned_cas_retains_both_racing_writer_inodes(self):
+        before = self.config.read_bytes()
+        after = (self.packet / "openclaw.after.json").read_bytes()
+        original_rename = os.rename
+        first = b'{"owner":"racer-one"}\n'
+        second = b'{"owner":"racer-two"}\n'
+        injected = False
+
+        def race(source, target, *args, **kwargs):
+            nonlocal injected
+            if Path(source) == self.config and not injected:
+                injected = True
+                self.config.write_bytes(first)
+                result = original_rename(source, target, *args, **kwargs)
+                self.config.write_bytes(second)
+                return result
+            return original_rename(source, target, *args, **kwargs)
+
+        with patch.object(stopped.os, "rename", side_effect=race):
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
+                                        "conflicting inode preserved"):
+                stopped._compare_and_install(self.config, before, after)
+        self.assertEqual(second, self.config.read_bytes())
+        held = list(self.root.glob(".openclaw-config-held-*"))
+        self.assertEqual(1, len(held))
+        self.assertEqual(first, held[0].read_bytes())
+
     def test_owned_cas_fsync_failure_restores_original_inode_and_bytes(self):
         before = self.config.read_bytes()
         before_stat = self.config.stat()

@@ -482,7 +482,12 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 packet_root=self.packet, manifest=transition)
             need(service_before == load_json(artifacts["service_config_snapshot"]),
                  "service transition baseline differs from packet snapshot")
-            expected_service_bytes = _json_bytes(service_after)
+            if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+                service_artifact = (self.packet /
+                    transition["service_transition"]["before"]["file"])
+                expected_service_bytes = service_artifact.read_bytes()
+            else:
+                expected_service_bytes = _json_bytes(service_after)
         else:
             expected_service_bytes = artifacts["service_config_snapshot"].read_bytes()
         expected_openclaw_bytes = artifacts["openclaw_config_snapshot"].read_bytes()

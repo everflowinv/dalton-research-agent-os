@@ -90,6 +90,7 @@ def _compare_and_install(
     os.close(held_descriptor)
     held = Path(held_name); held.unlink()
     published_identity: tuple[int, int] | None = None
+    held_is_owned = False
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(after); stream.flush(); os.fsync(stream.fileno())
@@ -101,7 +102,9 @@ def _compare_and_install(
             if not _occupied(path):
                 os.rename(held, path)
             raise BrokerStoppedWindowError(
-                "OpenClaw config changed during owned CAS")
+                "OpenClaw config changed during owned CAS; conflicting inode "
+                f"preserved at {held}")
+        held_is_owned = True
         os.link(candidate, path)
         linked = candidate.lstat()
         published_identity = (linked.st_dev, linked.st_ino)
@@ -125,7 +128,8 @@ def _compare_and_install(
         candidate.unlink(missing_ok=True)
         if _occupied(held) and not _occupied(path):
             os.rename(held, path)
-        elif _occupied(held) and (held.is_symlink() or held.is_file()):
+        elif (held_is_owned and _occupied(held)
+              and (held.is_symlink() or held.is_file())):
             held.unlink()
 
 
