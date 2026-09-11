@@ -687,7 +687,7 @@ class WebCoordinatorTests(unittest.TestCase):
         raw_path.write_bytes(b"tampered")
         refused = coordinator.recover_local_web_discoveries()
         self.assertEqual("refused", refused[0]["status"])
-            self.assertIn("raw spool bytes differ from the artifact authority", refused[0]["reason"])
+        self.assertIn("raw spool bytes differ from the artifact authority", refused[0]["reason"])
         self.assertEqual([], missions.source_discoveries(mission["id"]))
         next_params = mission_with_web_status(
             state, status="connected", grant=True, version=2, prior=mission,
