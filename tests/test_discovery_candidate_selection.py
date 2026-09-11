@@ -3,7 +3,8 @@ import json
 import unittest
 
 from dalton_core.discovery_candidate_selection import (
-    CandidateSelectionError, candidate_view, selection_prompt, validate_selection,
+    CandidateSelectionError, CockpitDiscoveryCandidateSelector, PURPOSE,
+    candidate_view, selection_prompt, validate_selection,
 )
 from dalton_core.store import canonical_json, content_hash
 
@@ -66,6 +67,23 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
                                                   if k != "content_hash"})
         view = candidate_view(raw, envelope)
         self.assertNotIn("private_provider_field", canonical_json(view))
+
+    def test_selector_uses_distinct_purpose_and_hash_bound_request(self):
+        raw, envelope = self.fixture(); view = candidate_view(raw, envelope)
+        class Model:
+            def __init__(self): self.kwargs = None
+            def call(self, **kwargs):
+                self.kwargs = kwargs
+                return {"text": '{"selected":[]}', "work_order_ref": "work:select",
+                        "replayed": False}
+        model = Model(); selector = CockpitDiscoveryCandidateSelector(model)
+        result = selector.select(view, mission={"id": "mission:v1"}, company={
+            "company_ref": "company:sec-cik:0000051143", "name": "IBM",
+            "ticker": "IBM", "aliases": ["International Business Machines"]},
+            missing_periods=["2026-Q2"])
+        self.assertEqual(model.kwargs["purpose"], PURPOSE)
+        self.assertEqual(result["selected"], [])
+        self.assertEqual(result["work_order_ref"], "work:select")
 
 
 if __name__ == "__main__": unittest.main()

@@ -7,14 +7,39 @@ from typing import Any
 
 from .store import canonical_json, content_hash
 from .alphaengine_core_search import SEARCH_MAX_RECORDS
+from .model_fallback_chain import TIER_CHEAP, register_purpose_tier
 
 CONTRACT_REF = "discovery-candidate-selection-contract:0.1"
+PURPOSE = "discovery_selection"
+register_purpose_tier(PURPOSE, TIER_CHEAP)
 _TEXT_FIELDS = ("title", "publish_time", "rank_date", "document_code", "type_id")
 _LIST_FIELDS = ("companies", "industries", "markets", "sources")
 
 
 class CandidateSelectionError(ValueError):
     pass
+
+
+class CockpitDiscoveryCandidateSelector:
+    def __init__(self, model: Any, *, config_version: str = "0.1") -> None:
+        if config_version != "0.1":
+            raise CandidateSelectionError("unsupported candidate selector config version")
+        self.model = model
+        self.config_hash = content_hash({"version": config_version, "purpose": PURPOSE,
+                                         "contract_ref": CONTRACT_REF})
+
+    def select(self, view: Mapping[str, Any], *, mission: Mapping[str, Any],
+               company: Mapping[str, Any], missing_periods: list[str]) -> dict[str, Any]:
+        identity = content_hash({"config_hash": self.config_hash,
+                                 "view_hash": view["content_hash"], "company": dict(company),
+                                 "missing_periods": missing_periods})
+        call = self.model.call(
+            purpose=PURPOSE, request_id=f"candidate-selection:{identity[:32]}",
+            prompt=selection_prompt(view, company=company, missing_periods=missing_periods),
+            mission=mission)
+        return {**validate_selection(call["text"], view),
+                "work_order_ref": call["work_order_ref"],
+                "replayed": bool(call.get("replayed")), "config_hash": self.config_hash}
 
 
 def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str, Any]:
