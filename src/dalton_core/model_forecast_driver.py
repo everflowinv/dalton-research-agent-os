@@ -79,8 +79,18 @@ from .store import (
 
 SCHEMA_VERSION = "0.2"
 LEGACY_SCHEMA_VERSION = "0.1"
+STRUCTURED_SCHEMA_VERSION = "0.3"
 FORMULA_REF = DRIVER_FORMULA_REF
 FORMULA_HASH = DRIVER_FORMULA_HASH
+STRUCTURE_FORMULA_REF = "formula:company-financial-statement-dag:0.1"
+STRUCTURE_EXECUTOR_CONTRACT = {
+    "schema_version": "0.1",
+    "ref": STRUCTURE_FORMULA_REF,
+    "operators": ["sum", "divide"],
+    "missing_input": "unavailable",
+    "zero_denominator": "unavailable",
+    "forecast_leaves": ["quarterly_growth", "share_of_line", "unavailable"],
+}
 GENERATOR_REF = "rule:trailing-carry-forward:1"
 AUTOMATION_ACTOR = "automation:driver-model"
 
@@ -210,6 +220,9 @@ MEASURES: tuple[str, ...] = (
     "revenue_share",
     # A share of forecast operating income.
     "operating_income_share",
+    # The base is frozen on the structure-backed driver rather than inferred
+    # from this token.
+    "share_of_line",
 )
 # What an assumption may stand on. ``market_proxy`` is W4's addition and the
 # Chem retrospective (§7.2) is why: a spread, a list price or a futures
@@ -240,6 +253,10 @@ _RECORD_FIELDS = frozenset({
     "formula_ref", "formula_hash", "generator_ref", "drivers", "assumptions",
     "results", "mission_version_ref", "actor_ref", "body_hash", "content_hash",
 })
+_STRUCTURE_RECORD_FIELDS = frozenset({
+    "financial_statement_structure", "financial_statement_structure_replay",
+    "forecast_structure_binding",
+})
 # What the version chain is about. Two records with the same body are the same
 # model, whatever mission asked for them, whenever they were built, and
 # whatever evidence prompted the attempt -- so a tick that finds nothing new is
@@ -254,6 +271,9 @@ _DRIVER_FIELDS = frozenset({
     "spec_rows", "note", "history",
 })
 _DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots"})
+_STRUCTURE_DRIVER_FIELDS = frozenset({
+    "structure_line_ref", "forecast_method", "forecast_base_ref",
+})
 _CELL_FIELDS = frozenset({
     "concept", "period_start", "period_end", "value", "basis", "accessions",
 })
@@ -1848,6 +1868,87 @@ def build_forecast_model(
     }
 
 
+def structure_formula_hash(
+    structure: Mapping[str, Any], binding: Mapping[str, Any],
+) -> str:
+    return content_hash({
+        "executor_contract": STRUCTURE_EXECUTOR_CONTRACT,
+        "structure_hash": structure.get("content_hash"),
+        "binding_hash": binding.get("content_hash"),
+    })
+
+
+def build_structured_forecast_model(
+    spec: Mapping[str, Any], table: Mapping[str, Any], *,
+    structure: Mapping[str, Any], replay: Mapping[str, Any],
+    binding: Mapping[str, Any], actor_ref: str = AUTOMATION_ACTOR,
+    mission_version_ref: str | None = None,
+    assumptions: Sequence[Mapping[str, Any]] | None = None,
+    generator_ref: str | None = GENERATOR_REF,
+    change_reason: str = "evidence_thicker",
+    evidence_refs: Sequence[Mapping[str, Any]] | None = None,
+    decision: str | None = None,
+) -> dict[str, Any]:
+    """Build a v0.3 model from one revalidated company statement DAG."""
+
+    from .company_financial_statement_structure import forecast_structure_binding
+
+    exact_binding = forecast_structure_binding(structure, replay, table)
+    if dict(binding) != exact_binding:
+        raise ForecastModelUnavailable("forecast statement structure binding differs")
+    company_ref = _text(table.get("company_ref"), "company_ref")
+    spec_ref = _text(table.get("spec_ref") or spec.get("spec_id"), "spec_ref")
+    if (
+        structure.get("company_ref") != company_ref
+        or binding.get("company_ref") != company_ref
+        or structure.get("spec_ref") != spec_ref
+        or binding.get("spec_ref") != spec_ref
+    ):
+        raise ForecastModelUnavailable("forecast statement structure belongs to another model")
+    horizon = spec.get("horizon") or {}
+    wanted = horizon.get("forecast_quarters")
+    if isinstance(wanted, bool) or not isinstance(wanted, int) or wanted < 1:
+        wanted = 4
+    drivers = build_structure_drivers(table, structure)
+    periods = forecast_periods(revenue_anchor(drivers), wanted)
+    if assumptions is None:
+        assumptions = default_structure_assumptions(
+            drivers, periods, structure, decided_by=actor_ref)
+    results = compute_structure_results(drivers, assumptions, periods, structure)
+    anchor = revenue_anchor(drivers)
+    if evidence_refs is None:
+        evidence_refs = filing_refs(drivers, table.get("periods"))
+    return {
+        SOURCE_VERSION_KEY: None,
+        "schema_version": STRUCTURED_SCHEMA_VERSION,
+        "model_ref": f"forecast-model:{company_ref}",
+        "company_ref": company_ref,
+        "spec_ref": spec_ref,
+        "spec_hash": _sha256(spec.get("content_hash"), "spec.content_hash"),
+        "inputs_hash": content_hash(json.loads(canonical_json(table))),
+        "unit": str(anchor.get("unit") or "usd"),
+        "currency": str(anchor.get("unit") or "usd").upper(),
+        "history_periods": [str(item) for item in (table.get("periods") or [])],
+        "realised_periods": [],
+        "forecast_periods": [dict(item) for item in periods],
+        "statements": statement_importances(spec),
+        "formula_ref": STRUCTURE_FORMULA_REF,
+        "formula_hash": structure_formula_hash(structure, binding),
+        "generator_ref": generator_ref,
+        "drivers": drivers,
+        "assumptions": [dict(item) for item in assumptions],
+        "results": results,
+        "financial_statement_structure": dict(structure),
+        "financial_statement_structure_replay": dict(replay),
+        "forecast_structure_binding": dict(binding),
+        "change_reason": _one_of(change_reason, CHANGE_REASONS, "change_reason"),
+        "evidence_refs": [dict(item) for item in evidence_refs],
+        "decision": decision,
+        "mission_version_ref": mission_version_ref,
+        "actor_ref": actor_ref,
+    }
+
+
 # -- versioning: the two entry points a caller may use ----------------------
 #
 # Neither of these decides anything. ``actualize_model`` writes down what a
@@ -2274,10 +2375,18 @@ def model_readiness(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str, Any]:
-    cell_optional = _CELL_OPTIONAL_FIELDS if schema_version == SCHEMA_VERSION else frozenset()
-    wire = _closed(value, _DRIVER_FIELDS, name, optional=_DRIVER_OPTIONAL_FIELDS)
+    cell_optional = (_CELL_OPTIONAL_FIELDS
+                     if schema_version in {SCHEMA_VERSION, STRUCTURED_SCHEMA_VERSION}
+                     else frozenset())
+    fields = (_DRIVER_FIELDS | _STRUCTURE_DRIVER_FIELDS
+              if schema_version == STRUCTURED_SCHEMA_VERSION else _DRIVER_FIELDS)
+    wire = _closed(value, fields, name, optional=_DRIVER_OPTIONAL_FIELDS)
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
-    driver_kinds = DRIVER_KINDS if schema_version == SCHEMA_VERSION else ("revenue", "expense")
+    driver_kinds = (
+        (*DRIVER_KINDS, "statement_line")
+        if schema_version == STRUCTURED_SCHEMA_VERSION else
+        DRIVER_KINDS if schema_version == SCHEMA_VERSION else ("revenue", "expense")
+    )
     wire["kind"] = _one_of(wire["kind"], driver_kinds, f"{name}.kind")
     wire["label"] = _text(wire["label"], f"{name}.label")
     wire["concept"] = _optional_text(wire["concept"], f"{name}.concept")
@@ -2285,8 +2394,25 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
     wire["unit"] = _optional_text(wire["unit"], f"{name}.unit")
     wire["status"] = _one_of(wire["status"], DRIVER_STATUSES, f"{name}.status")
     if wire["role"] is not None:
-        wire["role"] = _one_of(wire["role"], ROLES, f"{name}.role")
+        allowed_roles = ROLES
+        if schema_version == STRUCTURED_SCHEMA_VERSION:
+            from .company_financial_statement_structure import ROLES as statement_roles
+            allowed_roles = statement_roles
+        wire["role"] = _one_of(wire["role"], allowed_roles, f"{name}.role")
     wire["note"] = _optional_text(wire["note"], f"{name}.note")
+    if schema_version == STRUCTURED_SCHEMA_VERSION:
+        wire["structure_line_ref"] = _text(
+            wire["structure_line_ref"], f"{name}.structure_line_ref")
+        wire["forecast_method"] = _one_of(
+            wire["forecast_method"],
+            ("quarterly_growth", "share_of_line", "unavailable"),
+            f"{name}.forecast_method")
+        wire["forecast_base_ref"] = _optional_text(
+            wire["forecast_base_ref"], f"{name}.forecast_base_ref")
+        if ((wire["forecast_method"] == "share_of_line")
+                != (wire["forecast_base_ref"] is not None)):
+            raise ForecastModelValidationError(
+                f"{name}.forecast_base_ref belongs only to share_of_line")
     if not isinstance(wire["spec_rows"], list) or not wire["spec_rows"]:
         raise ForecastModelValidationError(f"{name}.spec_rows must name a specification row")
     wire["spec_rows"] = [_text(item, f"{name}.spec_rows[]") for item in wire["spec_rows"]]
@@ -2526,7 +2652,7 @@ def _normalize_outside_band(value: Any, name: str) -> dict[str, str] | None:
 
 
 def _normalize_result(value: Any, name: str, *, assumption_refs: set[str],
-                      driver_refs: set[str]) -> dict[str, Any]:
+                      driver_refs: set[str], schema_version: str = SCHEMA_VERSION) -> dict[str, Any]:
     wire = _closed(value, _RESULT_FIELDS, name)
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
     wire["driver_ref"] = _optional_text(wire["driver_ref"], f"{name}.driver_ref")
@@ -2534,7 +2660,11 @@ def _normalize_result(value: Any, name: str, *, assumption_refs: set[str],
         raise ForecastModelValidationError(
             f"{name}.driver_ref names no driver of this model")
     if wire["role"] is not None:
-        wire["role"] = _one_of(wire["role"], ROLES, f"{name}.role")
+        allowed_roles = ROLES
+        if schema_version == STRUCTURED_SCHEMA_VERSION:
+            from .company_financial_statement_structure import ROLES as statement_roles
+            allowed_roles = statement_roles
+        wire["role"] = _one_of(wire["role"], allowed_roles, f"{name}.role")
     wire["label"] = _text(wire["label"], f"{name}.label")
     wire["unit"] = _text(wire["unit"], f"{name}.unit")
     wire["formula"] = _text(wire["formula"], f"{name}.formula")
@@ -2605,8 +2735,13 @@ def _normalize_result(value: Any, name: str, *, assumption_refs: set[str],
 def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     """The whole record, checked against its closed shape and its own hashes."""
 
-    wire = _closed(value, _RECORD_FIELDS, "forecast model")
-    if wire["schema_version"] not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+    version = value.get("schema_version") if isinstance(value, Mapping) else None
+    fields = (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
+              if version == STRUCTURED_SCHEMA_VERSION else _RECORD_FIELDS)
+    wire = _closed(value, fields, "forecast model")
+    if wire["schema_version"] not in (
+        LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, STRUCTURED_SCHEMA_VERSION,
+    ):
         raise ForecastModelValidationError("forecast model schema_version is unsupported")
     for field in ("id", "created_at", "model_ref", "company_ref", "spec_ref",
                   "unit", "currency", "actor_ref"):
@@ -2645,7 +2780,37 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     if not wire["actor_ref"].startswith(("human:", "automation:")):
         raise ForecastModelValidationError("actor_ref must use a principal namespace")
     wire["generator_ref"] = _optional_text(wire["generator_ref"], "generator_ref")
-    if wire["formula_ref"] != FORMULA_REF or wire["formula_hash"] != FORMULA_HASH:
+    if wire["schema_version"] == STRUCTURED_SCHEMA_VERSION:
+        structure = wire["financial_statement_structure"]
+        replay = wire["financial_statement_structure_replay"]
+        binding = wire["forecast_structure_binding"]
+        if not all(isinstance(item, Mapping) for item in (structure, replay, binding)):
+            raise ForecastModelValidationError(
+                "structured forecast model needs statement authority objects")
+        if (
+            structure.get("content_hash") != binding.get("structure_hash")
+            or replay.get("structure_hash") != structure.get("content_hash")
+            or content_hash(replay) != binding.get("historical_replay_hash")
+            or structure.get("company_ref") != wire["company_ref"]
+            or binding.get("company_ref") != wire["company_ref"]
+            or structure.get("spec_ref") != wire["spec_ref"]
+            or binding.get("spec_ref") != wire["spec_ref"]
+            or structure.get("spec_hash") != wire["spec_hash"]
+            or binding.get("spec_hash") != wire["spec_hash"]
+        ):
+            raise ForecastModelValidationError(
+                "structured forecast model statement authority differs")
+        for item, name in ((structure, "financial_statement_structure"),
+                           (binding, "forecast_structure_binding")):
+            base = dict(item)
+            asserted = base.pop("content_hash", None)
+            if not isinstance(asserted, str) or content_hash(base) != asserted:
+                raise ForecastModelValidationError(f"{name} content hash is invalid")
+        if (wire["formula_ref"] != STRUCTURE_FORMULA_REF
+                or wire["formula_hash"] != structure_formula_hash(structure, binding)):
+            raise ForecastModelValidationError(
+                "structured forecast model must bind its exact statement formula")
+    elif wire["formula_ref"] != FORMULA_REF or wire["formula_hash"] != FORMULA_HASH:
         raise ForecastModelValidationError("forecast model must bind the frozen formula")
     wire["history_periods"] = [
         _iso_date(item, "history_periods[]") for item in (wire["history_periods"] or [])]
@@ -2710,7 +2875,7 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ForecastModelValidationError("results must be a list")
     wire["results"] = [
         _normalize_result(item, f"results[{index}]", assumption_refs=assumption_refs,
-                          driver_refs=driver_refs)
+                          driver_refs=driver_refs, schema_version=wire["schema_version"])
         for index, item in enumerate(wire["results"])]
     result_refs = {item["ref"] for item in wire["results"]}
     if len(result_refs) != len(wire["results"]):
@@ -2737,8 +2902,11 @@ def _statement_line_proof_row(row: Mapping[str, Any]) -> dict[str, Any]:
 def body_hash(body: Mapping[str, Any]) -> str:
     """What makes two models the same model: everything but when and who asked."""
 
+    fields = (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
+              if body.get("schema_version") == STRUCTURED_SCHEMA_VERSION
+              else _RECORD_FIELDS)
     return content_hash({key: value for key, value in body.items()
-                         if key not in _BODY_EXCLUDED and key in _RECORD_FIELDS})
+                         if key not in _BODY_EXCLUDED and key in fields})
 
 
 class ForecastModelAuthority:

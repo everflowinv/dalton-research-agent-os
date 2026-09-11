@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import copy
 from decimal import Decimal
+from pathlib import Path
+import tempfile
 import unittest
 
 from dalton_core.company_financial_statement_structure import (
+    forecast_structure_binding,
     validate_financial_statement_structure,
 )
 from dalton_core.model_forecast_driver import (
+    ForecastModelAuthority,
+    build_structured_forecast_model,
     build_structure_drivers,
     compute_structure_results,
     default_structure_assumptions,
     forecast_periods,
     revenue_anchor,
 )
+from dalton_core.store import DaltonStore
 from tests.test_company_financial_statement_structure import (
     company_spec,
     financial_inputs,
@@ -102,6 +108,27 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertIn("interest-income", pretax["reason"])
         self.assertEqual(by_cell[("net_income", end)]["status"], "unavailable")
         self.assertEqual(by_cell[("diluted_eps", end)]["status"], "unavailable")
+
+    def test_v03_model_freezes_structure_replay_and_binding(self):
+        inputs, structure = self.authority()
+        # Recreate the public replay from the exact proposal authority.
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"] if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            record = ForecastModelAuthority(store).publish(body)
+        self.assertEqual(record["schema_version"], "0.3")
+        self.assertEqual(record["forecast_structure_binding"], binding)
+        self.assertEqual(record["financial_statement_structure"], structure)
 
 
 if __name__ == "__main__":
