@@ -1251,12 +1251,13 @@ class DaltonStore:
         numeric_verification: Mapping[str, Any] | None = None,
         idempotency_key: str,
         fault_at: str | None = None,
+        document_execution_context: Any | None = None,
     ) -> dict[str, Any]:
         """Promote one low-risk candidate authorized by the active policy.
 
-        The evaluator re-derives the complete SEC filing-count statement from
-        Core's immutable connector authority.  A caller cannot select another
-        source, metric, statement, record count, policy version, or actor.
+        The evaluator replays the selected rule's exact source and execution
+        authority. Directed-document execution additionally requires an
+        in-process executor capability; it cannot be asserted through JSON.
         """
         from .research_auto_commit import authorize_policy_candidate
         from .research_verification import validate_candidate_claim
@@ -1281,6 +1282,8 @@ class DaltonStore:
             numeric_spec=numeric_spec,
             source_verification=source_verification,
             numeric_verification=numeric_verification,
+            document_execution_context=document_execution_context,
+            document_execution_store=self,
         )
         result = self._commit_authorized_candidate(
             decision_wire=decision_wire,
@@ -1292,6 +1295,9 @@ class DaltonStore:
                 decision_wire["policy_version_ref"],
                 decision_wire["policy_version_hash"],
             ),
+            document_execution_context=document_execution_context,
+            document_material=material,
+            document_source_verification=source_verification,
         )
         return {**result, "authorization": decision_wire}
 
@@ -1304,6 +1310,9 @@ class DaltonStore:
         idempotency_key: str,
         fault_at: str | None,
         active_policy_binding: tuple[str, str] | None,
+        document_execution_context: Any | None = None,
+        document_material: Mapping[str, Any] | None = None,
+        document_source_verification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Shared atomic Ledger writer for human and policy authorization."""
         from .research_review import (
@@ -1327,7 +1336,7 @@ class DaltonStore:
             # ADR-0003 option B, narrowed by ADR-0005: a semantic candidate
             # enters the Ledger through explicit human review, or through the
             # policy path only under the mission document qualitative rule;
-            # either way only as transcript evidence.
+            # with the exact source proof required by the selected path.
             from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
             policy_admitted = (
                 active_policy_binding is not None
@@ -1346,6 +1355,7 @@ class DaltonStore:
             if (
                 evidence_wire["source_type"] not in CITED_EVIDENCE_SOURCE_TYPES
                 and not policy_annual
+                and not (policy_admitted and document_execution_context is not None)
             ):
                 raise GateRejected(
                     "qualitative candidates require cited original evidence"
@@ -1423,146 +1433,157 @@ class DaltonStore:
                     raise GateRejected("research authorization policy is no longer active")
                 self._assert_policy_effective(policy_row)
 
-            required_authority_tables = (
-                "connector_invocations", "connector_source_envelopes",
-                "observability_artifact_version_index",
-                "observability_artifact_versions_v2",
-            )
-            present_tables = {
-                row["name"] for row in cur.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?)",
-                    required_authority_tables,
-                ).fetchall()
-            }
-            if present_tables != set(required_authority_tables):
-                # A Core that never opened its connector authority cannot verify
-                # any candidate SourceEnvelope.  Reject explicitly instead of
-                # surfacing a raw sqlite error from a missing table.
-                raise GateRejected(
-                    "Core connector authority is unavailable; "
-                    "candidate SourceEnvelope cannot be verified"
+            if document_execution_context is not None:
+                from .mission_document_research_promotion import authorize_document_candidate
+                exact_decision = authorize_document_candidate(
+                    connection=self.connection, store=self, context=document_execution_context,
+                    policy_version=self.active_policy(), evidence=evidence_wire, claim=claim_wire,
+                    material=document_material, source_verification=document_source_verification,
                 )
-            source = cur.execute(
-                "SELECT connector_invocation_ref,record_json,content_hash FROM "
-                "connector_source_envelopes WHERE source_envelope_id=?",
-                (evidence_wire["source_envelope_ref"],),
-            ).fetchone()
-            if source is None or source["content_hash"] != evidence_wire["source_envelope_hash"]:
-                raise GateRejected("candidate SourceEnvelope is not exact Core authority")
-            source_doc = json.loads(source["record_json"])
-            policy_annual_source = (
-                policy_admitted
-                and evidence_wire["source_type"] == "official_filing"
-                and evidence_wire["source_ref"] == "source:sec-edgar"
-                and source_doc.get("source") == "source:public-web"
-                and source_doc.get("operation") == "fetch_get"
-            )
-            if (
-                (
-                    source_doc.get("source") != evidence_wire["source_ref"]
-                    and not policy_annual_source
+                if canonical_json(exact_decision) != canonical_json(decision_wire):
+                    raise GateRejected("document authorization changed before Ledger commit")
+                producer_execution_ref = document_material["normalized_payload"]["draft_proof"]["model_invocation_ref"]
+            else:
+                required_authority_tables = (
+                    "connector_invocations", "connector_source_envelopes",
+                    "observability_artifact_version_index",
+                    "observability_artifact_versions_v2",
                 )
-                or source_doc.get("raw_artifact_version_ref")
-                != evidence_wire["artifact_refs"][0]["ref"]
-            ):
-                raise GateRejected("candidate source/artifact binding drifted from Core authority")
-            invocation = cur.execute(
-                "SELECT execution_ref FROM connector_invocations WHERE connector_invocation_id=?",
-                (source["connector_invocation_ref"],),
-            ).fetchone()
-            if invocation is None:
-                raise GateRejected("candidate producer execution is unavailable")
-            producer_execution_ref = invocation["execution_ref"]
-            artifact = cur.execute(
-                "SELECT i.version_id,v.content_hash,v.artifact_content_hash,v.record_json "
-                "FROM observability_artifact_version_index i "
-                "JOIN observability_artifact_versions_v2 v ON v.version_id=i.version_id "
-                "WHERE i.version_id=? AND i.producer_execution_ref=?",
-                (evidence_wire["artifact_refs"][0]["ref"], producer_execution_ref),
-            ).fetchone()
-            if (
-                artifact is None
-                or artifact["content_hash"] != evidence_wire["artifact_refs"][0]["hash"]
-            ):
-                raise GateRejected("candidate ArtifactVersion is not exact Core authority")
-            from .transcript_correction import (
-                TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
-                TranscriptCorrectionError,
-                validate_persisted_transcript_claim_citation,
-            )
-
-            from .transcript_correction import CITED_EVIDENCE_SOURCE_TYPES as _CITED
-            if evidence_wire["source_type"] in _CITED:
-                if (
-                    len(evidence_wire["artifact_refs"]) != 2
-                    or not evidence_wire["artifact_refs"][1]["ref"].startswith(
-                        "transcript-claim-citation-binding:"
-                    )
-                    or evidence_wire["source_lineage"][-1]
-                    != evidence_wire["artifact_refs"][1]["ref"]
-                ):
+                present_tables = {
+                    row["name"] for row in cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?)",
+                        required_authority_tables,
+                    ).fetchall()
+                }
+                if present_tables != set(required_authority_tables):
+                    # A Core that never opened its connector authority cannot verify
+                    # any candidate SourceEnvelope.  Reject explicitly instead of
+                    # surfacing a raw sqlite error from a missing table.
                     raise GateRejected(
-                        "transcript candidate is missing its exact citation binding"
+                        "Core connector authority is unavailable; "
+                        "candidate SourceEnvelope cannot be verified"
                     )
-                citation_ref = evidence_wire["artifact_refs"][1]
-                try:
-                    citation = validate_persisted_transcript_claim_citation(
-                        self.connection,
-                        citation_ref["ref"],
-                        citation_ref["hash"],
-                    )
-                except (TranscriptCorrectionError, sqlite3.Error) as exc:
-                    raise GateRejected(
-                        "transcript candidate citation authority is unavailable or invalid"
-                    ) from exc
-                correction_row = cur.execute(
-                    "SELECT record_json FROM transcript_correction_set_versions "
-                    "WHERE version_id=?",
-                    (citation["correction_set_version_ref"],),
+                source = cur.execute(
+                    "SELECT connector_invocation_ref,record_json,content_hash FROM "
+                    "connector_source_envelopes WHERE source_envelope_id=?",
+                    (evidence_wire["source_envelope_ref"],),
                 ).fetchone()
-                correction_set = (
-                    None if correction_row is None
-                    else json.loads(correction_row["record_json"])
-                )
-                document_ref = (
-                    None if not isinstance(correction_set, Mapping)
-                    else correction_set.get("document_ref")
-                )
-                alphaengine_document_binding = (
-                    source_doc.get("source") == "source:alphaengine"
-                    and source_doc.get("operation") == "get_document"
-                    and isinstance(document_ref, str)
-                    and document_ref.startswith("alphaengine-doc:")
-                    and source_doc.get("source_record_refs") == [
-                        f"{document_ref}:sha256:{citation['source_content_hash']}"
-                    ]
-                    and source_doc.get("raw_response_hash")
-                    == artifact["artifact_content_hash"]
-                )
-                direct_raw_binding = (
-                    citation["source_content_hash"]
-                    == artifact["artifact_content_hash"]
-                    and source_doc.get("raw_response_hash")
-                    == citation["source_content_hash"]
-                )
-                # ADR-0005 / P9d-17c: a fetched page cites its verified
-                # rendering, not its bytes; the fetch envelope names exactly
-                # the page record and the raw artifact is the fetched body.
-                # The rendering hash was verified against those bytes by the
-                # correction authority when the span was admitted.
-                public_web_binding = (
-                    evidence_wire["source_type"] == "public_web"
+                if source is None or source["content_hash"] != evidence_wire["source_envelope_hash"]:
+                    raise GateRejected("candidate SourceEnvelope is not exact Core authority")
+                source_doc = json.loads(source["record_json"])
+                policy_annual_source = (
+                    policy_admitted
+                    and evidence_wire["source_type"] == "official_filing"
+                    and evidence_wire["source_ref"] == "source:sec-edgar"
                     and source_doc.get("source") == "source:public-web"
                     and source_doc.get("operation") == "fetch_get"
-                    and isinstance(document_ref, str)
-                    and document_ref.startswith("public-web-document:")
-                    and source_doc.get("source_record_refs") == [document_ref]
-                    and source_doc.get("raw_response_hash") == artifact["artifact_content_hash"]
                 )
-                if not (alphaengine_document_binding or direct_raw_binding or public_web_binding):
-                    raise GateRejected(
-                        "transcript citation does not bind the exact raw ArtifactVersion"
+                if (
+                    (
+                        source_doc.get("source") != evidence_wire["source_ref"]
+                        and not policy_annual_source
                     )
+                    or source_doc.get("raw_artifact_version_ref")
+                    != evidence_wire["artifact_refs"][0]["ref"]
+                ):
+                    raise GateRejected("candidate source/artifact binding drifted from Core authority")
+                invocation = cur.execute(
+                    "SELECT execution_ref FROM connector_invocations WHERE connector_invocation_id=?",
+                    (source["connector_invocation_ref"],),
+                ).fetchone()
+                if invocation is None:
+                    raise GateRejected("candidate producer execution is unavailable")
+                producer_execution_ref = invocation["execution_ref"]
+                artifact = cur.execute(
+                    "SELECT i.version_id,v.content_hash,v.artifact_content_hash,v.record_json "
+                    "FROM observability_artifact_version_index i "
+                    "JOIN observability_artifact_versions_v2 v ON v.version_id=i.version_id "
+                    "WHERE i.version_id=? AND i.producer_execution_ref=?",
+                    (evidence_wire["artifact_refs"][0]["ref"], producer_execution_ref),
+                ).fetchone()
+                if (
+                    artifact is None
+                    or artifact["content_hash"] != evidence_wire["artifact_refs"][0]["hash"]
+                ):
+                    raise GateRejected("candidate ArtifactVersion is not exact Core authority")
+                from .transcript_correction import (
+                    TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
+                    TranscriptCorrectionError,
+                    validate_persisted_transcript_claim_citation,
+                )
+
+                from .transcript_correction import CITED_EVIDENCE_SOURCE_TYPES as _CITED
+                if evidence_wire["source_type"] in _CITED:
+                    if (
+                        len(evidence_wire["artifact_refs"]) != 2
+                        or not evidence_wire["artifact_refs"][1]["ref"].startswith(
+                            "transcript-claim-citation-binding:"
+                        )
+                        or evidence_wire["source_lineage"][-1]
+                        != evidence_wire["artifact_refs"][1]["ref"]
+                    ):
+                        raise GateRejected(
+                            "transcript candidate is missing its exact citation binding"
+                        )
+                    citation_ref = evidence_wire["artifact_refs"][1]
+                    try:
+                        citation = validate_persisted_transcript_claim_citation(
+                            self.connection,
+                            citation_ref["ref"],
+                            citation_ref["hash"],
+                        )
+                    except (TranscriptCorrectionError, sqlite3.Error) as exc:
+                        raise GateRejected(
+                            "transcript candidate citation authority is unavailable or invalid"
+                        ) from exc
+                    correction_row = cur.execute(
+                        "SELECT record_json FROM transcript_correction_set_versions "
+                        "WHERE version_id=?",
+                        (citation["correction_set_version_ref"],),
+                    ).fetchone()
+                    correction_set = (
+                        None if correction_row is None
+                        else json.loads(correction_row["record_json"])
+                    )
+                    document_ref = (
+                        None if not isinstance(correction_set, Mapping)
+                        else correction_set.get("document_ref")
+                    )
+                    alphaengine_document_binding = (
+                        source_doc.get("source") == "source:alphaengine"
+                        and source_doc.get("operation") == "get_document"
+                        and isinstance(document_ref, str)
+                        and document_ref.startswith("alphaengine-doc:")
+                        and source_doc.get("source_record_refs") == [
+                            f"{document_ref}:sha256:{citation['source_content_hash']}"
+                        ]
+                        and source_doc.get("raw_response_hash")
+                        == artifact["artifact_content_hash"]
+                    )
+                    direct_raw_binding = (
+                        citation["source_content_hash"]
+                        == artifact["artifact_content_hash"]
+                        and source_doc.get("raw_response_hash")
+                        == citation["source_content_hash"]
+                    )
+                    # ADR-0005 / P9d-17c: a fetched page cites its verified
+                    # rendering, not its bytes; the fetch envelope names exactly
+                    # the page record and the raw artifact is the fetched body.
+                    # The rendering hash was verified against those bytes by the
+                    # correction authority when the span was admitted.
+                    public_web_binding = (
+                        evidence_wire["source_type"] == "public_web"
+                        and source_doc.get("source") == "source:public-web"
+                        and source_doc.get("operation") == "fetch_get"
+                        and isinstance(document_ref, str)
+                        and document_ref.startswith("public-web-document:")
+                        and source_doc.get("source_record_refs") == [document_ref]
+                        and source_doc.get("raw_response_hash") == artifact["artifact_content_hash"]
+                    )
+                    if not (alphaengine_document_binding or direct_raw_binding or public_web_binding):
+                        raise GateRejected(
+                            "transcript citation does not bind the exact raw ArtifactVersion"
+                        )
 
             evidence_ref = evidence_wire["candidate_evidence_ref"].replace(
                 "candidate-evidence:", "evidence:", 1
@@ -1725,6 +1746,12 @@ class DaltonStore:
             )
             if fault_at == "after_receipt":
                 raise RuntimeError("injected reviewed candidate failure after receipt")
+            if document_execution_context is not None:
+                from .mission_document_research_promotion import persist_document_promotion
+                persist_document_promotion(cur, document_execution_context, decision_wire,
+                                           evidence_v2, claim_v2, document_material)
+            if fault_at == "after_document_promotion":
+                raise RuntimeError("injected reviewed candidate failure after document promotion")
             return result
 
     def register_evidence(

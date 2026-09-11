@@ -171,6 +171,8 @@ def _authorize_document_qualitative(
     evidence_wire: Mapping[str, Any], claim_wire: Mapping[str, Any],
     material: Mapping[str, Any] | None = None,
     source_verification: Mapping[str, Any] | None = None,
+    document_execution_context: Any | None = None,
+    document_execution_store: Any | None = None,
 ) -> dict[str, Any]:
     """ADR-0005: admit one automation-drafted qualitative candidate from a verified original."""
 
@@ -200,6 +202,15 @@ def _authorize_document_qualitative(
         raise ResearchAutoCommitRejected("document qualitative rule admits no numeric statement")
     if statement_is_boilerplate(claim_wire["normalized_statement"]):
         raise ResearchAutoCommitRejected("document qualitative rule admits no disclaimer or boilerplate")
+    from .research_verification import MISSION_DOCUMENT_AUTHORITY_MODE
+    if material is not None and material.get("provenance_mode") == MISSION_DOCUMENT_AUTHORITY_MODE:
+        from .mission_document_research_promotion import authorize_document_candidate
+        return authorize_document_candidate(
+            connection=connection, store=document_execution_store,
+            context=document_execution_context, policy_version=policy_version,
+            evidence=evidence_wire, claim=claim_wire, material=material,
+            source_verification=source_verification,
+        )
     if evidence_wire["source_type"] == "official_filing":
         return _authorize_registered_annual_qualitative(
             connection=connection, policy_version=policy_version,
@@ -736,6 +747,8 @@ def authorize_policy_candidate(
     numeric_spec: Mapping[str, Any] | None = None,
     source_verification: Mapping[str, Any] | None = None,
     numeric_verification: Mapping[str, Any] | None = None,
+    document_execution_context: Any | None = None,
+    document_execution_store: Any | None = None,
 ) -> dict[str, Any]:
     """Evaluate one exact candidate against Core authority and active policy."""
 
@@ -755,6 +768,8 @@ def authorize_policy_candidate(
             connection=connection, policy_version=policy_version,
             evidence_wire=evidence_wire, claim_wire=claim_wire,
             material=material, source_verification=source_verification,
+            document_execution_context=document_execution_context,
+            document_execution_store=document_execution_store,
         )
     rule = _policy_rule(policy_version)
     selected_rule = rule["selected_rule"]
