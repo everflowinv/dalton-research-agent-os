@@ -167,7 +167,9 @@ def _statement_structure_concepts(spec: Mapping[str, Any]) -> set[str]:
     return concepts
 
 
-def _series_for(missions: Any, company_ref: str, concept: str) -> dict[str, Any]:
+def _series_for(
+    missions: Any, company_ref: str, concept: str, *, legacy_replay: bool = False,
+) -> dict[str, Any]:
     """The filed series for one concept, and which statement it came from.
 
     No statement is passed to the query. Across every company held, a concept
@@ -192,13 +194,14 @@ def _series_for(missions: Any, company_ref: str, concept: str) -> dict[str, Any]
     return {
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
-        "series": quarterly_series(lines),
+        "series": quarterly_series(lines, legacy_replay=legacy_replay),
         "source_units": source_units,
     }
 
 
 def _cash_flow_inputs(
-    missions: Any, company_ref: str, spec: Mapping[str, Any],
+    missions: Any, company_ref: str, spec: Mapping[str, Any], *,
+    legacy_replay: bool = False,
 ) -> list[dict[str, Any]]:
     """Select exact filed cash-flow concepts, or retain a typed reason not to."""
 
@@ -240,11 +243,15 @@ def _cash_flow_inputs(
         candidates: list[tuple[str, dict[str, Any]]] = []
         rejected: list[str] = []
         for concept in concepts:
-            entry = _series_for(missions, company_ref, concept)
+            entry = _series_for(
+                missions, company_ref, concept, legacy_replay=legacy_replay,
+            )
             series = entry.get("series") or {}
             quarters = list(series.get("quarters") or [])
             units = set(entry.get("source_units") or [])
-            windows_valid = cash_quarter_windows_are_unique(quarters)
+            windows_valid = (
+                True if legacy_replay else cash_quarter_windows_are_unique(quarters)
+            )
             sign_valid = True
             if role == "capital_expenditure":
                 try:
@@ -390,20 +397,30 @@ def build_model_inputs(
     # revenue driver or expense row. Keep them as source authority lines; do
     # not manufacture economic model rows for them.
     statement_structure_bound = spec.get("financial_statement_structure") is not None
+    legacy_series = (
+        not statement_structure_bound
+        and spec.get("schema_version") in {None, "0.1", "0.2"}
+    )
     statement_structure_concepts = _statement_structure_concepts(spec)
     for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
 
     filed: dict[str, dict[str, Any]] = {}
     for concept in sorted(concepts):
-        filed[concept] = _series_for(missions, company_ref, concept)
+        filed[concept] = _series_for(
+            missions, company_ref, concept,
+            legacy_replay=legacy_series,
+        )
 
     cash_required = any(
         item.get("statement") == "cash" and item.get("importance") != "not_material"
         for item in (spec.get("forecast_statements") or [])
     )
     cash_flow_inputs = (
-        _cash_flow_inputs(missions, company_ref, spec) if cash_required else []
+        _cash_flow_inputs(
+            missions, company_ref, spec,
+            legacy_replay=legacy_series,
+        ) if cash_required else []
     )
 
     # The columns are the periods the filings actually cover, newest last, cut

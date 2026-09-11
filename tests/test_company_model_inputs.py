@@ -244,6 +244,98 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(ocf["status"], AMBIGUOUS)
         self.assertIn("2 frozen filed concepts", ocf["reason"])
 
+    def test_legacy_cash_input_preserves_the_pre_structured_series_shape(self):
+        periods = (("2025-01-01", "2025-03-31"),
+                   ("2025-04-01", "2025-06-30"),
+                   ("2025-07-01", "2025-09-30"),
+                   ("2025-10-01", "2025-12-31"))
+        cash = [
+            _line(concept, start, end,
+                  "100" if role == "operating_cash_flow" else "10",
+                  statement="cash")
+            for role, concept in (
+                ("operating_cash_flow",
+                 "us-gaap:NetCashProvidedByUsedInOperatingActivities"),
+                ("capital_expenditure",
+                 "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"),
+            )
+            for start, end in periods
+        ]
+        base = {**_spec(), "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        for version in (None, "0.1", "0.2"):
+            with self.subTest(version=version):
+                spec = dict(base)
+                if version is not None:
+                    spec["schema_version"] = version
+                table = build_model_inputs(
+                    FakeMissions(self.ledger().lines + cash), spec)
+                self.assertEqual(table["schema_version"], "0.2")
+                self.assertEqual(
+                    content_hash(table),
+                    "f2f6384ab75b9fcdeac12ab12bfe0916d616c45ffc582f70083b944161e1ed5f",
+                )
+                for item in table["cash_flow_inputs"]:
+                    if item["status"] == FILED:
+                        self.assertNotIn("durations", item["series"])
+                        self.assertNotIn("ambiguous_periods", item["series"])
+
+    def test_legacy_cash_input_preserves_overlapping_quarter_selection(self):
+        ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
+        periods = [
+            ("2025-01-01", "2025-03-31"),
+            ("2025-04-01", "2025-06-30"),
+            ("2025-04-02", "2025-06-30"),
+            ("2025-07-01", "2025-09-30"),
+            ("2025-10-01", "2025-12-31"),
+        ]
+        spec = {**_spec(), "schema_version": "0.2", "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        table = build_model_inputs(FakeMissions(
+            self.ledger().lines
+            + [_line(ocf, start, end, "100", statement="cash")
+               for start, end in periods]
+        ), spec)
+        operating = next(item for item in table["cash_flow_inputs"]
+                         if item["role"] == "operating_cash_flow")
+        self.assertEqual(operating["status"], FILED)
+        self.assertEqual(len(operating["series"]["quarters"]), 5)
+        self.assertEqual(
+            content_hash(table),
+            "d560fdee127917c4e90c6b752778bf6133c26c1dd0b7247492bef001d43f4543",
+        )
+
+        strict_spec = {
+            **spec, "schema_version": "0.4",
+            "cash_flow_companion": {
+                "schema_version": "0.1",
+                "lines": [
+                    {"role": "operating_cash_flow", "concept": ocf},
+                    {"role": "capital_expenditure", "concept": None},
+                ],
+            },
+        }
+        strict_table = build_model_inputs(FakeMissions(
+            self.ledger().lines
+            + [_line(ocf, start, end, "100", statement="cash")
+               for start, end in periods]
+        ), strict_spec)
+        strict_operating = next(item for item in strict_table["cash_flow_inputs"]
+                                if item["role"] == "operating_cash_flow")
+        self.assertEqual(strict_operating["status"], NOT_FOUND)
+        self.assertIn("duplicate or overlapping", strict_operating["reason"])
+
+        future_spec = {**strict_spec, "schema_version": "future-version"}
+        future_table = build_model_inputs(FakeMissions(
+            self.ledger().lines
+            + [_line(ocf, start, end, "100", statement="cash")
+               for start, end in periods]
+        ), future_spec)
+        future_operating = next(item for item in future_table["cash_flow_inputs"]
+                                if item["role"] == "operating_cash_flow")
+        self.assertEqual(future_operating["status"], NOT_FOUND)
+        self.assertIn("duplicate or overlapping", future_operating["reason"])
+
     def test_cash_input_keeps_missing_quarter_and_wrong_sign_as_gaps(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
         capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"

@@ -162,6 +162,30 @@ class QuarterlySeriesTests(unittest.TestCase):
             {"value": "953300000", "unit": "usd"},
         ])
 
+    def test_legacy_replay_keeps_the_original_shape_and_parse_order_tie(self):
+        series = quarterly_series([
+            _row("2026-04-01", "2026-06-30", "953300000",
+                 accession="0000051143-26-000078"),
+            _row("2026-04-01", "2026-06-30", "953263534",
+                 accession="0000051143-26-000078"),
+        ], legacy_replay=True)
+        self.assertEqual(series["quarters"][0]["value"], "953263534")
+        self.assertNotIn("durations", series)
+        self.assertNotIn("ambiguous_periods", series)
+
+    def test_legacy_replay_keeps_cross_unit_cumulative_arithmetic(self):
+        series = quarterly_series([
+            _row("2026-01-01", "2026-03-31", "100", unit="USD"),
+            _row("2026-01-01", "2026-06-30", "250", unit="EUR"),
+        ], legacy_replay=True)
+        self.assertEqual(
+            [(item["period_end"], item["value"], item["unit"])
+             for item in series["quarters"]],
+            [("2026-03-31", "100", "USD"),
+             ("2026-06-30", "150", "EUR")],
+        )
+        self.assertEqual(series["derived_count"], 1)
+
     def test_a_breakdown_is_never_mistaken_for_the_total(self):
         # Live: Accenture reports Consulting and Managed Services against the
         # same concept and period as the total, and the parser left the

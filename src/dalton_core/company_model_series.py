@@ -99,7 +99,7 @@ def period_kind(period_start: Any, period_end: Any) -> str:
 
 
 def _latest_by_period(
-    rows: Iterable[Mapping[str, Any]],
+    rows: Iterable[Mapping[str, Any]], *, legacy_replay: bool = False,
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
     """One figure per period: the most recently filed statement of it.
 
@@ -118,7 +118,7 @@ def _latest_by_period(
         if value is None or not end:
             continue
         key = (str(row.get("period_start") or ""), str(end))
-        candidates.setdefault(key, []).append({
+        candidate = {
             "period_start": row.get("period_start"),
             "period_end": end,
             "value": value,
@@ -126,10 +126,21 @@ def _latest_by_period(
             "accession": row.get("accession"),
             "form": row.get("filing_form"),
             "unit": row.get("unit"),
-        })
+        }
+        if legacy_replay:
+            held = candidates.get(key)
+            if held is None or str(row.get("filed") or "") >= str(
+                held[-1].get("filed") or ""
+            ):
+                candidates[key] = [candidate]
+        else:
+            candidates.setdefault(key, []).append(candidate)
     best: dict[tuple[str, str], dict[str, Any]] = {}
     ambiguous: list[dict[str, Any]] = []
     for key, items in candidates.items():
+        if legacy_replay:
+            best[key] = items[-1]
+            continue
         latest_authority = max(
             (str(item.get("filed") or ""), str(item.get("accession") or ""))
             for item in items
@@ -163,7 +174,8 @@ def _latest_by_period(
 
 
 def _derive_quarters(
-    durations: Sequence[Mapping[str, Any]], held: set[tuple[str, str]],
+    durations: Sequence[Mapping[str, Any]], held: set[tuple[str, str]], *,
+    legacy_replay: bool = False,
 ) -> list[dict[str, Any]]:
     """Quarters the filings imply but never state.
 
@@ -186,9 +198,11 @@ def _derive_quarters(
         ordered = sorted(items, key=lambda item: str(item["period_end"]))
         previous: Mapping[str, Any] | None = None
         for item in ordered:
-            if previous is not None and str(previous.get("unit") or "").casefold() == str(
-                item.get("unit") or ""
-            ).casefold():
+            if previous is not None and (
+                legacy_replay
+                or str(previous.get("unit") or "").casefold()
+                == str(item.get("unit") or "").casefold()
+            ):
                 previous_end = _date(previous["period_end"])
                 quarter_start = (previous_end.toordinal() + 1
                                  if previous_end is not None else None)
@@ -229,17 +243,24 @@ def _derive_quarters(
     return derived
 
 
-def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def quarterly_series(
+    rows: Iterable[Mapping[str, Any]], *, legacy_replay: bool = False,
+) -> dict[str, Any]:
     """A quarterly series for one concept, and an account of how it was built.
 
     Reported quarters are taken as filed. Missing ones are derived from
     cumulative figures where the arithmetic is available, and marked. Nothing
     is invented: a quarter neither reported nor derivable is simply absent, and
     the gaps are named so a reader can see what the model does not have.
+
+    ``legacy_replay`` preserves the exact pre-structured 0.1/0.2 projection:
+    filing-date-only tie selection, cross-unit cumulative arithmetic, and the
+    smaller returned shape.  Those choices are unsafe for new models but are
+    part of the immutable input hash carried by already-filed model versions.
     """
 
     rows = list(rows)
-    best, ambiguous = _latest_by_period(rows)
+    best, ambiguous = _latest_by_period(rows, legacy_replay=legacy_replay)
     quarters: list[dict[str, Any]] = []
     durations: list[dict[str, Any]] = []
     instants: list[dict[str, Any]] = []
@@ -259,7 +280,9 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             unknown += 1
 
     held = {(str(item["period_start"]), str(item["period_end"])) for item in quarters}
-    derived = _derive_quarters(durations, held)
+    derived = _derive_quarters(
+        durations, held, legacy_replay=legacy_replay,
+    )
     combined = sorted(
         [{**item, "source_accessions": sorted({str(item.get("accession") or "")} - {""}),
           "source_forms": sorted({str(item.get("form") or "")} - {""})}
@@ -267,7 +290,7 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
          for item in quarters + derived],
         key=lambda item: (str(item["period_end"]), str(item["period_start"])),
     )
-    return {
+    result = {
         "quarters": [
             {
                 "period_start": item["period_start"],
@@ -292,24 +315,32 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             ],
             key=lambda item: str(item["period_end"]),
         ),
-        "durations": sorted(
-            [
-                {"period_start": item["period_start"],
-                 "period_end": item["period_end"],
-                 "period_kind": period_kind(item["period_start"], item["period_end"]),
-                 "value": format(item["value"], "f"), "unit": item.get("unit"),
-                 "source_accessions": sorted(
-                     {str(item.get("accession") or "")} - {""}),
-                 "source_forms": sorted({str(item.get("form") or "")} - {""})}
-                for item in durations
-            ],
-            key=lambda item: (str(item["period_end"]), str(item["period_start"])),
-        ),
-        "ambiguous_periods": ambiguous,
         "cumulative_used": cumulative_count,
         "derived_count": len(derived),
         "unclassified_periods": unknown,
     }
+    if not legacy_replay:
+        result.update({
+            "durations": sorted(
+                [
+                    {"period_start": item["period_start"],
+                     "period_end": item["period_end"],
+                     "period_kind": period_kind(
+                         item["period_start"], item["period_end"]),
+                     "value": format(item["value"], "f"),
+                     "unit": item.get("unit"),
+                     "source_accessions": sorted(
+                         {str(item.get("accession") or "")} - {""}),
+                     "source_forms": sorted(
+                         {str(item.get("form") or "")} - {""})}
+                    for item in durations
+                ],
+                key=lambda item: (
+                    str(item["period_end"]), str(item["period_start"])),
+            ),
+            "ambiguous_periods": ambiguous,
+        })
+    return result
 
 
 def series_gaps(series: Mapping[str, Any]) -> list[dict[str, Any]]:
