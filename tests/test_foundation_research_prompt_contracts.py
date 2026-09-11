@@ -73,8 +73,9 @@ class FoundationResearchPromptContractTests(unittest.TestCase):
             "filings":[],"concepts":[],"market_proxies":[],"industry_classification":None})
         self.assertIn("cannot browse", prompt)
         self.assertIn("labelled market proxies", prompt)
-        self.assertIn("current base case", prompt)
-        self.assertIn("falsifier", prompt)
+        self.assertIn("Choose the model structure you currently judge appropriate", prompt)
+        self.assertIn("what observation would require a different structure", prompt)
+        self.assertIn("investment scenarios and tracking tasks have their own downstream consumers", prompt)
 
     def test_memo_distinguishes_market_evidence_house_view_and_arithmetic(self):
         prompt=memo.build_group_prompt(group="view", section_titles=["Variant view"],

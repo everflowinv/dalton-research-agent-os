@@ -1,5 +1,7 @@
 # Dalton 项目进度
 
+Current checkpoint (2026-09-11 06:45 UTC): R9b `e68171f` was **not deployed**: its 6,960-test full suite exposed seven stale-fixture/assertion failures, now repaired in integration with 16 affected tests passing. A new R9c freeze requires fresh full acceptance. Installed R9a retains broker 16/64/600,000 ms and twelve model configurations; its 45-sample health observation failed one transient SQLite lock sample, and actual Dossier 0.3 publication remains pending. AlphaEngine search selection is being wired asynchronously before acquisition; model-error recovery must never fetch all candidates. See the foundation runtime closure and earnings-call discovery audit reports for evidence and next actions.
+
 更新日期：2026-09-11（基础执行、年报阅读和模型调用真实路径验收；以下历史记录保留）
 
 ## 当前检查点（2026-09-11，R9a 部署后）

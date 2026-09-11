@@ -145,7 +145,12 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         request_id=(content_hash({"unit":self.unit,"company":"company:acn","prompt_sha":content_hash(prompt)})[:32]
                     if is_producer else
                     f"verify-{self.verified_draft_hash[:24]}-{verifier_prompt_contract_fingerprint()[:16]}")
-        work={"id":work_ref,"question":prompt,"metadata":{"purpose":"dossier" if is_producer else "dossier_verifier","request_id":request_id,"mission_version_ref":self.producer_input["mission"]["ref"],"mission_version_hash":self.producer_input["mission"]["hash"],"producer_route_decision_refs":producer_routes}}
+        # Real CockpitModel verifier work binds its producer routes in the
+        # persisted request id; provenance retains the semantic request id.
+        work_request_id = request_id
+        if producer_routes:
+            work_request_id += ":producer:" + content_hash(sorted(set(producer_routes)))[:16]
+        work={"id":work_ref,"question":prompt,"metadata":{"purpose":"dossier" if is_producer else "dossier_verifier","request_id":work_request_id,"mission_version_ref":self.producer_input["mission"]["ref"],"mission_version_hash":self.producer_input["mission"]["hash"],"producer_route_decision_refs":producer_routes}}
         work_hash=content_hash(work)
         output=(self.producer_text if is_producer else '{"verdict":"pass","findings":[]}')
         envelope={"id":result_ref,"work_order_ref":work_ref,"invocation_ref":invocation_ref,"status":"succeeded","outputs":{"text":output},"metadata":{"route_decision_ref":route_ref}}
@@ -223,7 +228,7 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         router=sqlite3.connect(self.router_path)
         router.execute("UPDATE model_route_decisions SET work_order_hash=? WHERE work_order_id='work:verifier'",(new_hash,))
         router.commit();router.close()
-        with self.assertRaisesRegex(ValueError,"did not bind its producer"):
+        with self.assertRaisesRegex(ValueError,"authority binding drifted"):
             validate_formal_unit_provenance(self.provenance, mission_ref="mission:v14", current_prior_ref=None, scheduler_db=self.scheduler_path, router_db=self.router_path)
 
     def test_cross_company_and_cross_unit_producer_proof_is_refused(self):
