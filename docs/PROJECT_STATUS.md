@@ -2,7 +2,19 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-11，02:06 UTC）
+## 当前检查点（2026-09-11，02:31 UTC）
+
+**基础版本 R6 `e6fc41b` 已安装，运行稳定性仍待修复，不能记为完整验收。** 同一冻结 6,843 tests / 1 skip、556 个 wheel 文件逐字一致、67 schemas / 40 entries / 0 escaped 副本演练通过。部署 exit 0、15 DB 备份通过；实际安装 556 个运行文件、1,844 个 retained source 文件与冻结一致。12 份模型/预算/credential、mission v14、broker 配置和历史未决调用均保留。
+
+实际五家公司 Excel 与 HTML 导出成功。同源码独立离线重算核对 484 个正式模型单元格、227 个完整年度汇总，全部匹配且无公式错误。OCF/CapEx 与预测 FCF 已可导出；历史 FCF、边界不完整年度和 DXC 无有效税率的预测仍明确缺失，不填零。Dossier 仍是部分档案（ACN 3/12、EPAM 9/12、IBM 10/12；CTSH/DXC 缺失的导出时快照），不是完整研究验收。
+
+部署后先有一次健康失败，随后同 PID 60123 的 12 次连续观察通过；再次检查仍出现约 100 秒心跳过期，故保留 `installed_bytes_verified_runtime_pending`。进程采样确认同步 HTTPS 发布阻塞控制器主线程，正修为有界单飞后台发布。独立排查还找到 model-router 的 DELETE journal 在并行读写时使正式 chain-link COMMIT 失败，正补 WAL 并发回归；Scheduler 的独立锁等待仍需区分。
+
+Dossier schema 0.3 六份来源追溯改进已交叉审查并合并，126 项集成测试通过。新单元精确回放 producer 结果、独立 verifier、输入/路由/mission 与治理；旧单元可在增量更新和 mission 改版间保留原证明，不编造历史。尚未部署，正在用真实只读资料验证兼容性。
+
+**Next step：** 先关闭服务发布阻塞和数据库并发基础缺陷，与 Dossier 改进统一验收后部署；再核对实际产物及运行稳定性。高阶投资方法、最终视觉和多 workspace 扩展继续后排。人类研究裁决与资料来源批准保持原边界。
+
+## 前一检查点（2026-09-11，02:06 UTC）
 
 **继续完成基础产物闭环；live 保持已验收 R5 `598f285`。** ACN 10-K → 新规格 → schema 0.2 模型已自然完成，OCF/CapEx 各 13 个季度、FCF 8/8 已计算。真实导出暴露的年度 filing hash 漏项和三条现金流公式缺口已修复，并补齐 ingest/ordinal/line identity 证明；修复版 ACN Excel 的 88 个模型单元格经 LibreOffice 重算全部匹配、无公式错误。尚未部署这些导出修复。
 
