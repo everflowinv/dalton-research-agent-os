@@ -23,7 +23,7 @@ from dalton_core.document_research_qualitative import (
     MissionDocumentDraftWorker, MissionDocumentVerifierWorker,
 )
 from dalton_core.mission_document_research_executor import (
-    MissionDocumentResearchExecutor,
+    MissionDocumentResearchExecutor, read_mission_document_research_observations,
 )
 from dalton_core.annual_report_qualitative import AnnualReportQualitativeError
 from dalton_core.raw_spool import RawSpool
@@ -40,11 +40,11 @@ class MissionDocumentResearchTests(unittest.TestCase):
     def _executor(self, fixture, authority):
         statement = "Managed services revenue is recognized over time."
         draft_adapter = CountingFakeAdapter({
-            "schema_version": "0.1", "answer": statement,
+            "schema_version": "0.1", "status": "answered", "answer": statement,
             "candidate": {"normalized_statement": statement,
                           "metric_or_aspect": "managed services revenue recognition",
                           "period": "current policy", "basis": "reported",
-                          "cited_match_indexes": [0]},
+                          "cited_match_indexes": [0]}, "missing": [],
         })
         verifier_adapter = CountingFakeAdapter({
             "schema_version": "0.1", "verdict": "pass",
@@ -405,6 +405,14 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_outcomes"
         ).fetchone()[0], 1)
+        observations = read_mission_document_research_observations(
+            fixture.store.connection, mission_version_ref=fixture.mission["id"])
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["outcome"], "candidate_staged")
+        self.assertEqual(observations[0]["result_envelope_ref"],
+                         fixture.harness.scheduler().formal_result(
+                             observations[0]["work_order_ref"])["result_envelope_id"])
+        self.assertEqual(observations[0]["question"], admission["planner_inquiry"]["question"])
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT count(*) FROM thesis_impact_day_admissions WHERE "
             "work_order_ref LIKE 'work:mission-document-research-%'"
@@ -456,6 +464,61 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(
             fixture.harness.staging.counts()["candidate_stage_requests"], 0
         )
+
+    def test_query_miss_is_typed_feedback_and_does_not_claim_no_answer(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        original = json.loads(fixture.store.connection.execute(
+            "SELECT plan_json FROM coverage_mission_research_plans WHERE plan_id=?",
+            (args["plan_ref"],),
+        ).fetchone()[0])
+        plan = {key: value for key, value in original.items() if key != "content_hash"}
+        plan["state_hash"] = "7" * 64
+        plan["inquiries"][0]["directed_document"]["query_terms"] = ["unobtainium"]
+        plan["inquiries"][0]["directed_document"]["query_rationale"] = (
+            "Try one bounded term and report a miss honestly."
+        )
+        plan["content_hash"] = content_hash(plan)
+        stored = self._record_plan(fixture, plan)
+        inquiry = plan["inquiries"][0]
+        admission = authority.admit_from_plan(**{
+            **args, "plan_ref": stored["plan_id"],
+            "inquiry_ref": inquiry_ref_for(inquiry_content_hash(inquiry)),
+        })
+        executor, draft, verifier = self._executor(fixture, authority)
+        results = [executor.run_once(admission["id"]) for _ in range(3)]
+        self.assertEqual([item["status"] for item in results], [
+            "admitted", "succeeded", "complete",
+        ])
+        self.assertEqual(results[-1]["research_status"], "query_miss")
+        self.assertEqual((draft.calls, verifier.calls), (0, 0))
+        feedback = read_mission_document_research_observations(
+            fixture.store.connection, mission_version_ref=fixture.mission["id"])
+        self.assertEqual(len(feedback), 1)
+        self.assertIn("does not prove", feedback[0]["meaning"])
+        self.assertEqual(feedback[0]["tried_query_terms"], ["unobtainium"])
+        replay = executor.run_once(admission["id"])
+        self.assertEqual(replay["feedback_ref"], results[-1]["feedback_ref"])
+
+    def test_insufficient_evidence_skips_verifier_and_records_exact_missing_need(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        draft.candidate_wire = {
+            "schema_version": "0.1", "status": "insufficient_evidence",
+            "answer": "The excerpts do not define the contract boundary.",
+            "candidate": None,
+            "missing": ["the contract clause that defines the service period"],
+        }
+        results = [executor.run_once(admission["id"]) for _ in range(5)]
+        self.assertEqual(results[-1]["research_status"], "no_verified_claim")
+        self.assertEqual((draft.calls, verifier.calls), (1, 0))
+        observations = read_mission_document_research_observations(
+            fixture.store.connection, mission_version_ref=fixture.mission["id"])
+        self.assertEqual(observations[0]["outcome"], "no_verified_claim")
+        self.assertEqual(observations[0]["missing_evidence"], [
+            "the contract clause that defines the service period"
+        ])
+        self.assertIsNotNone(observations[0]["draft_proof_ref"])
 
 
 if __name__ == "__main__":

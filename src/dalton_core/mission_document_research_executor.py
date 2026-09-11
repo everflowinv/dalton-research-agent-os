@@ -34,6 +34,79 @@ class MissionDocumentResearchExecutorError(RuntimeError):
     pass
 
 
+def read_mission_document_research_observations(
+    connection: Any, *, mission_version_ref: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read canonical immutable query outcomes for planner state projection."""
+
+    query = "SELECT * FROM mission_document_research_observations"
+    params: tuple[Any, ...] = ()
+    if mission_version_ref is not None:
+        query += " WHERE mission_version_ref=?"
+        params = (mission_version_ref,)
+    query += " ORDER BY created_at,observation_id"
+    try:
+        rows = connection.execute(query, params).fetchall()
+    except Exception as exc:
+        # Older copied states have no feedback table and therefore no outcomes.
+        if "no such table" in str(exc).lower():
+            return []
+        raise
+    result = []
+    fields = {
+        "schema_version", "id", "admission_ref", "admission_hash",
+        "mission_version_ref", "company_ref", "plan_ref", "plan_hash",
+        "inquiry_ref", "inquiry_hash", "question_version_ref",
+        "question_version_hash", "question", "wants", "document_ref",
+        "document_authority_ref",
+        "document_authority_hash", "search_proof_ref", "search_proof_hash",
+        "draft_proof_ref", "draft_proof_hash", "missing_evidence",
+        "stage", "work_order_ref", "work_order_hash",
+        "result_envelope_ref", "result_envelope_hash",
+        "candidate_evidence_ref", "candidate_evidence_hash",
+        "candidate_claim_ref", "candidate_claim_hash", "recovery",
+        "outcome", "tried_query_terms", "meaning", "suggested_actions",
+        "created_at", "content_hash",
+    }
+    for row in rows:
+        try:
+            wire = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "stored directed-document feedback is invalid") from exc
+        body = dict(wire) if isinstance(wire, Mapping) else {}
+        asserted = body.pop("content_hash", None)
+        columns = {
+            "id": row["observation_id"], "admission_ref": row["admission_ref"],
+            "admission_hash": row["admission_hash"],
+            "mission_version_ref": row["mission_version_ref"],
+            "company_ref": row["company_ref"], "inquiry_ref": row["inquiry_ref"],
+            "inquiry_hash": row["inquiry_hash"], "outcome": row["outcome"],
+            "created_at": row["created_at"],
+        }
+        if (not isinstance(wire, Mapping) or set(wire) != fields
+                or wire.get("schema_version") != SCHEMA_VERSION
+                or wire.get("outcome") not in {
+                    "query_miss", "no_verified_claim", "recovery_required", "candidate_staged"}
+                or any(wire.get(key) != value for key, value in columns.items())
+                or asserted != row["content_hash"] or asserted != content_hash(body)
+                or canonical_json(wire) != row["record_json"]
+                or not isinstance(wire.get("tried_query_terms"), list)
+                or wire.get("suggested_actions") != (
+                    ["revise_query_terms", "bounded_document_read"]
+                    if wire.get("outcome") == "query_miss" else
+                    ["revise_query_terms", "bounded_document_read", "acquire_another_document"]
+                    if wire.get("outcome") == "no_verified_claim" else []
+                )
+                or (wire.get("draft_proof_ref") is None)
+                != (wire.get("outcome") in {"query_miss", "recovery_required"})
+                or not isinstance(wire.get("missing_evidence"), list)):
+            raise MissionDocumentResearchExecutorError(
+                "stored directed-document feedback drifted")
+        result.append(dict(wire))
+    return result
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -102,6 +175,9 @@ def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
             "inquiry_ref": admission["inquiry_ref"], "inquiry_hash": admission["inquiry_hash"],
             "question_version_ref": admission["question_version_ref"],
             "question_version_hash": admission["question_version_hash"],
+            "question": admission["planner_inquiry"]["question"],
+            "wants": admission["planner_inquiry"]["wants"],
+            "document_ref": admission["request"]["registration"]["document_ref"],
             "document_authority_ref": admission["document_authority_ref"],
             "document_authority_hash": admission["document_authority_hash"],
             "step_ref": step["id"], "step_hash": step["content_hash"],
@@ -363,6 +439,118 @@ class MissionDocumentResearchExecutor:
             raise MissionDocumentResearchExecutorError("retrieval completion did not converge")
         return {"status": "succeeded", "work_order_ref": work["id"]}
 
+    def _write_observation(self, body):
+        body["content_hash"] = content_hash(body)
+        existing = self.connection.execute(
+            "SELECT record_json,content_hash FROM mission_document_research_observations "
+            "WHERE observation_id=?", (body["id"],)).fetchone()
+        if existing is None:
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO mission_document_research_observations VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (body["id"], body["admission_ref"], body["admission_hash"],
+                     body["mission_version_ref"], body["company_ref"],
+                     body["inquiry_ref"], body["inquiry_hash"], body["outcome"],
+                     canonical_json(body), body["content_hash"], body["created_at"]),
+                )
+        elif (existing["record_json"] != canonical_json(body)
+              or existing["content_hash"] != body["content_hash"]):
+            raise MissionDocumentResearchExecutorError("stored observation drifted")
+        exact = [item for item in read_mission_document_research_observations(
+            self.connection, mission_version_ref=body["mission_version_ref"]
+        ) if item["id"] == body["id"]]
+        if len(exact) != 1:
+            raise MissionDocumentResearchExecutorError("observation was not persisted exactly")
+        return exact[0]
+
+    def _research_feedback(self, admission, proof, work, formal, *, outcome, draft_proof=None):
+        if outcome not in {"query_miss", "no_verified_claim"}:
+            raise MissionDocumentResearchExecutorError("unsupported research feedback outcome")
+        missing = [] if draft_proof is None else list(draft_proof["output"]["missing"])
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "id": _ref("mission-document-research-feedback", {
+                "admission_ref": admission["id"], "outcome": outcome}),
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "mission_version_ref": admission["mission_version_ref"],
+            "company_ref": admission["company_ref"],
+            "plan_ref": admission["plan_ref"], "plan_hash": admission["plan_hash"],
+            "inquiry_ref": admission["inquiry_ref"], "inquiry_hash": admission["inquiry_hash"],
+            "question_version_ref": admission["question_version_ref"],
+            "question_version_hash": admission["question_version_hash"],
+            "question": admission["planner_inquiry"]["question"],
+            "wants": admission["planner_inquiry"]["wants"],
+            "document_ref": admission["request"]["registration"]["document_ref"],
+            "document_authority_ref": admission["document_authority_ref"],
+            "document_authority_hash": admission["document_authority_hash"],
+            "search_proof_ref": proof["id"], "search_proof_hash": proof["content_hash"],
+            "draft_proof_ref": None if draft_proof is None else draft_proof["id"],
+            "draft_proof_hash": None if draft_proof is None else draft_proof["content_hash"],
+            "missing_evidence": missing, "outcome": outcome,
+            "stage": work["metadata"]["stage"], "work_order_ref": work["id"],
+            "work_order_hash": content_hash(work),
+            "result_envelope_ref": formal["result_envelope_id"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+            "candidate_evidence_ref": None, "candidate_evidence_hash": None,
+            "candidate_claim_ref": None, "candidate_claim_hash": None,
+            "recovery": None,
+            "tried_query_terms": list(admission["request"]["query_terms"]),
+            "meaning": (
+                "The bounded query found no matching excerpt; this does not prove the "
+                "registered full text lacks an answer."
+                if outcome == "query_miss" else
+                "The retrieved excerpts were readable but did not support a verified answer; "
+                "this does not prove the registered full text or another document lacks one."
+            ),
+            "suggested_actions": (
+                ["revise_query_terms", "bounded_document_read"]
+                if outcome == "query_miss" else
+                ["revise_query_terms", "bounded_document_read", "acquire_another_document"]
+            ),
+            "created_at": admission["created_at"],
+        }
+        exact = self._write_observation(body)
+        return {"status": "complete", "research_status": outcome,
+                "feedback_ref": exact["id"], "feedback_hash": exact["content_hash"]}
+
+    def _candidate_observation(self, admission, work, formal, records):
+        proof = work["metadata"]["retrieval_proof"]
+        draft = work["metadata"]["draft_proof"]
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "id": _ref("mission-document-research-observation", {
+                "admission_ref": admission["id"], "outcome": "candidate_staged",
+                "work_order_ref": work["id"]}),
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "mission_version_ref": admission["mission_version_ref"],
+            "company_ref": admission["company_ref"], "plan_ref": admission["plan_ref"],
+            "plan_hash": admission["plan_hash"], "inquiry_ref": admission["inquiry_ref"],
+            "inquiry_hash": admission["inquiry_hash"],
+            "question_version_ref": admission["question_version_ref"],
+            "question_version_hash": admission["question_version_hash"],
+            "question": admission["planner_inquiry"]["question"],
+            "wants": admission["planner_inquiry"]["wants"],
+            "document_ref": admission["request"]["registration"]["document_ref"],
+            "document_authority_ref": admission["document_authority_ref"],
+            "document_authority_hash": admission["document_authority_hash"],
+            "search_proof_ref": proof["id"], "search_proof_hash": proof["content_hash"],
+            "draft_proof_ref": draft["id"], "draft_proof_hash": draft["content_hash"],
+            "missing_evidence": [], "outcome": "candidate_staged",
+            "stage": work["metadata"]["stage"], "work_order_ref": work["id"],
+            "work_order_hash": content_hash(work),
+            "result_envelope_ref": formal["result_envelope_id"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+            "candidate_evidence_ref": records["candidate_evidence_ref"],
+            "candidate_evidence_hash": records["candidate_evidence_hash"],
+            "candidate_claim_ref": records["candidate_claim_ref"],
+            "candidate_claim_hash": records["candidate_claim_hash"],
+            "tried_query_terms": list(admission["request"]["query_terms"]),
+            "meaning": "An independently verified draft-only candidate was staged.",
+            "suggested_actions": [], "recovery": None,
+            "created_at": admission["created_at"],
+        }
+        return self._write_observation(body)
+
     def _staging_records(self, admission, works, verifier):
         staged = stage_candidate(
             self.staging, admission=admission,
@@ -440,6 +628,10 @@ class MissionDocumentResearchExecutor:
             result_envelope_hash=content_hash(envelope))
         if completed["status"] != "fresh":
             raise MissionDocumentResearchExecutorError("staging completion did not converge")
+        stage_formal = self.scheduler.formal_result(work["id"])
+        if stage_formal is None:
+            raise MissionDocumentResearchExecutorError("staging formal result is unavailable")
+        self._candidate_observation(admission, work, stage_formal, records)
         return self._outcome(admission, works, records)
 
     def _stage_owned(self, work, formal):
@@ -511,18 +703,32 @@ class MissionDocumentResearchExecutor:
                 return {"status": "blocked", "work_order_ref": work["id"],
                         "stage": work["metadata"]["stage"]}
             if index == 0:
-                self.registry.verify_search_proof(formal["result_envelope"]["outputs"])
+                proof = self.registry.verify_search_proof(
+                    formal["result_envelope"]["outputs"])
+                if not proof["matches"]:
+                    return self._research_feedback(
+                        admission, proof, work, formal, outcome="query_miss")
             elif index in (1, 2):
                 validate_mission_document_work_authority(self.authority, self.scheduler, work)
-                validate_model_proof(formal["result_envelope"]["outputs"],
-                                     stage=work["metadata"]["stage"], work=work)
+                model_proof = validate_model_proof(
+                    formal["result_envelope"]["outputs"],
+                    stage=work["metadata"]["stage"], work=work)
+                if index == 1 and model_proof["output"]["status"] == "insufficient_evidence":
+                    return self._research_feedback(
+                        admission, work["metadata"]["retrieval_proof"],
+                        work, formal, outcome="no_verified_claim",
+                        draft_proof=model_proof)
             else:
                 self._stage_owned(work, formal)
                 works = [_derive(admission, self.scheduler, self.registry, blueprints, i)
                          for i in range(4)]
+                self._candidate_observation(
+                    admission, work, formal, formal["result_envelope"]["outputs"])
                 return self._outcome(admission, works, formal["result_envelope"]["outputs"])
         raise MissionDocumentResearchExecutorError("directed-document run has invalid shape")
 
 
 __all__ = ["AUTHORITY_KIND", "MissionDocumentResearchExecutor",
-           "MissionDocumentResearchExecutorError", "validate_mission_document_work_authority"]
+           "MissionDocumentResearchExecutorError",
+           "read_mission_document_research_observations",
+           "validate_mission_document_work_authority"]
