@@ -63,7 +63,9 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .claim_index_authority import MARKET_PROXY
-from .company_model_inputs import AMBIGUOUS, ESTIMATED, FILED, NOT_FOUND, SHARED
+from .company_model_inputs import (
+    AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, NOT_FOUND, SHARED,
+)
 from .driver_template import COST_DRIVER_TEMPLATES
 from .model_forecast import (
     DRIVER_FORMULA_HASH,
@@ -75,7 +77,8 @@ from .store import (
     DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash,
 )
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
+LEGACY_SCHEMA_VERSION = "0.1"
 FORMULA_REF = DRIVER_FORMULA_REF
 FORMULA_HASH = DRIVER_FORMULA_HASH
 GENERATOR_REF = "rule:trailing-carry-forward:1"
@@ -147,6 +150,9 @@ CONCEPT_ROLES: dict[str, str] = {
         OPERATING_CASH_FLOW,
     "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment": CAPITAL_EXPENDITURE,
 }
+for _cash_role, _cash_concepts in CASH_FLOW_ROLE_CONCEPTS.items():
+    for _cash_concept in _cash_concepts:
+        CONCEPT_ROLES[_cash_concept] = _cash_role
 ROLES: tuple[str, ...] = (
     REVENUE, COST_OF_REVENUE, OPERATING_EXPENSE, INCOME_TAX, NET_INCOME,
     OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE,
@@ -166,7 +172,7 @@ ROLE_STATEMENTS: dict[str, str] = {
     OPERATING_CASH_FLOW: "cash", CAPITAL_EXPENDITURE: "cash",
 }
 
-DRIVER_KINDS: tuple[str, ...] = ("revenue", "expense")
+DRIVER_KINDS: tuple[str, ...] = ("revenue", "expense", "cash_flow")
 DRIVER_STATUSES: tuple[str, ...] = (FILED, SHARED, ESTIMATED, NOT_FOUND, AMBIGUOUS)
 FORECASTABLE_STATUSES = frozenset({FILED, SHARED})
 # What a cell is. ``estimate`` is what we thought, ``human`` is what a person
@@ -251,6 +257,7 @@ _DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots"})
 _CELL_FIELDS = frozenset({
     "concept", "period_start", "period_end", "value", "basis", "accessions",
 })
+_CELL_OPTIONAL_FIELDS = frozenset({"source_forms", "derived_from"})
 _ASSUMPTION_FIELDS = frozenset({
     "ref", "driver_ref", "period", "measure", "value", "unit", "kind",
     "because", "refs", "provenance", "superseded_by", "outside_band",
@@ -423,6 +430,10 @@ def _cells_of(line: Mapping[str, Any], concept: str) -> list[dict[str, Any]]:
             "value": str(cell.get("value")),
             "basis": str(cell.get("basis")),
             "accessions": [str(item) for item in (cell.get("source_accessions") or [])],
+            **({"source_forms": [str(item) for item in cell["source_forms"]]}
+               if cell.get("source_forms") else {}),
+            **({"derived_from": [dict(item) for item in cell["derived_from"]]}
+               if cell.get("derived_from") else {}),
         })
     return sorted(cells, key=lambda item: item["period_end"])
 
@@ -466,6 +477,29 @@ def build_drivers(table: Mapping[str, Any]) -> list[dict[str, Any]]:
     filed = {str(item["concept"]): item for item in (table.get("filed_lines") or [])}
     drivers: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    for cash in table.get("cash_flow_inputs") or []:
+        if cash.get("status") != FILED:
+            continue
+        concept = str(cash["concept"])
+        ref = f"concept:{concept}"
+        quarters = list((cash.get("series") or {}).get("quarters") or [])
+        drivers[ref] = {
+            "ref": ref, "kind": "cash_flow", "label": concept,
+            "concept": concept, "statement": "cash", "unit": cash.get("unit"),
+            "status": FILED, "role": str(cash["role"]),
+            "spec_rows": [f"cash-flow:{cash['role']}"], "note": None,
+            "history": [{
+                "concept": concept, "period_start": item.get("period_start"),
+                "period_end": str(item["period_end"]), "value": str(item["value"]),
+                "basis": str(item["basis"]),
+                "accessions": [str(ref) for ref in item.get("source_accessions") or []],
+                "source_forms": [str(form) for form in item.get("source_forms") or []],
+                **({"derived_from": [dict(operand)
+                                     for operand in item["derived_from"]]}
+                   if item.get("derived_from") else {}),
+            } for item in quarters],
+        }
+        order.append(ref)
     for row in table.get("rows") or []:
         kind = (
             "revenue"
@@ -1880,10 +1914,12 @@ def model_readiness(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_driver(value: Any, name: str) -> dict[str, Any]:
+def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str, Any]:
+    cell_optional = _CELL_OPTIONAL_FIELDS if schema_version == SCHEMA_VERSION else frozenset()
     wire = _closed(value, _DRIVER_FIELDS, name, optional=_DRIVER_OPTIONAL_FIELDS)
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
-    wire["kind"] = _one_of(wire["kind"], DRIVER_KINDS, f"{name}.kind")
+    driver_kinds = DRIVER_KINDS if schema_version == SCHEMA_VERSION else ("revenue", "expense")
+    wire["kind"] = _one_of(wire["kind"], driver_kinds, f"{name}.kind")
     wire["label"] = _text(wire["label"], f"{name}.label")
     wire["concept"] = _optional_text(wire["concept"], f"{name}.concept")
     wire["statement"] = _optional_text(wire["statement"], f"{name}.statement")
@@ -1921,7 +1957,8 @@ def _normalize_driver(value: Any, name: str) -> dict[str, Any]:
         raise ForecastModelValidationError(f"{name}.history must be a list")
     cells = []
     for index, cell in enumerate(wire["history"]):
-        item = _closed(cell, _CELL_FIELDS, f"{name}.history[{index}]")
+        item = _closed(cell, _CELL_FIELDS, f"{name}.history[{index}]",
+                       optional=cell_optional)
         item["concept"] = _text(item["concept"], f"{name}.history[{index}].concept")
         item["period_start"] = (
             None if item["period_start"] is None
@@ -1932,6 +1969,61 @@ def _normalize_driver(value: Any, name: str) -> dict[str, Any]:
         item["accessions"] = [
             _text(entry, f"{name}.history[{index}].accessions[]")
             for entry in (item["accessions"] or [])]
+        if "source_forms" in item:
+            forms = item["source_forms"]
+            if (not isinstance(forms, list)
+                    or len(set(forms)) != len(forms)
+                    or any(form not in ("10-Q", "10-K") for form in forms)):
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}].source_forms must contain 10-Q/10-K")
+        if "derived_from" in item:
+            operands = item["derived_from"]
+            if not isinstance(operands, list) or len(operands) != 2:
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}].derived_from must contain two operands")
+            normalized_operands = []
+            for operand_index, operand in enumerate(operands):
+                if not isinstance(operand, Mapping):
+                    raise ForecastModelValidationError(
+                        f"{name}.history[{index}].derived_from[{operand_index}] "
+                        "must be an object")
+                normalized_operands.append({
+                    "period_start": _iso_date(operand.get("period_start"),
+                                              f"{name}.derived_from.period_start"),
+                    "period_end": _iso_date(operand.get("period_end"),
+                                            f"{name}.derived_from.period_end"),
+                    "value": format(_decimal(operand.get("value"),
+                                             f"{name}.derived_from.value"), "f"),
+                    "unit": _text(operand.get("unit"), f"{name}.derived_from.unit"),
+                    "accession": _text(operand.get("accession"),
+                                       f"{name}.derived_from.accession"),
+                    "form": _one_of(operand.get("form"), ("10-Q", "10-K"),
+                                    f"{name}.derived_from.form"),
+                })
+            item["derived_from"] = normalized_operands
+            derived = item["derived_from"]
+            if ({operand["accession"] for operand in derived} != set(item["accessions"])
+                    or {operand["form"] for operand in derived}
+                    != set(item.get("source_forms") or [])):
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}] derived operands do not match its sources")
+            if (derived[0]["unit"] != derived[1]["unit"]
+                    or derived[0]["unit"] != wire["unit"]
+                    or _decimal(derived[1]["value"], "derived value")
+                    - _decimal(derived[0]["value"], "derived value")
+                    != _decimal(item["value"], "derived quarter value")):
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}] derived arithmetic does not replay")
+        if wire["kind"] == "cash_flow" and item["basis"] == "derived_from_cumulative":
+            if "derived_from" not in item:
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}] derived cell must bind its operands")
+        elif wire["kind"] == "cash_flow" and "derived_from" in item:
+            raise ForecastModelValidationError(
+                f"{name}.history[{index}] reported cell cannot carry derived operands")
+        if wire["kind"] == "cash_flow" and not item.get("source_forms"):
+            raise ForecastModelValidationError(
+                f"{name}.history[{index}] cash flow cell must bind source forms")
         cells.append(item)
     if wire["concept"] is None and cells:
         raise ForecastModelValidationError(
@@ -2132,8 +2224,8 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     """The whole record, checked against its closed shape and its own hashes."""
 
     wire = _closed(value, _RECORD_FIELDS, "forecast model")
-    if wire["schema_version"] != SCHEMA_VERSION:
-        raise ForecastModelValidationError("forecast model schema_version is not 0.1")
+    if wire["schema_version"] not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+        raise ForecastModelValidationError("forecast model schema_version is unsupported")
     for field in ("id", "created_at", "model_ref", "company_ref", "spec_ref",
                   "unit", "currency", "actor_ref"):
         wire[field] = _text(wire[field], field)
@@ -2199,7 +2291,8 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(wire["drivers"], list) or not wire["drivers"]:
         raise ForecastModelValidationError("a model must carry at least one driver")
-    drivers = [_normalize_driver(item, f"drivers[{index}]")
+    drivers = [_normalize_driver(item, f"drivers[{index}]",
+                                 schema_version=wire["schema_version"])
                for index, item in enumerate(wire["drivers"])]
     driver_refs = {item["ref"] for item in drivers}
     if len(driver_refs) != len(drivers):
@@ -2408,7 +2501,7 @@ class ForecastModelAuthority:
             ingest_ids = sorted({str(row["ingest_id"]) for row in statement_wire})
             placeholders = ",".join("?" for _ in ingest_ids)
             filing_rows = self.connection.execute(
-                "SELECT ingest_id,company_ref,accession FROM "
+                "SELECT ingest_id,company_ref,accession,form FROM "
                 f"coverage_mission_statement_filings WHERE ingest_id IN ({placeholders})",
                 ingest_ids,
             ).fetchall()
@@ -2443,43 +2536,64 @@ class ForecastModelAuthority:
                     candidates = [
                         row for row in matches
                         if str(row.get("concept")) == str(cell.get("concept"))
+                        and str(row.get("statement")) == str(driver.get("statement"))
                         and str(row.get("unit")) == str(driver.get("unit"))
                         and row.get("dimension_axis") is None
                         and row.get("dimension_member") is None
                     ]
                     if cell.get("basis") == "derived_from_cumulative":
-                        source_rows = []
-                        for earlier in candidates:
-                            for later in candidates:
-                                try:
-                                    adjacent = (
-                                        date.fromisoformat(str(earlier["period_end"]))
-                                        + timedelta(days=1)
-                                        == date.fromisoformat(str(cell["period_start"]))
-                                    )
-                                except (KeyError, TypeError, ValueError):
-                                    adjacent = False
-                                if (earlier is not later and adjacent
-                                        and earlier.get("period_start") == later.get("period_start")
-                                        and later.get("period_end") == cell.get("period_end")):
-                                    source_rows = [earlier, later]
+                        if driver.get("kind") == "cash_flow":
+                            operands = cell.get("derived_from") or []
+                            operand_matches = []
+                            for operand in operands:
+                                operand_matches.append([
+                                    row for row in candidates
+                                    if row.get("period_start") == operand.get("period_start")
+                                    and row.get("period_end") == operand.get("period_end")
+                                    and str(row.get("value")) == str(operand.get("value"))
+                                    and str(row.get("unit")) == str(operand.get("unit"))
+                                    and str(found[str(row["ingest_id"])]["accession"])
+                                    == str(operand.get("accession"))
+                                    and str(found[str(row["ingest_id"])]["form"])
+                                    == str(operand.get("form"))
+                                ])
+                            exact = (
+                                len(operands) == 2
+                                and all(len(items) == 1 for items in operand_matches)
+                            )
+                        else:
+                            source_rows = []
+                            for earlier in candidates:
+                                for later in candidates:
+                                    try:
+                                        adjacent = (
+                                            date.fromisoformat(str(earlier["period_end"]))
+                                            + timedelta(days=1)
+                                            == date.fromisoformat(str(cell["period_start"]))
+                                        )
+                                    except (KeyError, TypeError, ValueError):
+                                        adjacent = False
+                                    if (earlier is not later and adjacent
+                                            and earlier.get("period_start")
+                                            == later.get("period_start")
+                                            and later.get("period_end")
+                                            == cell.get("period_end")):
+                                        source_rows = [earlier, later]
+                                        break
+                                if source_rows:
                                     break
-                            if source_rows:
-                                break
-                        exact = False
-                        if len(source_rows) == 2:
-                            from decimal import Decimal, InvalidOperation
-                            try:
-                                exact = (
-                                    {str(found[str(row["ingest_id"])]["accession"])
-                                     for row in source_rows} == cell_accessions
-                                    and
-                                    Decimal(str(source_rows[1]["value"]))
-                                    - Decimal(str(source_rows[0]["value"]))
-                                    == Decimal(str(cell.get("value")))
-                                )
-                            except (InvalidOperation, ValueError):
-                                exact = False
+                            exact = False
+                            if len(source_rows) == 2:
+                                try:
+                                    exact = (
+                                        {str(found[str(row["ingest_id"])]["accession"])
+                                         for row in source_rows} == cell_accessions
+                                        and Decimal(str(source_rows[1]["value"]))
+                                        - Decimal(str(source_rows[0]["value"]))
+                                        == Decimal(str(cell.get("value")))
+                                    )
+                                except (InvalidOperation, ValueError):
+                                    exact = False
                     else:
                         exact = any(
                             row.get("period_start") == cell.get("period_start")
@@ -2487,6 +2601,9 @@ class ForecastModelAuthority:
                             and str(row.get("value")) == str(cell.get("value"))
                             and cell_accessions == {
                                 str(found[str(row["ingest_id"])]["accession"])}
+                            and (driver.get("kind") != "cash_flow"
+                                 or set(cell.get("source_forms") or []) == {
+                                     str(found[str(row["ingest_id"])]["form"])} )
                             for row in candidates)
                     if not exact:
                         raise ForecastModelValidationError(

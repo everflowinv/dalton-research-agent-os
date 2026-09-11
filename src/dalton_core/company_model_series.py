@@ -124,6 +124,7 @@ def _latest_by_period(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str]
                 "value": value,
                 "filed": row.get("filed"),
                 "accession": row.get("accession"),
+                "form": row.get("filing_form"),
                 "unit": row.get("unit"),
             }
     return best
@@ -171,11 +172,23 @@ def _derive_quarters(
                                 str(item.get("accession") or ""),
                                 str(previous.get("accession") or ""),
                             } - {""}),
+                            "source_forms": sorted({
+                                str(item.get("form") or ""),
+                                str(previous.get("form") or ""),
+                            } - {""}),
                             "derived_from": [
                                 {"period_start": start,
-                                 "period_end": previous["period_end"]},
+                                 "period_end": previous["period_end"],
+                                 "value": format(previous["value"], "f"),
+                                 "unit": previous.get("unit"),
+                                 "accession": previous.get("accession"),
+                                 "form": previous.get("form")},
                                 {"period_start": start,
-                                 "period_end": item["period_end"]},
+                                 "period_end": item["period_end"],
+                                 "value": format(item["value"], "f"),
+                                 "unit": item.get("unit"),
+                                 "accession": item.get("accession"),
+                                 "form": item.get("form")},
                             ],
                         })
             previous = item
@@ -214,7 +227,8 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     held = {(str(item["period_start"]), str(item["period_end"])) for item in quarters}
     derived = _derive_quarters(durations, held)
     combined = sorted(
-        [{**item, "source_accessions": sorted({str(item.get("accession") or "")} - {""})}
+        [{**item, "source_accessions": sorted({str(item.get("accession") or "")} - {""}),
+          "source_forms": sorted({str(item.get("form") or "")} - {""})}
          if "source_accessions" not in item else item
          for item in quarters + derived],
         key=lambda item: (str(item["period_end"]), str(item["period_start"])),
@@ -230,6 +244,7 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 "unit": item.get("unit"),
                 "basis": item["basis"],
                 "source_accessions": item.get("source_accessions") or [],
+                "source_forms": item.get("source_forms") or [],
                 "derived_from": item.get("derived_from"),
             }
             for item in combined

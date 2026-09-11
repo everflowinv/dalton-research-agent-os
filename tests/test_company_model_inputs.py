@@ -16,6 +16,7 @@ from dalton_core.company_model_inputs import (
     AMBIGUOUS,
     ESTIMATED,
     FILED,
+    INCOMPLETE,
     NOT_FOUND,
     SHARED,
     ModelInputError,
@@ -100,6 +101,83 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(line["cells"]["2026-05-31"]["source_accessions"],
                          ["0001467373-26-000032"])
         self.assertFalse(line["is_split"])
+
+    def test_cash_input_refuses_ambiguous_frozen_operating_cash_concepts(self):
+        periods = (("2025-01-01", "2025-03-31"),
+                   ("2025-04-01", "2025-06-30"))
+        cash = [
+            _line(concept, start, end, "100", statement="cash")
+            for concept in (
+                "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+                "us-gaap:NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+            )
+            for start, end in periods
+        ]
+        cash += [_line("us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+                       start, end, "10", statement="cash") for start, end in periods]
+        spec = {**_spec(), "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        table = build_model_inputs(FakeMissions(self.ledger().lines + cash), spec)
+        ocf = next(item for item in table["cash_flow_inputs"]
+                   if item["role"] == "operating_cash_flow")
+        self.assertEqual(ocf["status"], AMBIGUOUS)
+        self.assertIn("2 frozen filed concepts", ocf["reason"])
+
+    def test_cash_input_keeps_missing_quarter_and_wrong_sign_as_gaps(self):
+        ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
+        capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
+        cash = [
+            _line(ocf, "2025-01-01", "2025-03-31", "100", statement="cash"),
+            _line(ocf, "2025-07-01", "2025-09-30", "120", statement="cash"),
+            _line(capex, "2025-01-01", "2025-03-31", "-10", statement="cash"),
+        ]
+        spec = {**_spec(), "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        table = build_model_inputs(FakeMissions(self.ledger().lines + cash), spec)
+        by_role = {item["role"]: item for item in table["cash_flow_inputs"]}
+        self.assertEqual(by_role["operating_cash_flow"]["status"], INCOMPLETE)
+        self.assertTrue(by_role["operating_cash_flow"]["gaps"])
+        self.assertEqual(by_role["capital_expenditure"]["status"], NOT_FOUND)
+        self.assertIn("outflow sign convention",
+                      by_role["capital_expenditure"]["reason"])
+
+    def test_cash_input_rejects_wrong_statement_dimensions_and_mixed_units(self):
+        ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
+        capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
+        rows = [
+            _line(ocf, "2025-01-01", "2025-03-31", "100", statement="income"),
+            _line(capex, "2025-01-01", "2025-03-31", "10", statement="cash"),
+            _line(capex, "2025-04-01", "2025-06-30", "12", statement="cash",
+                  unit="eur"),
+        ]
+        dimensional = _line(
+            ocf, "2025-04-01", "2025-06-30", "110", statement="cash")
+        dimensional["dimension_axis"] = "segment"
+        rows.append(dimensional)
+        spec = {**_spec(), "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        table = build_model_inputs(FakeMissions(self.ledger().lines + rows), spec)
+        by_role = {item["role"]: item for item in table["cash_flow_inputs"]}
+        self.assertEqual(by_role["operating_cash_flow"]["status"], NOT_FOUND)
+        self.assertIn("cash statement", by_role["operating_cash_flow"]["reason"])
+        self.assertEqual(by_role["capital_expenditure"]["status"], NOT_FOUND)
+        self.assertIn("single-unit", by_role["capital_expenditure"]["reason"])
+
+    def test_one_quarter_or_nonderivable_annual_pair_is_incomplete(self):
+        ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
+        capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
+        rows = [
+            _line(concept, "2025-01-01", end, value, statement="cash")
+            for concept, values in ((ocf, ("100", "500")), (capex, ("10", "50")))
+            for end, value in zip(("2025-03-31", "2025-12-31"), values)
+        ]
+        spec = {**_spec(), "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        table = build_model_inputs(FakeMissions(self.ledger().lines + rows), spec)
+        self.assertTrue(all(item["status"] == INCOMPLETE
+                            for item in table["cash_flow_inputs"]))
+        self.assertTrue(all("four consecutive quarters" in item["reason"]
+                            for item in table["cash_flow_inputs"]))
 
     def test_several_rows_on_one_filed_line_are_a_constraint_not_four_copies(self):
         spec = _spec(expenses=[

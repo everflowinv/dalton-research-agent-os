@@ -3915,7 +3915,7 @@ class CoverageMissionAuthority:
         company_ref = _text(company_ref, "company_ref")
         concept = _text(concept, "concept")
         query = (
-            "SELECT l.*, f.accession, f.filed, f.report_date "
+            "SELECT l.*, f.accession, f.filed, f.report_date, f.form AS filing_form "
             "FROM coverage_mission_statement_lines l "
             "JOIN coverage_mission_statement_filings f USING(ingest_id) "
             "WHERE f.company_ref=? AND l.concept=?"

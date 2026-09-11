@@ -446,20 +446,81 @@ class ResultTests(unittest.TestCase):
                 (capex, ("50000000", "55000000", "60500000", "66550000")))
             for (start, end), value in zip(QUARTERS, values)
         ])
-        record = model(missions, spec(cash="required", expenses=[
-            {"ref": "delivery", "label": "Cost of services",
-             "basis_concept": COST_CONCEPT, "behaviour": "variable_with_revenue",
-             "driver_ref": None, "because": "Delivery cost follows revenue."},
-            {"ref": "ocf", "label": "Operating cash flow", "basis_concept": ocf,
-             "behaviour": "variable_with_revenue", "driver_ref": None,
-             "because": "Cash conversion is the thesis."},
-            {"ref": "capex", "label": "Capital expenditure", "basis_concept": capex,
-             "behaviour": "semi_variable", "driver_ref": None,
-             "because": "Capital light, but not free."},
-        ]))
+        record = model(missions, spec(cash="required"))
         # 20% and 5% of 1,464.1m.
         fcf = cells_of(record, "result:free_cash_flow")["2026-08-31"]
         self.assertEqual(Decimal(fcf["value"]), Decimal("219615000"))
+
+    def test_cumulative_cash_filings_derive_quarters_without_expense_disguise(self):
+        ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
+        capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
+        cumulative_periods = (
+            ("2025-06-01", "2025-08-31"),
+            ("2025-06-01", "2025-11-30"),
+            ("2025-06-01", "2026-02-28"),
+            ("2025-06-01", "2026-05-31"),
+        )
+        cash = [
+            _line(concept, start, end, value, statement="cash")
+            for concept, values in (
+                (ocf, ("100", "220", "360", "520")),
+                (capex, ("10", "25", "45", "70")),
+            )
+            for (start, end), value in zip(cumulative_periods, values)
+        ]
+        for item in cash:
+            item["filing_form"] = (
+                "10-K" if item["period_end"] == "2026-05-31" else "10-Q"
+            )
+            if item["filing_form"] == "10-K":
+                item["accession"] = "0001467373-26-000099"
+        inputs = build_model_inputs(FakeMissions(ledger().lines + cash),
+                                    spec(cash="required"))
+        self.assertEqual(inputs["schema_version"], "0.2")
+        by_role = {item["role"]: item for item in inputs["cash_flow_inputs"]}
+        self.assertEqual(
+            [cell["value"] for cell in by_role["operating_cash_flow"]["series"]["quarters"]],
+            ["100", "120", "140", "160"],
+        )
+        self.assertEqual(
+            [cell["value"] for cell in by_role["capital_expenditure"]["series"]["quarters"]],
+            ["10", "15", "20", "25"],
+        )
+        self.assertTrue(all(
+            cell["basis"] == "derived_from_cumulative"
+            for cell in by_role["operating_cash_flow"]["series"]["quarters"][1:]
+        ))
+        record = build_forecast_model(spec(cash="required"), inputs)
+        self.assertEqual(
+            next(item for item in record["results"]
+                 if item["ref"] == "result:free_cash_flow")["status"],
+            "computed",
+        )
+        ocf_driver = next(item for item in record["drivers"]
+                          if item["role"] == "operating_cash_flow")
+        fourth = next(item for item in ocf_driver["history"]
+                      if item["period_end"] == "2026-05-31")
+        self.assertEqual(fourth["source_forms"], ["10-K", "10-Q"])
+        self.assertEqual(
+            [item["period_end"] for item in fourth["derived_from"]],
+            ["2026-02-28", "2026-05-31"],
+        )
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        published = ForecastModelAuthority(store).publish(record)
+        self.assertEqual(published["schema_version"], "0.2")
+        reread = ForecastModelAuthority(store).latest(ACN)
+        self.assertEqual(reread["content_hash"], published["content_hash"])
+        tampered = json.loads(json.dumps(published))
+        tampered.pop("status", None)
+        driver = next(item for item in tampered["drivers"]
+                      if item["role"] == "operating_cash_flow")
+        derived = next(item for item in driver["history"]
+                       if item.get("derived_from"))
+        derived["derived_from"][1]["value"] = "999"
+        with self.assertRaisesRegex(ForecastModelValidationError,
+                                    "derived arithmetic does not replay"):
+            validate_forecast_model(tampered)
 
     def test_readiness_counts_rather_than_scores(self):
         readiness = model_readiness(self.record)

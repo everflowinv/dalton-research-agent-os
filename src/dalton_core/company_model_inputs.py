@@ -35,6 +35,7 @@ drift from what it was derived from.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from .company_model_series import quarterly_series, series_gaps
@@ -45,11 +46,25 @@ SHARED = "share_of_filed"
 ESTIMATED = "estimated"
 NOT_FOUND = "concept_not_found"
 AMBIGUOUS = "concept_in_several_statements"
+INCOMPLETE = "incomplete_quarter_series"
+
+# Closed, role-specific candidates. These are SEC concepts whose semantics are
+# stable enough to enter arithmetic without a model guessing from a label.
+CASH_FLOW_ROLE_CONCEPTS: Mapping[str, tuple[str, ...]] = {
+    "operating_cash_flow": (
+        "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+        "us-gaap:NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ),
+    "capital_expenditure": (
+        "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+    ),
+}
 
 # The specification's horizon says how many quarters the model rests on; this
 # bounds one table regardless, so a specification asking for twenty years
 # cannot produce a table nobody can read.
 MAX_PERIODS = 24
+MIN_CASH_FLOW_QUARTERS = 4
 
 
 class ModelInputError(ValueError):
@@ -119,11 +134,68 @@ def _series_for(missions: Any, company_ref: str, concept: str) -> dict[str, Any]
     # unlabelled row because a reader has no reason to doubt it.
     reported = [row for row in lines
                 if not row.get("is_breakdown") and not row.get("dimension_axis")]
+    source_units = sorted({str(row.get("unit")) for row in reported if row.get("unit")})
     return {
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
         "series": quarterly_series(lines),
+        "source_units": source_units,
     }
+
+
+def _cash_flow_inputs(missions: Any, company_ref: str) -> list[dict[str, Any]]:
+    """Select exact filed cash-flow concepts, or retain a typed reason not to."""
+
+    selected: list[dict[str, Any]] = []
+    for role, concepts in CASH_FLOW_ROLE_CONCEPTS.items():
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        rejected: list[str] = []
+        for concept in concepts:
+            entry = _series_for(missions, company_ref, concept)
+            series = entry.get("series") or {}
+            quarters = list(series.get("quarters") or [])
+            units = set(entry.get("source_units") or [])
+            sign_valid = True
+            if role == "capital_expenditure":
+                try:
+                    sign_valid = all(Decimal(str(item["value"])) >= 0 for item in quarters)
+                except (InvalidOperation, ValueError):
+                    sign_valid = False
+            if entry.get("status") == FILED and entry.get("statement") == "cash" \
+                    and quarters and len(units) == 1 and sign_valid:
+                candidates.append((concept, entry))
+            elif entry.get("status") != NOT_FOUND:
+                rejected.append(
+                    f"{concept} is not a dimension-free, single-unit cash statement "
+                    "series with the filed outflow sign convention"
+                )
+        if len(candidates) != 1:
+            reason = (
+                f"{len(candidates)} frozen filed concepts qualify for {role}"
+                if candidates else
+                ("; ".join(rejected) or f"no frozen filed concept qualifies for {role}")
+            )
+            selected.append({"role": role, "status": AMBIGUOUS if candidates else NOT_FOUND,
+                             "reason": reason})
+            continue
+        concept, entry = candidates[0]
+        series = entry["series"]
+        gaps = series_gaps(series)
+        status = (
+            FILED if not gaps and len(series["quarters"]) >= MIN_CASH_FLOW_QUARTERS
+            else INCOMPLETE
+        )
+        item = {
+            "role": role, "status": status, "concept": concept,
+            "statement": "cash", "unit": series["quarters"][0]["unit"],
+            "series": series, "gaps": gaps,
+        }
+        if status == INCOMPLETE:
+            item["reason"] = (
+                "filed cumulative series does not provide four consecutive quarters"
+            )
+        selected.append(item)
+    return selected
 
 
 # How many unused filed lines to name. Enough to notice a missing top line,
@@ -225,6 +297,14 @@ def build_model_inputs(
     for concept in sorted(concepts):
         filed[concept] = _series_for(missions, company_ref, concept)
 
+    cash_required = any(
+        item.get("statement") == "cash" and item.get("importance") != "not_material"
+        for item in (spec.get("forecast_statements") or [])
+    )
+    cash_flow_inputs = (
+        _cash_flow_inputs(missions, company_ref) if cash_required else []
+    )
+
     # The columns are the periods the filings actually cover, newest last, cut
     # to the horizon the specification asked for. A period no filed line
     # reaches is not a column: an all-empty column is not history.
@@ -240,6 +320,9 @@ def build_model_inputs(
         if series:
             ends.update(str(item["period_end"]) for item in series["quarters"])
             ends.update(str(item["period_end"]) for item in series["instants"])
+    for item in cash_flow_inputs:
+        if item.get("status") == FILED:
+            ends.update(str(cell["period_end"]) for cell in item["series"]["quarters"])
     periods = sorted(ends)[-limit:]
 
     filed_lines: list[dict[str, Any]] = []
@@ -307,7 +390,7 @@ def build_model_inputs(
         row["statement"] = entry["statement"]
 
     result = {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
         "company_ref": company_ref,
         "spec_ref": spec.get("spec_id"),
         "state_hash": spec.get("state_hash"),
@@ -328,6 +411,7 @@ def build_model_inputs(
             }
             for item in (spec.get("operating_metrics") or [])
         ],
+        "cash_flow_inputs": cash_flow_inputs,
         "readiness": {
             **readiness(rows, filed_lines, periods),
             "filed_income_lines_no_row_uses": _unused_income_lines(
@@ -391,8 +475,11 @@ def readiness(
 
 __all__ = [
     "AMBIGUOUS",
+    "CASH_FLOW_ROLE_CONCEPTS",
     "ESTIMATED",
     "FILED",
+    "INCOMPLETE",
+    "MIN_CASH_FLOW_QUARTERS",
     "MAX_PERIODS",
     "NOT_FOUND",
     "SHARED",
