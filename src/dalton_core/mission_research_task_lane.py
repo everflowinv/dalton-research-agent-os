@@ -132,10 +132,18 @@ class ResearchTaskCoordinator:
             except Exception:  # noqa: BLE001 - an absent table means zero
                 return 0
 
+        from .document_research_inventory import document_inventory_signature
+
+        state_dir = getattr(self.launcher, "state_dir", None)
+        document_signature = (
+            None if state_dir is None
+            else document_inventory_signature(self.store, Path(state_dir))
+        )
         return {
             "plan_ref": plan_ref,
             "configuration": (self.launcher.configuration_signature()
                               if hasattr(self.launcher, "configuration_signature") else None),
+            "document_inventory": document_signature,
             "tasks": count(
                 "SELECT COUNT(*) FROM bounded_planner_loop_versions "
                 "WHERE json_extract(record_json,'$.admission.source')='inquiry'"),

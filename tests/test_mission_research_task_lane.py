@@ -98,6 +98,15 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["last"]["admitted"], 1)
 
+    def test_document_inventory_change_participates_child_signature(self) -> None:
+        self.launcher.state_dir = self.state_dir
+        before = self.coordinator._signature(None)
+        (self.state_dir / "document-research-config.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        after = self.coordinator._signature(None)
+        self.assertNotEqual(before["document_inventory"], after["document_inventory"])
+
     def test_the_hold_lapses_after_an_hour(self) -> None:
         self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         first = self.coordinator.dispatch_once()
