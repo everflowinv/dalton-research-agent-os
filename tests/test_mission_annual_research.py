@@ -160,11 +160,11 @@ class MissionAnnualFixture:
         draft_family = "annual-producer"
         verifier_family = draft_family if same_family else "annual-independent"
         self.draft_profile = helper._model_profile(
-            stage="mission-draft", capability="capability:dalton:model:qualitative-research",
+            stage="mission-draft", capability="research",
             slot="credential-slot:model:mission-draft", family=draft_family,
         )
         self.verifier_profile = helper._model_profile(
-            stage="mission-verifier", capability="capability:dalton:model:qualitative-verifier",
+            stage="mission-verifier", capability="verify",
             slot="credential-slot:model:mission-verifier", family=verifier_family,
         )
         for profile in (self.draft_profile, self.verifier_profile):
@@ -174,14 +174,14 @@ class MissionAnnualFixture:
             }
         self.draft_policy = helper._model_policy(
             stage="mission-draft", profile_ids=[self.draft_profile["id"]],
-            capability="capability:dalton:model:qualitative-research", tier="brain",
+            capability="research", tier="brain",
         )
         self.verifier_policy = helper._model_policy(
             stage="mission-verifier", profile_ids=[self.verifier_profile["id"]],
-            capability="capability:dalton:model:qualitative-verifier", tier="verifier",
+            capability="verify", tier="verifier",
         )
         self.verifier_policy["filters"]["family_independence_capabilities"] = [
-            "capability:dalton:model:qualitative-verifier"
+            "verify"
         ]
         if unusable_route:
             self.draft_policy["filters"]["allowed_providers"] = ["other"]
@@ -437,6 +437,16 @@ class MissionAnnualResearchTests(unittest.TestCase):
             admitted["request"]["query_terms"],
             ["customer segments", "outsourcing partners"],
         )
+        self.assertEqual(
+            admitted["model_authority"]["draft"]["workflow_capability"],
+            "capability:dalton:model:qualitative-research",
+        )
+        self.assertEqual(
+            admitted["model_authority"]["draft"]["router_capability"], "research"
+        )
+        self.assertEqual(
+            admitted["model_authority"]["verifier"]["router_capability"], "verify"
+        )
 
     def test_executor_runs_registered_retrieval_models_and_draft_only_staging(self):
         fixture = MissionAnnualFixture(self)
@@ -446,6 +456,13 @@ class MissionAnnualResearchTests(unittest.TestCase):
             _WORK_ID_RE.fullmatch(work["id"])
             for work in executor._blueprints(admission)
         ))
+        blueprints = executor._blueprints(admission)
+        self.assertEqual(blueprints[1]["requested_capabilities"], [
+            "capability:dalton:model:qualitative-research", "research",
+        ])
+        self.assertEqual(blueprints[2]["requested_capabilities"], [
+            "capability:dalton:model:qualitative-verifier", "verify",
+        ])
         outcomes = [executor.run_once(admission["id"]) for _ in range(9)]
         self.assertEqual(
             [item["status"] for item in outcomes],
@@ -454,6 +471,10 @@ class MissionAnnualResearchTests(unittest.TestCase):
             outcomes,
         )
         self.assertEqual(len(fixture.router.list_decisions()), 2)
+        self.assertEqual(
+            [item["capability"] for item in fixture.router.list_decisions()],
+            ["research", "verify"],
+        )
         self.assertEqual((draft.calls, verifier.calls), (1, 1))
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT count(*) FROM thesis_impact_day_admissions "

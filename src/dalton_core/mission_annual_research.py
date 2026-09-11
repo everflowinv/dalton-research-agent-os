@@ -20,6 +20,7 @@ from .annual_report_runtime import (
     load_annual_report_model_configs,
     plan_model_execution,
 )
+from .annual_report_qualitative import qualitative_router_capability
 from .agenda import read_exact_mandate_version
 from .dossier_repair_feedback import read_dossier_repair_feedback
 from .model_fallback_chain import tier_for
@@ -290,6 +291,10 @@ class MissionAnnualResearchAuthority:
         configs = {"draft": draft_config, "verifier": verifier_config}
         purposes = {"draft": DRAFT_PURPOSE, "verifier": VERIFIER_PURPOSE}
         capabilities = {"draft": DRAFT_CAPABILITY, "verifier": VERIFIER_CAPABILITY}
+        router_capabilities = {
+            stage: qualitative_router_capability(capabilities[stage])
+            for stage in capabilities
+        }
         proof: dict[str, Any] = {}
         families: dict[str, set[str]] = {}
         for stage in ("draft", "verifier"):
@@ -316,7 +321,8 @@ class MissionAnnualResearchAuthority:
                     profile["profile_version_ref"], "profile_hash", "profile_json",
                 )
                 reasons = self._profile_reasons(
-                    exact, policy, executions[stage], capabilities[stage], chain=chain
+                    exact, policy, executions[stage], router_capabilities[stage],
+                    chain=chain
                 )
                 candidates.append({
                     "profile_ref": exact["id"],
@@ -329,7 +335,7 @@ class MissionAnnualResearchAuthority:
                 raise MissionAnnualResearchError(
                     f"installed annual-report {stage} route has no eligible model"
                 )
-            if stage == "verifier" and capabilities[stage] not in set(
+            if stage == "verifier" and router_capabilities[stage] not in set(
                 policy["filters"]["family_independence_capabilities"]
             ):
                 raise MissionAnnualResearchError(
@@ -338,6 +344,8 @@ class MissionAnnualResearchAuthority:
             families[stage] = {item["family"] for item in usable}
             proof[stage] = {
                 "purpose": purposes[stage],
+                "workflow_capability": capabilities[stage],
+                "router_capability": router_capabilities[stage],
                 "config_hash": content_hash(configs[stage]),
                 "routing_policy_ref": policy_ref,
                 "routing_policy_hash": policy["content_hash"],

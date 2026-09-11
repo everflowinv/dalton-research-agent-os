@@ -46,6 +46,12 @@ class MissionDocumentModelAuthorityTests(unittest.TestCase):
         self.assertEqual(set(executions), {"draft", "verifier"})
         self.assertEqual(proof["draft"]["purpose"], DRAFT_PURPOSE)
         self.assertEqual(proof["verifier"]["purpose"], VERIFIER_PURPOSE)
+        self.assertEqual(proof["draft"]["workflow_capability"],
+                         "capability:dalton:model:qualitative-research")
+        self.assertEqual(proof["draft"]["router_capability"], "research")
+        self.assertEqual(proof["verifier"]["workflow_capability"],
+                         "capability:dalton:model:qualitative-verifier")
+        self.assertEqual(proof["verifier"]["router_capability"], "verify")
         self.assertEqual(
             proof["draft"]["config_hash"],
             content_hash(load_mission_document_model_configs(fixture.state)[0]),

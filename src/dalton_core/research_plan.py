@@ -62,6 +62,7 @@ from .agenda import (
     read_exact_mandate_version,
     read_exact_perception_snapshot,
 )
+from .annual_report_qualitative import qualitative_router_capability
 from .connector_inventory import load_packaged_connector_inventory
 from .research_question_backlog import (
     _read_exact_agenda_candidate,
@@ -2830,6 +2831,11 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
         ]
         if prior_work_ref is not None:
             input_refs.append(prior_work_ref)
+        requested_capabilities = list(step["requested_capabilities"])
+        if stage_model_config is not None:
+            requested_capabilities.append(
+                qualitative_router_capability(requested_capabilities[0])
+            )
         wire = {
             "schema_version": "0.1",
             "id": step["work_order_ref"],
@@ -2838,7 +2844,7 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
             "created_at": plan_wire["created_at"],
             "updated_at": plan_wire["created_at"],
             "question": question,
-            "requested_capabilities": list(step["requested_capabilities"]),
+            "requested_capabilities": requested_capabilities,
             "runtime_profile_ref": step["runtime_profile_ref"],
             "budget": (
                 {

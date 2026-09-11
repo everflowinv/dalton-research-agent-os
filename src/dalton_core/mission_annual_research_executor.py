@@ -21,6 +21,7 @@ from .annual_report_qualitative import (
     RegisteredAnnualReportVerifierWorker,
     build_annual_report_candidate_bundle,
     stage_annual_report_candidate,
+    qualitative_router_capability,
     validate_model_proof,
 )
 from .contracts import ResultEnvelope, WorkOrder
@@ -171,11 +172,16 @@ def _mission_annual_blueprints(admission: Mapping[str, Any]) -> list[dict[str, A
                 **_REGISTERED_ANNUAL_REPORT_BUDGET,
                 "step_max_attempts": step["max_attempts"],
             }
+        requested_capabilities = list(step["requested_capabilities"])
+        if model_key is not None:
+            requested_capabilities.append(
+                qualitative_router_capability(requested_capabilities[0])
+            )
         works.append(WorkOrder.from_dict({
             "schema_version": SCHEMA_VERSION, "id": work_ref,
             "created_at": admission["created_at"], "updated_at": admission["created_at"],
             "question": question,
-            "requested_capabilities": list(step["requested_capabilities"]),
+            "requested_capabilities": requested_capabilities,
             "runtime_profile_ref": step["runtime_profile_ref"],
             "budget": budget,
             "idempotency_key": f"mission-annual-research-work:{admission['id']}:{ordinal}",

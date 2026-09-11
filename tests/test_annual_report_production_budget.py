@@ -130,8 +130,8 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
         harness.planner.plans.annual_report_registry = source.registry
         registration = seed_core_registration(harness.planner, source)
 
-        draft_capability = "capability:dalton:model:qualitative-research"
-        verifier_capability = "capability:dalton:model:qualitative-verifier"
+        draft_capability = "research"
+        verifier_capability = "verify"
         draft_profile = model_profile(
             stage="budget-draft", capability=draft_capability,
             slot="credential-slot:model:budget-draft",

@@ -98,7 +98,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "id": "work:cockpit-plan-" + plan["state_hash"][:32],
             "created_at": fixture.mission["created_at"],
             "updated_at": fixture.mission["created_at"], "question": "fixture plan",
-            "requested_capabilities": ["capability:dalton:model:qualitative-research"],
+            "requested_capabilities": ["research"],
             "runtime_profile_ref": "runtime-profile:dalton-model-broker:0.1",
             "budget": {"max_input_tokens": 1_000, "max_output_tokens": 1_000,
                        "max_total_tokens": 2_000, "max_cost_usd": 1.0,
@@ -115,7 +115,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         invocation_ref = "model-invocation:fixture-planner:" + plan["state_hash"][:16]
         route = fixture.router.route(
             work, attempt_number=claim["attempt"]["attempt_number"],
-            capability="capability:dalton:model:qualitative-research",
+            capability="research",
             policy_version_ref=fixture.draft_policy["policy_version_ref"],
             credential_slot_refs=[fixture.draft_profile["credential_slot_ref"]],
             required_modalities=["text"], required_context_tokens=1_000,

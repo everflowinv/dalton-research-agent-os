@@ -533,8 +533,8 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             "Return exact annual-report passages with accession and source hash",
         )])
         record = records[0]
-        draft_capability = "capability:dalton:model:qualitative-research"
-        verifier_capability = "capability:dalton:model:qualitative-verifier"
+        draft_capability = "research"
+        verifier_capability = "verify"
         draft_preferred = self._model_profile(
             stage="zz-draft-preferred", capability=draft_capability,
             slot="credential-slot:model:draft-preferred",
@@ -699,6 +699,12 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             harness.planner.plans.plan_version(created["plan_version_ref"]),
             harness.core.connection,
         )
+        self.assertEqual(resolved_work[1]["requested_capabilities"], [
+            "capability:dalton:model:qualitative-research", "research",
+        ])
+        self.assertEqual(resolved_work[2]["requested_capabilities"], [
+            "capability:dalton:model:qualitative-verifier", "verify",
+        ])
         self.assertEqual(resolved_work[1]["metadata"]["provider_retry"], retry)
         draft_decisions = router.list_decisions(work_order_id=resolved_work[1]["id"])
         self.assertEqual(
@@ -713,6 +719,10 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             [item["decision_kind"] for item in draft_decisions],
             ["initial", "retry", "retry"],
         )
+        self.assertEqual(
+            [item["capability"] for item in draft_decisions],
+            ["research", "research", "research"],
+        )
 
         verifier_decision = router.list_decisions(
             work_order_id=resolved_work[2]["id"]
@@ -721,6 +731,7 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             verifier_decision["selected_profile_version_ref"],
             verifier_independent["profile_version_ref"],
         )
+        self.assertEqual(verifier_decision["capability"], "verify")
         same = next(
             item for item in verifier_decision["candidate_snapshot"]
             if item["profile_version_ref"]
@@ -781,8 +792,8 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
         registration = seed_core_registration(harness.planner, source)
         state = Path(harness.planner.temp.name)
 
-        draft_capability = "capability:dalton:model:qualitative-research"
-        verifier_capability = "capability:dalton:model:qualitative-verifier"
+        draft_capability = "research"
+        verifier_capability = "verify"
         draft_profile = self._model_profile(
             stage="cli-draft", capability=draft_capability,
             slot="credential-slot:model:cli-draft",

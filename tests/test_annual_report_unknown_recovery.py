@@ -164,8 +164,8 @@ class RecoveryFixture:
             "Which customers and outsourced operations shape the company?",
             "Use only exact registered annual-report passages",
         )])
-        draft_capability = "capability:dalton:model:qualitative-research"
-        verifier_capability = "capability:dalton:model:qualitative-verifier"
+        draft_capability = "research"
+        verifier_capability = "verify"
         helper = annual_support.RegisteredAnnualReportExecutorTests
         self.draft_profile = helper._model_profile(
             stage="recovery-draft", capability=draft_capability,

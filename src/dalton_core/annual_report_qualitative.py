@@ -31,6 +31,33 @@ from .store import canonical_json, content_hash
 from .transcript_polish_model_worker import RoutedTranscriptPolishModelWorker
 
 
+QUALITATIVE_RESEARCH_WORKFLOW_CAPABILITY = (
+    "capability:dalton:model:qualitative-research"
+)
+QUALITATIVE_VERIFIER_WORKFLOW_CAPABILITY = (
+    "capability:dalton:model:qualitative-verifier"
+)
+QUALITATIVE_RESEARCH_ROUTER_CAPABILITY = "research"
+QUALITATIVE_VERIFIER_ROUTER_CAPABILITY = "verify"
+_ROUTER_CAPABILITY_BY_WORKFLOW = {
+    QUALITATIVE_RESEARCH_WORKFLOW_CAPABILITY:
+        QUALITATIVE_RESEARCH_ROUTER_CAPABILITY,
+    QUALITATIVE_VERIFIER_WORKFLOW_CAPABILITY:
+        QUALITATIVE_VERIFIER_ROUTER_CAPABILITY,
+}
+
+
+def qualitative_router_capability(workflow_capability: str) -> str:
+    """Translate a workflow contract capability to Router vocabulary."""
+
+    try:
+        return _ROUTER_CAPABILITY_BY_WORKFLOW[workflow_capability]
+    except (KeyError, TypeError) as exc:
+        raise AnnualReportQualitativeError(
+            "qualitative model WorkOrder has an unsupported workflow capability"
+        ) from exc
+
+
 DRAFT_OUTPUT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["schema_version", "answer", "candidate"],
@@ -551,11 +578,18 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
         return None if route is None else route["id"]
 
     def _route_capability(self, work: WorkOrder) -> str:
-        if len(work.requested_capabilities) != 1:
+        declared = set(work.requested_capabilities)
+        workflow = declared.intersection(_ROUTER_CAPABILITY_BY_WORKFLOW)
+        if len(workflow) != 1:
             raise AnnualReportQualitativeError(
-                "qualitative model WorkOrder must request one capability"
+                "qualitative model WorkOrder must request one workflow capability"
             )
-        return work.requested_capabilities[0]
+        router_capability = qualitative_router_capability(next(iter(workflow)))
+        if declared != {*workflow, router_capability}:
+            raise AnnualReportQualitativeError(
+                "qualitative model WorkOrder capability declarations drifted"
+            )
+        return router_capability
 
     def _successful_result(self, work, route, invocation, result, candidate_text):
         stage = work.metadata["stage"]
@@ -851,8 +885,13 @@ __all__ = [
     "DRAFT_OUTPUT_SCHEMA", "VERIFIER_OUTPUT_SCHEMA", "AnnualReportCandidateAuthority",
     "AnnualReportQualitativeError", "RegisteredAnnualReportDraftWorker",
     "RegisteredAnnualReportModelWorker", "RegisteredAnnualReportVerifierWorker",
+    "QUALITATIVE_RESEARCH_ROUTER_CAPABILITY",
+    "QUALITATIVE_RESEARCH_WORKFLOW_CAPABILITY",
+    "QUALITATIVE_VERIFIER_ROUTER_CAPABILITY",
+    "QUALITATIVE_VERIFIER_WORKFLOW_CAPABILITY",
     "build_annual_report_candidate_bundle", "build_annual_report_qualitative_candidate",
     "draft_prompt", "parse_draft_text",
+    "qualitative_router_capability",
     "parse_verifier_text", "stage_annual_report_candidate", "validate_draft_output",
     "validate_model_proof", "validate_verifier_output", "verifier_prompt",
 ]

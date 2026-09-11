@@ -18,6 +18,7 @@ from .annual_report_runtime import (
     load_annual_report_model_config,
     plan_model_execution,
 )
+from .annual_report_qualitative import qualitative_router_capability
 from .model_configurations import register_model_config_name
 from .model_fallback_chain import (
     TIER_BRAIN,
@@ -225,6 +226,10 @@ class MissionDocumentModelAuthority:
             "draft": DRAFT_CAPABILITY,
             "verifier": VERIFIER_CAPABILITY,
         }
+        router_capabilities = {
+            stage: qualitative_router_capability(capabilities[stage])
+            for stage in capabilities
+        }
         executions: dict[str, dict[str, Any]] = {}
         for stage in ("draft", "verifier"):
             try:
@@ -273,7 +278,8 @@ class MissionDocumentModelAuthority:
                     "profile_hash": exact["content_hash"],
                     "family": exact["family"],
                     "preflight_reasons": self._profile_reasons(
-                        exact, policy, execution, capabilities[stage], chain=chain
+                        exact, policy, execution, router_capabilities[stage],
+                        chain=chain
                     ),
                 })
             usable = [item for item in candidates if not item["preflight_reasons"]]
@@ -281,7 +287,7 @@ class MissionDocumentModelAuthority:
                 raise MissionDocumentModelAuthorityError(
                     f"installed mission document {stage} route has no eligible model"
                 )
-            if stage == "verifier" and capabilities[stage] not in set(
+            if stage == "verifier" and router_capabilities[stage] not in set(
                 policy["filters"]["family_independence_capabilities"]
             ):
                 raise MissionDocumentModelAuthorityError(
@@ -290,6 +296,8 @@ class MissionDocumentModelAuthority:
             families[stage] = {item["family"] for item in usable}
             proof[stage] = {
                 "purpose": purposes[stage],
+                "workflow_capability": capabilities[stage],
+                "router_capability": router_capabilities[stage],
                 "config_hash": content_hash(configs[0 if stage == "draft" else 1]),
                 "routing_policy_ref": policy_ref,
                 "routing_policy_hash": policy["content_hash"],
