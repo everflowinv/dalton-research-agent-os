@@ -15,6 +15,7 @@ from scripts import observe_successor_health_candidate as health
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     MODEL_ADDITIONS, MODEL_REPLACEMENT, PRESERVE_SCHEMA_VERSION,
+    PURE_PRESERVE_SCHEMA_VERSION,
 )
 
 
@@ -41,6 +42,25 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
             }
             self.assertNotEqual(
                 execute._json_bytes(json.loads(raw)), raw)
+            self.assertEqual(
+                raw, execute.expected_preserved_service_bytes(packet, transition))
+
+    def test_schema_v04_preserves_noncanonical_service_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = Path(temporary)
+            raw = b'{"backup":{"keep_latest":3},"owner": {"signature":"x"}}\n'
+            artifact = packet / "service.before.json"
+            artifact.write_bytes(raw)
+            transition = {
+                "schema_version": PURE_PRESERVE_SCHEMA_VERSION,
+                "transition_kind": "preserve_existing",
+                "service_transition": {
+                    "kind": "preserve_exact", "mutation_count": 0,
+                    "before": {"file": artifact.name,
+                               "sha256": execute.sha(artifact)},
+                    "after_sha256": execute.sha(artifact),
+                },
+            }
             self.assertEqual(
                 raw, execute.expected_preserved_service_bytes(packet, transition))
 
