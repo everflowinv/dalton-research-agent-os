@@ -113,7 +113,9 @@ class DiscoverySelectionLauncher:
                      and selection.get('recovery_epoch') == row.get('recovery_epoch', 0)
                      and selection.get('content_hash') == content_hash({
                          key: value for key, value in selection.items()
-                         if key not in {'content_hash', 'work_order_ref', 'replayed', 'config_hash', 'recovery_epoch'}
+                         if key not in {'content_hash', 'work_order_ref', 'result_envelope_ref',
+                                        'invocation_ref', 'route_decision_ref', 'replayed',
+                                        'config_hash', 'recovery_epoch'}
                      }))
             if parsed.get('status') == 'succeeded' and not valid:
                 row = {**row, 'status': 'failed', 'exit_code': 1,

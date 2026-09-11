@@ -43,6 +43,9 @@ class CockpitDiscoveryCandidateSelector:
             mission=mission)
         return {**validate_selection(call["text"], view),
                 "work_order_ref": call["work_order_ref"],
+                "result_envelope_ref": call["result_envelope_ref"],
+                "invocation_ref": call["invocation_ref"],
+                "route_decision_ref": call["route_decision_ref"],
                 "replayed": bool(call.get("replayed")), "config_hash": self.config_hash,
                 "recovery_epoch": recovery_epoch}
 

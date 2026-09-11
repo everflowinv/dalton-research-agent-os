@@ -75,7 +75,9 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
             def call(self, **kwargs):
                 self.kwargs = kwargs
                 return {"text": '{"selected":[]}', "work_order_ref": "work:select",
-                        "replayed": False}
+                        "result_envelope_ref": "result-envelope:select",
+                        "invocation_ref": "invocation:select",
+                        "route_decision_ref": "route-decision:select", "replayed": False}
         model = Model(); selector = CockpitDiscoveryCandidateSelector(model)
         result = selector.select(view, mission={"id": "mission:v1"}, company={
             "company_ref": "company:sec-cik:0000051143", "name": "IBM",

@@ -28,6 +28,8 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
                             "candidate_view_hash":view["content_hash"],"selected":[]}
             selection={**selection_base,"content_hash":content_hash(selection_base),
                        "work_order_ref":"work-order:test","replayed":False,
+                       "result_envelope_ref":"result-envelope:test",
+                       "invocation_ref":"invocation:test","route_decision_ref":"route:test",
                        "config_hash":"a"*64,"recovery_epoch":0}
             summary.write_text(json.dumps({"status":"succeeded","identity_hash":ticket["identity_hash"],
                                            "selection":selection}))
