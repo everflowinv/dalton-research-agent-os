@@ -75,6 +75,13 @@ class DocumentInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Core ownership"):
             inventory_with_registry(core=self.core, mission=self.mission, registry=registry, purpose="directed_research")
 
+    def test_legacy_null_ticket_uses_the_registrys_verified_pinned_ticket(self):
+        self.insert(ticket=None)
+        registry, registration = self.registry()
+        result = inventory_with_registry(core=self.core, mission=self.mission, registry=registry,
+                                         purpose="directed_research")
+        self.assertEqual(result["registration_by_hash"][registration["content_hash"]]["acquisition_ticket_ref"], "ticket:1")
+
     def test_missing_or_denied_original_is_explicit_and_cannot_be_selected(self):
         self.insert()
         registry, _ = self.registry()

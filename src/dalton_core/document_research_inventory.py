@@ -84,7 +84,8 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
                 or authority.get("company_ref") != company
                 or registration.get("document_ref") != row["document_ref"]
                 or registration.get("source_ref") != row["source_ref"]
-                or registration.get("acquisition_ticket_ref") != row["ticket_ref"]):
+                or (row["ticket_ref"] is not None
+                    and registration.get("acquisition_ticket_ref") != row["ticket_ref"])):
             raise ValueError("verified document registration differs from its Core ownership")
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"],
