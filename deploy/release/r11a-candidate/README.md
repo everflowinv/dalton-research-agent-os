@@ -37,6 +37,10 @@ only the initially loaded services if any later step fails. Its order is:
 6. the unchanged frozen `deploy/macos/install.sh`;
 7. installed byte and configuration verification.
 
+The execution command also writes `installed-verification.json` from those
+live checks. The health finalizer consumes that exact artifact; no operator
+needs to synthesize its fields.
+
 The observer requires 45 healthy samples over at least 660 seconds from one
 postdeployment controller. The finalizer rechecks every raw sample and the
 installed wheel inventory, then writes a

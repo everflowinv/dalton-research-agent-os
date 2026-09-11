@@ -41,6 +41,10 @@ OPENCLAW = HOME / ".openclaw/openclaw.json"
 LAUNCH_AGENTS = HOME / "Library/LaunchAgents"
 LABELS = ("space.lumos.dalton.writer", "space.lumos.dalton.controller",
           "space.lumos.dalton.control", "space.lumos.dalton.thesis-impact")
+# install.sh owns this discovery input and may create it when a gateway is
+# present.  It is deliberately outside the owner/governance concurrency guard;
+# rollback never restores state JSON, so an installer-written value is kept.
+INSTALLER_MANAGED_STATE_JSON = frozenset({"model-catalog-sync.json"})
 
 
 class ExecuteError(RuntimeError):
@@ -97,9 +101,23 @@ def tree_hash(root: Path) -> str:
     return canonical_hash(rows)
 
 
+def tree_hash_excluding(root: Path, excluded: set[str]) -> str:
+    rows = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if relative in excluded: continue
+        mode = path.lstat().st_mode & 0o7777
+        if path.is_symlink(): rows.append([relative, "symlink", mode, os.readlink(path)])
+        elif path.is_file(): rows.append([relative, "file", mode, sha(path)])
+        elif path.is_dir(): rows.append([relative, "dir", mode])
+        else: raise ExecuteError(f"unsupported tree entry: {path}")
+    return canonical_hash(rows)
+
+
 def protected_state_hash(root: Path) -> str:
     rows = []
-    paths = list(root.glob("*.json"))
+    paths = [path for path in root.glob("*.json")
+             if path.name not in INSTALLER_MANAGED_STATE_JSON]
     for name in ("connector-governance", "governance-decisions", "discovery-plans"):
         directory = root / name
         if directory.is_dir(): paths.extend([directory, *directory.rglob("*")])
@@ -360,12 +378,17 @@ class Orchestrator:
         backup_tree_hashes = {"venv": tree_hash(rollback / "venv"),
                               "config": tree_hash(rollback / "config"),
                               "state-files": tree_hash(state_files), "plists": tree_hash(plists)}
+        protected_state_sha256 = protected_state_hash(STATE)
         need(backup_tree_hashes["venv"] == tree_hash(VENV)
              and backup_tree_hashes["config"] == tree_hash(CONFIG_DIR)
-             and backup_tree_hashes["state-files"] == protected_state_hash(STATE),
+             and protected_state_sha256 == protected_state_hash(state_files),
              "runtime or config changed during rollback copy")
         (rollback / "initial-state.json").write_text(json.dumps({"loaded": self.initially_loaded,
-            "plists": plist_inventory, "databases": [path.name for path in databases],
+            "plists": plist_inventory,
+            "plist_sha256": {label: sha(LAUNCH_AGENTS / f"{label}.plist")
+                              for label, present in plist_inventory.items() if present},
+            "databases": [path.name for path in databases],
+            "protected_state_sha256": protected_state_sha256,
             "backup_tree_hashes": backup_tree_hashes}, indent=2) + "\n")
         argv = [str(VENV / "bin/dalton-backup"), "create", "--backup-root", str(rollback / "databases")]
         for path in databases: argv += ["--database", f"{path.stem}={path}"]
@@ -387,8 +410,8 @@ class Orchestrator:
         self.command(["/bin/zsh", str(source / "deploy/macos/install.sh")], env=env)
 
     def verify_installed(self, artifacts: Mapping[str, Path]) -> dict[str, Any]:
-        need(SERVICE_CONFIG.read_bytes() == artifacts["service_config_after"].read_bytes(),
-             "installed service config is not the exact keep-latest-3 candidate")
+        need(load_json(SERVICE_CONFIG) == load_json(artifacts["service_config_after"]),
+             "installed service config is not the reviewed keep-latest-3 value")
         need(current_models() == load_json(artifacts["model_config_snapshot"]), "installed model configs changed")
         need(OPENCLAW.read_bytes() == artifacts["openclaw_config_snapshot"].read_bytes(), "OpenClaw config changed")
         plugin_tree_sha256 = verify_provider_plugin(artifacts["provider_plugin_snapshot"])
@@ -453,14 +476,30 @@ class Orchestrator:
         initial = load_json(rollback / "initial-state.json")
         for name, expected in initial["backup_tree_hashes"].items():
             need(tree_hash(rollback / name) == expected, f"rollback {name} copy changed")
-        need(protected_state_hash(STATE) == initial["backup_tree_hashes"]["state-files"],
+        need(protected_state_hash(STATE) == initial["protected_state_sha256"],
              "protected owner state changed; refusing to overwrite concurrent values")
         need(self.artifacts is not None, "rollback artifact authority is unavailable")
-        expected_after = rollback / "expected-config-after"
-        shutil.copytree(rollback / "config", expected_after, symlinks=True)
-        (expected_after / "service.json").write_bytes(self.artifacts["service_config_after"].read_bytes())
-        need(tree_hash(CONFIG_DIR) in {initial["backup_tree_hashes"]["config"], tree_hash(expected_after)},
-             "owner config changed outside the reviewed keep-latest delta")
+        need(tree_hash_excluding(CONFIG_DIR, {"service.json"})
+             == tree_hash_excluding(rollback / "config", {"service.json"}),
+             "owner config changed outside service.json")
+        current_service = load_json(SERVICE_CONFIG)
+        need(current_service in (load_json(self.artifacts["service_config_before"]),
+                                 load_json(self.artifacts["service_config_after"])),
+             "owner service config changed outside the reviewed keep-latest delta")
+        expected_databases = set(initial["databases"])
+        current_databases = {target.name for target in STATE.glob("*.sqlite")}
+        preserved_unknown_databases = sorted(current_databases - expected_databases)
+        inventory = initial["plists"]
+        plist_hashes = initial["plist_sha256"]
+        for label in LABELS:
+            target = LAUNCH_AGENTS / f"{label}.plist"
+            if target.exists():
+                need(target.is_file() and not target.is_symlink()
+                     and inventory[label] and sha(target) == plist_hashes[label],
+                     f"LaunchAgent changed outside reviewed installer output: {label}")
+            else:
+                need(inventory[label] or not target.is_symlink(),
+                     f"unexpected LaunchAgent path: {label}")
         restored_venv = RUNTIME / f".{rollback.name}.restore-venv"
         failed_venv = RUNTIME / f".{rollback.name}.failed-venv"
         shutil.copytree(rollback / "venv", restored_venv, symlinks=True)
@@ -469,11 +508,6 @@ class Orchestrator:
         failed_config = DALTON / f".{rollback.name}.failed-config"
         shutil.copytree(rollback / "config", restored_config, symlinks=True)
         os.replace(CONFIG_DIR, failed_config); os.replace(restored_config, CONFIG_DIR)
-        expected_databases = set(initial["databases"])
-        for target in STATE.glob("*.sqlite"):
-            if target.name not in expected_databases:
-                Path(f"{target}-wal").unlink(missing_ok=True); Path(f"{target}-shm").unlink(missing_ok=True)
-                target.unlink()
         manifest = load_json(rollback / "databases" / self.snapshot_id / "manifest.json")
         for row in manifest["files"]:
             need(isinstance(row.get("file"), str) and Path(row["file"]).name == row["file"]
@@ -482,9 +516,9 @@ class Orchestrator:
             Path(f"{target}-wal").unlink(missing_ok=True); Path(f"{target}-shm").unlink(missing_ok=True)
             temporary = target.with_name(f".{target.name}.r11a-restore")
             shutil.copy2(rollback / "restore" / row["file"], temporary); os.replace(temporary, target)
-        inventory = initial["plists"]
         for label in LABELS:
-            target = LAUNCH_AGENTS / f"{label}.plist"; target.unlink(missing_ok=True)
+            target = LAUNCH_AGENTS / f"{label}.plist"
+            target.unlink(missing_ok=True)
             if inventory[label]: shutil.copy2(rollback / "plists" / target.name, target)
         need(tree_hash(VENV) == initial["backup_tree_hashes"]["venv"]
              and tree_hash(CONFIG_DIR) == initial["backup_tree_hashes"]["config"],
@@ -492,7 +526,8 @@ class Orchestrator:
         self.restart_initial()
         shutil.rmtree(failed_venv); shutil.rmtree(failed_config)
         return {"status": "rolled_back_healthy", "bytes_restored": True,
-                "service_config_sha256": sha(SERVICE_CONFIG), "model_configs": len(current_models())}
+                "service_config_sha256": sha(SERVICE_CONFIG), "model_configs": len(current_models()),
+                "preserved_unknown_databases": preserved_unknown_databases}
 
 
 def load_json_bytes(value: str) -> Any:
@@ -501,7 +536,7 @@ def load_json_bytes(value: str) -> Any:
 
 
 def execute(packet: Path, expected_manifest_sha256: str, log_path: Path, receipt_path: Path,
-            *, do_execute: bool) -> dict[str, Any]:
+            installed_verification_path: Path | None = None, *, do_execute: bool) -> dict[str, Any]:
     manifest_path = packet / "release-manifest.candidate.json"
     need(HEX64.fullmatch(expected_manifest_sha256) is not None
          and manifest_path.is_file() and sha(manifest_path) == expected_manifest_sha256,
@@ -512,7 +547,9 @@ def execute(packet: Path, expected_manifest_sha256: str, log_path: Path, receipt
             preflight = Orchestrator(packet, sink).live_preflight(manifest, artifacts)
         preflight = dict(preflight); preflight["source"] = str(preflight["source"])
         return {"status": "reviewed_preflight_passed", "live_mutation": False, **preflight}
-    need(not log_path.exists() and not receipt_path.exists(), "execution output already exists")
+    need(installed_verification_path is not None, "execution requires an installed-verification output")
+    need(not log_path.exists() and not receipt_path.exists() and not installed_verification_path.exists(),
+         "execution output already exists")
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     started = datetime.now(timezone.utc).isoformat(); outcome: dict[str, Any]
     with os.fdopen(fd, "w", encoding="utf-8") as log:
@@ -523,8 +560,23 @@ def execute(packet: Path, expected_manifest_sha256: str, log_path: Path, receipt
             orchestrator.stop_and_backup(preflight["source"])
             orchestrator.install(preflight["source"], artifacts)
             verified = orchestrator.verify_installed(artifacts)
+            installed_record = {
+                "schema_version": "r11a-installed-verification-0.1",
+                "status": "installed_bytes_verified_runtime_pending",
+                "source_commit": COMMIT,
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "candidate_manifest_sha256": expected_manifest_sha256,
+                "wheel_sha256": WHEEL_SHA256,
+                "service_backup_keep_latest": load_json(SERVICE_CONFIG)["backup"]["keep_latest"],
+                "model_config_count": verified["model_configs"],
+                **verified,
+            }
+            exclusive_json(installed_verification_path, installed_record)
             outcome = {"status": "installer_finished_runtime_health_pending", "exit_code": 0,
-                       "installed": verified, "rollback": {"status": "not_required"}}
+                       "installed": verified,
+                       "installed_verification": installed_verification_path.name,
+                       "installed_verification_sha256": sha(installed_verification_path),
+                       "rollback": {"status": "not_required"}}
         except (Exception, KeyboardInterrupt) as exc:
             orchestrator.note(f"FAIL {type(exc).__name__}: {exc}")
             try: recovery = orchestrator.rollback()
@@ -550,13 +602,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-manifest-sha256", required=True)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--installed-verification", type=Path)
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
-    need(not args.execute or (args.log is not None and args.receipt is not None),
-         "--execute requires --log and --receipt")
+    need(not args.execute or (args.log is not None and args.receipt is not None
+                              and args.installed_verification is not None),
+         "--execute requires --log, --receipt and --installed-verification")
     result = execute(args.packet.resolve(), args.expected_manifest_sha256,
                      args.log.resolve() if args.log else Path("/nonexistent-log"),
                      args.receipt.resolve() if args.receipt else Path("/nonexistent-receipt"),
+                     args.installed_verification.resolve() if args.installed_verification else None,
                      do_execute=args.execute)
     print(json.dumps(result)); return int(result.get("exit_code", 0))
 
