@@ -2816,7 +2816,16 @@ class CoverageMissionAuthority:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
             ).fetchone()
-            proven_transport = bool(transport_code and transport_evidence_ref and transport_evidence_hash)
+            evidence_row = None
+            if transport_evidence_ref is not None:
+                evidence_row = cur.execute(
+                    "SELECT content_hash FROM connector_invocations WHERE connector_invocation_id=?",
+                    (transport_evidence_ref,),
+                ).fetchone()
+            proven_transport = bool(
+                transport_code and evidence_row is not None
+                and evidence_row["content_hash"] == transport_evidence_hash
+            )
             outcome = ("acquired" if status == "acquired" else
                        "transport_terminal" if failure_retryable is False and proven_transport else
                        "transport_retryable" if failure_retryable is True and proven_transport else

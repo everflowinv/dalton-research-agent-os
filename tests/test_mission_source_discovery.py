@@ -434,8 +434,8 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
             self.missions.settle_discovered_document(
                 row["record_id"], status="acquisition_failed", reason="forbidden",
                 failure_retryable=False, transport_code="HTTP_403",
-                transport_evidence_ref=f"connector-invocation:{index}",
-                transport_evidence_hash=f"{index + 1}" * 64)
+                transport_evidence_ref=receipt["connector_invocation_ref"],
+                transport_evidence_hash=receipt["connector_invocation_hash"])
             failed_rows.append(row)
         now = datetime.now(timezone.utc)
         held = self.missions.host_failure_cooldowns(
@@ -459,6 +459,12 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
                     window_seconds=1, cooldown_seconds=1, as_of=now)
         with self.assertRaises(sqlite3.DatabaseError):
             self.h.core.connection.execute("DELETE FROM coverage_mission_acquisition_attempts")
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.h.core.connection.execute(
+                "INSERT INTO coverage_mission_acquisition_attempts(attempt_ref) VALUES('forged')")
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.h.core.connection.execute(
+                "UPDATE coverage_mission_acquisition_attempts SET transport_code='forged'")
 
 
 class FakeAcquisitionLauncher:
