@@ -157,3 +157,23 @@ The drain's PID-only liveness test is now being fixed independently. Cashflow
 inputs and exact cumulative operand authority proof have completed independent
 review and integration; 164 integrated tests pass. They will join the next
 foundation freeze after the process identity repair is accepted.
+
+
+## Fifth foundation freeze, 2026-09-11，01:25 UTC
+
+Frozen `598f2859c59775882f6d85482db09407c8568abd` incorporates the cashflow
+contract and the reviewed PID identity repair. Root integrated 234 tests pass
+in 11.175 seconds. R5 wheel SHA-256
+`b9d5f1b18be851c374b3a8b842960ac2f4c33d04d293dec8a0d3465055c10ce4`
+matches 396 Python, 67 SQL, 90 JSON and 3 HTML source files, with three embedded
+JavaScript checks. Full acceptance and copied-live-state rehearsal are running.
+No R5 deployment has occurred. Main worktree's unrelated DeepSeek diff remains
+SHA-256 `43832e8e6d32cec9bf48b59044d200df0d57a99d30598859c23d4c1360207932`.
+
+The PID fix uses a stable same-descriptor ticket byte/metadata snapshot and the
+actual pre-Popen-to-ticket-write interval, with one-second OS timestamp
+precision allowance. Unavailable or malformed identity proof remains a wait;
+the helper never writes tickets or signals processes. Root and independent
+review verified delayed genuine launches, older/newer reuse, Python aliases,
+path ambiguity and read races. The old live reused PID has since exited; no
+system process was terminated to resolve it.
