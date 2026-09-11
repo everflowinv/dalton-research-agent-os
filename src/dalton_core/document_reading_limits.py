@@ -6,6 +6,7 @@ DEFAULT_READING_LIMITS = {
     "quote_chars": 1200,
     "max_document_chars": 600000,
     "max_pdf_pages": 400,
+    "max_decompressed_bytes": 8_000_000,
 }
 
 

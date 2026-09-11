@@ -19,7 +19,7 @@ Two rules shape it:
   stable.  ``text/html``, ``application/xhtml+xml`` and ``text/plain`` are
   rendered when they are UTF-8; ``application/pdf`` is rendered through
   ``pypdf`` when that optional extra is installed.  Anything else (an image,
-  an unknown charset, an encrypted or malformed PDF, or a PDF when the
+  an unknown charset, a password-protected or malformed PDF, or a PDF when the
   extractor is not installed) is refused with its reason rather than decoded
   into garbage a human might quote.  The renderer identity carries the
   extractor version, so upgrading it invalidates old contexts instead of
@@ -32,13 +32,17 @@ reading and citation; it never becomes Evidence or a Claim here.
 from __future__ import annotations
 
 import hashlib
+import gzip
+import io
 import json
 import re
+import zlib
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
 
 from .public_web_core_fetch import validate_public_web_fetch_manifest
+from .document_reading_limits import DEFAULT_READING_LIMITS
 from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 
 
@@ -54,6 +58,7 @@ RENDERABLE_MEDIA_TYPES: frozenset[str] = TEXT_MEDIA_TYPES | {PDF_MEDIA_TYPE}
 # A research PDF is bounded: an earnings release is tens of pages, and a
 # document longer than this is refused rather than partly rendered.
 MAX_PDF_PAGES = 400
+MAX_DECOMPRESSED_BYTES = DEFAULT_READING_LIMITS["max_decompressed_bytes"]
 _UTF8_CHARSETS: frozenset[str] = frozenset({"", "utf-8", "utf8", "us-ascii", "ascii"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -173,12 +178,15 @@ def _render_pdf(raw: bytes, *, max_pdf_pages: int = MAX_PDF_PAGES) -> tuple[str,
             "fetched page is a PDF but the PDF extractor is not installed; "
             "install the 'pdf' extra to render it"
         ) from exc
-    import io
-
+    empty_password = False
     try:
         reader = pypdf.PdfReader(io.BytesIO(raw))
         if reader.is_encrypted:
-            raise PublicWebSourceError("fetched PDF is encrypted and is not rendered")
+            # Public PDFs can forbid editing while permitting reading without
+            # a password. is_encrypted stays true even after this succeeds.
+            if not reader.decrypt(""):
+                raise PublicWebSourceError("fetched PDF requires a password and is not rendered")
+            empty_password = True
         pages = reader.pages
         if len(pages) > max_pdf_pages:
             raise PublicWebSourceError(
@@ -198,16 +206,21 @@ def _render_pdf(raw: bytes, *, max_pdf_pages: int = MAX_PDF_PAGES) -> tuple[str,
         raise PublicWebSourceError("fetched PDF yielded no extractable text")
     # The extractor version is part of the renderer identity: upgrading it
     # changes the text, and a context bound to the old text must go stale.
-    return "\n\n".join(blocks), f"pdf-pypdf-{pypdf.__version__}:0.1"
+    renderer = f"pdf-pypdf-{pypdf.__version__}:0.1"
+    if empty_password:
+        renderer += ":empty-password:0.1"
+    return "\n\n".join(blocks), renderer
 
 
 def render_public_web_text(raw: bytes, *, raw_media_type: str,
                            max_source_chars: int = MAX_SOURCE_CHARS,
-                           max_pdf_pages: int = MAX_PDF_PAGES) -> dict[str, Any]:
+                           max_pdf_pages: int = MAX_PDF_PAGES,
+                           max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES) -> dict[str, Any]:
     """Render fetched bytes as deterministic text plus how it was rendered."""
 
     if (type(max_source_chars) is not int or max_source_chars <= 0
-            or type(max_pdf_pages) is not int or max_pdf_pages <= 0):
+            or type(max_pdf_pages) is not int or max_pdf_pages <= 0
+            or type(max_decompressed_bytes) is not int or max_decompressed_bytes <= 0):
         raise PublicWebSourceError("rendering limits must be positive integers")
     if not isinstance(raw, bytes):
         raise PublicWebSourceError("fetched page bytes are unavailable")
@@ -216,8 +229,24 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str,
         raise PublicWebSourceError(
             f"fetched page media type {media_type} cannot be rendered as text for review"
         )
+    compressed = raw.startswith(b"\x1f\x8b")
+    if compressed:
+        # Original compressed bytes remain the receipt/hash authority. Decode
+        # one verified gzip stream (including CRC), with an explicit byte cap
+        # before parsing. Never quote a truncated compressed response.
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
+                decoded_bytes = stream.read(max_decompressed_bytes + 1)
+        except (OSError, EOFError, ValueError, zlib.error) as exc:
+            raise PublicWebSourceError("fetched gzip content is incomplete or invalid") from exc
+        if len(decoded_bytes) > max_decompressed_bytes:
+            raise PublicWebSourceError(
+                "fetched gzip content exceeds the configured decompressed byte limit")
+        raw = decoded_bytes
     if media_type == PDF_MEDIA_TYPE:
         text, renderer = _render_pdf(raw, max_pdf_pages=max_pdf_pages)
+        if compressed:
+            renderer = "gzip:0.1|" + renderer
         truncated = len(text) > max_source_chars
         if truncated:
             text = text[:max_source_chars]
@@ -243,6 +272,8 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str,
         parser.close()
         text = parser.text()
         renderer = "html-visible-blocks:0.1"
+    if compressed:
+        renderer = "gzip:0.1|" + renderer
     truncated = len(text) > max_source_chars
     if truncated:
         text = text[:max_source_chars]
@@ -267,6 +298,7 @@ def _one_row(connection: Any, query: str, params: tuple[Any, ...], label: str) -
 def verified_public_web_source(
     core: Any, spool: Any, manifest: Mapping[str, Any], receipt_reader: Any, *,
     max_source_chars: int = MAX_SOURCE_CHARS, max_pdf_pages: int = MAX_PDF_PAGES,
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Re-verify one fetched page end to end and render it.
 
@@ -400,7 +432,8 @@ def verified_public_web_source(
     )
 
     rendering = render_public_web_text(raw, raw_media_type=manifest["raw_media_type"],
-                                      max_source_chars=max_source_chars, max_pdf_pages=max_pdf_pages)
+                                      max_source_chars=max_source_chars, max_pdf_pages=max_pdf_pages,
+                                      max_decompressed_bytes=max_decompressed_bytes)
     return manifest, rendering
 
 

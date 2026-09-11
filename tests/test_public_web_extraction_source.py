@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
+import io
 import tempfile
 import unittest
 import unittest.mock
@@ -43,6 +45,22 @@ def remanifest(manifest: dict, **overrides) -> dict:
 
 
 class RenderTests(unittest.TestCase):
+    def test_gzip_text_is_decoded_with_integrity_and_configured_size_bounds(self):
+        raw = gzip.compress(PAGE, mtime=0)
+        rendered = render_public_web_text(raw, raw_media_type="text/html")
+        plain = render_public_web_text(PAGE, raw_media_type="text/html")
+        self.assertEqual(rendered["text"], plain["text"])
+        self.assertEqual(rendered["renderer"], "gzip:0.1|" + plain["renderer"])
+        with self.assertRaisesRegex(PublicWebSourceError, "decompressed byte limit"):
+            render_public_web_text(raw, raw_media_type="text/html", max_decompressed_bytes=len(PAGE)-1)
+        self.assertEqual(render_public_web_text(
+            raw, raw_media_type="text/html", max_decompressed_bytes=len(PAGE)), rendered)
+        corrupt = bytearray(raw)
+        corrupt[-8] ^= 1  # Fail CRC even though every text byte is available.
+        for broken in (bytes(corrupt), raw[:-4], b"\x1f\x8bgarbage"):
+            with self.subTest(body=broken[:8]), self.assertRaisesRegex(PublicWebSourceError, "gzip content"):
+                render_public_web_text(broken, raw_media_type="text/html")
+
     def test_visible_blocks_only_and_deterministic(self) -> None:
         first = render_public_web_text(PAGE, raw_media_type="text/html; charset=utf-8")
         second = render_public_web_text(PAGE, raw_media_type="text/html")
@@ -111,6 +129,23 @@ class VerifiedSourceTests(unittest.TestCase):
         self.assertEqual(rendering["text"], render_public_web_text(PAGE, raw_media_type="text/html")["text"])
         self.assertEqual(manifest["body_sha256"], hashlib.sha256(PAGE).hexdigest())
         self.assertIn("Accenture names a new CFO", rendering["text"])
+
+    def test_gzip_source_retains_compressed_receipt_and_spool_authority(self):
+        raw = gzip.compress(PAGE, mtime=0)
+        root = Path(self.temp.name) / "gzip"
+        root.mkdir()
+        harness = FetchHarness(root, transport=transport_for(raw))
+        self.addCleanup(harness.close)
+        receipt = harness.discover()
+        fetched = harness.fetch.fetch(harness.fetch.build_request(harness.authority(receipt, URL_A)))
+        manifest = harness.fetch.manifest(fetched)
+        verified, rendered = verified_public_web_source(
+            harness.core, harness.spool, manifest, harness.fetch.receipts)
+        self.assertEqual(verified, manifest)
+        self.assertEqual(verified["body_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(harness.spool.read_object(verified["raw_response_hash"]), raw)
+        self.assertIn("Accenture names a new CFO", rendered["text"])
+        self.assertEqual(rendered["renderer"], "gzip:0.1|html-visible-blocks:0.1")
 
     def test_receipt_and_lineage_drift_fail_closed(self) -> None:
         cases = {
@@ -199,6 +234,25 @@ def minimal_pdf(lines: list[str], *, encrypted_marker: bool = False) -> bytes:
 
 
 class PdfRenderTests(unittest.TestCase):
+    def test_empty_password_pdf_is_readable_but_real_password_stays_required(self):
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(minimal_pdf(["Annual revenue increased by 12 percent."])))
+        for password in ("", "required-secret"):
+            writer = pypdf.PdfWriter()
+            writer.add_page(reader.pages[0])
+            writer.encrypt(password, owner_password="owner-edit-password")
+            out = io.BytesIO()
+            writer.write(out)
+            raw = out.getvalue()
+            if password:
+                with self.assertRaisesRegex(PublicWebSourceError, "requires a password"):
+                    render_public_web_text(raw, raw_media_type="application/pdf")
+            else:
+                result = render_public_web_text(raw, raw_media_type="application/pdf")
+                self.assertIn("Annual revenue increased by 12 percent.", result["text"])
+                self.assertEqual(result["renderer"], f"pdf-pypdf-{pypdf.__version__}:0.1:empty-password:0.1")
+                self.assertEqual(result, render_public_web_text(raw, raw_media_type="application/pdf"))
+
     def test_a_pdf_renders_deterministically_and_names_its_extractor(self) -> None:
         raw = minimal_pdf(["New bookings of $21.1 billion", "Revenues of $16.5 billion"])
         first = render_public_web_text(raw, raw_media_type="application/pdf")

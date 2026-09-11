@@ -928,6 +928,7 @@ class DocumentExtractionService:
             manifest, rendering = verified_public_web_source(
                 writer.store, writer._transcript_spool, manifest, reader,
                 max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"],
+                max_decompressed_bytes=limits["max_decompressed_bytes"],
             )
             text = rendering["text"]
             # A web page has no declared content hash of its own: the citable
@@ -1470,7 +1471,8 @@ class DocumentExtractionService:
                     launcher.locate_completed_manifest(review["document_ref"]))
         _, rendering = verified_public_web_source(
             self.writer.store, self.writer._transcript_spool, manifest, reader,
-            max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"])
+            max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"],
+            max_decompressed_bytes=limits["max_decompressed_bytes"])
         return checked(rendering["text"])
 
     def generate_numeric(self, *, review_id, expected_review_hash, offset,

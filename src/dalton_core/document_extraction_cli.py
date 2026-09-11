@@ -560,6 +560,8 @@ def run_extraction(
 _PERMANENT_UNREADABLE = (
     "is not valid UTF-8",
     "is encrypted and is not rendered",
+    "requires a password and is not rendered",
+    "gzip content is incomplete or invalid",
     "no completed acquisition ticket",
     "no completed fetch ticket",
     # S5: a rendering that came back empty.  Offset zero is the only offset a
