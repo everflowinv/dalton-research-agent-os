@@ -11,6 +11,11 @@ class Process:
     def poll(self): return self.code
 
 class DiscoverySelectionLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.formal = patch('dalton_core.discovery_selection_launcher._formal_selection_valid',
+                            return_value=True)
+        self.formal.start()
+        self.addCleanup(self.formal.stop)
     def test_ticket_is_durable_and_empty_completion_advances_page(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); config=root/'model.json'; config.write_text('{}')
