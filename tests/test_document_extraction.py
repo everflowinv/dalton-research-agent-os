@@ -353,6 +353,15 @@ class DocumentExtractionTests(unittest.TestCase):
         self.assertEqual(h2.generate()['status'], 'failed')
         self.assertEqual(h2.adapter.calls, 1)
 
+    def test_truncated_source_cannot_issue_whole_document_completion_receipt(self):
+        h = self.h
+        with patch.object(h.service, "context", return_value={"source_truncated": True}):
+            with self.assertRaisesRegex(ResearchVerificationConflict, "truncated source"):
+                h.service.read_completion_receipt(
+                    review_id=h.review["review_id"],
+                    source_review_hash=h.params["expected_review_hash"], offset=0,
+                    actor_ref=OWNER)
+
     def test_changed_work_order_and_real_adapter_are_rejected(self):
         h = self.h; h.enable_fixture(); context = h.context()
         factory = h.writer._document_extraction_worker_factory

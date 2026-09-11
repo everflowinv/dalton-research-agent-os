@@ -1038,6 +1038,9 @@ class DocumentExtractionService:
     def read_completion_receipt(self, *, review_id, source_review_hash, offset, actor_ref):
         """Return a receipt only after replaying every formal window check."""
         context = self.context(review_id, source_review_hash, offset, actor_ref)
+        if context.get("source_truncated") is True:
+            raise ResearchVerificationConflict(
+                "a truncated source cannot prove complete document reading")
         result = self._suggestions(context)
         receipt = result.get("completion_receipt")
         if result.get("status") != "succeeded" or not isinstance(receipt, Mapping):
