@@ -666,10 +666,11 @@ fi
 # P14e / INT2: the three ProbeTemplates the ad-hoc research lane may bind. The
 # manifest is publication material -- the owner publishes each template with a
 # `human:` principal, and this script never signs anything -- so it is put
-# where the owner can read it and nowhere a lane looks. The lane's own config
-# file (research-task-lane.json) is *not* written here: it is the lane's
-# switch, and switching the lane on before any template is published gives a
-# lane that answers no_executable_adhoc_template_published every tick.
+# where the owner can read it and nowhere an ad-hoc lane looks. The ad-hoc
+# lane's own config file (research-task-lane.json) is *not* written here: it is
+# that lane's switch. A separately installed mission-document research config
+# enables only its registered-original admission producer and cannot bind
+# these ad-hoc templates.
 phase8_dir="$state_dir/phase8"
 mkdir -p "$phase8_dir"
 chmod 700 "$phase8_dir"
