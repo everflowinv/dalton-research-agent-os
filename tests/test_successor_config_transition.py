@@ -510,6 +510,23 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                          json.loads(self.service.read_text()))
         self.assertFalse((self.packet / "receipt.json").exists())
 
+    def test_atomic_service_create_preserves_racing_dangling_symlink(self):
+        manifest = self.build(); self.install_before()
+        real_link = os.link
+
+        def race_service_link(source, target, *args, **kwargs):
+            if Path(target).resolve() == self.service.resolve():
+                self.service.symlink_to(self.root / "owner-missing-target.json")
+            return real_link(source, target, *args, **kwargs)
+
+        with patch.object(os, "link", side_effect=race_service_link):
+            with self.assertRaises(FileExistsError):
+                self.apply(manifest)
+        self.assertTrue(self.service.is_symlink())
+        self.assertEqual(self.root / "owner-missing-target.json",
+                         self.service.readlink())
+        self.assertFalse((self.packet / "receipt.json").exists())
+
     def test_service_delta_cannot_overwrite_existing_budget_or_other_path(self):
         manifest = self.build(); self.install_before()
         changed = json.loads(self.service.read_text())

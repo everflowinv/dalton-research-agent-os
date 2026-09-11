@@ -668,7 +668,8 @@ def _apply_preserve_transition(
             held.unlink()
         finally:
             temporary.unlink(missing_ok=True)
-            if held.exists() and not service_config_path.exists():
+            if (held.exists() and not service_config_path.exists()
+                    and not service_config_path.is_symlink()):
                 os.rename(held, service_config_path)
             elif held.exists() and held.is_file() and not held.is_symlink():
                 held.unlink()
