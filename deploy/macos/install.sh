@@ -936,6 +936,21 @@ if [[ -n "${DALTON_QUALITY_VERIFIER_MODEL_PROFILE:-}" || -n "${DALTON_QUALITY_VE
 else
   print "note: set DALTON_QUALITY_VERIFIER_MODEL_TIER to install optional independent quality verification."
 fi
+# Registered annual-report plans inherit the currently installed drafting and
+# independent-verifier authorities on first install. The dedicated files then
+# become owner-managed and every later install preserves them byte for byte;
+# Cockpit selection and budget repointing can move them independently. No model
+# id, credential slot, route or budget is invented here.
+if [[ -f "$state_dir/dossier-model-config.json" || -f "$state_dir/initial-screen-model-config.json" ]]; then
+  if [[ -f "$state_dir/company-dossier-verifier-model-config.json" \
+     || -f "$state_dir/dossier-verifier-model-config.json" ]]; then
+    "$venv_dir/bin/python" -m dalton_core.annual_report_setup --config "$config_path"
+  else
+    print "note: no independent-verifier model config is installed; registered annual-report execution remains off."
+  fi
+else
+  print "note: no drafting model config is installed; registered annual-report execution remains off."
+fi
 # P9d-18 / ADR-0006: point the cockpit at the Core (read-only), the state
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.

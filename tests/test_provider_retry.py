@@ -10,16 +10,19 @@ from dalton_core.contracts import WorkOrder
 
 
 class ProviderRetryContractTests(unittest.TestCase):
-    def test_policy_is_closed_and_bounded(self):
+    def test_policy_is_closed_and_non_negative(self):
         self.assertEqual(validate_provider_retry({
             "max_same_profile_retries": 1, "retry_backoff_seconds": 2,
         })["max_same_profile_retries"], 1)
         for bad in (
-            {"max_same_profile_retries": 4, "retry_backoff_seconds": 0},
+            {"max_same_profile_retries": -1, "retry_backoff_seconds": 0},
             {"max_same_profile_retries": 1, "retry_backoff_seconds": 0, "codes": []},
         ):
             with self.assertRaises(ProviderRetryError):
                 validate_provider_retry(bad)
+        self.assertEqual(validate_provider_retry({
+            "max_same_profile_retries": 4, "retry_backoff_seconds": 0,
+        })["max_same_profile_retries"], 4)
 
     def test_only_exact_completed_broker_failure_is_eligible(self):
         work = WorkOrder(

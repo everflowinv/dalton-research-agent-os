@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Mapping
@@ -31,10 +32,6 @@ DEFAULT_MAX_RESULTS = 20
 DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024
 DEFAULT_CONTEXT_BEFORE_CHARS = 240
 DEFAULT_CONTEXT_AFTER_CHARS = 480
-MAX_QUERY_TERMS = 100
-MAX_RESULTS = 100
-MAX_SOURCE_BYTES = 64 * 1024 * 1024
-MAX_CONTEXT_CHARS = 16_000
 
 _CIK_RE = re.compile(r"[0-9]{1,10}\Z")
 _ACCESSION_RE = re.compile(r"([0-9]{10})-([0-9]{2})-([0-9]{6})\Z")
@@ -96,19 +93,12 @@ def normalize_request(value: Any) -> dict[str, Any]:
     }
     if not isinstance(raw_limits, Mapping) or set(raw_limits) != limit_fields:
         raise RegisteredAnnualReportError("annual report limits have an invalid closed shape")
-    ceilings = {
-        "max_query_terms": MAX_QUERY_TERMS,
-        "max_results": MAX_RESULTS,
-        "max_source_bytes": MAX_SOURCE_BYTES,
-        "context_before_chars": MAX_CONTEXT_CHARS,
-        "context_after_chars": MAX_CONTEXT_CHARS,
-    }
     limits: dict[str, int] = {}
-    for name, ceiling in ceilings.items():
+    for name in limit_fields:
         item = raw_limits.get(name)
-        if isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= ceiling:
+        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
             raise RegisteredAnnualReportError(
-                f"limits.{name} must be within 1..{ceiling}"
+                f"limits.{name} must be a positive integer"
             )
         limits[name] = item
     raw_terms = value.get("query_terms")
@@ -133,7 +123,7 @@ def normalize_request(value: Any) -> dict[str, Any]:
     model_fields = {
         "routing_policy_ref", "credential_slot_refs", "max_input_tokens",
         "max_output_tokens", "max_cost_usd", "max_seconds", "max_attempts",
-        "provider_retry",
+        "max_elapsed_seconds", "provider_retry",
     }
     for stage in ("draft", "verifier"):
         config = raw_model.get(stage)
@@ -150,20 +140,23 @@ def normalize_request(value: Any) -> dict[str, Any]:
             raise RegisteredAnnualReportError(
                 f"model_execution.{stage}.credential_slot_refs must be unique logical slots"
             )
-        maximums = {
-            "max_input_tokens": 1_000_000, "max_output_tokens": 100_000,
-            "max_seconds": 3_600, "max_attempts": 5,
-        }
-        parsed = {
-            name: raw if (not isinstance((raw := config.get(name)), bool)
-                          and isinstance(raw, int) and 1 <= raw <= maximum)
-            else None
-            for name, maximum in maximums.items()
-        }
-        if any(item is None for item in parsed.values()):
-            raise RegisteredAnnualReportError(f"model_execution.{stage} integer budget is invalid")
+        integer_budgets = (
+            "max_input_tokens", "max_output_tokens", "max_seconds",
+            "max_elapsed_seconds", "max_attempts",
+        )
+        parsed = {name: config.get(name) for name in integer_budgets}
+        if any(isinstance(item, bool) or not isinstance(item, int) or item < 1
+               for item in parsed.values()):
+            raise RegisteredAnnualReportError(
+                f"model_execution.{stage} integer budget is invalid"
+            )
         cost = config.get("max_cost_usd")
-        if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not 0 < float(cost) <= 100:
+        if (
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
+            or not math.isfinite(float(cost))
+            or not 0 < float(cost)
+        ):
             raise RegisteredAnnualReportError(f"model_execution.{stage}.max_cost_usd is invalid")
         provider_retry = None
         if config.get("provider_retry") is not None:
@@ -715,6 +708,49 @@ class RegisteredAnnualReportRegistry:
             "limits": limits_copy,
             "model_execution": dict(model_execution),
         })
+        mission_row = self.connection.execute(
+            "SELECT record_json,content_hash FROM coverage_mission_versions "
+            "WHERE mission_version_id=?", (mission_version_ref,),
+        ).fetchone()
+        if mission_row is None:
+            raise RegisteredAnnualReportError("coverage mission budget authority is unavailable")
+        try:
+            mission = json.loads(mission_row["record_json"])
+        except (TypeError, ValueError) as exc:
+            raise RegisteredAnnualReportError("coverage mission budget authority is invalid") from exc
+        asserted = mission.get("content_hash") if isinstance(mission, Mapping) else None
+        mission_body = dict(mission) if isinstance(mission, Mapping) else {}
+        mission_body.pop("content_hash", None)
+        if (
+            not isinstance(mission, Mapping)
+            or mission_row["content_hash"]
+            != (asserted if asserted is not None else content_hash(mission_body))
+            or (asserted is not None and asserted != content_hash(mission_body))
+            or not isinstance(mission.get("budget"), Mapping)
+        ):
+            raise RegisteredAnnualReportError("coverage mission budget authority is invalid")
+        mission_budget = mission["budget"]
+        paid_calls = sum(
+            request["model_execution"][stage]["max_attempts"]
+            for stage in ("draft", "verifier")
+        )
+        paid_cost = sum(
+            request["model_execution"][stage]["max_attempts"]
+            * request["model_execution"][stage]["max_cost_usd"]
+            for stage in ("draft", "verifier")
+        )
+        call_cap = mission_budget.get("max_daily_paid_calls")
+        cost_cap = mission_budget.get("max_daily_cost_usd")
+        if (
+            isinstance(call_cap, bool) or not isinstance(call_cap, int)
+            or isinstance(cost_cap, bool) or not isinstance(cost_cap, (int, float))
+            or not math.isfinite(float(cost_cap))
+            or call_cap < 0 or float(cost_cap) < 0
+            or paid_calls > call_cap or paid_cost > float(cost_cap)
+        ):
+            raise RegisteredAnnualReportError(
+                "annual-report model attempt/cost budget exceeds the exact coverage mission"
+            )
         # Includes exact issuer statement authority and immutable proof checks.
         resolve_core_registration(self.connection, request)
         return request
@@ -772,7 +808,7 @@ class RegisteredAnnualReportRegistry:
 __all__ = [
     "CAPABILITY", "DEFAULT_CONTEXT_AFTER_CHARS", "DEFAULT_CONTEXT_BEFORE_CHARS",
     "DEFAULT_MAX_QUERY_TERMS", "DEFAULT_MAX_RESULTS", "DEFAULT_MAX_SOURCE_BYTES",
-    "MAX_RESULTS", "OPERATION", "OUTPUT_CONTRACT_REF",
+    "OPERATION", "OUTPUT_CONTRACT_REF",
     "PERMISSION_SCOPE", "RUNTIME_PROFILE_REF", "RegisteredAnnualReportError",
     "RegisteredAnnualReportRegistry", "normalize_request",
     "resolve_core_registration", "source_bytes_hash", "validate_retrieval_proof",

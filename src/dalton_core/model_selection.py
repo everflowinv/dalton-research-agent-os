@@ -60,10 +60,11 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "draft": ("initial-screen-model-config.json",),
     "document_extraction": ("document-extraction-model-config.json",),
     "discovery_selection": ("discovery-selection-model-config.json",),
-    "registered_annual_report_draft": ("initial-screen-model-config.json",),
+    "registered_annual_report_draft": (
+        "registered-annual-report-draft-model-config.json",
+    ),
     "registered_annual_report_verifier": (
-        "company-dossier-verifier-model-config.json",
-        "dossier-verifier-model-config.json",
+        "registered-annual-report-verifier-model-config.json",
     ),
     "claim_index": ("claim-index-model-config.json",),
     "quality_verifier": ("quality-verifier-model-config.json",),

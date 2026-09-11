@@ -665,8 +665,8 @@ class MissionAndSwitchTests(unittest.TestCase):
                 self.assertTrue((REPO_ROOT / switch.repo_source).is_file())
 
     def test_the_switch_install_sh_does_write_is_the_one_it_names(self) -> None:
-        # Five now: extraction's model config, P14a's tracking policy, P12a's
-        # dossier policy, P12e's framework policy and P14-M2's catalog switch. Each has to be
+        # Seven now: extraction and the annual pair, P14a's tracking policy,
+        # P12a's dossier policy, P12e's framework policy and P14-M2's catalog switch. Each has to be
         # traceable to the line in install.sh that writes it -- a switch that
         # claims install seeds a file it does not is worse than a switch that
         # admits it is missing.
@@ -678,9 +678,12 @@ class MissionAndSwitchTests(unittest.TestCase):
             {"document-extraction-model-config.json", "tracking-policy.json",
              "p12a-dossier-policy-v1.json",
              "p12e-industry-framework-policy-v1.json",
-             "model-catalog-sync.json"},
+             "model-catalog-sync.json",
+             "registered-annual-report-draft-model-config.json",
+             "registered-annual-report-verifier-model-config.json"},
         )
         self.assertIn("document_extraction_setup", code)
+        self.assertIn("annual_report_setup", code)
         self.assertIn("p14a-tracking-policy-v2.json", code)
         self.assertIn("p12e-industry-framework-policy-v1.json", code)
         self.assertIn("p12a-dossier-policy-v1.json", code)

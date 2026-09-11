@@ -877,6 +877,16 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
         "written only when DALTON_PLANNER_MODEL_PROFILE/TIER is set",
     ),
     LaneSwitch(
+        "registered annual-report draft",
+        "registered-annual-report-draft-model-config.json", None, True,
+        "seeded from the current drafting authority and preserved thereafter",
+    ),
+    LaneSwitch(
+        "registered annual-report verifier",
+        "registered-annual-report-verifier-model-config.json", None, True,
+        "seeded from the current independent verifier and preserved thereafter",
+    ),
+    LaneSwitch(
         "industry_framework (P12e)", "p12e-industry-framework-policy-v1.json",
         "deploy/phase9/p12e-industry-framework-policy-v1.json", True,
         "INT3 seed block; one file, so all-or-nothing is automatic. The lane is "

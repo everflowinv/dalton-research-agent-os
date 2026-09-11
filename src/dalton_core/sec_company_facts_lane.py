@@ -343,7 +343,17 @@ class SecCompanyFactsLane:
             self.agenda = AgendaStore(self.core)
             self.backlog = ResearchQuestionBacklog(self.core)
             # Hard executor constraint: WorkOrders share the Core connection.
-            self.scheduler = Scheduler(connection=self.core.connection)
+            scheduler_kwargs: dict[str, Any] = {}
+            if self._annual_runtime_enabled:
+                from .annual_report_runtime import scheduler_policy
+
+                scheduler_kwargs = scheduler_policy((
+                    dict(annual_report_draft_model_execution),
+                    dict(annual_report_verifier_model_execution),
+                ))
+            self.scheduler = Scheduler(
+                connection=self.core.connection, **scheduler_kwargs
+            )
             self.scheduler.clock = self.clock
             self.connectors = ConnectorStore(self.core, clock=self.clock)
             self.journal = RunnerJournal(self.core, clock=self.clock)
@@ -389,6 +399,7 @@ class SecCompanyFactsLane:
                     routing_policy_ref=draft_config["routing_policy_ref"],
                     credential_slot_refs=draft_config["credential_slot_refs"],
                     provider_retry=draft_config["provider_retry"],
+                    lease_seconds=draft_config["max_seconds"],
                 )
                 self.annual_report_verifier_worker = RegisteredAnnualReportVerifierWorker(
                     **common,
@@ -396,6 +407,7 @@ class SecCompanyFactsLane:
                     routing_policy_ref=verifier_config["routing_policy_ref"],
                     credential_slot_refs=verifier_config["credential_slot_refs"],
                     provider_retry=verifier_config["provider_retry"],
+                    lease_seconds=verifier_config["max_seconds"],
                 )
             self.plans = ResearchPlanAuthority(
                 self.core,

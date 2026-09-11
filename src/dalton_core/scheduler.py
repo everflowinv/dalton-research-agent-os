@@ -367,6 +367,16 @@ class Scheduler:
                     "work_order_id": work_order_id,
                     "work_order_hash": existing["work_order_hash"],
                 }
+            # A plan may choose a tighter per-node bound than the installed
+            # Scheduler policy.  The WorkOrder can never raise the trusted
+            # policy cap; it can only spend fewer attempts.
+            work_max_attempts = self.max_attempts
+            requested_max = wire.get("budget", {}).get("step_max_attempts")
+            if (wire.get("metadata", {}).get("permission_scope")
+                    == "registered_annual_report_read"
+                    and isinstance(requested_max, int) and not isinstance(requested_max, bool)
+                    and requested_max > 0):
+                work_max_attempts = min(work_max_attempts, requested_max)
             cur.execute(
                 "INSERT INTO scheduler_work_orders "
                 "(work_order_id, work_order_json, work_order_hash, policy_version_id, max_attempts, created_at) "
@@ -376,7 +386,7 @@ class Scheduler:
                     canonical_json(wire),
                     work_hash,
                     self.policy_version_id,
-                    self.max_attempts,
+                    work_max_attempts,
                     now,
                 ),
             )

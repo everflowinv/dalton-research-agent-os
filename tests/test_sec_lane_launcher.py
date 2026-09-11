@@ -139,6 +139,64 @@ class SecLaneLauncherTests(unittest.TestCase):
                 launcher.status("sec-lane-run:" + "0" * 24)
             self.assertEqual(list((root / "state" / "sec-lane-runs").iterdir()), [])
 
+    def test_registered_annual_report_launch_is_explicitly_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unconfigured = self._launcher(root)
+            with self.assertRaisesRegex(LaneLaunchRejected, "not configured"):
+                unconfigured.start_registered_annual_report(
+                    plan_version_ref="research-plan-version:" + "a" * 32,
+                    actor_ref=OWNER,
+                )
+
+            state = root / "state"
+            spool = state / "spool"
+            spool.mkdir()
+            web_governance = root / "web-governance.json"
+            web_governance.write_text("{}\n", encoding="utf-8")
+            router = state / "router.sqlite"
+            key = state / "broker.key"
+            key.write_text("secret", encoding="utf-8")
+            os.chmod(key, 0o600)
+            base = {
+                "credential_slot_refs": ["credential-slot:model:test"],
+                "model_router_db": str(router.resolve()),
+                "broker_socket": str((state / "broker.sock").resolve()),
+                "broker_auth_key": str(key.resolve()),
+                "broker_client_id": "client:dalton-core", "expected_agent_id": "chem",
+                "budget_db": str((state / "budget.sqlite").resolve()),
+                "budget_policy_ref": "budget-policy:test:1",
+                "call_budget": {"max_input_tokens": 1000, "max_output_tokens": 100,
+                                "max_cost_usd": 1.0, "timeout_seconds": 30},
+                "run_budget": {"max_units": 1},
+            }
+            paths = []
+            for name, route in (("annual-draft.json", "routing-policy:draft:1"),
+                                ("annual-verifier.json", "routing-policy:verifier:1")):
+                path = state / name
+                path.write_text(json.dumps({**base, "routing_policy_ref": route}), encoding="utf-8")
+                os.chmod(path, 0o600)
+                paths.append(path)
+            launcher = self._launcher(
+                root, spool_dir=spool, web_fetch_governance_path=web_governance,
+                annual_report_draft_model_config_path=paths[0],
+                annual_report_verifier_model_config_path=paths[1],
+            )
+            ticket = launcher.start_registered_annual_report(
+                plan_version_ref="research-plan-version:" + "b" * 32,
+                actor_ref=OWNER,
+            )
+            self.assertEqual(ticket["operation"], "registered_annual_report")
+            self.assertEqual(launcher.wait(timeout=30), 0)
+            ticket_dir = state / "sec-lane-runs" / ticket["id"].split(":", 1)[1]
+            argv = json.loads((ticket_dir / "argv.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                argv[argv.index("--annual-plan-ref") + 1], ticket["plan_version_ref"]
+            )
+            self.assertEqual(
+                argv[argv.index("--annual-draft-model-config") + 1], str(paths[0].resolve())
+            )
+
     def test_ticket_lifecycle_command_shape_and_single_slot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

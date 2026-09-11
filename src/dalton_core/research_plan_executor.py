@@ -3,8 +3,9 @@
 This module connects the human-gated ResearchPlan task tree to the already
 built real components.  The executor runs the currently admitted node of one
 exact accepted + started SEC plan, one node at a time. Numeric plans use the
-four stages below. A qualitative registered annual-report plan runs one local
-retrieval node and stops before model drafting, verification or staging:
+four stages below. A qualitative registered annual-report plan runs local
+retrieval, model drafting, independent model verification and candidate
+staging through its own closed four-node tree:
 
 - ``connector``: the plan root WorkOrder is claimed on the Scheduler and
   executed through the existing ``ConnectorTransportExecutor`` + SEC public

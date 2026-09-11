@@ -679,6 +679,8 @@ class SetSelectionTests(StateDirectoryCase):
             "event-verifier-model-config.json",
             "zero-base-review-model-config.json",
             "zero-base-review-verifier-model-config.json",
+            "registered-annual-report-draft-model-config.json",
+            "registered-annual-report-verifier-model-config.json",
         })
 
     def test_quality_verifier_binding_reads_its_actual_optional_config(self) -> None:

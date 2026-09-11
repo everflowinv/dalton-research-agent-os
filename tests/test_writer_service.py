@@ -183,6 +183,23 @@ class WriterServiceTests(unittest.TestCase):
             self.worker.call("stage_change", {"unknown": True})
         self.assertEqual(ctx.exception.code, "protocol_error")
 
+    def test_annual_plan_socket_operation_reports_missing_installed_config(self):
+        with self.assertRaises(RemoteError) as ctx:
+            self.governance.call("create_registered_annual_report_plan", {
+                "question_ref": "research-question:annual",
+                "question_version_ref": "research-question-version:annual:1",
+                "decision_ref": "human-intent-decision:annual",
+                "mission_version_ref": "coverage-mission-version:annual",
+                "company_ref": "company:annual",
+                "review_ref": "mission-document-review:annual",
+                "issuer_cik": "0000320193",
+                "accession": "0000320193-25-000079",
+                "query_terms": ["operating dependencies"],
+                "actor_ref": "human:coverage-owner",
+            })
+        self.assertEqual(ctx.exception.code, "rejected")
+        self.assertIn("annual-report model configuration is missing or invalid", str(ctx.exception))
+
     def test_weekly_brief_cycle_rpc_is_core_only_and_policy_gated(self):
         plan = {
             "schema_version": "0.1",

@@ -25,12 +25,10 @@ def validate_provider_retry(value: Any) -> dict[str, int]:
         raise ProviderRetryError("provider_retry has an invalid shape")
     retries = value["max_same_profile_retries"]
     backoff = value["retry_backoff_seconds"]
-    if (isinstance(retries, bool) or not isinstance(retries, int)
-            or not 0 <= retries <= 3):
-        raise ProviderRetryError("max_same_profile_retries must be between 0 and 3")
-    if (isinstance(backoff, bool) or not isinstance(backoff, int)
-            or not 0 <= backoff <= 3600):
-        raise ProviderRetryError("retry_backoff_seconds must be between 0 and 3600")
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise ProviderRetryError("max_same_profile_retries must be a non-negative integer")
+    if isinstance(backoff, bool) or not isinstance(backoff, int) or backoff < 0:
+        raise ProviderRetryError("retry_backoff_seconds must be a non-negative integer")
     return {"max_same_profile_retries": retries,
             "retry_backoff_seconds": backoff}
 

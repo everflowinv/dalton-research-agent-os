@@ -189,8 +189,7 @@ class RoutedTranscriptPolishModelWorker:
                 and not isinstance(state.get("retry_profile_version_ref"), str)
                 or isinstance(state.get("same_profile_retries"), bool)
                 or not isinstance(state.get("same_profile_retries"), int)
-                or state.get("same_profile_retries", -1) < 0
-                or state.get("same_profile_retries", 4) > 3):
+                or state.get("same_profile_retries", -1) < 0):
             raise TranscriptPolishModelWorkerConflict(
                 "persisted provider retry state is invalid")
         decisions = self.router.list_decisions(work_order_id=work.id)
@@ -298,6 +297,31 @@ class RoutedTranscriptPolishModelWorker:
             for event in self.scheduler.attempt_history(work_order_id)
             if event.get("result_envelope_id") is not None
         }
+
+    def _work_deadline(self, work: WorkOrder) -> datetime | None:
+        maximum = work.budget.get("max_elapsed_seconds")
+        if maximum is None:
+            return None
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+            raise TranscriptPolishModelWorkerConflict(
+                "WorkOrder max_elapsed_seconds is invalid"
+            )
+        history = self.scheduler.attempt_history(work.id)
+        if not history:
+            raise TranscriptPolishModelWorkerConflict(
+                "WorkOrder has no Scheduler admission event"
+            )
+        try:
+            admitted_at = datetime.fromisoformat(history[0]["created_at"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TranscriptPolishModelWorkerConflict(
+                "WorkOrder admission time is invalid"
+            ) from exc
+        if admitted_at.tzinfo is None:
+            raise TranscriptPolishModelWorkerConflict(
+                "WorkOrder admission time lacks timezone authority"
+            )
+        return admitted_at.astimezone(timezone.utc) + timedelta(seconds=maximum)
 
     def _saved_invocation(self, invocation_id: str) -> dict[str, Any] | None:
         row = self.store.connection.execute(
@@ -480,6 +504,16 @@ class RoutedTranscriptPolishModelWorker:
                 "Scheduler lease does not retain the exact WorkOrder"
             )
         attempt_number = lease["attempt"]["attempt_number"]
+        deadline = self._work_deadline(work)
+        if deadline is not None and self.clock().astimezone(timezone.utc) >= deadline:
+            result = self._control_result(
+                work, attempt_number, code="MODEL_WORK_DEADLINE_EXCEEDED", status="failed"
+            )
+            completion = self.scheduler.complete(
+                work.id, attempt_number, self.worker_ref, lease["lease_token"], result,
+                idempotency_key=f"{self.namespace}-complete:{work.id}:{attempt_number}",
+            )
+            return {"status": "failed", "completion": completion}
         prior = self.router.list_decisions(work_order_id=work.id)
         provider_retry_state = self._provider_retry_state(work)
         accepted_attempts = self._accepted_attempts(work.id)
@@ -854,6 +888,23 @@ class RoutedTranscriptPolishModelWorker:
                     and result.metadata.get("provider_retry_proof") is not None):
                 retry_at = self.clock() + timedelta(
                     seconds=self.provider_retry["retry_backoff_seconds"])
+                deadline = self._work_deadline(work)
+                if deadline is not None and retry_at >= deadline:
+                    result = ResultEnvelope(
+                        schema_version=result.schema_version, id=result.id,
+                        created_at=result.created_at,
+                        work_order_ref=result.work_order_ref,
+                        invocation_ref=result.invocation_ref, status="failed",
+                        outputs=result.outputs,
+                        actual_side_effects=result.actual_side_effects,
+                        usage_refs=result.usage_refs,
+                        artifact_refs=result.artifact_refs,
+                        error=result.error,
+                        metadata=dict(result.metadata) | {
+                            "retry_deadline_exceeded": True,
+                        },
+                    )
+                    retry_at = None
             completion = self.scheduler.complete(
                 work.id,
                 attempt_number,

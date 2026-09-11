@@ -2411,6 +2411,7 @@ class ResearchPlanAuthority:
                 "credential_slot_refs": ["credential-slot:model:development"],
                 "max_input_tokens": 32_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120,
+                "max_elapsed_seconds": 120,
                 "max_attempts": 1,
                 "provider_retry": None,
             }),
@@ -2419,6 +2420,7 @@ class ResearchPlanAuthority:
                 "credential_slot_refs": ["credential-slot:model-verifier:development"],
                 "max_input_tokens": 48_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120,
+                "max_elapsed_seconds": 120,
                 "max_attempts": 1,
                 "provider_retry": None,
             }),
@@ -2843,6 +2845,7 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
                     ),
                     "max_cost_usd": stage_model_config["max_cost_usd"],
                     "max_seconds": stage_model_config["max_seconds"],
+                    "max_elapsed_seconds": stage_model_config["max_elapsed_seconds"],
                     "step_max_attempts": step["max_attempts"],
                 }
                 if stage_model_config is not None

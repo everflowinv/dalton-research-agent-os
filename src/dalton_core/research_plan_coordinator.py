@@ -176,6 +176,13 @@ def _reverify_scheduler_work_order(
         raise ResearchPlanCoordinatorConflict(
             "scheduler policy record_json is not valid JSON"
         ) from exc
+    expected_max_attempts = policy.get("max_attempts", 0)
+    if expected.get("metadata", {}).get("permission_scope") == (
+        "registered_annual_report_read"
+    ):
+        requested_max = expected.get("budget", {}).get("step_max_attempts")
+        if isinstance(requested_max, int) and not isinstance(requested_max, bool):
+            expected_max_attempts = min(expected_max_attempts, requested_max)
     if (
         not isinstance(policy, Mapping)
         or canonical_json(policy) != policy_row["policy_json"]
@@ -183,7 +190,9 @@ def _reverify_scheduler_work_order(
         or policy.get("created_at") != policy_row["created_at"]
         or content_hash({key: value for key, value in policy.items() if key != "created_at"})
         != policy_row["policy_hash"]
-        or policy.get("max_attempts") != row["max_attempts"]
+        or isinstance(row["max_attempts"], bool)
+        or not isinstance(row["max_attempts"], int)
+        or row["max_attempts"] != expected_max_attempts
     ):
         raise ResearchPlanCoordinatorConflict(
             "Scheduler WorkOrder frozen policy binding drifted"

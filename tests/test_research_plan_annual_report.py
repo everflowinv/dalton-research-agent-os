@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -33,6 +36,7 @@ from dalton_core.raw_spool import RawSpool
 from dalton_core.registered_annual_report import (
     RegisteredAnnualReportError,
     RegisteredAnnualReportRegistry,
+    normalize_request,
     source_bytes_hash,
 )
 from dalton_core.runner_journal import RunnerJournal
@@ -47,6 +51,10 @@ from dalton_core.research_plan_executor import ResearchPlanExecutor
 from tests import test_research_plan as planner_test_support
 from tests.test_research_plan_executor import PlanExecutorHarness
 from dalton_core.store import canonical_json, content_hash
+from dalton_core.annual_report_runtime import (
+    DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME,
+    load_annual_report_model_configs, plan_model_execution,
+)
 from tests.test_public_web_fetch_lane import _Response
 from tests.test_transcript_polish_model_worker import (
     FakeAdapter,
@@ -178,7 +186,9 @@ def seed_core_registration(fixture, source, *, accession=ACCESSION, cik=CIK):
     discovered_ref = "mission-discovered-document:annual-test:" + accession
     review_ref = REVIEW + ":" + accession
     mission_record = {
-        "autonomy": {"automation_principal": "automation:test"}
+        "autonomy": {"automation_principal": "automation:test"},
+        "budget": {"max_daily_paid_calls": 100, "max_daily_cost_usd": 1000.0,
+                   "max_alphaengine_calls_24h": 0},
     }
     with authority._transaction() as cur:
         cur.execute(
@@ -317,6 +327,27 @@ class RegisteredAnnualReportPlanTests(unittest.TestCase):
         self.assertEqual(
             wire["schema_version"], schema["properties"]["schema_version"]["const"]
         )
+        configurable = json.loads(json.dumps(
+            wire["execution_scope"]["parameters"]
+        ))
+        configurable["limits"].update({
+            "max_query_terms": 101, "max_results": 101,
+            "max_source_bytes": 128 * 1024 * 1024,
+            "context_before_chars": 20_000, "context_after_chars": 20_000,
+        })
+        configurable["model_execution"]["draft"].update({
+            "max_cost_usd": 101.0, "max_attempts": 6,
+            "provider_retry": {
+                "max_same_profile_retries": 4, "retry_backoff_seconds": 0,
+            },
+        })
+        self.assertEqual(
+            normalize_request(configurable)["model_execution"]["draft"]["max_attempts"],
+            6,
+        )
+        configurable["model_execution"]["draft"]["max_cost_usd"] = float("inf")
+        with self.assertRaisesRegex(RegisteredAnnualReportError, "max_cost_usd"):
+            normalize_request(configurable)
 
     def test_annual_model_purposes_are_tiered_and_cockpit_selectable(self) -> None:
         expected = {
@@ -412,6 +443,34 @@ class RegisteredAnnualReportPlanTests(unittest.TestCase):
                 question_version_ref=record["question_version_ref"],
                 decision_ref=decision["id"], **registration,
                 query_terms=["dependencies"], actor_ref="core:planner",
+            )
+
+    def test_exact_mission_budget_caps_paid_model_attempts(self) -> None:
+        fixture = self.planner()
+        source = AnnualSourceHarness(fixture)
+        self.addCleanup(source.close)
+        fixture.plans.annual_report_registry = source.registry
+        registration = seed_core_registration(fixture, source)
+        decision, records = fixture._selected_questions([(
+            "Which operating dependencies are disclosed?",
+            "Use the acquired annual report",
+        )])
+        record = records[0]
+        model = {
+            "routing_policy_ref": "routing-policy:test:1",
+            "credential_slot_refs": ["credential-slot:model:test"],
+            "max_input_tokens": 1000, "max_output_tokens": 100,
+            "max_cost_usd": 10.0, "max_seconds": 30,
+            "max_elapsed_seconds": 3600,
+            "max_attempts": 60, "provider_retry": None,
+        }
+        with self.assertRaisesRegex(ResearchPlanValidationError, "mission"):
+            fixture.plans.create_registered_annual_report_plan(
+                question_ref=record["question_ref"],
+                question_version_ref=record["question_version_ref"],
+                decision_ref=decision["id"], **registration,
+                query_terms=["dependencies"], draft_model_execution=model,
+                verifier_model_execution=model, actor_ref="core:planner",
             )
 
 
@@ -510,6 +569,7 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
                 ],
                 "max_input_tokens": 32_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120, "max_attempts": 3,
+                "max_elapsed_seconds": 3600,
                 "provider_retry": retry,
             },
             verifier_model_execution={
@@ -520,6 +580,7 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
                 ],
                 "max_input_tokens": 48_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120, "max_attempts": 1,
+                "max_elapsed_seconds": 120,
                 "provider_retry": None,
             },
             actor_ref="core:planner",
@@ -636,6 +697,7 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             [item["decision_kind"] for item in draft_decisions],
             ["initial", "retry", "retry"],
         )
+
         verifier_decision = router.list_decisions(
             work_order_id=resolved_work[2]["id"]
         )[-1]
@@ -692,6 +754,174 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
                 harness.core.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0
             )
 
+
+    def test_production_cli_runs_started_plan_from_installed_configs_and_local_manifest(self) -> None:
+        harness = PlanExecutorHarness(suffix="annual-report-cli")
+        self.addCleanup(harness.close)
+        source = AnnualSourceHarness(harness.planner)
+        self.addCleanup(source.close)
+        source.ticket_ref = "public-web-fetch:" + "a" * 24
+        harness.planner.plans.annual_report_registry = source.registry
+        registration = seed_core_registration(harness.planner, source)
+        state = Path(harness.planner.temp.name)
+
+        draft_capability = "capability:dalton:model:qualitative-research"
+        verifier_capability = "capability:dalton:model:qualitative-verifier"
+        draft_profile = self._model_profile(
+            stage="cli-draft", capability=draft_capability,
+            slot="credential-slot:model:cli-draft",
+        )
+        verifier_profile = self._model_profile(
+            stage="cli-verifier", capability=verifier_capability,
+            slot="credential-slot:model:cli-verifier",
+        )
+        for item in (draft_profile, verifier_profile):
+            item["availability"]["valid_until"] = "2027-09-11T00:00:00+00:00"
+        draft_policy = self._model_policy(
+            stage="cli-draft", profile_ids=[draft_profile["id"]],
+            capability=draft_capability, tier="brain",
+        )
+        verifier_policy = self._model_policy(
+            stage="cli-verifier", profile_ids=[verifier_profile["id"]],
+            capability=verifier_capability, tier="verifier",
+        )
+        router_path = state / "model-router.sqlite"
+        with ModelRouter(router_path) as router:
+            for item in (draft_profile, verifier_profile):
+                router.register_profile(item)
+            for item in (draft_policy, verifier_policy):
+                router.register_policy(item)
+        key_path = state / "broker.key"
+        key_path.write_text("fixture-secret", encoding="utf-8")
+        os.chmod(key_path, 0o600)
+        common = {
+            "model_router_db": str(router_path.resolve()),
+            "broker_socket": str((state / "unused-broker.sock").resolve()),
+            "broker_auth_key": str(key_path.resolve()),
+            "broker_client_id": "client:dalton-core",
+            "expected_agent_id": "chem",
+            "budget_db": str((state / "budget.sqlite").resolve()),
+            "budget_policy_ref": "thesis-impact-budget-policy-version:test:1",
+            "call_budget": {"max_input_tokens": 50000, "max_output_tokens": 4000,
+                            "max_cost_usd": 2.0, "timeout_seconds": 120},
+            "run_budget": {"max_units": 1},
+        }
+        for path, route, slot in (
+            (state / DRAFT_MODEL_CONFIG_NAME, draft_policy, draft_profile["credential_slot_ref"]),
+            (state / VERIFIER_MODEL_CONFIG_NAME, verifier_policy, verifier_profile["credential_slot_ref"]),
+        ):
+            installed = {
+                **common, "routing_policy_ref": route["policy_version_ref"],
+                "credential_slot_refs": [slot],
+            }
+            if path.name == DRAFT_MODEL_CONFIG_NAME:
+                installed["run_budget"] = {"max_units": 2, "max_seconds": 300}
+                installed["provider_retry"] = {
+                    "max_same_profile_retries": 1,
+                    "retry_backoff_seconds": 7,
+                }
+            path.write_text(canonical_json(installed) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+        configs = load_annual_report_model_configs(state)
+
+        decision, records = harness.planner._selected_questions([(
+            "Which customers and outsourced operations shape the company?",
+            "Use only the registered annual report",
+        )])
+        record = records[0]
+        created = harness.planner.plans.create_registered_annual_report_plan(
+            question_ref=record["question_ref"],
+            question_version_ref=record["question_version_ref"],
+            decision_ref=decision["id"], **registration,
+            query_terms=["customers", "outsourcing partners"],
+            draft_model_execution=plan_model_execution(
+                configs[0], "registered_annual_report_draft"
+            ),
+            verifier_model_execution=plan_model_execution(
+                configs[1], "registered_annual_report_verifier"
+            ),
+            actor_ref="core:planner",
+        )
+        harness.planner._approve(created, suffix="annual-report-cli-v02")
+        harness.planner._start(created, suffix="annual-report-cli-v02")
+
+        ticket_dir = state / "fetches" / source.ticket_ref.split(":", 1)[1]
+        ticket_dir.mkdir(parents=True)
+        document_ref = f"sec:filing:{source.accession}"
+        ticket = {"id": source.ticket_ref, "status": "succeeded",
+                  "document_ref": document_ref}
+        summary = {
+            "url_ref": document_ref, "canonical_url": source.url,
+            "manifest_ref": source.manifest["id"],
+            "manifest_hash": source.manifest["content_hash"], "status": "succeeded",
+        }
+        for name, value in (("ticket.json", ticket), ("summary.json", summary),
+                            ("manifest.json", source.manifest)):
+            path = ticket_dir / name
+            path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+        web_governance = state / "web-fetch-governance.json"
+        web_governance.write_text("{}\n", encoding="utf-8")
+        os.chmod(web_governance, 0o600)
+        staging = state / "review" / "candidate-staging.sqlite"
+        staging.parent.mkdir()
+        output = state / "annual-cli-output"
+        draft_fixture = state / "annual-draft.json"
+        verifier_fixture = state / "annual-verifier.json"
+        statement = "The company serves varied customers and depends on outsourcing partners."
+        draft_fixture.write_text(canonical_json([
+            {"fixture_provider_failure_code": "RATE_LIMITED"},
+            {
+                "schema_version": "0.1", "answer": statement,
+                "candidate": {"normalized_statement": statement,
+                              "metric_or_aspect": "customer and operating dependencies",
+                              "period": "FY2025 annual report", "basis": "reported",
+                              "cited_match_indexes": [0, 1]},
+            },
+        ]), encoding="utf-8")
+        verifier_fixture.write_text(canonical_json({
+            "schema_version": "0.1", "verdict": "pass",
+            "verified_statement": statement, "findings": [],
+        }), encoding="utf-8")
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+        completed = subprocess.run([
+            sys.executable, "-m", "dalton_core.sec_lane_cli",
+            "--state-dir", str(state), "--staging", str(staging),
+            "--governance", str(web_governance),
+            "--rehearsal-approved-by", "human:test-owner",
+            "--actor", "human:test-owner", "--annual-plan-ref", created["plan_version_ref"],
+            "--web-fetch-governance", str(web_governance),
+            "--annual-draft-model-config", str(state / DRAFT_MODEL_CONFIG_NAME),
+            "--annual-verifier-model-config", str(state / VERIFIER_MODEL_CONFIG_NAME),
+            "--annual-draft-fixture", str(draft_fixture),
+            "--annual-verifier-fixture", str(verifier_fixture),
+            "--spool-dir", str(source.root / "spool"),
+            "--summary-dir", str(output), "--quiet",
+        ], env=env, cwd=state, capture_output=True, text=True, timeout=60)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["outcomes"][-1]["status"], "complete")
+        self.assertIn("retryable", [item["status"] for item in result["outcomes"]])
+        draft_work = _resolved_plan_work_orders(
+            harness.planner.plans.plan_version(created["plan_version_ref"]),
+            harness.core.connection,
+        )[1]
+        self.assertEqual(draft_work["budget"]["max_elapsed_seconds"], 300)
+        attempts = {
+            row[0] for row in harness.core.connection.execute(
+                "SELECT attempt_number FROM scheduler_attempt_events "
+                "WHERE work_order_id=?", (draft_work["id"],)
+            ).fetchall()
+        }
+        self.assertEqual(attempts, {1, 2})
+        from dalton_core.research_verification import CandidateStagingStore
+        staged = CandidateStagingStore(staging)
+        try:
+            self.assertEqual(staged.counts()["candidate_claim_versions"], 1)
+            self.assertEqual(staged.counts()["candidate_evidence_versions"], 1)
+        finally:
+            staged.close()
     def test_review_progress_does_not_invalidate_append_only_source_proof(self) -> None:
         fixture = planner_test_support.ResearchPlanTests(
             methodName="test_create_plan_is_exact_closed_four_step_tree"

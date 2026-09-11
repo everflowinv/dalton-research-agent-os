@@ -54,14 +54,51 @@ cannot relax family independence. The registered purposes are selectable in
 the Cockpit as `registered_annual_report_draft` on the brain tier and
 `registered_annual_report_verifier` on the verifier tier.
 
-`SecCompanyFactsLane`, the existing production constructor for
-`ResearchPlanExecutor`, now accepts an all-or-none annual-report runtime. It
-constructs the manifest/receipt/spool registry, passes that same registry to
-`ResearchPlanAuthority` and `ResearchPlanExecutor`, constructs distinct draft
-and verifier workers, and passes each plan-bound retry configuration to the
-real worker. Partial runtime wiring is refused during construction. This removes
-the earlier test-only pattern of assigning registry and workers after the
-executor had already been built.
+The resident Writer now constructs `ResearchPlanAuthority` with the existing
+public-web completed-manifest reader, connector receipt authority and spool. Its
+human-governance socket operations create a 0.2 plan, record an explicit human
+approval, start that exact approved version, and launch its execution; none of
+those operations synthesizes an approval or start. `SecLaneLauncher` passes the
+plan ref and installed runtime paths to `sec_lane_cli`, which reopens the exact
+Core, Router, manifest, receipt and spool authorities and drives the four nodes
+to CandidateStaging.
+
+Draft and verifier use separate registered state files,
+`registered-annual-report-draft-model-config.json` and
+`registered-annual-report-verifier-model-config.json`. Both are in the shared
+model-config registry used by Cockpit selection and day-budget repointing. Plan
+creation resolves each file's current route, credential slots, per-call budget,
+run attempt budget and provider retry into immutable plan parameters. Missing,
+non-owner-only, malformed or split-Router configuration is reported before a
+lane child starts. `SecCompanyFactsLane`, the production `ResearchPlanExecutor`
+constructor, builds both routed workers from those values and refuses partial
+runtime wiring.
+
+`annual_report_setup` closes first-install activation without choosing a model.
+When the dedicated files are absent, it copies the complete current drafting
+authority (`dossier` or `initial-screen`) and current independent-verifier
+authority into the two dedicated files. This dynamically carries their exact
+Router, policy, credential slots, broker transport and budget pins. Once
+created, each annual file is preserved byte for byte on every reinstall; an
+owner can then move either purpose through the Cockpit. The macOS installer
+runs this setup only when both equivalent role configs exist and otherwise
+reports that annual execution remains off.
+
+The installed Scheduler policy is an upper authority bound; each annual node
+freezes a positive per-node attempt limit and may tighten that bound. Query,
+result, context, source-size, token, cost, timeout and retry values have useful
+defaults but no invented product ceilings. They remain finite positive (or, for
+retry/backoff, finite non-negative) integers/numbers supplied by owner-managed
+configuration. Actual model profiles, acquired spool capacity and Scheduler
+policy still enforce their own authoritative resource limits.
+
+Each model node also freezes `max_elapsed_seconds`, resolved from the
+owner-managed per-purpose run budget. If that override is absent, the runtime
+derives a finite default from call timeout, allowed attempts and configured
+retry backoff. Scheduler admission time anchors the node deadline. A returned
+provider failure cannot schedule `retry_at` at or beyond it, and a node claimed
+after it expires terminates before routing or provider I/O. Backoff remains
+freely configurable while every WorkOrder wait stays finite.
 
 The final node reuses `CandidateStagingStore` and its existing provenance consumers. It creates draft-only candidate Evidence and Claim records backed by the registered SEC authority and passing independent verifier proof. It does not write formal Evidence, Claim or Thesis rows, approve a plan, start one automatically, sign anything, perform acquisition or deploy changes.
 
@@ -72,7 +109,13 @@ The existing `0.1` numeric `list_filings` and `get_company_facts` identities, va
 This slice does not claim that every model failure is recoverable. Exact
 adapter-authenticated returned provider failures can retry once per configured
 profile and then advance through the declared chain within the WorkOrder's
-attempt and budget bounds. A post-send timeout whose completion is unknown
+attempt and elapsed-time bounds. The annual child keeps ownership of an active
+run while the Scheduler's exact `not_before` is pending; production sleeps to
+that timestamp, fixtures advance the authority clock, and only real node
+attempts consume the plan-derived transition budget. A restarted child also
+waits through an unexpired lease and resumes the same WorkOrder/attempt chain,
+so a 429 retry does not require another human run request. A post-send timeout
+whose completion is unknown
 still settles conservatively and remains terminal today.
 
 The required follow-up is a separate, configurable recovery contract for that
@@ -85,11 +128,23 @@ can be enabled; it is outside this integration commit.
 ## Integration verification
 
 The combined annual-report and returned-provider-failure branch was tested from
-the `c29b3e2` integration base. The Python suites covered 287 cases across the
-versioned plan, numeric executor, annual four-node execution, production lane
-construction, provider retry, transcript worker, router/fallback selection,
-Agenda, Human Intent, host adapter and workspace process. The OpenClaw broker's
-24 Node tests also passed. The annual end-to-end case uses an accepted and
+the `c29b3e2` integration base. The final production-wiring regression ran 239
+Python cases across the versioned plan, numeric executor, annual four-node
+execution, production lane construction, provider retry, transcript worker,
+router/fallback selection, Writer socket, model configuration registry and
+deployment switch reporting. The annual end-to-end case uses an accepted and
 started plan, real Scheduler/ModelRouter/accounting paths, two paid returned
 failures, same-profile retry, tier fallback, same-family verifier rejection and
-draft-only CandidateStaging completion without network access.
+draft-only CandidateStaging completion without network access. The Writer
+socket test also proves that an unconfigured installation returns the stable,
+operator-actionable annual-model-configuration refusal instead of spawning a
+child.
+
+The production CLI path also passed an isolated fixture acceptance: an already
+acquired manifest/spool/receipt chain and explicitly approved/started 0.2 plan
+were reopened in a child process; fake provider responses still traversed the
+real ModelRouter, Scheduler, accounting, independent-family verifier and shared
+CandidateStaging stores. No network, formal Claim, signature or deployment was
+performed. That fixture now returns a broker-authenticated 429 on the first
+draft attempt, waits to the Scheduler `not_before`, retries the same WorkOrder
+as attempt 2, and completes verifier and staging without a second human call.

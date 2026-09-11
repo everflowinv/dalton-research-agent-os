@@ -275,7 +275,11 @@ from .observability import (
     ObservabilityStore,
     ObservabilityValidationError,
 )
-from .research_plan import ResearchPlanAuthority, ResearchPlanConflict, ResearchPlanNotFound
+from .research_plan import (
+    REGISTERED_ANNUAL_REPORT_OPERATION,
+    ResearchPlanAuthority, ResearchPlanConflict, ResearchPlanControlPlane,
+    ResearchPlanNotFound, ResearchPlanValidationError,
+)
 from .research_question_backlog import (
     ResearchQuestionBacklog,
     ResearchQuestionConflict,
@@ -316,6 +320,10 @@ from .writer_protocol import (
 
 class WriterServerError(RuntimeError):
     pass
+
+
+class AnnualReportConfigurationUnavailable(ValueError):
+    """Safe, operator-actionable annual runtime configuration refusal."""
 
 
 _HUMAN_ACTOR_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
@@ -389,6 +397,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "acquire_public_web_document", "public_web_fetch_status",
     "stage_transcript_candidate", "transcript_candidate_status",
     "run_sec_company_facts_lane", "sec_lane_status",
+    "create_registered_annual_report_plan", "approve_research_plan",
+    "start_research_plan", "run_registered_annual_report_plan",
     "company_research_view", "company_research_query",
     "record_backlog_question", "publish_probe_template",
     "create_bounded_planner_loop", "bounded_probe_template",
@@ -644,6 +654,23 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "issuers", "filed_from", "filed_to", "actor_ref", "form",
     }),
     "sec_lane_status": frozenset({"ticket_ref"}),
+    "create_registered_annual_report_plan": frozenset({
+        "question_ref", "question_version_ref", "decision_ref",
+        "mission_version_ref", "company_ref", "review_ref", "issuer_cik",
+        "accession", "query_terms", "document_read_proof_ref",
+        "max_query_terms", "max_results", "max_source_bytes",
+        "context_before_chars", "context_after_chars", "idempotency_key",
+        "actor_ref",
+    }),
+    "approve_research_plan": frozenset({
+        "plan_version_ref", "decision", "reason", "idempotency_key", "actor_ref",
+    }),
+    "start_research_plan": frozenset({
+        "plan_version_ref", "idempotency_key", "actor_ref",
+    }),
+    "run_registered_annual_report_plan": frozenset({
+        "plan_version_ref", "actor_ref",
+    }),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
     "current_pointer": frozenset({"thesis_id"}),
     "get_version": frozenset({"version_id"}),
@@ -1064,6 +1091,10 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "acquire_public_web_document": "actor_ref",
     "stage_transcript_candidate": "actor_ref",
     "run_sec_company_facts_lane": "actor_ref",
+    "create_registered_annual_report_plan": "actor_ref",
+    "approve_research_plan": "actor_ref",
+    "start_research_plan": "actor_ref",
+    "run_registered_annual_report_plan": "actor_ref",
     "reconcile_forecasts": "requested_by",
     "decide_forecast_overturn": "actor_ref",
     "run_mission_source_discovery": "requested_by",
@@ -1280,6 +1311,8 @@ class WriterServer:
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
         discovery_selection_launcher: Any | None = None,
+        annual_report_draft_model_config_path: str | Path | None = None,
+        annual_report_verifier_model_config_path: str | Path | None = None,
         **lane_launchers: Any,
     ):
         try:
@@ -1380,6 +1413,14 @@ class WriterServer:
         self._document_extraction_coordinator: DocumentExtractionCoordinator | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
+        self._annual_report_draft_model_config_path = (
+            None if annual_report_draft_model_config_path is None
+            else Path(annual_report_draft_model_config_path).expanduser().resolve()
+        )
+        self._annual_report_verifier_model_config_path = (
+            None if annual_report_verifier_model_config_path is None
+            else Path(annual_report_verifier_model_config_path).expanduser().resolve()
+        )
         # The same owner-only CandidateStaging file the Cockpit review plane
         # opens as ``research_review.candidate_staging_path``; the writer
         # stages transcript candidates into it and reads status back from it.
@@ -1428,6 +1469,8 @@ class WriterServer:
         # read-only Cockpit and lane consumers between individual operations.
         self._model_router_owners: list[Any] = []
         self._research_plan: ResearchPlanAuthority | None = None
+        self._research_plan_control: ResearchPlanControlPlane | None = None
+        self._research_plan_scheduler: Scheduler | None = None
         self._backlog: ResearchQuestionBacklog | None = None
         self._bounded_planner: BoundedPlannerAuthority | None = None
         self._llm_planner_coordinator_instance: LLMResearchPlannerCoordinator | None = None
@@ -1821,6 +1864,31 @@ class WriterServer:
         if self._candidate_staging_path is not None:
             self._candidate_staging = CandidateStagingStore(self._candidate_staging_path)
             self._candidate_review = HumanReviewAuthority(self._candidate_staging_path)
+        annual_registry = None
+        if self._web_fetch_launcher is not None and self._transcript_spool is not None:
+            from .connector_authority_port import ConnectorCompletionReceiptReader
+            from .registered_annual_report import RegisteredAnnualReportRegistry
+
+            annual_registry = RegisteredAnnualReportRegistry(
+                core=self._store,
+                spool=self._transcript_spool,
+                manifest_reader=self._web_fetch_launcher.read_completed_manifest,
+                receipt_reader=ConnectorCompletionReceiptReader(
+                    connectors=self._connectors,
+                    observability=self._observability,
+                ),
+            )
+        # Research plans live in Core, including their Scheduler root/link
+        # bindings.  The resident writer owns this same-connection scheduler;
+        # the out-of-process lane reopens the exact rows for execution.
+        self._research_plan_scheduler = Scheduler(connection=self._store.connection)
+        self._research_plan = ResearchPlanAuthority(
+            self._store, annual_report_registry=annual_registry
+        )
+        self._research_plan_control = ResearchPlanControlPlane(
+            self._research_plan, self._backlog, self._observability,
+            self._research_plan_scheduler,
+        )
         if self._scheduler_path is not None:
             scheduler_kwargs: dict[str, Any] = {}
             if self._document_extraction_model_config is not None:
@@ -1837,7 +1905,6 @@ class WriterServer:
                 self._answer_routing,
                 self._bounded_control,
             )
-            self._research_plan = ResearchPlanAuthority(self._store)
             self._thesis_impact = ThesisImpactAuthority(
                 self._store, self._scheduler
             )
@@ -1944,6 +2011,8 @@ class WriterServer:
             self._planner_budget.close()
             self._planner_budget = None
         self._research_plan = None
+        self._research_plan_control = None
+        self._research_plan_scheduler = None
         self._backlog = None
         self._bounded_planner = None
         self._llm_planner_coordinator_instance = None
@@ -4430,6 +4499,103 @@ class WriterServer:
     def _op_sec_lane_status(self, p: Mapping[str, Any]) -> Any:
         return self.sec_lane_launcher.status(dict(p)["ticket_ref"])
 
+    def _annual_plan_authority(self) -> ResearchPlanAuthority:
+        if self._research_plan is None or self._research_plan.annual_report_registry is None:
+            raise AnnualReportConfigurationUnavailable(
+                "registered annual-report source authority is not configured"
+            )
+        return self._research_plan
+
+    def _annual_model_execution(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        from .annual_report_runtime import (
+            load_annual_report_model_configs, plan_model_execution,
+        )
+
+        try:
+            draft, verifier = load_annual_report_model_configs(
+                self.state_dir,
+                draft_path=self._annual_report_draft_model_config_path,
+                verifier_path=self._annual_report_verifier_model_config_path,
+            )
+        except ValueError as exc:
+            raise AnnualReportConfigurationUnavailable(
+                "registered annual-report model configuration is missing or invalid"
+            ) from exc
+        return (
+            plan_model_execution(draft, "registered_annual_report_draft"),
+            plan_model_execution(verifier, "registered_annual_report_verifier"),
+        )
+
+    def _op_create_registered_annual_report_plan(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        draft, verifier = self._annual_model_execution()
+        optional = {
+            name: values[name] for name in (
+                "document_read_proof_ref", "max_query_terms", "max_results",
+                "max_source_bytes", "context_before_chars", "context_after_chars",
+                "idempotency_key",
+            ) if name in values
+        }
+        return self._annual_plan_authority().create_registered_annual_report_plan(
+            question_ref=values["question_ref"],
+            question_version_ref=values["question_version_ref"],
+            decision_ref=values["decision_ref"],
+            mission_version_ref=values["mission_version_ref"],
+            company_ref=values["company_ref"], review_ref=values["review_ref"],
+            issuer_cik=values["issuer_cik"], accession=values["accession"],
+            query_terms=values["query_terms"], actor_ref=values["actor_ref"],
+            draft_model_execution=draft, verifier_model_execution=verifier,
+            **optional,
+        )
+
+    def _op_approve_research_plan(self, p: Mapping[str, Any]) -> Any:
+        if self._research_plan is None:
+            raise ResearchPlanValidationError("research plan authority is unavailable")
+        values = dict(p)
+        return self._research_plan.approve_plan(**values)
+
+    def _op_start_research_plan(self, p: Mapping[str, Any]) -> Any:
+        if self._research_plan_control is None or self._research_plan is None:
+            raise ResearchPlanValidationError("research plan start authority is unavailable")
+        values = dict(p)
+        plan = self._research_plan.plan_version(values["plan_version_ref"])
+        control = self._research_plan_control
+        if plan["schema_version"] == "0.2":
+            from .annual_report_runtime import scheduler_policy
+
+            executions = plan["execution_scope"]["parameters"]["model_execution"]
+            scheduler = Scheduler(
+                connection=self.store.connection,
+                **scheduler_policy((executions["draft"], executions["verifier"])),
+            )
+            control = ResearchPlanControlPlane(
+                self._research_plan, self._backlog, self._observability, scheduler
+            )
+        return control.start_plan(**values)
+
+    def _op_run_registered_annual_report_plan(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        # Validate resident source/config authority before occupying a child slot.
+        authority = self._annual_plan_authority()
+        if self._sec_lane_launcher is None:
+            raise AnnualReportConfigurationUnavailable(
+                "registered annual-report execution launcher is not configured"
+            )
+        plan = authority.plan_version(values["plan_version_ref"])
+        if (
+            plan["schema_version"] != "0.2"
+            or plan["execution_scope"]["operation"]
+            != REGISTERED_ANNUAL_REPORT_OPERATION
+        ):
+            raise ResearchPlanValidationError(
+                "run_registered_annual_report_plan requires a registered annual-report 0.2 plan"
+            )
+        self._annual_model_execution()
+        return self._sec_lane_launcher.start_registered_annual_report(
+            plan_version_ref=values["plan_version_ref"],
+            actor_ref=values["actor_ref"],
+        )
+
     @property
     def candidate_staging(self) -> CandidateStagingStore:
         if self._candidate_staging is None:
@@ -4646,7 +4812,7 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError, AnalystJournalValidationError)):
+        if isinstance(exc, (AnnualReportConfigurationUnavailable, ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, ResearchPlanValidationError, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError, AnalystJournalValidationError)):
             return "rejected"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound, ForecastReconciliationNotFound)):
             return "not_found"
@@ -4728,7 +4894,9 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError, AnalystJournalValidationError)):
+        if isinstance(exc, AnnualReportConfigurationUnavailable):
+            return str(exc)
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, ResearchPlanValidationError, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError, AnalystJournalValidationError)):
             return "request rejected by contract or gate"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound, ForecastReconciliationNotFound)):
             return "requested object was not found"
@@ -4800,6 +4968,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sec-lane-rehearsal-fixture",
         help="rehearsal only: company-facts fixture file served instead of data.sec.gov (tests)",
+    )
+    parser.add_argument(
+        "--annual-report-draft-model-config",
+        help="registered annual-report producer router/broker/budget JSON; defaults to its registered state file",
+    )
+    parser.add_argument(
+        "--annual-report-verifier-model-config",
+        help="independent annual-report verifier router/broker/budget JSON; defaults to its registered state file",
     )
     parser.add_argument(
         "--alphaengine-search-governance",
@@ -4924,6 +5100,18 @@ def main(argv: list[str] | None = None) -> int:
             state_dir=Path(args.db).expanduser().resolve().parent,
             core_db=args.db, writer_socket=args.socket)
         principals = load_principals(args.token_config)
+        from .annual_report_runtime import (
+            DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME,
+        )
+        state_dir = Path(args.db).expanduser().resolve().parent
+        annual_draft_config_path = (
+            Path(args.annual_report_draft_model_config).expanduser().resolve()
+            if args.annual_report_draft_model_config else state_dir / DRAFT_MODEL_CONFIG_NAME
+        )
+        annual_verifier_config_path = (
+            Path(args.annual_report_verifier_model_config).expanduser().resolve()
+            if args.annual_report_verifier_model_config else state_dir / VERIFIER_MODEL_CONFIG_NAME
+        )
         launcher = None
         sec_lane_launcher = None
         if args.sec_lane_governance is not None:
@@ -4947,6 +5135,10 @@ def main(argv: list[str] | None = None) -> int:
                 staging_path=args.candidate_staging,
                 mode_args=lane_mode_args,
                 user_agent=args.sec_lane_user_agent,
+                web_fetch_governance_path=args.web_fetch_governance,
+                annual_report_draft_model_config_path=annual_draft_config_path,
+                annual_report_verifier_model_config_path=annual_verifier_config_path,
+                spool_dir=args.transcript_spool_dir,
             )
         # P14-0: every registered lane builds its own launcher from the
         # arguments it declared, or answers None and is simply absent.
@@ -5106,6 +5298,8 @@ def main(argv: list[str] | None = None) -> int:
             acquisition_launcher=launcher,
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
+            annual_report_draft_model_config_path=annual_draft_config_path,
+            annual_report_verifier_model_config_path=annual_verifier_config_path,
             planner_model_config=planner_model_config,
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),

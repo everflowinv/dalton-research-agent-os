@@ -404,6 +404,31 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             "SELECT COUNT(*) FROM model_invocations WHERE work_order_ref=?", (model_work.id,)
         ).fetchone()[0], 2)
 
+    def test_provider_backoff_cannot_cross_work_order_elapsed_deadline(self):
+        retry = {"max_same_profile_retries": 10, "retry_backoff_seconds": 30}
+        prepared = self._prepare(provider_retry=retry).to_dict()
+        prepared["id"] += "-deadline"
+        prepared["idempotency_key"] += "-deadline"
+        prepared["budget"]["max_elapsed_seconds"] = 20
+        model_work = WorkOrder.from_dict(prepared)
+        self.assertEqual(self.scheduler.enqueue(model_work)["status"], "fresh")
+        worker = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router,
+            adapter=ReturnedFailureSequenceAdapter(candidate(), ["RATE_LIMITED"]),
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            provider_retry=retry, clock=lambda: NOW,
+        )
+        outcome = worker.run_once(model_work)
+        self.assertEqual(outcome["status"], "failed")
+        formal = self.scheduler.formal_result(model_work.id)
+        self.assertEqual(formal["terminal_state"], "failed")
+        self.assertTrue(
+            formal["result_envelope"]["metadata"]["retry_deadline_exceeded"]
+        )
+
     def test_returned_failures_retry_then_fallback_and_survive_worker_restart(self):
         second = profile()
         second.update({

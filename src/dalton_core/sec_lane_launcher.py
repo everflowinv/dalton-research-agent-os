@@ -134,6 +134,9 @@ class SecLaneLauncher:
         clock: Callable[[], datetime] | None = None,
         spool_dir: str | Path | None = None,
         user_agent: str | None = None,
+        web_fetch_governance_path: str | Path | None = None,
+        annual_report_draft_model_config_path: str | Path | None = None,
+        annual_report_verifier_model_config_path: str | Path | None = None,
         governance_loader: Callable[[Path], Any] | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser().resolve()
@@ -145,6 +148,18 @@ class SecLaneLauncher:
         self.mode_args = tuple(str(item) for item in mode_args)
         self.python_executable = python_executable or sys.executable
         self.user_agent = user_agent
+        self.web_fetch_governance_path = (
+            None if web_fetch_governance_path is None
+            else Path(web_fetch_governance_path).expanduser().resolve()
+        )
+        self.annual_report_draft_model_config_path = (
+            None if annual_report_draft_model_config_path is None
+            else Path(annual_report_draft_model_config_path).expanduser().resolve()
+        )
+        self.annual_report_verifier_model_config_path = (
+            None if annual_report_verifier_model_config_path is None
+            else Path(annual_report_verifier_model_config_path).expanduser().resolve()
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._governance_loader = governance_loader or _default_governance_loader
         self._lock = threading.Lock()
@@ -353,6 +368,92 @@ class SecLaneLauncher:
                 "pid": process.pid,
                 "status": "running",
                 "exit_code": None,
+                "completed_at": None,
+            }
+            _write_owner_only(self._ticket_path(ticket_id), record)
+            self._current = (ticket_id, process)
+            return dict(record)
+
+    def start_registered_annual_report(
+        self, *, plan_version_ref: str, actor_ref: str
+    ) -> dict[str, Any]:
+        """Run one already approved and started 0.2 plan in the lane child."""
+
+        if not isinstance(actor_ref, str) or _HUMAN_RE.fullmatch(actor_ref) is None:
+            raise LaneLaunchRejected("annual-report lane run actor must be a human principal")
+        if not isinstance(plan_version_ref, str) or not plan_version_ref.startswith(
+            "research-plan-version:"
+        ):
+            raise LaneLaunchRejected("plan_version_ref must be a research plan version")
+        required = {
+            "connector spool": self.spool_dir,
+            "public-web fetch governance": self.web_fetch_governance_path,
+            "annual-report draft model configuration": self.annual_report_draft_model_config_path,
+            "annual-report verifier model configuration": self.annual_report_verifier_model_config_path,
+        }
+        missing = [name for name, path in required.items() if path is None or not path.exists()]
+        if missing:
+            raise LaneLaunchRejected(
+                "registered annual-report execution is not configured: " + ", ".join(missing)
+            )
+        # Validate both files, including their common Router authority and budgets,
+        # before a child can occupy the single lane slot.
+        from .annual_report_runtime import load_annual_report_model_configs
+        try:
+            load_annual_report_model_configs(
+                self.state_dir,
+                draft_path=self.annual_report_draft_model_config_path,
+                verifier_path=self.annual_report_verifier_model_config_path,
+            )
+        except Exception as exc:
+            raise LaneLaunchRejected(str(exc)) from exc
+        governance = self.load_governance()
+        with self._lock:
+            if self._current is not None and self._current[1].poll() is None:
+                raise LaneLaunchConflict(f"lane run {self._current[0]} is still running")
+            started_at = _wire_time(self.clock())
+            digest = hashlib.sha256(canonical_json({
+                "operation": "registered_annual_report",
+                "plan_version_ref": plan_version_ref,
+                "actor_ref": actor_ref,
+                "started_at": started_at,
+                "governance_hash": governance.content_hash,
+            }).encode("utf-8")).hexdigest()[:24]
+            ticket_id = f"{TICKET_PREFIX}:{digest}"
+            ticket_dir = _secure_dir(self.tickets_dir / digest)
+            command = [
+                self.python_executable, "-m", CLI_MODULE,
+                "--state-dir", str(self.state_dir),
+                "--staging", str(self.staging_path),
+                "--governance", str(self.governance_path),
+                "--summary-dir", str(ticket_dir),
+                "--actor", actor_ref,
+                "--annual-plan-ref", plan_version_ref,
+                "--web-fetch-governance", str(self.web_fetch_governance_path),
+                "--annual-draft-model-config", str(self.annual_report_draft_model_config_path),
+                "--annual-verifier-model-config", str(self.annual_report_verifier_model_config_path),
+                "--spool-dir", str(self.spool_dir),
+                "--quiet", "--stack-dump-seconds", str(STACK_DUMP_SECONDS),
+                *self.mode_args,
+            ]
+            log_path = ticket_dir / "run.log"
+            log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                process = subprocess.Popen(
+                    command, cwd=str(self.state_dir), stdin=subprocess.DEVNULL,
+                    stdout=log_fd, stderr=subprocess.STDOUT,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+            finally:
+                os.close(log_fd)
+            record = {
+                "schema_version": TICKET_SCHEMA_VERSION, "id": ticket_id,
+                "operation": "registered_annual_report",
+                "plan_version_ref": plan_version_ref, "actor_ref": actor_ref,
+                "governance_ref": governance.id, "governance_hash": governance.content_hash,
+                "transport": "local-registered-sec-source",
+                "staging_path": str(self.staging_path), "started_at": started_at,
+                "pid": process.pid, "status": "running", "exit_code": None,
                 "completed_at": None,
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
