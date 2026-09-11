@@ -177,3 +177,28 @@ the helper never writes tickets or signals processes. Root and independent
 review verified delayed genuine launches, older/newer reuse, Python aliases,
 path ambiguity and read races. The old live reused PID has since exited; no
 system process was terminated to resolve it.
+
+
+## Fifth freeze installed and verified, 2026-09-11，01:37 UTC
+
+R5 exact-freeze full suite passed 6,829 tests in 570.083 test seconds
+(571.831 wall-clock seconds), one skip; log SHA-256
+`81505761b9b4bb60a068742ee2224d93dd0fb4f92414b53c754e57fb27c141bf`.
+The same-freeze rehearsal passed 67/40/0; final report SHA-256
+`541b92d741036ff00e7dda21784503eb19aee3e53217cb0973294ca1c7abc628`.
+
+Deployment completed normally with exit 0 at 01:34:43 UTC. Drain took one poll
+and 0.823 seconds. Fifteen authority databases were backed up and verified for
+restore in `deploy-backup-20260911T013344Z`. Installed source is retained at
+`.release-source.Yot7Vp`; all 1,841 Git archive files and 556 wheel runtime files
+match. Same controller PID 51807 passed three health checks at 01:35:21,
+01:35:41 and 01:36:01 UTC, with ages 0.954831 / 5.245311 / 14.808335 seconds.
+Runtime verification SHA-256
+`ffa45d709be1f05c65b8fdad022f0dd5acbb548cc4bc7af879418a4f7ee483d6`.
+
+All twelve model configurations, their budget selections and credential
+admission are preserved. Optional statement configuration presence/content,
+full broker configuration bytes, original mission v14 and the exact historical
+indeterminate broker journal row are unchanged. No gateway maintenance was
+reapplied. Actual annual/Dossier/Event/model/XLSX acceptance is now running;
+installation and health do not imply that those product prerequisites passed.
