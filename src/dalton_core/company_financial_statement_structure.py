@@ -1097,6 +1097,13 @@ def annual_diluted_eps(
     direct_income = aggregate_fiscal_year(
         diluted_eps_numerator_cells, semantic="direct_annual", fiscal_year=fiscal_year,
     )
+    has_direct_income = any(
+        cell.get("fiscal_year") == fiscal_year and cell.get("period_kind") == "annual"
+        for cell in diluted_eps_numerator_cells
+    )
+    if has_direct_income and direct_income["status"] != "computed":
+        return {"status": "unavailable", "value": None,
+                "reason": "direct annual diluted-EPS numerator authority is ambiguous"}
     if direct_income["status"] == "computed":
         if (
             quarterly_income["status"] == "computed"
@@ -1146,6 +1153,13 @@ def annual_diluted_eps(
     filed_eps = aggregate_fiscal_year(
         diluted_eps_cells, semantic="direct_annual", fiscal_year=fiscal_year,
     )
+    has_filed_eps = any(
+        cell.get("fiscal_year") == fiscal_year and cell.get("period_kind") == "annual"
+        for cell in diluted_eps_cells
+    )
+    if has_filed_eps and filed_eps["status"] != "computed":
+        return {"status": "unavailable", "value": None,
+                "reason": "filed annual diluted EPS authority is ambiguous"}
     if filed_eps["status"] == "computed":
         eps_period = filed_eps["source_periods"][0]
         if (

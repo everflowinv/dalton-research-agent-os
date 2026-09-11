@@ -541,6 +541,12 @@ class FinancialStatementStructureTests(unittest.TestCase):
             diluted_weighted_share_cells=shares,
             fiscal_year="FY2025",
         )["reason"])
+        ambiguous = [*numerator, {**numerator[0], "period_start": "2025-01-02"}]
+        self.assertIn("ambiguous", annual_diluted_eps(
+            diluted_eps_numerator_cells=ambiguous,
+            diluted_weighted_share_cells=shares,
+            fiscal_year="FY2025",
+        )["reason"])
 
 
 if __name__ == "__main__":
