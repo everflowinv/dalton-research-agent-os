@@ -185,6 +185,10 @@ class AutomationAdmissionTests(AutomationDraftingTests):
              "work_order_ref": "work:document-extraction:failed-1"},
         ])
         self.assertEqual(summary["reviews_complete"], 0)
+        self.assertEqual(
+            (summary["status"], summary["stop_reason"], summary["blocked"]["code"]),
+            ("failed", "model_execution_pending_or_failed", "all_model_windows_unavailable"),
+        )
         self.assertEqual(summary["resolved_reviews"], [])
         self.assertEqual(
             [(item["status"], item["error_code"], item["work_order_ref"])
@@ -196,6 +200,20 @@ class AutomationAdmissionTests(AutomationDraftingTests):
             self.h.missions.active_mission("coverage-mission:us-it-services")["id"]
         )[0]
         self.assertEqual(review["state"], "awaiting_human_extraction")
+
+    def test_pending_capacity_window_is_not_reported_as_a_successful_empty_run(self) -> None:
+        summary = self._run_with_generation_results([
+            {"status": "pending", "suggestions": [],
+             "work_order_ref": "work:document-extraction:queued"},
+            {"status": "pending", "suggestions": [],
+             "work_order_ref": "work:document-extraction:queued-2"},
+        ])
+        self.assertEqual(summary["reviews_complete"], 0)
+        self.assertEqual(summary["drafted"][0]["status"], "pending")
+        self.assertEqual(
+            (summary["status"], summary["stop_reason"], summary["blocked"]["code"]),
+            ("failed", "model_execution_pending_or_failed", "all_model_windows_unavailable"),
+        )
 
     def test_cached_failed_formal_result_stays_open_on_every_replay(self) -> None:
         self._grant_automation()
@@ -559,11 +577,18 @@ class HostKeepaliveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             ThesisImpactBudgetStore(str(root / "budget.sqlite")).close()
-            ModelRouter(str(root / "router.sqlite")).close()
+            with ModelRouter(str(root / "router.sqlite")) as router:
+                route_profile = profile()
+                router.register_profile(route_profile)
+                route_policy = policy()
+                route_policy["purpose_overrides"] = {"document_extraction": {
+                    "mode": "explicit", "chain": [route_profile["id"]]}}
+                router.register_policy(route_policy)
             # Closed stores leave no sidecars, so a read-only open refuses.
             with self.assertRaises(Exception):
                 ThesisImpactBudgetStore(str(root / "budget.sqlite"), read_only=True)
-            config = {"routing_policy_ref": "x", "credential_slot_refs": ["s"], "model_router_db": str(root / "router.sqlite"),
+            config = {"routing_policy_ref": route_policy["policy_version_ref"],
+                      "credential_slot_refs": [route_profile["credential_slot_ref"]], "model_router_db": str(root / "router.sqlite"),
                       "broker_socket": "/s", "broker_auth_key": "/k", "broker_client_id": "client:dalton-core",
                       "expected_agent_id": "chem", "budget_db": str(root / "budget.sqlite"), "budget_policy_ref": "b"}
             host = ExtractionHost(state_dir=root, spool_dir=root / "spool", scheduler_db=root / "scheduler.sqlite",

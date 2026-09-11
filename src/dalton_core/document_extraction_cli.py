@@ -522,6 +522,25 @@ def run_extraction(
             summary["failure_reason"] = "all queued document views failed before drafting"
             summary["status"] = "failed"
             return summary
+        if (summary["reviews_scanned"] > 0 and summary["reviews_complete"] == 0
+                and summary["qualitative_failures"]
+                and not any(item.get("status") == "succeeded"
+                            for item in summary["drafted"])):
+            reasons: dict[str, int] = {}
+            for item in summary["qualitative_failures"]:
+                reason = str(item.get("error_code") or item.get("status") or "unknown")
+                reasons[reason] = reasons.get(reason, 0) + 1
+            summary["blocked"] = {
+                "code": "all_model_windows_unavailable",
+                "review_count": summary["reviews_scanned"],
+                "reasons": [{"reason": reason, "count": count}
+                            for reason, count in sorted(reasons.items())],
+            }
+            summary["stop_reason"] = "model_execution_pending_or_failed"
+            summary["failure_reason"] = (
+                "all attempted document windows are pending or failed; no review was completed")
+            summary["status"] = "failed"
+            return summary
         summary["stop_reason"] = stop_reason or ("nothing_to_draft" if drafted == 0 else "drained")
         summary["status"] = "succeeded"
         return summary
