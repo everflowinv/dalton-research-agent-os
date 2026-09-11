@@ -427,8 +427,18 @@ class Orchestrator:
         need(load_json(SERVICE_CONFIG).get("thesis_impact", {}).get("enabled") is False
              and not (LAUNCH_AGENTS / "space.lumos.dalton.thesis-impact.plist").exists()
              and not self.loaded("space.lumos.dalton.thesis-impact"), "install enabled thesis impact")
-        installed_root = next((VENV / "lib").glob("python*/site-packages"), None)
-        need(installed_root is not None, "installed site-packages unavailable")
+        need(self.rollback_root is not None, "pre-install plist authority is unavailable")
+        initial = load_json(self.rollback_root / "initial-state.json")
+        for label, present in initial["plists"].items():
+            target = LAUNCH_AGENTS / f"{label}.plist"
+            need(target.is_file() == present and not target.is_symlink()
+                 and (not present or sha(target) == initial["plist_sha256"][label]),
+                 f"installed LaunchAgent bytes differ: {label}")
+        need([label for label in LABELS if self.loaded(label)] == self.initially_loaded,
+             "installed service set differs from the stopped-window precondition")
+        installed_roots = list((VENV / "lib").glob("python*/site-packages"))
+        need(len(installed_roots) == 1, "installed site-packages inventory differs")
+        installed_root = installed_roots[0]
         with zipfile.ZipFile(artifacts["wheel"]) as archive:
             files = {name: archive.read(name) for name in archive.namelist()
                      if name.startswith("dalton_core/") and Path(name).suffix in {".py", ".sql", ".json", ".html"}}
