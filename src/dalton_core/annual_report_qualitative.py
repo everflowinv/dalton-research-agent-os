@@ -238,6 +238,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
     def __init__(self, *, budget_store=None, budget_policy_ref=None,
                  mission_resolver: Callable[[str, str], Mapping[str, Any]] | None = None,
                  mission_annual_research_authority=None,
+                 mission_document_research_authority=None,
                  transport_retry: Mapping[str, Any] | None = None,
                  **kwargs):
         """Bind production annual calls to the same durable mission budget.
@@ -251,10 +252,13 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
 
         adapter = kwargs.get("adapter")
         production = isinstance(adapter, OpenClawModelAdapter)
+        has_mission_authority = (
+            callable(mission_resolver) or mission_document_research_authority is not None
+        )
         if production and not (
             isinstance(budget_store, ThesisImpactBudgetStore)
             and isinstance(budget_policy_ref, str) and budget_policy_ref
-            and callable(mission_resolver)
+            and has_mission_authority
         ):
             raise AnnualReportQualitativeError(
                 "annual-report broker execution requires mission budget authority"
@@ -263,6 +267,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
         self.budget_policy_ref = budget_policy_ref
         self.mission_resolver = mission_resolver
         self.mission_annual_research_authority = mission_annual_research_authority
+        self.mission_document_research_authority = mission_document_research_authority
         if transport_retry is None:
             self.transport_retry = None
         else:
@@ -348,10 +353,23 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
         if (work.metadata.get("budget_db") != self.budget_store.path
                 or work.metadata.get("budget_policy_ref") != self.budget_policy_ref):
             raise AnnualReportQualitativeError("annual-report budget binding drifted")
-        registration = work.metadata["retrieval_proof"]["registration"]
-        mission_ref = registration["mission_version_ref"]
-        company_ref = registration["company_ref"]
-        mission = self.mission_resolver(mission_ref, company_ref)
+        registration = work.metadata["retrieval_proof"].get(
+            "registration",
+            work.metadata["retrieval_proof"].get("request", {}).get("registration"),
+        )
+        if work.metadata.get("authority_kind") == "mission_document_research_admission":
+            admission = self.mission_document_research_authority.resolve_for_execution(
+                work.metadata["mission_document_research_admission_ref"]
+            )
+            mission_ref = admission["mission_version_ref"]
+            company_ref = admission["company_ref"]
+            mission = self.mission_document_research_authority.active_budget_mission(
+                admission["id"]
+            )
+        else:
+            mission_ref = registration["mission_version_ref"]
+            company_ref = registration["company_ref"]
+            mission = self.mission_resolver(mission_ref, company_ref)
         if (mission.get("id") != mission_ref
                 or not isinstance(mission.get("outer_budget"), Mapping)):
             raise AnnualReportQualitativeError("annual-report mission authority drifted")

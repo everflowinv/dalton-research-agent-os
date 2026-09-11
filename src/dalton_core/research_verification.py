@@ -73,9 +73,10 @@ TRANSCRIPT_CORE_AUTHORITY_MODE = "transcript_core_authority"
 # citable original is the verified rendering of its exact bytes.
 PUBLIC_WEB_CORE_AUTHORITY_MODE = "public_web_core_authority"
 REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE = "registered_annual_report_authority"
+MISSION_DOCUMENT_AUTHORITY_MODE = "mission_document_research_authority"
 CITED_CORE_AUTHORITY_MODES = frozenset({
     TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE,
-    REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
+    REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE, MISSION_DOCUMENT_AUTHORITY_MODE,
 })
 # ADR-0007: whether a cited original may carry a number into the Ledger.
 #
@@ -195,7 +196,7 @@ def _canonical_decimal_text(value: Any) -> str:
 _AUTHORITY_PROVENANCE_MODES = frozenset({
     "connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE,
     PUBLIC_WEB_CORE_AUTHORITY_MODE, REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
-    "mission_figure_authority",
+    MISSION_DOCUMENT_AUTHORITY_MODE, "mission_figure_authority",
 })
 PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
 REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF = (
@@ -206,6 +207,15 @@ REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH = content_hash({
     "rules": [
         "core-statement-filing-issuer", "core-acquired-sec-review",
         "source-manifest-binding", "source-content-hash", "retrieval-proof",
+        "independent-model-verification",
+    ],
+})
+MISSION_DOCUMENT_SOURCE_VERIFIER_REF = "verifier:mission-document-authority-source:0.1"
+MISSION_DOCUMENT_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": MISSION_DOCUMENT_SOURCE_VERIFIER_REF,
+    "rules": [
+        "active-mission-admission", "exact-planner-inquiry",
+        "registered-original-replay", "search-span-hash",
         "independent-model-verification",
     ],
 })
@@ -634,6 +644,8 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH),
             (REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
              REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH),
+            (MISSION_DOCUMENT_SOURCE_VERIFIER_REF,
+             MISSION_DOCUMENT_SOURCE_VERIFIER_HASH),
             (MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
@@ -1362,6 +1374,9 @@ def build_candidate_evidence(
             REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE:
                 (REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
                  REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH),
+            MISSION_DOCUMENT_AUTHORITY_MODE:
+                (MISSION_DOCUMENT_SOURCE_VERIFIER_REF,
+                 MISSION_DOCUMENT_SOURCE_VERIFIER_HASH),
         }[verification_mode]
         if (
             material_wire["schema_version"] != "0.2"
@@ -1730,6 +1745,10 @@ class CandidateStagingStore:
             verification_mode == REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE
             and evidence_wire["source_type"] == "official_filing"
         )
+        directed_document_evidence = (
+            verification_mode == MISSION_DOCUMENT_AUTHORITY_MODE
+            and material_wire.get("provenance_mode") == MISSION_DOCUMENT_AUTHORITY_MODE
+        )
 
         spec_wire: dict[str, Any] | None
         numeric_wire: dict[str, Any] | None
@@ -1739,7 +1758,8 @@ class CandidateStagingStore:
                 raise VerificationRejected(
                     "qualitative candidate cannot carry numeric spec or numeric verification"
                 )
-            if not transcript_evidence and not annual_report_evidence:
+            if not transcript_evidence and not annual_report_evidence \
+                    and not directed_document_evidence:
                 raise VerificationRejected(
                     "qualitative candidate requires authenticated transcript evidence "
                     "or a fetched public-web/registered annual-report original"
@@ -2103,6 +2123,8 @@ __all__ = [
     "REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE",
     "REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF",
     "REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH",
+    "MISSION_DOCUMENT_AUTHORITY_MODE", "MISSION_DOCUMENT_SOURCE_VERIFIER_REF",
+    "MISSION_DOCUMENT_SOURCE_VERIFIER_HASH",
     "build_source_verification_material", "build_authority_source_material",
     "validate_source_verification_material",
     "validate_numeric_verification_spec", "validate_verification_bundle",

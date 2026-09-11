@@ -19,15 +19,65 @@ from dalton_core.host_tool_runner import ACCESS_POLICY_REF, RETENTION_POLICY_REF
 from dalton_core.mission_document_research import (
     MissionDocumentResearchAuthority, MissionDocumentResearchError, PURPOSE,
 )
+from dalton_core.document_research_qualitative import (
+    MissionDocumentDraftWorker, MissionDocumentVerifierWorker,
+)
+from dalton_core.mission_document_research_executor import (
+    MissionDocumentResearchExecutor,
+)
+from dalton_core.annual_report_qualitative import AnnualReportQualitativeError
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_question_backlog import ResearchQuestionBacklog
 from dalton_core.research_task import inquiry_content_hash, inquiry_ref_for
 from dalton_core.store import content_hash
 from tests.test_document_research import FakeLauncher, FakeReceiptReader
-from tests.test_mission_annual_research import COMPANY, MissionAnnualFixture, NOW
+from tests.test_mission_annual_research import (
+    COMPANY, CountingFakeAdapter, MissionAnnualFixture, NOW,
+)
 
 
 class MissionDocumentResearchTests(unittest.TestCase):
+    def _executor(self, fixture, authority):
+        statement = "Managed services revenue is recognized over time."
+        draft_adapter = CountingFakeAdapter({
+            "schema_version": "0.1", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "managed services revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]},
+        })
+        verifier_adapter = CountingFakeAdapter({
+            "schema_version": "0.1", "verdict": "pass",
+            "verified_statement": statement, "findings": [],
+        })
+        scheduler = fixture.harness.scheduler()
+        common = dict(
+            scheduler=scheduler, router=fixture.router, store=fixture.store,
+            observability=fixture.harness.observability, polish_worker=None,
+            budget_store=fixture.budget,
+            budget_policy_ref="budget-policy:mission-annual:1",
+            mission_document_research_authority=authority,
+            clock=fixture.harness.clock,
+        )
+        draft = MissionDocumentDraftWorker(
+            adapter=draft_adapter,
+            routing_policy_ref=fixture.draft_policy["policy_version_ref"],
+            credential_slot_refs=(fixture.draft_profile["credential_slot_ref"],),
+            **common,
+        )
+        verifier = MissionDocumentVerifierWorker(
+            adapter=verifier_adapter,
+            routing_policy_ref=fixture.verifier_policy["policy_version_ref"],
+            credential_slot_refs=(fixture.verifier_profile["credential_slot_ref"],),
+            **common,
+        )
+        return MissionDocumentResearchExecutor(
+            authority=authority, scheduler=scheduler, registry=authority.registry,
+            draft_worker=draft, verifier_worker=verifier,
+            staging=fixture.harness.staging, actor_ref="automation:test",
+            clock=fixture.harness.clock,
+        ), draft_adapter, verifier_adapter
+
     def _record_plan(self, fixture, plan):
         raw = {
             "schema_version": "0.1", "assessment": plan["assessment"],
@@ -332,6 +382,80 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 MissionDocumentResearchError, "planner plan lacks automation execution authority"
             ):
                 authority.admit_from_plan(**{**args, "plan_ref": stored["plan_id"]})
+
+    def test_source_neutral_executor_searches_models_verifies_and_stages_once(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(9)]
+        self.assertEqual([item["status"] for item in outcomes], [
+            "admitted", "succeeded", "admitted", "succeeded", "admitted",
+            "succeeded", "admitted", "complete", "complete",
+        ])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
+        material = json.loads(fixture.harness.staging.connection.execute(
+            "SELECT record_json FROM candidate_source_materials"
+        ).fetchone()[0])
+        self.assertEqual(material["source_ref"], COMPANY_WIKI_SOURCE_REF)
+        self.assertEqual(
+            material["normalized_payload"]["search_proof"]["request"]["registration"],
+            admission["request"]["registration"],
+        )
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_outcomes"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions WHERE "
+            "work_order_ref LIKE 'work:mission-document-research-%'"
+        ).fetchone()[0], 2)
+
+    def test_model_worker_rejects_substituted_question_before_budget_or_adapter(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        work["question"] = "Use some other document and mission"
+        work["metadata"]["prompt_hash"] = content_hash(work["question"])
+        work["metadata"]["model_request_binding_hash"] = "0" * 64
+        with self.assertRaisesRegex(AnnualReportQualitativeError, "authority is invalid"):
+            executor.draft_worker._work(work)
+        self.assertEqual(draft.calls, 0)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], 0)
+
+    def test_budget_refusal_is_terminal_with_no_model_call(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=NOW.date().isoformat(), work_order_ref="work:other-budget-consumer",
+            attempt_number=1, phase="assessment", route_decision_ref="route:other",
+            reserved_micros=9_500_000,
+        )
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        result = executor.run_once(admission["id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual((draft.calls, verifier.calls), (0, 0))
+
+    def test_stage_claim_precedes_candidate_side_effect(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        for _ in range(7):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 3)
+        foreign = executor.scheduler.claim("worker:foreign", work_order_id=work["id"])
+        self.assertIsNotNone(foreign)
+        self.assertEqual(executor.run_once(admission["id"])["status"], "pending")
+        self.assertEqual(
+            fixture.harness.staging.counts()["candidate_stage_requests"], 0
+        )
 
 
 if __name__ == "__main__":

@@ -201,6 +201,8 @@ PURPOSE_POOLS: dict[str, str] = {
     # goes through llm_planner_execute, which carries the pool explicitly).
     "research_task": "adhoc",
     "adhoc_research": "adhoc",
+    "mission_directed_document_draft": "adhoc",
+    "mission_directed_document_verifier": "adhoc",
     "tracking": "event_response",
     # W4: the same pool its lane spends from, or the two would disagree.
     "zero_base_review": "coverage",

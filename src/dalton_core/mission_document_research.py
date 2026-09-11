@@ -549,6 +549,15 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError("mission document admission is unavailable")
         return self._read_row(row)
 
+    def active_budget_mission(self, admission_ref: str) -> dict[str, Any]:
+        """Re-resolve the exact active mission used by before-send accounting."""
+
+        wire = self.admission(admission_ref)
+        return self._mission(
+            wire["mission_version_ref"], wire["mission_version_hash"],
+            wire["company_ref"], wire["source_ref"],
+        )
+
     def resolve_for_execution(self, admission_ref: str) -> dict[str, Any]:
         wire = self.admission(admission_ref)
         identity = self._derive(
