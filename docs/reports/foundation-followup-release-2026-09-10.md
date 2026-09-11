@@ -113,3 +113,12 @@ No annual columns were invented: all five live statement authorities contain 10-
 EPAM's Dossier is 9/12 units, not a complete dossier. The final three units and ACN's first three units were blocked by reproducible deterministic-check mismatches: a cited English period date became an unsourced day number, and a cited historical analyst target reduction became an authored investment conclusion. Strict source-bound repairs are under cross-review; neither existing hold nor published authority has been rewritten. Formal EventJudgement remains absent; the last observed capacity failure preceded the broker adjustment.
 
 Next: finish the exact form boundary and Dossier checks, freeze this foundation follow-up, run complete acceptance, deploy under existing authorization, and verify annual acquisition and the remaining actual products.
+
+
+## Fourth freeze, 2026-09-11 00:57 UTC
+
+Frozen `fdc61e9a140993d5c2af427e53d98ed8eede7845` includes the completed statement form/atomic batch boundary, strict sourced-date and historical target-attribution checks with deterministic recovery identities, expense formula export and audit sheet readability, and configurable bounded startup wait. The combined 260-test regression passed. Wheel SHA-256 `c009bddde77c9e13ba3263642c928649b86eb77ae654bde3a8ffd973c9765ea0` matches 556 source files, with three JavaScript checks. The same-freeze current-live-copy rehearsal passed 67 schemas, 40 entries and zero escaped paths; report SHA-256 `64a7640cbf1e15e897939ffefd11f83b65d6cd4203ca8786808ea942dd058694`. Full acceptance remains running; R4 is not yet deployed.
+
+The next deployment wrapper retains the already applied broker capacity receipt and verifies current capacity 8, without reapplying gateway maintenance. Independent static review passed. All backup contents remain recoverable; one additional older task-owned backup was compressed only after full 92-member content/metadata equality and empty handle checks. The five newest expanded backups remain intact. Completed R4 rehearsal state/home were removed after process/handle checks, retaining its report, config and logs.
+
+Next: accept only the same frozen full-suite result, bind the new deployment review, deploy under existing authorization, and inspect actual annual sources and formal research products. Advanced investment methodology remains deferred behind these foundations.
