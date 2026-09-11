@@ -11,8 +11,11 @@ from unittest.mock import patch
 from dalton_core.document_research import build_document_research_policy
 from scripts.prepare_successor_config_transition import (
     ConfigTransitionError, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
-    DOCUMENT_CONFIG, PRESERVED_TARGETS, apply_transition,
+    DOCUMENT_CONFIG, OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
+    PRESERVED_TARGETS, apply_transition,
     build_preserve_existing_transition, build_transition, canonical_hash,
+    expected_openclaw_frame_transition_state,
+    expected_service_transition_state,
 )
 
 
@@ -365,6 +368,79 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             service_config_before_path=self.packet / "service.before.json",
             service_delta_path=self.packet / "service.delta.json",
         )
+
+    def build_external(self, *, present: bool = True,
+                       change_owner_signature: bool = False):
+        service = json.loads(json.dumps(self.service_before))
+        service["bounded_planner"]["config"]["planner_call_budget"] = self.budget
+        write(self.packet / "service.installed.json", service)
+        before = {
+            "plugins": {"entries": {"dalton-openclaw-model-broker": {
+                "config": {"maxConcurrent": 16},
+            }}},
+            "owner": {"credential": "secret-ref", "signature": "owner:sig"},
+        }
+        if present:
+            before["plugins"]["entries"]["dalton-openclaw-model-broker"][
+                "config"]["maxFrameBytes"] = 262144
+        after = json.loads(json.dumps(before))
+        after["plugins"]["entries"]["dalton-openclaw-model-broker"][
+            "config"]["maxFrameBytes"] = OPENCLAW_TARGET_MAX_FRAME_BYTES
+        if change_owner_signature:
+            after["owner"]["signature"] = "changed"
+        write(self.packet / "openclaw.before.json", before)
+        write(self.packet / "openclaw.after.json", after)
+        return build_preserve_existing_transition(
+            packet_root=self.packet, release_ref="code-successor-frame",
+            source_commit="c" * 40,
+            baseline_models_path=self.packet / "models.json",
+            model_config_paths={name: self.packet / name for name in self.models},
+            preserved_config_paths=self.preserved,
+            preserved_state_authority_paths={
+                "connector-governance/yfinance-analyst-estimates-v1.json":
+                    self.packet / "yfinance-approved.json"},
+            service_config_before_path=self.packet / "service.installed.json",
+            openclaw_config_before_path=self.packet / "openclaw.before.json",
+            openclaw_config_after_path=self.packet / "openclaw.after.json",
+        )
+
+    def test_external_frame_transition_preserves_service_and_binds_one_leaf(self):
+        manifest = self.build_external()
+        self.assertEqual("successor-config-transition-0.3",
+                         manifest["schema_version"])
+        service_before, service_after = expected_service_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(service_before, service_after)
+        before, after, row = expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertNotEqual(before, after)
+        self.assertEqual(list(OPENCLAW_FRAME_PATH), row["json_path"])
+        self.assertEqual({"state": "present", "value": 262144},
+                         row["before_presence"])
+        self.assertEqual(1048576, row["after_value"])
+        self.assertEqual(0, manifest["boundaries"]["service_config_mutations"])
+        self.assertEqual(1, manifest["boundaries"]["external_config_mutations"])
+
+    def test_external_frame_transition_records_absent_default_without_inventing_before(self):
+        manifest = self.build_external(present=False)
+        before, after, row = expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual({"state": "absent", "effective_default": 262144},
+                         row["before_presence"])
+        before_value = json.loads(before)
+        cursor = before_value
+        for key in OPENCLAW_FRAME_PATH[:-1]:
+            cursor = cursor[key]
+        self.assertNotIn(OPENCLAW_FRAME_PATH[-1], cursor)
+        after_value = json.loads(after)
+        cursor = after_value
+        for key in OPENCLAW_FRAME_PATH[:-1]:
+            cursor = cursor[key]
+        self.assertEqual(1048576, cursor[OPENCLAW_FRAME_PATH[-1]])
+
+    def test_external_frame_transition_rejects_any_second_semantic_change(self):
+        with self.assertRaisesRegex(ConfigTransitionError, "changes more"):
+            self.build_external(change_owner_signature=True)
 
     @staticmethod
     def accepted():
