@@ -1210,7 +1210,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("research_playbook_schema.sql", "dalton_core.research_playbook", "ResearchPlaybookAuthority", "core"),
     MigrationSpec("research_quality_schema.sql", "dalton_core.research_quality_score", "QualityScoreAuthority", "core"),
     MigrationSpec("research_question_backlog_schema.sql", "dalton_core.research_question_backlog", "ResearchQuestionBacklog", "core"),
-    # These four authorities apply static CREATE-only schemas, but their
+    # These authorities apply static CREATE-only schemas, but their
     # production constructors intentionally require exact source/model
     # collaborators.  A deploy rehearsal validates the SQL against the copied
     # Core without fabricating those capabilities or permitting a model call.
@@ -1218,6 +1218,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("mission_annual_research_executor_schema.sql", "dalton_core.mission_annual_research_executor", "MissionAnnualResearchExecutor", "core_sql"),
     MigrationSpec("mission_document_research_schema.sql", "dalton_core.mission_document_research", "MissionDocumentResearchAuthority", "core_sql"),
     MigrationSpec("mission_document_research_executor_schema.sql", "dalton_core.mission_document_research_executor", "MissionDocumentResearchExecutor", "core_sql"),
+    MigrationSpec("mission_document_research_promotion_schema.sql", "dalton_core.mission_document_research_promotion", "persist_document_promotion", "core_sql"),
     MigrationSpec("runner_journal_schema.sql", "dalton_core.runner_journal", "RunnerJournal", "core"),
     MigrationSpec("statement_snapshot_schema.sql", "dalton_core.statement_snapshot", "StatementSnapshotAuthority", "core"),
     # P11b: the broker notes those expectations were read out of.

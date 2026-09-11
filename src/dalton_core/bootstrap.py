@@ -85,6 +85,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("mission_annual_research_executor_schema.sql", None),
     ("mission_document_research_schema.sql", None),
     ("mission_document_research_executor_schema.sql", None),
+    ("mission_document_research_promotion_schema.sql", None),
     ("model_forecast_schema.sql", None),
     ("prior_model_schema.sql", None),
     ("research_constitution_schema.sql", None),

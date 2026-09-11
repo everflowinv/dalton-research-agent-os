@@ -504,6 +504,7 @@ class MigrationCoverageTests(unittest.TestCase):
                 "mission_annual_research_executor_schema.sql",
                 "mission_document_research_schema.sql",
                 "mission_document_research_executor_schema.sql",
+                "mission_document_research_promotion_schema.sql",
             },
         )
         self.assertTrue(all(spec.kind in {"root", "core", "core_sql"}
@@ -525,6 +526,7 @@ class MigrationCoverageTests(unittest.TestCase):
                 "mission_annual_research_executor_schema.sql",
                 "mission_document_research_schema.sql",
                 "mission_document_research_executor_schema.sql",
+                "mission_document_research_promotion_schema.sql",
             ):
                 self.assertFalse(any(name in finding for finding in findings), findings)
 
