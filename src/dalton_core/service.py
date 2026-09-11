@@ -684,12 +684,15 @@ class DaltonService:
         self._stop.set()
 
     def close(self) -> None:
+        sweep_close_error: BaseException | None = None
         sweep_executor, self._sweep_executor = self._sweep_executor, None
         if sweep_executor is not None:
             # A sweep can append expiry/retry events.  Drain it, then close its
             # thread-owned connection on that same thread before shutdown.
             try:
                 sweep_executor.submit(self._close_sweep_scheduler).result()
+            except BaseException as exc:
+                sweep_close_error = exc
             finally:
                 sweep_executor.shutdown(wait=True, cancel_futures=True)
         self._sweep_future = None
@@ -722,6 +725,8 @@ class DaltonService:
         executor, self._agenda_executor = self._agenda_executor, None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        if sweep_close_error is not None:
+            raise sweep_close_error
 
     def _ensure_sweep_scheduler(self) -> None:
         if self._scheduler is None:

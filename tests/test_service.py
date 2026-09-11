@@ -794,6 +794,54 @@ class ServiceTests(unittest.TestCase):
                 release.set()
                 service.close()
 
+    def test_successful_lease_sweep_clears_prior_degraded_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = DaltonService(self._maintenance_config(Path(directory)))
+            calls = 0
+
+            def sweep():
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("one failed read")
+                return []
+
+            try:
+                with mock.patch.object(service, "_perform_sweep", sweep):
+                    failed = service.run_once(
+                        force_projection=True, wait_for_projection=True
+                    )
+                    recovered = service.run_once(
+                        force_projection=True, wait_for_projection=True
+                    )
+                self.assertEqual("degraded", failed["state"])
+                self.assertEqual("RuntimeError: one failed read", failed["last_error"])
+                self.assertEqual("running", recovered["state"])
+                self.assertIsNone(recovered["last_error"])
+                self.assertEqual(2, calls)
+            finally:
+                service.close()
+
+    def test_sweep_close_failure_does_not_skip_other_executor_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = DaltonService(self._maintenance_config(Path(directory)))
+            service.start()
+            scheduler = service._scheduler
+            self.assertIsNotNone(scheduler)
+
+            def failed_close():
+                assert scheduler is not None
+                scheduler.close()
+                service._scheduler = None
+                raise RuntimeError("close failed after release")
+
+            with mock.patch.object(service, "_close_sweep_scheduler", failed_close):
+                with self.assertRaisesRegex(RuntimeError, "close failed after release"):
+                    service.close()
+            self.assertIsNone(service._sweep_executor)
+            self.assertIsNone(service._projection_executor)
+            self.assertIsNone(service._plugin_executor)
+
     def test_scheduler_schema_indexes_only_leased_sweep_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scheduler.sqlite"
