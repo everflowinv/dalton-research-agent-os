@@ -4,7 +4,7 @@ The owner reiterated that exported workbooks must strictly follow the Desktop re
 
 The Desktop `US eCommerce_Model_20260801.xlsx` was reopened read-only. Its SHA-256 remains `545709e06eb0c1452cf74224d92e8ecb70bef4764f316e74595b2f41f87567b0`, matching the September 10 review. Four worksheet previews were inspected: Valuation, Financials, Driver, and Category Analysis. Source OOXML styles, column/row dimensions, panes, merges, number formats and representative cell bindings were independently extracted. The private extraction SHA-256 is `02ca90bbd4c1a33e77131e2295d7e696bdfbff79293d3a4f69d3438c7f955c8e`. No original file, external data link or vendor refresh was changed or executed.
 
-## Remaining presentation differences
+## Original presentation differences (before this implementation)
 
 | Reference | Existing exporter | Required implementation |
 | --- | --- | --- |
@@ -29,3 +29,22 @@ The current company-structure work first closes income-statement bridges, attrib
 ## 19:10 UTC implementation checkpoint
 
 The reusable source-bound template contract is integrated through `c6a370dc`. It preserves the reference label hierarchy, annual support/CAGR columns, precise Financials/Driver widths and composed row/cell styles. Five template tests plus 18 existing export tests passed before the current exporter integration. The contract has not yet been applied to exported workbooks, and visual parity is not yet accepted. A Sol agent owns actual sheet reconstruction and rendered comparison; company-specific annual EPS and formula-graph work continues independently. Historical annual EPS now uses explicit filed numerator/weighted-share authority; forecast annual EPS remains unavailable until a separately declared annual-share forecast method is implemented and validated.
+
+## 20:30 UTC presentation and numerical acceptance
+
+The final integrated template candidate is author commit `6c1053831f50d7cb53d634b12616a538dbae076d` (integration `4eb8f966`). Root and an independent Sol reviewer inspected actual Valuation, Financials and Driver renders against the read-only AMZN previews. This scope now passes: exact source style/layout tokens, compact annual/quarter columns, A/B/C label hierarchy, light-blue Financials sections, brown Driver major sections, annual House/Street/gap valuation blocks and one driver assumption row across periods. Currency labels derive from the model; unsupported market/Street values remain explicitly unavailable. Current shares outstanding is not substituted with weighted diluted EPS shares. Actual ratios and forecast assumptions are distinguished.
+
+The structured 0.3 synthetic company includes interest income, interest expense, pretax income, non-controlling interest, parent income, explicit diluted-EPS numerator, weighted shares and diluted EPS. A mixed year contains a newly filed actual quarter plus three forecasts. The actualization exercise exposed and fixed future values still based on the superseded estimate: future formulas now replay from the filed actual using the same recorded assumptions. Annual projection 0.2 binds every structured income line outcome, exact calendar filing, model/input/structure and source-quarter identities; both reports and Excel consume it.
+
+LibreOffice saved a recalculated XLSX, then each relevant cached cell was compared to internal authority:
+
+- 56 historical structured quarter cells, 56 actual/forecast model cells and 28 annual projection cells: **140 comparisons**.
+- 16 unavailable cells verified blank; zero missing or unexpected populated cells; zero formula errors.
+- Maximum numerical residual `4.467e-9`, within recorded rounding tolerance.
+- Original Desktop workbook SHA remains unchanged.
+- Numerical receipt SHA: `adf3f885913529458df240b06748e90d76df26870a47b6cac0fda23952e41759`.
+- Author suite: 130 passed. Independent export/template/structure suite: 40 passed. Root integration suite before the final currency-only delta: 317 passed; final delta: 40 passed.
+
+The immutable synthetic model/spec/input/projection/calendar files, source/recalculated XLSX and renders remain in private `/private/tmp/dalton-fund-template-numerical-qa.84lnmk/`. No private original model values were committed.
+
+This accepts the three-sheet presentation and numerical scope, **not AMZN-level model completeness**. Full balance sheet, full cash-flow statement, segment operating drivers, Category Analysis and sourced Street comparisons remain separate. A regression audit also found that structured 0.3 drops the existing legacy OCF/CapEx/FCF model outputs; a versioned 0.4 cash-flow companion is being implemented before the financial upgrade may deploy. It preserves explicit selected source lines and the existing FCF definition without claiming a full cash-flow model. R14c1 execution deployment remains separate.
