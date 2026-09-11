@@ -816,31 +816,75 @@ class CockpitChainTests(unittest.TestCase):
         from tests.test_company_dossier_draft import STRUCTURE, material, reply, one_sentence
 
         class TextAdapter(ChainAdapter):
-            def __init__(self, text):
+            def __init__(self, text, *, busy_once=False):
                 super().__init__({})
                 self.text = text
+                self.busy_once = busy_once
 
             def execute(self, work, route, profile):
                 invocation, envelope = super().execute(work, route, profile)
+                if self.busy_once:
+                    self.busy_once = False
+                    return invocation, replace(
+                        envelope,
+                        status="failed",
+                        outputs={},
+                        error={
+                            "code": "BUSY",
+                            "message": "broker concurrency limit reached",
+                        },
+                        metadata={
+                            **envelope.metadata,
+                            "dispatch_proof": {
+                                "authority": "openclaw-model-adapter",
+                                "state": "definitely_not_sent",
+                                "version": "0.1",
+                            },
+                        },
+                    )
                 return invocation, replace(envelope, outputs={"text": self.text})
 
         unit = "demand_drivers"
+        transport_retry = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 15,
+            "retry_backoff_seconds": 2,
+        }
+        capacity_retry = {
+            "cooldown_seconds": 60,
+            "max_recovery_epochs": 1,
+            "scheduler_max_attempts": 1,
+        }
         company = {"company_ref": "company:acn", "ticker": "ACN"}
         rows = material()
         adapter = TextAdapter(reply([
             one_sentence("causal_chain:0", ["C1"]),
             {"slot_id": "causal_chain:1", "unknown": "not yet established"},
-        ]))
-        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        ]), busy_once=True)
+        clock = MutableClock()
+        model = self._model(
+            adapter,
+            policy_version_ref=self.chain_policy,
+            transport_retry=transport_retry,
+            capacity_retry=capacity_retry,
+            clock=clock,
+        )
         kwargs = dict(unit=unit, structure=STRUCTURE, material=rows,
                       company=company, mission=self.mission)
+        unavailable = draft_unit(model, **kwargs)
+        self.assertEqual(unavailable["status"], "unavailable", unavailable)
+        clock.advance(60)
         produced = draft_unit(model, **kwargs)
         self.assertEqual(produced["status"], "drafted", produced)
         blocks = {unit: produced["block"]}
         verifier_adapter = TextAdapter('{"verdict":"pass","findings":[]}')
         checked = verify(self._model(
             verifier_adapter, policy_version_ref=self.verifier_policy,
-            slots=self.verifier_slots), blocks, company=company,
+            slots=self.verifier_slots,
+            transport_retry=transport_retry,
+            capacity_retry=capacity_retry,
+            clock=clock,
+        ), blocks, company=company,
             mission=self.mission,
             producer_route_decision_refs=[produced["model"]["route_decision_ref"]])
         self.assertEqual(checked["status"], "verified", checked)
@@ -868,9 +912,36 @@ class CockpitChainTests(unittest.TestCase):
             company_ref=company["company_ref"], current_units={unit},
             current_blocks=blocks, current_mission_hash=self.mission["content_hash"],
             scheduler_db=self.root / "scheduler.sqlite", router_db=self.router_db)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            producer_work = scheduler.work_order_authority(
+                produced["model"]["work_order_ref"]
+            )["work_order"]
+            verifier_work = scheduler.work_order_authority(
+                checked["model"]["work_order_ref"]
+            )["work_order"]
+        for work in (producer_work, verifier_work):
+            binding = work["metadata"]["request_identity"]
+            self.assertEqual(binding["exact_config"]["transport_retry"], transport_retry)
+            self.assertEqual(binding["exact_config"]["capacity_retry"], capacity_retry)
+            self.assertEqual(work["metadata"]["request_id"], binding["decorated_request_id"])
+        producer_recovery = producer_work["metadata"]["request_identity"][
+            "recovery_parent"
+        ]
+        self.assertEqual(producer_recovery["kind"], "capacity")
+        self.assertTrue(producer_recovery["proof_ref"].startswith(
+            "capacity-recovery:1:"
+        ))
+        self.assertTrue(
+            verifier_work["metadata"]["request_id"].endswith(
+                ":producer:"
+                + content_hash(verifier_work["metadata"][
+                    "producer_route_decision_refs"
+                ])[:16]
+            )
+        )
         replay = draft_unit(model, **kwargs)
         self.assertTrue(replay["model"]["replayed"])
-        self.assertEqual(len(adapter.served), 1)
+        self.assertEqual(len(adapter.served), 2)
         # A changed authority hash cannot borrow the previous paid result,
         # even when a caller incorrectly keeps the same version reference.
         changed = draft_unit(model, **{**kwargs, "mission": {
@@ -878,6 +949,79 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(changed["status"], "drafted", changed)
         self.assertNotEqual(changed["model"]["work_order_ref"],
                             produced["model"]["work_order_ref"])
+
+    def test_dossier_replays_exact_legacy_success_without_forging_request_proof(self) -> None:
+        import dalton_core.company_dossier_draft  # noqa: F401
+
+        retry = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 5,
+            "retry_backoff_seconds": 0,
+        }
+        capacity = {
+            "cooldown_seconds": 60,
+            "max_recovery_epochs": 1,
+            "scheduler_max_attempts": 3,
+        }
+        adapter = ChainAdapter({})
+        model = self._model(
+            adapter,
+            policy_version_ref=self.chain_policy,
+            transport_retry=retry,
+            capacity_retry=capacity,
+        )
+        kwargs = {
+            "purpose": "dossier",
+            "request_id": "legacy-dossier-success",
+            "prompt": "draft one unit",
+            "mission": self.mission,
+        }
+        with patch(
+            "dalton_core.cockpit_model._DOSSIER_PURPOSES", frozenset()
+        ):
+            legacy = model.call(**kwargs)
+        replay = model.call(**kwargs)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["work_order_ref"], legacy["work_order_ref"])
+        self.assertEqual(len(adapter.served), 1)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            work = scheduler.work_order_authority(legacy["work_order_ref"])["work_order"]
+        self.assertNotIn("request_identity", work["metadata"])
+
+    def test_dossier_request_binding_rejects_unbound_suffixes(self) -> None:
+        from dalton_core.cockpit_model import (
+            dossier_request_identity,
+            validate_dossier_request_identity,
+        )
+
+        binding = dossier_request_identity(
+            semantic_request_id="semantic-dossier-request",
+            config={"transport_retry": {
+                "max_definitely_not_sent_retries": 1,
+                "queue_wait_seconds": 5,
+                "retry_backoff_seconds": 0,
+            }},
+            producer_route_decision_refs=["route-decision:producer"],
+        )
+        validated = validate_dossier_request_identity(
+            binding,
+            semantic_request_id="semantic-dossier-request",
+            producer_route_decision_refs=["route-decision:producer"],
+        )
+        self.assertEqual(validated, binding)
+        with self.assertRaisesRegex(ValueError, "decorated request"):
+            validate_dossier_request_identity(
+                {
+                    **binding,
+                    "decorated_request_id": (
+                        binding["decorated_request_id"]
+                        + ":operator-recovery:"
+                        + "a" * 16
+                    ),
+                },
+                semantic_request_id="semantic-dossier-request",
+                producer_route_decision_refs=["route-decision:producer"],
+            )
 
     def test_memo_writer_reads_real_scheduler_work_and_router_route(self) -> None:
         from dalton_core.writer_server import WriterServer

@@ -888,17 +888,80 @@ def validate_formal_unit_provenance(
                     "outcome": result_row["outcome"], "created_at": result_row["created_at"],
                 }
                 metadata = work.get("metadata") or {}
-                expected_request_ids = {claimed["request_id"]}
-                if role == "verifier":
-                    producer_refs = sorted(set(metadata.get("producer_route_decision_refs") or []))
-                    if producer_refs:
-                        expected_request_ids.add(
-                            f"{claimed['request_id']}:producer:{content_hash(producer_refs)[:16]}")
+                producer_refs = sorted(set(
+                    metadata.get("producer_route_decision_refs") or []
+                ))
+                request_identity = metadata.get("request_identity")
+                if request_identity is not None:
+                    from .cockpit_model import validate_dossier_request_identity
+
+                    try:
+                        validated_request = validate_dossier_request_identity(
+                            request_identity,
+                            semantic_request_id=claimed["request_id"],
+                            producer_route_decision_refs=producer_refs,
+                        )
+                    except Exception as exc:
+                        raise ValueError(
+                            f"unit_provenance.{unit}.{role} request identity is invalid"
+                        ) from exc
+                    request_matches = (
+                        metadata.get("request_id")
+                        == validated_request["decorated_request_id"]
+                    )
+                    recovery_parent = validated_request["recovery_parent"]
+                    if recovery_parent is not None:
+                        parent = scheduler.execute(
+                            "SELECT terminal_state,result_envelope_hash "
+                            "FROM scheduler_formal_results WHERE work_order_id=?",
+                            (recovery_parent["work_order_ref"],),
+                        ).fetchone()
+                        parent_matches = (
+                            parent is not None
+                            and parent["terminal_state"] == "failed"
+                            and parent["result_envelope_hash"]
+                            == recovery_parent["result_envelope_hash"]
+                        )
+                        if not parent_matches:
+                            parent_result = scheduler.execute(
+                                "SELECT outcome,result_envelope_hash FROM "
+                                "scheduler_result_envelopes WHERE work_order_id=? "
+                                "ORDER BY attempt_number DESC LIMIT 1",
+                                (recovery_parent["work_order_ref"],),
+                            ).fetchone()
+                            parent_event = scheduler.execute(
+                                "SELECT state FROM scheduler_attempt_events "
+                                "WHERE work_order_id=? ORDER BY event_seq DESC LIMIT 1",
+                                (recovery_parent["work_order_ref"],),
+                            ).fetchone()
+                            parent_matches = (
+                                parent_result is not None
+                                and parent_result["outcome"] == "retryable"
+                                and parent_result["result_envelope_hash"]
+                                == recovery_parent["result_envelope_hash"]
+                                and parent_event is not None
+                                and parent_event["state"] == "failed"
+                            )
+                        if not parent_matches:
+                            raise ValueError(
+                                f"unit_provenance.{unit}.{role} recovery parent drifted"
+                            )
+                else:
+                    # Historical successful work remains valid only in the
+                    # exact pre-decoration forms that were authoritative then.
+                    # Config/recovery suffixes need the new closed binding and
+                    # are never inferred from a string in old history.
+                    legacy_request = claimed["request_id"]
+                    if role == "verifier" and producer_refs:
+                        legacy_request += (
+                            ":producer:" + content_hash(producer_refs)[:16]
+                        )
+                    request_matches = metadata.get("request_id") == legacy_request
                 if (content_hash(work) != work_row["work_order_hash"]
                         or metadata.get("purpose") != purpose
                         or metadata.get("mission_version_ref") != bound_mission.get("ref")
                         or metadata.get("mission_version_hash") != bound_mission.get("hash")
-                        or metadata.get("request_id") not in expected_request_ids
+                        or not request_matches
                         or content_hash(work.get("question")) != claimed["prompt_hash"]
                         or (role == "producer" and
                             producer_input.get("prompt_sha") !=

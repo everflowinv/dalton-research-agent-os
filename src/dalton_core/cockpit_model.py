@@ -135,6 +135,8 @@ _LEASE_GRACE_SECONDS = 30.0
 # identity definition is a changed identity, and it is versioned like every
 # other frozen definition here rather than quietly reusing the old keys.
 IDENTITY_VERSION = 2
+DOSSIER_REQUEST_IDENTITY_VERSION = "0.1"
+_DOSSIER_PURPOSES = frozenset({"dossier", "dossier_verifier"})
 
 
 class CockpitModelError(RuntimeError):
@@ -423,6 +425,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                verifier_provider_contract: str | None = None,
                verifier_provider_schema_hash: str | None = None,
                mission_version_hash: str | None = None,
+               request_identity: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
@@ -446,6 +449,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         identity["mission_version_hash"] = mission_version_hash
     if producer_route_decision_refs:
         identity["producer_route_decision_refs"] = list(producer_route_decision_refs)
+    if request_identity is not None:
+        identity["request_identity_hash"] = content_hash(request_identity)
     digest = content_hash(identity)
     at = created_at or _now()
     capability = (
@@ -468,12 +473,195 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "mission_version_hash": mission_version_hash}),
                                  **({} if not producer_route_decision_refs else {
                                      "producer_route_decision_refs": list(producer_route_decision_refs)}),
+                                 **({} if request_identity is None else {
+                                     "request_identity": dict(request_identity)}),
                                  **({} if verifier_provider_contract is None else {
                                      "verifier_output_schema_version": "0.1",
                                      "verifier_provider_contract": verifier_provider_contract,
                                      "verifier_provider_schema_hash": verifier_provider_schema_hash,
                                  })},
     )
+
+
+def _legacy_decorated_request_id(
+    request_id: str,
+    config: Mapping[str, Any],
+    producer_refs: Sequence[str],
+) -> str:
+    """Rebuild the pre-binding identity solely for exact successful replay."""
+
+    decorated = request_id
+    if "capacity_retry" in config:
+        decorated += ":capacity-policy:" + content_hash(
+            _capacity_retry(config)
+        )[:16]
+    if "transport_retry" in config:
+        decorated += ":transport-policy:" + content_hash(
+            config["transport_retry"]
+        )[:16]
+    if producer_refs:
+        decorated += ":producer:" + content_hash(list(producer_refs))[:16]
+    return decorated
+
+
+def dossier_request_identity(
+    *,
+    semantic_request_id: str,
+    config: Mapping[str, Any],
+    producer_route_decision_refs: Sequence[str] = (),
+    recovery_parent: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind one Dossier request to exact execution config and recovery authority."""
+
+    producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
+    exact_config = {
+        **(
+            {"capacity_retry": dict(config["capacity_retry"])}
+            if "capacity_retry" in config
+            else {}
+        ),
+        **(
+            {"transport_retry": dict(config["transport_retry"])}
+            if "transport_retry" in config
+            else {}
+        ),
+    }
+    body = {
+        "schema_version": DOSSIER_REQUEST_IDENTITY_VERSION,
+        "semantic_request_id": semantic_request_id,
+        "exact_config": exact_config,
+        "recovery_parent": None if recovery_parent is None else dict(recovery_parent),
+        "producer_route_decision_refs": list(producer_refs),
+    }
+    decorated = (
+        semantic_request_id
+        + ":request-binding:"
+        + content_hash(body)[:32]
+    )
+    if producer_refs:
+        decorated += ":producer:" + content_hash(list(producer_refs))[:16]
+    return {**body, "decorated_request_id": decorated}
+
+
+def validate_dossier_request_identity(
+    value: Any,
+    *,
+    semantic_request_id: str,
+    producer_route_decision_refs: Sequence[str],
+) -> dict[str, Any]:
+    """Validate and reconstruct a persisted Dossier request binding."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version", "semantic_request_id", "exact_config",
+        "recovery_parent", "producer_route_decision_refs", "decorated_request_id",
+    }:
+        raise ValueError("Dossier request identity has an invalid closed shape")
+    copied = dict(value)
+    if (
+        copied["schema_version"] != DOSSIER_REQUEST_IDENTITY_VERSION
+        or copied["semantic_request_id"] != semantic_request_id
+        or not isinstance(copied["decorated_request_id"], str)
+    ):
+        raise ValueError("Dossier request identity semantic binding drifted")
+    exact = copied["exact_config"]
+    if not isinstance(exact, Mapping) or set(exact) - {
+        "capacity_retry", "transport_retry"
+    }:
+        raise ValueError("Dossier request identity config is invalid")
+    if "transport_retry" in exact:
+        from .document_extraction import validate_transport_retry
+
+        validate_transport_retry(exact["transport_retry"])
+    if "capacity_retry" in exact:
+        retry = exact["capacity_retry"]
+        if not isinstance(retry, Mapping) or set(retry) != {
+            "cooldown_seconds", "max_recovery_epochs", "scheduler_max_attempts"
+        }:
+            raise ValueError("Dossier capacity retry identity is invalid")
+        for key, maximum in (
+            ("cooldown_seconds", 86400),
+            ("max_recovery_epochs", 10),
+            ("scheduler_max_attempts", 10),
+        ):
+            item = retry[key]
+            minimum = 0 if key == "max_recovery_epochs" else 1
+            if (
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or not minimum <= item <= maximum
+            ):
+                raise ValueError("Dossier capacity retry identity is invalid")
+    stored_refs = copied["producer_route_decision_refs"]
+    expected_refs = sorted({str(ref) for ref in producer_route_decision_refs})
+    if stored_refs != expected_refs:
+        raise ValueError("Dossier request identity producer binding drifted")
+    recovery = copied["recovery_parent"]
+    if recovery is not None:
+        if not isinstance(recovery, Mapping) or set(recovery) != {
+            "kind", "work_order_ref", "result_envelope_hash", "proof_ref"
+        }:
+            raise ValueError("Dossier request recovery parent is invalid")
+        patterns = {
+            "operator": r"operator-recovery:[0-9a-f]{16}",
+            "route_admission": r"route-admission:[0-9a-f]{64}",
+            "capacity": r"capacity-recovery:[1-9][0-9]*:[0-9a-f]{16}",
+        }
+        pattern = patterns.get(recovery.get("kind"))
+        if (
+            pattern is None
+            or re.fullmatch(pattern, str(recovery.get("proof_ref"))) is None
+            or re.fullmatch(
+                r"work:cockpit-[a-z0-9_]+-[0-9a-f]{32}",
+                str(recovery.get("work_order_ref")),
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(recovery.get("result_envelope_hash")),
+            ) is None
+        ):
+            raise ValueError("Dossier request recovery parent is invalid")
+    rebuilt = dossier_request_identity(
+        semantic_request_id=semantic_request_id,
+        config=exact,
+        producer_route_decision_refs=expected_refs,
+        recovery_parent=recovery,
+    )
+    if canonical_json(rebuilt) != canonical_json(copied):
+        raise ValueError("Dossier decorated request identity drifted")
+    return copied
+
+
+def _make_dossier_recovery_parent(
+    *,
+    kind: str,
+    proof_ref: str,
+    work_order_ref: str,
+    formal: Mapping[str, Any],
+) -> dict[str, Any]:
+    envelope_hash = formal.get("result_envelope_hash")
+    if not isinstance(envelope_hash, str):
+        envelope = formal.get("result_envelope")
+        if not isinstance(envelope, Mapping):
+            raise CockpitModelError("Dossier recovery has no formal parent proof")
+        envelope_hash = content_hash(envelope)
+    parent = {
+        "kind": kind,
+        "work_order_ref": work_order_ref,
+        "result_envelope_hash": envelope_hash,
+        "proof_ref": proof_ref,
+    }
+    # Validate the closed recovery shape before it can enter an identity.
+    probe = dossier_request_identity(
+        semantic_request_id="recovery-shape-probe",
+        config={},
+        recovery_parent=parent,
+    )
+    validate_dossier_request_identity(
+        probe,
+        semantic_request_id="recovery-shape-probe",
+        producer_route_decision_refs=(),
+    )
+    return parent
 
 
 def _failure(work: WorkOrder, code: str, route_ref: str | None,
@@ -627,30 +815,56 @@ class CockpitModel:
 
     def call(self, *, purpose: str, request_id: str, prompt: str,
              mission: Mapping[str, Any],
-             producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
+             producer_route_decision_refs: Sequence[str] = (),
+             _dossier_recovery_parent: Mapping[str, Any] | None = None,
+             ) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
         capacity_retry = _capacity_retry(self.config)
-        base_request_id = request_id
-        if "capacity_retry" in self.config:
-            policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
-            canonical = re.search(
-                re.escape(policy_suffix)
-                + r"(?::route-admission:[0-9a-f]{64})?"
-                + r"(?::operator-recovery:[0-9a-f]{16})?"
-                + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
-                base_request_id,
-            )
-            if canonical is None:
-                base_request_id += policy_suffix
-            request_id = base_request_id
-        if "transport_retry" in self.config:
-            retry_suffix = ":transport-policy:" + content_hash(
-                self.config["transport_retry"]
-            )[:16]
-            if retry_suffix not in base_request_id:
-                base_request_id += retry_suffix
-            request_id = base_request_id
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
+        semantic_request_id = request_id
+        request_identity = None
+        legacy_request_id = None
+        if (
+            purpose in _DOSSIER_PURPOSES
+            and (
+                "capacity_retry" in self.config
+                or "transport_retry" in self.config
+                or _dossier_recovery_parent is not None
+            )
+        ):
+            request_identity = dossier_request_identity(
+                semantic_request_id=semantic_request_id,
+                config=self.config,
+                producer_route_decision_refs=producer_refs,
+                recovery_parent=_dossier_recovery_parent,
+            )
+            request_id = request_identity["decorated_request_id"]
+            base_request_id = request_id
+            if _dossier_recovery_parent is None:
+                legacy_request_id = _legacy_decorated_request_id(
+                    semantic_request_id, self.config, producer_refs
+                )
+        else:
+            base_request_id = request_id
+            if "capacity_retry" in self.config:
+                policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
+                canonical = re.search(
+                    re.escape(policy_suffix)
+                    + r"(?::route-admission:[0-9a-f]{64})?"
+                    + r"(?::operator-recovery:[0-9a-f]{16})?"
+                    + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
+                    base_request_id,
+                )
+                if canonical is None:
+                    base_request_id += policy_suffix
+                request_id = base_request_id
+            if "transport_retry" in self.config:
+                retry_suffix = ":transport-policy:" + content_hash(
+                    self.config["transport_retry"]
+                )[:16]
+                if retry_suffix not in base_request_id:
+                    base_request_id += retry_suffix
+                request_id = base_request_id
         legacy_budget = {
             "max_input_tokens": self.max_input_tokens,
             "max_output_tokens": self.max_output_tokens,
@@ -664,7 +878,7 @@ class CockpitModel:
         budget_changed = effective != legacy_budget
         explicit_budget = (budget_changed or "call_budget" in self.config
                            or purpose in self.config.get("purpose_call_budgets", {}))
-        if producer_refs:
+        if producer_refs and request_identity is None:
             request_id = f"{request_id}:producer:{content_hash(list(producer_refs))[:16]}"
         # P13aa: the WorkOrder id is content-addressed on (purpose, request_id,
         # mission version, prompt) and deliberately excludes the clock -- but
@@ -685,19 +899,44 @@ class CockpitModel:
         # perception snapshot's generated_at for exactly this reason.)
         created_at = mission.get("created_at") or self.clock().isoformat(timespec="microseconds")
         provider_contract = _verifier_provider_contract(purpose) if producer_refs else None
-        work = build_work(purpose=purpose, request_id=request_id, prompt=prompt, mission_version_ref=mission["id"],
-                          max_input_tokens=effective["max_input_tokens"], max_output_tokens=effective["max_output_tokens"],
-                          max_cost_usd=effective["max_cost_usd"], max_seconds=effective["timeout_seconds"],
-                          budget_identity=(budget_fingerprint(effective) if explicit_budget else None),
-                          created_at=created_at,
-                          verifier_provider_contract=(
-                              provider_contract[0] if provider_contract else None),
-                          verifier_provider_schema_hash=(
-                              provider_contract[1] if provider_contract else None),
-                          mission_version_hash=(mission["content_hash"] if purpose in {
-                              "investment_memo", "investment_memo_verifier",
-                              "dossier", "dossier_verifier"} else None),
-                          producer_route_decision_refs=producer_refs)
+        work_args = {
+            "purpose": purpose,
+            "prompt": prompt,
+            "mission_version_ref": mission["id"],
+            "max_input_tokens": effective["max_input_tokens"],
+            "max_output_tokens": effective["max_output_tokens"],
+            "max_cost_usd": effective["max_cost_usd"],
+            "max_seconds": effective["timeout_seconds"],
+            "budget_identity": (
+                budget_fingerprint(effective) if explicit_budget else None
+            ),
+            "created_at": created_at,
+            "verifier_provider_contract": (
+                provider_contract[0] if provider_contract else None
+            ),
+            "verifier_provider_schema_hash": (
+                provider_contract[1] if provider_contract else None
+            ),
+            "mission_version_hash": (
+                mission["content_hash"]
+                if purpose in {
+                    "investment_memo", "investment_memo_verifier",
+                    "dossier", "dossier_verifier",
+                }
+                else None
+            ),
+            "producer_route_decision_refs": producer_refs,
+        }
+        work = build_work(
+            request_id=request_id,
+            request_identity=request_identity,
+            **work_args,
+        )
+        legacy_work = (
+            build_work(request_id=legacy_request_id, **work_args)
+            if legacy_request_id is not None
+            else None
+        )
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
@@ -748,11 +987,35 @@ class CockpitModel:
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
+            if legacy_work is not None:
+                legacy_formal = scheduler.formal_result(legacy_work.id)
+                if legacy_formal is not None:
+                    # Old successful work remains replayable byte-for-byte.
+                    # Failed history has no closed request/config/recovery
+                    # binding, so it remains terminal rather than becoming a
+                    # newly decorated paid call.
+                    return self._answer(
+                        legacy_formal,
+                        legacy_work,
+                        True,
+                        0,
+                        "replayed",
+                    )
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            dossier_bound = request_identity is not None
+            prior_recovery_kind = (
+                (request_identity.get("recovery_parent") or {}).get("kind")
+                if dossier_bound
+                else None
+            )
             if (formal is not None and formal.get("terminal_state") == "failed"
-                    and ":operator-recovery:" not in base_request_id):
+                    and (
+                        prior_recovery_kind != "operator"
+                        if dossier_bound
+                        else ":operator-recovery:" not in base_request_id
+                    )):
                 from .controlled_failure_redrive import approved_request
 
                 recovery_suffix = approved_request(
@@ -763,6 +1026,21 @@ class CockpitModel:
                     mission=mission,
                 )
                 if recovery_suffix is not None:
+                    if dossier_bound:
+                        parent = _make_dossier_recovery_parent(
+                            kind="operator",
+                            proof_ref=recovery_suffix.removeprefix(":"),
+                            work_order_ref=work.id,
+                            formal=formal,
+                        )
+                        return self.call(
+                            purpose=purpose,
+                            request_id=semantic_request_id,
+                            prompt=prompt,
+                            mission=mission,
+                            producer_route_decision_refs=producer_refs,
+                            _dossier_recovery_parent=parent,
+                        )
                     return self.call(
                         purpose=purpose,
                         request_id=base_request_id + recovery_suffix,
@@ -776,6 +1054,23 @@ class CockpitModel:
                 config=self.config,
             )
             if recovery_request is not None:
+                if dossier_bound:
+                    marker = ":route-admission:"
+                    proof = recovery_request.rsplit(marker, 1)[-1]
+                    parent = _make_dossier_recovery_parent(
+                        kind="route_admission",
+                        proof_ref="route-admission:" + proof,
+                        work_order_ref=work.id,
+                        formal=formal,
+                    )
+                    return self.call(
+                        purpose=purpose,
+                        request_id=semantic_request_id,
+                        prompt=prompt,
+                        mission=mission,
+                        producer_route_decision_refs=producer_refs,
+                        _dossier_recovery_parent=parent,
+                    )
                 return self.call(
                     purpose=purpose, request_id=recovery_request, prompt=prompt,
                     mission=mission, producer_route_decision_refs=producer_refs,
@@ -783,7 +1078,8 @@ class CockpitModel:
             capacity_terminal = formal
             if formal is None and scheduler.status(work.id)["state"] == "failed":
                 row = scheduler.connection.execute(
-                    "SELECT result_envelope_json,created_at FROM scheduler_result_envelopes "
+                    "SELECT result_envelope_json,result_envelope_hash,created_at "
+                    "FROM scheduler_result_envelopes "
                     "WHERE work_order_id=? ORDER BY attempt_number DESC LIMIT 1",
                     (work.id,),
                 ).fetchone()
@@ -791,10 +1087,22 @@ class CockpitModel:
                     capacity_terminal = {
                         "terminal_state": "failed",
                         "result_envelope": json.loads(row["result_envelope_json"]),
+                        "result_envelope_hash": row["result_envelope_hash"],
                         "created_at": row["created_at"],
                     }
-            match = re.search(r":capacity-recovery:(\d+):[0-9a-f]{16}$", base_request_id)
-            epoch = int(match.group(1)) if match else 0
+            match = (
+                None
+                if dossier_bound
+                else re.search(
+                    r":capacity-recovery:(\d+):[0-9a-f]{16}$",
+                    base_request_id,
+                )
+            )
+            if dossier_bound and prior_recovery_kind == "capacity":
+                proof_ref = (request_identity["recovery_parent"] or {})["proof_ref"]
+                epoch = int(proof_ref.split(":", 2)[1])
+            else:
+                epoch = int(match.group(1)) if match else 0
             if (_capacity_busy_terminal(capacity_terminal)
                     and epoch < capacity_retry["max_recovery_epochs"]):
                 completed_at = datetime.fromisoformat(str(capacity_terminal["created_at"]))
@@ -802,6 +1110,23 @@ class CockpitModel:
                            - completed_at.astimezone(timezone.utc)).total_seconds()
                 if elapsed >= capacity_retry["cooldown_seconds"]:
                     policy_hash = content_hash(capacity_retry)[:16]
+                    if dossier_bound:
+                        parent = _make_dossier_recovery_parent(
+                            kind="capacity",
+                            proof_ref=(
+                                f"capacity-recovery:{epoch + 1}:{policy_hash}"
+                            ),
+                            work_order_ref=work.id,
+                            formal=capacity_terminal,
+                        )
+                        return self.call(
+                            purpose=purpose,
+                            request_id=semantic_request_id,
+                            prompt=prompt,
+                            mission=mission,
+                            producer_route_decision_refs=producer_refs,
+                            _dossier_recovery_parent=parent,
+                        )
                     clean_request = (base_request_id[:match.start()] if match
                                      else base_request_id)
                     recovery_request = (f"{clean_request}:capacity-recovery:"
@@ -1266,6 +1591,8 @@ __all__ = [
     "CockpitModel", "CockpitModelError", "CockpitModelPoolExhausted",
     "CockpitModelRouteUnavailable",
     "WORKER_REF", "admit_day_ledger", "build_work", "call_cost_micros",
-    "independent_model_call", "lane_status_for", "pool_refusal_message", "purposes", "register_purpose",
+    "dossier_request_identity", "independent_model_call", "lane_status_for",
+    "pool_refusal_message", "purposes", "register_purpose",
     "settle_day_ledger", "unwrap_json_object",
+    "validate_dossier_request_identity",
 ]
