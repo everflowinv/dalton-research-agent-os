@@ -469,6 +469,48 @@ def _recovery_policy(admission: Mapping[str, Any], index: int) -> dict[str, int]
     return dict(value)
 
 
+def _day_budget_recovery_deadline(
+    *, started: datetime, policy: Mapping[str, int], proof: Mapping[str, Any],
+    links: Sequence[Mapping[str, Any]],
+) -> datetime:
+    """Give one proven daily refusal a bounded window after its UTC reset.
+
+    The first daily refusal in a recovery chain is the immutable anchor.  Later
+    daily refusals therefore cannot move the deadline forward one day at a
+    time.  Other failure classes retain the ordinary window from ``started``.
+    """
+
+    deadline = started + timedelta(seconds=policy["max_elapsed_seconds"])
+    candidates = [
+        link.get("failure_proof") for link in links
+        if isinstance(link.get("failure_proof"), Mapping)
+    ]
+    candidates.append(proof)
+    anchor = next((
+        item for item in candidates
+        if item.get("classification") == "atomic_day_budget_refusal"
+    ), None)
+    if anchor is None:
+        return deadline
+    failed_at = _parse_time(anchor.get("failed_at"), "day-budget refusal time")
+    try:
+        day_after = datetime.fromisoformat(str(anchor.get("refusal_day"))).replace(
+            tzinfo=timezone.utc,
+        ) + timedelta(days=1)
+    except (TypeError, ValueError) as exc:
+        raise MissionDocumentResearchExecutorError(
+            "day-budget refusal day is invalid"
+        ) from exc
+    eligible_at = max(
+        failed_at + timedelta(seconds=policy["retry_backoff_seconds"]),
+        day_after,
+    )
+    return max(
+        deadline,
+        eligible_at + timedelta(seconds=policy["max_elapsed_seconds"]),
+    )
+
+
 def _parse_time(value: Any, name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -970,12 +1012,13 @@ def _recovery_rows(connection: Any, admission: Mapping[str, Any], index: int) ->
 
 def _read_recovery_link(
     connection: Any, admission: Mapping[str, Any], index: int, row: Any,
-    base: Mapping[str, Any], prior: Mapping[str, Any] | None,
+    base: Mapping[str, Any], prior_links: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     try:
         wire = json.loads(row["record_json"])
     except (TypeError, ValueError, RecursionError) as exc:
         raise MissionDocumentResearchExecutorError("recovery link is invalid") from exc
+    prior = None if not prior_links else prior_links[-1]
     number = 1 if prior is None else prior["recovery_number"] + 1
     policy = _recovery_policy(admission, index)
     identity = {
@@ -1011,6 +1054,13 @@ def _read_recovery_link(
         _parse_time(wire["failure_proof"].get("failed_at"), "failed formal time")
         if isinstance(proof, Mapping) and proof.get("failed_at") is not None else None
     )
+    allowed_deadline = (
+        _day_budget_recovery_deadline(
+            started=started, policy=policy, proof=proof, links=prior_links,
+        )
+        if isinstance(proof, Mapping)
+        else started + timedelta(seconds=policy["max_elapsed_seconds"])
+    )
     if (canonical_json(wire) != row["record_json"]
             or canonical_json(wire) != canonical_json(expected)
             or any(wire.get(key) != value for key, value in columns.items())
@@ -1026,7 +1076,7 @@ def _read_recovery_link(
                 else failed_formal_time,
             ))
             or created < started
-            or created >= started + timedelta(seconds=policy["max_elapsed_seconds"])):
+            or created >= allowed_deadline):
         raise MissionDocumentResearchExecutorError("recovery link authority drifted")
     recovered = _recovery_work(base, wire)
     stored = connection.execute(
@@ -1048,15 +1098,15 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
     for current in range(1, index + 1):
         base = _derive(admission, scheduler, authority.registry,
                        [*effective, originals[current]], current)
-        prior = None
+        prior_links: list[dict[str, Any]] = []
         for row in _recovery_rows(authority.connection, admission, current):
             link = _read_recovery_link(
-                authority.connection, admission, current, row, base, prior)
+                authority.connection, admission, current, row, base, prior_links)
             if worker is not None:
                 _verify_recovery_failure_proof(
                     authority, scheduler, admission, current, base, link, worker)
             base = _recovery_work(base, link)
-            prior = link
+            prior_links.append(link)
             if current == index:
                 selected_links.append(link)
         effective.append(base)
@@ -1487,6 +1537,9 @@ class MissionDocumentResearchExecutor:
                 "retry_at": None, "deadline": _time(deadline), "proof": None,
             }
         else:
+            deadline = _day_budget_recovery_deadline(
+                started=started, policy=policy, proof=proof, links=links,
+            )
             failed_at = _parse_time(formal["created_at"], "failed formal time")
             eligible_at = failed_at + timedelta(seconds=policy["retry_backoff_seconds"])
             if proof["refusal_day"] is not None:

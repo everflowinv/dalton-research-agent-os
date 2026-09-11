@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +32,9 @@ from dalton_core.mission_document_research_executor import (
     effective_mission_document_work_orders,
     exact_mission_document_model_execution_authority,
     read_mission_document_research_observations,
+)
+from dalton_core.mission_document_research_lane import (
+    MissionDocumentResearchCoordinator,
 )
 from dalton_core.annual_report_qualitative import AnnualReportQualitativeError
 from dalton_core.annual_report_runtime import (
@@ -1058,7 +1061,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
 
     def test_atomic_day_budget_refusal_waits_for_refill_then_uses_fresh_work(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
-        self._enable_recovery(fixture, maximum=1, elapsed=172800)
+        self._enable_recovery(fixture, maximum=1, elapsed=7200)
         admission = authority.admit_from_plan(**args)
         other = fixture.budget.admit(
             policy_version_id="budget-policy:mission-annual:1",
@@ -1074,7 +1077,14 @@ class MissionDocumentResearchTests(unittest.TestCase):
         waiting = executor.run_once(admission["id"])
         self.assertEqual(waiting["reason"], "fresh_work_recovery_backoff")
         self.assertEqual((draft.calls, verifier.calls), (0, 0))
-        fixture.harness.clock.value += timedelta(days=1)
+        observation = read_mission_document_research_observations(
+            fixture.store.connection, mission_version_ref=fixture.mission["id"],
+        )[0]
+        self.assertEqual(
+            observation["recovery"]["deadline"],
+            "2026-09-12T02:00:00.000000+00:00",
+        )
+        fixture.harness.clock.value += timedelta(hours=12)
         recovered = executor.run_once(admission["id"])
         self.assertEqual(recovered["reason"], "fresh_work_recovery")
         final = None
@@ -1089,6 +1099,74 @@ class MissionDocumentResearchTests(unittest.TestCase):
         ).fetchone()[0])
         self.assertEqual(link["failure_proof"]["classification"],
                          "atomic_day_budget_refusal")
+
+    def test_legacy_stopped_day_budget_observation_reopens_at_utc_reset(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1, elapsed=7200)
+        admission = authority.admit_from_plan(**args)
+        consumed = fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=NOW.date().isoformat(), work_order_ref="work:legacy-budget-consumer",
+            attempt_number=1, phase="assessment", route_decision_ref="route:legacy",
+            reserved_micros=9_500_000,
+        )
+        fixture.budget.settle(consumed["admission_id"], actual_micros=9_500_000)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        for _ in range(4):
+            failed = executor.run_once(admission["id"])
+        self.assertEqual(failed["status"], "failed")
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        formal = executor.scheduler.formal_result(work["id"])
+        proof = executor._safe_failure_proof(admission, work, formal, 1)
+        executor._recovery_observation(admission, work, formal, 1, {
+            "status": "stopped", "reason": "fresh_work_recovery_deadline_exceeded",
+            "eligible": False, "used_fresh_work_orders": 0,
+            "max_fresh_work_orders": 1,
+            "retry_at": "2026-09-12T00:00:00.000000+00:00",
+            "deadline": "2026-09-11T14:00:00.000000+00:00",
+            "proof": proof,
+        })
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock,
+        )
+        fixture.harness.clock.value = datetime(
+            2026, 9, 11, 23, 59, 59, tzinfo=timezone.utc,
+        )
+        self.assertEqual(
+            lane._typed_recovery_state(admission, work["id"])["action"], "waiting",
+        )
+        fixture.harness.clock.value = datetime(
+            2026, 9, 12, 0, 0, tzinfo=timezone.utc,
+        )
+        self.assertEqual(
+            lane._typed_recovery_state(admission, work["id"])["action"], "resume",
+        )
+
+    def test_daily_budget_window_is_anchored_once_across_recovery_chain(self):
+        policy = {"max_fresh_work_orders": 3, "retry_backoff_seconds": 0,
+                  "max_elapsed_seconds": 7200}
+        first = {
+            "classification": "atomic_day_budget_refusal",
+            "failed_at": "2026-09-11T20:35:12.000000+00:00",
+            "refusal_day": "2026-09-11",
+        }
+        later = {
+            "classification": "atomic_day_budget_refusal",
+            "failed_at": "2026-09-12T01:00:00.000000+00:00",
+            "refusal_day": "2026-09-12",
+        }
+        from dalton_core.mission_document_research_executor import (
+            _day_budget_recovery_deadline,
+        )
+        deadline = _day_budget_recovery_deadline(
+            started=datetime(2026, 9, 11, 20, 35, 12, tzinfo=timezone.utc),
+            policy=policy, proof=later,
+            links=[{"failure_proof": first}],
+        )
+        self.assertEqual(
+            deadline,
+            datetime(2026, 9, 12, 2, 0, tzinfo=timezone.utc),
+        )
 
     def test_adapter_proved_pre_send_failure_recovers_with_new_budget_identity(self):
         fixture, authority, args, _registration, _launcher = self._fixture()

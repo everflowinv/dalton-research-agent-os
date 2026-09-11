@@ -359,6 +359,45 @@ class MissionDocumentResearchCoordinator:
             )
         recovery = selected["recovery"]
         if recovery["status"] == "stopped":
+            # Releases before the bounded UTC-day recovery contract could
+            # persist a daily-budget refusal as permanently stopped when its
+            # midnight retry fell beyond the ordinary elapsed window.  Keep
+            # that immutable row, but allow its first proven daily reset to
+            # reach the executor, which revalidates the full refusal authority
+            # before it can enqueue a fresh WorkOrder.
+            proof = recovery.get("proof")
+            legacy_day_wait = (
+                recovery.get("reason") == "fresh_work_recovery_deadline_exceeded"
+                and recovery.get("used_fresh_work_orders") == 0
+                and isinstance(proof, Mapping)
+                and proof.get("classification") == "atomic_day_budget_refusal"
+            )
+            if legacy_day_wait:
+                retry_at = recovery.get("retry_at")
+                if not isinstance(retry_at, str) or not retry_at:
+                    raise MissionDocumentResearchLaneError(
+                        "document research daily-budget recovery lacks retry_at"
+                    )
+                try:
+                    parsed = datetime.fromisoformat(retry_at)
+                except ValueError as exc:
+                    raise MissionDocumentResearchLaneError(
+                        "document research daily-budget retry_at is invalid"
+                    ) from exc
+                if parsed.tzinfo is None:
+                    raise MissionDocumentResearchLaneError(
+                        "document research daily-budget retry_at lacks timezone"
+                    )
+                due = parsed.astimezone(timezone.utc)
+                if self.clock().astimezone(timezone.utc) < due:
+                    return {
+                        "action": "waiting", "reason": "fresh_work_recovery_backoff",
+                        "retry_at": retry_at, "work_order_ref": work_ref,
+                    }
+                return {
+                    "action": "resume", "reason": "typed_day_budget_recovery_due",
+                    "work_order_ref": work_ref,
+                }
             return {
                 "action": "recovery_required", "reason": recovery["reason"],
                 "work_order_ref": work_ref,
@@ -711,22 +750,30 @@ class MissionDocumentResearchCoordinator:
         now = self.clock().astimezone(timezone.utc)
         for admission in admissions:
             held = holds.get(admission["id"])
-            if held is None or held["disposition"] != "recovery_wait":
+            legacy_day_hold = (
+                held is not None
+                and held["disposition"] == "recovery_required"
+                and held["reason"] == "fresh_work_recovery_deadline_exceeded"
+            )
+            if held is None or (
+                held["disposition"] != "recovery_wait" and not legacy_day_hold
+            ):
                 continue
             if held["admission_hash"] != admission["content_hash"]:
                 raise MissionDocumentResearchLaneError(
                     "document research hold admission hash drifted"
                 )
-            try:
-                retry_at = datetime.fromisoformat(held["retry_at"]).astimezone(
-                    timezone.utc
-                )
-            except ValueError as exc:
-                raise MissionDocumentResearchLaneError(
-                    "document research hold retry_at is invalid"
-                ) from exc
-            if now < retry_at:
-                continue
+            if not legacy_day_hold:
+                try:
+                    retry_at = datetime.fromisoformat(held["retry_at"]).astimezone(
+                        timezone.utc
+                    )
+                except ValueError as exc:
+                    raise MissionDocumentResearchLaneError(
+                        "document research hold retry_at is invalid"
+                    ) from exc
+                if now < retry_at:
+                    continue
             recovery = self._execution_state(admission)
             if recovery["action"] == "waiting":
                 self._hold(

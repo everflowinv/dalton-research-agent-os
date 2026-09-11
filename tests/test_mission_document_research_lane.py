@@ -221,6 +221,49 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
         self.assertNotIn(admission["id"], holds["holds"])
 
+    def test_legacy_daily_budget_required_hold_is_reclassified_to_wait(self) -> None:
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        ticket_ref = "mission-document-research:" + "d" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+        }
+        retry_at = "2026-09-12T00:00:00.000000+00:00"
+        self.lane.holds_path.write_text(canonical_json({
+            "schema_version": "0.1",
+            "holds": {admission["id"]: {
+                "admission_hash": admission["content_hash"],
+                "ticket_ref": ticket_ref,
+                "reason": "fresh_work_recovery_deadline_exceeded",
+                "disposition": "recovery_required",
+                "retry_at": None,
+            }},
+            "content_hash": content_hash({
+                "schema_version": "0.1",
+                "holds": {admission["id"]: {
+                    "admission_hash": admission["content_hash"],
+                    "ticket_ref": ticket_ref,
+                    "reason": "fresh_work_recovery_deadline_exceeded",
+                    "disposition": "recovery_required",
+                    "retry_at": None,
+                }},
+            }),
+        }) + "\n", encoding="utf-8")
+        self.lane._execution_state = lambda _admission: {
+            "action": "waiting", "reason": "fresh_work_recovery_backoff",
+            "retry_at": retry_at, "work_order_ref": "work:daily-budget-refused",
+        }
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "waiting")
+        hold = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))[
+            "holds"
+        ][admission["id"]]
+        self.assertEqual(hold["disposition"], "recovery_wait")
+        self.assertEqual(hold["retry_at"], retry_at)
+
     def test_started_without_owned_ticket_is_not_blindly_replayed(self) -> None:
         first = self.store.add(1)
         second = self.store.add(2)
