@@ -1992,10 +1992,187 @@ def _prior_quarter_cell(drivers: Sequence[Mapping[str, Any]], driver_ref: str,
     return None
 
 
+def _structure_definition(value: Mapping[str, Any]) -> dict[str, Any]:
+    """The company judgement frozen by a structure, apart from input version.
+
+    A new filing necessarily changes the financial-input and replay hashes.  It
+    must not silently change the line topology, signs, forecast methods, or
+    note evidence while an existing model is merely being actualised.
+    """
+
+    return {
+        key: value for key, value in value.items()
+        if key not in {"content_hash", "financial_input_hash"}
+    }
+
+
+def _actualize_structured_model(
+    prior: Mapping[str, Any], table: Mapping[str, Any], *,
+    structure: Mapping[str, Any] | None, replay: Mapping[str, Any] | None,
+    binding: Mapping[str, Any] | None,
+    evidence_refs: Sequence[Mapping[str, Any]] | None,
+    actor_ref: str | None,
+) -> dict[str, Any] | None:
+    """Actualise a v0.3 model by replaying its exact company statement DAG."""
+
+    from .company_financial_statement_structure import forecast_structure_binding
+
+    if not all(isinstance(item, Mapping) for item in (structure, replay, binding)):
+        raise ForecastModelUnavailable(
+            "structured model actualisation needs current statement authority")
+    assert structure is not None and replay is not None and binding is not None
+    exact_binding = forecast_structure_binding(structure, replay, table)
+    if dict(binding) != exact_binding:
+        raise ForecastModelUnavailable("current statement structure binding differs")
+    prior_structure = prior.get("financial_statement_structure")
+    if not isinstance(prior_structure, Mapping) or (
+        _structure_definition(prior_structure) != _structure_definition(structure)
+    ):
+        raise ForecastModelUnavailable(
+            "the statement structure changed, so this is a new model rather than "
+            "an actualisation of the old one")
+
+    ends = realised_ends(prior, table)
+    if not ends:
+        return None
+    realised = set(ends)
+    periods_by_end = {
+        str(item["end"]): dict(item) for item in (prior.get("forecast_periods") or [])
+    }
+    drivers = build_structure_drivers(table, structure)
+    historical, historical_refs = _structure_historical_values(drivers, structure)
+    result_refs = _structure_result_refs(structure)
+    formulas = {
+        str(item["output_ref"]): item for item in (structure.get("formulas") or [])
+    }
+    lines = {str(item["ref"]): item for item in (structure.get("lines") or [])}
+
+    results: list[dict[str, Any]] = []
+    for prior_line in prior.get("results") or []:
+        ref = str(prior_line["ref"])
+        line_ref = next((key for key, value in result_refs.items() if value == ref), None)
+        if line_ref is None:
+            raise ForecastModelUnavailable(
+                f"result {ref} is outside the current statement structure")
+        formula = formulas.get(line_ref)
+        cells: list[dict[str, Any]] = []
+        for cell in prior_line.get("cells") or []:
+            end = str(cell["period"]["end"])
+            if (end not in realised or cell.get("kind") != "estimate"
+                    or cell.get("superseded_by")):
+                cells.append(dict(cell))
+                continue
+            value = historical.get(line_ref, {}).get(end)
+            if value is None:
+                cells.append(dict(cell))
+                continue
+            if formula is None:
+                actual = _computed_cell(
+                    ref, periods_by_end[end], value, kind="actual",
+                    inputs=historical_refs.get(line_ref, {}).get(end, []))
+            else:
+                dependencies = (
+                    [str(item["line_ref"]) for item in formula["terms"]]
+                    if formula.get("operator") == "sum" else
+                    [str(formula["numerator_ref"]), str(formula["denominator_ref"])]
+                )
+                actual = _computed_cell(
+                    ref, periods_by_end[end], value, kind="actual",
+                    results=[{"ref": result_refs[item], "period_end": end}
+                             for item in dependencies])
+            cells.append({**dict(cell), "superseded_by": actual["ref"]})
+            cells.append(actual)
+        updated = {**dict(prior_line), "cells": sorted(
+            cells, key=lambda item: (str(item["period"]["end"]),
+                                     0 if item["kind"] == "estimate" else 1))}
+        results.append(_finish(updated))
+
+    drivers_by_ref = {str(item["ref"]): item for item in drivers}
+    lines_by_driver = {
+        str(item["ref"]): str(item["structure_line_ref"]) for item in drivers
+    }
+    assumptions: list[dict[str, Any]] = []
+    for item in prior.get("assumptions") or []:
+        end = str(item["period"]["end"])
+        if (end not in realised or item.get("kind") == "actual"
+                or item.get("superseded_by")):
+            assumptions.append(dict(item))
+            continue
+        driver_ref = str(item["driver_ref"])
+        driver = drivers_by_ref.get(driver_ref)
+        line_ref = lines_by_driver.get(driver_ref)
+        filed = None if driver is None else _driver_cell(drivers, driver_ref, end)
+        actual = None
+        if filed is not None and line_ref is not None:
+            value = _decimal(filed["value"], "filed value")
+            refs = [_cell_ref(filed)]
+            rate: Decimal | None = None
+            if item.get("measure") == "quarterly_growth":
+                base = _prior_quarter_cell(drivers, driver_ref, end)
+                if base is not None:
+                    divisor = _decimal(base["value"], "filed value")
+                    if divisor != 0:
+                        rate = (value - divisor) / divisor
+                        refs.append(_cell_ref(base))
+            elif item.get("measure") == "share_of_line":
+                base_ref = str(lines[line_ref].get("forecast_base_ref"))
+                divisor = historical.get(base_ref, {}).get(end)
+                if divisor is not None and divisor != 0:
+                    rate = value / divisor
+                    refs.extend(historical_refs.get(base_ref, {}).get(end, []))
+            if rate is not None:
+                actual = _assumption(
+                    driver_ref=driver_ref, period=periods_by_end[end],
+                    measure=str(item["measure"]),
+                    value=rate.quantize(_RATE_QUANT, ROUND_HALF_UP),
+                    unit=str(item["unit"]), kind="actual",
+                    because=f"what the filings reported for the quarter ended {end}",
+                    refs=refs, decided_by=str(actor_ref or prior.get("actor_ref")),
+                    rule_ref=None)
+        assumptions.append({**dict(item),
+                            "superseded_by": None if actual is None else actual["ref"]})
+        if actual is not None:
+            assumptions.append(actual)
+
+    keep = (list(prior.get("realised_periods") or [])
+            + [periods_by_end[end] for end in ends])[-MAX_REALISED_PERIODS:]
+    forecast = [dict(item) for item in (prior.get("forecast_periods") or [])
+                if str(item["end"]) not in realised]
+    if evidence_refs is None:
+        evidence_refs = filing_refs(drivers, ends)
+    body = {
+        SOURCE_VERSION_KEY: str(prior["id"]),
+        **{key: value for key, value in prior.items()
+           if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS)
+           and key not in _BODY_EXCLUDED},
+        "history_periods": [str(item) for item in (table.get("periods") or [])],
+        "realised_periods": keep,
+        "forecast_periods": forecast,
+        "inputs_hash": content_hash(json.loads(canonical_json(table))),
+        "formula_hash": structure_formula_hash(structure, binding),
+        "drivers": drivers,
+        "assumptions": sorted(assumptions, key=lambda item: (
+            item["driver_ref"], item["period"]["end"], item["kind"])),
+        "results": results,
+        "financial_statement_structure": dict(structure),
+        "financial_statement_structure_replay": dict(replay),
+        "forecast_structure_binding": dict(binding),
+        "actor_ref": str(actor_ref or prior["actor_ref"]),
+        "change_reason": "filing_actual",
+        "evidence_refs": [dict(item) for item in evidence_refs],
+        "decision": None,
+        "mission_version_ref": prior.get("mission_version_ref"),
+    }
+    return body
+
+
 def actualize_model(
     prior: Mapping[str, Any],
     table: Mapping[str, Any],
     *,
+    structure: Mapping[str, Any] | None = None,
+    replay: Mapping[str, Any] | None = None,
+    binding: Mapping[str, Any] | None = None,
     evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     actor_ref: str | None = None,
 ) -> dict[str, Any] | None:
@@ -2010,6 +2187,11 @@ def actualize_model(
 
     Returns ``None`` when no forecast quarter has been filed yet.
     """
+
+    if prior.get("schema_version") == STRUCTURED_SCHEMA_VERSION:
+        return _actualize_structured_model(
+            prior, table, structure=structure, replay=replay, binding=binding,
+            evidence_refs=evidence_refs, actor_ref=actor_ref)
 
     ends = realised_ends(prior, table)
     if not ends:

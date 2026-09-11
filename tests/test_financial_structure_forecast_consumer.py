@@ -8,10 +8,13 @@ import unittest
 
 from dalton_core.company_financial_statement_structure import (
     forecast_structure_binding,
+    replay_historical_structure,
     validate_financial_statement_structure,
 )
 from dalton_core.model_forecast_driver import (
     ForecastModelAuthority,
+    ForecastModelUnavailable,
+    actualize_model,
     build_structured_forecast_model,
     build_structure_drivers,
     compute_structure_results,
@@ -129,6 +132,100 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertEqual(record["schema_version"], "0.3")
         self.assertEqual(record["forecast_structure_binding"], binding)
         self.assertEqual(record["financial_statement_structure"], structure)
+
+    def test_v03_actualization_replays_exact_dag_and_eps_inputs(self):
+        inputs, structure = self.authority()
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"]
+                            if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            authority = ForecastModelAuthority(store)
+            prior = authority.publish(body)
+
+            current = copy.deepcopy(inputs)
+            current["periods"].append("2026-03-31")
+            actuals = {
+                "revenue": 1400, "cost": 840, "opex": 280, "operating": 280,
+                "interest_income": 10, "interest_expense": 20, "pretax": 270,
+                "tax": 60, "net": 210, "nci": 5, "parent": 205,
+                "eps_numerator": 205, "shares": 100, "eps": "2.05",
+            }
+            for line in current["filed_lines"]:
+                line["cells"]["2026-03-31"] = {
+                    "period_start": "2026-01-01",
+                    "value": str(actuals[line["concept"]]),
+                    "unit": next(iter(line["cells"].values()))["unit"],
+                    "basis": "reported", "source_accessions": ["0000000000-26-000002"],
+                }
+            current_candidate = proposal(current)
+            for line in current_candidate["lines"]:
+                original = next(item for item in structure["lines"]
+                                if item["ref"] == line["ref"])
+                line["forecast_method"] = original["forecast_method"]
+                line["forecast_base_ref"] = original["forecast_base_ref"]
+            current_structure, current_replay = validate_financial_statement_structure(
+                current_candidate, company_spec(), current)
+            current_binding = forecast_structure_binding(
+                current_structure, current_replay, current)
+            updated = actualize_model(
+                prior, current, structure=current_structure, replay=current_replay,
+                binding=current_binding)
+            self.assertIsNotNone(updated)
+            record = authority.publish(updated)
+
+        by_cell = cells(record["results"])
+        for role, value in (("operating_income", "280.00000000"),
+                            ("pretax_income", "270.00000000"),
+                            ("parent_net_income", "205.00000000"),
+                            ("diluted_eps", "2.05000000")):
+            self.assertEqual(by_cell[(role, "2026-03-31")]["value"], value)
+            self.assertEqual(by_cell[(role, "2026-03-31")]["kind"], "actual")
+        eps = by_cell[("diluted_eps", "2026-03-31")]
+        self.assertEqual(eps["result_refs"], [
+            {"ref": "result:diluted_eps_numerator", "period_end": "2026-03-31"},
+            {"ref": "result:diluted_weighted_average_shares",
+             "period_end": "2026-03-31"},
+        ])
+
+    def test_v03_actualization_refuses_changed_formula_topology(self):
+        inputs, structure = self.authority()
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"]
+                            if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            prior = ForecastModelAuthority(store).publish(body)
+        changed = copy.deepcopy(structure)
+        changed["created_by"] = "automation:other-structure-decision"
+        changed_body = dict(changed)
+        changed_body.pop("content_hash")
+        from dalton_core.store import content_hash
+        changed["content_hash"] = content_hash(changed_body)
+        changed_replay = replay_historical_structure(changed, inputs)
+        changed_binding = forecast_structure_binding(changed, changed_replay, inputs)
+        with self.assertRaisesRegex(ForecastModelUnavailable, "structure changed"):
+            actualize_model(
+                prior, inputs, structure=changed, replay=changed_replay,
+                binding=changed_binding)
 
 
 if __name__ == "__main__":
