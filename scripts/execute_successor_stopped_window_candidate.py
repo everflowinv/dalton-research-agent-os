@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 from scripts import execute_r11a_stopped_window_candidate as r11
 from scripts import openclaw_broker_stopped_window as broker_window
 from scripts import prepare_release_acceptance_candidate as release_acceptance
+from scripts.successor_ops_binding import OpsBindingError, verify_ops_binding
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     PRESERVE_SCHEMA_VERSION, _json_bytes,
@@ -216,6 +217,15 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          and transition.get("source_commit") == source["commit"],
          "successor transition is not the frozen inert candidate")
     binding = load_json(paths["copied_state_rehearsal_binding"])
+    if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+        ops_helpers = binding.get("ops_helpers", {})
+        execution_binding = ops_helpers.get("execution_binding", {})
+        need(execution_binding.get("git_commit") == ops_helpers.get("git_commit"),
+             "copied-state rehearsal operations identity is inconsistent")
+        try:
+            verify_ops_binding(execution_binding)
+        except OpsBindingError as exc:
+            raise SuccessorExecuteError(str(exc)) from exc
     need(binding.get("status") == "passed"
          and binding.get("acceptance_state") == "candidate_evidence_only"
          and binding.get("code_commit") == source["commit"]
