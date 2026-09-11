@@ -316,18 +316,33 @@ class NodeBrokerRoundTripTests(unittest.TestCase):
         ).isoformat(timespec="microseconds")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            provider_path = root / "provider.txt"
+            provider_path.write_text("gemini", encoding="utf-8")
             harness = root / "harness.mjs"
             harness.write_text(f'''
+import {{ readFileSync }} from "node:fs";
 import {{ WebSearchBroker }} from "{BROKER_DIR}/src/broker.mjs";
 import {{ BrokerServer }} from "{BROKER_DIR}/src/server.mjs";
-const inner = {{
-  query: "Accenture AI demand", provider: "gemini", model: "gemini-2.5-flash", tookMs: 3,
-  externalContent: {{ untrusted: true, source: "web_search", provider: "gemini", wrapped: true }},
-  content: "UNTRUSTED synthesis",
-  citations: [{{ url: "https://Example.com/investors?q=ai#top", title: "IR" }}],
+const providerPath = {json.dumps(str(provider_path))};
+const provider = () => readFileSync(providerPath, "utf8").trim();
+const runtime = {{
+  version: "2026.9.3",
+  config: {{ current: () => ({{ tools: {{ web: {{ search: {{ provider: provider() }} }} }} }}) }},
+  webSearch: {{
+    listProviders() {{ return [{{ id: "gemini" }}, {{ id: "antigravity" }}]; }},
+    async search(input) {{
+      const selected = input.providerId;
+      const inner = {{
+        query: input.args.query, provider: selected, model: `${{selected}}-model`, tookMs: 3,
+        externalContent: {{ untrusted: true, source: "web_search", provider: selected, wrapped: true }},
+        content: "UNTRUSTED synthesis",
+        citations: [{{ url: "https://Example.com/investors?q=ai#top", title: "IR" }}],
+      }};
+      return {{ provider: selected, result: inner }};
+    }},
+  }},
 }};
-const runtime = {{ version: "2026.9.1", webSearch: {{ async search() {{ return {{ provider: "gemini", result: inner }}; }} }} }};
-const broker = new WebSearchBroker(runtime, {{ clientId: "client:dalton-core", expectedProvider: "gemini", socketName: "broker.sock" }}, {{ hostConfig: {{}} }});
+const broker = new WebSearchBroker(runtime, {{ clientId: "client:dalton-core", expectedProvider: "antigravity", socketName: "broker.sock" }});
 const server = new BrokerServer(broker);
 const socketPath = await server.start("{root}");
 process.stdout.write(socketPath + "\\n");
@@ -340,7 +355,10 @@ process.on("SIGTERM", async () => {{ await server.stop(); process.exit(0); }});
                 socket_path = (process.stdout.readline() or "").strip()
                 self.assertTrue(socket_path, process.stderr.read() if process.poll() else "broker did not start")
                 key_path = root / "broker.sock.key"
-                handle = WebSearchBrokerHandle(socket_path=socket_path, auth_key_path=key_path)
+                handle = WebSearchBrokerHandle(
+                    socket_path=socket_path, auth_key_path=key_path,
+                    expected_provider="gemini",
+                )
                 result = handle.invoke(
                     "web_search", {"query": "Accenture AI demand", "count": 3},
                     call_ref="credential-use:web-search:node", deadline_at=deadline, max_response_bytes=1_000_000,
@@ -349,6 +367,12 @@ process.on("SIGTERM", async () => {{ await server.stop(); process.exit(0); }});
                 self.assertEqual((body["ok"], body["idempotencyStatus"], body["callRef"]),
                                  (True, "fresh", "credential-use:web-search:node"))
                 self.assertEqual(json.loads(result.result["content"][0]["text"])["provider"], "gemini")
+                self.assertEqual(body["provider"], "gemini")
+                journal_path = root / "broker.sock.journal.json"
+                first_record = next(
+                    row for row in json.loads(journal_path.read_text())["records"]
+                    if row["invocationId"] == "credential-use:web-search:node"
+                )
                 # The same call ref replays without a second host search.
                 replay = handle.invoke(
                     "web_search", {"query": "Accenture AI demand", "count": 3},
@@ -361,6 +385,41 @@ process.on("SIGTERM", async () => {{ await server.stop(); process.exit(0); }});
                         "web_search", {"query": "another", "count": 3},
                         call_ref="credential-use:web-search:node", deadline_at=deadline, max_response_bytes=1_000_000,
                     )
+
+                # The same long-lived Node broker follows a host runtime
+                # switch. A stale Python guard is refused before host search;
+                # a handle bound to the new snapshot succeeds.
+                provider_path.write_text("antigravity", encoding="utf-8")
+                with self.assertRaises(WebSearchProviderContractDrift):
+                    handle.invoke(
+                        "web_search", {"query": "switch guard", "count": 3},
+                        call_ref="credential-use:web-search:stale", deadline_at=deadline,
+                        max_response_bytes=1_000_000,
+                    )
+                antigravity_handle = WebSearchBrokerHandle(
+                    socket_path=socket_path, auth_key_path=key_path,
+                    expected_provider="antigravity",
+                )
+                antigravity = antigravity_handle.invoke(
+                    "web_search", {"query": "switch accepted", "count": 3},
+                    call_ref="credential-use:web-search:antigravity", deadline_at=deadline,
+                    max_response_bytes=1_000_000,
+                )
+                self.assertEqual(
+                    json.loads(antigravity.raw_response)["provider"], "antigravity"
+                )
+                provider_path.write_text("gemini", encoding="utf-8")
+                gemini_again = handle.invoke(
+                    "web_search", {"query": "switch back", "count": 3},
+                    call_ref="credential-use:web-search:gemini-again", deadline_at=deadline,
+                    max_response_bytes=1_000_000,
+                )
+                self.assertEqual(json.loads(gemini_again.raw_response)["provider"], "gemini")
+                final_first_record = next(
+                    row for row in json.loads(journal_path.read_text())["records"]
+                    if row["invocationId"] == "credential-use:web-search:node"
+                )
+                self.assertEqual(final_first_record, first_record)
             finally:
                 process.terminate()
                 process.wait(timeout=30)
