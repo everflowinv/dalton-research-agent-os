@@ -68,8 +68,16 @@ def normalize_evidence_target(value: Any) -> dict[str, Any]:
             end = date.fromisoformat(period["period_end"]).isoformat()
         except (TypeError, ValueError) as exc:
             raise DocumentResearchStrategyError("financial note target period is invalid") from exc
+        if (period["period_start"] != start or period["period_end"] != end):
+            raise DocumentResearchStrategyError(
+                "financial note target period is not canonical")
         if start > end:
             raise DocumentResearchStrategyError("financial note target period is reversed")
+        elapsed = (date.fromisoformat(end) - date.fromisoformat(start)).days
+        if ((value["applicability_kind"] == "annual" and not 290 < elapsed <= 380)
+                or (value["applicability_kind"] == "quarter" and not 60 < elapsed <= 120)):
+            raise DocumentResearchStrategyError(
+                "financial note period differs from its applicability")
         normalized_periods.append({"period_start": start, "period_end": end})
     if normalized_periods != sorted(normalized_periods, key=lambda item: (
             item["period_start"], item["period_end"])) \

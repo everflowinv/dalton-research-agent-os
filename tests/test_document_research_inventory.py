@@ -245,3 +245,16 @@ class DocumentInventoryTests(unittest.TestCase):
             connection=self.db, mission=self.mission, company_ref="company:A",
             registration=registration,
         ), [])
+        inventory = inventory_with_registry(
+            core=self.core, mission=self.mission, registry=registry,
+            purpose="directed_research",
+        )
+        document = inventory["readable_documents_by_company"]["company:A"][0]
+        self.assertNotIn("evidence_targets", document)
+        self.assertEqual(document["unavailable_evidence_targets"], [{
+            "target_ref": "financial_note:diluted_eps_numerator:0.1",
+            "status": "unavailable",
+            "reason": "exact_standard_diluted_eps_and_weighted_shares_authority_unavailable",
+            "statement_ingest_ref": ingest,
+            "statement_filing_hash": filing_hash,
+        }])

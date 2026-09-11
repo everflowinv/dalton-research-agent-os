@@ -562,6 +562,8 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "text explaining the diluted-EPS numerator for the exact stated period. It is not numeric "
         "authority, does not create a formula, and must not be retagged to another period, filing, "
         "document, or company. Omit evidence_target for ordinary qualitative research.\n\n"
+        "An unavailable_evidence_targets entry is an explicit authority gap, not a target you "
+        "may select or a reason to infer a value from labels.\n\n"
         "Each company's document_research_feedback records what earlier directed reads actually "
         "tried. A query_miss or no_verified_claim is an unresolved research question, not a "
         "finding that the source contains nothing. Use the tried terms and missing evidence "

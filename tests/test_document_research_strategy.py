@@ -74,6 +74,12 @@ class DocumentStrategyTests(unittest.TestCase):
             evidence_target(statement_filing_hash="d" * 64),
             evidence_target(form="10-Q"),
             evidence_target(periods=[
+                {"period_start": "2025-01-01", "period_end": "2025-03-31"},
+            ]),
+            evidence_target(periods=[
+                {"period_start": "20250101", "period_end": "2025-12-31"},
+            ]),
+            evidence_target(periods=[
                 {"period_start": "2025-01-01", "period_end": "2025-12-31"},
                 {"period_start": "2024-01-01", "period_end": "2024-12-31"},
             ]),
@@ -135,3 +141,4 @@ class DocumentStrategyTests(unittest.TestCase):
         self.assertIn("Claims summarize previous findings", build_prompt(current))
         self.assertIn("document's language", build_prompt(current))
         self.assertIn("It is not numeric authority", build_prompt(current))
+        self.assertIn("explicit authority gap", build_prompt(current))

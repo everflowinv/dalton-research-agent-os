@@ -37,6 +37,44 @@ _DILUTED_EPS_CONCEPT = "us-gaap:EarningsPerShareDiluted"
 _DILUTED_SHARES_CONCEPT = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
 
 
+def _unavailable_financial_note_target(
+    *, connection: Any, mission: Mapping[str, Any], company_ref: str,
+    registration: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Explain why an exact current 10-K has no selectable typed target."""
+
+    document_ref = registration.get("document_ref")
+    if (registration.get("source_ref") != "source:sec-edgar"
+            or not isinstance(document_ref, str)
+            or not document_ref.startswith("sec:filing:")):
+        return []
+    tables = {row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_statement_filings','coverage_mission_statement_dispatches')"
+    )}
+    if tables != {"coverage_mission_statement_filings",
+                  "coverage_mission_statement_dispatches"}:
+        return []
+    accession = document_ref.removeprefix("sec:filing:")
+    row = connection.execute(
+        "SELECT f.ingest_id,f.content_hash FROM coverage_mission_statement_filings f "
+        "JOIN coverage_mission_statement_dispatches d ON d.dispatch_id=f.dispatch_id "
+        "WHERE f.company_ref=? AND f.accession=? AND f.form='10-K' "
+        "AND d.mission_version_ref=? AND d.mission_version_hash=? "
+        "AND d.company_ref=? AND d.form='10-K' AND d.status='succeeded'",
+        (company_ref, accession, mission.get("id"), mission.get("content_hash"), company_ref),
+    ).fetchone()
+    if row is None:
+        return []
+    return [{
+        "target_ref": FINANCIAL_NOTE_TARGET_REF,
+        "status": "unavailable",
+        "reason": "exact_standard_diluted_eps_and_weighted_shares_authority_unavailable",
+        "statement_ingest_ref": row["ingest_id"],
+        "statement_filing_hash": row["content_hash"],
+    }]
+
+
 def financial_note_targets_for_registration(
     *, connection: Any, mission: Mapping[str, Any], company_ref: str,
     registration: Mapping[str, Any],
@@ -217,6 +255,13 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
         )
         if evidence_targets:
             projected["evidence_targets"] = evidence_targets
+        else:
+            unavailable_targets = _unavailable_financial_note_target(
+                connection=core.connection, mission=mission, company_ref=company,
+                registration=registration,
+            )
+            if unavailable_targets:
+                projected["unavailable_evidence_targets"] = unavailable_targets
         if preview_chars:
             end = min(preview_chars, registration["normalized_text"]["characters"])
             if end:
