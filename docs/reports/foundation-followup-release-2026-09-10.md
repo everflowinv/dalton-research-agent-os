@@ -241,3 +241,10 @@ Independent review confirmed the WAL failures are not merely fixtures: the live 
 实际 556 运行文件 / 1,850 tracked source 文件匹配，逐字 receipt SHA `150ca947818d115668c9de345a0d3060461dff1e5fed94b196d4634921022477`。模型、预算、credential、mission、broker 和 pending 保留通过。私有 release stager 绑定两份部署前 baseline hashes，postdeploy config receipt 绑定精确 accepted manifest / execution receipt；installed 状态与 wheel hash 也严格检查。3 项私有流程/拒绝测试通过。
 
 运行状态暂为 installed_bytes_verified_runtime_pending。新 controller PID 69511 / 03:18:30.604875Z；03:20:39 起完整 45 样本观察，不能用早期通过样本替代最终结果。启动时超过一分钟仍 starting，保留原始进程采样；最终在配置的安装等待期限内通过，不抬高日常健康门槛。另一会话四份 DeepSeek diff SHA 仍为 `43832e8e6d32cec9bf48b59044d200df0d57a99d30598859c23d4c1360207932`。
+
+
+## R7b 连续运行验收完成（2026-09-11 03:32 UTC）
+
+同一 PID 69511 / 03:18:30.604875Z 在 03:20:39–03:31:49 UTC 连续观察 45 次，670.174 秒全部通过，最大 heartbeat age 7.522 秒；覆盖三个 planner 启动（03:18、03:23、03:28）。运行 receipt SHA `07e96cd1bc3fde4fd0971d94ead3ed75f7392d94b2a45d69070a5eac15408e65`，完整 raw 样本摘要 SHA `b1f97c0e59007f6d87adf4bdfeae964a7958f18fcdbe0916fcd4d2579ff27b59`。已逐一校验原始样本 hash、结果及进程身份，并重算接受条件；manifest 状态为 deployed_verified，runtime_health_only 明确 true。
+
+Dossier 产品验收仍 pending：v4 实际只读检查无 0.3 记录，而正常 lane 因 writer 队列超时尚未产生新子进程结果。这个条件与基础 heartbeat 区分，不能从健康检查推导出研究链完成。排队请求恢复与实测约 9 倍的输入重建提速已统一冻结 R8a `9fa9e569d0a75f343f611a8bb31d869a173c0e5d`；wheel、67 schemas / 40 entries / 0 escaped 演练通过，完整测试进行中。
