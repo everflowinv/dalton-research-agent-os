@@ -731,6 +731,30 @@ test("queue timeout and close never claim or call the provider", async () => {
   assert.equal(calls, 1); release(); await first;
 });
 
+test("close during a fresh journal claim persists a terminal result without provider execution", async () => {
+  const backing = new MemoryIdempotencyJournal({ ttlMs: 60_000 });
+  let releaseClaim;
+  const gate = new Promise((resolve) => { releaseClaim = resolve; });
+  const journal = {
+    get: (...args) => backing.get(...args),
+    async claim(...args) { await gate; return backing.claim(...args); },
+    complete: (...args) => backing.complete(...args),
+  };
+  let calls = 0;
+  const broker = new ModelBroker(fakeRuntime(async () => { calls += 1; return result(); }), config(), { journal });
+  const pending = broker.handle(request({ invocationId: "invocation:closing" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  broker.close(); releaseClaim();
+  const closed = await pending;
+  assert.equal(closed.error.code, "BROKER_CLOSED"); assert.equal(calls, 0);
+  const persisted = backing.get("invocation:closing");
+  assert.equal(persisted.state, "completed");
+  assert.equal(persisted.response.error.code, "BROKER_CLOSED");
+  const replay = await broker.handle(request({ invocationId: "invocation:closing", replayOnly: true }));
+  assert.equal(replay.error.code, "BROKER_CLOSED");
+  assert.equal(replay.idempotencyStatus, "duplicate");
+});
+
 test("cost unavailability is explicit and host failures never echo prompts", async () => {
   const secretPrompt = "PRIVATE-PROMPT-CONTENT";
   const broker = new ModelBroker(fakeRuntime(async () => {

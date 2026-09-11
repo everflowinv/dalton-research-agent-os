@@ -317,6 +317,10 @@ export class ModelBroker {
       return this.#failure(request, requestHash, "fresh", code,
         code === "BUSY" ? "broker queue is full" : code === "BROKER_CLOSED" ? "broker stopped while request was queued" : "broker queue wait exceeded its configured limit");
     }
+    if (this.closed) {
+      this.#releaseReservation();
+      return this.#failure(request, requestHash, "fresh", "BROKER_CLOSED", "broker stopped before durable admission");
+    }
     let claim;
     try {
       claim = await this.journal.claim(request.invocationId, requestHash);
@@ -329,6 +333,12 @@ export class ModelBroker {
       if (claim.status === "conflict") return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "invocationId was already used for another request");
       if (claim.status === "completed") return this.#duplicate(claim.record.response);
       return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "prior host completion may have run; automatic replay is blocked");
+    }
+    if (this.closed) {
+      this.#releaseReservation();
+      const response = this.#failure(request, requestHash, "fresh", "BROKER_CLOSED", "broker stopped before provider execution");
+      try { await this.journal.complete(request.invocationId, requestHash, response); return response; }
+      catch { return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "closed result could not be committed to the idempotency journal"); }
     }
     this.reserved -= 1;
     try { return await this.#completeAndPersist(request, requestHash); }
