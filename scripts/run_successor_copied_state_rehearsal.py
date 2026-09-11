@@ -21,16 +21,18 @@ from typing import Any, Mapping, Sequence
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
-    PRESERVE_SCHEMA_VERSION,
+    PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
     _json_bytes, _record_hash, _service_after, _set_leaf,
     _validated_service_delta,
     apply_transition_to_scratch, canonical_hash,
     expected_openclaw_frame_transition_state,
-    expected_service_transition_state, expected_transition_state,
+    expected_preserved_openclaw_state, expected_service_transition_state,
+    expected_transition_state,
 )
 
 PRESERVE_SCHEMA_VERSIONS = {
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
+    PURE_PRESERVE_SCHEMA_VERSION,
 }
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
@@ -446,7 +448,7 @@ def derive_confined_transition(
             service_row["delta"] = {
                 "file": delta_path.name, "sha256": _sha(delta_path)}
             service_row["after_sha256"] = delta["expected_after_sha256"]
-        else:
+        elif manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
             service_row["after_sha256"] = _sha(service_before_path)
 
             original_external = manifest["external_config_transitions"][0]
@@ -493,6 +495,22 @@ def derive_confined_transition(
                 "file": confined_after.name, "sha256": _sha(confined_after)}
             external["before_sha256"] = _sha(confined_before)
             external["after_sha256"] = _sha(confined_after)
+        else:
+            service_row["after_sha256"] = _sha(service_before_path)
+            original_external = manifest["external_config_transition"]
+            original_before = packet_root / original_external["before"]["file"]
+            _artifact(original_before, original_external["before"]["sha256"],
+                      "original preserved OpenClaw config")
+            scratch_openclaw = rehearsal.temp_root / "openclaw/openclaw.json"
+            _need(scratch_openclaw.is_file() and not scratch_openclaw.is_symlink()
+                  and scratch_openclaw.read_bytes() == original_before.read_bytes(),
+                  "confined OpenClaw baseline differs from preserved bytes")
+            confined_before = derived_root / "openclaw-config.preserved.json"
+            _write_exclusive(confined_before, scratch_openclaw.read_bytes())
+            derived["external_config_transition"]["before"] = {
+                "file": confined_before.name, "sha256": _sha(confined_before)}
+            derived["external_config_transition"]["after_sha256"] = _sha(
+                confined_before)
 
     derived["model_inventory"] = {
         "before_count": len(raw_models), "after_count": len(final_models),
@@ -509,6 +527,8 @@ def derive_confined_transition(
         "schema_version": (
             "successor-confined-transition-derivation-0.3"
             if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION
+            else "successor-confined-transition-derivation-0.4"
+            if manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.2"
             if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.1"),
@@ -698,13 +718,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 detail += "; 2 present install authorities preserved"
             self.successor_openclaw = None
-            if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            if manifest.get("schema_version") in {
+                    EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
                 self.successor_openclaw = self.temp_root / "openclaw/openclaw.json"
                 self.successor_openclaw.parent.mkdir(mode=0o700)
                 _write_exclusive(
                     self.successor_openclaw,
                     args.openclaw_config_snapshot.read_bytes())
-                detail += "; reviewed OpenClaw before bytes staged in scratch"
+                detail += "; reviewed OpenClaw bytes staged in scratch"
             return detail, findings
 
         def post_catalog_sync_steps(self):
@@ -814,6 +835,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _need(actual_openclaw == expected_value,
               "confined OpenClaw result changes more than reviewed paths")
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
+    elif manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+        expected_openclaw = expected_preserved_openclaw_state(
+            packet_root=packet_root, manifest=manifest)
+        _need(rehearsal.successor_openclaw.is_file()
+              and not rehearsal.successor_openclaw.is_symlink()
+              and rehearsal.successor_openclaw.read_bytes() == expected_openclaw,
+              "confined OpenClaw bytes changed during pure-preserve rehearsal")
+        final["openclaw_config_semantic_sha256"] = canonical_hash(
+            json.loads(expected_openclaw))
+        final["openclaw_config_sha256"] = _sha(rehearsal.successor_openclaw)
     _verify_frozen_source(source_root, args.code_commit)
     _need(frozen_ops_binding() == ops_execution_binding,
           "release operations changed during copied-state rehearsal")

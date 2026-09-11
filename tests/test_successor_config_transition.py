@@ -6,18 +6,20 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from dalton_core.document_research import build_document_research_policy
 from scripts.prepare_successor_config_transition import (
     ConfigTransitionError, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
     DOCUMENT_CONFIG, OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
-    PRESERVED_TARGETS, apply_transition,
+    PRESERVED_TARGETS, PURE_PRESERVE_SCHEMA_VERSION, apply_transition,
     build_preserve_existing_transition, build_transition, canonical_hash,
     apply_transition_to_scratch,
     expected_openclaw_frame_transition_state,
-    expected_service_transition_state,
+    expected_preserved_openclaw_state, expected_service_transition_state,
 )
+from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
 
 
 def write(path: Path, value: object) -> None:
@@ -438,6 +440,100 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             openclaw_config_after_path=self.packet / "openclaw.after.json",
             openclaw_broker_journal_path=self.packet / "broker.journal.json",
             **plugin_args,
+        )
+
+    def build_pure(self):
+        write(self.packet / "openclaw.preserved.json", {
+            "plugins": {"entries": {"dalton-openclaw-model-broker": {
+                "config": {"maxFrameBytes": 1048576}}}},
+            "owner": {"signature": "preserved"},
+        })
+        return build_preserve_existing_transition(
+            packet_root=self.packet, release_ref="code-successor-pure",
+            source_commit="d" * 40,
+            baseline_models_path=self.packet / "models.json",
+            model_config_paths={name: self.packet / name for name in self.models},
+            preserved_config_paths=self.preserved,
+            preserved_state_authority_paths={
+                "connector-governance/yfinance-analyst-estimates-v1.json":
+                    self.packet / "yfinance-approved.json"},
+            service_config_before_path=self.packet / "service.before.json",
+            openclaw_config_before_path=self.packet / "openclaw.preserved.json",
+        )
+
+    def test_pure_preserve_transition_changes_no_configuration_bytes(self):
+        manifest = self.build_pure()
+        self.assertEqual(PURE_PRESERVE_SCHEMA_VERSION, manifest["schema_version"])
+        self.assertEqual({
+            "configuration_mutations": 0, "service_config_mutations": 0,
+            "external_config_mutations": 0, "live_mutation": False,
+            "manifest_publication": False, "service_lifecycle": False,
+            "model_calls": False,
+        }, manifest["boundaries"])
+        service_before, service_after = expected_service_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(service_before, service_after)
+        openclaw_before = expected_preserved_openclaw_state(
+            packet_root=self.packet, manifest=manifest)
+
+        self.install_before()
+        openclaw = self.root / "scratch/openclaw.json"
+        openclaw.parent.mkdir()
+        openclaw.write_bytes(openclaw_before)
+        before_state = self.state_files()
+        before_service = self.service.read_bytes()
+        manifest_path = self.packet / "transition.pure.json"
+        write(manifest_path, manifest)
+        receipt = apply_transition_to_scratch(
+            packet_root=self.packet, scratch_root=self.root,
+            state_dir=self.state, manifest_path=manifest_path,
+            expected_manifest_sha256=hashlib.sha256(
+                manifest_path.read_bytes()).hexdigest(),
+            receipt_path=self.root / "receipt.pure.json",
+            service_config_path=self.service, external_config_path=openclaw,
+        )
+        self.assertEqual("successor-config-transition-receipt-0.4",
+                         receipt["schema_version"])
+        self.assertEqual((0, 0, 0), (
+            receipt["configuration_mutations"],
+            receipt["service_config_mutations"],
+            receipt["external_config_mutations"],
+        ))
+        self.assertEqual(before_state, self.state_files())
+        self.assertEqual(before_service, self.service.read_bytes())
+        self.assertEqual(openclaw_before, openclaw.read_bytes())
+
+    def test_pure_preserve_derivation_binds_confined_exact_openclaw_bytes(self):
+        manifest = self.build_pure()
+        self.install_before()
+        scratch = self.root / "derive-pure"
+        (scratch / "openclaw").mkdir(parents=True)
+        (scratch / "openclaw/openclaw.json").write_bytes(
+            (self.packet / "openclaw.preserved.json").read_bytes())
+
+        class Module:
+            @staticmethod
+            def model_config_inventory(state):
+                return {
+                    path.name: json.loads(path.read_text())
+                    for path in sorted(state.glob("*-model-config.json"))
+                }
+
+        derived_path, _proof_path, proof = derive_confined_transition(
+            Module, SimpleNamespace(
+                temp_root=scratch, temp_state=self.state,
+                temp_config=self.service, replacements={},
+            ),
+            packet_root=self.packet, manifest=manifest,
+            original_manifest_sha256="e" * 64,
+        )
+        derived = json.loads(derived_path.read_text())
+        self.assertEqual("successor-confined-transition-derivation-0.4",
+                         proof["schema_version"])
+        self.assertEqual(
+            (scratch / "openclaw/openclaw.json").read_bytes(),
+            expected_preserved_openclaw_state(
+                packet_root=derived_path.parent, manifest=derived),
         )
 
     def test_external_frame_transition_preserves_service_and_binds_one_leaf(self):

@@ -10,7 +10,8 @@ Schema 0.1 retains the original five-file activation behavior. Schema 0.2
 preserves an already-installed model/document/lane configuration and applies
 one separately reviewed planner service-budget CAS. Schema 0.3 preserves those
 bytes and the service config while binding one reviewed external OpenClaw
-config transition. ``--apply`` is intended for an already controlled stopped
+config transition. Schema 0.4 is a code-only successor: all reviewed Dalton
+and OpenClaw configuration bytes remain exact. ``--apply`` is intended for an already controlled stopped
 window and writes an exclusive receipt. It does not stop/start services,
 install code, call a model, or publish a release.
 """
@@ -34,9 +35,11 @@ from dalton_core.document_research_inventory import validate_inventory_config
 SCHEMA_VERSION = "successor-config-transition-0.1"
 PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.2"
 EXTERNAL_CAS_SCHEMA_VERSION = "successor-config-transition-0.3"
+PURE_PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.4"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
 PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.3"
+PURE_PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.4"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -524,7 +527,7 @@ def build_preserve_existing_transition(
     web_search_plugin_destination_path: Path | None = None,
     openclaw_broker_journal_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Build a 0.2 service delta or a 0.3 external broker-frame CAS.
+    """Build a 0.2 service delta, 0.3 external CAS, or 0.4 pure preserve.
 
     The 0.3 form preserves the service and every reviewed Dalton configuration
     byte. It changes the fixed OpenClaw broker ``maxFrameBytes`` leaf and may
@@ -612,8 +615,37 @@ def build_preserve_existing_transition(
 
     service_before, service_before_bytes = _read_json(
         service_config_before_path, "service config before")
-    external_cas = service_delta_path is None
-    if external_cas:
+    pure_preserve = (
+        service_delta_path is None
+        and openclaw_config_before_path is not None
+        and openclaw_config_after_path is None
+        and web_search_plugin_source_path is None
+        and web_search_plugin_destination_path is None
+        and openclaw_broker_journal_path is None
+    )
+    external_cas = service_delta_path is None and not pure_preserve
+    if pure_preserve:
+        openclaw_before, openclaw_before_bytes = _read_json(
+            openclaw_config_before_path, "OpenClaw config before")
+        _need(bool(openclaw_before), "preserved OpenClaw config is empty")
+        schema_version = PURE_PRESERVE_SCHEMA_VERSION
+        service_transition = {
+            "kind": "preserve_exact", "mutation_count": 0,
+            "before": _artifact(service_config_before_path, packet_root),
+            "after_sha256": sha256_bytes(service_before_bytes),
+        }
+        openclaw_transition = {
+            "kind": "preserve_exact", "mutation_count": 0,
+            "before": _artifact(openclaw_config_before_path, packet_root),
+            "after_sha256": sha256_bytes(openclaw_before_bytes),
+        }
+        boundaries = {
+            "configuration_mutations": 0, "service_config_mutations": 0,
+            "external_config_mutations": 0,
+            "live_mutation": False, "manifest_publication": False,
+            "service_lifecycle": False, "model_calls": False,
+        }
+    elif external_cas:
         _need(openclaw_config_before_path is not None
               and openclaw_config_after_path is not None
               and openclaw_broker_journal_path is not None,
@@ -727,7 +759,9 @@ def build_preserve_existing_transition(
         ],
         "boundaries": boundaries,
     }
-    if openclaw_transition is not None:
+    if schema_version == PURE_PRESERVE_SCHEMA_VERSION:
+        body["external_config_transition"] = openclaw_transition
+    elif openclaw_transition is not None:
         body["external_config_transitions"] = [openclaw_transition]
     body["content_hash"] = canonical_hash(body)
     return body
@@ -763,14 +797,15 @@ def expected_transition_state(
     _need(isinstance(models, dict), "baseline model snapshot is invalid")
     version = manifest.get("schema_version")
     _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION,
-                      EXTERNAL_CAS_SCHEMA_VERSION},
+                      EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION},
           "transition schema version is unsupported")
     document = None
     lane = None
     for row in manifest.get("targets", []):
         artifact = (row.get("before") if isinstance(row, Mapping)
                     and version in {PRESERVE_SCHEMA_VERSION,
-                                    EXTERNAL_CAS_SCHEMA_VERSION} else row.get("after")
+                                    EXTERNAL_CAS_SCHEMA_VERSION,
+                                    PURE_PRESERVE_SCHEMA_VERSION} else row.get("after")
                     if isinstance(row, Mapping) else None)
         if not isinstance(row, Mapping) or not isinstance(artifact, Mapping):
             raise ConfigTransitionError("transition target is invalid")
@@ -804,11 +839,12 @@ def expected_service_transition_state(
     """Return the exact semantic service before/after state for 0.2 or 0.3."""
 
     version = manifest.get("schema_version")
-    _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}
+    _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
+                      PURE_PRESERVE_SCHEMA_VERSION}
           and manifest.get("transition_kind") == "preserve_existing",
           "service transition requires preserve-existing schema 0.2 or 0.3")
     row = manifest.get("service_transition")
-    if version == EXTERNAL_CAS_SCHEMA_VERSION:
+    if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
         _need(isinstance(row, Mapping)
               and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
               and row.get("kind") == "preserve_exact"
@@ -898,6 +934,25 @@ def expected_openclaw_frame_transition_state(
           and row["after_sha256"] == sha256_bytes(after_bytes),
           "OpenClaw frame transition authority differs")
     return before_bytes, after_bytes, row
+
+
+def expected_preserved_openclaw_state(
+    *, packet_root: Path, manifest: Mapping[str, Any],
+) -> bytes:
+    """Return exact OpenClaw bytes bound by a pure-preserve successor."""
+
+    _need(manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION,
+          "pure OpenClaw preservation requires schema 0.4")
+    row = manifest.get("external_config_transition")
+    _need(isinstance(row, Mapping)
+          and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
+          and row.get("kind") == "preserve_exact"
+          and row.get("mutation_count") == 0,
+          "pure OpenClaw transition shape differs")
+    _, before = _resolve_artifact(packet_root, row["before"])
+    _need(row.get("after_sha256") == sha256_bytes(before),
+          "pure OpenClaw transition hash differs")
+    return before
 
 
 def verify_preserved_state_authorities(
@@ -1004,13 +1059,18 @@ def _apply_preserve_transition(
         "configuration_mutations": 0,
         "service_config_mutations": 1 if version == PRESERVE_SCHEMA_VERSION else 0,
         **({} if version == PRESERVE_SCHEMA_VERSION
-           else {"external_config_mutations": 1}),
+           else {"external_config_mutations": (
+               1 if version == EXTERNAL_CAS_SCHEMA_VERSION else 0
+           )}),
         "live_mutation": False, "manifest_publication": False,
         "service_lifecycle": False, "model_calls": False,
     }
     if version == EXTERNAL_CAS_SCHEMA_VERSION:
         expected_fields.add("external_config_transitions")
-    _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}
+    elif version == PURE_PRESERVE_SCHEMA_VERSION:
+        expected_fields.add("external_config_transition")
+    _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
+                      PURE_PRESERVE_SCHEMA_VERSION}
           and set(manifest) == expected_fields
           and manifest.get("boundaries") == expected_boundaries,
           "preserve-existing transition boundary differs")
@@ -1082,7 +1142,7 @@ def _apply_preserve_transition(
     verified_state_authorities = verify_preserved_state_authorities(
         packet_root=packet_root, state_dir=state_dir, manifest=manifest)
 
-    if version == EXTERNAL_CAS_SCHEMA_VERSION:
+    if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
         service_before_value, service_after_value = expected_service_transition_state(
             packet_root=packet_root, manifest=manifest)
         _, service_before_bytes = _resolve_artifact(
@@ -1092,16 +1152,26 @@ def _apply_preserve_transition(
               and not service_config_path.is_symlink()
               and service_config_path.read_bytes() == service_before_bytes,
               "service config differs from reviewed preserved bytes")
-        external_before, external_after, external_row = (
-            expected_openclaw_frame_transition_state(
-                packet_root=packet_root, manifest=manifest))
+        if version == EXTERNAL_CAS_SCHEMA_VERSION:
+            external_before, external_after, external_row = (
+                expected_openclaw_frame_transition_state(
+                    packet_root=packet_root, manifest=manifest))
+        else:
+            external_before = expected_preserved_openclaw_state(
+                packet_root=packet_root, manifest=manifest)
+            external_after = external_before
+            external_row = None
         _need(external_config_path is not None
               and external_config_path.is_file()
               and not external_config_path.is_symlink()
               and external_config_path.read_bytes() == external_after,
               "OpenClaw config differs from reviewed applied bytes")
         receipt = {
-            "schema_version": EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION,
+            "schema_version": (
+                EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION
+                if version == EXTERNAL_CAS_SCHEMA_VERSION
+                else PURE_PRESERVE_RECEIPT_SCHEMA_VERSION
+            ),
             "status": "configured_controller_start_pending",
             "release_ref": manifest["release_ref"],
             "source_commit": manifest["source_commit"],
@@ -1118,15 +1188,20 @@ def _apply_preserve_transition(
             "service_config_mutations": 0,
             "service_config_before_sha256": sha256_bytes(service_before_bytes),
             "service_config_after_sha256": sha256_bytes(service_before_bytes),
-            "external_config_mutations": 1,
+            "external_config_mutations": (
+                1 if version == EXTERNAL_CAS_SCHEMA_VERSION else 0
+            ),
             "external_config_before_sha256": sha256_bytes(external_before),
             "external_config_after_sha256": sha256_bytes(external_after),
-            "historical_unresolved_sha256": external_row[
-                "historical_unresolved"]["records_sha256"],
-            "retry_authorized": False, "refund_authorized": False,
             "service_lifecycle_mutations": 0, "model_calls": 0,
             "manifest_publication": False,
         }
+        if external_row is not None:
+            receipt.update({
+                "historical_unresolved_sha256": external_row[
+                    "historical_unresolved"]["records_sha256"],
+                "retry_authorized": False, "refund_authorized": False,
+            })
         receipt["content_hash"] = canonical_hash(receipt)
         if fault_hook is not None:
             fault_hook("before_receipt")
@@ -1325,7 +1400,8 @@ def apply_transition(
     asserted = dict(manifest).pop("content_hash", None)
     _need(asserted == canonical_hash({k: v for k, v in manifest.items() if k != "content_hash"})
           and manifest.get("schema_version") in {
-              SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}
+              SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
+              PURE_PRESERVE_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -1344,7 +1420,8 @@ def apply_transition(
               "scratch rehearsal requires the inert pending transition")
 
     if manifest.get("schema_version") in {
-            PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}:
+            PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
+            PURE_PRESERVE_SCHEMA_VERSION}:
         _need(service_config_path is not None,
               "preserve-existing transition requires the service config path")
         return _apply_preserve_transition(
@@ -1559,6 +1636,17 @@ def apply_transition_to_scratch(
             _fsync_directory(external_config_path.parent)
         finally:
             temporary.unlink(missing_ok=True)
+    elif manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+        _need(external_config_path is not None,
+              "schema 0.4 scratch requires an OpenClaw config path")
+        external_config_path = external_config_path.resolve()
+        expected = expected_preserved_openclaw_state(
+            packet_root=packet_root, manifest=manifest)
+        _need(external_config_path.is_relative_to(scratch_root)
+              and external_config_path.is_file()
+              and not external_config_path.is_symlink()
+              and external_config_path.read_bytes() == expected,
+              "scratch OpenClaw config differs from preserved bytes")
     try:
         receipt = apply_transition(
             packet_root=packet_root, state_dir=state_dir,
