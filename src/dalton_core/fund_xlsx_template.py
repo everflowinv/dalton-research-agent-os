@@ -35,6 +35,7 @@ _NUMBER_KINDS = frozenset({
 })
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _CELL_RANGE = re.compile(r"[A-Z]+[1-9][0-9]*(?::[A-Z]+[1-9][0-9]*)?")
+_UNIT_HEADER_SPAN_EXTRA_WIDTH = 0.75
 
 
 class FundXlsxTemplateError(ValueError):
@@ -300,6 +301,10 @@ def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
                                  (widths["gutter_1"], widths["gutter_2"], widths["gutter_3"])):
             sheet.column_dimensions[column].width = width
         sheet.column_dimensions["D"].width = widths[f"{role}_label"]
+        # Keep E and every period column fixed while giving the A:C unit span
+        # enough room for a three-letter ISO currency label at the source font.
+        sheet.column_dimensions["C"].width += _UNIT_HEADER_SPAN_EXTRA_WIDTH
+        sheet.column_dimensions["D"].width -= _UNIT_HEADER_SPAN_EXTRA_WIDTH
         for item in all_periods:
             sheet.column_dimensions[get_column_letter(item["column"])].width = model_grid["period_column_width"]
         support = model_grid["annual_support"]

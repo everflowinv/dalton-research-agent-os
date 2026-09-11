@@ -151,8 +151,18 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertEqual(financials.sheet_format.defaultRowHeight, 11.25)
         self.assertEqual(financials.column_dimensions["A"].width, 1.875)
         self.assertEqual(financials.column_dimensions["B"].width, 2.125)
-        self.assertEqual(financials.column_dimensions["C"].width, 2.125)
-        self.assertEqual(financials.column_dimensions["D"].width, 25.125)
+        self.assertEqual(financials.column_dimensions["C"].width, 2.875)
+        self.assertEqual(financials.column_dimensions["D"].width, 24.375)
+        self.assertEqual(
+            sum(financials.column_dimensions[column].width for column in "ABCD"),
+            31.25,
+        )
+        self.assertEqual(driver.column_dimensions["C"].width, 2.875)
+        self.assertEqual(driver.column_dimensions["D"].width, 21.625)
+        self.assertEqual(
+            sum(driver.column_dimensions[column].width for column in "ABCD"),
+            28.5,
+        )
         self.assertEqual(financials.column_dimensions["G"].width, 1.375)
         self.assertEqual(financials.column_dimensions["H"].width, 6.375)
         self.assertEqual(financials.column_dimensions["I"].width, 1.125)
