@@ -9,7 +9,8 @@ from .child_tickets import adopt_finished_child
 from .lane_child_launcher import process_matches
 from .store import canonical_json, content_hash
 
-def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any]) -> bool:
+def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any],
+                            source: Mapping[str, Any]) -> bool:
     """Verify the selection came from one exact successful Scheduler result."""
     from .contracts import ResultEnvelope, WorkOrder
     from .readonly_sqlite import connect_read_only
@@ -27,6 +28,8 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any]) ->
             return False
         work = WorkOrder.from_dict(json.loads(work_row["work_order_json"])).to_dict()
         envelope = ResultEnvelope.from_dict(json.loads(formal["result_envelope_json"])).to_dict()
+        from .discovery_candidate_selection import selection_prompt, validate_selection
+        validated = validate_selection(envelope.get("outputs", {}).get("text", ""), source["view"])
         record = {"id": formal["result_record_id"], "work_order_id": formal["work_order_id"],
                   "attempt_number": formal["attempt_number"],
                   "result_envelope_id": formal["result_envelope_id"],
@@ -36,6 +39,9 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any]) ->
             canonical_json(work) == work_row["work_order_json"]
             and content_hash(work) == work_row["work_order_hash"]
             and work.get("metadata", {}).get("purpose") == "discovery_selection"
+            and work.get("metadata", {}).get("mission_version_ref") == source["mission_ref"]
+            and work["question"] == selection_prompt(source["view"], company=source["company"],
+                                                       missing_periods=source["missing_periods"])
             and canonical_json(envelope) == formal["result_envelope_json"]
             and content_hash(envelope) == formal["result_envelope_hash"]
             and content_hash(record) == formal["content_hash"]
@@ -43,6 +49,7 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any]) ->
             and selection.get("result_envelope_ref") == envelope["id"]
             and selection.get("invocation_ref") == envelope.get("invocation_ref")
             and selection.get("route_decision_ref") == envelope.get("metadata", {}).get("route_decision_ref")
+            and all(selection.get(key) == value for key, value in validated.items())
         )
     except (Exception,):
         return False
@@ -161,7 +168,7 @@ class DiscoverySelectionLauncher:
                      and isinstance(selection, Mapping)
                      and selection.get('candidate_view_hash') == source['view']['content_hash']
                      and selection.get('recovery_epoch') == row.get('recovery_epoch', 0)
-                     and _formal_selection_valid(self.scheduler, selection)
+                     and _formal_selection_valid(self.scheduler, selection, source)
                      and selection.get('content_hash') == content_hash({
                          key: value for key, value in selection.items()
                          if key not in {'content_hash', 'work_order_ref', 'result_envelope_ref',
