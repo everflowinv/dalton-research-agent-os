@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -260,6 +263,19 @@ class ChainExecutionTests(unittest.TestCase):
         self.assertIsNone(links[0]["skip_reason"])
         self.assertEqual(links[0]["tier"], "brain")
         self.assertEqual(links[0]["decision_id"], result["route_decision_ref"])
+
+    def test_a_concurrent_reader_does_not_block_the_served_chain_link_commit(self) -> None:
+        reader = sqlite3.connect(self.router.path)
+        self.addCleanup(reader.close)
+        self.assertEqual(reader.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM model_route_decisions").fetchone()
+
+        result = self._run("brain", FakeBroker({}), work_id="work:p14m-reader")
+
+        self.assertEqual(result["status"], "served")
+        self.assertEqual(len(self.router.chain_links(
+            work_order_id="work:p14m-reader")), 1)
 
     def test_a_provider_failure_moves_to_the_next_link_as_a_switch(self) -> None:
         broker = FakeBroker({
@@ -649,6 +665,36 @@ class ChainExecutionTests(unittest.TestCase):
         )
         self.assertEqual(again["status"], "duplicate")
         self.assertEqual(again["policy_version_ref"], self.policies["brain"])
+
+
+class ModelRouterJournalTests(unittest.TestCase):
+    def test_a_legacy_router_converts_after_a_concurrent_reader_releases(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "router.sqlite"
+        with ModelRouter(path):
+            pass
+        legacy = sqlite3.connect(path, check_same_thread=False)
+        self.assertEqual(legacy.execute("PRAGMA journal_mode=DELETE").fetchone()[0],
+                         "delete")
+        legacy.execute("BEGIN")
+        legacy.execute("SELECT COUNT(*) FROM model_route_decisions").fetchone()
+        released = threading.Event()
+
+        def release() -> None:
+            time.sleep(0.15)
+            legacy.rollback()
+            legacy.close()
+            released.set()
+
+        thread = threading.Thread(target=release)
+        thread.start()
+        self.addCleanup(thread.join)
+        with ModelRouter(path) as reopened:
+            self.assertEqual(
+                reopened.connection.execute("PRAGMA journal_mode").fetchone()[0],
+                "wal")
+        self.assertTrue(released.wait(1))
 
 
 if __name__ == "__main__":  # pragma: no cover

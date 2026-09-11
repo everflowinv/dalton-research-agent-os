@@ -13,6 +13,7 @@ import math
 import os
 import re
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+._-]*:[^\s]+$")
 _SLOT_RE = re.compile(r"^credential[-_]slot:[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
+_WAL_CONVERSION_SECONDS = 5.0
 _DECISION_KINDS = frozenset({"initial", "retry", "switch"})
 _AVAILABILITY_STATES = frozenset({"available", "degraded", "unavailable"})
 _PREFERENCE_FIELDS = frozenset(
@@ -789,10 +791,34 @@ class ModelRouter:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        if not read_only and connection is None and self.path != ":memory:":
+            self._ensure_wal()
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_model_router_authorized")
         if not read_only:
             self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    def _ensure_wal(self) -> None:
+        """Keep concurrent route readers from blocking an immutable link commit."""
+
+        row = self.connection.execute("PRAGMA journal_mode").fetchone()
+        if row is not None and str(row[0]).lower() == "wal":
+            return
+        deadline = time.monotonic() + _WAL_CONVERSION_SECONDS
+        while True:
+            try:
+                mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()
+                if mode is not None and str(mode[0]).lower() == "wal":
+                    return
+            except sqlite3.OperationalError:
+                mode = self.connection.execute("PRAGMA journal_mode").fetchone()
+                if mode is not None and str(mode[0]).lower() == "wal":
+                    return
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+                continue
+            raise ModelRouterValidationError("model router requires WAL journal mode")
 
     def memory_snapshot(self) -> "ModelRouter":
         """Disposable writable snapshot; backup replaces the entire schema too.

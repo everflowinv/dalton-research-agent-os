@@ -542,6 +542,11 @@ class CockpitChainTests(unittest.TestCase):
                 policy_id="model-routing-policy:p14m-cockpit-pinned",
             )["policy_version_ref"]
             self.slots = credential_slots_for(router, list(tier_chain("brain")))
+        # Production keeps the router authority open for the service lifetime.
+        # Keep that ownership boundary here so strict read-only inspections can
+        # attach to the WAL sidecars without creating them.
+        self.router_authority = ModelRouter(self.router_db)
+        self.addCleanup(self.router_authority.close)
         with ThesisImpactBudgetStore(self.root / "budget.sqlite") as budget:
             budget.register_policy(
                 policy_version_id=BUDGET_POLICY, day_cap_micros=5_000_000
