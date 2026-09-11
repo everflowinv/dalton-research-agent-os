@@ -1470,12 +1470,10 @@ class MissionSourceDiscoveryCoordinator:
             return {"research_purpose": "earnings_call_transcript",
                     "research_question": "Find the specified company's missing quarterly earnings-call transcript."}
         questions = mission.get("research_questions") or ()
-        selected: list[str] = []
-        for question in questions:
-            candidate = " ".join((*selected, str(question).strip()))
-            if len(candidate) > 480:
-                break
-            selected.append(str(question).strip())
+        # Mission authority already validates these questions. Keep complete
+        # questions; the configured model input budget governs the prompt.
+        # A display-sized character cap must not discard later research needs.
+        selected = [str(question).strip() for question in questions if str(question).strip()]
         if not selected:
             raise DiscoveryPlanError("sell-side selection requires a current mission research question")
         return {"research_purpose": "sell_side_research",

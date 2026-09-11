@@ -138,7 +138,7 @@ def selection_prompt(view: Mapping[str, Any], *, company: Mapping[str, Any],
         if (set(context) != {"research_purpose", "research_question"}
                 or context.get("research_purpose") not in {"earnings_call_transcript", "sell_side_research"}
                 or not isinstance(context.get("research_question"), str)
-                or not context["research_question"].strip() or len(context["research_question"]) > 500):
+                or not context["research_question"].strip()):
             raise CandidateSelectionError("selection context is invalid")
         instruction = (
             "Select documents that directly help answer the stated research question. For an earnings-call "

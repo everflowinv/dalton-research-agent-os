@@ -10,6 +10,18 @@ from dalton_core.store import canonical_json, content_hash
 
 
 class DiscoveryCandidateSelectionTests(unittest.TestCase):
+    def test_complete_mission_questions_survive_the_selection_context(self):
+        from dalton_core.mission_source_discovery import MissionSourceDiscoveryCoordinator
+        questions = ["Revenue recognition premise " * 30, "Which margin assumption changes next quarter?"]
+        context = MissionSourceDiscoveryCoordinator._selection_context(
+            {"research_questions": questions}, {"document_type": "sell_side_report"})
+        for question in questions:
+            self.assertIn(question.strip(), context["research_question"])
+        prompt = selection_prompt({"candidates": []}, company={
+            "company_ref": "company:test", "name": "Test", "ticker": "TEST", "aliases": []},
+            missing_periods=[], selection_context=context)
+        self.assertIn(questions[1], prompt)
+
     def fixture(self):
         results = [
             {"doc_id": "other", "title": "International Foods quarterly call",
