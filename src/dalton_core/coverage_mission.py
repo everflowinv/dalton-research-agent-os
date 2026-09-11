@@ -2796,11 +2796,13 @@ class CoverageMissionAuthority:
 
         A human acquisition puts original bytes into connector authority
         without touching this ledger, so the row can read ``discovered`` (the
-        fetch came after discovery) or ``already_in_authority`` (search found
-        the bytes already there) while the document is fully held.  The caller
-        proves the bytes are in authority for this source; this moves the row
-        to ``acquired`` so the human review queue picks it up and no second
-        paid fetch is spent.
+        fetch came after discovery), ``already_in_authority`` (search found
+        the bytes already there), or ``acquisition_failed`` (the independent
+        acquisition arrived after a failed automated fetch) while the document
+        is fully held.  The caller proves the bytes are in authority for this
+        source; this moves the row to ``acquired`` so the human review queue
+        picks it up and no second paid fetch is spent.  It does not add a
+        successful acquisition-attempt event: no new transport ran here.
         """
 
         record_id = _text(record_id, "record_id")
@@ -2812,13 +2814,15 @@ class CoverageMissionAuthority:
                 raise CoverageMissionNotFound("discovered document was not found")
             if row["status"] == "acquired":
                 return self._document_row(row)
-            if row["status"] not in ("discovered", "already_in_authority"):
+            if row["status"] not in (
+                "discovered", "already_in_authority", "acquisition_failed"
+            ):
                 raise CoverageMissionConflict("document is not awaiting acquisition")
             now = _now()
             cur.execute(
                 "UPDATE coverage_mission_discovered_documents SET status='acquired',"
                 "failure_reason=NULL,failure_retryable=NULL,updated_at=? WHERE record_id=? "
-                "AND status IN ('discovered','already_in_authority')",
+                "AND status IN ('discovered','already_in_authority','acquisition_failed')",
                 (now, record_id),
             )
             if cur.rowcount != 1:

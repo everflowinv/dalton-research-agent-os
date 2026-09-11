@@ -267,3 +267,34 @@ class HostRecoveryCoordinatorTests(unittest.TestCase):
         self.assertTrue(probe["host_recovery_probe"])
         self.assertEqual(self.coordinator.launch_acquisition()["status"], "busy")
         self.assertEqual(len(self.fetch.calls), 1)
+
+    def test_due_failed_probe_already_in_authority_settles_without_fetch(self):
+        """A later independent acquisition closes a due terminal row.
+
+        The recovery selector deliberately admits terminal failures.  If the
+        exact document has entered source authority since that failure, the
+        coordinator must queue its review without launching or inventing a
+        successful recovery fetch.
+        """
+
+        self.coordinator.skip_hosts = ("available.example",)
+        self.clock.advance(days=2)
+        before_attempts = self.h.core.connection.execute(
+            "SELECT COUNT(*) FROM coverage_mission_acquisition_attempts"
+        ).fetchone()[0]
+        with patch.object(self.coordinator, "_document_in_authority", return_value=True):
+            result = self.coordinator.launch_acquisition()
+        self.assertEqual(result["status"], "already_in_authority")
+        self.assertEqual(result["settled_status"], "acquired")
+        self.assertEqual(result["review_status"], "fresh")
+        self.assertEqual(self.fetch.calls, [])
+        row = self.h.core.connection.execute(
+            "SELECT status,failure_reason,failure_retryable "
+            "FROM coverage_mission_discovered_documents WHERE record_id=?",
+            (result["record_id"],),
+        ).fetchone()
+        self.assertEqual(tuple(row), ("acquired", None, None))
+        after_attempts = self.h.core.connection.execute(
+            "SELECT COUNT(*) FROM coverage_mission_acquisition_attempts"
+        ).fetchone()[0]
+        self.assertEqual(after_attempts, before_attempts)

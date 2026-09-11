@@ -1048,6 +1048,41 @@ class CoordinatorTests(unittest.TestCase):
         )
         self.assertEqual([item["document_ref"] for item in failed], [NEW_DOC])
 
+    def test_failed_acquisition_later_held_settles_without_retrying_transport(self) -> None:
+        """Copied state may hold bytes acquired after an orphaned fetch row."""
+
+        v1 = self.create_mission()
+        self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.acquisition_launcher.outcome = "failed"
+        self.coordinator.dispatch_once()
+        launched = self.coordinator.dispatch_once()["acquisition"]
+        self.assertEqual((launched["status"], launched["document_ref"]),
+                         ("launched", NEW_DOC))
+        self.acquisition_launcher.finish()
+        settled = self.coordinator.dispatch_once()["settled_documents"]
+        self.assertEqual([item["status"] for item in settled], ["acquisition_failed"])
+
+        # A separate, successful governed acquisition subsequently put the
+        # same document into AlphaEngine authority.  This is the production
+        # shape in the copied R10 state: the mission row remains failed while
+        # the source authority already owns the bytes.
+        seed_known_document(self.h, NEW_DOC)
+        calls_before = len(self.acquisition_launcher.calls)
+        self.clock.advance(days=2)
+        result = self.coordinator.launch_acquisition()
+        self.assertEqual(
+            (result["status"], result["document_ref"], result["settled_status"]),
+            ("already_in_authority", NEW_DOC, "acquired"),
+        )
+        self.assertEqual(result["review_status"], "fresh")
+        self.assertEqual(len(self.acquisition_launcher.calls), calls_before)
+        failed = self.missions.discovered_documents(
+            self.missions.active_mission("coverage-mission:us-it-services")["id"],
+            status="acquisition_failed",
+        )
+        self.assertEqual(failed, [])
+
 
 class SearchChildTests(unittest.TestCase):
     """The real launcher spawns the real child in fake-search mode."""
