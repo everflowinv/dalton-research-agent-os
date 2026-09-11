@@ -14,7 +14,7 @@ from dalton_core.mission_document_research_admission import (
     open_mission_document_admission_authority,
     registration_index,
 )
-from dalton_core.research_question_backlog import ResearchQuestionBacklog
+from dalton_core.research_question_backlog import ResearchQuestionBacklog, ResearchQuestionConflict
 from dalton_core.research_task_cli import run_admissions
 from dalton_core.mission_document_model_authority import (
     DRAFT_MODEL_CONFIG_NAME,
@@ -29,16 +29,98 @@ from tests import test_mission_document_research as mission_document_tests
 
 
 class MissionDocumentAdmissionProducerTests(unittest.TestCase):
-    def _fixture(self):
+    def _fixture(self, *, company_in_mandate=True):
         owner = mission_document_tests.MissionDocumentResearchTests(
             "test_exact_archived_plan_question_and_registration_admit_and_replay"
         )
         self.addCleanup(owner.doCleanups)
-        fixture, authority, args, registration, _launcher = owner._fixture()
+        fixture, authority, args, registration, _launcher = owner._fixture(company_in_mandate=company_in_mandate)
         plan = CoverageMissionAuthority(fixture.store).latest_research_plan(
             fixture.mission["id"]
         )
         return fixture, authority, args, registration, plan
+
+    def test_forged_inquiry_refuses_before_any_backlog_write(self):
+        fixture, authority, _args, registration, plan = self._fixture(company_in_mandate=False)
+        before = fixture.store.connection.execute("SELECT COUNT(*) FROM backlog_questions").fetchone()[0]
+        forged = {**plan["inquiries"][0], "question": "A caller-invented question?"}
+        with self.assertRaisesRegex(mission_document_tests.MissionDocumentResearchError, "absent or ambiguous"):
+            admit_directed_inquiry(
+                authority=authority, registrations={registration["id"]: registration},
+                backlog=ResearchQuestionBacklog(fixture.store), mission=fixture.mission,
+                plan=plan, inquiry=forged,
+            )
+        self.assertEqual(fixture.store.connection.execute("SELECT COUNT(*) FROM backlog_questions").fetchone()[0], before)
+
+    def test_industry_mandate_admits_company_in_exact_mission_universe(self):
+        fixture, authority, _args, registration, plan = self._fixture(company_in_mandate=False)
+        result = admit_directed_inquiry(
+            authority=authority, registrations={registration["id"]: registration},
+            backlog=ResearchQuestionBacklog(fixture.store), mission=fixture.mission,
+            plan=plan, inquiry=plan["inquiries"][0],
+        )
+        self.assertEqual(result["status"], "fresh")
+        self.assertEqual(result["company_ref"], plan["inquiries"][0]["company_ref"])
+
+    def test_mission_question_binding_is_checked_before_duplicate_return(self):
+        fixture, _authority, _args, registration, plan = self._fixture(company_in_mandate=False)
+        backlog = ResearchQuestionBacklog(fixture.store)
+        mission = fixture.mission
+        base = dict(
+            mandate_version_ref=mission["bindings"]["mandate_version"]["ref"],
+            company_ref=plan["inquiries"][0]["company_ref"], question="Unique scope check?",
+            answer_criteria="An exact original quote.", source_refs=[registration["source_ref"]],
+            actor_ref=mission["autonomy"]["automation_principal"],
+            mission_binding={"ref": mission["id"], "hash": mission["content_hash"]},
+            idempotency_key="test:mission-question-scope",
+        )
+        # Failure after all three question inserts must roll everything back.
+        counts = {name: fixture.store.connection.execute("SELECT COUNT(*) FROM " + name).fetchone()[0]
+                  for name in ("backlog_questions", "backlog_question_versions", "backlog_question_pointer",
+                               "backlog_question_events", "backlog_idempotency")}
+        with patch.object(backlog, "_event", side_effect=RuntimeError("injected after inserts")):
+            with self.assertRaisesRegex(RuntimeError, "injected after inserts"):
+                backlog.record_question(**base)
+        for name, count in counts.items():
+            self.assertEqual(fixture.store.connection.execute("SELECT COUNT(*) FROM " + name).fetchone()[0], count)
+        first = backlog.record_question(**base)
+        self.assertEqual(first["status"], "fresh")
+        self.assertEqual(backlog.record_question(**base)["question_version_ref"], first["question_version_ref"])
+        invalid = [
+            {"mission_binding": {"ref": mission["id"], "hash": "0" * 64}},
+            {"company_ref": "company:sec-cik:0000000001"},
+            {"actor_ref": "automation:another-mission"},
+            {"source_refs": ["source:not-connected"]},
+            {"mission_binding": None, "idempotency_key": None},
+        ]
+        for delta in invalid:
+            with self.subTest(delta=delta), self.assertRaises(ResearchQuestionConflict):
+                backlog.record_question(**{**base, **delta})
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT COUNT(*) FROM backlog_questions WHERE question_ref=?", (first["question_ref"],)
+        ).fetchone()[0], 1)
+        # A new signed mission revokes the question grant. The old binding
+        # must fail even for a previously recorded idempotency key; the new
+        # binding must also fail because its principal lacks this write scope.
+        params = {key: mission[key] for key in (
+            "title", "objective", "industry_ref", "universe", "research_questions",
+            "deliverables", "source_plan", "bindings", "autonomy", "budget",
+        )}
+        params["autonomy"] = {
+            **mission["autonomy"], "may_write": [item for item in mission["autonomy"]["may_write"]
+                                                 if item != "research_question"],
+        }
+        successor = CoverageMissionAuthority(fixture.store).create_mission(
+            mission["mission_ref"], **params, actor_ref="human:test-owner",
+            version_id="coverage-mission-version:scope-revoked:2",
+            prior_version_ref=mission["id"], idempotency_key="test:scope-revocation",
+        )
+        with self.assertRaises(ResearchQuestionConflict):
+            backlog.record_question(**base)
+        with self.assertRaises(ResearchQuestionConflict):
+            backlog.record_question(**{**base, "mission_binding": {
+                "ref": successor["id"], "hash": successor["content_hash"],
+            }})
 
     def test_producer_derives_every_mutation_input_from_the_stored_inquiry(self):
         fixture, authority, _args, registration, plan = self._fixture()

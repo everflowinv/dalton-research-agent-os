@@ -353,10 +353,10 @@ class MissionDocumentResearchAuthority:
             },
         }
 
-    def _derive(
-        self, *, plan_ref: str, inquiry_ref: str, question_version_ref: str,
-        document_authority_ref: str,
+    def question_origin_from_plan(
+        self, *, plan_ref: str, inquiry_ref: str, document_authority_ref: str,
     ) -> dict[str, Any]:
+        """Validate exact planner/source/mission authority before writing a question."""
         plan, plan_row = _exact_plan(self.connection, plan_ref)
         matches = []
         for ordinal, inquiry in enumerate(plan["inquiries"]):
@@ -397,6 +397,23 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError(
                 "document registration belongs to another mission or company"
             )
+        return {
+            "plan": plan, "plan_row": plan_row, "ordinal": ordinal,
+            "inquiry": inquiry, "inquiry_hash": inquiry_hash, "strategy": strategy,
+            "registration": registration, "mission": mission,
+        }
+
+    def _derive(
+        self, *, plan_ref: str, inquiry_ref: str, question_version_ref: str,
+        document_authority_ref: str,
+    ) -> dict[str, Any]:
+        origin = self.question_origin_from_plan(
+            plan_ref=plan_ref, inquiry_ref=inquiry_ref,
+            document_authority_ref=document_authority_ref,
+        )
+        plan, plan_row, ordinal = origin["plan"], origin["plan_row"], origin["ordinal"]
+        inquiry, inquiry_hash = origin["inquiry"], origin["inquiry_hash"]
+        strategy, registration, mission = origin["strategy"], origin["registration"], origin["mission"]
         try:
             question = read_exact_backlog_question_version(
                 self.connection.cursor(), _text(question_version_ref, "question_version_ref")

@@ -237,10 +237,10 @@ class MissionDocumentResearchTests(unittest.TestCase):
             work_order_ref=work.id,
         )
 
-    def _fixture(self, *, auto_commit=False):
+    def _fixture(self, *, auto_commit=False, company_in_mandate=True):
         fixture = MissionAnnualFixture(
             self, additional_connected_source=COMPANY_WIKI_SOURCE_REF,
-            company_in_mandate=True, auto_commit=auto_commit,
+            company_in_mandate=company_in_mandate, auto_commit=auto_commit,
         )
         spool = RawSpool(str(fixture.state / "document-research-spool"), max_total_bytes=2_000_000)
         text = (
@@ -340,6 +340,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             source_refs=[COMPANY_WIKI_SOURCE_REF],
             actor_ref=fixture.mission["autonomy"]["automation_principal"],
             idempotency_key="mission-document:test:question",
+            mission_binding={"ref": fixture.mission["id"], "hash": fixture.mission["content_hash"]},
         )
         registrations = {registration["id"]: registration}
         authority = MissionDocumentResearchAuthority(
