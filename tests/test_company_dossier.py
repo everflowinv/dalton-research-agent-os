@@ -31,6 +31,7 @@ from dalton_core.company_dossier import (
     SECTIONS,
     UNITS,
     VARIANT_SLOTS,
+    _CONCLUSION_PATTERNS,
     CompanyDossierAuthority,
     CompanyDossierConflict,
     CompanyDossierValidationError,
@@ -694,6 +695,44 @@ class OutputRubricTests(unittest.TestCase):
         findings = output_rubric_findings(
             record, constitution=constitution(criteria=criteria), policy=mapped)
         self.assertEqual([item["section"] for item in findings], ["variant_view"])
+
+    def test_every_prompt_forbidden_conclusion_remains_a_variant_finding(self):
+        criteria = CRITERIA + ["outputs never auto-generate investment conclusions"]
+        mapped = validate_policy({
+            **policy(),
+            "output_rubric_bindings": policy()["output_rubric_bindings"] + [{
+                "criterion_hash": content_hash(criteria[2]),
+                "check": "no_investment_conclusion", "reason": ""}],
+        })
+        for phrase in _CONCLUSION_PATTERNS:
+            with self.subTest(phrase=phrase):
+                block = variant("claim-version:v")
+                block["slots"][0]["sentences"][0]["text"] = f"Evidence says {phrase}."
+                findings = output_rubric_findings(
+                    body(drafted_sections={}, variant_block=block),
+                    constitution=constitution(criteria=criteria),
+                    policy=mapped)
+                self.assertEqual(
+                    [item["phrase"] for item in findings
+                     if item["code"] == "investment_conclusion"],
+                    [phrase],
+                )
+
+    def test_evidence_disagreement_without_a_valuation_conclusion_is_allowed(self):
+        criteria = CRITERIA + ["outputs never auto-generate investment conclusions"]
+        mapped = validate_policy({
+            **policy(),
+            "output_rubric_bindings": policy()["output_rubric_bindings"] + [{
+                "criterion_hash": content_hash(criteria[2]),
+                "check": "no_investment_conclusion", "reason": ""}],
+        })
+        block = variant("claim-version:v")
+        block["slots"][0]["sentences"][0]["text"] = (
+            "The cited market expectation differs from the company's reported demand.")
+        self.assertEqual(output_rubric_findings(
+            body(drafted_sections={}, variant_block=block),
+            constitution=constitution(criteria=criteria),
+            policy=mapped), [])
 
     def test_a_number_in_the_classification_is_traced_like_any_other(self):
         block = classification("claim-version:c")

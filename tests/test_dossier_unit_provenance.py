@@ -8,9 +8,11 @@ from pathlib import Path
 
 from dalton_core.company_dossier_cli import validate_formal_unit_provenance
 from dalton_core.company_dossier import CompanyDossierAuthority, UNITS
+from dalton_core.company_dossier import VARIANT_SLOTS
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.company_dossier_draft import (
-    build_unit_prompt, build_verifier_prompt, draft_hash, parse_unit_output,
+    build_unit_prompt, build_verifier_prompt, draft_hash, legacy_unit_prompt_v02,
+    parse_unit_output,
 )
 from dalton_core.store import canonical_json, content_hash
 from tests.test_company_dossier import body, drafted
@@ -163,6 +165,53 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         bad=json.loads(json.dumps(self.provenance));bad[self.unit]["producer"]["invocation_ref"]="invocation:wrong"
         with self.assertRaisesRegex(ValueError,"authority binding drifted"):
             validate_formal_unit_provenance(bad, mission_ref="mission:v14", current_prior_ref=None, scheduler_db=self.scheduler_path, router_db=self.router_path)
+
+    def test_legacy_variant_prompt_remains_valid_formal_authority(self):
+        unit = "variant_view"
+        structure = [{"slot_id": slot, "prompt": slot} for slot in VARIANT_SLOTS]
+        rows = list(material())
+        producer_text = reply([
+            one_sentence(slot, ["C2"] if slot == "market_view" else ["C1"],
+                         text=f"{slot} is described by the cited evidence.")
+            for slot in VARIANT_SLOTS
+        ])
+        block = parse_unit_output(
+            producer_text, unit=unit, structure=structure, material=rows)
+        prompt = legacy_unit_prompt_v02(
+            unit=unit, structure=structure, material=rows, company=self.company)
+        parse_input = {"structure": structure, "material": rows, "prior_body": "",
+            "profile": None, "profile_table": "", "market_view_available": True,
+            "classification": None}
+        frozen = {"unit": unit, "company": self.company,
+            "prompt_sha": content_hash({"prompt": prompt}),
+            "mission": {"ref": "mission:v14", "hash": "c" * 64},
+            "constitution": self.producer_input["constitution"],
+            "policy": self.producer_input["policy"], "parse_input": parse_input}
+        digest = draft_hash({unit: block})
+        verifier_prompt = build_verifier_prompt({unit: block}, company=self.company)
+
+        original = (self.unit, self.producer_prompt, self.verifier_prompt,
+                    self.producer_text, self.verified_draft_hash, self.producer_input)
+        self.unit, self.producer_prompt = unit, prompt
+        self.verifier_prompt, self.producer_text = verifier_prompt, producer_text
+        self.verified_draft_hash, self.producer_input = digest, frozen
+        scheduler = sqlite3.connect(self.scheduler_path)
+        router = sqlite3.connect(self.router_path)
+        producer_route = self._call(scheduler, router, "producer-legacy", [])
+        self._call(scheduler, router, "verifier-legacy", [producer_route])
+        scheduler.commit(); router.commit(); scheduler.close(); router.close()
+        proof = {unit: {"input_fingerprint": content_hash(frozen),
+            "producer_input": frozen, "producer_prior_version_ref": None,
+            "resolved_classification": None, "verified_draft_hash": digest,
+            "producer": self.calls["producer-legacy"],
+            "verifier": self.calls["verifier-legacy"]}}
+        try:
+            validate_formal_unit_provenance(
+                proof, mission_ref="mission:v14", current_prior_ref=None,
+                scheduler_db=self.scheduler_path, router_db=self.router_path)
+        finally:
+            (self.unit, self.producer_prompt, self.verifier_prompt,
+             self.producer_text, self.verified_draft_hash, self.producer_input) = original
 
     def test_verifier_must_bind_the_exact_producer_route(self):
         connection=sqlite3.connect(self.scheduler_path)

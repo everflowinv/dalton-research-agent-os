@@ -21,10 +21,11 @@ import unittest
 
 from dalton_core.company_dossier import (
     CLASSIFICATION_SLOTS, MAX_GAP_CHARS, MAX_GAPS, MAX_SENTENCE_CHARS,
-    MAX_SOURCES_PER_SECTION, VARIANT_SLOTS,
+    MAX_SOURCES_PER_SECTION, VARIANT_SLOTS, _CONCLUSION_PATTERNS,
 )
 from dalton_core.company_dossier_draft import (
     DRAFT_PURPOSE,
+    SECTION_SENTENCE_CAP,
     SLOT_SENTENCE_CAP,
     DossierDraftRefused,
     build_unit_prompt,
@@ -35,6 +36,7 @@ from dalton_core.company_dossier_draft import (
     independence,
     independence_precheck,
     material_rows,
+    legacy_unit_prompt_v02,
     parse_unit_output,
     render_material,
     validate_verifier_output,
@@ -44,6 +46,7 @@ from dalton_core.company_dossier_draft import (
 from dalton_core.cockpit_model import purposes
 from dalton_core.company_dossier import load_policy
 from dalton_core.company_dossier_cli import build_dossier_input, dossier_input_fingerprint
+from dalton_core.store import content_hash
 
 COMPANY = {"company_ref": "company:sec-cik:0001467373", "ticker": "ACN"}
 MISSION = {"id": "mission-version:1", "mission_ref": "mission:x",
@@ -131,7 +134,18 @@ class PromptTests(unittest.TestCase):
         self.assertIn(f"at most {MAX_SOURCES_PER_SECTION} distinct material tags", prompt)
 
     def test_the_contract_fingerprint_is_stable_and_bound_to_the_limits(self):
-        self.assertRegex(draft_contract_fingerprint(), r"^[0-9a-f]{64}$")
+        fingerprint = draft_contract_fingerprint()
+        self.assertRegex(fingerprint, r"^[0-9a-f]{64}$")
+        legacy = content_hash({
+            "version": "company-dossier-draft-contract:0.2",
+            "max_gaps": MAX_GAPS,
+            "max_gap_chars": MAX_GAP_CHARS,
+            "max_sentence_chars": MAX_SENTENCE_CHARS,
+            "max_sources": MAX_SOURCES_PER_SECTION,
+            "slot_sentence_cap": SLOT_SENTENCE_CAP,
+            "section_sentence_cap": SECTION_SENTENCE_CAP,
+        })
+        self.assertNotEqual(fingerprint, legacy)
         prompt = build_unit_prompt(unit="demand_drivers", structure=STRUCTURE,
                                    material=material(), company=COMPANY)
         for limit in (MAX_GAPS, MAX_GAP_CHARS, MAX_SENTENCE_CHARS,
@@ -153,6 +167,25 @@ class PromptTests(unittest.TestCase):
                        if slot != "market_view"],
             material=material(), company=COMPANY, market_view_available=False)
         self.assertIn("Do not speculate about what the market thinks", prompt)
+
+    def test_variant_prompt_carries_the_exact_investment_conclusion_boundary(self):
+        arguments = dict(
+            unit="variant_view",
+            structure=[{"slot_id": slot, "prompt": slot} for slot in VARIANT_SLOTS],
+            material=material(), company=COMPANY,
+        )
+        prompt = build_unit_prompt(**arguments)
+        self.assertIn("Describe only the cited evidence about the market view", prompt)
+        for phrase in _CONCLUSION_PATTERNS:
+            self.assertIn(phrase, prompt)
+        legacy = legacy_unit_prompt_v02(**arguments)
+        self.assertNotIn("Variant-view boundary:", legacy)
+        self.assertNotEqual(content_hash(prompt), content_hash(legacy))
+
+        other = build_unit_prompt(
+            unit="business_model", structure=STRUCTURE,
+            material=material(), company=COMPANY)
+        self.assertNotIn("Variant-view boundary:", other)
 
     def test_the_guidance_prompt_hands_over_a_computed_table(self):
         prompt = build_unit_prompt(

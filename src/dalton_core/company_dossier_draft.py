@@ -56,6 +56,7 @@ from .company_dossier import (
     SECTIONS,
     SLOT_SENTENCE_CAP,
     VARIANT_UNIT,
+    _CONCLUSION_PATTERNS,
     CompanyDossierValidationError,
     section_body,
     validate_classification,
@@ -89,8 +90,9 @@ MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # prompt SHA already binds every WorkOrder; the exported fingerprint also lets
 # the lane retire a terminal refusal after a reviewed contract repair without
 # pretending that the underlying company evidence changed.
-DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.2"
+DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.3"
 VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.2"
+VARIANT_CONCLUSION_RULE_VERSION = "variant-no-investment-conclusion:1"
 
 
 def draft_contract_fingerprint() -> str:
@@ -102,6 +104,8 @@ def draft_contract_fingerprint() -> str:
         "max_sources": MAX_SOURCES_PER_SECTION,
         "slot_sentence_cap": SLOT_SENTENCE_CAP,
         "section_sentence_cap": SECTION_SENTENCE_CAP,
+        "variant_conclusion_rule": VARIANT_CONCLUSION_RULE_VERSION,
+        "variant_conclusion_patterns": _CONCLUSION_PATTERNS,
     })
 
 
@@ -261,6 +265,7 @@ def build_unit_prompt(
     profile_table: str = "",
     market_view_available: bool = True,
     classification: Any = None,
+    _variant_conclusion_rule: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -311,6 +316,16 @@ def build_unit_prompt(
         "- Do not repeat the previous version. Say what the new evidence changes.",
         "",
     ]
+    if unit == VARIANT_UNIT and _variant_conclusion_rule:
+        forbidden = ", ".join(_CONCLUSION_PATTERNS)
+        lines += [
+            "Variant-view boundary:",
+            "- Describe only the cited evidence about the market view and where it differs",
+            "  from company evidence. Do not turn that disagreement into our valuation,",
+            "  recommendation, position change, or price target.",
+            f"- Do not use these investment-conclusion phrases: {forbidden}.",
+            "",
+        ]
     if unit == CLASSIFICATION_UNIT:
         # A table, and deliberately not indented like the slot list above: the
         # slots are the structure and the vocabulary is a menu, and a reply
@@ -353,6 +368,12 @@ def build_unit_prompt(
         lines += ["Previous version of this part:", prior_body[:MAX_PRIOR_CHARS], ""]
     lines.append(render_material(material))
     return "\n".join(lines)
+
+
+def legacy_unit_prompt_v02(**kwargs: Any) -> str:
+    """Rebuild an immutable v0.2 producer question for formal replay only."""
+
+    return build_unit_prompt(**kwargs, _variant_conclusion_rule=False)
 
 
 # ---------------------------------------------------------------------------

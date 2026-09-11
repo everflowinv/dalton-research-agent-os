@@ -69,6 +69,7 @@ from .company_dossier_draft import (
     MAX_UNITS_PER_RUN,
     TIMEOUT_SECONDS,
     build_unit_prompt,
+    legacy_unit_prompt_v02,
     build_verifier_prompt,
     draft_hash,
     draft_unit,
@@ -914,7 +915,7 @@ def validate_formal_unit_provenance(
                             raise ValueError(
                                 f"unit_provenance.{unit}.verifier prompt binding drifted")
                 else:
-                    expected_prompt = build_unit_prompt(
+                    prompt_args = dict(
                         unit=unit, structure=producer_input["parse_input"]["structure"],
                         material=producer_input["parse_input"]["material"],
                         company=producer_input["company"],
@@ -922,13 +923,16 @@ def validate_formal_unit_provenance(
                         profile_table=producer_input["parse_input"]["profile_table"],
                         market_view_available=producer_input["parse_input"]["market_view_available"],
                         classification=producer_input["parse_input"]["classification"])
+                    expected_prompts = [build_unit_prompt(**prompt_args)]
+                    if unit == VARIANT_UNIT:
+                        expected_prompts.append(legacy_unit_prompt_v02(**prompt_args))
                     expected_request = content_hash({
                         "unit": unit,
                         "company": (producer_input.get("company") or {}).get("company_ref"),
                         "prompt_sha": claimed["prompt_hash"],
                     })[:32]
                     if (claimed["request_id"] != expected_request
-                            or work.get("question") != expected_prompt):
+                            or work.get("question") not in expected_prompts):
                         raise ValueError(f"unit_provenance.{unit}.producer input binding drifted")
                     parse_input = producer_input["parse_input"]
                     try:
