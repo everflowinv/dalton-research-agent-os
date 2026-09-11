@@ -336,6 +336,7 @@ class SecCompanyFactsLane:
         # A caller-supplied clock is a rehearsal clock: advance it instead of sleeping.
         self._realtime = clock is None
         self._opened = False
+        self.annual_budget = None
 
         self.core = DaltonStore(self.state_dir / "core.sqlite")
         try:
@@ -371,6 +372,7 @@ class SecCompanyFactsLane:
                 )
                 from .connector_authority_port import ConnectorCompletionReceiptReader
                 from .registered_annual_report import RegisteredAnnualReportRegistry
+                from .thesis_impact_budget import ThesisImpactBudgetStore
 
                 self.annual_report_registry = RegisteredAnnualReportRegistry(
                     core=self.core,
@@ -391,6 +393,23 @@ class SecCompanyFactsLane:
                 }
                 draft_config = dict(annual_report_draft_model_execution)
                 verifier_config = dict(annual_report_verifier_model_execution)
+                from .openclaw_model_adapter import OpenClawModelAdapter
+                production = any(isinstance(item, OpenClawModelAdapter) for item in (
+                    annual_report_draft_adapter, annual_report_verifier_adapter
+                ))
+                budget_policy_ref = None
+                mission_authority = None
+                if production:
+                    if (draft_config["budget_db"] != verifier_config["budget_db"]
+                            or draft_config["budget_policy_ref"]
+                            != verifier_config["budget_policy_ref"]):
+                        raise LanePreconditionError(
+                            "annual draft and verifier must share one mission budget authority"
+                        )
+                    self.annual_budget = ThesisImpactBudgetStore(draft_config["budget_db"])
+                    budget_policy_ref = draft_config["budget_policy_ref"]
+                    self.annual_budget.policy(budget_policy_ref)
+                    mission_authority = CoverageMissionAuthority(self.core)
                 self.annual_report_draft_model_execution = draft_config
                 self.annual_report_verifier_model_execution = verifier_config
                 self.annual_report_draft_worker = RegisteredAnnualReportDraftWorker(
@@ -399,6 +418,9 @@ class SecCompanyFactsLane:
                     routing_policy_ref=draft_config["routing_policy_ref"],
                     credential_slot_refs=draft_config["credential_slot_refs"],
                     provider_retry=draft_config["provider_retry"],
+                    budget_store=self.annual_budget,
+                    budget_policy_ref=budget_policy_ref,
+                    mission_resolver=(None if mission_authority is None else mission_authority.mission),
                     lease_seconds=draft_config["max_seconds"],
                 )
                 self.annual_report_verifier_worker = RegisteredAnnualReportVerifierWorker(
@@ -407,6 +429,9 @@ class SecCompanyFactsLane:
                     routing_policy_ref=verifier_config["routing_policy_ref"],
                     credential_slot_refs=verifier_config["credential_slot_refs"],
                     provider_retry=verifier_config["provider_retry"],
+                    budget_store=self.annual_budget,
+                    budget_policy_ref=budget_policy_ref,
+                    mission_resolver=(None if mission_authority is None else mission_authority.mission),
                     lease_seconds=verifier_config["max_seconds"],
                 )
             self.plans = ResearchPlanAuthority(
@@ -527,6 +552,12 @@ class SecCompanyFactsLane:
                     obj.close()
                 except Exception:
                     pass
+        if self.annual_budget is not None:
+            try:
+                self.annual_budget.close()
+            except Exception:
+                pass
+            self.annual_budget = None
         self.core.close()
 
     def __enter__(self) -> "SecCompanyFactsLane":

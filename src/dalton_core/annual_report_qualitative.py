@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import timezone
+from decimal import Decimal
 from typing import Any
 
 from .contracts import ResultEnvelope, WorkOrder
@@ -221,6 +223,94 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
     namespace = "registered-annual-report-model"
     purpose = "registered_annual_report_draft"
     expected_stage: str | None = None
+
+    def __init__(self, *, budget_store=None, budget_policy_ref=None,
+                 mission_resolver: Callable[[str], Mapping[str, Any]] | None = None,
+                 **kwargs):
+        """Bind production annual calls to the same durable mission budget.
+
+        Fixture adapters remain usable without a budget authority.  A real
+        OpenClaw adapter is refused unless all three authority inputs exist;
+        an annual call must never silently become an unbudgeted model call.
+        """
+        from .openclaw_model_adapter import OpenClawModelAdapter
+        from .thesis_impact_budget import ThesisImpactBudgetStore
+
+        adapter = kwargs.get("adapter")
+        production = isinstance(adapter, OpenClawModelAdapter)
+        if production and not (
+            isinstance(budget_store, ThesisImpactBudgetStore)
+            and isinstance(budget_policy_ref, str) and budget_policy_ref
+            and callable(mission_resolver)
+        ):
+            raise AnnualReportQualitativeError(
+                "annual-report broker execution requires mission budget authority"
+            )
+        self.budget_store = budget_store
+        self.budget_policy_ref = budget_policy_ref
+        self.mission_resolver = mission_resolver
+        self.admission = None
+        self._admission_identity = None
+        super().__init__(**kwargs)
+
+    def _before_model_call(self, work, route, profile, replayed):
+        if self.budget_store is None:
+            return
+        if (work.metadata.get("budget_db") != self.budget_store.path
+                or work.metadata.get("budget_policy_ref") != self.budget_policy_ref):
+            raise AnnualReportQualitativeError("annual-report budget binding drifted")
+        mission_ref = work.metadata["retrieval_proof"]["registration"][
+            "mission_version_ref"
+        ]
+        mission = self.mission_resolver(mission_ref)
+        if mission.get("id") != mission_ref:
+            raise AnnualReportQualitativeError("annual-report mission authority drifted")
+        identity = (work.id, int(route["attempt_number"]))
+        if self._admission_identity != identity:
+            self.admission = None
+            self._admission_identity = identity
+        if self.admission is not None:
+            return
+        ceiling = int(Decimal(str(work.budget["max_cost_usd"])) * 1_000_000)
+        scope = {
+            "mission_ref": mission["mission_ref"],
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
+            "max_daily_cost_micros": int(
+                Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000
+            ),
+        }
+        self.admission = self.budget_store.admit(
+            policy_version_id=self.budget_policy_ref,
+            day=self.clock().astimezone(timezone.utc).date().isoformat(),
+            work_order_ref=work.id,
+            attempt_number=route["attempt_number"], phase="assessment",
+            route_decision_ref=route["id"], reserved_micros=ceiling,
+            mission_binding=scope,
+        )
+        if self.admission.get("status") == "rejected":
+            raise AnnualReportQualitativeError("annual-report mission budget refused the call")
+
+    def _after_accounting(self, work, route, accounting):
+        if self.budget_store is None:
+            return None
+        cost = accounting["cost"]
+        if cost["amount_micros"] > self.admission["reserved_micros"]:
+            return "MODEL_COST_EXCEEDED_RESERVATION"
+        # Estimated/unknown usage retains the full reservation.  It is not a
+        # zero-cost failure and is the only safe basis for later redrive.
+        if cost["cost_status"] == "actual":
+            self.budget_store.settle(
+                self.admission["admission_id"],
+                actual_micros=cost["amount_micros"],
+                usage_entry_ref=accounting["usage"]["id"],
+            )
+        return None
+
+    def _after_capacity_deferred(self, work, route, adapter_result):
+        if self.budget_store is not None and self.admission is not None:
+            self.budget_store.settle(self.admission["admission_id"], actual_micros=0)
 
     @staticmethod
     def _validate_candidate_sink(_sink: Any) -> None:
