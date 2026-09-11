@@ -13,7 +13,7 @@ const REQUIRED_REQUEST_KEYS = new Set([
   "maxTokens",
   "timeoutMs",
 ]);
-const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls"]);
+const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls", "queueWaitMs"]);
 const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
 const REQUIRED_CONTROL_KEYS = new Set([
   "maxInputTokens",
@@ -240,6 +240,9 @@ export function validateRequest(input, maxFrameBytes) {
   if ("replayOnly" in input && typeof input.replayOnly !== "boolean") {
     throw new ProtocolError("INVALID_REQUEST", "replayOnly must be boolean");
   }
+  if ("queueWaitMs" in input && (!Number.isInteger(input.queueWaitMs) || input.queueWaitMs < 0 || input.queueWaitMs > 3_600_000)) {
+    throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be an integer 0..3600000");
+  }
   const maxTokens = positiveInteger(input.maxTokens, "maxTokens");
   const request = Object.freeze({
     schemaVersion: PROTOCOL_VERSION,
@@ -254,6 +257,7 @@ export function validateRequest(input, maxFrameBytes) {
       requiredControls: validateRequiredControls(input.requiredControls, maxTokens),
     }),
     ...(input.replayOnly === true ? { replayOnly: true } : {}),
+    ...(input.queueWaitMs !== undefined ? { queueWaitMs: input.queueWaitMs } : {}),
   });
   if (Buffer.byteLength(canonicalJson(request), "utf8") > maxFrameBytes) {
     throw new ProtocolError("FRAME_TOO_LARGE", "request exceeds the configured frame limit");

@@ -690,6 +690,47 @@ test("concurrency limit rejects excess work without consuming its invocation id"
   assert.equal(calls, 2);
 });
 
+test("bounded queue is FIFO and duplicate queued invocations join one provider call", async () => {
+  const releases = [];
+  const started = [];
+  const broker = new ModelBroker(fakeRuntime(async ({ messages }) => {
+    started.push(messages[0].content);
+    await new Promise((resolve) => releases.push(resolve));
+    return result();
+  }), config({ maxConcurrent: 1, maxQueued: 2, maxQueueWaitMs: 1000 }));
+  const one = broker.handle(request({ prompt: "one" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const twoRequest = request({ invocationId: "invocation:two", workOrderId: "work:two", prompt: "two", queueWaitMs: 1000 });
+  const two = broker.handle(twoRequest);
+  const duplicateTwo = broker.handle(twoRequest);
+  const three = broker.handle(request({ invocationId: "invocation:three", workOrderId: "work:three", prompt: "three", queueWaitMs: 1000 }));
+  assert.equal(broker.limits.queued, 2);
+  releases.shift()(); await one; await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["one", "two"]);
+  releases.shift()();
+  assert.equal((await two).ok, true); assert.equal((await duplicateTwo).idempotencyStatus, "duplicate");
+  await new Promise((resolve) => setImmediate(resolve)); assert.deepEqual(started, ["one", "two", "three"]);
+  releases.shift()(); await three;
+});
+
+test("queue timeout and close never claim or call the provider", async () => {
+  let release; let calls = 0;
+  const journal = new MemoryIdempotencyJournal({ ttlMs: 60_000 });
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    calls += 1; await new Promise((resolve) => { release = resolve; }); return result();
+  }), config({ maxConcurrent: 1, maxQueued: 2, maxQueueWaitMs: 10 }), { journal });
+  const first = broker.handle(request()); await new Promise((resolve) => setImmediate(resolve));
+  const timedRequest = request({ invocationId: "invocation:timed", workOrderId: "work:timed", queueWaitMs: 10 });
+  const timed = await broker.handle(timedRequest);
+  assert.equal(timed.error.code, "QUEUE_TIMEOUT");
+  assert.equal(journal.get(timedRequest.invocationId), null);
+  const closedRequest = request({ invocationId: "invocation:closed", workOrderId: "work:closed", queueWaitMs: 1000 });
+  const closedPromise = broker.handle(closedRequest); broker.close();
+  assert.equal((await closedPromise).error.code, "BROKER_CLOSED");
+  assert.equal(journal.get(closedRequest.invocationId), null);
+  assert.equal(calls, 1); release(); await first;
+});
+
 test("cost unavailability is explicit and host failures never echo prompts", async () => {
   const secretPrompt = "PRIVATE-PROMPT-CONTENT";
   const broker = new ModelBroker(fakeRuntime(async () => {

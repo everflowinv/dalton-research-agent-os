@@ -50,6 +50,7 @@ export class BrokerServer {
 
   async stop() {
     if (!this.server) return;
+    this.broker.close();
     for (const socket of this.connections) socket.destroy();
     const server = this.server;
     this.server = null;

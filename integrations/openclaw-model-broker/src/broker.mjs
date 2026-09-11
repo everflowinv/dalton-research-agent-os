@@ -12,6 +12,8 @@ const DEFAULTS = Object.freeze({
   maxFrameBytes: 262_144,
   maxOutputBytes: 262_144,
   maxConcurrent: 2,
+  maxQueued: 0,
+  maxQueueWaitMs: 600_000,
   idleTimeoutMs: 5_000,
   authMaxSkewMs: 30_000,
   journalTtlMs: 86_400_000,
@@ -146,6 +148,8 @@ function validateConfig(input) {
     "maxFrameBytes",
     "maxOutputBytes",
     "maxConcurrent",
+    "maxQueued",
+    "maxQueueWaitMs",
     "idleTimeoutMs",
     "authMaxSkewMs",
     "journalTtlMs",
@@ -211,6 +215,8 @@ function validateConfig(input) {
     maxFrameBytes: integer(config.maxFrameBytes, "maxFrameBytes", DEFAULTS.maxFrameBytes, 1024, 1_048_576),
     maxOutputBytes: integer(config.maxOutputBytes, "maxOutputBytes", DEFAULTS.maxOutputBytes, 1, 1_048_576),
     maxConcurrent: integer(config.maxConcurrent, "maxConcurrent", DEFAULTS.maxConcurrent, 1, 32),
+    maxQueued: integer(config.maxQueued, "maxQueued", DEFAULTS.maxQueued, 0, 1024),
+    maxQueueWaitMs: integer(config.maxQueueWaitMs, "maxQueueWaitMs", DEFAULTS.maxQueueWaitMs, 1, 3_600_000),
     idleTimeoutMs: integer(config.idleTimeoutMs, "idleTimeoutMs", DEFAULTS.idleTimeoutMs, 100, 60_000),
     authMaxSkewMs: integer(config.authMaxSkewMs, "authMaxSkewMs", DEFAULTS.authMaxSkewMs, 1_000, 300_000),
     journalTtlMs: integer(config.journalTtlMs, "journalTtlMs", DEFAULTS.journalTtlMs, 60_000, 604_800_000),
@@ -260,6 +266,8 @@ export class ModelBroker {
     this.active = 0;
     this.reserved = 0;
     this.inFlight = new Map();
+    this.queue = [];
+    this.closed = false;
   }
 
   get limits() {
@@ -267,6 +275,9 @@ export class ModelBroker {
       maxFrameBytes: this.config.maxFrameBytes,
       maxOutputBytes: this.config.maxOutputBytes,
       maxConcurrent: this.config.maxConcurrent,
+      maxQueued: this.config.maxQueued,
+      maxQueueWaitMs: this.config.maxQueueWaitMs,
+      queued: this.queue.length,
       idleTimeoutMs: this.config.idleTimeoutMs,
     };
   }
@@ -276,7 +287,7 @@ export class ModelBroker {
     // replayOnly is an authenticated transport instruction, not part of the
     // provider request identity.  It can read a durable journal result but
     // can never create a journal claim or call the host model on a miss.
-    const { replayOnly = false, ...executionRequest } = request;
+    const { replayOnly = false, queueWaitMs = 0, ...executionRequest } = request;
     const requestHash = contentHash(executionRequest);
     const live = this.inFlight.get(request.invocationId);
     if (live) {
@@ -293,25 +304,64 @@ export class ModelBroker {
     if (replayOnly) {
       return this.#failure(request, requestHash, "fresh", "IDEMPOTENCY_MISS", "no durable completion exists; replay-only request did not call the host");
     }
-    if (this.active + this.reserved >= this.config.maxConcurrent) {
-      return this.#failure(request, requestHash, "fresh", "BUSY", "broker concurrency limit reached");
+    const promise = this.#admitAndRun(request, requestHash, queueWaitMs);
+    this.inFlight.set(request.invocationId, { requestHash, promise });
+    promise.finally(() => this.inFlight.delete(request.invocationId)).catch(() => {});
+    return promise;
+  }
+
+  async #admitAndRun(request, requestHash, queueWaitMs) {
+    const admitted = await this.#waitForCapacity(queueWaitMs);
+    if (admitted !== "admitted") {
+      const code = admitted === "closed" ? "BROKER_CLOSED" : admitted === "full" ? "BUSY" : "QUEUE_TIMEOUT";
+      return this.#failure(request, requestHash, "fresh", code,
+        code === "BUSY" ? "broker queue is full" : code === "BROKER_CLOSED" ? "broker stopped while request was queued" : "broker queue wait exceeded its configured limit");
     }
-    this.reserved += 1;
     let claim;
     try {
       claim = await this.journal.claim(request.invocationId, requestHash);
     } catch {
+      this.#releaseReservation();
       return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "idempotency journal is unavailable");
-    } finally {
-      this.reserved -= 1;
     }
-    if (claim.status === "conflict") return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "invocationId was already used for another request");
-    if (claim.status === "completed") return this.#duplicate(claim.record.response);
-    if (claim.status === "pending") return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "prior host completion may have run; automatic replay is blocked");
-    const promise = this.#completeAndPersist(request, requestHash);
-    this.inFlight.set(request.invocationId, { requestHash, promise });
-    promise.finally(() => this.inFlight.delete(request.invocationId)).catch(() => {});
-    return promise;
+    if (claim.status !== "fresh") {
+      this.#releaseReservation();
+      if (claim.status === "conflict") return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "invocationId was already used for another request");
+      if (claim.status === "completed") return this.#duplicate(claim.record.response);
+      return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "prior host completion may have run; automatic replay is blocked");
+    }
+    this.reserved -= 1;
+    try { return await this.#completeAndPersist(request, requestHash); }
+    finally { this.#drainQueue(); }
+  }
+
+  #waitForCapacity(requestedWaitMs) {
+    if (this.closed) return Promise.resolve("closed");
+    if (this.active + this.reserved < this.config.maxConcurrent) {
+      this.reserved += 1; return Promise.resolve("admitted");
+    }
+    if (requestedWaitMs === 0 || this.config.maxQueued === 0 || this.queue.length >= this.config.maxQueued) return Promise.resolve("full");
+    return new Promise((resolve) => {
+      const entry = { resolve, timer: null };
+      entry.timer = setTimeout(() => {
+        const index = this.queue.indexOf(entry);
+        if (index >= 0) this.queue.splice(index, 1);
+        resolve("timeout");
+      }, Math.min(requestedWaitMs, this.config.maxQueueWaitMs));
+      this.queue.push(entry);
+    });
+  }
+
+  #releaseReservation() { this.reserved -= 1; this.#drainQueue(); }
+  #drainQueue() {
+    while (!this.closed && this.queue.length && this.active + this.reserved < this.config.maxConcurrent) {
+      const entry = this.queue.shift(); clearTimeout(entry.timer); this.reserved += 1; entry.resolve("admitted");
+    }
+  }
+
+  close() {
+    this.closed = true;
+    for (const entry of this.queue.splice(0)) { clearTimeout(entry.timer); entry.resolve("closed"); }
   }
 
   async #completeAndPersist(request, requestHash) {
