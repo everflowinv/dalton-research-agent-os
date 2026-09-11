@@ -505,15 +505,18 @@ class FakeSearchLauncher:
     def running(self) -> bool:
         return any(ticket["status"] == "running" for ticket in self.tickets.values())
 
-    def start(self, *, authorization, spec_ref, as_of=None, cursor=None):
+    def start(self, *, authorization, spec_ref, as_of=None, cursor=None,
+              variant_index=None, missing_periods=()):
         self.starts.append({
             "authorization": dict(authorization), "spec_ref": spec_ref,
             "cursor": cursor, "as_of": as_of,
+            "variant_index": variant_index, "missing_periods": list(missing_periods),
         })
         ticket_id = f"alphaengine-discovery:{len(self.starts):024x}"
         params = build_discovery_parameters(
             self.plan, spec_ref=spec_ref, company_ref=authorization["company_ref"],
-            as_of=as_of, cursor=cursor,
+            as_of=as_of, cursor=cursor, variant_index=variant_index or 0,
+            missing_periods=missing_periods,
         )
         summary = {"discovery_ref": None, "new_document_count": 0, "failure_reason": None}
         status = "succeeded"
@@ -587,6 +590,36 @@ class CoordinatorTests(unittest.TestCase):
         legacy=plan_for_tests(); before=canonical_json(legacy)
         validate_discovery_plan(legacy)
         self.assertEqual(canonical_json(legacy),before)
+
+    def test_v06_consumed_empty_page_advances_to_next_query_variant(self):
+        v1=self.create_mission(); mission=self.mission_v2(v1)
+        company_ref=mission['universe'][0]['company_ref']
+        plan=build_discovery_plan(plan_id='discovery-plan:variants:coordinator',
+            created_at=NOW.isoformat(timespec='microseconds'),mission_ref=self.plan['mission_ref'],
+            source_ref='source:alphaengine',max_calls_24h=30,
+            companies={company_ref:{'name':'Accenture plc','ticker':'ACN','aliases':['Accenture']}},specs=[{
+                'spec_ref':'earnings-call-transcripts','document_type':'meeting_minutes',
+                'query_variants':[{'query_template':'{name} {quarter} earnings call transcript','filters':{}},
+                                  {'query_template':'{ticker} {quarter} results webcast','filters':{}}],
+                'lookback_days':400,'rediscovery_interval_days':7,'retry_interval_days':1}])
+        search=FakeSearchLauncher(self.h,self.missions,plan)
+        class Selection:
+            consumed=[]
+            def currently_consumed(self,**kwargs): return list(self.consumed)
+        selection=Selection()
+        coordinator=MissionSourceDiscoveryCoordinator(store=self.h.core,missions=self.missions,plan=plan,
+            search_launcher=search,acquisition_launcher=None,clock=self.clock,selection_launcher=selection)
+        first=coordinator.launch_discovery(); self.assertEqual(first['status'],'launched')
+        coordinator.settle_dispatches()
+        discovery=self.missions.source_discoveries(mission['id'],company_ref=company_ref,
+                                                   spec_ref='earnings-call-transcripts')[0]
+        selection.consumed=[discovery['id']]
+        self.clock.advance(days=2)
+        second=coordinator.launch_discovery(); self.assertEqual(second['status'],'launched',second)
+        self.assertEqual(search.starts[-1]['variant_index'],1)
+        compiled=build_discovery_parameters(plan,spec_ref='earnings-call-transcripts',company_ref=company_ref,
+            as_of=self.clock().date(),variant_index=1,missing_periods=search.starts[-1]['missing_periods'])
+        self.assertIn('results webcast',compiled['query'])
 
     def mission_v2(self, v1, *, cap: int = 30):
         params = mission_params(self.state)
