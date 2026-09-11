@@ -1113,7 +1113,30 @@ class CockpitModel:
              producer_route_decision_refs: Sequence[str] = (),
              _dossier_recovery_parent: Mapping[str, Any] | None = None,
              ) -> dict[str, Any]:
-        """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
+        """Run configured paid retries without retaining prior call contexts."""
+
+        while True:
+            outcome = self._call_once(
+                purpose=purpose,
+                request_id=request_id,
+                prompt=prompt,
+                mission=mission,
+                producer_route_decision_refs=producer_route_decision_refs,
+                _dossier_recovery_parent=_dossier_recovery_parent,
+            )
+            if "_provider_retry_backoff_seconds" not in outcome:
+                return outcome
+            backoff = outcome["_provider_retry_backoff_seconds"]
+            if backoff:
+                import time
+                time.sleep(backoff)
+
+    def _call_once(self, *, purpose: str, request_id: str, prompt: str,
+                   mission: Mapping[str, Any],
+                   producer_route_decision_refs: Sequence[str] = (),
+                   _dossier_recovery_parent: Mapping[str, Any] | None = None,
+                   ) -> dict[str, Any]:
+        """Run one Scheduler attempt and request another through a private marker."""
         capacity_retry = _capacity_retry(self.config)
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         semantic_request_id = request_id
@@ -1513,17 +1536,11 @@ class CockpitModel:
                             and completion["work_state"] == "ready"
                             and result.metadata.get("provider_retry_proof") is not None
                         ):
-                            backoff = self.config["provider_retry"][
-                                "retry_backoff_seconds"]
-                            if backoff:
-                                import time
-                                time.sleep(backoff)
-                            return self.call(
-                                purpose=purpose, request_id=semantic_request_id,
-                                prompt=prompt, mission=mission,
-                                producer_route_decision_refs=producer_refs,
-                                _dossier_recovery_parent=_dossier_recovery_parent,
-                            )
+                            return {
+                                "_provider_retry_backoff_seconds":
+                                    self.config["provider_retry"][
+                                        "retry_backoff_seconds"],
+                            }
                         if failure is not None:
                             _raise_failure(
                                 failure, outcome.get("pool_rejection"),
@@ -1626,12 +1643,12 @@ class CockpitModel:
                                     if broker_local_not_sent:
                                         cost_micros, cost_status = 0, "failed"
                                     elif cost_status != "actual":
-                                        from .provider_retry import returned_provider_failure_proof
-
-                                        if returned_provider_failure_proof(
-                                            invocation, result
-                                        ) is None:
-                                            cost_micros, cost_status = reserved, "reserved"
+                                        # A provider-completed failure proves a
+                                        # paid call happened. It does not prove
+                                        # what that call cost. Missing actual
+                                        # telemetry therefore retains the full
+                                        # reservation for this attempt.
+                                        cost_micros, cost_status = reserved, "reserved"
                                     failure = str(error.get("message") or "the model call failed")
                                     paid_retry = self._paid_retry_result(
                                         work=work, lease=lease, route=route,
@@ -1665,17 +1682,11 @@ class CockpitModel:
                         and completion["work_state"] == "ready"
                         and result.metadata.get("provider_retry_proof") is not None
                     ):
-                        backoff = self.config["provider_retry"][
-                            "retry_backoff_seconds"]
-                        if backoff:
-                            import time
-                            time.sleep(backoff)
-                        return self.call(
-                            purpose=purpose, request_id=semantic_request_id,
-                            prompt=prompt, mission=mission,
-                            producer_route_decision_refs=producer_refs,
-                            _dossier_recovery_parent=_dossier_recovery_parent,
-                        )
+                        return {
+                            "_provider_retry_backoff_seconds":
+                                self.config["provider_retry"][
+                                    "retry_backoff_seconds"],
+                        }
                     if failure is not None:
                         _raise_failure(
                             failure, pool_rejection,
@@ -1852,9 +1863,17 @@ class CockpitModel:
                     from .provider_retry import returned_provider_failure_proof
 
                     if returned_provider_failure_proof(invocation, envelope) is not None:
-                        spend[route["id"]] = _cost_micros(
+                        measured = _cost_micros(
                             invocation, route, profile, ceiling
                         )
+                        if measured[1] == "actual":
+                            spend[route["id"]] = measured
+                        else:
+                            # Retry eligibility proves provider execution, not
+                            # metering. Preserve the whole attempt reservation
+                            # when the provider did not return actual cost.
+                            spend[route["id"]] = (ceiling, "reserved")
+                            uncertain_spend = True
                         # A provider-completed failure is chargeable, but it did
                         # not serve model content. Stop this Scheduler attempt;
                         # the caller records its proof before another route.

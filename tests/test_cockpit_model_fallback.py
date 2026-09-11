@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import sqlite3
 import tempfile
 import unittest
@@ -157,8 +158,12 @@ class ReturnedProviderSequenceAdapter(ChainAdapter):
         super().__init__({})
         self.failures = list(failures)
         self.invocation_ids = []
+        self.call_depths = []
 
     def execute(self, work, route, profile):
+        self.call_depths.append(sum(
+            frame.function == "_call_once" for frame in inspect.stack()
+        ))
         invocation, envelope = super().execute(work, route, profile)
         identity = content_hash({"route": route["id"], "call": len(self.served)})[:32]
         invocation = replace(
@@ -708,6 +713,7 @@ class CockpitChainTests(unittest.TestCase):
              "profile:claude-fable-5-1"],
         )
         self.assertEqual(len(set(adapter.invocation_ids)), 3)
+        self.assertEqual(adapter.call_depths, [1, 1, 1])
         decisions = self._decisions()
         self.assertEqual(
             [(item["attempt_number"], item["decision_kind"])
@@ -735,6 +741,70 @@ class CockpitChainTests(unittest.TestCase):
             work = scheduler.work_order_authority(answer["work_order_ref"])[
                 "work_order"]
         self.assertEqual(work["metadata"]["provider_retry"], retry)
+
+    def test_chain_provider_retry_without_actual_cost_retains_reservation(self) -> None:
+        class MissingFailureCost(ReturnedProviderSequenceAdapter):
+            def execute(inner, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                if envelope.status == "failed":
+                    invocation = replace(invocation, usage={})
+                return invocation, envelope
+
+        answer = self._model(
+            MissingFailureCost(["RATE_LIMITED"]),
+            policy_version_ref=self.chain_policy,
+            provider_retry={
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 0,
+            },
+        ).call(
+            purpose="plan", request_id="unknown-cost-chain-provider-retry",
+            prompt="what next?", mission=self.mission,
+        )
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            rows = ledger.connection.execute(
+                "SELECT a.attempt_number,a.reserved_micros,s.actual_micros "
+                "FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s "
+                "ON s.admission_id=a.admission_id "
+                "WHERE a.work_order_ref=? ORDER BY a.attempt_number",
+                (answer["work_order_ref"],),
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][2], rows[0][1])
+        self.assertEqual(rows[1][2], 1_000)
+
+    def test_single_route_provider_retry_without_actual_cost_retains_reservation(self) -> None:
+        class MissingFailureCost(ReturnedProviderSequenceAdapter):
+            def execute(inner, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                if envelope.status == "failed":
+                    invocation = replace(invocation, usage={})
+                return invocation, envelope
+
+        answer = self._model(
+            MissingFailureCost(["RATE_LIMITED"]),
+            policy_version_ref=self.pinned_policy,
+            provider_retry={
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 0,
+            },
+        ).call(
+            purpose="plan", request_id="unknown-cost-single-provider-retry",
+            prompt="what next?", mission=self.mission,
+        )
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            rows = ledger.connection.execute(
+                "SELECT a.attempt_number,a.reserved_micros,s.actual_micros "
+                "FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s "
+                "ON s.admission_id=a.admission_id "
+                "WHERE a.work_order_ref=? ORDER BY a.attempt_number",
+                (answer["work_order_ref"],),
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][2], rows[0][1])
+        self.assertEqual(rows[1][2], 1_000)
 
     def test_single_pin_unproved_busy_is_charged_and_never_paid_retried(self) -> None:
         class UnprovedBusy(ChainAdapter):
