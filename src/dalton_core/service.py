@@ -501,6 +501,11 @@ class DaltonService:
         self._last_sweep_at: str | None = None
         self._last_projection_at: str | None = None
         self._last_projection_monotonic = 0.0
+        self._projection_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._projection_future: concurrent.futures.Future[
+            tuple[dict[str, Any], tuple[Any, ...]]
+        ] | None = None
+        self._projection_error: str | None = None
         self._last_source_signature: tuple[Any, ...] | None = None
         self._projection_watermark: str | None = None
         self._expired_lease_count = 0
@@ -512,6 +517,10 @@ class DaltonService:
             }
             for plugin in config.plugins
         }
+        self._plugin_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._plugin_futures: dict[
+            str, concurrent.futures.Future[dict[str, Any]]
+        ] = {}
         self._agenda = None if config.agenda is None else AgendaCoordinator(config.agenda)
         self._agenda_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._agenda_future: concurrent.futures.Future[dict[str, Any]] | None = None
@@ -608,12 +617,27 @@ class DaltonService:
             self._outbox_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-outbox"
             )
+        if self.config.plugins:
+            # Rendering and publishing may include bounded remote reads.  They
+            # must not prevent the controller loop from renewing its heartbeat.
+            self._plugin_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dalton-static-dashboard"
+            )
+        self._projection_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="dalton-dashboard-projection"
+        )
         self._write_heartbeat("starting")
 
     def stop(self) -> None:
         self._stop.set()
 
     def close(self) -> None:
+        projection_executor, self._projection_executor = self._projection_executor, None
+        if projection_executor is not None:
+            projection_executor.shutdown(wait=True, cancel_futures=True)
+        plugin_executor, self._plugin_executor = self._plugin_executor, None
+        if plugin_executor is not None:
+            plugin_executor.shutdown(wait=True, cancel_futures=True)
         outbox_executor, self._outbox_executor = self._outbox_executor, None
         if outbox_executor is not None:
             outbox_executor.shutdown(wait=False, cancel_futures=True)
@@ -775,8 +799,9 @@ class DaltonService:
             last_snapshot_id=manifest["snapshot_id"], last_error=None,
         )
 
-    def _project(self, source_signature: tuple[Any, ...] | None = None) -> None:
-        signature_before = source_signature or self._sources()
+    def _build_projection(
+        self, source_signature: tuple[Any, ...]
+    ) -> tuple[dict[str, Any], tuple[Any, ...]]:
         snapshot = project_dashboard(
             self.config.core_db,
             self.config.scheduler_db,
@@ -784,9 +809,32 @@ class DaltonService:
             capability_catalog_db=self.config.capability_catalog_db,
             model_router_db=self.config.model_router_db,
         )
-        now = _utc_now()
-        self._last_projection_at = now
+        return snapshot, source_signature
+
+    def _project(self, source_signature: tuple[Any, ...] | None = None) -> None:
+        if self._projection_future is not None:
+            return
+        executor = self._projection_executor
+        if executor is None:
+            raise RuntimeError("dashboard projection executor is unavailable")
+        signature_before = source_signature or self._sources()
         self._last_projection_monotonic = time.monotonic()
+        self._projection_future = executor.submit(
+            self._build_projection, signature_before
+        )
+
+    def _poll_projection(self) -> None:
+        future = self._projection_future
+        if future is None or not future.done():
+            return
+        self._projection_future = None
+        try:
+            snapshot, signature_before = future.result()
+        except Exception as exc:
+            self._projection_error = f"{type(exc).__name__}: {exc}"
+            return
+        self._projection_error = None
+        self._last_projection_at = _utc_now()
         self._projection_watermark = snapshot["metadata"]["source_watermark"]
         # Keep the pre-build signature.  If an authority changes while the
         # projector is reading, the next tick sees a mismatch and rebuilds;
@@ -796,26 +844,45 @@ class DaltonService:
             self._run_plugin(plugin)
 
     def _run_plugin(self, plugin: StaticDashboardPlugin) -> None:
+        if plugin.name in self._plugin_futures:
+            return
         state = self._plugin_states[plugin.name]
         state["last_attempt_at"] = _utc_now()
-        try:
-            result = plugin.on_projection(self.config.projection_db)
-        except Exception as exc:
-            state.update(
-                state="error",
-                last_error=f"{type(exc).__name__}: {exc}",
-                retry_at_monotonic=time.monotonic() + self.config.plugin_retry_seconds,
-            )
-            return
-        state.update(
-            state="ready",
-            last_success_at=_utc_now(),
-            last_error=None,
-            result=result,
-            retry_at_monotonic=0.0,
+        # Keep an already published dashboard healthy while its replacement is
+        # prepared.  The completed future below atomically advances success or
+        # exposes the refresh error on a later controller tick.
+        if state["state"] == "pending":
+            state["state"] = "running"
+        executor = self._plugin_executor
+        if executor is None:
+            raise RuntimeError("static dashboard executor is unavailable")
+        self._plugin_futures[plugin.name] = executor.submit(
+            plugin.on_projection, self.config.projection_db
         )
 
+    def _poll_plugins(self) -> None:
+        for name, future in tuple(self._plugin_futures.items()):
+            if not future.done():
+                continue
+            del self._plugin_futures[name]
+            state = self._plugin_states[name]
+            try:
+                result = future.result()
+            except Exception as exc:
+                state.update(
+                    state="error", last_error=f"{type(exc).__name__}: {exc}",
+                    retry_at_monotonic=(
+                        time.monotonic() + self.config.plugin_retry_seconds
+                    ),
+                )
+            else:
+                state.update(
+                    state="ready", last_success_at=_utc_now(), last_error=None,
+                    result=result, retry_at_monotonic=0.0,
+                )
+
     def _retry_plugins(self) -> None:
+        self._poll_plugins()
         if not self.config.projection_db.exists():
             return
         now = time.monotonic()
@@ -824,7 +891,9 @@ class DaltonService:
             if state["state"] == "error" and now >= state["retry_at_monotonic"]:
                 self._run_plugin(plugin)
 
-    def run_once(self, *, force_projection: bool = False) -> dict[str, Any]:
+    def run_once(
+        self, *, force_projection: bool = False, wait_for_projection: bool = False
+    ) -> dict[str, Any]:
         self.start()
         assert self._scheduler is not None
         expired = self._scheduler.sweep_expired()
@@ -835,6 +904,8 @@ class DaltonService:
         self._poll_bounded_planner()
         self._poll_outbox()
         self._run_backup()
+        self._poll_projection()
+        self._poll_plugins()
         current_signature = self._sources()
         elapsed = time.monotonic() - self._last_projection_monotonic
         should_project = (
@@ -845,14 +916,23 @@ class DaltonService:
             force_projection
             or self._last_projection_monotonic == 0.0
             or elapsed >= self.config.projection_min_interval_seconds
-        )
+        ) and self._projection_future is None and not self._plugin_futures
         if should_project:
             self._project(current_signature)
         else:
             self._retry_plugins()
+        if wait_for_projection:
+            future = self._projection_future
+            if future is not None:
+                concurrent.futures.wait((future,))
+                self._poll_projection()
+            plugin_futures = tuple(self._plugin_futures.values())
+            if plugin_futures:
+                concurrent.futures.wait(plugin_futures)
+            self._poll_plugins()
         self._last_tick_at = _utc_now()
         self._last_error = None
-        degraded = any(
+        degraded = self._projection_error is not None or any(
             plugin["state"] == "error" for plugin in self._plugin_states.values()
         ) or self._agenda_state["state"] == "error" or self._weekly_brief_state[
             "state"
@@ -921,7 +1001,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             service = DaltonService(config)
             if args.once:
                 try:
-                    result = service.run_once(force_projection=True)
+                    result = service.run_once(
+                        force_projection=True, wait_for_projection=True
+                    )
                     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
                     return 0 if result["state"] == "running" else 1
                 finally:

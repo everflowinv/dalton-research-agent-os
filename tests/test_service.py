@@ -6,8 +6,11 @@ import json
 import plistlib
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dalton_core.dashboard import ProjectionWriter
 from dalton_core.bootstrap import bootstrap
@@ -741,7 +744,11 @@ class ServiceTests(unittest.TestCase):
             }
             service = DaltonService(ServiceConfig.from_mapping(raw))
             try:
-                heartbeat = service.run_once(force_projection=True)
+                # ``daltond --once`` uses this wait mode and must retain its
+                # original complete projection + rendered artifact contract.
+                heartbeat = service.run_once(
+                    force_projection=True, wait_for_projection=True
+                )
             finally:
                 service.close()
             self.assertEqual(heartbeat["state"], "running")
@@ -753,6 +760,108 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue((root / "public" / "index.html").is_file())
             saved = json.loads((root / "run" / "heartbeat.json").read_text())
             self.assertEqual(saved["service"], "daltond")
+
+    def test_blocked_dashboard_publish_does_not_block_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            with DaltonStore(core) as store:
+                ObservabilityStore(store)
+            raw = {
+                "schema_version": "0.1", "core_db": str(core),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "run" / "heartbeat.json"),
+                "writer_socket": str(root / "run" / "writer.sock"),
+                "tick_seconds": 1, "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [{"type": "static_dashboard", "enabled": True,
+                             "output_path": str(root / "public" / "index.html"),
+                             "publisher": None}],
+            }
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocked(_plugin, _projection):
+                entered.set()
+                release.wait(5)
+                return {"render": {"sha256": "a" * 64}, "publish": None}
+
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            try:
+                with mock.patch(
+                    "dalton_core.plugins.static_dashboard.StaticDashboardPlugin.on_projection",
+                    blocked,
+                ):
+                    first = service.run_once(force_projection=True)
+                    for _ in range(100):
+                        first = service.run_once()
+                        if entered.wait(0.01):
+                            break
+                    self.assertTrue(entered.wait(1))
+                    before = time.monotonic()
+                    second = service.run_once(force_projection=True)
+                    self.assertLess(time.monotonic() - before, 1)
+                    self.assertNotEqual(first["last_tick_at"], second["last_tick_at"])
+                    self.assertEqual(second["plugins"]["static_dashboard"]["state"], "running")
+                    self.assertEqual(len(service._plugin_futures), 1)
+                    release.set()
+                    for _ in range(100):
+                        heartbeat = service.run_once()
+                        if heartbeat["plugins"]["static_dashboard"]["state"] == "ready":
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual(heartbeat["plugins"]["static_dashboard"]["state"], "ready")
+            finally:
+                release.set()
+                service.close()
+
+    def test_blocked_projection_does_not_block_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            with DaltonStore(core) as store:
+                ObservabilityStore(store)
+            raw = {
+                "schema_version": "0.1", "core_db": str(core),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "run" / "heartbeat.json"),
+                "writer_socket": str(root / "run" / "writer.sock"),
+                "tick_seconds": 1, "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1, "plugins": [],
+            }
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocked(*_args, **_kwargs):
+                entered.set()
+                release.wait(5)
+                return {"metadata": {"source_watermark": "sha256:" + "a" * 64}}
+
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            try:
+                with mock.patch("dalton_core.service.project_dashboard", blocked):
+                    first = service.run_once(force_projection=True)
+                    self.assertTrue(entered.wait(1))
+                    before = time.monotonic()
+                    second = service.run_once(force_projection=True)
+                    self.assertLess(time.monotonic() - before, 1)
+                    self.assertNotEqual(first["last_tick_at"], second["last_tick_at"])
+                    release.set()
+                    for _ in range(100):
+                        heartbeat = service.run_once()
+                        if heartbeat["projection_watermark"] is not None:
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual(
+                        heartbeat["projection_watermark"], "sha256:" + "a" * 64
+                    )
+            finally:
+                release.set()
+                service.close()
 
     def test_bounded_planner_block_parses_and_reports_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
