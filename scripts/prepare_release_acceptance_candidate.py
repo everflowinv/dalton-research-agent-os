@@ -30,6 +30,8 @@ ARTIFACT_NAMES = (
     "wheel_verification",
     "full_suite_log",
     "full_suite_receipt",
+    "full_suite_runner",
+    "full_suite_native_result",
     "rehearsal_binding",
     "rehearsal_report",
     "release_helper_manifest",
@@ -182,14 +184,18 @@ def _validate_runtime_snapshot(path: Path, runtime: Mapping[str, Any]) -> tuple[
 def _validate_full_suite(
     receipt_path: Path,
     log_path: Path,
+    runner_path: Path,
+    native_result_path: Path,
     *,
     source_root: Path,
     commit: str,
     expected_log_sha256: str,
+    expected_runner_sha256: str,
+    expected_native_result_sha256: str,
 ) -> dict[str, Any]:
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        native = json.loads(native_result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CandidateError("full-suite evidence is unreadable") from exc
     _need(isinstance(receipt, dict), "full-suite receipt is not an object")
@@ -208,9 +214,14 @@ def _validate_full_suite(
     )
     command = receipt.get("command")
     _need(
-        isinstance(command, list)
-        and command[1:] == ["-m", "unittest", "discover", "-s", "tests", "-t", "."],
+        isinstance(command, list) and len(command) == 3
+        and Path(command[1]).name == runner_path.name and command[2] == "--child"
+        and receipt.get("runner_sha256") == expected_runner_sha256 == _sha256(runner_path),
         "full-suite receipt command differs",
+    )
+    _need(
+        receipt.get("discovery") == {"start_dir": "tests", "top_level_dir": "."},
+        "full-suite receipt does not declare whole-source discovery",
     )
     tests = receipt.get("tests")
     skipped = receipt.get("skipped")
@@ -225,14 +236,22 @@ def _validate_full_suite(
         receipt.get("log_sha256") == expected_log_sha256 == _sha256(log_path),
         "full-suite receipt does not bind the packet log",
     )
-    summary = re.search(
-        r"Ran ([0-9]+) tests in [0-9.]+s\n\nOK(?: \(skipped=([0-9]+)\))?\s*$",
-        log_text,
-    )
-    _need(summary is not None, "full-suite log has no passing unittest summary")
     _need(
-        int(summary.group(1)) == tests and int(summary.group(2) or 0) == skipped,
-        "full-suite receipt counts differ from the log",
+        receipt.get("native_result_sha256") == expected_native_result_sha256
+        == _sha256(native_result_path),
+        "full-suite receipt does not bind the native unittest result",
+    )
+    native_fields = {
+        "tests", "failures", "errors", "skipped", "expected_failures",
+        "unexpected_successes", "successful",
+    }
+    _need(isinstance(native, dict) and set(native) == native_fields, "native unittest result shape differs")
+    _need(
+        native == {key: receipt.get(key) for key in native_fields}
+        and native["successful"] is True
+        and native["failures"] == native["errors"] == native["unexpected_successes"] == 0
+        and native["tests"] == tests and native["skipped"] == skipped,
+        "full-suite receipt counts differ from native unittest result",
     )
     return {"tests": tests, "skipped": skipped, "elapsed_seconds": receipt["elapsed_seconds"]}
 
@@ -325,9 +344,13 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
     suite = _validate_full_suite(
         paths["full_suite_receipt"],
         paths["full_suite_log"],
+        paths["full_suite_runner"],
+        paths["full_suite_native_result"],
         source_root=source_root,
         commit=commit,
         expected_log_sha256=artifacts["full_suite_log"]["sha256"],
+        expected_runner_sha256=artifacts["full_suite_runner"]["sha256"],
+        expected_native_result_sha256=artifacts["full_suite_native_result"]["sha256"],
     )
     count, semantic = _validate_runtime_snapshot(
         paths["final_activated_model_config_snapshot"],

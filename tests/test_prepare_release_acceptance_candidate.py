@@ -78,6 +78,17 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
         }
         artifacts = {}
         suite_log = b"test output\nRan 370 tests in 1.000s\n\nOK (skipped=1)\n"
+        suite_runner = b"# guarded full-suite runner\n"
+        native_result = {
+            "tests": 370,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 1,
+            "expected_failures": 0,
+            "unexpected_successes": 0,
+            "successful": True,
+        }
+        native_result_bytes = (json.dumps(native_result) + "\n").encode()
         for name in ARTIFACT_NAMES:
             if name == "final_activated_model_config_snapshot":
                 artifacts[name] = self._write("final-model-configs.json", snapshot_bytes)
@@ -117,19 +128,24 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
                     "code_commit": self.commit,
                     "final_commit": self.commit,
                     "clean": True,
-                    "command": ["/runtime/python", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                    "command": ["/runtime/python", "/tmp/full-suite-runner.py", "--child"],
+                    "runner_sha256": hashlib.sha256(suite_runner).hexdigest(),
+                    "discovery": {"start_dir": "tests", "top_level_dir": "."},
                     "elapsed_seconds": 1.0,
                     "exit_code": 0,
-                    "tests": 370,
-                    "skipped": 1,
-                    "failures": 0,
-                    "errors": 0,
+                    **native_result,
                     "log": "/tmp/original-full-suite.log",
                     "log_sha256": hashlib.sha256(suite_log).hexdigest(),
+                    "native_result": "/tmp/full-suite-native-result.json",
+                    "native_result_sha256": hashlib.sha256(native_result_bytes).hexdigest(),
                 }
                 artifacts[name] = self._write(
                     "full-suite-receipt.json", (json.dumps(receipt) + "\n").encode()
                 )
+            elif name == "full_suite_runner":
+                artifacts[name] = self._write("full-suite-runner.py", suite_runner)
+            elif name == "full_suite_native_result":
+                artifacts[name] = self._write("full-suite-native-result.json", native_result_bytes)
             else:
                 artifacts[name] = self._write(f"{name}.artifact", f"{name}\n".encode())
         document["artifacts"] = artifacts
