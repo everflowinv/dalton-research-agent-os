@@ -4,6 +4,11 @@ from pathlib import Path
 from unittest.mock import patch
 from dalton_core.discovery_selection_launcher import DiscoverySelectionLauncher
 from dalton_core.store import content_hash
+from dalton_core.cockpit_model import build_work
+from dalton_core.contracts import ResultEnvelope
+from dalton_core.scheduler import Scheduler
+from dalton_core.discovery_selection_launcher import _formal_selection_valid
+from dalton_core.discovery_candidate_selection import PURPOSE
 
 class Process:
     pid=43210
@@ -112,3 +117,26 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
             popen.assert_not_called()
 
 if __name__=='__main__': unittest.main()
+
+class DiscoverySelectionFormalAuthorityTests(unittest.TestCase):
+    def test_exact_success_is_accepted_and_route_tamper_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'scheduler.sqlite'
+            scheduler=Scheduler(path)
+            work=build_work(purpose='discovery_selection',request_id='selection:test',prompt='select',
+                mission_version_ref='mission-version:test',max_input_tokens=100,max_output_tokens=100,
+                max_cost_usd=1,max_seconds=30,created_at='2026-09-11T00:00:00+00:00')
+            scheduler.enqueue(work); lease=scheduler.claim('worker:test',work_order_id=work.id)
+            envelope=ResultEnvelope(schema_version='0.1',id='result:selection:test',
+                created_at='2026-09-11T00:00:01+00:00',work_order_ref=work.id,
+                invocation_ref='invocation:selection:test',status='succeeded',
+                outputs={'text':'{"selected":[]}'},actual_side_effects=(),usage_refs=(),artifact_refs=(),
+                error=None,metadata={'route_decision_ref':'route-decision:selection:test'})
+            scheduler.complete(work.id,1,'worker:test',lease['lease_token'],envelope,
+                               idempotency_key='complete:selection:test')
+            selection={'work_order_ref':work.id,'result_envelope_ref':envelope.id,
+                       'invocation_ref':envelope.invocation_ref,
+                       'route_decision_ref':'route-decision:selection:test'}
+            self.assertTrue(_formal_selection_valid(path,selection))
+            self.assertFalse(_formal_selection_valid(path,{**selection,'route_decision_ref':'route:tampered'}))
+            scheduler.close()

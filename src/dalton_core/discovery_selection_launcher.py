@@ -15,6 +15,8 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any]) ->
     from .readonly_sqlite import connect_read_only
     try:
         with closing(connect_read_only(scheduler_db)) as connection:
+            import sqlite3
+            connection.row_factory = sqlite3.Row
             work_row = connection.execute(
                 "SELECT work_order_json,work_order_hash FROM scheduler_work_orders WHERE work_order_id=?",
                 (selection.get("work_order_ref"),)).fetchone()
