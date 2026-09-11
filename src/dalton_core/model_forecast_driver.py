@@ -2014,6 +2014,19 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
                     != _decimal(item["value"], "derived quarter value")):
                 raise ForecastModelValidationError(
                     f"{name}.history[{index}] derived arithmetic does not replay")
+            try:
+                period_chain_is_exact = (
+                    derived[0]["period_start"] == derived[1]["period_start"]
+                    and date.fromisoformat(derived[0]["period_end"])
+                    + timedelta(days=1)
+                    == date.fromisoformat(item["period_start"])
+                    and derived[1]["period_end"] == item["period_end"]
+                )
+            except (TypeError, ValueError):
+                period_chain_is_exact = False
+            if not period_chain_is_exact:
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}] derived periods do not replay")
         if wire["kind"] == "cash_flow" and item["basis"] == "derived_from_cumulative":
             if "derived_from" not in item:
                 raise ForecastModelValidationError(
@@ -2021,6 +2034,10 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
         elif wire["kind"] == "cash_flow" and "derived_from" in item:
             raise ForecastModelValidationError(
                 f"{name}.history[{index}] reported cell cannot carry derived operands")
+        if wire["kind"] == "cash_flow" and item["basis"] not in (
+                "reported", "derived_from_cumulative"):
+            raise ForecastModelValidationError(
+                f"{name}.history[{index}].basis is not a filed cash-flow basis")
         if wire["kind"] == "cash_flow" and not item.get("source_forms"):
             raise ForecastModelValidationError(
                 f"{name}.history[{index}] cash flow cell must bind source forms")
