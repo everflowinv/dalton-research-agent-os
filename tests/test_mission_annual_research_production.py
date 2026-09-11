@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import sys
@@ -15,6 +16,9 @@ from dalton_core.store import canonical_json, content_hash
 from dalton_core.research_verification import CandidateStagingStore
 from dalton_core.mission_annual_research_launcher import (
     MissionAnnualResearchLauncher,
+)
+from dalton_core.mission_annual_research_lane import (
+    MissionAnnualResearchCoordinator,
 )
 from dalton_core.lane_child_launcher import LaneChildRejected
 from tests.test_mission_annual_research import MissionAnnualFixture
@@ -168,9 +172,18 @@ class MissionAnnualResearchProductionTests(unittest.TestCase):
             staged.close()
 
         with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
-            replay_ticket = launcher.start(
+            with self.assertRaisesRegex(
+                LaneChildRejected, "requires controlled re-entry"
+            ):
+                launcher.start(
+                    admission_ref=admission["id"],
+                    admission_hash=admission["content_hash"],
+                )
+            replay_ticket = launcher.resume(
                 admission_ref=admission["id"],
                 admission_hash=admission["content_hash"],
+                prior_ticket_ref=ticket["id"],
+                authorization="test:exact-scheduler-replay",
             )
             self.assertEqual(launcher.wait(timeout=60), 0)
             replay_finished = launcher.status(replay_ticket["id"])
@@ -178,6 +191,12 @@ class MissionAnnualResearchProductionTests(unittest.TestCase):
         replay_summary = replay_finished["summary"]
         self.assertEqual(replay_summary["status"], "complete")
         self.assertEqual(len(replay_summary["outcomes"]), 1)
+        marker = launcher._ticket_path(ticket["id"]).with_name(
+            "controlled-reentry-"
+            + hashlib.sha256(b"test:exact-scheduler-replay").hexdigest()[:24]
+            + ".json"
+        )
+        self.assertTrue(marker.is_file())
 
         with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
             wrong = launcher.start(
@@ -196,6 +215,72 @@ class MissionAnnualResearchProductionTests(unittest.TestCase):
         summary_path.write_text(canonical_json(tampered) + "\n", encoding="utf-8")
         with self.assertRaisesRegex(LaneChildRejected, "summary authority drifted"):
             launcher.status(wrong["id"])
+
+    def test_production_budget_refusal_is_visible_to_writer_without_broker_io(self):
+        fixture = MissionAnnualFixture(self)
+        fixture.harness.clock.value = datetime.now(timezone.utc)
+        governance = self._install_manifest_pointer(fixture)
+        consumed = fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=fixture.harness.clock.value.date().isoformat(),
+            work_order_ref="work:other-production-budget-consumer",
+            attempt_number=1, phase="assessment",
+            route_decision_ref="route:other-production-budget-consumer",
+            reserved_micros=9_500_000,
+        )
+        self.assertEqual(consumed["status"], "fresh")
+
+        def unexpected(_request):
+            self.fail("budget refusal must happen before broker I/O")
+
+        broker = FakeBroker(fixture.state, unexpected, connections=1)
+        self.addCleanup(broker.close)
+        self._production_configs(fixture, broker)
+        admission = fixture.authority.admit(**fixture.args())
+        staging_path = fixture.state / "mission-annual-budget-staging.sqlite"
+        CandidateStagingStore(staging_path).close()
+        launcher = MissionAnnualResearchLauncher(
+            state_dir=fixture.state, staging_path=staging_path,
+            web_fetch_governance_path=governance,
+            spool_dir=fixture.source.root / "spool",
+            python_executable=sys.executable,
+        )
+        self.addCleanup(launcher.close)
+        python_path = os.pathsep.join((
+            str(Path(__file__).parents[1] / "src"),
+            str(Path(__file__).parents[1]),
+        ))
+        with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
+            ticket = launcher.start(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+            )
+            self.assertEqual(launcher.wait(timeout=60), 1)
+            failed = launcher.status(ticket["id"])
+        self.assertEqual(failed["summary"]["status"], "failed")
+        self.assertEqual(broker.requests, [])
+
+        coordinator = MissionAnnualResearchCoordinator(
+            store=fixture.store, launcher=launcher,
+        )
+        pointer = {
+            "ticket_ref": ticket["id"], "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        coordinator.latest_path.write_text(
+            canonical_json({**pointer, "content_hash": content_hash(pointer)}) + "\n",
+            encoding="utf-8",
+        )
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "recovery_required")
+        hold = json.loads(coordinator.holds_path.read_text(encoding="utf-8"))[
+            "holds"
+        ][admission["id"]]
+        self.assertEqual(hold["disposition"], "recovery_required")
+        self.assertTrue(
+            hold["reason"].startswith("budget_or_pool_refused:"), hold
+        )
+        self.assertEqual(broker.requests, [])
 
 
 if __name__ == "__main__":

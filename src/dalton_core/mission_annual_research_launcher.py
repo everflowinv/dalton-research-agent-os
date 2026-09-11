@@ -111,9 +111,60 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
             "configuration": configuration,
         }
         digest = content_hash(signature)[:24]
+        ticket_ref = f"{self.TICKET_PREFIX}:{digest}"
+        if self._ticket_path(ticket_ref).is_file():
+            prior = self.status(ticket_ref)
+            if prior["status"] == "running":
+                return prior
+            raise LaneChildRejected(
+                "terminal annual ticket requires controlled re-entry"
+            )
         return self.spawn(
             digest=digest,
             record={**signature, "configuration_hash": content_hash(configuration)},
+            admission_ref=admission_ref,
+            admission_hash=admission_hash,
+            configuration=configuration,
+        )
+
+    def resume(
+        self, *, admission_ref: str, admission_hash: str,
+        prior_ticket_ref: str, authorization: str,
+    ) -> dict[str, Any]:
+        """Re-enter the same ticket only under a caller's exact authority.
+
+        ``LaneChildLauncher`` archives the prior summary and admits only one
+        controlled re-entry marker for this authorization.  A changed runtime
+        configuration produces a different ticket and is therefore refused.
+        """
+
+        configuration = self.configuration()
+        signature = {
+            "admission_ref": admission_ref,
+            "admission_hash": admission_hash,
+            "configuration": configuration,
+        }
+        digest = content_hash(signature)[:24]
+        expected = f"{self.TICKET_PREFIX}:{digest}"
+        if prior_ticket_ref != expected:
+            raise LaneChildRejected(
+                "controlled annual re-entry changed ticket identity"
+            )
+        prior = self.status(prior_ticket_ref)
+        if (
+            prior.get("status") == "running"
+            or prior.get("admission_ref") != admission_ref
+            or prior.get("admission_hash") != admission_hash
+            or prior.get("configuration") != configuration
+            or prior.get("configuration_hash") != content_hash(configuration)
+        ):
+            raise LaneChildRejected(
+                "controlled annual re-entry lost its exact prior ticket"
+            )
+        return self.spawn(
+            digest=digest,
+            record={**signature, "configuration_hash": content_hash(configuration)},
+            _controlled_reentry=(prior_ticket_ref, authorization),
             admission_ref=admission_ref,
             admission_hash=admission_hash,
             configuration=configuration,

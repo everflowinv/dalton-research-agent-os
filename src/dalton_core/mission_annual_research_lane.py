@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .lane_child_launcher import (
     LaneChildConflict,
@@ -63,7 +64,10 @@ def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
             not isinstance(admission_ref, str)
             or not admission_ref.startswith("mission-annual-research-admission:")
             or not isinstance(value, Mapping)
-            or set(value) != {"admission_hash", "ticket_ref", "reason"}
+            or set(value) != {
+                "admission_hash", "ticket_ref", "reason", "disposition",
+                "retry_at",
+            }
             or not _sha256(value.get("admission_hash"))
             or (
                 value.get("ticket_ref") is not None
@@ -76,6 +80,10 @@ def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
             )
             or not isinstance(value.get("reason"), str)
             or not value["reason"]
+            or value.get("disposition") not in {
+                "terminal_hold", "recovery_required",
+            }
+            or value.get("retry_at") is not None
         ):
             raise MissionAnnualResearchLaneError(
                 "annual research hold ledger has an invalid entry"
@@ -93,9 +101,13 @@ def _write_holds(path: Path, holds: Mapping[str, Mapping[str, Any]]) -> None:
 
 
 class MissionAnnualResearchCoordinator:
-    def __init__(self, *, store: Any, launcher: Any | None) -> None:
+    def __init__(
+        self, *, store: Any, launcher: Any | None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.store = store
         self.launcher = launcher
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     @property
     def latest_path(self) -> Path:
@@ -186,13 +198,252 @@ class MissionAnnualResearchCoordinator:
     def _hold(
         self, holds: dict[str, dict[str, Any]], admission: Mapping[str, Any],
         *, reason: str, ticket_ref: str | None,
+        disposition: str = "terminal_hold",
     ) -> None:
         holds[admission["id"]] = {
             "admission_hash": admission["content_hash"],
             "ticket_ref": ticket_ref,
             "reason": reason,
+            "disposition": disposition,
+            "retry_at": None,
         }
         _write_holds(self.holds_path, holds)
+
+    def _execution_state(self, admission: Mapping[str, Any]) -> dict[str, Any]:
+        """Classify only authority already persisted for this admission.
+
+        A ready/missing node can be resumed because the executor reconstructs
+        the exact Work and the adapter replays an existing route before any
+        new send.  A formal failure is never relaunched here; typed local
+        capacity and budget failures are exposed for the recovery graph, and
+        every other formal failure stays terminal/unknown.
+        """
+
+        from .contracts import ResultEnvelope, WorkOrder
+
+        for ordinal in range(1, 5):
+            work_ref = "work:mission-annual-research-" + content_hash({
+                "admission_identity_hash": admission["identity_hash"],
+                "ordinal": ordinal,
+            })[:32]
+            row = self.store.connection.execute(
+                "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+                "WHERE work_order_id=?", (work_ref,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "action": "resume",
+                    "reason": "next_exact_work_not_yet_admitted",
+                    "work_order_ref": work_ref,
+                }
+            try:
+                work = WorkOrder.from_dict(json.loads(row["work_order_json"])).to_dict()
+            except Exception as exc:
+                raise MissionAnnualResearchLaneError(
+                    "annual research Scheduler Work authority is invalid"
+                ) from exc
+            if (
+                canonical_json(work) != row["work_order_json"]
+                or content_hash(work) != row["work_order_hash"]
+                or work["id"] != work_ref
+                or work["metadata"].get(
+                    "mission_annual_research_admission_ref"
+                ) != admission["id"]
+                or work["metadata"].get(
+                    "mission_annual_research_admission_hash"
+                ) != admission["content_hash"]
+            ):
+                raise MissionAnnualResearchLaneError(
+                    "annual research Scheduler Work authority drifted"
+                )
+            formal = self.store.connection.execute(
+                "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+                (work_ref,),
+            ).fetchone()
+            if formal is not None:
+                try:
+                    envelope = ResultEnvelope.from_dict(
+                        json.loads(formal["result_envelope_json"])
+                    ).to_dict()
+                except Exception as exc:
+                    raise MissionAnnualResearchLaneError(
+                        "annual research formal result is invalid"
+                    ) from exc
+                formal_body = {
+                    "id": formal["result_record_id"],
+                    "work_order_id": formal["work_order_id"],
+                    "attempt_number": formal["attempt_number"],
+                    "result_envelope_id": formal["result_envelope_id"],
+                    "result_envelope_hash": formal["result_envelope_hash"],
+                    "terminal_state": formal["terminal_state"],
+                    "created_at": formal["created_at"],
+                }
+                if (
+                    canonical_json(envelope) != formal["result_envelope_json"]
+                    or envelope["work_order_ref"] != work_ref
+                    or envelope["id"] != formal["result_envelope_id"]
+                    or content_hash(envelope) != formal["result_envelope_hash"]
+                    or content_hash(formal_body) != formal["content_hash"]
+                ):
+                    raise MissionAnnualResearchLaneError(
+                        "annual research formal result authority drifted"
+                    )
+                if formal["terminal_state"] == "succeeded":
+                    continue
+                refusal = self._budget_refusal(
+                    work, int(formal["attempt_number"])
+                )
+                if refusal is not None:
+                    return {
+                        "action": "recovery_required", "reason": refusal,
+                        "work_order_ref": work_ref,
+                    }
+                code = str((envelope.get("error") or {}).get("code", ""))
+                capacity = {
+                    "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                    "QUEUE_TIMEOUT", "BROKER_CLOSED",
+                }
+                if (
+                    code in capacity
+                    and envelope.get("metadata", {}).get(
+                        "control_plane_failure"
+                    ) is True
+                ):
+                    return {
+                        "action": "recovery_required",
+                        "reason": "proved_capacity_not_sent_exhausted",
+                        "work_order_ref": work_ref,
+                    }
+                return {
+                    "action": "recovery_required",
+                    "reason": "terminal_model_or_post_send_result",
+                    "work_order_ref": work_ref,
+                }
+            event = self.store.connection.execute(
+                "SELECT state,not_before,attempt_number FROM scheduler_attempt_events "
+                "WHERE work_order_id=? ORDER BY event_seq DESC LIMIT 1",
+                (work_ref,),
+            ).fetchone()
+            if event is None:
+                raise MissionAnnualResearchLaneError(
+                    "annual research Scheduler Work has no attempt authority"
+                )
+            refusal = self._budget_refusal(work, int(event["attempt_number"]))
+            if refusal is not None:
+                return {
+                    "action": "recovery_required", "reason": refusal,
+                    "work_order_ref": work_ref,
+                }
+            if event["state"] == "ready":
+                not_before = event["not_before"]
+                if not_before is not None and self.clock().astimezone(
+                    timezone.utc
+                ) < datetime.fromisoformat(not_before).astimezone(timezone.utc):
+                    return {
+                        "action": "waiting", "reason": "scheduler_backoff",
+                        "retry_at": not_before, "work_order_ref": work_ref,
+                    }
+                return {
+                    "action": "resume", "reason": "scheduler_ready",
+                    "work_order_ref": work_ref,
+                }
+            if event["state"] == "leased":
+                lease = self.store.connection.execute(
+                    "SELECT expires_at FROM scheduler_leases WHERE work_order_id=? "
+                    "ORDER BY lease_version DESC LIMIT 1", (work_ref,),
+                ).fetchone()
+                if lease is None:
+                    raise MissionAnnualResearchLaneError(
+                        "annual research leased Work lost its lease authority"
+                    )
+                expires_at = lease["expires_at"]
+                if self.clock().astimezone(timezone.utc) < datetime.fromisoformat(
+                    expires_at
+                ).astimezone(timezone.utc):
+                    return {
+                        "action": "waiting", "reason": "existing_lease",
+                        "retry_at": expires_at, "work_order_ref": work_ref,
+                    }
+                return {
+                    "action": "resume", "reason": "expired_lease_replay",
+                    "work_order_ref": work_ref,
+                }
+            return {
+                "action": "recovery_required",
+                "reason": "scheduler_terminal_without_formal_result",
+                "work_order_ref": work_ref,
+            }
+        return {
+            "action": "resume", "reason": "outcome_commit_not_yet_finished",
+            "work_order_ref": None,
+        }
+
+    @staticmethod
+    def _budget_refusal(
+        work: Mapping[str, Any], attempt_number: int,
+    ) -> str | None:
+        stage = work.get("metadata", {}).get("stage")
+        if stage not in {
+            "qualitative_model_draft", "independent_qualitative_verifier",
+        }:
+            return None
+        path = work["metadata"].get("budget_db")
+        if not isinstance(path, str) or not Path(path).is_file():
+            return None
+        phase = (
+            "verification"
+            if stage == "independent_qualitative_verifier" else "assessment"
+        )
+        connection = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            candidates = []
+            for table in (
+                "thesis_impact_day_rejections", "model_budget_pool_rejections",
+            ):
+                try:
+                    candidates.extend(connection.execute(
+                        f"SELECT record_json,content_hash FROM {table} "
+                        "WHERE work_order_ref=? AND attempt_number=? AND phase=?",
+                        (work["id"], attempt_number, phase),
+                    ).fetchall())
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc):
+                        raise
+            if not candidates:
+                return None
+            if len(candidates) != 1:
+                raise MissionAnnualResearchLaneError(
+                    "annual research budget refusal is not unique"
+                )
+            row = candidates[0]
+            try:
+                wire = json.loads(row["record_json"])
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise MissionAnnualResearchLaneError(
+                    "annual research budget refusal is invalid"
+                ) from exc
+            body = dict(wire) if isinstance(wire, Mapping) else {}
+            asserted = body.pop("content_hash", None)
+            if (
+                not isinstance(wire, Mapping)
+                or canonical_json(wire) != row["record_json"]
+                or asserted != row["content_hash"]
+                or asserted != content_hash(body)
+                or wire.get("work_order_ref") != work["id"]
+                or wire.get("attempt_number") != attempt_number
+                or wire.get("phase") != phase
+            ):
+                raise MissionAnnualResearchLaneError(
+                    "annual research budget refusal authority drifted"
+                )
+            reason = wire.get("reason")
+            return (
+                "budget_or_pool_refused:"
+                + (reason if isinstance(reason, str) and reason else "owner_budget_exceeded")
+            )
+        finally:
+            connection.close()
 
     def dispatch_once(self) -> dict[str, Any]:
         if self.launcher is None:
@@ -220,10 +471,64 @@ class MissionAnnualResearchCoordinator:
                 "status": child_status or ticket["status"],
             }
             if child_status != "complete":
+                recovery = (
+                    self._execution_state(admission)
+                    if self._started(admission["id"]) else {
+                        "action": "terminal_hold",
+                        "reason": child_status or ticket["status"],
+                    }
+                )
+                settled["recovery"] = recovery
+                if recovery["action"] == "waiting":
+                    return {
+                        "status": "waiting", "ticket_ref": ticket["id"],
+                        "admission_ref": admission["id"],
+                        "retry_at": recovery["retry_at"], "last": settled,
+                    }
+                if recovery["action"] == "resume":
+                    authorization = canonical_json({
+                        "schema_version": "0.1",
+                        "kind": "exact_scheduler_replay",
+                        "admission_ref": admission["id"],
+                        "admission_hash": admission["content_hash"],
+                        "prior_ticket_ref": ticket["id"],
+                        "work_order_ref": recovery["work_order_ref"],
+                        "reason": recovery["reason"],
+                    })
+                    try:
+                        resumed = self.launcher.resume(
+                            admission_ref=admission["id"],
+                            admission_hash=admission["content_hash"],
+                            prior_ticket_ref=ticket["id"],
+                            authorization=authorization,
+                        )
+                    except LaneChildConflict as exc:
+                        return {"status": "busy", "reason": str(exc), "last": settled}
+                    except LaneChildRejected as exc:
+                        self._hold(
+                            holds, admission,
+                            reason="controlled_reentry_unavailable:" + str(exc),
+                            ticket_ref=ticket["id"],
+                            disposition="recovery_required",
+                        )
+                        settled["recovery"] = {
+                            "action": "recovery_required",
+                            "reason": "controlled_reentry_unavailable",
+                        }
+                        recovery = settled["recovery"]
+                    else:
+                        return {
+                            "status": "resumed", "ticket_ref": resumed["id"],
+                            "admission_ref": admission["id"], "last": settled,
+                        }
+                disposition = (
+                    "recovery_required"
+                    if recovery["action"] == "recovery_required"
+                    else "terminal_hold"
+                )
                 self._hold(
-                    holds, admission,
-                    reason=(child_status or ticket["status"]),
-                    ticket_ref=ticket["id"],
+                    holds, admission, reason=recovery["reason"],
+                    ticket_ref=ticket["id"], disposition=disposition,
                 )
 
         for admission in admissions:
@@ -238,7 +543,7 @@ class MissionAnnualResearchCoordinator:
                 self._hold(
                     holds, admission,
                     reason="started_without_owned_live_ticket",
-                    ticket_ref=None,
+                    ticket_ref=None, disposition="recovery_required",
                 )
                 continue
             try:
@@ -267,7 +572,13 @@ class MissionAnnualResearchCoordinator:
                 "admission_ref": admission["id"], "last": settled,
             }
         return {
-            "status": "idle", "reason": "no unstarted annual research admission",
+            "status": (
+                "recovery_required"
+                if any(item["disposition"] == "recovery_required"
+                       for item in holds.values())
+                else "idle"
+            ),
+            "reason": "no unstarted annual research admission",
             "held": len(holds), "last": settled,
         }
 

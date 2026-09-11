@@ -17,6 +17,7 @@ from dalton_core.mission_annual_research_lane import (
     argv_fragment,
     lane_configuration,
 )
+from dalton_core.scheduler import Scheduler
 from dalton_core.store import canonical_json, content_hash
 
 
@@ -48,6 +49,7 @@ class _Store:
             "schema_version": "0.1",
             "id": f"mission-annual-research-admission:{ordinal:032x}",
             "created_at": f"2026-09-11T12:00:0{ordinal}.000000+00:00",
+            "identity_hash": content_hash({"ordinal": ordinal}),
         }
         wire = {**body, "content_hash": content_hash(body)}
         self.connection.execute(
@@ -71,6 +73,7 @@ class _Launcher:
         tickets_dir.mkdir(parents=True)
         self.tickets: dict[str, dict] = {}
         self.started: list[tuple[str, str]] = []
+        self.resumed: list[dict] = []
 
     def start(self, *, admission_ref: str, admission_hash: str) -> dict:
         self.started.append((admission_ref, admission_hash))
@@ -84,6 +87,10 @@ class _Launcher:
 
     def status(self, ticket_ref: str) -> dict:
         return dict(self.tickets[ticket_ref])
+
+    def resume(self, **kwargs) -> dict:
+        self.resumed.append(dict(kwargs))
+        return {"id": kwargs["prior_ticket_ref"], "status": "running"}
 
 
 def _write_latest(path: Path, admission: dict, ticket_ref: str) -> None:
@@ -172,6 +179,8 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
                     "admission_hash": admission["content_hash"],
                     "ticket_ref": None,
                     "reason": "orphaned",
+                    "disposition": "terminal_hold",
+                    "retry_at": None,
                     "extra": True,
                 }
             },
@@ -191,6 +200,8 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
                     "admission_hash": "0" * 64,
                     "ticket_ref": None,
                     "reason": "orphaned",
+                    "disposition": "terminal_hold",
+                    "retry_at": None,
                 }
             },
         }
@@ -199,6 +210,88 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(MissionAnnualResearchLaneError, "hash drifted"):
             self.lane.dispatch_once()
+
+    def _scheduler_work(self, admission: dict) -> tuple[Scheduler, dict]:
+        scheduler = Scheduler(
+            connection=self.store.connection, max_attempts=2,
+            default_lease_seconds=30, max_lease_seconds=60,
+            max_total_lease_seconds=120,
+        )
+        work_ref = "work:mission-annual-research-" + content_hash({
+            "admission_identity_hash": admission["identity_hash"], "ordinal": 1,
+        })[:32]
+        work = {
+            "schema_version": "0.1", "id": work_ref,
+            "created_at": admission["created_at"],
+            "updated_at": admission["created_at"],
+            "question": "retrieve exact registered annual source",
+            "requested_capabilities": ["registered_source_retrieval"],
+            "runtime_profile_ref": "runtime:registered-source-local",
+            "budget": {"max_seconds": 60},
+            "idempotency_key": "enqueue:" + work_ref,
+            "declared_side_effects": [], "status": "ready",
+            "input_refs": [admission["id"]],
+            "metadata": {
+                "mission_annual_research_admission_ref": admission["id"],
+                "mission_annual_research_admission_hash": admission["content_hash"],
+                "stage": "registered_source_retrieval",
+            },
+        }
+        scheduler.enqueue(work)
+        return scheduler, work
+
+    def test_failed_child_with_ready_exact_work_uses_controlled_reentry(self) -> None:
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        self._scheduler_work(admission)
+        ticket_ref = "mission-annual-research:" + "c" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+
+        result = self.lane.dispatch_once()
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(len(self.launcher.resumed), 1)
+        authorization = json.loads(self.launcher.resumed[0]["authorization"])
+        self.assertEqual(authorization["kind"], "exact_scheduler_replay")
+        self.assertEqual(authorization["work_order_ref"], result["last"]["recovery"]["work_order_ref"])
+
+    def test_proved_capacity_terminal_is_visible_as_recovery_required(self) -> None:
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        scheduler, work = self._scheduler_work(admission)
+        claim = scheduler.claim("worker:test", work_order_id=work["id"])
+        assert claim is not None
+        result = {
+            "schema_version": "0.1",
+            "id": "result:capacity:" + "d" * 24,
+            "created_at": "2026-09-11T12:00:03.000000+00:00",
+            "work_order_ref": work["id"],
+            "invocation_ref": "invocation:not-started:" + "d" * 24,
+            "status": "failed", "outputs": {},
+            "actual_side_effects": [], "usage_refs": [], "artifact_refs": [],
+            "error": {"code": "BUSY"},
+            "metadata": {"control_plane_failure": True},
+        }
+        scheduler.complete(
+            work["id"], 1, "worker:test", claim["lease_token"], result,
+            idempotency_key="capacity-terminal",
+        )
+        ticket_ref = "mission-annual-research:" + "d" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "succeeded",
+            "summary": {"status": "blocked"},
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+
+        dispatched = self.lane.dispatch_once()
+        self.assertEqual(dispatched["status"], "recovery_required")
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        held = holds["holds"][admission["id"]]
+        self.assertEqual(held["disposition"], "recovery_required")
+        self.assertEqual(held["reason"], "proved_capacity_not_sent_exhausted")
 
     def test_lane_is_opt_in_and_registered_once(self) -> None:
         self.assertIs(
