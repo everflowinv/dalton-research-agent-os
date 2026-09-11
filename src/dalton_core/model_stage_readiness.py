@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .forecast_sensitivity import projection_readiness
+from .forecast_sensitivity import (
+    BAND_RULE_REF,
+    SELECTION_RULE_HASH,
+    SELECTION_RULE_REF,
+    projection_readiness,
+)
 from .model_forecast_driver import model_readiness
 
 
@@ -121,6 +126,12 @@ def company_model_readiness(
         and sensitivity.get("model_version_ref") == model.get("id")
         and sensitivity.get("model_version_hash") == model.get("content_hash")
     )
+    current_sensitivity_rule_binding = bool(
+        sensitivity
+        and sensitivity.get("selection_rule_ref") == SELECTION_RULE_REF
+        and sensitivity.get("selection_rule_hash") == SELECTION_RULE_HASH
+        and sensitivity.get("band_rule_ref") == BAND_RULE_REF
+    )
     driver_count = projection.get("drivers_selected", 0)
     driver_count_ready = 3 <= driver_count <= 5
     consensus_quantified = (
@@ -151,6 +162,8 @@ def company_model_readiness(
     )
     checks = [
         {"criterion": "active_mission_model_sensitivity_binding", "passed": authority_binding},
+        {"criterion": "current_sensitivity_rule_binding",
+         "passed": current_sensitivity_rule_binding},
         {"criterion": "three_to_five_key_drivers", "passed": driver_count_ready},
         {"criterion": "historical_model_checks_pass", "passed": historical},
         {"criterion": "two_year_filings_reconciled_zero_error",

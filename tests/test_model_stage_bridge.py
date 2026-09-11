@@ -3,6 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from dalton_core.forecast_sensitivity import (
+    BAND_RULE_REF,
+    SELECTION_RULE_HASH,
+    SELECTION_RULE_REF,
+)
 from dalton_core.mission_model_stage_lane import advance_once
 from dalton_core.model_stage_readiness import (
     company_model_readiness,
@@ -131,6 +136,9 @@ class ModelStageReadinessTests(unittest.TestCase):
             "id": "sensitivity:v1", "company_ref": "company:a",
             "mission_version_ref": "mission:v14",
             "model_version_ref": model["id"], "model_version_hash": model["content_hash"],
+            "selection_rule_ref": SELECTION_RULE_REF,
+            "selection_rule_hash": SELECTION_RULE_HASH,
+            "band_rule_ref": BAND_RULE_REF,
             "selection": {"status": "available"}, "impact_metric": {
                 "result_ref": "result:revenue"}, "horizon": [{}],
             "history_window": {"quarters": 8},
@@ -152,6 +160,18 @@ class ModelStageReadinessTests(unittest.TestCase):
             filing_proof=filing_proof)
 
         self.assertTrue(result["passed"], result)
+
+        for changed in (
+            {"band_rule_ref": "rule:historical-band:1"},
+            {"selection_rule_ref": "rule:swing-rank:0"},
+            {"selection_rule_hash": "a" * 64},
+        ):
+            legacy = {**sensitivity, **changed}
+            waiting = company_model_readiness(
+                model, legacy, mission=mission(), company_ref="company:a",
+                filing_proof=filing_proof)
+            self.assertFalse(waiting["passed"], changed)
+            self.assertIn("current_sensitivity_rule_binding", waiting["reasons"])
 
     def test_baseline_cadence_is_not_completed_calendar_proof(self):
         source = {"ref": "claim:1", "period": "2026-09-10"}
