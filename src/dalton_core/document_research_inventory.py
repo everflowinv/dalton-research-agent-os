@@ -102,6 +102,13 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
 
 def load_document_inventory(*, core: Any, mission: Mapping[str, Any],
                             state_dir: Path, config_path: Path | None = None) -> dict[str, Any]:
+    result = load_document_inventory_authority(
+        core=core, mission=mission, state_dir=state_dir, config_path=config_path)
+    return {key: value for key, value in result.items() if key != "registry"}
+
+
+def load_document_inventory_authority(*, core: Any, mission: Mapping[str, Any],
+                                      state_dir: Path, config_path: Path | None = None) -> dict[str, Any]:
     """Compose only read capabilities; absent configuration grants no reads."""
     from .alphaengine_acquisition_launcher import ReadOnlyAlphaEngineManifestReader
     from .connector_authority_port import ReadOnlyConnectorReceiptReader
@@ -113,7 +120,7 @@ def load_document_inventory(*, core: Any, mission: Mapping[str, Any],
     if not config_path.exists():
         return {"readable_documents_by_company": {}, "unavailable_documents_by_company": {},
                 "registration_by_hash": {}, "document_research_policy": None,
-                "status": "unconfigured"}
+                "status": "unconfigured", "registry": None}
     if config_path.is_symlink():
         raise ValueError("document research configuration cannot be a symlink")
     config = validate_inventory_config(json.loads(config_path.read_text(encoding="utf-8")))
@@ -151,7 +158,7 @@ def load_document_inventory(*, core: Any, mission: Mapping[str, Any],
     result = inventory_with_registry(core=core, mission=mission, registry=registry,
                                      purpose=config["purpose"])
     return {**result, "status": "configured", "config_hash": content_hash(config),
-            "unavailable_sources": missing}
+            "unavailable_sources": missing, "registry": registry}
 
 
 def document_inventory_signature(core: Any, state_dir: Path) -> str:
