@@ -206,21 +206,23 @@ class FundXlsxExportTests(unittest.TestCase):
             sheet["J3"].value,
             '=IF(AND(F3>0,G3>0),(G3/F3)^(1/1)-1,"")',
         )
-        self.assertEqual(valuation["B5"].value, 100)
+        self.assertEqual(valuation["A5"].value, "TSO (MM) — N/A")
+        self.assertIsNone(valuation["B5"].value)
         self.assertEqual(valuation["E5"].value, 100)
         driver = book["Driver"]
         revenue_assumption_rows = [
             row for row in range(3, driver.max_row + 1)
             if driver.cell(row, 3).value == "Revenues — Quarterly growth (ratio)"
         ]
-        self.assertEqual(revenue_assumption_rows, [10])
+        self.assertEqual(revenue_assumption_rows, [8])
         self.assertEqual(
-            sum(driver.cell(10, column).value is not None
+            sum(driver.cell(8, column).value is not None
                 for column in range(12, driver.max_column + 1)),
             8,
         )
         self.assertEqual(valuation["A1"].fill.fgColor.rgb[-6:], "3366FF")
-        self.assertEqual(valuation["A2"].value, "Ticker")
+        self.assertEqual(valuation["A2"].value, "Company")
+        self.assertEqual(valuation["B2"].value, "Unavailable")
         self.assertEqual(valuation["A8"].value, "GAAP EPS (USD)")
         self.assertEqual(valuation["A9"].value, "House — N/A")
         self.assertEqual(valuation["A10"].value, "Street — N/A")

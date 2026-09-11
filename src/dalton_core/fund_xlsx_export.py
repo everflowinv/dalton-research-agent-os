@@ -500,11 +500,9 @@ def export_fund_workbook(
         for line in statement_structure.get("lines") or []
     }
 
-    company_label = (
-        (mission_binding or {}).get("entity_name")
-        or (mission_binding or {}).get("ticker")
-        or model["company_ref"]
-    )
+    ticker_label = (mission_binding or {}).get("ticker")
+    entity_label = (mission_binding or {}).get("entity_name")
+    company_label = entity_label or ticker_label or "Company unavailable"
     for ws, title in ((sources, "Sources and bindings"), (manifest, "Formula map")):
         ws.append([title])
         ws.append([company_label, f"As of {model['created_at']}"])
@@ -566,13 +564,24 @@ def export_fund_workbook(
         item["ref"]: _reader_label(item["label"]) for item in model["drivers"]
     }
     grouped_assumptions: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
-    for assumption in model["assumptions"]:
+    group_order: dict[tuple[str, str, str], int] = {}
+    for ordinal, assumption in enumerate(model["assumptions"]):
         key = (
             str(assumption["driver_ref"]), str(assumption["measure"]),
             str(assumption["unit"]),
         )
+        group_order.setdefault(key, ordinal)
         grouped_assumptions.setdefault(key, []).append(assumption)
-    for (driver_ref, measure, unit), group in grouped_assumptions.items():
+    driver_order = {str(item["ref"]): index
+                    for index, item in enumerate(model["drivers"])}
+    ordered_assumptions = sorted(
+        grouped_assumptions.items(),
+        key=lambda item: (
+            driver_order.get(item[0][0], len(driver_order)),
+            group_order[item[0]],
+        ),
+    )
+    for (driver_ref, measure, unit), group in ordered_assumptions:
         label = driver_labels.get(driver_ref, driver_ref)
         driver.cell(
             row,
@@ -965,8 +974,8 @@ def export_fund_workbook(
                 "model_label": result["label"],
             })
 
-    valuation_ws.cell(2, 1, "Ticker")
-    valuation_ws.cell(2, 2, company_label)
+    valuation_ws.cell(2, 1, "Ticker" if ticker_label else "Company")
+    valuation_ws.cell(2, 2, ticker_label or entity_label or "Unavailable")
     valuation_ws.cell(3, 1, "Date")
     valuation_ws.cell(
         3, 2,
@@ -985,11 +994,10 @@ def export_fund_workbook(
     market_cap = basis.get("market_cap")
     cash = (latest_roles.get("cash_and_equivalents") or {}).get("value")
     debt = (latest_roles.get("total_debt") or {}).get("value")
-    scenario_shares = (valuation_scenario or {}).get("diluted_shares")
     scenario_net_cash = (valuation_scenario or {}).get("net_cash")
     summary = [
         (4, 1, "Current Price", price_value, "per_share"),
-        (5, 1, "TSO (MM)", shares_value or scenario_shares, "shares"),
+        (5, 1, "TSO (MM)", shares_value, "shares"),
         (2, 4, "Market Cap ($M)", market_cap, "currency"),
         (3, 4, "Cash ($MM)", cash, "currency"),
         (4, 4, "Debt ($MM)", debt, "currency"),
