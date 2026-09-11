@@ -13,6 +13,7 @@ from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissi
 from dalton_core.document_extraction import (
     DocumentExtractionService, DocumentExtractionModelWorker, HermeticExtractionAdapter,
     build_prompt, build_work, parse_suggestions, verified_source, GATE_REASON, WINDOW_CHARS, OUTPUT_SCHEMA,
+    LEGACY_CALL_BUDGET,
 )
 from dalton_core.model_router import ModelRouter
 from dalton_core.research_verification import ResearchVerificationConflict, ResearchVerificationError
@@ -212,6 +213,28 @@ class DocumentExtractionTests(unittest.TestCase):
             "max_total_tokens": 20100, "max_cost_usd": 0.04, "max_seconds": 47,
         })
         self.assertNotEqual(configured.id, build_work(context).id)
+
+    def test_packaged_extraction_budget_is_large_and_hash_bound(self):
+        context = self.h.context()
+        work = build_work(context)
+        self.assertEqual(work.budget, {
+            "max_input_tokens": 64000, "max_output_tokens": 4096,
+            "max_total_tokens": 68096, "max_cost_usd": 1.0,
+            "max_seconds": 600,
+        })
+        self.assertIn("call_budget_fingerprint", work.metadata)
+        legacy = build_work(context, call_budget=LEGACY_CALL_BUDGET)
+        self.assertNotEqual(work.id, legacy.id)
+
+    def test_transport_retry_policy_changes_work_identity(self):
+        context = self.h.context()
+        retried = build_work(context, model_config={
+            "transport_retry": {"max_definitely_not_sent_retries": 1},
+        })
+        self.assertNotEqual(retried.id, build_work(context).id)
+        self.assertEqual(retried.metadata["transport_retry"], {
+            "max_definitely_not_sent_retries": 1,
+        })
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

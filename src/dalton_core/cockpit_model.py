@@ -602,6 +602,21 @@ class CockpitModel:
             expected_agent_id=config["expected_agent_id"], timeout_seconds=float(timeout_seconds),
         )
 
+    def _execute_with_safe_retry(self, adapter: Any, work: WorkOrder,
+                                 route: Mapping[str, Any],
+                                 profile: Mapping[str, Any]) -> Any:
+        """Retry only the adapter's proof that no request crossed its boundary."""
+        from .openclaw_model_adapter import BrokerDefinitelyNotSent
+
+        maximum = int((self.config.get("transport_retry") or {}).get(
+            "max_definitely_not_sent_retries", 0))
+        for retry_number in range(maximum + 1):
+            try:
+                return adapter.execute(work, route, profile)
+            except BrokerDefinitelyNotSent:
+                if retry_number >= maximum:
+                    raise
+
     def call(self, *, purpose: str, request_id: str, prompt: str,
              mission: Mapping[str, Any],
              producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
@@ -619,6 +634,13 @@ class CockpitModel:
             )
             if canonical is None:
                 base_request_id += policy_suffix
+            request_id = base_request_id
+        if "transport_retry" in self.config:
+            retry_suffix = ":transport-policy:" + content_hash(
+                self.config["transport_retry"]
+            )[:16]
+            if retry_suffix not in base_request_id:
+                base_request_id += retry_suffix
             request_id = base_request_id
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         legacy_budget = {
@@ -886,9 +908,11 @@ class CockpitModel:
                             failure = decision["failure"]
                         if admission is not None:
                             try:
-                                invocation, result = self._adapter(
-                                    router, timeout_seconds=effective["timeout_seconds"]
-                                ).execute(work, route, profile)
+                                invocation, result = self._execute_with_safe_retry(
+                                    self._adapter(
+                                        router, timeout_seconds=effective["timeout_seconds"]),
+                                    work, route, profile,
+                                )
                                 cost_micros, cost_status = _cost_micros(invocation, route, profile, reserved)
                                 if result.status == "succeeded":
                                     failure = None
@@ -1071,9 +1095,10 @@ class CockpitModel:
         def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
             nonlocal uncertain_spend
             try:
-                invocation, envelope = self._adapter(
-                    router, timeout_seconds=call_budget["timeout_seconds"]
-                ).execute(work, route, profile)
+                invocation, envelope = self._execute_with_safe_retry(
+                    self._adapter(router, timeout_seconds=call_budget["timeout_seconds"]),
+                    work, route, profile,
+                )
             except OpenClawModelAdapterError as exc:
                 definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent)
                 spend[route["id"]] = (

@@ -36,6 +36,9 @@ def preserved_budget_overrides(path: str | Path) -> dict[str, Any]:
         # of a malformed recovery policy.
         validate_model_config(wire)
         kept["capacity_retry"] = dict(wire["capacity_retry"])
+    if "transport_retry" in wire:
+        from .document_extraction import validate_transport_retry
+        kept["transport_retry"] = validate_transport_retry(wire["transport_retry"])
     for key in ("call_budget", "run_budget"):
         if key in wire:
             validator = validate_budget_overrides if key == "call_budget" else validate_run_budget_overrides

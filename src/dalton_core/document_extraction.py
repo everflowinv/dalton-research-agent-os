@@ -79,12 +79,22 @@ TASK_HASH = content_hash({"task": TASK_REF, "output": OUTPUT_SCHEMA, "window_cha
                           "quote_chars": QUOTE_CHARS, "authority": "suggestions_only_human_citation_and_accept"})
 
 
+def validate_transport_retry(value):
+    if (not isinstance(value, Mapping)
+            or set(value) != {"max_definitely_not_sent_retries"}
+            or isinstance(value["max_definitely_not_sent_retries"], bool)
+            or not isinstance(value["max_definitely_not_sent_retries"], int)
+            or not 0 <= value["max_definitely_not_sent_retries"] <= 3):
+        raise ResearchVerificationError("invalid transport retry configuration")
+    return dict(value)
+
+
 def validate_model_config(value):
     """Pure closed installation shape check; never reads a credential file."""
     required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
-                "capacity_retry", "reading_limits"}
+                "capacity_retry", "reading_limits", "transport_retry"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -125,6 +135,8 @@ def validate_model_config(value):
             if (not isinstance(value, int) or isinstance(value, bool)
                     or not minimum <= value <= maximum):
                 raise ResearchVerificationError("invalid capacity retry configuration")
+    if "transport_retry" in config:
+        validate_transport_retry(config["transport_retry"])
     return config
 
 
@@ -301,12 +313,15 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
                call_budget: Mapping[str, Any] | None = None) -> WorkOrder:
     from .call_budget import budget_fingerprint, resolve_call_budget
 
+    configured = model_config or {}
     explicit = call_budget is not None or any(
         key in (model_config or {}) for key in ("call_budget", "purpose_call_budgets")
     )
     resolved = dict(call_budget or resolve_call_budget(
-        model_config or {}, "document_extraction", defaults=LEGACY_CALL_BUDGET,
+        configured, "document_extraction", defaults=LEGACY_CALL_BUDGET,
     ))
+    explicit = explicit or resolved != LEGACY_CALL_BUDGET
+    transport_retry = dict(configured.get("transport_retry") or {})
     prompt = build_prompt(context)
     # The installed extraction worker and ModelRouter deliberately use this
     # conservative counter too.  Refuse before enqueue when a full canonical
@@ -325,6 +340,8 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
     identity = {"task": TASK_HASH, "context": context["content_hash"]}
     if explicit:
         identity["call_budget"] = budget_hash
+    if transport_retry:
+        identity["transport_retry"] = content_hash(transport_retry)
     digest = content_hash(identity)
     return WorkOrder(
         schema_version="0.1", id="work:document-extraction-" + digest[:32],
@@ -342,6 +359,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
                   "task_hash": TASK_HASH, "context": dict(context), "producer_ref": PRODUCER,
                   **({"call_budget": resolved, "call_budget_fingerprint": budget_hash}
                      if explicit else {}),
+                  **({"transport_retry": transport_retry} if transport_retry else {}),
                   "execution_mode": "broker" if context.get("model_binding") else "hermetic_fixture", "candidate_only": True},
     )
 
@@ -507,7 +525,7 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
     purpose = "document_extraction"
 
     def __init__(self, *, context_resolver, adapter, budget_store=None, budget_policy_ref=None,
-                 mission_resolver=None, **kwargs):
+                 mission_resolver=None, max_definitely_not_sent_retries=0, **kwargs):
         from .openclaw_model_adapter import OpenClawModelAdapter
         from .thesis_impact_budget import ThesisImpactBudgetStore
         if type(adapter) is not HermeticExtractionAdapter and not (
@@ -521,6 +539,11 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         self.mission_resolver = mission_resolver
         self.admission = None
         self._admission_identity = None
+        if (isinstance(max_definitely_not_sent_retries, bool)
+                or not isinstance(max_definitely_not_sent_retries, int)
+                or not 0 <= max_definitely_not_sent_retries <= 3):
+            raise ResearchVerificationError("invalid definitely-not-sent retry bound")
+        self.max_definitely_not_sent_retries = max_definitely_not_sent_retries
         super().__init__(adapter=adapter, polish_worker=None, **kwargs)
 
     def _before_model_call(self, work, route, profile, replayed):
@@ -608,14 +631,20 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         if type(self.adapter) is HermeticExtractionAdapter:
             self._before_model_call(work, route, profile, False)
             return self.adapter.execute(work, route, profile)
-        return self.adapter.execute(
-            work,
-            route,
-            profile,
-            before_send=lambda: self._before_model_call(
-                work, route, profile, False
-            ),
-        )
+        from .openclaw_model_adapter import BrokerDefinitelyNotSent
+        for retry_number in range(self.max_definitely_not_sent_retries + 1):
+            try:
+                return self.adapter.execute(
+                    work,
+                    route,
+                    profile,
+                    before_send=lambda: self._before_model_call(
+                        work, route, profile, False
+                    ),
+                )
+            except BrokerDefinitelyNotSent:
+                if retry_number >= self.max_definitely_not_sent_retries:
+                    raise
 
     def _after_accounting(self, work, route, accounting):
         if self.budget_store is None:
@@ -676,7 +705,12 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                                       call_budget=work.metadata.get("call_budget"))
         if work.metadata.get("task_ref") == DISCOVERY_TASK_REF:
             return build_discovery_work(current, call_budget=work.metadata.get("call_budget"))
-        return build_work(current, call_budget=work.metadata.get("call_budget"))
+        return build_work(
+            current,
+            call_budget=work.metadata.get("call_budget"),
+            model_config={"transport_retry": work.metadata["transport_retry"]}
+            if work.metadata.get("transport_retry") else None,
+        )
 
     def _parse_candidate(self, text, work):
         from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
@@ -1578,6 +1612,8 @@ class DocumentExtractionService:
                 mission_resolver=lambda c: self.writer.coverage_mission.mission(c["mission_version_ref"]),
                 budget_store=budget, budget_policy_ref=config["budget_policy_ref"],
                 routing_policy_ref=config["routing_policy_ref"], credential_slot_refs=config["credential_slot_refs"],
+                max_definitely_not_sent_retries=(config.get("transport_retry") or {}).get(
+                    "max_definitely_not_sent_retries", 0),
                 token_counter=lambda text: len(text.encode("utf-8")))
             saved = worker.scheduler.enqueue(work)
             if saved["status"] == "conflict":

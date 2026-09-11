@@ -323,6 +323,27 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute(
             'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],1)
 
+    def test_configured_same_model_retry_precedes_fallback(self):
+        self.h.writer._document_extraction_model_config['transport_retry'] = {
+            'max_definitely_not_sent_retries': 1,
+        }
+        original = self.execute
+        calls = []
+
+        def fail_once(adapter, work, route, profile, *, before_send=None):
+            calls.append(profile['id'])
+            if len(calls) == 1:
+                raise BrokerDefinitelyNotSent('synthetic pre-send refusal')
+            return original(adapter, work, route, profile, before_send=before_send)
+
+        with patch.object(OpenClawModelAdapter, 'execute', autospec=True,
+                          side_effect=fail_once):
+            result = self.h.generate()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(calls, [self.pr['id'], self.pr['id']])
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0], 1)
+
     def test_invalid_provider_output_accounts_failure_and_never_retries(self):
         self.invalid=True
         with self.patch_execute():
@@ -332,6 +353,9 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute('SELECT actual_micros FROM thesis_impact_day_settlements').fetchone()[0],1000)
 
     def test_disconnect_keeps_full_reservation_and_no_automatic_paid_retry(self):
+        self.h.writer._document_extraction_model_config['transport_retry'] = {
+            'max_definitely_not_sent_retries': 3,
+        }
         def uncertain_disconnect(adapter, work, route, profile, *, before_send=None):
             before_send()
             raise BrokerConnectionError('synthetic disconnect after admission')
@@ -346,9 +370,10 @@ class BrokerAdmissionTests(unittest.TestCase):
         # this test is about is that a disconnect frees nothing; the amount is
         # asserted against the same derivation the worker used, so it moves
         # with the profile instead of being a second copy of the number.
-        expected=RESERVATION_HEADROOM*window_reservation_micros(self.pr['cost'],{'max_input_tokens':16000,'max_output_tokens':3000})
+        expected=RESERVATION_HEADROOM*window_reservation_micros(
+            self.pr['cost'], build_work(self.h.context()).budget)
         self.assertEqual(self.b.connection.execute('SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],expected)
-        self.assertLess(expected,50000)
+        self.assertLess(expected,1_000_000)
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],0)
 
     def test_failed_broker_envelope_keeps_full_reservation_and_does_not_fallback(self):
@@ -380,7 +405,7 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute(
             'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0], 0)
         expected=RESERVATION_HEADROOM*window_reservation_micros(
-            self.pr['cost'],{'max_input_tokens':16000,'max_output_tokens':3000})
+            self.pr['cost'], build_work(self.h.context()).budget)
         self.assertEqual(self.b.connection.execute(
             'SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],
             expected)
@@ -393,7 +418,7 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_rejections').fetchone()[0],1)
 
     def test_provider_cost_overrun_is_accounted_terminal_and_blocks_further_calls(self):
-        self.actual_cost=0.1
+        self.actual_cost=2.0
         with self.patch_execute():
             result=self.h.generate()
             self.assertEqual(result['status'],'failed')

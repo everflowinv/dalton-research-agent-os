@@ -561,7 +561,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def _model(self, adapter: ChainAdapter, *, policy_version_ref: str,
                slots: list[str] | None = None, capacity_retry=None,
-               clock=None) -> CockpitModel:
+               transport_retry=None, clock=None) -> CockpitModel:
         config = {
             "routing_policy_ref": policy_version_ref,
             "credential_slot_refs": list(slots if slots is not None else self.slots),
@@ -573,6 +573,7 @@ class CockpitChainTests(unittest.TestCase):
             "budget_db": str(self.root / "budget.sqlite"),
             "budget_policy_ref": BUDGET_POLICY,
             **({} if capacity_retry is None else {"capacity_retry": capacity_retry}),
+            **({} if transport_retry is None else {"transport_retry": transport_retry}),
         }
         return CockpitModel(
             config, scheduler_db=str(self.root / "scheduler.sqlite"),
@@ -613,6 +614,25 @@ class CockpitChainTests(unittest.TestCase):
         decisions = self._decisions()
         self.assertEqual([item["decision_kind"] for item in decisions], ["initial", "switch"])
         self.assertEqual(answer["route_decision_ref"], decisions[1]["id"])
+
+    def test_proved_pre_send_failure_retries_same_model_before_fallback(self) -> None:
+        class Once(ChainAdapter):
+            def execute(inner, work, route, profile):
+                if not inner.served:
+                    inner.served.append(profile["id"])
+                    raise BrokerDefinitelyNotSent("connect failed before send")
+                return super(Once, inner).execute(work, route, profile)
+
+        adapter = Once({})
+        answer = self._model(
+            adapter, policy_version_ref=self.chain_policy,
+            transport_retry={"max_definitely_not_sent_retries": 1},
+        ).call(purpose="plan", request_id="same-model-retry",
+               prompt="what next?", mission=self.mission)
+        self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")
+        self.assertEqual(adapter.served,
+                         ["profile:gpt-6-astra", "profile:gpt-6-astra"])
+        self.assertEqual(len(self._links()), 1)
 
     def test_independent_call_fails_closed_and_keeps_legacy_fakes_compatible(self) -> None:
         class Legacy:

@@ -6,6 +6,12 @@
     "timeout_seconds": 120
   },
   "purposes": {
+    "document_extraction": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 64000,
+      "max_output_tokens": 4096,
+      "timeout_seconds": 600
+    },
     "claim_index": {
       "max_cost_usd": 0.6,
       "max_input_tokens": 60000,

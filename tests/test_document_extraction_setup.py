@@ -47,6 +47,7 @@ class ExtractionSetupTests(unittest.TestCase):
                 "purpose_call_budgets": {"document_numeric_extraction": {"max_output_tokens": 777}},
                 "run_budget": {"max_units": 9},
                 "purpose_run_budgets": {"document_extraction": {"max_calls": 4}},
+                "transport_retry": {"max_definitely_not_sent_retries": 1},
             }
             wire.update(budgets)
             wire["unknown_private_field"] = "must not survive"
