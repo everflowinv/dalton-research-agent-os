@@ -411,6 +411,45 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
             with self.assertRaises(sqlite3.DatabaseError):
                 conn.execute(statement)
 
+    def test_typed_host_failures_cool_down_and_success_resets(self) -> None:
+        v1 = self.create_mission()
+        mission = self.mission_v2(v1)
+        authorization = self.missions.authorize_source_discovery(
+            company_ref=ACN, source_ref="source:alphaengine", requested_by=AUTOMATION)
+        params, receipt = self.run_search()
+        record = self.missions.record_source_discovery(
+            authorization=authorization, discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"], spec_ref="earnings-call-transcripts",
+            query_hash=search_spec_hash(params), parameters=params,
+            connector_invocation_ref=receipt["connector_invocation_ref"],
+            connector_invocation_hash=receipt["connector_invocation_hash"],
+            source_envelope_ref=receipt["source_envelope_ref"],
+            source_envelope_hash=receipt["source_envelope_hash"],
+            document_refs=receipt["document_refs"], in_authority_document_refs=[],)
+        failed_rows = []
+        for index in range(2):
+            row = self.missions.next_discovered_document()
+            self.missions.set_document_host(row["record_id"], "blocked.example")
+            self.missions.mark_discovered_document_launched(row["record_id"], f"fetch:{index}")
+            self.missions.settle_discovered_document(
+                row["record_id"], status="acquisition_failed", reason="forbidden",
+                failure_retryable=False, transport_code="HTTP_403")
+            failed_rows.append(row)
+        now = datetime.now(timezone.utc)
+        held = self.missions.host_failure_cooldowns(
+            source_ref="source:alphaengine", minimum_distinct_urls=2,
+            window_seconds=86400, cooldown_seconds=21600, as_of=now)
+        self.assertEqual((held[0]["host"], held[0]["distinct_urls"]), ("blocked.example", 2))
+        self.missions.mark_failed_document_retry_launched(failed_rows[0]["record_id"], "fetch:success")
+        self.missions.settle_discovered_document(failed_rows[0]["record_id"], status="acquired")
+        self.assertEqual(self.missions.host_failure_cooldowns(
+            source_ref="source:alphaengine", minimum_distinct_urls=2,
+            window_seconds=86400, cooldown_seconds=21600, as_of=now), [])
+        self.assertEqual(self.missions.host_failure_cooldowns(
+            source_ref="source:alphaengine", minimum_distinct_urls=2,
+            window_seconds=86400, cooldown_seconds=1,
+            as_of=now + timedelta(seconds=2)), [])
+
 
 class FakeAcquisitionLauncher:
     def __init__(self, harness: SearchHarness, *, outcome: str = "succeeded") -> None:
@@ -666,6 +705,22 @@ class CoordinatorTests(unittest.TestCase):
         launched = self.coordinator.launch_acquisition()
         self.assertEqual((launched["status"], launched["document_ref"]),
                          ("launched", NEW_DOC))
+
+    def test_typed_host_cooldown_is_visible_and_does_not_launch(self) -> None:
+        v1 = self.create_mission(); self.mission_v2(v1); seed_known_document(self.h)
+        self.coordinator.dispatch_once()
+        self.coordinator.failure_cooldown = {
+            "minimum_distinct_urls": 3, "window_seconds": 86400, "cooldown_seconds": 21600}
+        held = [{"host": "documents.example", "reason": "typed terminal transport failures",
+                 "distinct_urls": 3, "until": "2026-09-11T10:00:00.000000+00:00",
+                 "next_probe": "2026-09-11T10:00:00.000000+00:00"}]
+        self.missions.set_document_host(
+            self.missions.next_discovered_document()["record_id"], "documents.example")
+        with patch.object(self.missions, "host_failure_cooldowns", return_value=held):
+            result = self.coordinator.launch_acquisition()
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["cooldown_hosts"], held)
+        self.assertEqual(self.acquisition_launcher.calls, [])
 
     def test_continuation_rejects_plan_change_and_repeated_cursor(self) -> None:
         discovery = {

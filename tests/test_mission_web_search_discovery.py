@@ -199,6 +199,21 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
         self.assertIn("0.3", schema["properties"]["schema_version"]["enum"])
         self.assertEqual(set(schema["properties"]["acquisition"]["required"]), {"preferred_hosts", "skip_hosts"})
 
+    def test_plan_0_5_binds_configurable_failure_cooldown(self) -> None:
+        plan = build_discovery_plan(
+            plan_id="discovery-plan:x:web:cooldown", created_at=NOW.isoformat(timespec="microseconds"),
+            mission_ref="coverage-mission:us-it-services", companies={ACN: "Accenture ACN"},
+            source_ref=WEB_SEARCH_SOURCE_REF, specs=web_plan_for_tests()["specs"],
+            max_calls_24h=10, acquisition={"preferred_hosts": [], "skip_hosts": []},
+            failure_cooldown={"minimum_distinct_urls": 3, "window_seconds": 86400,
+                              "cooldown_seconds": 21600},)
+        self.assertEqual(plan["schema_version"], "0.5")
+        self.assertEqual(validate_discovery_plan(plan), plan)
+        broken = json.loads(json.dumps(plan)); broken["acquisition"]["failure_cooldown"]["extra"] = 1
+        broken["content_hash"] = "0" * 64
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan(broken)
+
 
 class WebDiscoveryLedgerTests(unittest.TestCase):
     def setUp(self) -> None:

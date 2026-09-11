@@ -145,6 +145,22 @@ CREATE TABLE IF NOT EXISTS coverage_mission_discovered_documents (
     host TEXT,
     UNIQUE(mission_version_ref, document_ref)
 );
+CREATE TABLE IF NOT EXISTS coverage_mission_acquisition_attempts (
+    attempt_ref TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    mission_version_ref TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    host TEXT,
+    document_ref TEXT NOT NULL,
+    ticket_ref TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('acquired','transport_terminal','transport_retryable','unknown_failure')),
+    transport_code TEXT,
+    transport_evidence_ref TEXT,
+    transport_evidence_hash TEXT,
+    created_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    UNIQUE(record_id,ticket_ref)
+);
 
 CREATE TABLE IF NOT EXISTS coverage_mission_idempotency (
     idempotency_key TEXT PRIMARY KEY,

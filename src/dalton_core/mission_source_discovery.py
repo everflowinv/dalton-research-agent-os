@@ -88,9 +88,11 @@ DISCOVERY_PLAN_SCHEMA_VERSION_V3 = "0.3"
 # text, so it carries its own spec shape rather than a query_template nobody
 # would fill in.
 DISCOVERY_PLAN_SCHEMA_VERSION_V4 = "0.4"
+DISCOVERY_PLAN_SCHEMA_VERSION_V5 = "0.5"
 DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
     DISCOVERY_PLAN_SCHEMA_VERSION, DISCOVERY_PLAN_SCHEMA_VERSION_V2,
     DISCOVERY_PLAN_SCHEMA_VERSION_V3, DISCOVERY_PLAN_SCHEMA_VERSION_V4,
+    DISCOVERY_PLAN_SCHEMA_VERSION_V5,
 )
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
@@ -164,8 +166,10 @@ _PLAN_FIELDS = frozenset({
 _PLAN_FIELDS_V2 = _PLAN_FIELDS | frozenset({"budget"})
 _PLAN_FIELDS_V3 = _PLAN_FIELDS_V2 | frozenset({"acquisition"})
 _PLAN_FIELDS_V4 = _PLAN_FIELDS_V2
+_PLAN_FIELDS_V5 = _PLAN_FIELDS_V3
 _BUDGET_FIELDS = frozenset({"max_calls_24h"})
 _ACQUISITION_FIELDS = frozenset({"preferred_hosts", "skip_hosts"})
+_ACQUISITION_FIELDS_V5 = _ACQUISITION_FIELDS | {"failure_cooldown"}
 MAX_POLICY_HOSTS = 50
 _HOST_RE = re.compile(
     r"(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\Z"
@@ -187,17 +191,29 @@ def _plan_hosts(value: Any, name: str) -> list[str]:
     return hosts
 
 
-def _plan_acquisition(value: Any) -> dict[str, list[str]]:
+def _plan_acquisition(value: Any, *, cooldown: bool = False) -> dict[str, Any]:
     """Closed acquisition policy: which hosts the fetch lane prefers or never touches."""
 
-    if not isinstance(value, Mapping) or set(value) != _ACQUISITION_FIELDS:
+    expected = _ACQUISITION_FIELDS_V5 if cooldown else _ACQUISITION_FIELDS
+    if not isinstance(value, Mapping) or set(value) != expected:
         raise DiscoveryPlanError("discovery plan acquisition must have exactly preferred_hosts and skip_hosts")
     preferred = _plan_hosts(value["preferred_hosts"], "acquisition.preferred_hosts")
     skipped = _plan_hosts(value["skip_hosts"], "acquisition.skip_hosts")
     overlap = sorted(set(preferred) & set(skipped))
     if overlap:
         raise DiscoveryPlanError(f"acquisition hosts cannot be both preferred and skipped: {overlap}")
-    return {"preferred_hosts": preferred, "skip_hosts": skipped}
+    result: dict[str, Any] = {"preferred_hosts": preferred, "skip_hosts": skipped}
+    if cooldown:
+        raw = value["failure_cooldown"]
+        fields = {"minimum_distinct_urls", "window_seconds", "cooldown_seconds"}
+        if not isinstance(raw, Mapping) or set(raw) != fields:
+            raise DiscoveryPlanError("failure_cooldown has an invalid closed shape")
+        result["failure_cooldown"] = {
+            "minimum_distinct_urls": _positive_int(raw["minimum_distinct_urls"], "minimum_distinct_urls", maximum=100),
+            "window_seconds": _positive_int(raw["window_seconds"], "window_seconds", maximum=2592000),
+            "cooldown_seconds": _positive_int(raw["cooldown_seconds"], "cooldown_seconds", maximum=2592000),
+        }
+    return result
 _COMPANY_FIELDS = frozenset({"search_terms"})
 _SPEC_FIELDS = frozenset({
     "spec_ref", "document_type", "query_template", "lookback_days",
@@ -272,6 +288,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         DISCOVERY_PLAN_SCHEMA_VERSION_V2: _PLAN_FIELDS_V2,
         DISCOVERY_PLAN_SCHEMA_VERSION_V3: _PLAN_FIELDS_V3,
         DISCOVERY_PLAN_SCHEMA_VERSION_V4: _PLAN_FIELDS_V4,
+        DISCOVERY_PLAN_SCHEMA_VERSION_V5: _PLAN_FIELDS_V5,
     }[schema_version]
     if set(value) != fields:
         raise DiscoveryPlanError("discovery plan has an invalid closed shape")
@@ -301,10 +318,10 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
             ),
         }
     acquisition: dict[str, list[str]] | None = None
-    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V3:
+    if schema_version in (DISCOVERY_PLAN_SCHEMA_VERSION_V3, DISCOVERY_PLAN_SCHEMA_VERSION_V5):
         if source_ref != WEB_SEARCH_SOURCE_REF:
             raise DiscoveryPlanError("discovery plan 0.3 acquisition policy is only for source:web-search")
-        acquisition = _plan_acquisition(wire["acquisition"])
+        acquisition = _plan_acquisition(wire["acquisition"], cooldown=schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V5)
     if (schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V4) != (source_ref == SEC_SOURCE_REF):
         raise DiscoveryPlanError(
             "discovery plan 0.4 is the SEC filings index shape and source:sec-edgar requires it"
@@ -404,6 +421,7 @@ def build_discovery_plan(
     source_ref: str = ALPHAENGINE_SOURCE_REF,
     max_calls_24h: int | None = None,
     acquisition: Mapping[str, Sequence[str]] | None = None,
+    failure_cooldown: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Author a plan (hash appended) from search terms and spec rows.
 
@@ -428,11 +446,18 @@ def build_discovery_plan(
         base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V2
         base["budget"] = {"max_calls_24h": max_calls_24h}
     if acquisition is not None:
-        base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V3
+        base["schema_version"] = (
+            DISCOVERY_PLAN_SCHEMA_VERSION_V5 if failure_cooldown is not None
+            else DISCOVERY_PLAN_SCHEMA_VERSION_V3
+        )
         base["acquisition"] = {
             "preferred_hosts": list(acquisition.get("preferred_hosts", ())),
             "skip_hosts": list(acquisition.get("skip_hosts", ())),
         }
+        if failure_cooldown is not None:
+            base["acquisition"]["failure_cooldown"] = dict(failure_cooldown)
+    elif failure_cooldown is not None:
+        raise DiscoveryPlanError("failure_cooldown requires an acquisition policy")
     return validate_discovery_plan({**base, "content_hash": content_hash(base)})
 
 
@@ -1020,6 +1045,7 @@ class MissionSourceDiscoveryCoordinator:
         # The provider's redirect proxies are held with the plan's skip list:
         # not policy but a physical fact, the transport refuses to follow one
         # out, so fetching such a row could only ever fail.
+        self.failure_cooldown = policy.get("failure_cooldown")
         self.skip_hosts: tuple[str, ...] = tuple(dict.fromkeys(
             [*policy.get("skip_hosts", ()), *sorted(REDIRECT_PROXY_HOSTS)]
         )) if self.source_ref == WEB_SEARCH_SOURCE_REF else tuple(policy.get("skip_hosts", ()))
@@ -1192,6 +1218,12 @@ class MissionSourceDiscoveryCoordinator:
                         summary.get("failure_retryable")
                         if type(summary.get("failure_retryable")) is bool else None
                     ),
+                    transport_code=(
+                        (summary.get("fetch") or {}).get("error", {}).get("code")
+                        if isinstance((summary.get("fetch") or {}).get("error"), Mapping) else None
+                    ),
+                    transport_evidence_ref=(summary.get("fetch") or {}).get("connector_invocation_ref"),
+                    transport_evidence_hash=(summary.get("fetch") or {}).get("connector_invocation_hash"),
                 )
             entry = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
@@ -1667,6 +1699,9 @@ class MissionSourceDiscoveryCoordinator:
         if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False
+        cooldowns = ([] if not self.failure_cooldown else self.missions.host_failure_cooldowns(
+            source_ref=self.source_ref, as_of=self.clock(), **self.failure_cooldown))
+        cooldown_hosts = [row["host"] for row in cooldowns]
         try:
             mission = self.missions.active_mission(self.plan["mission_ref"])
         except CoverageMissionNotFound:
@@ -1685,7 +1720,8 @@ class MissionSourceDiscoveryCoordinator:
         }
         document = self.missions.next_discovered_document(
             source_ref=self.source_ref,
-            preferred_hosts=self.preferred_hosts, skip_hosts=self.skip_hosts,
+            preferred_hosts=self.preferred_hosts,
+            skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
             preferred_needs=needs,
             excluded_needs=stopped_needs,
             excluded_mission_version_ref=None if mission is None else mission["id"],
@@ -1720,7 +1756,8 @@ class MissionSourceDiscoveryCoordinator:
                     else ACQUISITION_RETRY_INTERVAL
                 ),
                 as_of=self.clock(),
-                source_ref=self.source_ref, skip_hosts=self.skip_hosts,
+                source_ref=self.source_ref,
+                skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
                 excluded_needs=stopped_needs,
                 excluded_mission_version_ref=None if mission is None else mission["id"],
             )
@@ -1729,6 +1766,7 @@ class MissionSourceDiscoveryCoordinator:
             idle: dict[str, Any] = {
                 "status": "idle", "stage_order": stage_order,
                 "plan_stopped_needs": stopped_needs,
+                "cooldown_hosts": cooldowns,
             }
             if self.skip_hosts:
                 idle["held_by_skip_hosts"] = self.missions.discovered_documents_held_by_skip(
@@ -1772,6 +1810,7 @@ class MissionSourceDiscoveryCoordinator:
             "status": "launched", "record_id": document["record_id"],
             "document_ref": document["document_ref"], "ticket_ref": ticket["id"],
             "retry": retry, "budget": budget,
+            "cooldown_hosts": cooldowns,
         }
 
     def _acquire_within_budget(

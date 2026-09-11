@@ -856,6 +856,7 @@ class CoverageMissionAuthority:
         self._migrate_company_model_spec_contract()
         self._migrate_discovered_document_host()
         self._migrate_discovered_document_retryability()
+        self._migrate_acquisition_attempts()
         self._migrate_settlement_failure_reason()
         self._migrate_plan_sufficiency()
         self._migrate_statement_dimension_count()
@@ -1039,6 +1040,18 @@ class CoverageMissionAuthority:
             "ALTER TABLE coverage_mission_discovered_documents ADD COLUMN failure_retryable "
             "INTEGER CHECK(failure_retryable IS NULL OR failure_retryable IN (0,1))"
         )
+
+    def _migrate_acquisition_attempts(self) -> None:
+        self.connection.executescript("""
+        CREATE TABLE IF NOT EXISTS coverage_mission_acquisition_attempts (
+          attempt_ref TEXT PRIMARY KEY, record_id TEXT NOT NULL,
+          mission_version_ref TEXT NOT NULL, source_ref TEXT NOT NULL, host TEXT,
+          document_ref TEXT NOT NULL, ticket_ref TEXT NOT NULL,
+          outcome TEXT NOT NULL CHECK(outcome IN ('acquired','transport_terminal','transport_retryable','unknown_failure')),
+          transport_code TEXT, transport_evidence_ref TEXT, transport_evidence_hash TEXT,
+          created_at TEXT NOT NULL, content_hash TEXT NOT NULL,
+          UNIQUE(record_id,ticket_ref));
+        """)
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -2753,7 +2766,9 @@ class CoverageMissionAuthority:
 
     def settle_discovered_document(
         self, record_id: str, *, status: str, reason: str | None = None,
-        failure_retryable: bool | None = None,
+        failure_retryable: bool | None = None, transport_code: str | None = None,
+        transport_evidence_ref: str | None = None,
+        transport_evidence_hash: str | None = None,
     ) -> dict[str, Any]:
         record_id = _text(record_id, "record_id")
         status = _vocabulary(status, ("acquired", "acquisition_failed"), "status")
@@ -2765,6 +2780,13 @@ class CoverageMissionAuthority:
             raise CoverageMissionValidationError("an acquired document carries no failure reason")
         elif failure_retryable is not None:
             raise CoverageMissionValidationError("an acquired document carries no failure retryability")
+        if transport_code is not None:
+            transport_code = _text(transport_code, "transport_code")
+        if (transport_evidence_ref is None) != (transport_evidence_hash is None):
+            raise CoverageMissionValidationError("transport evidence ref and hash travel together")
+        if transport_evidence_ref is not None:
+            transport_evidence_ref = _text(transport_evidence_ref, "transport_evidence_ref")
+            transport_evidence_hash = _text(transport_evidence_hash, "transport_evidence_hash")
         with self._transaction() as cur:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
@@ -2787,7 +2809,46 @@ class CoverageMissionAuthority:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
             ).fetchone()
+            outcome = ("acquired" if status == "acquired" else
+                       "transport_terminal" if failure_retryable is False and transport_code else
+                       "transport_retryable" if failure_retryable is True and transport_code else
+                       "unknown_failure")
+            event = {"record_id": record_id, "mission_version_ref": row["mission_version_ref"],
+                     "source_ref": row["source_ref"], "host": row["host"],
+                     "document_ref": row["document_ref"], "ticket_ref": row["ticket_ref"],
+                     "outcome": outcome, "transport_code": transport_code,
+                     "transport_evidence_ref": transport_evidence_ref,
+                     "transport_evidence_hash": transport_evidence_hash, "created_at": now}
+            event_hash = content_hash(event)
+            cur.execute(
+                "INSERT INTO coverage_mission_acquisition_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"acquisition-attempt:{event_hash[:32]}", record_id, row["mission_version_ref"],
+                 row["source_ref"], row["host"], row["document_ref"], row["ticket_ref"],
+                 outcome, transport_code, transport_evidence_ref, transport_evidence_hash, now, event_hash),
+            )
         return self._document_row(row)
+
+    def host_failure_cooldowns(self, *, source_ref: str, minimum_distinct_urls: int,
+                               window_seconds: int, cooldown_seconds: int,
+                               as_of: datetime) -> list[dict[str, Any]]:
+        cutoff = (as_of - timedelta(seconds=window_seconds)).isoformat(timespec="microseconds")
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_acquisition_attempts WHERE source_ref=? AND host IS NOT NULL "
+            "AND created_at>=? ORDER BY created_at,attempt_ref", (source_ref, cutoff)).fetchall()
+        by_host: dict[str, list[Any]] = {}
+        for row in rows: by_host.setdefault(row["host"], []).append(row)
+        result = []
+        for host, events in sorted(by_host.items()):
+            last_success = max((r["created_at"] for r in events if r["outcome"] == "acquired"), default="")
+            failures = [r for r in events if r["outcome"] == "transport_terminal" and r["created_at"] > last_success]
+            urls = sorted({r["document_ref"] for r in failures})
+            if len(urls) < minimum_distinct_urls: continue
+            until = datetime.fromisoformat(failures[-1]["created_at"]) + timedelta(seconds=cooldown_seconds)
+            if as_of < until:
+                result.append({"host": host, "reason": "typed terminal transport failures",
+                               "distinct_urls": len(urls), "until": until.isoformat(timespec="microseconds"),
+                               "next_probe": until.isoformat(timespec="microseconds")})
+        return result
 
     # -- P9d-2: human extraction queue for acquired documents -----------------
 
