@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .store import DaltonStore, canonical_json, content_hash
@@ -43,6 +44,34 @@ class CompanyResearchViewError(RuntimeError):
 
 class CompanyResearchViewValidationError(CompanyResearchViewError):
     """A request does not satisfy the closed contract."""
+
+
+@dataclass(frozen=True)
+class CompanyClaimQueryContext:
+    """One operation's immutable projection of one company's Claim snapshot."""
+
+    connection: Any
+    company_ref: str
+    rows: tuple[Mapping[str, Any], ...]
+
+
+def prepare_company_claim_query(
+    store: DaltonStore, company_ref: str,
+) -> CompanyClaimQueryContext:
+    """Read ClaimIndex once for repeated queries within one operation.
+
+    The returned value is deliberately not cached.  Its connection and company
+    binding prevent a caller from carrying a projection into another authority
+    or company operation.
+    """
+
+    company_ref = _text(company_ref, "company_ref")
+    snapshot = store.claim_index_snapshot()
+    return CompanyClaimQueryContext(
+        connection=store.connection,
+        company_ref=company_ref,
+        rows=tuple(_claim_rows(store, snapshot, company_ref)),
+    )
 
 
 def _text(value: Any, name: str) -> str:
@@ -528,6 +557,7 @@ def query_company_research(
     importance: str | None = None,
     canonical_only: bool = True,
     exclude_retired: bool = False,
+    claim_context: CompanyClaimQueryContext | None = None,
 ) -> list[dict[str, Any]]:
     """Structured query over claim rows; returns immutable refs and hashes.
 
@@ -559,8 +589,20 @@ def query_company_research(
         )
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
         raise CompanyResearchViewValidationError("limit must be between 1 and 1000")
-    snapshot = store.claim_index_snapshot()
-    rows = _claim_rows(store, snapshot, company_ref)
+    if claim_context is None:
+        snapshot = store.claim_index_snapshot()
+        rows = _claim_rows(store, snapshot, company_ref)
+    else:
+        if company_ref is None:
+            raise CompanyResearchViewValidationError(
+                "claim_context requires an exact company_ref")
+        if claim_context.connection is not store.connection:
+            raise CompanyResearchViewValidationError(
+                "claim_context belongs to a different authority connection")
+        if claim_context.company_ref != company_ref:
+            raise CompanyResearchViewValidationError(
+                "claim_context belongs to a different company")
+        rows = claim_context.rows
     filtered = []
     for row in rows:
         if aspect is not None and row["metric_or_aspect"] != aspect:
@@ -618,9 +660,11 @@ def query_company_research(
 __all__ = [
     "CLAIM_STATUSES",
     "CompanyResearchViewError",
+    "CompanyClaimQueryContext",
     "CompanyResearchViewValidationError",
     "PROJECTION_KIND",
     "annotate_with_index",
     "build_company_research_view",
     "query_company_research",
+    "prepare_company_claim_query",
 ]

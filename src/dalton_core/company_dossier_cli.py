@@ -156,7 +156,8 @@ def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
 
 
 def claim_material(
-    store: Any, company_ref: str, aspect: str, *, limit: int = MAX_CLAIM_ROWS
+    store: Any, company_ref: str, aspect: str, *, limit: int = MAX_CLAIM_ROWS,
+    claim_context: Any = None,
 ) -> list[dict[str, Any]]:
     """The canonical Claims for one aspect, importance first, bounded.
 
@@ -170,6 +171,7 @@ def claim_material(
     rows = query_company_research(
         store, company_ref=company_ref, index_aspect=aspect,
         canonical_only=True, exclude_retired=True, limit=min(limit * 3, 1000),
+        claim_context=claim_context,
     )
     from .claim_index_authority import IMPORTANCE_RANK
 
@@ -349,7 +351,8 @@ def _forecast_cell_rows(
 
 
 def market_view_material(
-    store: DaltonStore, company_ref: str, *, limit: int = MAX_CLAIM_ROWS
+    store: DaltonStore, company_ref: str, *, limit: int = MAX_CLAIM_ROWS,
+    claim_context: Any = None,
 ) -> list[dict[str, Any]]:
     """What is known about the market's view: sell-side Claims and price drivers.
 
@@ -360,10 +363,12 @@ def market_view_material(
     view says so instead of imagining a street.
     """
 
-    rows = claim_material(store, company_ref, "history_of_price_drivers", limit=limit)
+    rows = claim_material(store, company_ref, "history_of_price_drivers", limit=limit,
+                          claim_context=claim_context)
     seen = {row["ref"] for row in rows}
     for aspect in SECTIONS:
-        for row in claim_material(store, company_ref, aspect, limit=limit):
+        for row in claim_material(store, company_ref, aspect, limit=limit,
+                                  claim_context=claim_context):
             if row.get("importance") == "sell_side" and row["ref"] not in seen:
                 seen.add(row["ref"])
                 rows.append(row)
@@ -371,14 +376,15 @@ def market_view_material(
 
 
 def guidance_material(
-    store: DaltonStore, company_ref: str
+    store: DaltonStore, company_ref: str, *, claim_context: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """What P12f computes over: guidance statements and settled numbers."""
 
     guides = [
         {"ref": row["ref"], "text": row["text"], "period": row.get("period"),
          "label": row.get("text")}
-        for row in claim_material(store, company_ref, "guidance_style")
+        for row in claim_material(store, company_ref, "guidance_style",
+                                  claim_context=claim_context)
     ]
     # A settled number can be a quantitative Claim as easily as a filed line:
     # "revenue grew 5.95% in the quarter" is exactly what a guidance range is
@@ -387,7 +393,8 @@ def guidance_material(
     # about, and the index has already put filings ahead of news among them.
     actuals: list[dict[str, Any]] = []
     for aspect in SECTIONS:
-        for row in claim_material(store, company_ref, aspect):
+        for row in claim_material(store, company_ref, aspect,
+                                  claim_context=claim_context):
             if row.get("claim_kind") != "quantitative" or row.get("value") is None:
                 continue
             actuals.append({
@@ -538,14 +545,19 @@ def plan_units(
     constitution: Mapping[str, Any],
     policy: Mapping[str, Any],
     prior: Mapping[str, Any] | None,
+    claim_context: Any = None,
+    _reuse_claim_snapshot: bool = True,
 ) -> dict[str, Any]:
     """Per unit: can it be drafted, is it stale, and what would it be shown."""
 
     connection = store.connection
+    if claim_context is None and _reuse_claim_snapshot:
+        from .company_research_view import prepare_company_claim_query
+        claim_context = prepare_company_claim_query(store, company_ref)
     prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
     plan: dict[str, Any] = {}
     numbers = number_material(store, company_ref)
-    market = market_view_material(store, company_ref)
+    market = market_view_material(store, company_ref, claim_context=claim_context)
     for unit in UNITS:
         entry: dict[str, Any] = {"unit": unit, "status": "ready", "reason": None,
                                  "structure": [], "material": [], "new_refs": 0,
@@ -567,16 +579,19 @@ def plan_units(
         # written from the tail of a cash-flow statement is what "assembled by
         # grouping Claims" was supposed to stop.
         if unit in SECTIONS:
-            claims = claim_material(store, company_ref, unit)
+            claims = claim_material(store, company_ref, unit,
+                                    claim_context=claim_context)
             material = (claims + [row for row in numbers
                                   if unit in FIGURE_SECTIONS]) if claims else []
         elif unit == CLASSIFICATION_UNIT:
             material = [row for aspect in ("business_model", "segments_and_mix",
                                            "demand_drivers", "supply_and_cost")
-                        for row in claim_material(store, company_ref, aspect, limit=10)]
+                        for row in claim_material(store, company_ref, aspect, limit=10,
+                                                  claim_context=claim_context)]
         else:
             material = (market + [row for row in claim_material(
-                store, company_ref, "competitive_position", limit=10)]) if market else []
+                store, company_ref, "competitive_position", limit=10,
+                claim_context=claim_context)]) if market else []
         if not material:
             reason = "no_canonical_claims"
             if unit == "catalyst_calendar" and not table_exists(
@@ -665,7 +680,8 @@ def _json_row(connection: Any, query: str, params: Sequence[Any]) -> dict[str, A
 
 def reconstruct_dossier_input(
     connection: Any, record: Mapping[str, Any], current_mission: Mapping[str, Any],
-    policy: Mapping[str, Any],
+    policy: Mapping[str, Any], *, _reuse_claim_snapshot: bool = True,
+    _claim_context: Any = None,
 ) -> dict[str, dict[str, Any]]:
     """Rebuild current producer input using SELECT-only access and a fixed predecessor."""
 
@@ -684,9 +700,15 @@ def reconstruct_dossier_input(
         raise ValueError("current mission constitution binding does not resolve exactly")
     company_ref = str(record["company_ref"])
     view = _ReadOnlyStoreView(connection)
+    from .company_research_view import prepare_company_claim_query
+    claim_context = _claim_context
+    if claim_context is None and _reuse_claim_snapshot:
+        claim_context = prepare_company_claim_query(view, company_ref)
     plan = plan_units(store=view, company_ref=company_ref, constitution=constitution,
-                      policy=policy, prior=prior)
-    guides, actuals = guidance_material(view, company_ref)
+                      policy=policy, prior=prior, claim_context=claim_context,
+                      _reuse_claim_snapshot=_reuse_claim_snapshot)
+    guides, actuals = guidance_material(
+        view, company_ref, claim_context=claim_context)
     profile = build_profile(company_ref=company_ref, guides=guides, actuals=actuals)
     company = {"company_ref": company_ref, "ticker": next(
         (member.get("ticker") for member in current_mission.get("universe") or []
@@ -742,7 +764,11 @@ def dossier_freshness(connection: Any, record: Mapping[str, Any],
     stored = record.get("input_fingerprints")
     if stored is None:
         return "unknown"
-    rebuilt = reconstruct_dossier_input(connection, record, current_mission, policy)
+    view = _ReadOnlyStoreView(connection)
+    from .company_research_view import prepare_company_claim_query
+    claim_context = prepare_company_claim_query(view, str(record["company_ref"]))
+    rebuilt = reconstruct_dossier_input(
+        connection, record, current_mission, policy, _claim_context=claim_context)
     current = {unit: dossier_input_fingerprint(value) for unit, value in rebuilt.items()}
     for unit, fingerprint in stored.items():
         if fingerprint is not None and current[unit] != fingerprint:
@@ -753,9 +779,9 @@ def dossier_freshness(connection: Any, record: Mapping[str, Any],
     constitution = _json_row(connection,
         "SELECT record_json FROM research_constitution_versions WHERE constitution_version_id=?",
         (binding["ref"],))
-    plan = plan_units(store=_ReadOnlyStoreView(connection),
+    plan = plan_units(store=view,
                       company_ref=record["company_ref"], constitution=constitution,
-                      policy=policy, prior=record)
+                      policy=policy, prior=record, claim_context=claim_context)
     return "unknown" if any(
         stored[unit] is None and (_unit_was_drafted(record, unit)
                                  or plan[unit]["status"] == "ready")
@@ -936,8 +962,11 @@ def dossier_company_source_fingerprint(connection: Any, company_ref: str) -> str
     """
 
     view = _ReadOnlyStoreView(connection)
+    from .company_research_view import prepare_company_claim_query
+    claim_context = prepare_company_claim_query(view, company_ref)
     claims = {
-        aspect: claim_material(view, company_ref, aspect)
+        aspect: claim_material(view, company_ref, aspect,
+                               claim_context=claim_context)
         for aspect in SECTIONS
     }
     figures = []
@@ -1123,16 +1152,21 @@ def run_dossier(
         run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
 
         chosen = None
+        chosen_claim_context = None
         plan: dict[str, Any] = {}
         prior = None
         examined = candidates[0]
         for candidate in candidates:
             examined = candidate
             prior = authority.latest(candidate)
+            from .company_research_view import prepare_company_claim_query
+            candidate_claim_context = prepare_company_claim_query(store, candidate)
             plan = plan_units(store=store, company_ref=candidate,
-                              constitution=constitution, policy=policy, prior=prior)
+                              constitution=constitution, policy=policy, prior=prior,
+                              claim_context=candidate_claim_context)
             if stale_units(plan, limit=max_units, revise=revise_units):
                 chosen = candidate
+                chosen_claim_context = candidate_claim_context
                 break
         def planned(entries: Mapping[str, Any]) -> dict[str, Any]:
             return {
@@ -1201,7 +1235,8 @@ def run_dossier(
             (member.get("ticker") for member in mission["universe"]
              if member.get("company_ref") == chosen), None)}
 
-        guides, actuals = guidance_material(store, chosen)
+        guides, actuals = guidance_material(
+            store, chosen, claim_context=chosen_claim_context)
         profile = build_profile(company_ref=chosen, guides=guides, actuals=actuals)
         profile_table = render_profile_table(profile)
         held_classification = str(
