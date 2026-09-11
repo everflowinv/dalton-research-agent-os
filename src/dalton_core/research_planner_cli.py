@@ -142,7 +142,8 @@ def read_spend(store: DaltonStore, mission: Mapping[str, Any], *,
 
 def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
                 mission: dict[str, Any], *, plans_dir: Path, as_of: str,
-                budget_db: Path | None = None) -> dict[str, Any]:
+                budget_db: Path | None = None,
+                document_inventory: dict[str, Any] | None = None) -> dict[str, Any]:
     """Assemble everything the planner is allowed to see, and nothing else."""
 
     planned = planned_spec_refs_from_directory(plans_dir)
@@ -174,6 +175,14 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
                                 + uncorroborated(observations))
         disputed[company_ref] = contested(observations)
     from .dossier_repair_feedback import read_dossier_repair_feedback
+    from .document_research_inventory import load_document_inventory
+
+    if document_inventory is None:
+        try:
+            document_inventory = load_document_inventory(
+                core=store, mission=mission, state_dir=Path(store.path).parent)
+        except Exception as exc:  # preserve ordinary planning, disclose unavailable original reads
+            document_inventory = {"status": "unavailable", "reason": type(exc).__name__}
 
     return build_research_state(
         mission=mission, checklist=checklist, industry=industry,
@@ -181,6 +190,13 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         contested_by_company=disputed, acquisition_by_company=acquisition,
         dossier_feedback_by_company=read_dossier_repair_feedback(
             Path(store.path).parent),
+        readable_documents_by_company=document_inventory.get("readable_documents_by_company"),
+        unavailable_documents_by_company=document_inventory.get("unavailable_documents_by_company"),
+        document_research_policy=document_inventory.get("document_research_policy"),
+        document_research_availability={
+            key: document_inventory[key] for key in ("status", "reason", "config_hash", "unavailable_sources")
+            if key in document_inventory
+        },
         budget=mission["budget"],
         spend=read_spend(store, mission, budget_db=budget_db,
                          as_of=datetime.fromisoformat(as_of)),

@@ -49,6 +49,7 @@ def company_state(
     acquisition: Mapping[str, Any] | None = None,
     dossier_feedback: Mapping[str, Any] | None = None,
     readable_documents: Sequence[Mapping[str, Any]] = (),
+    unavailable_documents: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """One company's position, as a planner needs to see it.
 
@@ -132,6 +133,7 @@ def company_state(
             "repair_targets": list(dossier_feedback.get("repair_targets") or ()),
         },
         "readable_documents": [dict(document) for document in readable_documents],
+        "unavailable_documents": [dict(document) for document in unavailable_documents],
     }
 
 
@@ -185,7 +187,9 @@ def build_research_state(
     acquisition_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     dossier_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     readable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    unavailable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     document_research_policy: Mapping[str, Any] | None = None,
+    document_research_availability: Mapping[str, Any] | None = None,
     budget: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     as_of: str,
@@ -203,6 +207,7 @@ def build_research_state(
     acquisition_by_company = acquisition_by_company or {}
     dossier_feedback_by_company = dossier_feedback_by_company or {}
     readable_documents_by_company = readable_documents_by_company or {}
+    unavailable_documents_by_company = unavailable_documents_by_company or {}
     companies = [
         company_state(
             entry,
@@ -212,6 +217,7 @@ def build_research_state(
             acquisition=acquisition_by_company.get(entry.get("company_ref")),
             dossier_feedback=dossier_feedback_by_company.get(entry.get("company_ref")),
             readable_documents=readable_documents_by_company.get(entry.get("company_ref"), ()),
+            unavailable_documents=unavailable_documents_by_company.get(entry.get("company_ref"), ()),
         )
         for entry in checklist
     ]
@@ -225,6 +231,7 @@ def build_research_state(
         "schema_version": SCHEMA_VERSION,
         "document_research_contract_ref": "directed-document:0.1",
         "document_research_policy": None if document_research_policy is None else dict(document_research_policy),
+        "document_research_availability": dict(document_research_availability or {}),
         "as_of": as_of,
         "goal": {
             "mission_ref": mission.get("mission_ref"),

@@ -218,10 +218,12 @@ class ResearchPlannerCoordinator:
                 return 0
 
         from .dossier_repair_feedback import dossier_repair_feedback_signature
+        from .document_research_inventory import document_inventory_signature
 
         return {
             # What is held, and what has been read out of it.
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),
+            "document_versions": document_inventory_signature(self.store, Path(self.store.path).parent),
             "reviews_open": count(
                 "SELECT COUNT(*) FROM coverage_mission_document_reviews "
                 "WHERE state='awaiting_human_extraction'"),
