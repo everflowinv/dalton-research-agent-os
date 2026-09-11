@@ -315,11 +315,11 @@ export class ModelBroker {
     if (admitted !== "admitted") {
       const code = admitted === "closed" ? "BROKER_CLOSED" : admitted === "full" ? "BUSY" : "QUEUE_TIMEOUT";
       return this.#failure(request, requestHash, "fresh", code,
-        code === "BUSY" ? "broker queue is full" : code === "BROKER_CLOSED" ? "broker stopped while request was queued" : "broker queue wait exceeded its configured limit");
+        code === "BUSY" ? "broker queue is full" : code === "BROKER_CLOSED" ? "broker stopped while request was queued" : "broker queue wait exceeded its configured limit", true);
     }
     if (this.closed) {
       this.#releaseReservation();
-      return this.#failure(request, requestHash, "fresh", "BROKER_CLOSED", "broker stopped before durable admission");
+      return this.#failure(request, requestHash, "fresh", "BROKER_CLOSED", "broker stopped before durable admission", true);
     }
     let claim;
     try {
@@ -336,7 +336,7 @@ export class ModelBroker {
     }
     if (this.closed) {
       this.#releaseReservation();
-      const response = this.#failure(request, requestHash, "fresh", "BROKER_CLOSED", "broker stopped before provider execution");
+      const response = this.#failure(request, requestHash, "fresh", "BROKER_CLOSED", "broker stopped before provider execution", true);
       try { await this.journal.complete(request.invocationId, requestHash, response); return response; }
       catch { return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "closed result could not be committed to the idempotency journal"); }
     }
@@ -479,6 +479,7 @@ export class ModelBroker {
         }, request.timeoutMs);
       });
       const result = await Promise.race([completion, timeout]);
+      if (result?.failure !== undefined) return this.#providerFailure(request, requestHash, result);
       return this.#success(request, requestHash, result);
     } catch (error) {
       const safeHostFailure = error instanceof Error
@@ -560,6 +561,7 @@ export class ModelBroker {
       requestHash,
       idempotencyStatus: "fresh",
       ok: true,
+      dispatchProof: null,
       provider: result.provider,
       model: result.model,
       canonicalModel: canonicalActualModel(result.provider, result.model),
@@ -569,6 +571,24 @@ export class ModelBroker {
       cost: { available: costUsd !== null, usd: costUsd },
       error: null,
     });
+  }
+
+  #providerFailure(request, requestHash, result) {
+    const failure = result?.failure;
+    if (!failure || typeof failure !== "object" || Array.isArray(failure)
+        || Object.keys(failure).sort().join(",") !== "httpStatus,state,version"
+        || failure.version !== "0.1" || failure.state !== "provider_completed_failure"
+        || !Number.isSafeInteger(failure.httpStatus)
+        || !(failure.httpStatus === 429 || failure.httpStatus >= 500 && failure.httpStatus <= 599)
+        || result.provider !== request.model.split("/", 1)[0]
+        || canonicalActualModel(result.provider, result.model) !== request.model
+        || result.agentId !== this.config.dedicatedAgentId) {
+      throw new ProtocolError("INVALID_HOST_RESULT", "host returned an invalid provider failure proof");
+    }
+    const code = failure.httpStatus === 429 ? "RATE_LIMITED" : "PROVIDER_INTERNAL_ERROR";
+    return this.#failure(request, requestHash, "fresh", code,
+      `provider returned retryable HTTP ${failure.httpStatus}`, false,
+      { authority: "openclaw-model-broker", state: "provider_completed_failure", version: "0.1" });
   }
 
   #validateProviderControlProof(request, proof) {
@@ -615,7 +635,7 @@ export class ModelBroker {
     }
   }
 
-  #failure(request, requestHash, idempotencyStatus, code, message) {
+  #failure(request, requestHash, idempotencyStatus, code, message, definitelyNotSent = false, dispatchProof = null) {
     return sealResponse({
       schemaVersion: PROTOCOL_VERSION,
       brokerVersion: BROKER_VERSION,
@@ -634,6 +654,9 @@ export class ModelBroker {
       usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, totalTokens: null },
       cost: { available: false, usd: null },
       error: { code, message },
+      dispatchProof: dispatchProof ?? (definitelyNotSent ? {
+        authority: "openclaw-model-broker", state: "definitely_not_sent", version: "0.1",
+      } : null),
     });
   }
 }

@@ -119,6 +119,7 @@ class RoutedTranscriptPolishCoordinator:
             max_output_tokens=budget["max_output_tokens"],
             max_cost_usd=budget["max_cost_usd"],
             max_seconds=budget["max_seconds"],
+            provider_retry=model_work.metadata.get("provider_retry"),
         )
         if canonical_json(expected.to_dict()) != canonical_json(
             model_work.to_dict()

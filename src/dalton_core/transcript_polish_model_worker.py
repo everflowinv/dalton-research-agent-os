@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
@@ -91,6 +91,7 @@ class RoutedTranscriptPolishModelWorker:
         credential_slot_refs: Sequence[str],
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         lease_seconds: float | None = None,
+        provider_retry: Mapping[str, Any] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._validate_scheduler_store(scheduler, store)
@@ -132,7 +133,102 @@ class RoutedTranscriptPolishModelWorker:
         self.credential_slot_refs = slots
         self.token_counter = token_counter
         self.lease_seconds = lease_seconds
+        if provider_retry is None:
+            self.provider_retry = None
+        else:
+            from .provider_retry import validate_provider_retry
+            self.provider_retry = validate_provider_retry(provider_retry)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _provider_retry_state(self, work: WorkOrder) -> dict[str, Any] | None:
+        if self.provider_retry is None:
+            return None
+        if work.metadata.get("provider_retry") != self.provider_retry:
+            raise TranscriptPolishModelWorkerConflict(
+                "WorkOrder provider retry policy does not match the worker"
+            )
+        rows = self.scheduler.connection.execute(
+            "SELECT result_envelope_json,result_envelope_hash,attempt_number "
+            "FROM scheduler_result_envelopes "
+            "WHERE work_order_id=? AND outcome='retryable' "
+            "ORDER BY attempt_number DESC", (work.id,),
+        ).fetchall()
+        if not rows:
+            return {"excluded_profile_ids": [], "retry_profile_version_ref": None,
+                    "same_profile_retries": 0}
+        selected = None
+        for row in rows:
+            try:
+                wire = json.loads(row["result_envelope_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise TranscriptPolishModelWorkerConflict(
+                    "persisted retry result is invalid") from exc
+            if (canonical_json(wire) != row["result_envelope_json"]
+                    or content_hash(wire) != row["result_envelope_hash"]):
+                raise TranscriptPolishModelWorkerConflict(
+                    "persisted provider retry result drifted")
+            metadata = wire.get("metadata") if isinstance(wire, Mapping) else None
+            if not isinstance(metadata, Mapping) or "provider_retry_proof" not in metadata:
+                continue
+            if "provider_retry_state" not in metadata:
+                raise TranscriptPolishModelWorkerConflict(
+                    "persisted provider retry proof has no state")
+            selected = (row, wire, metadata["provider_retry_state"])
+            break
+        if selected is None:
+            return {"excluded_profile_ids": [], "retry_profile_version_ref": None,
+                    "same_profile_retries": 0}
+        row, wire, state = selected
+        if (not isinstance(state, Mapping)
+                or not isinstance(state.get("excluded_profile_ids"), list)
+                or not all(isinstance(x, str) and x for x in state["excluded_profile_ids"])
+                or set(state) != {"excluded_profile_ids", "retry_profile_version_ref",
+                                  "same_profile_retries"}
+                or len(set(state["excluded_profile_ids"])) != len(state["excluded_profile_ids"])
+                or state.get("retry_profile_version_ref") is not None
+                and not isinstance(state.get("retry_profile_version_ref"), str)
+                or isinstance(state.get("same_profile_retries"), bool)
+                or not isinstance(state.get("same_profile_retries"), int)
+                or state.get("same_profile_retries", -1) < 0
+                or state.get("same_profile_retries", 4) > 3):
+            raise TranscriptPolishModelWorkerConflict(
+                "persisted provider retry state is invalid")
+        decisions = self.router.list_decisions(work_order_id=work.id)
+        matching = [item for item in decisions
+                    if item.get("attempt_number") == row["attempt_number"]]
+        proved_route = matching[-1] if matching else None
+        selected_version = None if proved_route is None else proved_route.get(
+            "selected_profile_version_ref")
+        selected_id = None
+        if selected_version is not None:
+            selected_id = self.router.get_profile(selected_version)["id"]
+        if (wire.get("work_order_ref") != work.id
+                or wire.get("status") != "retryable"
+                or proved_route is None
+                or wire.get("metadata", {}).get("route_decision_ref") != proved_route.get("id")
+                or (state["retry_profile_version_ref"] is not None
+                    and state["retry_profile_version_ref"] != selected_version)
+                or (state["retry_profile_version_ref"] is None
+                    and selected_id not in state["excluded_profile_ids"])
+                or state["same_profile_retries"]
+                    > self.provider_retry["max_same_profile_retries"]):
+            raise TranscriptPolishModelWorkerConflict(
+                "persisted provider retry state does not match route history")
+        return dict(state)
+
+    @staticmethod
+    def _capacity_code(result: ResultEnvelope) -> str | None:
+        if result.status != "failed" or result.metadata.get("dispatch_proof") != {
+            "authority": "openclaw-model-adapter",
+            "state": "definitely_not_sent",
+            "version": "0.1",
+        }:
+            return None
+        code = str((result.error or {}).get("code", "")).upper()
+        if code in {"BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                    "QUEUE_TIMEOUT", "BROKER_CLOSED"}:
+            return code
+        return None
 
     @staticmethod
     def _work(value: WorkOrder | Mapping[str, Any]) -> WorkOrder:
@@ -273,6 +369,26 @@ class RoutedTranscriptPolishModelWorker:
     def _after_capacity_deferred(self, work, route, adapter_result):
         """Specialized budget ledgers may release proved broker-local refusal."""
 
+    def _successful_result(self, work, route, invocation, result, candidate_text):
+        """Specialized workers may wrap validated output in a typed proof."""
+
+        return result
+
+    def _producer_family(self, work):
+        """Family an independent-verifier route must differ from, if any."""
+
+        return None
+
+    def _producer_decision_ref(self, work):
+        """Immutable producer route for fallback-chain independence, if any."""
+
+        return None
+
+    def _route_capability(self, work):
+        """Capability passed to the router; specialized workers may narrow it."""
+
+        return "research"
+
     def _execute_model(self, work, route, profile):
         """Admit immediately before the adapter's execution boundary."""
         self._before_model_call(work, route, profile, False)
@@ -365,6 +481,7 @@ class RoutedTranscriptPolishModelWorker:
             )
         attempt_number = lease["attempt"]["attempt_number"]
         prior = self.router.list_decisions(work_order_id=work.id)
+        provider_retry_state = self._provider_retry_state(work)
         accepted_attempts = self._accepted_attempts(work.id)
         recovery_route = (
             prior[-1]
@@ -392,11 +509,26 @@ class RoutedTranscriptPolishModelWorker:
             )
             estimated_input = max(1, self.token_counter(work.question))
             estimated_output = int(work.budget["max_output_tokens"])
-            if not has_chain:
+            if provider_retry_state is not None:
+                # Preserve execute_chain's purpose/tier selection while making
+                # each paid retry a separate Scheduler attempt. Without tier,
+                # a policy with no explicit purpose override would route by
+                # global preferences and silently ignore the declared chain.
+                retry_purpose = self.purpose
+                retry_tier = None
+                if has_chain:
+                    from .model_fallback_chain import FallbackChainError, tier_for
+                    retry_purpose = self.purpose or "document_extraction"
+                    try:
+                        retry_tier = tier_for(retry_purpose)
+                    except FallbackChainError as exc:
+                        raise TranscriptPolishModelWorkerRejected(
+                            "provider retry purpose has no declared model tier"
+                        ) from exc
                 routed = self.router.route(
                     work,
                     attempt_number=attempt_number,
-                    capability="research",
+                    capability=self._route_capability(work),
                     policy_version_ref=self.routing_policy_ref,
                     credential_slot_refs=self.credential_slot_refs,
                     required_modalities=("text",),
@@ -405,7 +537,36 @@ class RoutedTranscriptPolishModelWorker:
                     estimated_output_tokens=estimated_output,
                     decision_kind="initial" if not prior else "retry",
                     previous_decision_ref=None if not prior else prior[-1]["id"],
-                    producer_family=None,
+                    producer_family=self._producer_family(work),
+                    purpose=retry_purpose,
+                    tier=retry_tier,
+                    excluded_profile_ids=provider_retry_state["excluded_profile_ids"],
+                    required_profile_version_ref=provider_retry_state[
+                        "retry_profile_version_ref"],
+                    idempotency_key=f"{self.namespace}-route:{work.id}:{attempt_number}",
+                )
+                route = routed["decision"]
+                if route["outcome"] != "selected":
+                    return self._complete_route_rejection(work, lease, route)
+                profile = self.router.get_profile(route["selected_profile_version_ref"])
+                try:
+                    invocation, adapter_result = self._execute_model(work, route, profile)
+                except OpenClawModelAdapterError as exc:
+                    return self._complete_adapter_failure(work, lease, route, exc)
+            elif not has_chain:
+                routed = self.router.route(
+                    work,
+                    attempt_number=attempt_number,
+                    capability=self._route_capability(work),
+                    policy_version_ref=self.routing_policy_ref,
+                    credential_slot_refs=self.credential_slot_refs,
+                    required_modalities=("text",),
+                    required_context_tokens=estimated_input + estimated_output,
+                    estimated_input_tokens=estimated_input,
+                    estimated_output_tokens=estimated_output,
+                    decision_kind="initial" if not prior else "retry",
+                    previous_decision_ref=None if not prior else prior[-1]["id"],
+                    producer_family=self._producer_family(work),
                     purpose=self.purpose,
                     idempotency_key=(
                         f"{self.namespace}-route:{work.id}:{attempt_number}"
@@ -447,11 +608,8 @@ class RoutedTranscriptPolishModelWorker:
                             "failure_class": "unclassified_failure",
                         }
                     invocation, envelope = value
-                    code = str((envelope.error or {}).get("code", "")).upper()
-                    if envelope.status == "failed" and code in {
-                        "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
-                        "QUEUE_TIMEOUT", "BROKER_CLOSED",
-                    }:
+                    code = self._capacity_code(envelope)
+                    if code is not None:
                         # This typed broker-local result is authoritative proof
                         # that no provider request was made. Release the durable
                         # reservation before execute_chain returns its deferred
@@ -473,7 +631,7 @@ class RoutedTranscriptPolishModelWorker:
                     self.router,
                     work,
                     purpose=self.purpose or "document_extraction",
-                    capability="research",
+                    capability=self._route_capability(work),
                     attempt_number=attempt_number,
                     policy_version_ref=self.routing_policy_ref,
                     credential_slot_refs=self.credential_slot_refs,
@@ -485,6 +643,7 @@ class RoutedTranscriptPolishModelWorker:
                         f"{self.namespace}-route:{work.id}:{attempt_number}"
                     ),
                     call=call,
+                    producer_decision_ref=self._producer_decision_ref(work),
                 )
                 if chained["status"] != "served":
                     route_ref = chained.get("route_decision_ref")
@@ -550,11 +709,8 @@ class RoutedTranscriptPolishModelWorker:
                 ),
             )
             return {"status": "failed", "route": route, "completion": completion}
-        capacity_code = str((adapter_result.error or {}).get("code", "")).upper()
-        if adapter_result.status == "failed" and capacity_code in {
-            "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
-            "QUEUE_TIMEOUT", "BROKER_CLOSED",
-        }:
+        capacity_code = self._capacity_code(adapter_result)
+        if capacity_code is not None:
             self._after_capacity_deferred(work, route, adapter_result)
             result = self._control_result(
                 work, attempt_number, code=capacity_code, status="retryable",
@@ -613,6 +769,41 @@ class RoutedTranscriptPolishModelWorker:
                 "replayed": False,
             }
         result = adapter_result
+        if accounting_failure is None and self.provider_retry is not None:
+            from .provider_retry import returned_provider_failure_proof
+            proof = returned_provider_failure_proof(invocation, adapter_result)
+            if proof is not None:
+                used = int(provider_retry_state.get("same_profile_retries", 0))
+                excluded = list(provider_retry_state.get("excluded_profile_ids", []))
+                if used < self.provider_retry["max_same_profile_retries"]:
+                    next_profile = profile["profile_version_ref"]
+                    used += 1
+                else:
+                    if profile["id"] not in excluded:
+                        excluded.append(profile["id"])
+                    next_profile = None
+                    used = 0
+                status = self._bounded_failure_status(lease)
+                result = ResultEnvelope(
+                    schema_version=adapter_result.schema_version,
+                    id=adapter_result.id,
+                    created_at=adapter_result.created_at,
+                    work_order_ref=adapter_result.work_order_ref,
+                    invocation_ref=adapter_result.invocation_ref,
+                    status=status,
+                    outputs={}, actual_side_effects=adapter_result.actual_side_effects,
+                    usage_refs=adapter_result.usage_refs,
+                    artifact_refs=adapter_result.artifact_refs,
+                    error=dict(adapter_result.error or {}),
+                    metadata=dict(adapter_result.metadata) | {
+                        "provider_retry_proof": proof,
+                        "provider_retry_state": {
+                            "excluded_profile_ids": excluded,
+                            "retry_profile_version_ref": next_profile,
+                            "same_profile_retries": used,
+                        },
+                    },
+                )
         if accounting_failure is not None:
             result = self._control_result(work, attempt_number, code=accounting_failure, status="failed",
                 invocation_ref=invocation.id, route_ref=route["id"], usage_refs=adapter_result.usage_refs,
@@ -653,7 +844,16 @@ class RoutedTranscriptPolishModelWorker:
                         usage_refs=adapter_result.usage_refs,
                         created_at=adapter_result.created_at,
                     )
+                else:
+                    result = self._successful_result(
+                        work, route, invocation, result, text
+                    )
         try:
+            retry_at = None
+            if (result.status == "retryable" and self.provider_retry is not None
+                    and result.metadata.get("provider_retry_proof") is not None):
+                retry_at = self.clock() + timedelta(
+                    seconds=self.provider_retry["retry_backoff_seconds"])
             completion = self.scheduler.complete(
                 work.id,
                 attempt_number,
@@ -662,7 +862,7 @@ class RoutedTranscriptPolishModelWorker:
                 result,
                 idempotency_key=(
                     f"{self.namespace}-complete:{work.id}:{attempt_number}"
-                ),
+                ), retry_at=retry_at,
             )
         except LeaseExpired:
             # The adapter may finish after its Scheduler lease.  Core correctly

@@ -72,7 +72,11 @@ TRANSCRIPT_CORE_AUTHORITY_MODE = "transcript_core_authority"
 # ADR-0005 / P9d-17c: the same chain for a fetched public-web page, whose
 # citable original is the verified rendering of its exact bytes.
 PUBLIC_WEB_CORE_AUTHORITY_MODE = "public_web_core_authority"
-CITED_CORE_AUTHORITY_MODES = frozenset({TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE})
+REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE = "registered_annual_report_authority"
+CITED_CORE_AUTHORITY_MODES = frozenset({
+    TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE,
+    REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
+})
 # ADR-0007: whether a cited original may carry a number into the Ledger.
 #
 # ``reject_cited_quantitative`` is the rule as it has stood since ADR-0003:
@@ -190,9 +194,21 @@ def _canonical_decimal_text(value: Any) -> str:
     return "0" if formatted in {"", "-0"} else formatted
 _AUTHORITY_PROVENANCE_MODES = frozenset({
     "connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE,
-    PUBLIC_WEB_CORE_AUTHORITY_MODE, "mission_figure_authority",
+    PUBLIC_WEB_CORE_AUTHORITY_MODE, REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
+    "mission_figure_authority",
 })
 PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
+REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF = (
+    "verifier:registered-annual-report-core-authority-source:0.1"
+)
+REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
+    "rules": [
+        "core-statement-filing-issuer", "core-acquired-sec-review",
+        "source-manifest-binding", "source-content-hash", "retrieval-proof",
+        "independent-model-verification",
+    ],
+})
 TRANSCRIPT_SOURCE_VERIFIER_REF = "verifier:transcript-core-authority-source:0.1"
 TRANSCRIPT_SOURCE_VERIFIER_HASH = content_hash({
     "ref": TRANSCRIPT_SOURCE_VERIFIER_REF,
@@ -616,6 +632,8 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (_AUTHORITY_SOURCE_VERIFIER_REF, _AUTHORITY_SOURCE_VERIFIER_HASH),
             (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH),
             (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH),
+            (REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
+             REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH),
             (MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
@@ -1336,11 +1354,15 @@ def build_candidate_evidence(
         # figure taken from a filed document is official_filing evidence.
         expected_source_type = material_wire["source_type"]
     elif verification_mode in CITED_CORE_AUTHORITY_MODES:
-        expected_verifier = (
-            (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH)
-            if verification_mode == TRANSCRIPT_CORE_AUTHORITY_MODE
-            else (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH)
-        )
+        expected_verifier = {
+            TRANSCRIPT_CORE_AUTHORITY_MODE:
+                (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH),
+            PUBLIC_WEB_CORE_AUTHORITY_MODE:
+                (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH),
+            REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE:
+                (REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
+                 REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH),
+        }[verification_mode]
         if (
             material_wire["schema_version"] != "0.2"
             or material_wire.get("provenance_mode") != verification_mode
@@ -1591,6 +1613,10 @@ class CandidateStagingStore:
         # ADR-0005 / P9d-17c: a fetched public-web page cited through the
         # same correction authority is cited evidence too.
         transcript_evidence = evidence_wire["source_type"] in (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web")
+        annual_report_evidence = (
+            verification_mode == REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE
+            and evidence_wire["source_type"] == "official_filing"
+        )
 
         spec_wire: dict[str, Any] | None
         numeric_wire: dict[str, Any] | None
@@ -1600,10 +1626,10 @@ class CandidateStagingStore:
                 raise VerificationRejected(
                     "qualitative candidate cannot carry numeric spec or numeric verification"
                 )
-            if not transcript_evidence:
+            if not transcript_evidence and not annual_report_evidence:
                 raise VerificationRejected(
                     "qualitative candidate requires authenticated transcript evidence "
-                    "or a fetched public-web page with an exact citation binding"
+                    "or a fetched public-web/registered annual-report original"
                 )
             spec_wire = None
             numeric_wire = None
@@ -1961,6 +1987,9 @@ __all__ = [
     "figure_candidate_numerics",
     "TRANSCRIPT_CORE_AUTHORITY_MODE", "TRANSCRIPT_SOURCE_VERIFIER_REF",
     "TRANSCRIPT_SOURCE_VERIFIER_HASH",
+    "REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE",
+    "REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF",
+    "REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH",
     "build_source_verification_material", "build_authority_source_material",
     "validate_source_verification_material",
     "validate_numeric_verification_spec", "validate_verification_bundle",

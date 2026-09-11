@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema:registered-annual-report-draft:0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "answer", "candidate"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "answer": {"type": "string", "minLength": 1},
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["normalized_statement", "metric_or_aspect", "period", "basis", "cited_match_indexes"],
+      "properties": {
+        "normalized_statement": {"type": "string", "minLength": 1},
+        "metric_or_aspect": {"type": "string", "minLength": 1},
+        "period": {"type": "string", "minLength": 1},
+        "basis": {"type": "string", "minLength": 1},
+        "cited_match_indexes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 0}}
+      }
+    }
+  }
+}

@@ -1679,6 +1679,8 @@ class ModelRouter:
         idempotency_key: str,
         decision_kind: str = "initial",
         previous_decision_ref: str | None = None,
+        excluded_profile_ids: Sequence[str] = (),
+        required_profile_version_ref: str | None = None,
         producer_family: str | None = None,
         tier: str | None = None,
         purpose: str | None = None,
@@ -1702,6 +1704,13 @@ class ModelRouter:
         idempotency_key = _string(idempotency_key, "idempotency_key")
         if decision_kind not in _DECISION_KINDS:
             raise ModelRouterValidationError("decision_kind is invalid")
+        excluded_profile_ids = tuple(
+            _string(item, "excluded_profile_ids") for item in excluded_profile_ids
+        )
+        if len(set(excluded_profile_ids)) != len(excluded_profile_ids):
+            raise ModelRouterValidationError("excluded_profile_ids must be unique")
+        required_profile_version_ref = _ref(
+            required_profile_version_ref, "required_profile_version_ref", nullable=True)
         previous_decision_ref = _ref(
             previous_decision_ref, "previous_decision_ref", nullable=True
         )
@@ -1748,6 +1757,10 @@ class ModelRouter:
             "previous_decision_ref": previous_decision_ref,
             "producer_family": producer_family,
         }
+        if excluded_profile_ids:
+            request["excluded_profile_ids"] = list(excluded_profile_ids)
+        if required_profile_version_ref is not None:
+            request["required_profile_version_ref"] = required_profile_version_ref
         if tier is not None:
             # Part of the request identity -- the same work routed under a
             # different tier is a different request -- but deliberately not part
@@ -1854,6 +1867,11 @@ class ModelRouter:
             snapshot: list[dict[str, Any]] = []
             for profile in latest_profiles:
                 reasons = list(global_reasons)
+                if (required_profile_version_ref is not None
+                        and profile["profile_version_ref"] != required_profile_version_ref):
+                    reasons.append("not_exact_provider_retry_profile_version")
+                if profile["id"] in excluded_profile_ids:
+                    reasons.append("excluded_by_provider_retry_history")
                 if profile["profile_version_ref"] in switch_exclusions:
                     reasons.append("already_tried_in_switch_chain")
                 if profile.get("status") == "retired":

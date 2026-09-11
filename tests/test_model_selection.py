@@ -613,6 +613,55 @@ class SetSelectionTests(StateDirectoryCase):
         self.assertIn("service.json#bounded_planner.planner_routing_policy_ref",
                       result["model_configs_repointed"])
 
+    def test_human_intent_selection_preserves_nested_transport_setup(self) -> None:
+        state = self.root / "state" / "dalton-core"
+        state.mkdir(parents=True)
+        self.config_path.unlink()
+        service_path = self.root / "config" / "service.json"
+        service_path.parent.mkdir()
+        transport = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 12,
+            "retry_backoff_seconds": 2,
+        }
+        service = {
+            "model_router_db": str(self.root / "model-router.sqlite"),
+            "control": {"config": {"intent_composer": {
+                "model_router_db": str(self.root / "model-router.sqlite"),
+                "routing_policy_ref": self.policies["cheap"],
+                "credential_slot_refs": ["credential-slot:openai:dalton"],
+                "transport_retry": transport,
+                "timeout_seconds": 180,
+            }}},
+        }
+        service_path.write_text(json.dumps(service), encoding="utf-8")
+        chosen = "profile:zai-glm-5-3-flash"
+        result = set_model_selection(
+            state,
+            purpose="human_intent",
+            mode="explicit",
+            chain=[chosen],
+            now=NOW,
+        )
+        updated = json.loads(service_path.read_text(encoding="utf-8"))
+        intent = updated["control"]["config"]["intent_composer"]
+        self.assertNotEqual(intent["routing_policy_ref"], self.policies["cheap"])
+        self.assertEqual(intent["transport_retry"], transport)
+        self.assertEqual(intent["timeout_seconds"], 180)
+        selected_profile = next(
+            item for item in self.router.latest_profiles() if item["id"] == chosen
+        )
+        self.assertIn(
+            selected_profile["credential_slot_ref"],
+            intent["credential_slot_refs"],
+        )
+        self.assertEqual(result["model_configs_repointed"], [
+            "service.json#control.config.intent_composer.routing_policy_ref"
+        ])
+        binding = purpose_policy_bindings(state)["human_intent"]
+        self.assertEqual(binding["status"], "configured")
+        self.assertEqual(binding["policy_version_ref"], intent["routing_policy_ref"])
+
     def test_registry_covers_every_installed_role_configuration(self) -> None:
         self.assertEqual(set(model_config_names()), {
             "document-extraction-model-config.json",

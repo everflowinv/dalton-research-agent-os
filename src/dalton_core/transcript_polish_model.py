@@ -249,6 +249,7 @@ def build_transcript_polish_model_work_order(
     max_output_tokens: int = 64_000,
     max_cost_usd: float = 10.0,
     max_seconds: int = 600,
+    provider_retry: Mapping[str, Any] | None = None,
 ) -> WorkOrder:
     """Create one model-candidate WorkOrder bound to an exact local probe."""
 
@@ -274,6 +275,9 @@ def build_transcript_polish_model_work_order(
     max_seconds = _positive_int(max_seconds, "max_seconds")
     max_cost_usd = _positive_cost(max_cost_usd)
     probe_hash = content_hash(probe.to_dict())
+    if provider_retry is not None:
+        from .provider_retry import validate_provider_retry
+        provider_retry = validate_provider_retry(provider_retry)
     identity = {
         "model_task_ref": TRANSCRIPT_POLISH_MODEL_REF,
         "model_task_hash": TRANSCRIPT_POLISH_MODEL_HASH,
@@ -281,6 +285,8 @@ def build_transcript_polish_model_work_order(
         "probe_work_order_ref": probe.id,
         "probe_work_order_hash": probe_hash,
         "resolved_source_hash": source["resolved_source_hash"],
+        **({"provider_retry_hash": content_hash(provider_retry)}
+           if provider_retry is not None else {}),
     }
     digest = content_hash(identity)
     input_refs = [probe.id, source["source_manifest_ref"]]
@@ -328,6 +334,8 @@ def build_transcript_polish_model_work_order(
                 "correction_set_version_hash"
             ],
             "resolved_source_hash": source["resolved_source_hash"],
+            **({"provider_retry": provider_retry}
+               if provider_retry is not None else {}),
         },
     )
 

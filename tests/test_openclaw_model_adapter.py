@@ -187,6 +187,7 @@ def success_response(
             },
             "cost": cost or {"available": True, "usd": 0.01},
             "error": None,
+            "dispatchProof": None,
         }
     )
 
@@ -196,6 +197,7 @@ def failure_response(
     *,
     code: str = "BUSY",
     message: str = "broker concurrency limit reached",
+    dispatch_proof: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     core = core_request(request)
     return seal(
@@ -223,6 +225,7 @@ def failure_response(
             },
             "cost": {"available": False, "usd": None},
             "error": {"code": code, "message": message},
+            "dispatchProof": dispatch_proof,
         }
     )
 
@@ -1331,6 +1334,33 @@ process.on("SIGTERM",async()=>{await server.stop();process.exit(0)});
                     request, message=f"host failed for {request['prompt']}"
                 )
             )
+
+    def test_broker_local_dispatch_proof_is_closed_and_not_inferred_from_code(self):
+        proof = {"authority": "openclaw-model-broker",
+                 "state": "definitely_not_sent", "version": "0.1"}
+        (_, proved), broker = self.run_with(
+            lambda request: failure_response(request, dispatch_proof=proof))
+        broker.close()
+        self.assertEqual(proved.metadata["dispatch_proof"], {
+            "authority": "openclaw-model-adapter",
+            "state": "definitely_not_sent", "version": "0.1"})
+        provider_proof = {"authority": "openclaw-model-broker",
+                          "state": "provider_completed_failure", "version": "0.1"}
+        (_, provider_failed), broker = self.run_with(
+            lambda request: failure_response(
+                request, code="RATE_LIMITED", dispatch_proof=provider_proof))
+        broker.close()
+        self.assertEqual(provider_failed.metadata["dispatch_proof"], {
+            "authority": "openclaw-model-adapter",
+            "state": "provider_completed_failure", "version": "0.1"})
+        (_, unproved), broker = self.run_with(failure_response)
+        broker.close()
+        self.assertIsNone(unproved.metadata["dispatch_proof"])
+        with self.assertRaisesRegex(BrokerProtocolError, "dispatchProof"):
+            self.run_with(lambda request: failure_response(
+                request, dispatch_proof={"authority": "client",
+                                         "state": "definitely_not_sent",
+                                         "version": "0.1"}))
 
 
 if __name__ == "__main__":

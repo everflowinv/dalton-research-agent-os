@@ -20,29 +20,30 @@ approval and Discord reactions cannot impersonate that human authority; the
 only autonomous path is a separate immutable policy authorization for the
 closed public SEC read-only scope.
 
-Version 1 is closed to a single SEC public, credential-free, read-only
-``list_filings`` research plan:
+Version 1 keeps the deployed SEC public numeric plans closed to
+``list_filings`` and ``get_company_facts``. Version 2 adds one qualitative
+``search_registered_annual_report`` plan over an exact locally registered
+issuer/accession/source-hash tuple:
 
-- ``source_ref``/``connector_profile_ref``/``operation``/output contract are
-  frozen to the packaged ``connector-profile-template:sec:0.1`` template;
-- the frozen request parameters are exactly ``issuer_cik`` (CIK format), a
-  form from the frozen allowlist and a bounded filing-date window;
-- permissions are frozen to the public read scope, ``auth_mode=none``, the
-  read-only side-effect class and the SEC source verifier output contract;
-- the budget/retry bounds and the single deterministic step are rebuilt from
-  the same constants/template on every read, so caller-injected mutable
+- numeric source/profile/output contracts remain frozen to the packaged SEC
+  connector template; qualitative retrieval binds a separate frozen local
+  registered-source profile and declares no network side effect;
+- the qualitative request freezes an issuer CIK, matching 10-K accession,
+  source SHA-256, query terms and result bound;
+- permissions are frozen to their operation-specific scope and
+  ``auth_mode=none``;
+- budget/retry bounds and deterministic steps are rebuilt from frozen
+  constants on every read, so caller-injected mutable
   content, other connectors, credentials, writes, broadened permissions or
   extra steps fail closed.
 
 This slice creates no capability lease and no auto-answer.  It reuses the
-existing WorkflowRunVersion, WorkOrderLink and Scheduler authorities.  The
-plan contains a closed four-step tree (SEC connector -> authority resolver ->
-verifier -> candidate staging).  Start records the complete tree but enqueues
-only the root connector WorkOrder; downstream nodes remain planned until a
-coordinator observes the exact upstream result and admits them.  Candidate
-staging still never writes Evidence/Claim/Thesis directly; the separate
-Ledger commit boundary decides whether exact deterministic results qualify
-for policy authorization or require human escalation.
+existing WorkflowRunVersion, WorkOrderLink and Scheduler authorities. Numeric
+plans retain the closed four-step tree (SEC connector -> authority resolver ->
+verifier -> candidate staging). The qualitative plan has only a local
+registered-filing retrieval node; model drafting, independent qualitative
+verification and candidate staging are subsequent contracts. Candidate
+staging still never writes Evidence/Claim/Thesis directly.
 """
 
 from __future__ import annotations
@@ -69,12 +70,31 @@ from .research_question_backlog import (
     read_exact_backlog_question_version,
 )
 from .research_context import build_agenda_context_binding
+from .registered_annual_report import (
+    CAPABILITY as REGISTERED_ANNUAL_REPORT_CAPABILITY,
+    DEFAULT_CONTEXT_AFTER_CHARS,
+    DEFAULT_CONTEXT_BEFORE_CHARS,
+    DEFAULT_MAX_QUERY_TERMS,
+    DEFAULT_MAX_RESULTS,
+    DEFAULT_MAX_SOURCE_BYTES,
+    OPERATION as REGISTERED_ANNUAL_REPORT_OPERATION,
+    OUTPUT_CONTRACT_REF as REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF,
+    PERMISSION_SCOPE as REGISTERED_ANNUAL_REPORT_PERMISSION_SCOPE,
+    RUNTIME_PROFILE_REF as REGISTERED_ANNUAL_REPORT_RUNTIME_PROFILE_REF,
+    RegisteredAnnualReportError,
+    RegisteredAnnualReportRegistry,
+    normalize_request as normalize_registered_annual_report_request,
+    resolve_core_registration,
+    validate_retrieval_proof,
+)
 from .store import canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
+REGISTERED_ANNUAL_REPORT_PLAN_SCHEMA_VERSION = "0.2"
 _SCHEMA_PATH = Path(__file__).with_name("research_plan_schema.sql")
 _IDENTITY_SCHEMA = "research-plan-identity-v1"
+_REGISTERED_ANNUAL_REPORT_IDENTITY_SCHEMA = "research-plan-identity-v2"
 
 # Frozen planner identity for the thin closure planner.
 PLANNER_REF = "planner:research-plan-thin:0.1"
@@ -125,6 +145,20 @@ SEC_MAX_SECONDS = 60
 PERMISSION_SCOPE = "public_sec_list_filings"
 COMPANY_FACTS_PERMISSION_SCOPE = "public_sec_company_facts"
 SIDE_EFFECT_CLASS = "read_only_public"
+REGISTERED_ANNUAL_REPORT_PROFILE_REF = (
+    "registered-source-profile:sec-annual-report:0.1"
+)
+REGISTERED_ANNUAL_REPORT_PROFILE_HASH = content_hash({
+    "profile_ref": REGISTERED_ANNUAL_REPORT_PROFILE_REF,
+    "source_ref": SEC_SOURCE_REF,
+    "operation": REGISTERED_ANNUAL_REPORT_OPERATION,
+    "permission_scope": REGISTERED_ANNUAL_REPORT_PERMISSION_SCOPE,
+    "runtime_profile_ref": REGISTERED_ANNUAL_REPORT_RUNTIME_PROFILE_REF,
+    "output_contract_ref": REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF,
+})
+REGISTERED_ANNUAL_REPORT_VERIFIER_REF = (
+    "verifier:registered-annual-report-retrieval:0.1"
+)
 PLAN_AUTO_START_RULE_REF = "research-plan-auto-start:sec-public-list-filings:v1"
 PLAN_COMPANY_FACTS_AUTO_START_RULE_REF = (
     "research-plan-auto-start:sec-public-company-facts:v1"
@@ -617,11 +651,22 @@ def _validate_company_facts_request(value: Any) -> dict[str, Any]:
     }
 
 
+def _validate_registered_annual_report_request(value: Any) -> dict[str, Any]:
+    """Translate the local filing contract's errors into plan validation."""
+
+    try:
+        return normalize_registered_annual_report_request(value)
+    except RegisteredAnnualReportError as exc:
+        raise ResearchPlanValidationError(str(exc)) from exc
+
+
 def _validate_operation_request(operation: str, value: Any) -> dict[str, Any]:
     if operation == SEC_OPERATION:
         return _validate_sec_request(value)
     if operation == SEC_COMPANY_FACTS_OPERATION:
         return _validate_company_facts_request(value)
+    if operation == REGISTERED_ANNUAL_REPORT_OPERATION:
+        return _validate_registered_annual_report_request(value)
     raise ResearchPlanValidationError("SEC research operation is not approved")
 
 
@@ -630,6 +675,8 @@ def _operation_permission_scope(operation: str) -> str:
         return PERMISSION_SCOPE
     if operation == SEC_COMPANY_FACTS_OPERATION:
         return COMPANY_FACTS_PERMISSION_SCOPE
+    if operation == REGISTERED_ANNUAL_REPORT_OPERATION:
+        return REGISTERED_ANNUAL_REPORT_PERMISSION_SCOPE
     raise ResearchPlanValidationError("SEC research operation is not approved")
 
 
@@ -791,6 +838,49 @@ _DOWNSTREAM_STEP_SPECS: tuple[dict[str, Any], ...] = (
     },
 )
 
+_REGISTERED_ANNUAL_REPORT_STEP_SPEC = {
+    "stage": "registered_filing_retrieval",
+    "operation": REGISTERED_ANNUAL_REPORT_OPERATION,
+    "requested_capabilities": [REGISTERED_ANNUAL_REPORT_CAPABILITY],
+    "runtime_profile_ref": REGISTERED_ANNUAL_REPORT_RUNTIME_PROFILE_REF,
+    "declared_side_effects": [],
+    "output_contract_ref": REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF,
+}
+
+_REGISTERED_ANNUAL_REPORT_DOWNSTREAM_STEP_SPECS = (
+    {
+        "stage": "qualitative_model_draft",
+        "operation": "draft_registered_annual_report_answer",
+        "requested_capabilities": ["capability:dalton:model:qualitative-research"],
+        "runtime_profile_ref": "runtime:dalton-core:qualitative-model-worker:0.1",
+        "declared_side_effects": [],
+        "output_contract_ref": "schema:registered-annual-report-draft:0.1",
+    },
+    {
+        "stage": "independent_qualitative_verifier",
+        "operation": "verify_registered_annual_report_draft",
+        "requested_capabilities": ["capability:dalton:model:qualitative-verifier"],
+        "runtime_profile_ref": "runtime:dalton-core:qualitative-model-worker:0.1",
+        "declared_side_effects": [],
+        "output_contract_ref": "schema:registered-annual-report-verification:0.1",
+    },
+    {
+        "stage": "qualitative_candidate_staging",
+        "operation": "stage_verified_qualitative_candidate",
+        "requested_capabilities": [STAGING_CAPABILITY],
+        "runtime_profile_ref": STAGING_RUNTIME_PROFILE_REF,
+        "declared_side_effects": [],
+        "output_contract_ref": "schema:candidate-claim:0.1",
+    },
+)
+
+_REGISTERED_ANNUAL_REPORT_BUDGET = {
+    "max_attempts": 1,
+    "max_pages": 1,
+    "max_response_bytes": 512 * 1024,
+    "max_seconds": 30,
+}
+
 
 def sec_capability_for_operation(operation: str) -> str:
     """Which permission slip one SEC operation runs under.
@@ -809,6 +899,11 @@ def sec_capability_for_operation(operation: str) -> str:
 
 
 def _step_specs(operation: str) -> tuple[dict[str, Any], ...]:
+    if operation == REGISTERED_ANNUAL_REPORT_OPERATION:
+        return (
+            _REGISTERED_ANNUAL_REPORT_STEP_SPEC,
+            *_REGISTERED_ANNUAL_REPORT_DOWNSTREAM_STEP_SPECS,
+        )
     operation_wire = _sec_operation(_sec_template(), operation)
     return (
         {
@@ -856,7 +951,11 @@ def build_research_plan_step(
         "parameters": parameters,
     })[:32]
     step = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": (
+            REGISTERED_ANNUAL_REPORT_PLAN_SCHEMA_VERSION
+            if operation == REGISTERED_ANNUAL_REPORT_OPERATION
+            else SCHEMA_VERSION
+        ),
         "id": step_id,
         "ordinal": ordinal,
         "stage": spec["stage"],
@@ -886,13 +985,19 @@ def build_research_plan_steps(
     steps: list[dict[str, Any]] = []
     prior: str | None = None
     for ordinal in range(1, len(_step_specs(operation)) + 1):
+        step_max_attempts = max_attempts
+        if operation == REGISTERED_ANNUAL_REPORT_OPERATION and ordinal in (2, 3):
+            model_stage = "draft" if ordinal == 2 else "verifier"
+            step_max_attempts = _validate_registered_annual_report_request(
+                sec_request
+            )["model_execution"][model_stage]["max_attempts"]
         step = build_research_plan_step(
             plan_version_ref=plan_version_ref,
             sec_request=sec_request,
             operation=operation,
             ordinal=ordinal,
             prior_step_ref=prior,
-            max_attempts=max_attempts,
+            max_attempts=step_max_attempts,
         )
         steps.append(step)
         prior = step["id"]
@@ -946,6 +1051,14 @@ def plan_identity(
     elif operation == SEC_COMPANY_FACTS_OPERATION:
         base["operation"] = operation
         base["company_facts_request"] = _validate_company_facts_request(sec_request)
+    elif operation == REGISTERED_ANNUAL_REPORT_OPERATION:
+        # Qualitative retrieval has a new identity schema.  The deployed
+        # numeric identity bytes above therefore remain exactly unchanged.
+        base["identity_schema"] = _REGISTERED_ANNUAL_REPORT_IDENTITY_SCHEMA
+        base["operation"] = operation
+        base["registered_annual_report_request"] = (
+            _validate_registered_annual_report_request(sec_request)
+        )
     else:
         raise ResearchPlanValidationError("SEC research operation is not approved")
     return base
@@ -1140,8 +1253,49 @@ def _revalidate_execution_scope(
         raise ResearchPlanConflict(
             "plan execution scope has an invalid closed shape"
         )
-    template = _sec_template()
     operation_name = scope.get("operation")
+    if operation_name == REGISTERED_ANNUAL_REPORT_OPERATION:
+        parameters = _validate_registered_annual_report_request(scope["parameters"])
+        expected_constants = {
+            "source_ref": SEC_SOURCE_REF,
+            "connector_profile_ref": REGISTERED_ANNUAL_REPORT_PROFILE_REF,
+            "connector_profile_hash": REGISTERED_ANNUAL_REPORT_PROFILE_HASH,
+            "permission_scope": REGISTERED_ANNUAL_REPORT_PERMISSION_SCOPE,
+            "auth_mode": "none",
+            "side_effect_class": SIDE_EFFECT_CLASS,
+            "declared_side_effects": [],
+            "verifier_ref": REGISTERED_ANNUAL_REPORT_VERIFIER_REF,
+            "output_contract_ref": REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF,
+            "output_contract_hash": content_hash({
+                "output_contract_ref": REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF,
+            }),
+        }
+        for field, expected in expected_constants.items():
+            if scope[field] != expected:
+                raise ResearchPlanConflict(
+                    f"registered annual-report plan {field} drifted"
+                )
+        if canonical_json(scope["budget"]) != canonical_json(
+            _REGISTERED_ANNUAL_REPORT_BUDGET
+        ):
+            raise ResearchPlanConflict(
+                "registered annual-report plan budget drifted"
+            )
+        expected_steps = build_research_plan_steps(
+            plan_version_ref=plan_version_ref,
+            sec_request=parameters,
+            max_attempts=1,
+            operation=operation_name,
+        )
+        steps = scope["steps"]
+        if not isinstance(steps, list) or len(steps) != 4:
+            raise ResearchPlanConflict(
+                "registered annual-report plan must define the four-node qualitative tree"
+            )
+        for step, expected in zip(steps, expected_steps, strict=True):
+            _revalidate_plan_step(step, expected=expected)
+        return
+    template = _sec_template()
     if operation_name not in {SEC_OPERATION, SEC_COMPANY_FACTS_OPERATION}:
         raise ResearchPlanConflict("plan operation is outside the approved SEC reads")
     operation = _sec_operation(template, operation_name)
@@ -1255,7 +1409,7 @@ def read_exact_research_plan_version(cursor: Any, version_ref: str) -> dict[str,
     )
     if wire["content_hash"] != row["content_hash"]:
         raise ResearchPlanConflict("ResearchPlanVersion content_hash column drifted")
-    if set(wire) != _PLAN_FIELDS or wire.get("schema_version") != SCHEMA_VERSION:
+    if set(wire) != _PLAN_FIELDS:
         raise ResearchPlanConflict("ResearchPlanVersion has an invalid closed shape")
     if (
         wire["agenda_binding"].get("decision_ref") != row["decision_ref"]
@@ -1319,6 +1473,13 @@ def read_exact_research_plan_version(cursor: Any, version_ref: str) -> dict[str,
         )
     scope = wire["execution_scope"]
     operation_name = scope.get("operation")
+    expected_schema_version = (
+        REGISTERED_ANNUAL_REPORT_PLAN_SCHEMA_VERSION
+        if operation_name == REGISTERED_ANNUAL_REPORT_OPERATION
+        else SCHEMA_VERSION
+    )
+    if wire.get("schema_version") != expected_schema_version:
+        raise ResearchPlanConflict("ResearchPlanVersion schema version drifted")
     parameters = _validate_operation_request(operation_name, scope["parameters"])
     identity = plan_identity(
         question_ref=wire["question_ref"],
@@ -1763,11 +1924,14 @@ def _read_plan_event_history(
 class ResearchPlanAuthority:
     """ResearchPlanVersion authority layered on a ``DaltonStore``."""
 
-    def __init__(self, store: Any):
+    def __init__(
+        self, store: Any, *, annual_report_registry: RegisteredAnnualReportRegistry | None = None
+    ):
         if not hasattr(store, "connection") or not hasattr(store, "_transaction"):
             raise TypeError("store must be a DaltonStore-like authority")
         self.store = store
         self.connection: sqlite3.Connection = store.connection
+        self.annual_report_registry = annual_report_registry
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     @staticmethod
@@ -1862,6 +2026,7 @@ class ResearchPlanAuthority:
         actor_ref: str,
         idempotency_key: str | None = None,
         company_facts_request: Mapping[str, Any] | None = None,
+        registered_annual_report_request: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record one immutable plan from an exact selected question/decision.
 
@@ -1878,7 +2043,14 @@ class ResearchPlanAuthority:
         question_ref = _text(question_ref, "question_ref")
         question_version_ref = _text(question_version_ref, "question_version_ref")
         decision_ref = _text(decision_ref, "decision_ref")
-        if company_facts_request is None:
+        if (
+            company_facts_request is not None
+            and registered_annual_report_request is not None
+        ):
+            raise ResearchPlanValidationError(
+                "a plan cannot combine numeric and qualitative SEC operations"
+            )
+        if company_facts_request is None and registered_annual_report_request is None:
             operation_name = SEC_OPERATION
             sec_request = _validate_sec_request({
                 "issuer_cik": issuer_cik,
@@ -1887,7 +2059,7 @@ class ResearchPlanAuthority:
                 "filing_date_to": filing_date_to,
             })
             request_scope = {"sec_request": sec_request}
-        else:
+        elif company_facts_request is not None:
             operation_name = SEC_COMPANY_FACTS_OPERATION
             sec_request = _validate_company_facts_request(company_facts_request)
             if sec_request["cik"] != _text(issuer_cik, "issuer_cik").zfill(10):
@@ -1901,6 +2073,33 @@ class ResearchPlanAuthority:
             request_scope = {
                 "operation": operation_name,
                 "company_facts_request": sec_request,
+            }
+        else:
+            operation_name = REGISTERED_ANNUAL_REPORT_OPERATION
+            sec_request = _validate_registered_annual_report_request(
+                registered_annual_report_request
+            )
+            if self.annual_report_registry is None:
+                raise ResearchPlanValidationError(
+                    "registered annual report plans require acquired source authority"
+                )
+            try:
+                self.annual_report_registry.verify_request(sec_request)
+            except RegisteredAnnualReportError as exc:
+                raise ResearchPlanValidationError(str(exc)) from exc
+            if sec_request["issuer_cik"] != _text(
+                issuer_cik, "issuer_cik"
+            ).zfill(10):
+                raise ResearchPlanValidationError(
+                    "issuer_cik must match registered annual report request"
+                )
+            if _text(form, "form") != "10-K":
+                raise ResearchPlanValidationError(
+                    "registered annual report plan form must be 10-K"
+                )
+            request_scope = {
+                "operation": operation_name,
+                "registered_annual_report_request": sec_request,
             }
         actor_ref = _text(actor_ref, "actor_ref")
         request = {
@@ -1955,6 +2154,18 @@ class ResearchPlanAuthority:
                 question_version=head_wire,
                 binding=agenda_binding,
             )
+            if operation_name == REGISTERED_ANNUAL_REPORT_OPERATION:
+                if sec_request["company_ref"] != head_wire["company_ref"]:
+                    raise ResearchPlanConflict(
+                        "registered annual report company differs from the selected question"
+                    )
+                # The caller supplies an exact pointer, not registration
+                # authority.  Resolve the pointer against existing Core
+                # statement/acquisition rows before a plan identity exists.
+                try:
+                    resolve_core_registration(self.connection, sec_request)
+                except RegisteredAnnualReportError as exc:
+                    raise ResearchPlanConflict(str(exc)) from exc
             plan_ref = plan_version_ref_for(
                 question_ref=question_ref,
                 question_version_ref=question_version_ref,
@@ -2002,31 +2213,60 @@ class ResearchPlanAuthority:
                     "only a selected question can produce a new plan"
                 )
             context = _recompute_context_binding(cur, cycle)
-            template = _sec_template()
-            operation = _sec_operation(template, operation_name)
-            scope = {
-                "source_ref": template["source_identity"]["source_ref"],
-                "connector_profile_ref": template["id"],
-                "connector_profile_hash": template["content_hash"],
-                "operation": operation_name,
-                "parameters": sec_request,
-                "permission_scope": _operation_permission_scope(operation_name),
-                "auth_mode": template["auth_boundary"]["mode"],
-                "side_effect_class": SIDE_EFFECT_CLASS,
-                "declared_side_effects": ["read:public-http"],
-                "verifier_ref": SEC_VERIFIER_REF,
-                "output_contract_ref": operation["output_schema_ref"],
-                "output_contract_hash": operation["output_schema_hash"],
-                "budget": _execution_budget(template, operation_name),
-                "steps": build_research_plan_steps(
-                    plan_version_ref=plan_ref,
-                    sec_request=sec_request,
-                    max_attempts=SEC_MAX_ATTEMPTS,
-                    operation=operation_name,
-                ),
-            }
+            if operation_name == REGISTERED_ANNUAL_REPORT_OPERATION:
+                scope = {
+                    "source_ref": SEC_SOURCE_REF,
+                    "connector_profile_ref": REGISTERED_ANNUAL_REPORT_PROFILE_REF,
+                    "connector_profile_hash": REGISTERED_ANNUAL_REPORT_PROFILE_HASH,
+                    "operation": operation_name,
+                    "parameters": sec_request,
+                    "permission_scope": REGISTERED_ANNUAL_REPORT_PERMISSION_SCOPE,
+                    "auth_mode": "none",
+                    "side_effect_class": SIDE_EFFECT_CLASS,
+                    "declared_side_effects": [],
+                    "verifier_ref": REGISTERED_ANNUAL_REPORT_VERIFIER_REF,
+                    "output_contract_ref": REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF,
+                    "output_contract_hash": content_hash({
+                        "output_contract_ref": (
+                            REGISTERED_ANNUAL_REPORT_OUTPUT_CONTRACT_REF
+                        ),
+                    }),
+                    "budget": dict(_REGISTERED_ANNUAL_REPORT_BUDGET),
+                    "steps": build_research_plan_steps(
+                        plan_version_ref=plan_ref,
+                        sec_request=sec_request,
+                        max_attempts=1,
+                        operation=operation_name,
+                    ),
+                }
+                plan_schema_version = REGISTERED_ANNUAL_REPORT_PLAN_SCHEMA_VERSION
+            else:
+                template = _sec_template()
+                operation = _sec_operation(template, operation_name)
+                scope = {
+                    "source_ref": template["source_identity"]["source_ref"],
+                    "connector_profile_ref": template["id"],
+                    "connector_profile_hash": template["content_hash"],
+                    "operation": operation_name,
+                    "parameters": sec_request,
+                    "permission_scope": _operation_permission_scope(operation_name),
+                    "auth_mode": template["auth_boundary"]["mode"],
+                    "side_effect_class": SIDE_EFFECT_CLASS,
+                    "declared_side_effects": ["read:public-http"],
+                    "verifier_ref": SEC_VERIFIER_REF,
+                    "output_contract_ref": operation["output_schema_ref"],
+                    "output_contract_hash": operation["output_schema_hash"],
+                    "budget": _execution_budget(template, operation_name),
+                    "steps": build_research_plan_steps(
+                        plan_version_ref=plan_ref,
+                        sec_request=sec_request,
+                        max_attempts=SEC_MAX_ATTEMPTS,
+                        operation=operation_name,
+                    ),
+                }
+                plan_schema_version = SCHEMA_VERSION
             plan_wire = self._record({
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": plan_schema_version,
                 "id": plan_ref,
                 "created_at": created_at,
                 "planner_ref": PLANNER_REF,
@@ -2127,6 +2367,89 @@ class ResearchPlanAuthority:
                 "filed_from": filed_from,
                 "filed_to": filed_to,
             },
+        )
+
+    def create_registered_annual_report_plan(
+        self,
+        *,
+        question_ref: str,
+        question_version_ref: str,
+        decision_ref: str,
+        mission_version_ref: str,
+        company_ref: str,
+        review_ref: str,
+        issuer_cik: str,
+        accession: str,
+        query_terms: Sequence[str],
+        actor_ref: str,
+        document_read_proof_ref: str | None = None,
+        max_query_terms: int = DEFAULT_MAX_QUERY_TERMS,
+        max_results: int = DEFAULT_MAX_RESULTS,
+        max_source_bytes: int = DEFAULT_MAX_SOURCE_BYTES,
+        context_before_chars: int = DEFAULT_CONTEXT_BEFORE_CHARS,
+        context_after_chars: int = DEFAULT_CONTEXT_AFTER_CHARS,
+        draft_model_execution: Mapping[str, Any] | None = None,
+        verifier_model_execution: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a human-gated qualitative search of one registered 10-K."""
+
+        if self.annual_report_registry is None:
+            raise ResearchPlanValidationError(
+                "registered annual report plans require acquired source authority"
+            )
+        limits = {
+            "max_query_terms": max_query_terms,
+            "max_results": max_results,
+            "max_source_bytes": max_source_bytes,
+            "context_before_chars": context_before_chars,
+            "context_after_chars": context_after_chars,
+        }
+        model_execution = {
+            "draft": dict(draft_model_execution or {
+                "routing_policy_ref": "routing-policy:qualitative-research:development",
+                "credential_slot_refs": ["credential-slot:model:development"],
+                "max_input_tokens": 32_000, "max_output_tokens": 4_000,
+                "max_cost_usd": 1.0, "max_seconds": 120,
+                "max_attempts": 1,
+                "provider_retry": None,
+            }),
+            "verifier": dict(verifier_model_execution or {
+                "routing_policy_ref": "routing-policy:qualitative-verifier:development",
+                "credential_slot_refs": ["credential-slot:model-verifier:development"],
+                "max_input_tokens": 48_000, "max_output_tokens": 4_000,
+                "max_cost_usd": 1.0, "max_seconds": 120,
+                "max_attempts": 1,
+                "provider_retry": None,
+            }),
+        }
+        try:
+            registered_request = self.annual_report_registry.bind_request(
+                mission_version_ref=mission_version_ref,
+                company_ref=company_ref,
+                review_ref=review_ref,
+                issuer_cik=issuer_cik,
+                accession=accession,
+                document_read_proof_ref=document_read_proof_ref,
+                query_terms=list(query_terms),
+                limits=limits,
+                model_execution=model_execution,
+            )
+        except RegisteredAnnualReportError as exc:
+            raise ResearchPlanValidationError(str(exc)) from exc
+
+        return self.create_plan(
+            question_ref=question_ref,
+            question_version_ref=question_version_ref,
+            decision_ref=decision_ref,
+            issuer_cik=issuer_cik,
+            form="10-K",
+            # These legacy arguments are outside this operation's identity.
+            filing_date_from="1995-01-01",
+            filing_date_to="1995-01-01",
+            actor_ref=actor_ref,
+            idempotency_key=idempotency_key,
+            registered_annual_report_request=registered_request,
         )
 
     def approve_plan(
@@ -2450,7 +2773,7 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
     work_orders: list[dict[str, Any]] = []
     prior_work_ref: str | None = None
     for step in steps:
-        if step["stage"] == "connector":
+        if step["stage"] in {"connector", "registered_filing_retrieval"}:
             request = step["parameters"]
             if step["operation"] == SEC_OPERATION:
                 question = (
@@ -2466,6 +2789,13 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
                     f"{request['form']}, filed in "
                     f"{request['filed_from']}..{request['filed_to']}"
                 )
+            elif step["operation"] == REGISTERED_ANNUAL_REPORT_OPERATION:
+                question = (
+                    "Search registered SEC annual report for CIK "
+                    f"{request['issuer_cik']}, accession {request['accession']}, "
+                    f"source SHA-256 {request['source_content_hash']}, terms "
+                    f"{','.join(request['query_terms'])}"
+                )
             else:
                 raise ResearchPlanConflict(
                     "connector WorkOrder operation is outside the approved SEC reads"
@@ -2475,6 +2805,16 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
                 f"Research plan {plan_wire['id']} stage {step['ordinal']}: "
                 f"{step['operation']}"
             )
+        stage_model_config = None
+        if plan_wire["execution_scope"]["operation"] == REGISTERED_ANNUAL_REPORT_OPERATION:
+            if step["stage"] == "qualitative_model_draft":
+                stage_model_config = plan_wire["execution_scope"]["parameters"][
+                    "model_execution"
+                ]["draft"]
+            elif step["stage"] == "independent_qualitative_verifier":
+                stage_model_config = plan_wire["execution_scope"]["parameters"][
+                    "model_execution"
+                ]["verifier"]
         input_refs = [
             plan_wire["question_version_ref"],
             plan_wire["agenda_binding"]["decision_ref"],
@@ -2492,10 +2832,25 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
             "question": question,
             "requested_capabilities": list(step["requested_capabilities"]),
             "runtime_profile_ref": step["runtime_profile_ref"],
-            "budget": {
-                **dict(plan_wire["execution_scope"]["budget"]),
-                "step_max_attempts": step["max_attempts"],
-            },
+            "budget": (
+                {
+                    "max_attempts": stage_model_config["max_attempts"],
+                    "max_input_tokens": stage_model_config["max_input_tokens"],
+                    "max_output_tokens": stage_model_config["max_output_tokens"],
+                    "max_total_tokens": (
+                        stage_model_config["max_input_tokens"]
+                        + stage_model_config["max_output_tokens"]
+                    ),
+                    "max_cost_usd": stage_model_config["max_cost_usd"],
+                    "max_seconds": stage_model_config["max_seconds"],
+                    "step_max_attempts": step["max_attempts"],
+                }
+                if stage_model_config is not None
+                else {
+                    **dict(plan_wire["execution_scope"]["budget"]),
+                    "step_max_attempts": step["max_attempts"],
+                }
+            ),
             "idempotency_key": f"research-plan-work:{plan_wire['id']}:{step['ordinal']}",
             "declared_side_effects": list(step["declared_side_effects"]),
             "status": "ready",
@@ -2510,6 +2865,15 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "operation": step["operation"],
                 "permission_scope": plan_wire["execution_scope"]["permission_scope"],
                 "upstream_work_order_ref": prior_work_ref,
+                **({
+                    "routing_policy_ref": stage_model_config["routing_policy_ref"],
+                    "credential_slot_refs": list(stage_model_config["credential_slot_refs"]),
+                    "provider_retry": (
+                        None
+                        if stage_model_config["provider_retry"] is None
+                        else dict(stage_model_config["provider_retry"])
+                    ),
+                } if stage_model_config is not None else {}),
             },
         }
         from .contracts import WorkOrder
@@ -2520,6 +2884,183 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
     return work_orders
 
 
+def _formal_result_from_cursor(cursor: sqlite3.Cursor, work_order_ref: str) -> dict[str, Any] | None:
+    row = cursor.execute(
+        "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+        (work_order_ref,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        envelope = json.loads(row["result_envelope_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ResearchPlanConflict("Scheduler formal result is not canonical JSON") from exc
+    if (row["result_envelope_json"] != canonical_json(envelope)
+            or row["result_envelope_hash"] != content_hash(envelope)):
+        raise ResearchPlanConflict("Scheduler formal ResultEnvelope hash drifted")
+    return {**dict(row), "result_envelope": envelope}
+
+
+def _resolve_qualitative_child_work_order(
+    plan_wire: Mapping[str, Any], blueprint: Mapping[str, Any],
+    upstream_work: Mapping[str, Any], upstream_formal: Mapping[str, Any],
+    *, question: str,
+) -> dict[str, Any]:
+    """Bind a child to exact formal upstream output before admission."""
+
+    from .annual_report_qualitative import (
+        draft_prompt, validate_model_proof, verifier_prompt,
+    )
+    from .contracts import WorkOrder
+
+    stage = blueprint["metadata"]["stage"]
+    request = plan_wire["execution_scope"]["parameters"]
+    upstream_envelope = upstream_formal["result_envelope"]
+    if upstream_formal["terminal_state"] != "succeeded":
+        raise ResearchPlanConflict("qualitative child requires succeeded upstream")
+    metadata = dict(blueprint["metadata"])
+    input_refs = list(blueprint["input_refs"])
+    if stage == "qualitative_model_draft":
+        proof = validate_retrieval_proof(
+            upstream_envelope["outputs"], expected_request=request
+        )
+        prompt = draft_prompt(question=question, retrieval_proof=proof)
+        context_hash = content_hash(proof["matches"])
+        binding = {
+            "prompt_hash": content_hash(prompt),
+            "retrieval_proof_ref": proof["id"],
+            "retrieval_proof_hash": proof["content_hash"],
+            "source_content_hash": request["source_content_hash"],
+            "context_hash": context_hash,
+            "routing_policy_ref": metadata["routing_policy_ref"],
+            "credential_slot_refs": metadata["credential_slot_refs"],
+            "provider_retry": metadata["provider_retry"],
+        }
+        metadata.update({
+            "question": question,
+            "prompt_hash": content_hash(prompt),
+            "model_request_binding_hash": content_hash(binding),
+            "retrieval_proof": proof,
+            "retrieval_match_count": len(proof["matches"]),
+            "source_content_hash": request["source_content_hash"],
+            "context_hash": context_hash,
+            "upstream_result_ref": upstream_envelope["id"],
+            "upstream_result_hash": upstream_formal["result_envelope_hash"],
+        })
+        input_refs.extend([proof["id"], upstream_envelope["id"]])
+    elif stage == "independent_qualitative_verifier":
+        draft_proof = validate_model_proof(
+            upstream_envelope["outputs"], stage="qualitative_model_draft",
+            work=upstream_work,
+        )
+        proof = upstream_work["metadata"]["retrieval_proof"]
+        producer = {
+            "route_decision_ref": draft_proof["route_decision_ref"],
+            "model_invocation_ref": draft_proof["model_invocation_ref"],
+            "model_family": draft_proof["model_family"],
+            "request_binding_hash": draft_proof["request_binding_hash"],
+        }
+        prompt = verifier_prompt(
+            question=question, retrieval_proof=proof,
+            draft=draft_proof["output"], producer_proof=producer,
+        )
+        binding = {
+            "prompt_hash": content_hash(prompt), "draft_hash": draft_proof["output_hash"],
+            "retrieval_proof_hash": proof["content_hash"],
+            "source_content_hash": request["source_content_hash"],
+            "context_hash": upstream_work["metadata"]["context_hash"],
+            "producer_route_decision_ref": draft_proof["route_decision_ref"],
+            "routing_policy_ref": metadata["routing_policy_ref"],
+            "credential_slot_refs": metadata["credential_slot_refs"],
+            "provider_retry": metadata["provider_retry"],
+        }
+        metadata.update({
+            "question": question,
+            "prompt_hash": content_hash(prompt),
+            "model_request_binding_hash": content_hash(binding),
+            "retrieval_proof": proof,
+            "retrieval_match_count": len(proof["matches"]),
+            "draft": draft_proof["output"], "draft_proof": draft_proof,
+            "producer_model_family": draft_proof["model_family"],
+            "producer_route_decision_ref": draft_proof["route_decision_ref"],
+            "source_content_hash": request["source_content_hash"],
+            "context_hash": upstream_work["metadata"]["context_hash"],
+            "upstream_result_ref": upstream_envelope["id"],
+            "upstream_result_hash": upstream_formal["result_envelope_hash"],
+        })
+        input_refs.extend([draft_proof["id"], proof["id"], upstream_envelope["id"]])
+    elif stage == "qualitative_candidate_staging":
+        verifier_proof = validate_model_proof(
+            upstream_envelope["outputs"], stage="independent_qualitative_verifier",
+            work=upstream_work,
+        )
+        proof = upstream_work["metadata"]["retrieval_proof"]
+        draft_proof = upstream_work["metadata"]["draft_proof"]
+        request_body = {
+            "question": question, "retrieval_proof_hash": proof["content_hash"],
+            "draft_proof_hash": draft_proof["content_hash"],
+            "verifier_proof_hash": verifier_proof["content_hash"],
+            "producer_route_decision_ref": draft_proof["route_decision_ref"],
+            "verifier_route_decision_ref": verifier_proof["route_decision_ref"],
+            "source_content_hash": request["source_content_hash"],
+            "context_hash": upstream_work["metadata"]["context_hash"],
+        }
+        prompt = canonical_json({
+            "task": "Stage the independently verified qualitative candidate as draft-only Evidence/Claim candidates.",
+            **request_body,
+        })
+        metadata.update({
+            "question": question,
+            "prompt_hash": content_hash(prompt),
+            "model_request_binding_hash": content_hash(request_body),
+            "retrieval_proof": proof, "draft_proof": draft_proof,
+            "verifier_proof": verifier_proof,
+            "source_content_hash": request["source_content_hash"],
+            "context_hash": upstream_work["metadata"]["context_hash"],
+            "producer_route_decision_ref": draft_proof["route_decision_ref"],
+            "verifier_route_decision_ref": verifier_proof["route_decision_ref"],
+            "upstream_result_ref": upstream_envelope["id"],
+            "upstream_result_hash": upstream_formal["result_envelope_hash"],
+        })
+        input_refs.extend([
+            verifier_proof["id"], draft_proof["id"], proof["id"],
+            upstream_envelope["id"],
+        ])
+    else:
+        raise ResearchPlanConflict("unsupported qualitative child stage")
+    return WorkOrder.from_dict({
+        **dict(blueprint), "question": prompt,
+        "input_refs": list(dict.fromkeys(input_refs)), "metadata": metadata,
+    }).to_dict()
+
+
+def _resolved_plan_work_orders(
+    plan_wire: Mapping[str, Any], cursor: sqlite3.Cursor
+) -> list[dict[str, Any]]:
+    """Resolve admitted qualitative children from exact upstream formals."""
+
+    blueprints = _plan_work_orders(plan_wire)
+    if plan_wire["execution_scope"]["operation"] != REGISTERED_ANNUAL_REPORT_OPERATION:
+        return blueprints
+    question_wire = read_exact_backlog_question_version(
+        cursor, plan_wire["question_version_ref"]
+    )
+    if question_wire["content_hash"] != plan_wire["question_version_hash"]:
+        raise ResearchPlanConflict("qualitative prompt question version drifted")
+    resolved = [blueprints[0]]
+    for blueprint in blueprints[1:]:
+        upstream = resolved[-1]
+        formal = _formal_result_from_cursor(cursor, upstream["id"])
+        if formal is None or formal["terminal_state"] != "succeeded":
+            resolved.extend(blueprints[len(resolved):])
+            break
+        resolved.append(_resolve_qualitative_child_work_order(
+            plan_wire, blueprint, upstream, formal,
+            question=question_wire["question"],
+        ))
+    return resolved
+
+
 def _plan_link_specs(
     plan_wire: Mapping[str, Any], work_orders: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -2528,7 +3069,10 @@ def _plan_link_specs(
     relations = ("decomposed_from", "verifies", "follows_up")
     specs: list[dict[str, Any]] = []
     for index, (parent, child, relation) in enumerate(
-        zip(work_orders[:-1], work_orders[1:], relations, strict=True), start=1
+        zip(
+            work_orders[:-1], work_orders[1:],
+            relations[:max(0, len(work_orders) - 1)], strict=True,
+        ), start=1
     ):
         specs.append({
             "link_id": "work-order-link:research-plan:" + content_hash({
@@ -2552,7 +3096,7 @@ def _read_exact_workflow_tree(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Recompute workflow, WorkOrder and link authority for a started plan."""
 
-    work_orders = _plan_work_orders(plan_wire)
+    work_orders = _resolved_plan_work_orders(plan_wire, cursor)
     root = work_orders[0]
     if (
         root["id"] != start_wire["root_work_order_ref"]
@@ -3120,6 +3664,9 @@ __all__ = [
     "SEC_ALLOWED_FORMS",
     "SEC_OPERATION",
     "SEC_COMPANY_FACTS_OPERATION",
+    "REGISTERED_ANNUAL_REPORT_OPERATION",
+    "REGISTERED_ANNUAL_REPORT_PLAN_SCHEMA_VERSION",
+    "REGISTERED_ANNUAL_REPORT_PERMISSION_SCOPE",
     "PERMISSION_SCOPE",
     "COMPANY_FACTS_PERMISSION_SCOPE",
     "PLAN_AUTO_START_RULE_REF",

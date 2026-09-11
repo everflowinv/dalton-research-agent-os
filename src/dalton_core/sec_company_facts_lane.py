@@ -296,6 +296,12 @@ class SecCompanyFactsLane:
         spool_dir: str | Path | None = None,
         user_agent: str = DEFAULT_USER_AGENT,
         adapter: Any | None = None,
+        annual_report_manifest_reader: Callable[[str, str], Mapping[str, Any]] | None = None,
+        annual_report_model_router: Any | None = None,
+        annual_report_draft_adapter: Any | None = None,
+        annual_report_verifier_adapter: Any | None = None,
+        annual_report_draft_model_execution: Mapping[str, Any] | None = None,
+        annual_report_verifier_model_execution: Mapping[str, Any] | None = None,
         clock: MutableClock | None = None,
     ) -> None:
         if not getattr(governance, "approved", False):
@@ -305,6 +311,22 @@ class SecCompanyFactsLane:
             )
         if not issuers:
             raise LanePreconditionError("at least one issuer is required")
+        annual_runtime = (
+            annual_report_manifest_reader,
+            annual_report_model_router,
+            annual_report_draft_adapter,
+            annual_report_verifier_adapter,
+            annual_report_draft_model_execution,
+            annual_report_verifier_model_execution,
+        )
+        if any(item is not None for item in annual_runtime) and not all(
+            item is not None for item in annual_runtime
+        ):
+            raise LanePreconditionError(
+                "registered annual-report execution requires manifest reader, "
+                "router, both adapters and both model configurations"
+            )
+        self._annual_runtime_enabled = all(item is not None for item in annual_runtime)
         self.governance = governance
         self.issuers = tuple(issuers)
         self.state_dir = Path(state_dir)
@@ -320,17 +342,68 @@ class SecCompanyFactsLane:
             self.observability = ObservabilityStore(self.core)
             self.agenda = AgendaStore(self.core)
             self.backlog = ResearchQuestionBacklog(self.core)
-            self.plans = ResearchPlanAuthority(self.core)
             # Hard executor constraint: WorkOrders share the Core connection.
             self.scheduler = Scheduler(connection=self.core.connection)
             self.scheduler.clock = self.clock
-            self.control = ResearchPlanControlPlane(
-                self.plans, self.backlog, self.observability, self.scheduler
-            )
             self.connectors = ConnectorStore(self.core, clock=self.clock)
             self.journal = RunnerJournal(self.core, clock=self.clock)
             spool_root = Path(spool_dir) if spool_dir is not None else self.state_dir / "connector-spool"
             self.spool = RawSpool(str(spool_root), max_total_bytes=1_000_000_000)
+            self.annual_report_registry = None
+            self.annual_report_draft_worker = None
+            self.annual_report_verifier_worker = None
+            self.annual_report_draft_model_execution = None
+            self.annual_report_verifier_model_execution = None
+            if self._annual_runtime_enabled:
+                from .annual_report_qualitative import (
+                    RegisteredAnnualReportDraftWorker,
+                    RegisteredAnnualReportVerifierWorker,
+                )
+                from .connector_authority_port import ConnectorCompletionReceiptReader
+                from .registered_annual_report import RegisteredAnnualReportRegistry
+
+                self.annual_report_registry = RegisteredAnnualReportRegistry(
+                    core=self.core,
+                    spool=self.spool,
+                    manifest_reader=annual_report_manifest_reader,
+                    receipt_reader=ConnectorCompletionReceiptReader(
+                        connectors=self.connectors,
+                        observability=self.observability,
+                    ),
+                )
+                common = {
+                    "scheduler": self.scheduler,
+                    "router": annual_report_model_router,
+                    "store": self.core,
+                    "observability": self.observability,
+                    "polish_worker": None,
+                    "clock": self.clock,
+                }
+                draft_config = dict(annual_report_draft_model_execution)
+                verifier_config = dict(annual_report_verifier_model_execution)
+                self.annual_report_draft_model_execution = draft_config
+                self.annual_report_verifier_model_execution = verifier_config
+                self.annual_report_draft_worker = RegisteredAnnualReportDraftWorker(
+                    **common,
+                    adapter=annual_report_draft_adapter,
+                    routing_policy_ref=draft_config["routing_policy_ref"],
+                    credential_slot_refs=draft_config["credential_slot_refs"],
+                    provider_retry=draft_config["provider_retry"],
+                )
+                self.annual_report_verifier_worker = RegisteredAnnualReportVerifierWorker(
+                    **common,
+                    adapter=annual_report_verifier_adapter,
+                    routing_policy_ref=verifier_config["routing_policy_ref"],
+                    credential_slot_refs=verifier_config["credential_slot_refs"],
+                    provider_retry=verifier_config["provider_retry"],
+                )
+            self.plans = ResearchPlanAuthority(
+                self.core,
+                annual_report_registry=self.annual_report_registry,
+            )
+            self.control = ResearchPlanControlPlane(
+                self.plans, self.backlog, self.observability, self.scheduler
+            )
             self.catalog = CapabilityCatalog(
                 str(catalog_db if catalog_db is not None else self.state_dir / "catalog.sqlite"),
                 clock=self.clock,
@@ -415,6 +488,9 @@ class SecCompanyFactsLane:
                 policy_resolver=governance.policy,
                 principal_ref=governance.principal_ref,
                 runner_environment_hash=self.manifest["content_hash"],
+                annual_report_registry=self.annual_report_registry,
+                annual_report_draft_worker=self.annual_report_draft_worker,
+                annual_report_verifier_worker=self.annual_report_verifier_worker,
                 actor_ref=self.manifest["runner_actor_ref"],
                 capability_policy_ref=governance.policy_ref,
             )

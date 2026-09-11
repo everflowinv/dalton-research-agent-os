@@ -1,6 +1,6 @@
 """Authority-bound WorkOrder admission coordinator for the research plan tree.
 
-The planner start records the complete four-node tree (SEC connector ->
+Numeric planner start records the complete four-node tree (SEC connector ->
 authority resolver -> source/numeric verifier -> candidate staging) but
 enqueues only the root connector WorkOrder.  This coordinator is the only
 admission path for the three downstream nodes: it admits exactly the child of
@@ -48,7 +48,9 @@ This slice creates no database schema, no capability lease, no credential,
 no Ledger write and no second queue/DAG system; the Scheduler stays the only queue
 authority.  The connector receipt chain is read from the exact
 ``ResearchCoordinatorStore`` instance the connector path already writes
-(``research_runner_requests``/``research_completion_receipts``).
+(``research_runner_requests``/``research_completion_receipts``). A qualitative
+registered-annual-report plan is a one-node tree whose formal result carries a
+closed retrieval proof and no connector receipt.
 """
 
 from __future__ import annotations
@@ -68,13 +70,23 @@ from .research_coordinator import (
     validate_connector_completion_receipt,
 )
 from .research_plan import (
+    REGISTERED_ANNUAL_REPORT_OPERATION,
     ResearchPlanAuthority,
     ResearchPlanError,
     _plan_link_specs,
     _plan_work_orders,
+    _resolved_plan_work_orders,
     plan_start_ref_for,
     read_exact_research_plan_start,
     read_exact_research_plan_version,
+)
+from .registered_annual_report import (
+    RegisteredAnnualReportError,
+    validate_retrieval_proof,
+)
+from .annual_report_qualitative import (
+    AnnualReportQualitativeError,
+    validate_model_proof,
 )
 from .scheduler import Scheduler
 from .store import canonical_json, content_hash
@@ -84,6 +96,7 @@ _STAGE_RECORD_KINDS = {
     "authority_resolver": ("authority_resolution",),
     "verifier": ("source_verification", "numeric_verification"),
     "candidate_staging": ("candidate_evidence", "candidate_claim"),
+    "qualitative_candidate_staging": ("candidate_evidence", "candidate_claim"),
 }
 _STAGE_RECORD_PREFIXES = {
     "authority_resolution": "authority-resolution:",
@@ -625,12 +638,32 @@ def _reverify_stage_output(
     step: Mapping[str, Any],
     outcome: Mapping[str, Any],
     *,
+    current_work_order: Mapping[str, Any],
     upstream_work_order: Mapping[str, Any],
     upstream_outcome: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate the closed, hashed output proof for a non-connector stage."""
 
     output = outcome["envelope"].get("outputs")
+    if (
+        plan_wire["execution_scope"]["operation"]
+        == REGISTERED_ANNUAL_REPORT_OPERATION
+        and step["stage"] in {
+            "qualitative_model_draft", "independent_qualitative_verifier",
+        }
+    ):
+        try:
+            proof = validate_model_proof(
+                output, stage=step["stage"], work=current_work_order
+            )
+        except AnnualReportQualitativeError as exc:
+            raise ResearchPlanCoordinatorConflict(str(exc)) from exc
+        if (outcome["envelope"]["actual_side_effects"] != []
+                or outcome["envelope"]["artifact_refs"]):
+            raise ResearchPlanCoordinatorConflict(
+                "qualitative model result reports undeclared effects/artifacts"
+            )
+        return proof
     fields = {
         "schema_version", "id", "created_at", "plan_version_ref",
         "plan_version_hash", "step_ref", "step_hash", "stage", "operation",
@@ -909,9 +942,10 @@ class ResearchPlanCoordinator:
         if self.fault_injector is not None:
             self.fault_injector(seam)
 
-    @staticmethod
-    def _tree(plan_wire: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        work_orders = _plan_work_orders(plan_wire)
+    def _tree(self, plan_wire: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        work_orders = _resolved_plan_work_orders(
+            plan_wire, self.plan.connection.cursor()
+        )
         return work_orders, _plan_link_specs(plan_wire, work_orders)
 
     def _admission_context(
@@ -952,20 +986,36 @@ class ResearchPlanCoordinator:
                 cursor, work_orders[index]["id"], work_orders[index]
             )
             if index == 0 and outcome["state"] == "succeeded":
-                outcome["connector_proof"] = _connector_receipt_chain(
-                    cursor,
-                    connector_cursor,
-                    outcome["envelope"],
-                    result_envelope_hash=outcome["formal"]["result_envelope_hash"],
-                    work_order_id=work_orders[index]["id"],
-                    work_order_hash=content_hash(work_orders[index]),
-                    attempt_number=outcome["formal"]["attempt_number"],
-                )
+                if plan_wire["execution_scope"]["operation"] == (
+                    REGISTERED_ANNUAL_REPORT_OPERATION
+                ):
+                    try:
+                        outcome["retrieval_proof"] = validate_retrieval_proof(
+                            outcome["envelope"]["outputs"],
+                            expected_request=plan_wire["execution_scope"]["parameters"],
+                        )
+                    except RegisteredAnnualReportError as exc:
+                        raise ResearchPlanCoordinatorConflict(str(exc)) from exc
+                    if outcome["envelope"]["actual_side_effects"] != []:
+                        raise ResearchPlanCoordinatorConflict(
+                            "registered annual-report retrieval reported side effects"
+                        )
+                else:
+                    outcome["connector_proof"] = _connector_receipt_chain(
+                        cursor,
+                        connector_cursor,
+                        outcome["envelope"],
+                        result_envelope_hash=outcome["formal"]["result_envelope_hash"],
+                        work_order_id=work_orders[index]["id"],
+                        work_order_hash=content_hash(work_orders[index]),
+                        attempt_number=outcome["formal"]["attempt_number"],
+                    )
             elif index > 0 and outcome["state"] == "succeeded":
                 outcome["stage_output"] = _reverify_stage_output(
                     plan_wire,
                     plan_wire["execution_scope"]["steps"][index],
                     outcome,
+                    current_work_order=work_orders[index],
                     upstream_work_order=work_orders[index - 1],
                     upstream_outcome=outcomes[index - 1],
                 )

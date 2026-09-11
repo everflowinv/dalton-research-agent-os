@@ -5,6 +5,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from dalton_core.human_intent import (
     CallableIntentInterpreter,
     HumanIntentAuthority,
     HumanIntentConflict,
+    HumanIntentInterpreterError,
     HumanIntentValidationError,
     IntentComposerConfig,
     InterpreterOutput,
@@ -25,11 +27,16 @@ from dalton_core.human_intent import (
     build_cockpit_intent_context,
     build_intent_interpreter_prompt,
     build_intent_interpreter_work_order,
+    intent_scheduler_policy,
     load_frozen_intent_corpus,
     score_intent_calibration_case,
     validate_interpreter_candidate,
 )
 from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_model_adapter import (
+    BrokerDefinitelyNotSent,
+    OpenClawModelAdapterError,
+)
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import content_hash
 
@@ -546,6 +553,447 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
                 formal["result_envelope_hash"],
                 output.provenance["result_envelope_hash"],
             )
+
+    def test_transport_policy_is_closed_and_only_explicit_policy_changes_identity(self):
+        raw = {
+            "staging_path": str(self.config.staging_path),
+            "scheduler_db": str(self.config.scheduler_db),
+            "model_router_db": str(self.config.model_router_db),
+            "broker_socket": str(self.config.broker_socket),
+            "broker_auth_key": str(self.config.broker_auth_key),
+            "routing_policy_ref": self.config.routing_policy_ref,
+            "credential_slot_refs": list(self.config.credential_slot_refs),
+            "broker_client_id": self.config.broker_client_id,
+            "expected_agent_id": self.config.expected_agent_id,
+            "timeout_seconds": self.config.timeout_seconds,
+            "max_input_tokens": self.config.max_input_tokens,
+            "max_output_tokens": self.config.max_output_tokens,
+            "max_cost_usd": self.config.max_cost_usd,
+        }
+        with self.assertRaisesRegex(
+            HumanIntentValidationError, "invalid intent transport"
+        ):
+            IntentComposerConfig.from_mapping({
+                **raw,
+                "transport_retry": {
+                    "max_definitely_not_sent_retries": 1,
+                    "queue_wait_seconds": 4,
+                },
+            })
+        bounded_config = IntentComposerConfig.from_mapping({
+            **raw, "max_scheduler_attempts": 5
+        })
+        self.assertEqual(bounded_config.max_scheduler_attempts, 5)
+        with self.assertRaisesRegex(
+            HumanIntentValidationError, "max_scheduler_attempts"
+        ):
+            IntentComposerConfig.from_mapping({
+                **raw, "max_scheduler_attempts": 11
+            })
+        utterance = {
+            "id": "human-utterance-version:transport-identity",
+            "created_at": NOW,
+            "verbatim_text": "状态？",
+            "content_hash": "9" * 64,
+        }
+        common = {
+            "max_input_tokens": 16000,
+            "max_output_tokens": 1200,
+            "max_cost_usd": 1.0,
+            "max_seconds": 60,
+        }
+        legacy = build_intent_interpreter_work_order(context(), utterance, **common)
+        explicit = build_intent_interpreter_work_order(
+            context(),
+            utterance,
+            transport_retry={
+                "max_definitely_not_sent_retries": 0,
+                "queue_wait_seconds": 0,
+                "retry_backoff_seconds": 0,
+            },
+            **common,
+        )
+        bounded = build_intent_interpreter_work_order(
+            context(), utterance, max_scheduler_attempts=5, **common
+        )
+        self.assertNotIn("transport_retry", legacy.metadata)
+        self.assertNotEqual(explicit.id, legacy.id)
+        self.assertNotEqual(bounded.id, legacy.id)
+
+    def test_configured_timeout_and_transport_fit_the_immutable_scheduler_lease(self):
+        config = IntentComposerConfig(
+            **{
+                field: getattr(self.config, field)
+                for field in self.config.__dataclass_fields__
+                if field not in {"transport_retry", "max_scheduler_attempts"}
+            },
+            transport_retry={
+                "max_definitely_not_sent_retries": 1,
+                "queue_wait_seconds": 7,
+                "retry_backoff_seconds": 3,
+            },
+            max_scheduler_attempts=5,
+        )
+        policy = intent_scheduler_policy(config)
+        self.assertEqual(policy["route_candidate_count"], 1)
+        self.assertEqual(policy["default_lease_seconds"], 167)
+        self.assertEqual(policy["max_attempts"], 5)
+        with OpenClawIntentInterpreter(config)._scheduler() as scheduler:
+            stored = scheduler.connection.execute(
+                "SELECT policy_json FROM scheduler_policy_versions "
+                "WHERE policy_version_id=?",
+                (policy["policy_version_id"],),
+            ).fetchone()
+            self.assertIsNotNone(stored)
+            self.assertEqual(json.loads(stored[0])["default_lease_seconds"], 167)
+
+    def test_real_fake_broker_gets_queue_and_scheduler_keeps_exact_invocation(self):
+        from tests.test_openclaw_model_adapter import (
+            AUTH_SECRET,
+            FakeBroker,
+            core_request,
+            seal,
+            success_response,
+        )
+        from dalton_core.openclaw_model_adapter import canonical_hash
+
+        profile = model_profile()
+        profile.update({
+            "profile_version_ref": "model-profile-version:intent-test:2",
+            "version": 2,
+            "prior_version_ref": "model-profile-version:intent-test:1",
+            "provider": "openai",
+            "model": "gpt-5.6",
+            "family": "openai-gpt",
+        })
+        profile.pop("content_hash", None)
+        with ModelRouter(self.config.model_router_db) as router:
+            self.assertEqual(router.register_profile(profile)["status"], "fresh")
+        candidate = {
+            "schema_version": "0.1",
+            "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"),
+            "rationale": "状态查询",
+        }
+        def respond(request):
+            response = success_response(
+                request,
+                text=json.dumps(candidate, ensure_ascii=False, separators=(",", ":")),
+            )
+            execution = core_request(request)
+            execution.pop("queueWaitMs")
+            response["requestHash"] = canonical_hash(execution)
+            response.pop("contentHash")
+            return seal(response)
+
+        broker = FakeBroker(self.config.staging_path.parent, respond)
+        self.addCleanup(broker.close)
+        key = self.config.broker_auth_key
+        key.write_bytes(AUTH_SECRET)
+        config = IntentComposerConfig(
+            **{
+                field: getattr(self.config, field)
+                for field in self.config.__dataclass_fields__
+                if field not in {"broker_socket", "expected_agent_id", "transport_retry"}
+            },
+            broker_socket=broker.path,
+            expected_agent_id="dalton-model-broker",
+            transport_retry={
+                "max_definitely_not_sent_retries": 0,
+                "queue_wait_seconds": 4,
+                "retry_backoff_seconds": 0,
+            },
+        )
+        output = OpenClawIntentInterpreter(config).interpret(context(), {
+            "id": "human-utterance-version:real-broker",
+            "created_at": NOW,
+            "verbatim_text": "状态？",
+            "content_hash": "8" * 64,
+        })
+        self.assertEqual(json.loads(output.text)["intent_kind"], "meta")
+        self.assertEqual(broker.requests[0]["queueWaitMs"], 4000)
+        with Scheduler(config.scheduler_db) as scheduler:
+            formal = scheduler.formal_result(output.provenance["work_order_ref"])
+        self.assertEqual(formal["terminal_state"], "succeeded")
+        self.assertEqual(
+            formal["result_envelope"]["invocation_ref"],
+            output.provenance["model_invocation_ref"],
+        )
+
+    def test_real_unix_capacity_proof_defers_then_queue_success_uses_next_attempt(self):
+        from tests.test_openclaw_model_adapter import (
+            AUTH_SECRET, FakeBroker, core_request, failure_response, seal, success_response,
+        )
+        from dalton_core.openclaw_model_adapter import canonical_hash
+        candidate = {
+            "schema_version": "0.1", "intent_kind": "meta",
+            "disposition": "candidate", "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None, "evidence_spans": evidence("状态？"),
+            "rationale": "状态查询",
+        }
+        def respond(request):
+            if len(broker.requests) == 1:
+                response = failure_response(request, dispatch_proof={
+                    "authority": "openclaw-model-broker",
+                    "state": "definitely_not_sent", "version": "0.1",
+                })
+            else:
+                response = success_response(
+                    request, text=json.dumps(candidate, ensure_ascii=False, separators=(",", ":")))
+                response.update({"provider": "test", "model": "intent-test",
+                                 "canonicalModel": "test/intent-test"})
+            execution = core_request(request)
+            execution.pop("queueWaitMs")
+            response["requestHash"] = canonical_hash(execution)
+            response.pop("contentHash")
+            return seal(response)
+        broker = FakeBroker(self.config.staging_path.parent, respond, connections=2)
+        self.addCleanup(broker.close)
+        self.config.broker_auth_key.write_bytes(AUTH_SECRET)
+        config = replace(
+            self.config, broker_socket=broker.path,
+            expected_agent_id="dalton-model-broker",
+            transport_retry={"max_definitely_not_sent_retries": 0,
+                             "queue_wait_seconds": 4, "retry_backoff_seconds": 0},
+        )
+        utterance = {"id": "human-utterance-version:real-capacity", "created_at": NOW,
+                     "verbatim_text": "状态？", "content_hash": "9" * 64}
+        interpreter = OpenClawIntentInterpreter(config)
+        with self.assertRaisesRegex(HumanIntentInterpreterError, "capacity is pending"):
+            interpreter.interpret(context(), utterance)
+        with Scheduler(config.scheduler_db) as scheduler:
+            work_id = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()[0]
+            self.assertEqual(scheduler.status(work_id)["state"], "ready")
+        output = interpreter.interpret(context(), utterance)
+        self.assertEqual(len(broker.requests), 2)
+        self.assertNotEqual(broker.requests[0]["invocationId"], broker.requests[1]["invocationId"])
+        with Scheduler(config.scheduler_db) as scheduler:
+            self.assertEqual(scheduler.status(output.provenance["work_order_ref"])["attempt_number"], 2)
+
+    def test_exact_policy_chain_retries_only_definitely_not_sent_then_falls_back(self):
+        first = model_profile()
+        second = model_profile()
+        second.update({
+            "profile_version_ref": "model-profile-version:intent-fallback:1",
+            "id": "profile:intent-fallback",
+            "model": "intent-fallback",
+            "family": "intent-fallback",
+        })
+        policy = model_policy()
+        policy.update({
+            "policy_version_ref": "model-routing-policy-version:intent:2",
+            "version": 2,
+            "prior_version_ref": "model-routing-policy-version:intent:1",
+            "purpose_overrides": {
+                "human_intent": {
+                    "mode": "explicit",
+                    "chain": [first["id"], second["id"]],
+                }
+            },
+        })
+        policy["filters"] = {
+            **policy["filters"],
+            "allowed_profile_ids": [first["id"], second["id"]],
+        }
+        with ModelRouter(self.config.model_router_db) as router:
+            self.assertEqual(router.register_profile(second)["status"], "fresh")
+            self.assertEqual(router.register_policy(policy)["status"], "fresh")
+        candidate = {
+            "schema_version": "0.1",
+            "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"),
+            "rationale": "状态查询",
+        }
+        calls = []
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                calls.append(selected["id"])
+                if selected["id"] == first["id"]:
+                    raise BrokerDefinitelyNotSent("connect failed before sendall")
+                return FakeBrokerAdapter(candidate).execute(work, route, selected)
+
+        config = replace(
+            self.config,
+            routing_policy_ref=policy["policy_version_ref"],
+            transport_retry={
+                "max_definitely_not_sent_retries": 1,
+                "queue_wait_seconds": 0,
+                "retry_backoff_seconds": 0,
+            },
+        )
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            OpenClawIntentInterpreter(config).interpret(context(), {
+                "id": "human-utterance-version:chain-fallback",
+                "created_at": NOW,
+                "verbatim_text": "状态？",
+                "content_hash": "7" * 64,
+            })
+        self.assertEqual(calls, [first["id"], first["id"], second["id"]])
+        self.assertEqual(intent_scheduler_policy(config)["route_candidate_count"], 2)
+
+    def test_indeterminate_dispatch_never_retries_or_falls_back(self):
+        first = model_profile()
+        second = model_profile()
+        second.update({
+            "profile_version_ref": "model-profile-version:intent-indeterminate:1",
+            "id": "profile:intent-indeterminate",
+            "model": "intent-indeterminate",
+            "family": "intent-indeterminate",
+        })
+        policy = model_policy()
+        policy.update({
+            "policy_version_ref": "model-routing-policy-version:intent:2",
+            "version": 2,
+            "prior_version_ref": "model-routing-policy-version:intent:1",
+            "purpose_overrides": {
+                "human_intent": {
+                    "mode": "explicit",
+                    "chain": [first["id"], second["id"]],
+                }
+            },
+        })
+        policy["filters"] = {
+            **policy["filters"],
+            "allowed_profile_ids": [first["id"], second["id"]],
+        }
+        with ModelRouter(self.config.model_router_db) as router:
+            router.register_profile(second)
+            router.register_policy(policy)
+        calls = []
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                calls.append(selected["id"])
+                raise OpenClawModelAdapterError("dispatch outcome unknown")
+
+        config = replace(
+            self.config,
+            routing_policy_ref=policy["policy_version_ref"],
+            transport_retry={
+                "max_definitely_not_sent_retries": 3,
+                "queue_wait_seconds": 0,
+                "retry_backoff_seconds": 0,
+            },
+        )
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            with self.assertRaisesRegex(HumanIntentInterpreterError, "did not succeed"):
+                OpenClawIntentInterpreter(config).interpret(context(), {
+                    "id": "human-utterance-version:indeterminate",
+                    "created_at": NOW,
+                    "verbatim_text": "状态？",
+                    "content_hash": "6" * 64,
+                })
+        self.assertEqual(calls, [first["id"]])
+
+    def test_capacity_busy_releases_the_unspent_attempt_for_scheduler_retry(self):
+        candidate = {
+            "schema_version": "0.1",
+            "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"),
+            "rationale": "状态查询",
+        }
+        calls = 0
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                nonlocal calls
+                calls += 1
+                invocation, result = FakeBrokerAdapter(candidate).execute(
+                    work, route, selected
+                )
+                if calls == 1:
+                    wire = result.to_dict()
+                    wire.update({
+                        "status": "failed",
+                        "outputs": {},
+                        "error": {"code": "BUSY", "message": "broker full"},
+                    })
+                    wire["metadata"] = {
+                        **wire["metadata"],
+                        "dispatch_proof": {
+                            "authority": "openclaw-model-adapter",
+                            "state": "definitely_not_sent",
+                            "version": "0.1",
+                        },
+                    }
+                    return invocation, ResultEnvelope.from_dict(wire)
+                return invocation, result
+
+        utterance = {
+            "id": "human-utterance-version:capacity",
+            "created_at": NOW,
+            "verbatim_text": "状态？",
+            "content_hash": "5" * 64,
+        }
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            interpreter = OpenClawIntentInterpreter(self.config)
+            with self.assertRaisesRegex(HumanIntentInterpreterError, "capacity is pending"):
+                interpreter.interpret(context(), utterance)
+            output = interpreter.interpret(context(), utterance)
+        self.assertEqual(calls, 2)
+        with Scheduler(self.config.scheduler_db) as scheduler:
+            status = scheduler.status(output.provenance["work_order_ref"])
+            history = scheduler.attempt_history(output.provenance["work_order_ref"])
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["attempt_number"], 2)
+        self.assertTrue(any(row["state"] == "ready" for row in history))
+
+    def test_provider_busy_code_without_undispatched_proof_is_terminal(self):
+        candidate = {
+            "schema_version": "0.1",
+            "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"),
+            "rationale": "状态查询",
+        }
+        calls = 0
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                nonlocal calls
+                calls += 1
+                invocation, result = FakeBrokerAdapter(candidate).execute(
+                    work, route, selected
+                )
+                wire = result.to_dict()
+                wire.update({
+                    "status": "failed",
+                    "outputs": {},
+                    "error": {"code": "BUSY", "message": "provider busy"},
+                })
+                return invocation, ResultEnvelope.from_dict(wire)
+
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            with self.assertRaisesRegex(HumanIntentInterpreterError, "did not succeed"):
+                OpenClawIntentInterpreter(self.config).interpret(context(), {
+                    "id": "human-utterance-version:provider-busy",
+                    "created_at": NOW,
+                    "verbatim_text": "状态？",
+                    "content_hash": "4" * 64,
+                })
+        self.assertEqual(calls, 1)
 
 
 class HumanIntentComposerTests(unittest.TestCase):

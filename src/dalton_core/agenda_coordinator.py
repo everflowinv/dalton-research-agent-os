@@ -17,7 +17,11 @@ from typing import Any, Iterable, Mapping, Sequence
 from .contracts import ResultEnvelope, WorkOrder
 from .context_materializer import AGENDA_RENDERER_REF
 from .model_router import ModelRouter
-from .openclaw_model_adapter import OpenClawModelAdapter
+from .openclaw_model_adapter import (
+    BrokerDefinitelyNotSent,
+    OpenClawModelAdapter,
+    OpenClawModelAdapterError,
+)
 from .perception import LegacyCoveragePerceptionAdapter
 from .provider_token_estimate import (
     PROVIDER_INPUT_ESTIMATOR_REF,
@@ -49,6 +53,9 @@ MAX_CONTEXT_BYTES = 512 * 1024
 # ids, envelope markers).  The framing measured ~1,700 characters (~800
 # estimated tokens) on the coordinator test fixture; 1,000 leaves margin.
 MATERIALIZATION_FRAMING_RESERVE_TOKENS = 1_000
+AGENDA_MODEL_PURPOSE = "agenda_planning"
+AGENDA_MODEL_WORKER = "worker:agenda-model"
+AGENDA_LEASE_GRACE_SECONDS = 30
 
 
 class CoordinatorError(RuntimeError):
@@ -71,17 +78,20 @@ class AgendaCoordinatorConfig:
     broker_client_id: str
     expected_agent_id: str
     timeout_seconds: float = 180.0
+    transport_retry: Mapping[str, int] | None = None
+    max_scheduler_attempts: int | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "AgendaCoordinatorConfig":
-        expected = {
+        required = {
             "scheduler_db", "model_router_db", "writer_socket", "core_token_config",
             "broker_socket", "broker_auth_key", "perception_source_db",
             "perception_snapshot_path", "company_ref", "routing_policy_ref",
             "credential_slot_refs", "broker_client_id", "expected_agent_id",
             "timeout_seconds",
         }
-        if set(value) != expected:
+        optional = {"transport_retry", "max_scheduler_attempts"}
+        if not isinstance(value, Mapping) or set(value) - optional != required:
             raise CoordinatorError("agenda coordinator config has an invalid closed shape")
         def path(name: str) -> Path:
             raw = value[name]
@@ -100,6 +110,26 @@ class AgendaCoordinatorConfig:
             if not isinstance(raw, str) or not raw:
                 raise CoordinatorError(f"{name} must be a non-empty string")
             strings[name] = raw
+        transport_retry = None
+        if "transport_retry" in value:
+            from .document_extraction import validate_transport_retry
+
+            try:
+                transport_retry = validate_transport_retry(value["transport_retry"])
+            except Exception as exc:
+                raise CoordinatorError("invalid agenda transport retry configuration") from exc
+        max_scheduler_attempts = None
+        if "max_scheduler_attempts" in value:
+            raw_attempts = value["max_scheduler_attempts"]
+            if (
+                isinstance(raw_attempts, bool)
+                or not isinstance(raw_attempts, int)
+                or not 1 <= raw_attempts <= 10
+            ):
+                raise CoordinatorError(
+                    "max_scheduler_attempts must be an integer from 1 through 10"
+                )
+            max_scheduler_attempts = raw_attempts
         return cls(
             scheduler_db=path("scheduler_db"),
             model_router_db=path("model_router_db"),
@@ -115,7 +145,56 @@ class AgendaCoordinatorConfig:
             broker_client_id=strings["broker_client_id"],
             expected_agent_id=strings["expected_agent_id"],
             timeout_seconds=float(timeout),
+            transport_retry=transport_retry,
+            max_scheduler_attempts=max_scheduler_attempts,
         )
+
+
+def agenda_scheduler_policy(config: AgendaCoordinatorConfig) -> dict[str, Any]:
+    """Freeze a lease that covers the exact Agenda route and transport policy."""
+
+    from .model_fallback_chain import purpose_tiers
+    from .model_router import resolve_chain
+
+    with ModelRouter(config.model_router_db) as router:
+        routing_policy = router.get_policy(config.routing_policy_ref)
+        profiles = {profile["id"]: profile for profile in router.latest_profiles()}
+    tier = purpose_tiers().get(AGENDA_MODEL_PURPOSE)
+    resolved = resolve_chain(
+        routing_policy,
+        tier=tier,
+        purpose=AGENDA_MODEL_PURPOSE,
+        profiles=profiles,
+    )
+    candidates = max(1, len(resolved["chain"]) if resolved is not None else 1)
+    transport = config.transport_retry or {}
+    retries = int(transport.get("max_definitely_not_sent_retries", 0))
+    queue_wait = int(transport.get("queue_wait_seconds", 0))
+    backoff = int(transport.get("retry_backoff_seconds", 0))
+    lease_seconds = (
+        candidates * (retries + 1) * (config.timeout_seconds + queue_wait)
+        + candidates * retries * backoff
+        + AGENDA_LEASE_GRACE_SECONDS
+    )
+    max_attempts = config.max_scheduler_attempts or 3
+    scheduler_binding = content_hash(
+        {
+            "routing_policy_hash": routing_policy["content_hash"],
+            "max_attempts": max_attempts,
+            "lease_seconds": lease_seconds,
+        }
+    )[:16]
+    return {
+        "policy_version_id": (
+            f"scheduler-policy-agenda-lease-{int(lease_seconds)}s-"
+            f"routes-{routing_policy['content_hash'][:16]}-{scheduler_binding}-0.1"
+        ),
+        "max_attempts": max_attempts,
+        "default_lease_seconds": lease_seconds,
+        "max_lease_seconds": lease_seconds,
+        "max_total_lease_seconds": lease_seconds * 2,
+        "route_candidate_count": candidates,
+    }
 
 
 def _utc(value: datetime | None = None) -> datetime:
@@ -251,14 +330,231 @@ class AgendaCoordinator:
         self.config = config
 
     def _adapter(self, router: ModelRouter) -> OpenClawModelAdapter:
+        transport = self.config.transport_retry or {}
         return OpenClawModelAdapter(
             self.config.broker_socket,
             route_resolver=lambda decision_ref: router.get_decision(decision_ref),
             auth_client_id=self.config.broker_client_id,
             auth_key_provider=lambda: self.config.broker_auth_key.read_bytes().strip(),
             timeout_seconds=self.config.timeout_seconds,
+            queue_wait_seconds=float(transport.get("queue_wait_seconds", 0)),
             expected_agent_id=self.config.expected_agent_id,
         )
+
+    def _scheduler(self) -> Scheduler:
+        policy = agenda_scheduler_policy(self.config)
+        return Scheduler(
+            self.config.scheduler_db,
+            policy_version_id=policy["policy_version_id"],
+            max_attempts=policy["max_attempts"],
+            default_lease_seconds=policy["default_lease_seconds"],
+            max_lease_seconds=policy["max_lease_seconds"],
+            max_total_lease_seconds=policy["max_total_lease_seconds"],
+        )
+
+    def _execute_with_safe_retry(
+        self,
+        adapter: Any,
+        work: WorkOrder,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> tuple[Any, ResultEnvelope]:
+        """Retry only when the adapter proves no request crossed the socket."""
+
+        transport = self.config.transport_retry or {}
+        maximum = int(transport.get("max_definitely_not_sent_retries", 0))
+        for retry_number in range(maximum + 1):
+            try:
+                return adapter.execute(work, route, profile)
+            except BrokerDefinitelyNotSent:
+                if retry_number >= maximum:
+                    raise
+                backoff = int(transport.get("retry_backoff_seconds", 0))
+                if backoff:
+                    import time
+
+                    time.sleep(backoff)
+        raise AssertionError("Agenda transport retry loop did not return")
+
+    @staticmethod
+    def _capacity_code(result: ResultEnvelope) -> str | None:
+        if result.status != "failed":
+            return None
+        if result.metadata.get("dispatch_proof") != {
+            "authority": "openclaw-model-adapter",
+            "state": "definitely_not_sent",
+            "version": "0.1",
+        }:
+            return None
+        code = str((result.error or {}).get("code", "")).upper()
+        if code in {
+            "BUSY",
+            "CONCURRENCY_LIMIT",
+            "BROKER_CONCURRENCY_LIMIT",
+            "QUEUE_TIMEOUT",
+            "BROKER_CLOSED",
+        }:
+            return code
+        return None
+
+    def _execute_model_attempt(
+        self,
+        client: WriterClient,
+        router: ModelRouter,
+        work: WorkOrder,
+        lease: Mapping[str, Any],
+        *,
+        estimated_input: int,
+        estimated_output: int,
+    ) -> dict[str, Any]:
+        """Route the exact policy chain and execute one Scheduler attempt."""
+
+        from .model_fallback_chain import (
+            classify_model_failure,
+            execute_chain,
+            purpose_tiers,
+        )
+        from .model_router import policy_chain
+
+        attempt = lease["attempt"]["attempt_number"]
+        required_context = max(4096, estimated_input + estimated_output)
+        policy = router.get_policy(self.config.routing_policy_ref)
+        tier = purpose_tiers()[AGENDA_MODEL_PURPOSE]
+        chain = policy_chain(
+            policy, tier=tier, purpose=AGENDA_MODEL_PURPOSE
+        )
+        adapter = self._adapter(router)
+
+        def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+            try:
+                invocation, result = self._execute_with_safe_retry(
+                    adapter, work, route, profile
+                )
+            except BrokerDefinitelyNotSent as exc:
+                return {
+                    "outcome": "failed",
+                    "failure_class": classify_model_failure(exc),
+                    "reason": str(exc),
+                }
+            except OpenClawModelAdapterError as exc:
+                # Once dispatch is indeterminate, neither this provider nor a
+                # fallback may be called again under the same budget.
+                return {
+                    "outcome": "failed",
+                    "failure_class": "unclassified_failure",
+                    "reason": str(exc),
+                }
+            capacity_code = self._capacity_code(result)
+            if capacity_code is not None:
+                return {
+                    "outcome": "failed",
+                    "failure_class": "capacity_busy",
+                    "error_code": capacity_code,
+                    "reason": (result.error or {}).get(
+                        "message", "broker capacity unavailable"
+                    ),
+                }
+            if result.status != "succeeded":
+                # The generic broker envelope does not prove that a failed
+                # provider call was cost-free. Return it as the served link so
+                # the caller settles its invocation and ends this WorkOrder;
+                # a second provider call could otherwise spend twice.
+                return {
+                    "outcome": "served",
+                    "value": (invocation, result),
+                }
+            return {"outcome": "served", "value": (invocation, result)}
+
+        if chain is not None:
+            chained = execute_chain(
+                router,
+                work,
+                purpose=AGENDA_MODEL_PURPOSE,
+                tier=tier,
+                capability="extract",
+                attempt_number=attempt,
+                policy_version_ref=self.config.routing_policy_ref,
+                credential_slot_refs=self.config.credential_slot_refs,
+                required_modalities=("text",),
+                required_context_tokens=required_context,
+                estimated_input_tokens=estimated_input,
+                estimated_output_tokens=estimated_output,
+                idempotency_prefix=f"agenda-route:{work.id}:{attempt}",
+                call=call,
+            )
+            if chained["status"] != "served":
+                route_ref = chained.get("route_decision_ref")
+                if route_ref is None and chained.get("links"):
+                    route_ref = chained["links"][-1]["decision_id"]
+                return {
+                    "status": (
+                        "capacity_busy"
+                        if chained.get("reason") == "capacity_busy"
+                        else "failed"
+                    ),
+                    "route_ref": route_ref,
+                    "error_type": (
+                        (chained.get("failures") or [{}])[-1].get("code")
+                        if chained.get("reason") == "capacity_busy"
+                        else "ModelChain" + chained["status"].title()
+                    ),
+                }
+            invocation, result = chained["value"]
+            return {
+                "status": "executed",
+                "route": chained["decision"],
+                "profile": chained["profile"],
+                "invocation": invocation,
+                "result": result,
+            }
+
+        prior = router.list_decisions(work_order_id=work.id)
+        routed = router.route(
+            work,
+            attempt_number=attempt,
+            capability="extract",
+            policy_version_ref=self.config.routing_policy_ref,
+            credential_slot_refs=self.config.credential_slot_refs,
+            required_modalities=("text",),
+            required_context_tokens=required_context,
+            estimated_input_tokens=estimated_input,
+            estimated_output_tokens=estimated_output,
+            purpose=AGENDA_MODEL_PURPOSE,
+            decision_kind="initial" if not prior else "retry",
+            previous_decision_ref=None if not prior else prior[-1]["id"],
+            idempotency_key=f"agenda-route:{work.id}:{attempt}",
+        )["decision"]
+        if routed["outcome"] != "selected":
+            return {
+                "status": "route_rejected",
+                "route_ref": routed["id"],
+                "rejection_reasons": routed["rejection_reasons"],
+            }
+        profile = router.get_profile(routed["selected_profile_version_ref"])
+        try:
+            invocation, result = self._execute_with_safe_retry(
+                adapter, work, routed, profile
+            )
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "route_ref": routed["id"],
+                "error_type": type(exc).__name__,
+            }
+        capacity_code = self._capacity_code(result)
+        if capacity_code is not None:
+            return {
+                "status": "capacity_busy",
+                "route_ref": routed["id"],
+                "error_type": capacity_code,
+            }
+        return {
+            "status": "executed",
+            "route": routed,
+            "profile": profile,
+            "invocation": invocation,
+            "result": result,
+        }
 
     def _materialize_context(
         self, client: WriterClient, cycle_id: str, policy: Mapping[str, Any]
@@ -361,10 +657,59 @@ class AgendaCoordinator:
         return scheduler.complete(
             work.id,
             attempt_number,
-            "worker:agenda-model",
+            AGENDA_MODEL_WORKER,
             lease["lease_token"],
             result,
             idempotency_key=f"agenda-control-failure:{cycle_id}:{attempt_number}:{code}",
+        )
+
+    @staticmethod
+    def _defer_capacity(
+        scheduler: Scheduler,
+        work: WorkOrder,
+        lease: Mapping[str, Any],
+        *,
+        cycle_id: str,
+        code: str,
+        route_ref: str | None,
+    ) -> dict[str, Any]:
+        """Release a broker-local refusal into the bounded Scheduler retry loop."""
+
+        attempt_number = lease["attempt"]["attempt_number"]
+        digest = content_hash(
+            {
+                "work_order_ref": work.id,
+                "attempt_number": attempt_number,
+                "cycle_ref": cycle_id,
+                "code": code,
+                "route_ref": route_ref,
+            }
+        )[:32]
+        result = ResultEnvelope(
+            schema_version=SCHEMA_VERSION,
+            id=f"result:agenda-capacity-deferred-{digest}",
+            created_at=_utc().isoformat(timespec="microseconds"),
+            work_order_ref=work.id,
+            invocation_ref=f"invocation:not-started:{digest}",
+            status="retryable",
+            outputs={},
+            actual_side_effects=(),
+            usage_refs=(),
+            artifact_refs=(),
+            error={"code": code},
+            metadata={
+                "cycle_ref": cycle_id,
+                "capacity_deferred": True,
+                "route_decision_ref": route_ref,
+            },
+        )
+        return scheduler.complete(
+            work.id,
+            attempt_number,
+            AGENDA_MODEL_WORKER,
+            lease["lease_token"],
+            result,
+            idempotency_key=f"agenda-capacity-deferred:{cycle_id}:{attempt_number}",
         )
 
     @staticmethod
@@ -704,7 +1049,16 @@ class AgendaCoordinator:
             # rendered prompt hash are stable across restart and unrelated
             # Ledger growth; any real authority drift therefore becomes an
             # enqueue conflict rather than a second paid model call.
-            digest = content_hash({"cycle_ref": cycle_id})[:32]
+            identity = {"cycle_ref": cycle_id}
+            if self.config.transport_retry is not None:
+                identity["transport_retry"] = content_hash(
+                    self.config.transport_retry
+                )
+            if self.config.max_scheduler_attempts is not None:
+                identity["max_scheduler_attempts"] = (
+                    self.config.max_scheduler_attempts
+                )
+            digest = content_hash(identity)[:32]
             created_at = existing["cycle"]["created_at"]
             work = WorkOrder(
                 schema_version=SCHEMA_VERSION,
@@ -721,7 +1075,20 @@ class AgendaCoordinator:
                     "max_cost_usd": policy["max_daily_cost_usd"],
                     "max_seconds": self.config.timeout_seconds,
                 },
-                idempotency_key=f"agenda-work:{cycle_id}",
+                idempotency_key=(
+                    f"agenda-work:{cycle_id}"
+                    + (
+                        ":transport-policy:"
+                        + content_hash(self.config.transport_retry)[:16]
+                        if self.config.transport_retry is not None
+                        else ""
+                    )
+                    + (
+                        f":max-attempts:{self.config.max_scheduler_attempts}"
+                        if self.config.max_scheduler_attempts is not None
+                        else ""
+                    )
+                ),
                 declared_side_effects=(),
                 status="ready",
                 input_refs=input_refs,
@@ -735,10 +1102,20 @@ class AgendaCoordinator:
                     "prompt_tokens": prompt_tokens,
                     "estimated_provider_input_tokens": estimated_provider_input,
                     "provider_input_estimator_ref": PROVIDER_INPUT_ESTIMATOR_REF,
+                    **(
+                        {"transport_retry": dict(self.config.transport_retry)}
+                        if self.config.transport_retry is not None
+                        else {}
+                    ),
+                    **(
+                        {"max_scheduler_attempts": self.config.max_scheduler_attempts}
+                        if self.config.max_scheduler_attempts is not None
+                        else {}
+                    ),
                 },
             )
             self._workflow(client, work, cycle_id, context["policy_version_ref"])
-            with Scheduler(self.config.scheduler_db) as scheduler, ModelRouter(self.config.model_router_db) as router:
+            with self._scheduler() as scheduler, ModelRouter(self.config.model_router_db) as router:
                 enqueued = scheduler.enqueue(work)
                 formal = scheduler.formal_result(work.id)
                 if enqueued["status"] == "conflict" and formal is None:
@@ -753,23 +1130,18 @@ class AgendaCoordinator:
                     )
                     raise CoordinatorError("agenda prompt no longer matches its WorkOrder")
                 if formal is None:
-                    lease = scheduler.claim("worker:agenda-model", work_order_id=work.id)
+                    lease = scheduler.claim(AGENDA_MODEL_WORKER, work_order_id=work.id)
                     if lease is None:
                         return {"status": "waiting_for_lease", "cycle_id": cycle_id, "work_order_id": work.id}
-                    routed = router.route(
+                    attempt_outcome = self._execute_model_attempt(
+                        client,
+                        router,
                         work,
-                        attempt_number=lease["attempt"]["attempt_number"],
-                        capability="extract",
-                        policy_version_ref=self.config.routing_policy_ref,
-                        credential_slot_refs=self.config.credential_slot_refs,
-                        required_modalities=("text",),
-                        required_context_tokens=max(4096, estimated_input + policy["max_output_tokens"]),
-                        estimated_input_tokens=estimated_input,
-                        estimated_output_tokens=policy["max_output_tokens"],
-                        purpose="agenda_planning",
-                        idempotency_key=f"agenda-route:{cycle_id}:{lease['attempt']['attempt_number']}",
-                    )["decision"]
-                    if routed["outcome"] != "selected":
+                        lease,
+                        estimated_input=estimated_input,
+                        estimated_output=policy["max_output_tokens"],
+                    )
+                    if attempt_outcome["status"] == "route_rejected":
                         self._terminal_control_failure(
                             scheduler,
                             work,
@@ -777,12 +1149,32 @@ class AgendaCoordinator:
                             cycle_id=cycle_id,
                             code="model_route_rejected",
                         )
-                        client.fail_agenda_cycle(cycle_id=cycle_id, reason="model_route_rejected", metadata={"rejection_reasons": routed["rejection_reasons"]}, actor_ref=COORDINATOR_ACTOR)
+                        client.fail_agenda_cycle(cycle_id=cycle_id, reason="model_route_rejected", metadata={"rejection_reasons": attempt_outcome["rejection_reasons"]}, actor_ref=COORDINATOR_ACTOR)
                         raise CoordinatorError("model router rejected the agenda work order")
-                    profile = router.get_profile(routed["selected_profile_version_ref"])
-                    try:
-                        invocation, result = self._adapter(router).execute(work, routed, profile)
-                    except Exception as exc:
+                    if attempt_outcome["status"] == "capacity_busy":
+                        completion = self._defer_capacity(
+                            scheduler,
+                            work,
+                            lease,
+                            cycle_id=cycle_id,
+                            code=str(attempt_outcome.get("error_type") or "CAPACITY_BUSY"),
+                            route_ref=attempt_outcome.get("route_ref"),
+                        )
+                        if completion["work_state"] == "ready":
+                            return {
+                                "status": "pending",
+                                "cycle_id": cycle_id,
+                                "work_order_id": work.id,
+                                "reason": "model_capacity_busy",
+                            }
+                        client.fail_agenda_cycle(
+                            cycle_id=cycle_id,
+                            reason="model_capacity_retry_exhausted",
+                            metadata={"work_order_ref": work.id},
+                            actor_ref=COORDINATOR_ACTOR,
+                        )
+                        return {"status": "failed", "cycle_id": cycle_id}
+                    if attempt_outcome["status"] != "executed":
                         self._terminal_control_failure(
                             scheduler,
                             work,
@@ -793,10 +1185,14 @@ class AgendaCoordinator:
                         client.fail_agenda_cycle(
                             cycle_id=cycle_id,
                             reason="model_adapter_rejected_or_failed",
-                            metadata={"error_type": type(exc).__name__},
+                            metadata={"error_type": attempt_outcome.get("error_type")},
                             actor_ref=COORDINATOR_ACTOR,
                         )
-                        raise
+                        raise CoordinatorError("model adapter rejected or failed")
+                    routed = attempt_outcome["route"]
+                    profile = attempt_outcome["profile"]
+                    invocation = attempt_outcome["invocation"]
+                    result = attempt_outcome["result"]
                     client.register_invocation(invocation.to_dict())
                     self._record_usage_and_cost(
                         client, invocation, profile, cycle_id, routed
@@ -829,7 +1225,7 @@ class AgendaCoordinator:
                     scheduler.complete(
                         work.id,
                         lease["attempt"]["attempt_number"],
-                        "worker:agenda-model",
+                        AGENDA_MODEL_WORKER,
                         lease["lease_token"],
                         result,
                         idempotency_key=f"agenda-complete:{cycle_id}:{lease['attempt']['attempt_number']}",

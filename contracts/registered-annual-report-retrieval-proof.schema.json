@@ -1,0 +1,522 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RegisteredAnnualReportRetrievalProof",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "operation",
+    "permission_scope",
+    "request",
+    "registration",
+    "matches",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.2"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^annual-report-retrieval-proof:[0-9a-f]{32}$"
+    },
+    "operation": {
+      "const": "search_registered_annual_report"
+    },
+    "permission_scope": {
+      "const": "registered_annual_report_read"
+    },
+    "request": {
+      "$ref": "#/$defs/request"
+    },
+    "registration": {
+      "$ref": "#/$defs/registration"
+    },
+    "matches": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/match"
+      }
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_version_ref",
+        "company_ref",
+        "review_ref",
+        "acquired_document_ref",
+        "acquired_document_hash",
+        "acquisition_ticket_ref",
+        "document_read_proof_ref",
+        "document_read_proof_hash",
+        "issuer_cik",
+        "accession",
+        "source_manifest_ref",
+        "source_manifest_hash",
+        "source_raw_hash",
+        "source_content_hash",
+        "source_renderer",
+        "query_terms",
+        "limits",
+        "model_execution"
+      ],
+      "properties": {
+        "mission_version_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issuer_cik": {
+          "type": "string",
+          "pattern": "^[0-9]{10}$"
+        },
+        "accession": {
+          "type": "string",
+          "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$"
+        },
+        "source_manifest_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "query_terms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 160
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_query_terms",
+            "max_results",
+            "max_source_bytes",
+            "context_before_chars",
+            "context_after_chars"
+          ],
+          "properties": {
+            "max_query_terms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "max_source_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 67108864
+            },
+            "context_before_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16000
+            },
+            "context_after_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16000
+            }
+          }
+        },
+        "acquired_document_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acquisition_ticket_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_read_proof_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source_renderer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acquired_document_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "document_read_proof_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_raw_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model_execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "draft",
+            "verifier"
+          ],
+          "properties": {
+            "draft": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "routing_policy_ref",
+                "credential_slot_refs",
+                "max_input_tokens",
+                "max_output_tokens",
+                "max_cost_usd",
+                "max_seconds",
+                "max_attempts",
+                "provider_retry"
+              ],
+              "properties": {
+                "routing_policy_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "credential_slot_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "max_input_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "max_output_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "max_cost_usd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 100
+                },
+                "max_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "max_attempts": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5
+                },
+                "provider_retry": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_same_profile_retries",
+                        "retry_backoff_seconds"
+                      ],
+                      "properties": {
+                        "max_same_profile_retries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3
+                        },
+                        "retry_backoff_seconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 300
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "verifier": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "routing_policy_ref",
+                "credential_slot_refs",
+                "max_input_tokens",
+                "max_output_tokens",
+                "max_cost_usd",
+                "max_seconds",
+                "max_attempts",
+                "provider_retry"
+              ],
+              "properties": {
+                "routing_policy_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "credential_slot_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "max_input_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "max_output_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "max_cost_usd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 100
+                },
+                "max_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "max_attempts": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5
+                },
+                "provider_retry": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_same_profile_retries",
+                        "retry_backoff_seconds"
+                      ],
+                      "properties": {
+                        "max_same_profile_retries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3
+                        },
+                        "retry_backoff_seconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 300
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "source_ref",
+        "mission_version_ref",
+        "company_ref",
+        "issuer_cik",
+        "accession",
+        "form",
+        "review_ref",
+        "acquired_document_ref",
+        "acquired_document_hash",
+        "acquisition_ticket_ref",
+        "document_read_proof_ref",
+        "document_read_proof_hash",
+        "statement_ingest_ref",
+        "statement_filing_hash",
+        "source_manifest_ref",
+        "source_manifest_hash",
+        "source_raw_hash",
+        "source_content_hash",
+        "source_renderer",
+        "source_truncated"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^registered-annual-report:[0-9a-f]{32}$"
+        },
+        "schema_version": {
+          "const": "0.2"
+        },
+        "source_ref": {
+          "const": "source:sec-edgar"
+        },
+        "mission_version_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issuer_cik": {
+          "type": "string",
+          "pattern": "^[0-9]{10}$"
+        },
+        "accession": {
+          "type": "string",
+          "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$"
+        },
+        "form": {
+          "const": "10-K"
+        },
+        "review_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "statement_ingest_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "statement_filing_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_manifest_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "acquired_document_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acquisition_ticket_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_read_proof_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source_renderer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acquired_document_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "document_read_proof_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_raw_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_truncated": {
+          "const": false
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "matched_term",
+        "source_start",
+        "source_end",
+        "excerpt",
+        "excerpt_sha256",
+        "source_location"
+      ],
+      "properties": {
+        "matched_term": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 160
+        },
+        "source_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_end": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "excerpt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "excerpt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_location": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

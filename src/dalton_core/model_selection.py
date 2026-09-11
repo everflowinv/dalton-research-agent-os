@@ -60,6 +60,11 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "draft": ("initial-screen-model-config.json",),
     "document_extraction": ("document-extraction-model-config.json",),
     "discovery_selection": ("discovery-selection-model-config.json",),
+    "registered_annual_report_draft": ("initial-screen-model-config.json",),
+    "registered_annual_report_verifier": (
+        "company-dossier-verifier-model-config.json",
+        "dossier-verifier-model-config.json",
+    ),
     "claim_index": ("claim-index-model-config.json",),
     "quality_verifier": ("quality-verifier-model-config.json",),
     "quality": ("initial-screen-model-config.json",),
@@ -111,6 +116,9 @@ PURPOSE_LABELS: dict[str, str] = {
     "quality": "给产出打分",
     "document_extraction": "从文档抽取研究事实",
     "discovery_selection": "从搜索结果选择研究资料",
+    "registered_annual_report_draft": "从已登记年报起草定向回答",
+    "registered_annual_report_verifier": "独立核验年报定向回答",
+    "human_intent": "把自然语言翻译成受限意图",
     "agenda_planning": "旧议程规划",
     "thesis_impact_assessment": "评估新事实对论点的影响",
     "thesis_impact_verifier": "核验论点影响评估",
@@ -225,6 +233,26 @@ def purpose_policy_bindings(
             "requires_restart": True,
             "editable": True,
         }
+    control = service.get("control") if isinstance(service, Mapping) else None
+    control_config = control.get("config") if isinstance(control, Mapping) else None
+    intent = (
+        control_config.get("intent_composer")
+        if isinstance(control_config, Mapping)
+        else None
+    )
+    intent_ref = intent.get("routing_policy_ref") if isinstance(intent, Mapping) else None
+    result["human_intent"] = {
+        "status": "configured" if isinstance(intent_ref, str) else "unconfigured",
+        "source": f"{service_path}#control.config.intent_composer.routing_policy_ref",
+        "policy_version_ref": intent_ref if isinstance(intent_ref, str) else None,
+        "model_router_db": (
+            (intent.get("model_router_db") or service.get("model_router_db"))
+            if isinstance(intent, Mapping) and isinstance(service, Mapping)
+            else None
+        ),
+        "requires_restart": True,
+        "editable": True,
+    }
     if result["plan"]["status"] == "unconfigured":
         file_binding("plan", (directory / "research-planner-model-config.json",))
     # These consumers receive a path at launch time.  No installed path in the
@@ -340,6 +368,31 @@ def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any
     if not path.is_file():
         return None
     service = json.loads(path.read_text(encoding="utf-8"))
+    if purpose == "human_intent":
+        control = service.get("control")
+        control_config = control.get("config") if isinstance(control, Mapping) else None
+        config = (
+            control_config.get("intent_composer")
+            if isinstance(control_config, Mapping)
+            else None
+        )
+        if not isinstance(config, Mapping) or not isinstance(
+            config.get("routing_policy_ref"), str
+        ):
+            raise ModelSelectionError(
+                "service.json does not configure the human_intent runtime policy pin"
+            )
+        router_db = config.get("model_router_db") or service.get("model_router_db")
+        return {
+            "name": "service.json#control.config.intent_composer.routing_policy_ref",
+            "path": path,
+            "config": service,
+            "runtime_config": config,
+            "field": "routing_policy_ref",
+            "slots_field": "credential_slot_refs",
+            "router_db": router_db,
+            "routing_policy_ref": config["routing_policy_ref"],
+        }
     locations = {
         "plan": ("bounded_planner", "planner_routing_policy_ref",
                  "planner_credential_slot_refs", "planner_model_router_db"),

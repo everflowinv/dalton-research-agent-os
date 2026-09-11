@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -17,10 +18,11 @@ from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_model_adapter import (
     BrokerConnectionError,
     BrokerDefinitelyNotSent,
+    OpenClawModelAdapter,
 )
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
-from dalton_core.store import DaltonStore, content_hash
+from dalton_core.store import DaltonStore, canonical_json, content_hash
 from dalton_core.transcript_polish import (
     TRANSCRIPT_POLISH_CAPABILITY,
     TRANSCRIPT_POLISH_OPERATION,
@@ -31,6 +33,7 @@ from dalton_core.transcript_polish import (
 )
 from dalton_core.transcript_polish_model_worker import (
     RoutedTranscriptPolishModelWorker,
+    TranscriptPolishModelWorkerConflict,
 )
 from dalton_core.transcript_polish_model import (
     build_transcript_polish_model_prompt,
@@ -54,6 +57,9 @@ from tests.test_transcript_polish import (
     POLISHED,
     WHEN,
     candidate,
+)
+from tests.test_openclaw_model_adapter import (
+    AUTH_CLIENT_ID, AUTH_SECRET, FakeBroker, failure_response, seal, success_response,
 )
 
 
@@ -211,6 +217,37 @@ class UncertainFailureRecordingAdapter(RecordingAdapter):
         raise BrokerConnectionError("fixture outcome is uncertain")
 
 
+class ReturnedFailureSequenceAdapter(FakeAdapter):
+    def __init__(self, candidate_wire, failures):
+        super().__init__(candidate_wire)
+        self.failures = list(failures)
+        self.selected_profile_ids = []
+        self.invocation_ids = []
+
+    def execute(self, work, route, selected):
+        self.selected_profile_ids.append(selected["id"])
+        invocation, succeeded = super().execute(work, route, selected)
+        self.invocation_ids.append(invocation.id)
+        if self.failures:
+            code = self.failures.pop(0)
+            return invocation, ResultEnvelope(
+                schema_version=succeeded.schema_version, id=succeeded.id,
+                created_at=succeeded.created_at, work_order_ref=work.id,
+                invocation_ref=invocation.id, status="failed", outputs={},
+                actual_side_effects=(), usage_refs=succeeded.usage_refs,
+                artifact_refs=(),
+                error={"code": code, "message": "temporary", "source": "openclaw-model-broker"},
+                metadata=dict(succeeded.metadata) | {
+                    "broker_response_hash": content_hash({"route": route["id"], "code": code}),
+                    "broker_request_mode": "execute",
+                    "dispatch_proof": {"authority": "openclaw-model-adapter",
+                                       "state": "provider_completed_failure",
+                                       "version": "0.1"},
+                },
+            )
+        return invocation, succeeded
+
+
 class LateThenReplayAdapter(FakeAdapter):
     def __init__(self, candidate_wire: dict, advance_clock) -> None:
         super().__init__(candidate_wire)
@@ -318,13 +355,14 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             },
         )
 
-    def _prepare(self) -> WorkOrder:
+    def _prepare(self, **extra) -> WorkOrder:
         prepared = self.coordinator.prepare(
             self.probe,
             max_input_tokens=10_000,
             max_output_tokens=4_000,
             max_cost_usd=1.0,
             max_seconds=60,
+            **extra,
         )
         self.assertEqual(prepared["status"], "model_work_ready")
         self.assertNotIn(
@@ -343,6 +381,314 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             prepared["work_order"]["question"],
         )
         return WorkOrder.from_dict(prepared["work_order"])
+
+    def test_returned_provider_failure_retries_same_profile_with_new_invocation(self):
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        model_work = self._prepare(provider_retry=retry)
+        adapter = ReturnedFailureSequenceAdapter(candidate(), ["RATE_LIMITED"])
+        worker = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            provider_retry=retry, clock=lambda: NOW,
+        )
+        self.assertEqual(worker.run_once(model_work)["status"], "retryable")
+        self.assertEqual(worker.run_once(model_work)["status"], "succeeded")
+        self.assertEqual(adapter.selected_profile_ids,
+                         ["profile:test-transcript", "profile:test-transcript"])
+        self.assertEqual(len(set(adapter.invocation_ids)), 2)
+        self.assertEqual(len(self.router.list_decisions(work_order_id=model_work.id)), 2)
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations WHERE work_order_ref=?", (model_work.id,)
+        ).fetchone()[0], 2)
+
+    def test_returned_failures_retry_then_fallback_and_survive_worker_restart(self):
+        second = profile()
+        second.update({
+            "profile_version_ref": "model-profile-version:test-retry-backup:1",
+            "id": "profile:test-retry-backup", "model": "retry-backup",
+            "family": "test-retry-backup",
+            "credential_slot_ref": "credential-slot:openclaw:test-backup",
+        })
+        self.router.register_profile(second)
+        selected_policy = policy()
+        selected_policy.update({
+            "policy_version_ref": "model-routing-policy-version:test-provider-retry:1",
+            "id": "model-routing-policy:test-provider-retry",
+            "purpose_overrides": {"document_extraction": {
+                "mode": "explicit",
+                "chain": [profile()["id"], second["id"]],
+            }},
+        })
+        self.router.register_policy(selected_policy)
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        model_work = self._prepare(provider_retry=retry)
+        adapter = ReturnedFailureSequenceAdapter(
+            candidate(), ["RATE_LIMITED", "PROVIDER_INTERNAL_ERROR"])
+
+        class PurposeWorker(RoutedTranscriptPolishModelWorker):
+            purpose = "document_extraction"
+
+        def make_worker():
+            return PurposeWorker(
+                scheduler=self.scheduler, router=self.router, adapter=adapter,
+                store=self.store, observability=self.observability,
+                polish_worker=TranscriptPolishWorker(self.authority),
+                routing_policy_ref=selected_policy["policy_version_ref"],
+                credential_slot_refs=(profile()["credential_slot_ref"],
+                                      second["credential_slot_ref"]),
+                provider_retry=retry, clock=lambda: NOW,
+            )
+
+        self.assertEqual(make_worker().run_once(model_work)["status"], "retryable")
+        self.assertEqual(make_worker().run_once(model_work)["status"], "retryable")
+        final = make_worker().run_once(model_work)
+        self.assertEqual(final["status"], "succeeded")
+        self.assertEqual(adapter.selected_profile_ids, [
+            "profile:test-transcript", "profile:test-transcript",
+            "profile:test-retry-backup",
+        ])
+        self.assertEqual(len(set(adapter.invocation_ids)), 3)
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM observability_cost_entries"
+        ).fetchone()[0], 3)
+        parents = {
+            json.loads(row[0])["parent_ref"] for row in self.store.connection.execute(
+                "SELECT invocation_json FROM model_invocations WHERE work_order_ref=?",
+                (model_work.id,),
+            ).fetchall()
+        }
+        self.assertEqual(len(parents), 3)
+        replay = make_worker().run_once(model_work)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(adapter.invocation_ids), 3)
+
+    def test_provider_retry_preserves_declared_tier_order_without_purpose_override(self):
+        preferred = profile()
+        preferred.update({
+            "profile_version_ref": "model-profile-version:zz-preferred:1",
+            "id": "profile:zz-preferred", "model": "zz-preferred",
+            "family": "zz-preferred",
+            "credential_slot_ref": "credential-slot:openclaw:zz-preferred",
+        })
+        self.router.register_profile(preferred)
+        selected_policy = policy()
+        selected_policy.update({
+            "policy_version_ref": "model-routing-policy-version:tier-provider-retry:1",
+            "id": "model-routing-policy:tier-provider-retry",
+            "fallback_chains": {
+                "tiers": {"cheap": [preferred["id"], profile()["id"]]}
+            },
+        })
+        # A tier orders candidates already authorized by the policy filters.
+        # Only an explicit purpose override may escape a legacy profile pin.
+        selected_policy["filters"]["allowed_profile_ids"] = [
+            preferred["id"], profile()["id"],
+        ]
+        self.router.register_policy(selected_policy)
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        work = self._prepare(provider_retry=retry)
+        adapter = ReturnedFailureSequenceAdapter(
+            candidate(), ["RATE_LIMITED", "PROVIDER_INTERNAL_ERROR"]
+        )
+
+        class PurposeWorker(RoutedTranscriptPolishModelWorker):
+            purpose = "document_extraction"
+
+        def run():
+            return PurposeWorker(
+                scheduler=self.scheduler, router=self.router, adapter=adapter,
+                store=self.store, observability=self.observability,
+                polish_worker=TranscriptPolishWorker(self.authority),
+                routing_policy_ref=selected_policy["policy_version_ref"],
+                credential_slot_refs=(
+                    profile()["credential_slot_ref"],
+                    preferred["credential_slot_ref"],
+                ),
+                provider_retry=retry, clock=lambda: NOW,
+            ).run_once(work)
+        self.assertEqual(run()["status"], "retryable")
+        self.assertEqual(adapter.selected_profile_ids, [preferred["id"]])
+        self.assertEqual(run()["status"], "retryable")
+        self.assertEqual(run()["status"], "succeeded")
+        self.assertEqual(adapter.selected_profile_ids, [
+            preferred["id"], preferred["id"], profile()["id"],
+        ])
+        self.assertEqual(len(set(adapter.invocation_ids)), 3)
+
+    def test_unknown_returned_failure_is_terminal(self):
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        model_work = self._prepare(provider_retry=retry)
+        adapter = ReturnedFailureSequenceAdapter(candidate(), ["NOT_RATE_LIMITED"])
+        worker = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            provider_retry=retry, clock=lambda: NOW,
+        )
+        self.assertEqual(worker.run_once(model_work)["status"], "failed")
+        self.assertEqual(len(adapter.invocation_ids), 1)
+
+    def test_provider_retry_history_tamper_fails_closed_and_nonproof_does_not_reset(self):
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        model_work = self._prepare(provider_retry=retry)
+        adapter = ReturnedFailureSequenceAdapter(candidate(), ["RATE_LIMITED"])
+        worker = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            provider_retry=retry, clock=lambda: NOW,
+        )
+        self.assertEqual(worker.run_once(model_work)["status"], "retryable")
+        original = dict(self.scheduler.connection.execute(
+            "SELECT result_envelope_json,result_envelope_hash,attempt_number "
+            "FROM scheduler_result_envelopes WHERE work_order_id=?",
+            (model_work.id,),
+        ).fetchone())
+
+        class Rows:
+            def __init__(self, rows): self.rows = rows
+            def fetchall(self): return self.rows
+        class Connection:
+            def __init__(self, rows): self.rows = rows
+            def execute(self, *_): return Rows(self.rows)
+
+        nonproof = ResultEnvelope.from_dict(json.loads(
+            original["result_envelope_json"])).to_dict()
+        nonproof["id"] = "result:unrelated-capacity-retry"
+        nonproof["metadata"] = {"route_decision_ref": "route:unrelated"}
+        nonproof_row = {"result_envelope_json": canonical_json(nonproof),
+                        "result_envelope_hash": content_hash(nonproof),
+                        "attempt_number": 2}
+        worker.scheduler = SimpleNamespace(connection=Connection([nonproof_row, original]))
+        state = worker._provider_retry_state(model_work)
+        self.assertEqual(state["same_profile_retries"], 1)
+
+        missing = json.loads(original["result_envelope_json"])
+        del missing["metadata"]["provider_retry_state"]
+        missing_row = {"result_envelope_json": canonical_json(missing),
+                       "result_envelope_hash": content_hash(missing),
+                       "attempt_number": 1}
+        worker.scheduler = SimpleNamespace(connection=Connection([missing_row]))
+        with self.assertRaises(TranscriptPolishModelWorkerConflict):
+            worker._provider_retry_state(model_work)
+        malformed_state = json.loads(original["result_envelope_json"])
+        malformed_state["metadata"]["provider_retry_state"] = None
+        malformed_state_row = {
+            "result_envelope_json": canonical_json(malformed_state),
+            "result_envelope_hash": content_hash(malformed_state),
+            "attempt_number": 1,
+        }
+        worker.scheduler = SimpleNamespace(connection=Connection([malformed_state_row]))
+        with self.assertRaises(TranscriptPolishModelWorkerConflict):
+            worker._provider_retry_state(model_work)
+        worker.scheduler = SimpleNamespace(connection=Connection([{
+            "result_envelope_json": "{", "result_envelope_hash": "0" * 64,
+            "attempt_number": 1,
+        }]))
+        with self.assertRaises(TranscriptPolishModelWorkerConflict):
+            worker._provider_retry_state(model_work)
+        self.assertEqual(len(adapter.invocation_ids), 1)
+
+    def test_real_unix_adapter_capacity_proof_returns_scheduler_pending(self):
+        model_work = self._prepare()
+        broker = FakeBroker(
+            Path(self.temp.name),
+            lambda request: failure_response(
+                request,
+                dispatch_proof={"authority": "openclaw-model-broker",
+                                "state": "definitely_not_sent", "version": "0.1"},
+            ),
+        )
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path, route_resolver=self.router.get_decision,
+            auth_client_id=AUTH_CLIENT_ID,
+            auth_key_provider=lambda: AUTH_SECRET,
+            expected_agent_id="dalton-model-broker", clock=lambda: NOW,
+        )
+        result = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            clock=lambda: NOW,
+        ).run_once(model_work)
+        self.assertEqual(result["status"], "retryable")
+        self.assertEqual(self.scheduler.status(model_work.id)["state"], "ready")
+        self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations WHERE work_order_ref=?",
+            (model_work.id,),
+        ).fetchone()[0], 0)
+
+    def test_real_unix_capacity_code_without_proof_is_paid_terminal(self):
+        model_work = self._prepare()
+        broker = FakeBroker(Path(self.temp.name), failure_response)
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path, route_resolver=self.router.get_decision,
+            auth_client_id=AUTH_CLIENT_ID, auth_key_provider=lambda: AUTH_SECRET,
+            expected_agent_id="dalton-model-broker", clock=lambda: NOW,
+        )
+        result = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",), clock=lambda: NOW,
+        ).run_once(model_work)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.scheduler.status(model_work.id)["state"], "failed")
+        self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations WHERE work_order_ref=?", (model_work.id,)
+        ).fetchone()[0], 1)
+
+    def test_real_unix_adapter_returned_failure_retries_as_new_paid_attempt(self):
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        model_work = self._prepare(provider_retry=retry)
+        def responder(request):
+            if len(broker.requests) == 1:
+                return failure_response(
+                    request, code="RATE_LIMITED",
+                    dispatch_proof={"authority": "openclaw-model-broker",
+                                    "state": "provider_completed_failure", "version": "0.1"})
+            response = success_response(request, text=canonical_json(candidate()))
+            response.update({"provider": "test", "model": "transcript",
+                             "canonicalModel": "test/transcript"})
+            return seal({key: value for key, value in response.items()
+                         if key != "contentHash"})
+        broker = FakeBroker(Path(self.temp.name), responder, connections=2)
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path, route_resolver=self.router.get_decision,
+            auth_client_id=AUTH_CLIENT_ID, auth_key_provider=lambda: AUTH_SECRET,
+            expected_agent_id="dalton-model-broker", clock=lambda: NOW,
+        )
+        worker = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler, router=self.router, adapter=adapter,
+            store=self.store, observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref="model-routing-policy-version:test-transcript:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            provider_retry=retry, clock=lambda: NOW,
+        )
+        self.assertEqual(worker.run_once(model_work)["status"], "retryable")
+        self.assertEqual(worker.run_once(model_work)["status"], "succeeded")
+        self.assertEqual(len(broker.requests), 2)
+        self.assertNotEqual(broker.requests[0]["invocationId"], broker.requests[1]["invocationId"])
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations WHERE work_order_ref=?",
+            (model_work.id,),
+        ).fetchone()[0], 2)
 
     def _worker(self, candidate_wire: dict) -> RoutedTranscriptPolishModelWorker:
         return RoutedTranscriptPolishModelWorker(

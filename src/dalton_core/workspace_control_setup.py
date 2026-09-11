@@ -66,6 +66,10 @@ def configure_workspace_control(
         existing_base = json.loads(json.dumps(existing))
         if isinstance(existing_base.get("config"), dict):
             existing_base["config"].pop("cockpit", None)
+            # Human Intent is an installed extension of the control plane.
+            # Re-running the base workspace setup must preserve it rather
+            # than treating its closed configuration as a conflicting base.
+            existing_base["config"].pop("intent_composer", None)
         if existing_base != desired:
             raise WorkspaceError("workspace control is already configured differently")
     original = config.read_bytes()

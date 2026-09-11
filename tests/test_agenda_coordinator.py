@@ -13,13 +13,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.agenda_coordinator import (
+    AGENDA_LEASE_GRACE_SECONDS,
     AgendaCoordinator,
     AgendaCoordinatorConfig,
     CoordinatorError,
+    agenda_scheduler_policy,
 )
 from dalton_core.contracts import InvocationGranularity, ModelInvocation, ResultEnvelope, WorkOrder
 from dalton_core.governance_cli import ephemeral_call
 from dalton_core.model_deployment import install_openclaw_catalog
+from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_model_adapter import BrokerDefinitelyNotSent
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import content_hash
 from dalton_core.writer_server import CORE_OPERATIONS, Principal, write_token_config
@@ -63,6 +67,356 @@ class FakeAdapter:
 
 
 class AgendaCoordinatorTests(unittest.TestCase):
+    def test_real_unix_capacity_proof_defers_without_paid_invocation(self):
+        from tests.test_openclaw_model_adapter import (
+            AUTH_SECRET, FakeBroker, core_request, failure_response, seal, success_response,
+        )
+        from dalton_core.openclaw_model_adapter import canonical_hash
+        from tests.test_human_intent import model_policy, model_profile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router_path = root / "router.sqlite"
+            with ModelRouter(router_path) as router:
+                profile = model_profile()
+                profile["availability"] = {"state": "available",
+                    "checked_at": "2026-09-11T00:00:00+00:00",
+                    "valid_until": "2099-09-11T00:00:00+00:00"}
+                router.register_profile(profile)
+                router.register_policy(model_policy())
+            def respond(request):
+                if len(broker.requests) == 1:
+                    response = failure_response(request, dispatch_proof={
+                        "authority": "openclaw-model-broker",
+                        "state": "definitely_not_sent", "version": "0.1",
+                    })
+                else:
+                    response = success_response(request, text='{"candidates":[]}')
+                    response.update({"provider": "test", "model": "intent-test",
+                                     "canonicalModel": "test/intent-test"})
+                execution = core_request(request)
+                execution.pop("queueWaitMs")
+                response["requestHash"] = canonical_hash(execution)
+                response.pop("contentHash")
+                return seal(response)
+            broker = FakeBroker(root, respond, connections=2)
+            self.addCleanup(broker.close)
+            key = root / "broker.key"
+            key.write_bytes(AUTH_SECRET)
+            config = AgendaCoordinatorConfig(
+                scheduler_db=root / "scheduler.sqlite", model_router_db=router_path,
+                writer_socket=root / "writer.sock", core_token_config=root / "tokens.json",
+                broker_socket=broker.path, broker_auth_key=key,
+                perception_source_db=root / "legacy.sqlite",
+                perception_snapshot_path=root / "perception.json", company_ref="wanhua",
+                routing_policy_ref="model-routing-policy-version:intent:1",
+                credential_slot_refs=("credential-slot:openclaw:intent",),
+                broker_client_id="client:dalton-core",
+                expected_agent_id="dalton-model-broker", timeout_seconds=180,
+                transport_retry={"max_definitely_not_sent_retries": 0,
+                                 "queue_wait_seconds": 4, "retry_backoff_seconds": 0},
+            )
+            work = WorkOrder(
+                schema_version="0.1", id="work:agenda-real-capacity",
+                created_at="2026-08-14T10:00:00+00:00",
+                updated_at="2026-08-14T10:00:00+00:00", question="propose questions",
+                requested_capabilities=("extract",),
+                runtime_profile_ref=config.routing_policy_ref,
+                budget={"max_input_tokens": 8000, "max_output_tokens": 1000,
+                        "max_total_tokens": 9000, "max_cost_usd": 1, "max_seconds": 180},
+                idempotency_key="agenda-real-capacity", declared_side_effects=(),
+                status="pending",
+            )
+            with ModelRouter(router_path) as router:
+                outcome = AgendaCoordinator(config)._execute_model_attempt(
+                    None, router, work, {"attempt": {"attempt_number": 1}},
+                    estimated_input=100, estimated_output=100,
+                )
+            self.assertEqual(outcome["status"], "capacity_busy", outcome)
+            self.assertEqual(len(broker.requests), 1)
+            with ModelRouter(router_path) as router:
+                recovered = AgendaCoordinator(config)._execute_model_attempt(
+                    None, router, work, {"attempt": {"attempt_number": 2}},
+                    estimated_input=100, estimated_output=100,
+                )
+            self.assertEqual(recovered["status"], "executed", recovered)
+            self.assertEqual(len(broker.requests), 2)
+            self.assertNotEqual(broker.requests[0]["invocationId"],
+                                broker.requests[1]["invocationId"])
+
+    def test_transport_config_is_closed_and_lease_covers_exact_policy_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router_path = root / "router.sqlite"
+            install_openclaw_catalog(
+                router_path,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
+            with ModelRouter(router_path) as router:
+                original = router.get_policy(
+                    "model-routing-policy-version:dalton-openclaw:1"
+                )
+                chained = dict(original)
+                chained.pop("content_hash")
+                chained.update(
+                    version=2,
+                    prior_version_ref=original["policy_version_ref"],
+                    policy_version_ref=(
+                        "model-routing-policy-version:dalton-openclaw:2"
+                    ),
+                    created_at="2026-08-14T09:01:00+00:00",
+                    purpose_overrides={
+                        "agenda_planning": {
+                            "mode": "explicit",
+                            "chain": [
+                                "model-profile:deepseek-v4-flash",
+                                "model-profile:gemini-3-5-flash-lite",
+                            ],
+                        }
+                    },
+                )
+                router.register_policy(chained)
+            common = dict(
+                scheduler_db=root / "scheduler.sqlite",
+                model_router_db=router_path,
+                writer_socket=root / "writer.sock",
+                core_token_config=root / "tokens.json",
+                broker_socket=root / "broker.sock",
+                broker_auth_key=root / "broker.key",
+                perception_source_db=root / "legacy.sqlite",
+                perception_snapshot_path=root / "perception.json",
+                company_ref="wanhua",
+                routing_policy_ref=chained["policy_version_ref"],
+                credential_slot_refs=(
+                    "credential-slot:openclaw:deepseek",
+                    "credential-slot:openclaw:google",
+                ),
+                broker_client_id="client:dalton-core",
+                expected_agent_id="chem",
+                timeout_seconds=180,
+            )
+            configured = AgendaCoordinatorConfig(
+                **common,
+                transport_retry={
+                    "max_definitely_not_sent_retries": 2,
+                    "queue_wait_seconds": 90,
+                    "retry_backoff_seconds": 7,
+                },
+                max_scheduler_attempts=5,
+            )
+            policy = agenda_scheduler_policy(configured)
+            self.assertEqual(policy["route_candidate_count"], 2)
+            self.assertEqual(policy["max_attempts"], 5)
+            self.assertEqual(
+                policy["max_lease_seconds"],
+                2 * 3 * (180 + 90) + 2 * 2 * 7 + AGENDA_LEASE_GRACE_SECONDS,
+            )
+            legacy_policy = agenda_scheduler_policy(AgendaCoordinatorConfig(**common))
+            self.assertEqual(
+                legacy_policy["max_lease_seconds"],
+                2 * 180 + AGENDA_LEASE_GRACE_SECONDS,
+            )
+            with AgendaCoordinator(configured)._scheduler(), AgendaCoordinator(
+                AgendaCoordinatorConfig(**common)
+            )._scheduler():
+                pass
+            connection = sqlite3.connect(common["scheduler_db"])
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM scheduler_policy_versions"
+                ).fetchone()[0],
+                2,
+            )
+            connection.close()
+
+            class FirstLinkUnavailable(FakeAdapter):
+                selected = []
+
+                def execute(self, work, route, selected):
+                    type(self).selected.append(selected["id"])
+                    if selected["id"] == "model-profile:deepseek-v4-flash":
+                        raise BrokerDefinitelyNotSent("first provider was not sent")
+                    return super().execute(work, route, selected)
+
+            work = WorkOrder(
+                schema_version="0.1",
+                id="work:agenda-chain-lifecycle",
+                created_at="2026-08-14T10:00:00+00:00",
+                updated_at="2026-08-14T10:00:00+00:00",
+                question="propose questions",
+                requested_capabilities=("extract",),
+                runtime_profile_ref=chained["policy_version_ref"],
+                budget={
+                    "max_input_tokens": 8000,
+                    "max_output_tokens": 1000,
+                    "max_total_tokens": 9000,
+                    "max_cost_usd": 1,
+                    "max_seconds": 180,
+                },
+                idempotency_key="agenda-chain-lifecycle",
+                declared_side_effects=(),
+                status="ready",
+                input_refs=(),
+                metadata={"cycle_ref": "agenda-cycle:chain-lifecycle"},
+            )
+            coordinator = AgendaCoordinator(configured)
+            FirstLinkUnavailable.selected = []
+            with coordinator._scheduler() as scheduler, ModelRouter(
+                router_path
+            ) as router, patch.object(
+                AgendaCoordinator,
+                "_adapter",
+                return_value=FirstLinkUnavailable(),
+            ), patch("time.sleep"):
+                scheduler.enqueue(work)
+                lease = scheduler.claim(
+                    "worker:agenda-model", work_order_id=work.id
+                )
+                outcome = coordinator._execute_model_attempt(
+                    object(),
+                    router,
+                    work,
+                    lease,
+                    estimated_input=100,
+                    estimated_output=1000,
+                )
+                self.assertEqual(outcome["status"], "executed")
+                self.assertEqual(
+                    outcome["profile"]["id"],
+                    "model-profile:gemini-3-5-flash-lite",
+                )
+                self.assertEqual(
+                    FirstLinkUnavailable.selected,
+                    [
+                        "model-profile:deepseek-v4-flash",
+                        "model-profile:deepseek-v4-flash",
+                        "model-profile:deepseek-v4-flash",
+                        "model-profile:gemini-3-5-flash-lite",
+                    ],
+                )
+                self.assertEqual(
+                    [link["served"] for link in router.chain_links()],
+                    [False, True],
+                )
+
+                class ReturnedProviderFailure(FakeAdapter):
+                    selected = []
+
+                    def execute(self, work, route, selected):
+                        type(self).selected.append(selected["id"])
+                        invocation, result = super().execute(work, route, selected)
+                        wire = result.to_dict()
+                        wire.update({
+                            "status": "failed",
+                            "outputs": {},
+                            "error": {
+                                "code": "PROVIDER_ERROR",
+                                "message": "provider returned a failure",
+                            },
+                        })
+                        return invocation, ResultEnvelope.from_dict(wire)
+
+                failed_work = WorkOrder.from_dict({
+                    **work.to_dict(),
+                    "id": "work:agenda-returned-provider-failure",
+                    "idempotency_key": "agenda-returned-provider-failure",
+                })
+                scheduler.enqueue(failed_work)
+                failed_lease = scheduler.claim(
+                    "worker:agenda-model", work_order_id=failed_work.id
+                )
+                with patch.object(
+                    AgendaCoordinator,
+                    "_adapter",
+                    return_value=ReturnedProviderFailure(),
+                ):
+                    failed = coordinator._execute_model_attempt(
+                        object(),
+                        router,
+                        failed_work,
+                        failed_lease,
+                        estimated_input=100,
+                        estimated_output=1000,
+                    )
+                self.assertEqual(failed["status"], "executed")
+                self.assertEqual(failed["result"].status, "failed")
+                self.assertEqual(
+                    ReturnedProviderFailure.selected,
+                    ["model-profile:deepseek-v4-flash"],
+                )
+
+    def test_transport_config_validation_and_queue_propagation(self):
+        root = Path("/tmp/agenda-transport-validation")
+        raw = {
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "model_router_db": str(root / "router.sqlite"),
+            "writer_socket": str(root / "writer.sock"),
+            "core_token_config": str(root / "tokens.json"),
+            "broker_socket": str(root / "broker.sock"),
+            "broker_auth_key": str(root / "broker.key"),
+            "perception_source_db": str(root / "legacy.sqlite"),
+            "perception_snapshot_path": str(root / "perception.json"),
+            "company_ref": "wanhua",
+            "routing_policy_ref": "routing-policy:agenda",
+            "credential_slot_refs": ["slot:test"],
+            "broker_client_id": "client:dalton-core",
+            "expected_agent_id": "chem",
+            "timeout_seconds": 180,
+        }
+        legacy = AgendaCoordinatorConfig.from_mapping(raw)
+        self.assertIsNone(legacy.transport_retry)
+        self.assertEqual(
+            AgendaCoordinator(legacy)._adapter(object())._queue_wait_seconds, 0
+        )
+        raw["transport_retry"] = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 17,
+            "retry_backoff_seconds": 2,
+        }
+        configured = AgendaCoordinatorConfig.from_mapping(raw)
+        self.assertEqual(
+            AgendaCoordinator(configured)._adapter(object())._queue_wait_seconds, 17
+        )
+        invalid = dict(raw)
+        invalid["transport_retry"] = dict(raw["transport_retry"], typo=1)
+        with self.assertRaisesRegex(CoordinatorError, "transport retry"):
+            AgendaCoordinatorConfig.from_mapping(invalid)
+        bounded = AgendaCoordinatorConfig.from_mapping({
+            **raw, "max_scheduler_attempts": 5
+        })
+        self.assertEqual(bounded.max_scheduler_attempts, 5)
+        with self.assertRaisesRegex(CoordinatorError, "max_scheduler_attempts"):
+            AgendaCoordinatorConfig.from_mapping({
+                **raw, "max_scheduler_attempts": 0
+            })
+
+    def test_capacity_code_requires_closed_undispatched_proof(self):
+        base = {
+            "schema_version": "0.1",
+            "id": "result:agenda-capacity-proof",
+            "created_at": "2026-08-14T10:00:00+00:00",
+            "work_order_ref": "work:agenda-capacity-proof",
+            "invocation_ref": "invocation:agenda-capacity-proof",
+            "status": "failed",
+            "outputs": {},
+            "actual_side_effects": [],
+            "usage_refs": [],
+            "artifact_refs": [],
+            "error": {"code": "BUSY", "message": "busy"},
+            "metadata": {},
+        }
+        result = ResultEnvelope.from_dict(base)
+        self.assertIsNone(AgendaCoordinator._capacity_code(result))
+        proven = ResultEnvelope.from_dict({
+            **base,
+            "metadata": {"dispatch_proof": {
+                "authority": "openclaw-model-adapter",
+                "state": "definitely_not_sent",
+                "version": "0.1",
+            }},
+        })
+        self.assertEqual(AgendaCoordinator._capacity_code(proven), "BUSY")
+
     def test_missing_provider_tokens_use_authority_bound_route_estimate(self):
         class RecordingClient:
             def __init__(self):
@@ -353,6 +707,16 @@ class AgendaCoordinatorTests(unittest.TestCase):
                 self.assertEqual(first["status"], "decided")
                 self.assertEqual(second["status"], "decided")
                 self.assertEqual(FakeAdapter.calls, 1)
+                scheduler_connection = sqlite3.connect(scheduler)
+                saved_work_id = scheduler_connection.execute(
+                    "SELECT work_order_id FROM scheduler_work_orders"
+                ).fetchone()[0]
+                scheduler_connection.close()
+                self.assertEqual(
+                    "work:agenda-"
+                    + content_hash({"cycle_ref": first["cycle_id"]})[:32],
+                    saved_work_id,
+                )
                 conn = sqlite3.connect(core)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM observability_usage_entries").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM observability_cost_entries").fetchone()[0], 1)
@@ -382,6 +746,182 @@ class AgendaCoordinatorTests(unittest.TestCase):
                 self.assertIn("OUTPUT_CONTRACT=", question)
             finally:
                 process.terminate(); process.wait(timeout=3)
+
+    def test_transport_retry_and_capacity_defer_share_one_scheduler_lifecycle(self):
+        class RetryThenBusyThenSuccess(FakeAdapter):
+            transport_calls = 0
+
+            def execute(self, work, route, profile):
+                type(self).transport_calls += 1
+                if type(self).transport_calls == 1:
+                    raise BrokerDefinitelyNotSent("connect failed before send")
+                invocation, result = super().execute(work, route, profile)
+                if type(self).transport_calls == 2:
+                    result = ResultEnvelope(
+                        schema_version=result.schema_version,
+                        id=result.id,
+                        created_at=result.created_at,
+                        work_order_ref=result.work_order_ref,
+                        invocation_ref=result.invocation_ref,
+                        status="failed",
+                        outputs={},
+                        actual_side_effects=(),
+                        usage_refs=(),
+                        artifact_refs=(),
+                        error={
+                            "code": "BUSY",
+                            "message": "broker capacity is busy",
+                        },
+                        metadata={
+                            **result.metadata,
+                            "dispatch_proof": {
+                                "authority": "openclaw-model-adapter",
+                                "state": "definitely_not_sent",
+                                "version": "0.1",
+                            },
+                        },
+                    )
+                return invocation, result
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            scheduler = root / "scheduler.sqlite"
+            router = root / "router.sqlite"
+            socket = root / "run" / "writer.sock"
+            tokens = root / "tokens.json"
+            legacy = root / "legacy.sqlite"
+            self.legacy(legacy)
+            write_token_config(
+                tokens,
+                [Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True)],
+            )
+            install_openclaw_catalog(
+                router,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
+            env = {
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+            }
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "dalton_core.writer_server",
+                    "--db",
+                    str(core),
+                    "--socket",
+                    str(socket),
+                    "--token-config",
+                    str(tokens),
+                ],
+                cwd=str(Path(__file__).parents[1]),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline and not socket.exists():
+                    time.sleep(0.02)
+                config = AgendaCoordinatorConfig(
+                    scheduler_db=scheduler,
+                    model_router_db=router,
+                    writer_socket=socket,
+                    core_token_config=tokens,
+                    broker_socket=root / "broker.sock",
+                    broker_auth_key=root / "broker.key",
+                    perception_source_db=legacy,
+                    perception_snapshot_path=root / "perception.json",
+                    company_ref="wanhua",
+                    routing_policy_ref=(
+                        "model-routing-policy-version:dalton-openclaw:1"
+                    ),
+                    credential_slot_refs=(
+                        "credential-slot:openclaw:deepseek",
+                        "credential-slot:openclaw:openai",
+                        "credential-slot:openclaw:claude-cli",
+                    ),
+                    broker_client_id="client:dalton-core",
+                    expected_agent_id="chem",
+                    timeout_seconds=180,
+                    transport_retry={
+                        "max_definitely_not_sent_retries": 1,
+                        "queue_wait_seconds": 5,
+                        "retry_backoff_seconds": 0,
+                    },
+                    max_scheduler_attempts=4,
+                )
+                self.govern(tokens, socket)
+                coordinator = AgendaCoordinator(config)
+                adapter = RetryThenBusyThenSuccess()
+                RetryThenBusyThenSuccess.transport_calls = 0
+                with patch.object(
+                    AgendaCoordinator, "_adapter", return_value=adapter
+                ):
+                    first = coordinator.run_once(
+                        now=datetime(2026, 8, 14, 10, tzinfo=timezone.utc)
+                    )
+                    self.assertEqual(first["status"], "pending")
+                    self.assertEqual(first["reason"], "model_capacity_busy")
+                    self.assertNotEqual(
+                        first["work_order_id"],
+                        "work:agenda-"
+                        + content_hash({"cycle_ref": first["cycle_id"]})[:32],
+                    )
+                    connection = sqlite3.connect(core)
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM model_invocations"
+                        ).fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM observability_cost_entries"
+                        ).fetchone()[0],
+                        0,
+                    )
+                    connection.close()
+                    second = coordinator.run_once(
+                        now=datetime(2026, 8, 14, 11, tzinfo=timezone.utc)
+                    )
+                self.assertEqual(second["status"], "decided")
+                self.assertEqual(RetryThenBusyThenSuccess.transport_calls, 3)
+                connection = sqlite3.connect(scheduler)
+                work = json.loads(
+                    connection.execute(
+                        "SELECT work_order_json FROM scheduler_work_orders"
+                    ).fetchone()[0]
+                )
+                self.assertEqual(work["metadata"]["transport_retry"], config.transport_retry)
+                self.assertEqual(work["metadata"]["max_scheduler_attempts"], 4)
+                states = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT state FROM scheduler_attempt_events ORDER BY event_seq"
+                    ).fetchall()
+                ]
+                self.assertIn("retryable", states)
+                self.assertEqual(states[-1], "succeeded")
+                policy_wire = json.loads(
+                    connection.execute(
+                        "SELECT p.policy_json FROM scheduler_work_orders w "
+                        "JOIN scheduler_policy_versions p "
+                        "ON p.policy_version_id=w.policy_version_id"
+                    ).fetchone()[0]
+                )
+                self.assertEqual(
+                    policy_wire["max_lease_seconds"],
+                    2 * (180 + 5) + AGENDA_LEASE_GRACE_SECONDS,
+                )
+                self.assertEqual(policy_wire["max_attempts"], 4)
+                connection.close()
+            finally:
+                process.terminate()
+                process.wait(timeout=3)
 
     def test_input_token_budget_fails_closed_without_truncating(self):
         with tempfile.TemporaryDirectory() as directory:

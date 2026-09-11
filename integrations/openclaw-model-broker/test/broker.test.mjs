@@ -204,6 +204,40 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
   }
 });
 
+test("preserves only the closed returned provider failure union", async () => {
+  for (const [httpStatus, code] of [[429, "RATE_LIMITED"], [503, "PROVIDER_INTERNAL_ERROR"]]) {
+    const broker = new ModelBroker(fakeRuntime(async () => ({
+      failure: { version: "0.1", state: "provider_completed_failure", httpStatus },
+      provider: "openai", model: "gpt-5.6", agentId: "dalton-model-broker",
+      usage: { inputTokens: 12 },
+    })), config());
+    const response = await broker.handle(request({ invocationId: `invocation:http-${httpStatus}` }));
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, code);
+    assert.deepEqual(response.dispatchProof, {
+      authority: "openclaw-model-broker", state: "provider_completed_failure", version: "0.1",
+    });
+    assert.equal(response.usage.totalTokens, null);
+    verifyHash(response);
+  }
+});
+
+test("does not promote malformed or non-retryable host failures", async () => {
+  for (const [name, failure] of [
+    ["unauthorized", { version: "0.1", state: "provider_completed_failure", httpStatus: 401 }],
+    ["string-status", { version: "0.1", state: "provider_completed_failure", httpStatus: "429" }],
+    ["extra", { version: "0.1", state: "provider_completed_failure", httpStatus: 503, message: "x" }],
+  ]) {
+    const broker = new ModelBroker(fakeRuntime(async () => ({
+      failure, provider: "openai", model: "gpt-5.6", agentId: "dalton-model-broker",
+    })), config());
+    const response = await broker.handle(request({ invocationId: `invocation:bad-${name}` }));
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "INVALID_HOST_RESULT");
+    assert.equal(response.dispatchProof, null);
+  }
+});
+
 test("profile thinking level is pinned on host completion", async () => {
   const calls = [];
   const runtime = fakeRuntime(async (params) => {
@@ -723,10 +757,13 @@ test("queue timeout and close never claim or call the provider", async () => {
   const timedRequest = request({ invocationId: "invocation:timed", workOrderId: "work:timed", queueWaitMs: 10 });
   const timed = await broker.handle(timedRequest);
   assert.equal(timed.error.code, "QUEUE_TIMEOUT");
+  assert.deepEqual(timed.dispatchProof, { authority: "openclaw-model-broker", state: "definitely_not_sent", version: "0.1" });
   assert.equal(journal.get(timedRequest.invocationId), null);
   const closedRequest = request({ invocationId: "invocation:closed", workOrderId: "work:closed", queueWaitMs: 1000 });
   const closedPromise = broker.handle(closedRequest); broker.close();
-  assert.equal((await closedPromise).error.code, "BROKER_CLOSED");
+  const closed = await closedPromise;
+  assert.equal(closed.error.code, "BROKER_CLOSED");
+  assert.deepEqual(closed.dispatchProof, { authority: "openclaw-model-broker", state: "definitely_not_sent", version: "0.1" });
   assert.equal(journal.get(closedRequest.invocationId), null);
   assert.equal(calls, 1); release(); await first;
 });

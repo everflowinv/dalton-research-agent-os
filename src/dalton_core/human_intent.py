@@ -22,7 +22,11 @@ from typing import Any, Iterator, Protocol
 
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .model_router import ModelRouter
-from .openclaw_model_adapter import OpenClawModelAdapter, OpenClawModelAdapterError
+from .openclaw_model_adapter import (
+    BrokerDefinitelyNotSent,
+    OpenClawModelAdapter,
+    OpenClawModelAdapterError,
+)
 from .research_context import count_dalton_search_tokens
 from .scheduler import Scheduler
 from .store import canonical_json, content_hash
@@ -73,6 +77,8 @@ INTERPRETER_CANDIDATE_CONTRACT_HASH = content_hash({
     "execution": False,
 })
 WORKER_REF = "worker:human-intent-interpreter:0.1"
+INTENT_MODEL_PURPOSE = "human_intent"
+INTENT_LEASE_GRACE_SECONDS = 30.0
 _SCHEMA_PATH = Path(__file__).with_name("human_intent_schema.sql")
 _FROZEN_CORPUS_PATH = (
     Path(__file__).with_name("calibration_fixtures") / "human-intent-v0.1.json"
@@ -542,16 +548,23 @@ class IntentComposerConfig:
     max_input_tokens: int
     max_output_tokens: int
     max_cost_usd: float
+    transport_retry: Mapping[str, int] | None = None
+    max_scheduler_attempts: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "IntentComposerConfig":
-        fields = {
+        required = {
             "staging_path", "scheduler_db", "model_router_db", "broker_socket",
             "broker_auth_key", "routing_policy_ref", "credential_slot_refs",
             "broker_client_id", "expected_agent_id", "timeout_seconds",
             "max_input_tokens", "max_output_tokens", "max_cost_usd",
         }
-        value = _closed(raw, fields, "intent_composer config")
+        optional = {"transport_retry", "max_scheduler_attempts"}
+        if not isinstance(raw, Mapping) or set(raw) - optional != required:
+            raise HumanIntentValidationError(
+                "intent_composer config has an invalid closed shape"
+            )
+        value = dict(raw)
         refs = value["credential_slot_refs"]
         if (
             not isinstance(refs, list)
@@ -570,6 +583,16 @@ class IntentComposerConfig:
             or cost <= 0
         ):
             raise HumanIntentValidationError("max_cost_usd must be positive and finite")
+        transport_retry = None
+        if "transport_retry" in value:
+            from .document_extraction import validate_transport_retry
+
+            try:
+                transport_retry = validate_transport_retry(value["transport_retry"])
+            except Exception as exc:
+                raise HumanIntentValidationError(
+                    "invalid intent transport retry configuration"
+                ) from exc
         return cls(
             staging_path=_path(value["staging_path"], "staging_path"),
             scheduler_db=_path(value["scheduler_db"], "scheduler_db"),
@@ -596,6 +619,16 @@ class IntentComposerConfig:
                 value["max_output_tokens"], "max_output_tokens", maximum=8_000
             ),
             max_cost_usd=float(cost),
+            transport_retry=transport_retry,
+            max_scheduler_attempts=(
+                _positive_int(
+                    value["max_scheduler_attempts"],
+                    "max_scheduler_attempts",
+                    maximum=10,
+                )
+                if "max_scheduler_attempts" in value
+                else None
+            ),
         )
 
 
@@ -1141,6 +1174,8 @@ def build_intent_interpreter_work_order(
     max_output_tokens: int,
     max_cost_usd: float,
     max_seconds: int,
+    transport_retry: Mapping[str, int] | None = None,
+    max_scheduler_attempts: int | None = None,
 ) -> WorkOrder:
     context_wire = validate_intent_context_pack(context)
     utterance_ref = _text(
@@ -1170,6 +1205,10 @@ def build_intent_interpreter_work_order(
         "utterance_hash": utterance_hash,
         "candidate_contract_hash": INTERPRETER_CANDIDATE_CONTRACT_HASH,
     }
+    if transport_retry is not None:
+        identity["transport_retry"] = content_hash(transport_retry)
+    if max_scheduler_attempts is not None:
+        identity["max_scheduler_attempts"] = max_scheduler_attempts
     digest = content_hash(identity)
     return WorkOrder(
         schema_version=SCHEMA_VERSION,
@@ -1200,8 +1239,61 @@ def build_intent_interpreter_work_order(
             "utterance_version_ref": utterance_ref,
             "utterance_version_hash": utterance_hash,
             "candidate_contract_hash": INTERPRETER_CANDIDATE_CONTRACT_HASH,
+            **(
+                {"transport_retry": dict(transport_retry)}
+                if transport_retry is not None
+                else {}
+            ),
+            **(
+                {"max_scheduler_attempts": max_scheduler_attempts}
+                if max_scheduler_attempts is not None
+                else {}
+            ),
         },
     )
+
+
+def intent_scheduler_policy(config: IntentComposerConfig) -> dict[str, Any]:
+    """Freeze a lease covering the exact route and transport policy."""
+
+    from .model_fallback_chain import purpose_tiers
+    from .model_router import resolve_chain
+
+    with ModelRouter(config.model_router_db) as router:
+        policy = router.get_policy(config.routing_policy_ref)
+        profiles = {profile["id"]: profile for profile in router.latest_profiles()}
+    resolved = resolve_chain(
+        policy,
+        tier=purpose_tiers()[INTENT_MODEL_PURPOSE],
+        purpose=INTENT_MODEL_PURPOSE,
+        profiles=profiles,
+    )
+    candidates = max(1, len(resolved["chain"]) if resolved is not None else 1)
+    transport = config.transport_retry or {}
+    retries = int(transport.get("max_definitely_not_sent_retries", 0))
+    queue_wait = int(transport.get("queue_wait_seconds", 0))
+    backoff = int(transport.get("retry_backoff_seconds", 0))
+    lease_seconds = (
+        candidates * (retries + 1) * (config.timeout_seconds + queue_wait)
+        + candidates * retries * backoff
+        + INTENT_LEASE_GRACE_SECONDS
+    )
+    max_attempts = config.max_scheduler_attempts or 3
+    binding = content_hash({
+        "routing_policy_hash": policy["content_hash"],
+        "max_attempts": max_attempts,
+        "lease_seconds": lease_seconds,
+    })[:16]
+    return {
+        "policy_version_id": (
+            f"scheduler-policy-human-intent-{binding}-0.1"
+        ),
+        "max_attempts": max_attempts,
+        "default_lease_seconds": lease_seconds,
+        "max_lease_seconds": lease_seconds,
+        "max_total_lease_seconds": lease_seconds * 2,
+        "route_candidate_count": candidates,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1258,9 +1350,12 @@ class OpenClawIntentInterpreter:
         code: str,
         route_ref: str | None,
         invocation_ref: str | None = None,
+        attempt_number: int = 1,
+        retryable: bool = False,
     ) -> ResultEnvelope:
         identity = {
             "work_order_ref": work.id,
+            "attempt_number": attempt_number,
             "code": code,
             "route_ref": route_ref,
             "invocation_ref": invocation_ref,
@@ -1274,7 +1369,7 @@ class OpenClawIntentInterpreter:
                 invocation_ref
                 or f"invocation:not-started:{content_hash(identity)[:32]}"
             ),
-            status="failed",
+            status="retryable" if retryable else "failed",
             outputs={},
             actual_side_effects=(),
             usage_refs=(),
@@ -1282,9 +1377,227 @@ class OpenClawIntentInterpreter:
             error={"code": code},
             metadata={
                 "control_plane_failure": True,
+                "capacity_deferred": retryable,
                 "route_decision_ref": route_ref,
             },
         )
+
+    def _adapter(self, router: ModelRouter) -> OpenClawModelAdapter:
+        transport = self.config.transport_retry or {}
+        return OpenClawModelAdapter(
+            self.config.broker_socket,
+            route_resolver=lambda ref: router.get_decision(ref),
+            auth_client_id=self.config.broker_client_id,
+            auth_key_provider=lambda: self.config.broker_auth_key.read_bytes().strip(),
+            timeout_seconds=self.config.timeout_seconds,
+            queue_wait_seconds=float(transport.get("queue_wait_seconds", 0)),
+            expected_agent_id=self.config.expected_agent_id,
+        )
+
+    def _scheduler(self) -> Scheduler:
+        policy = intent_scheduler_policy(self.config)
+        return Scheduler(
+            self.config.scheduler_db,
+            policy_version_id=policy["policy_version_id"],
+            max_attempts=policy["max_attempts"],
+            default_lease_seconds=policy["default_lease_seconds"],
+            max_lease_seconds=policy["max_lease_seconds"],
+            max_total_lease_seconds=policy["max_total_lease_seconds"],
+        )
+
+    def _execute_with_safe_retry(
+        self,
+        adapter: Any,
+        work: WorkOrder,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> tuple[ModelInvocation, ResultEnvelope]:
+        """Retry only while the adapter proves that no bytes were dispatched."""
+
+        transport = self.config.transport_retry or {}
+        maximum = int(transport.get("max_definitely_not_sent_retries", 0))
+        for retry_number in range(maximum + 1):
+            try:
+                return adapter.execute(work, route, profile)
+            except BrokerDefinitelyNotSent:
+                if retry_number >= maximum:
+                    raise
+                backoff = int(transport.get("retry_backoff_seconds", 0))
+                if backoff:
+                    import time
+
+                    time.sleep(backoff)
+        raise AssertionError("intent transport retry loop did not return")
+
+    @staticmethod
+    def _capacity_code(result: ResultEnvelope) -> str | None:
+        if result.status != "failed":
+            return None
+        # A broker error code alone says nothing about whether a provider
+        # received the request. Only an adapter-authored, closed proof can
+        # release the Scheduler attempt as unspent.
+        if result.metadata.get("dispatch_proof") != {
+            "authority": "openclaw-model-adapter",
+            "state": "definitely_not_sent",
+            "version": "0.1",
+        }:
+            return None
+        code = str((result.error or {}).get("code", "")).upper()
+        if code in {
+            "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+            "QUEUE_TIMEOUT", "BROKER_CLOSED",
+        }:
+            return code
+        return None
+
+    @staticmethod
+    def _bind_invocation(
+        invocation: ModelInvocation,
+        result: ResultEnvelope,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> ResultEnvelope:
+        wire = result.to_dict()
+        wire["metadata"] = {
+            **wire["metadata"],
+            "intent_model_invocation": invocation.to_dict(),
+            "route_decision_hash": route["content_hash"],
+            "profile_version_hash": profile["content_hash"],
+        }
+        return ResultEnvelope.from_dict(wire)
+
+    def _execute_attempt(
+        self,
+        router: ModelRouter,
+        work: WorkOrder,
+        *,
+        attempt_number: int,
+        prompt_tokens: int,
+    ) -> ResultEnvelope:
+        """Run the pinned chain while permitting at most one dispatched call."""
+
+        from .model_fallback_chain import execute_chain, purpose_tiers
+        from .model_router import policy_chain
+
+        policy = router.get_policy(self.config.routing_policy_ref)
+        tier = purpose_tiers()[INTENT_MODEL_PURPOSE]
+        chain = policy_chain(policy, tier=tier, purpose=INTENT_MODEL_PURPOSE)
+        adapter = self._adapter(router)
+
+        def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+            try:
+                invocation, result = self._execute_with_safe_retry(
+                    adapter, work, route, profile
+                )
+            except BrokerDefinitelyNotSent as exc:
+                return {
+                    "outcome": "failed",
+                    "failure_class": "transport_failure",
+                    "reason": str(exc),
+                }
+            except OpenClawModelAdapterError as exc:
+                # Dispatch may have happened. A second provider call could
+                # spend the same WorkOrder budget twice, so fail this work.
+                return {
+                    "outcome": "failed",
+                    "failure_class": "unclassified_failure",
+                    "reason": str(exc),
+                }
+            capacity = self._capacity_code(result)
+            if capacity is not None:
+                return {
+                    "outcome": "failed",
+                    "failure_class": "capacity_busy",
+                    "error_code": capacity,
+                    "reason": (result.error or {}).get(
+                        "message", "broker capacity unavailable"
+                    ),
+                }
+            # A returned provider envelope consumed the one-call budget even
+            # when it failed. Treat it as served so the chain cannot spend on
+            # another provider, and preserve the exact invocation formally.
+            return {
+                "outcome": "served",
+                "value": self._bind_invocation(invocation, result, route, profile),
+            }
+
+        route_args = {
+            "purpose": INTENT_MODEL_PURPOSE,
+            "capability": "extract",
+            "attempt_number": attempt_number,
+            "policy_version_ref": self.config.routing_policy_ref,
+            "credential_slot_refs": self.config.credential_slot_refs,
+            "required_modalities": ("text",),
+            "required_context_tokens": prompt_tokens + self.config.max_output_tokens,
+            "estimated_input_tokens": prompt_tokens,
+            "estimated_output_tokens": self.config.max_output_tokens,
+        }
+        if chain is not None:
+            outcome = execute_chain(
+                router,
+                work,
+                tier=tier,
+                idempotency_prefix=(
+                    f"human-intent-route:{work.id}:{attempt_number}"
+                ),
+                call=call,
+                **route_args,
+            )
+            if outcome["status"] == "served":
+                return outcome["value"]
+            route_ref = outcome.get("route_decision_ref")
+            if route_ref is None and outcome.get("links"):
+                route_ref = outcome["links"][-1]["decision_id"]
+            capacity = outcome.get("reason") == "capacity_busy"
+            return self._failure_result(
+                work,
+                code=(
+                    (outcome.get("failures") or [{}])[-1].get("code", "BUSY")
+                    if capacity
+                    else "MODEL_CHAIN_" + outcome["status"].upper()
+                ),
+                route_ref=route_ref,
+                attempt_number=attempt_number,
+                retryable=capacity,
+            )
+
+        prior = router.list_decisions(work_order_id=work.id)
+        routed = router.route(
+            work,
+            idempotency_key=f"human-intent-route:{work.id}:{attempt_number}",
+            decision_kind="initial" if not prior else "retry",
+            previous_decision_ref=None if not prior else prior[-1]["id"],
+            **route_args,
+        )["decision"]
+        if routed["outcome"] != "selected":
+            return self._failure_result(
+                work,
+                code="MODEL_ROUTE_REJECTED",
+                route_ref=routed["id"],
+                attempt_number=attempt_number,
+            )
+        profile = router.get_profile(routed["selected_profile_version_ref"])
+        try:
+            invocation, result = self._execute_with_safe_retry(
+                adapter, work, routed, profile
+            )
+        except BrokerDefinitelyNotSent:
+            return self._failure_result(
+                work, code="BROKER_DEFINITELY_NOT_SENT", route_ref=routed["id"],
+                attempt_number=attempt_number,
+            )
+        except OpenClawModelAdapterError:
+            return self._failure_result(
+                work, code="MODEL_ADAPTER_INDETERMINATE", route_ref=routed["id"],
+                attempt_number=attempt_number,
+            )
+        capacity = self._capacity_code(result)
+        if capacity is not None:
+            return self._failure_result(
+                work, code=capacity, route_ref=routed["id"],
+                attempt_number=attempt_number, retryable=True,
+            )
+        return self._bind_invocation(invocation, result, routed, profile)
 
     @staticmethod
     def _provenance(
@@ -1347,8 +1660,10 @@ class OpenClawIntentInterpreter:
             max_output_tokens=self.config.max_output_tokens,
             max_cost_usd=self.config.max_cost_usd,
             max_seconds=self.config.timeout_seconds,
+            transport_retry=self.config.transport_retry,
+            max_scheduler_attempts=self.config.max_scheduler_attempts,
         )
-        with Scheduler(self.config.scheduler_db) as scheduler:
+        with self._scheduler() as scheduler:
             enqueued = scheduler.enqueue(work)
             if enqueued["status"] == "conflict":
                 raise HumanIntentInterpreterError(
@@ -1363,57 +1678,12 @@ class OpenClawIntentInterpreter:
                     )
                 with ModelRouter(self.config.model_router_db) as router:
                     prompt_tokens = count_dalton_search_tokens(work.question)
-                    route = router.route(
+                    result = self._execute_attempt(
+                        router,
                         work,
                         attempt_number=lease["attempt"]["attempt_number"],
-                        capability="extract",
-                        policy_version_ref=self.config.routing_policy_ref,
-                        credential_slot_refs=self.config.credential_slot_refs,
-                        required_modalities=("text",),
-                        required_context_tokens=(
-                            prompt_tokens + self.config.max_output_tokens
-                        ),
-                        estimated_input_tokens=prompt_tokens,
-                        estimated_output_tokens=self.config.max_output_tokens,
-                        idempotency_key=(
-                            f"human-intent-route:{work.id}:"
-                            f"{lease['attempt']['attempt_number']}"
-                        ),
-                    )["decision"]
-                    if route["outcome"] != "selected":
-                        result = self._failure_result(
-                            work, code="MODEL_ROUTE_REJECTED", route_ref=route["id"]
-                        )
-                    else:
-                        profile = router.get_profile(
-                            route["selected_profile_version_ref"]
-                        )
-                        adapter = OpenClawModelAdapter(
-                            self.config.broker_socket,
-                            route_resolver=lambda ref: router.get_decision(ref),
-                            auth_client_id=self.config.broker_client_id,
-                            auth_key_provider=lambda: self.config.broker_auth_key.read_bytes().strip(),
-                            timeout_seconds=self.config.timeout_seconds,
-                            expected_agent_id=self.config.expected_agent_id,
-                        )
-                        try:
-                            invocation, result = adapter.execute(
-                                work, route, profile
-                            )
-                            result_wire = result.to_dict()
-                            result_wire["metadata"] = {
-                                **result_wire["metadata"],
-                                "intent_model_invocation": invocation.to_dict(),
-                                "route_decision_hash": route["content_hash"],
-                                "profile_version_hash": profile["content_hash"],
-                            }
-                            result = ResultEnvelope.from_dict(result_wire)
-                        except OpenClawModelAdapterError:
-                            result = self._failure_result(
-                                work,
-                                code="MODEL_ADAPTER_REJECTED_OR_FAILED",
-                                route_ref=route["id"],
-                            )
+                        prompt_tokens=prompt_tokens,
+                    )
                     completion = scheduler.complete(
                         work.id,
                         lease["attempt"]["attempt_number"],
@@ -1428,6 +1698,10 @@ class OpenClawIntentInterpreter:
                     if completion["status"] == "conflict":
                         raise HumanIntentInterpreterError(
                             "intent WorkOrder completion conflicted"
+                        )
+                    if result.status == "retryable":
+                        raise HumanIntentInterpreterError(
+                            "intent model capacity is pending"
                         )
                 formal = scheduler.formal_result(work.id)
             if formal is None or formal["terminal_state"] != "succeeded":
@@ -2570,11 +2844,13 @@ __all__ = [
     "CallableIntentInterpreter", "HumanIntentAuthority", "HumanIntentConflict",
     "FROZEN_INTENT_CORPUS_HASH", "HumanIntentError", "HumanIntentInterpreterError",
     "HumanIntentValidationError", "INTERPRETER_CANDIDATE_CONTRACT_HASH",
-    "INTERPRETER_HASH", "INTERPRETER_REF", "IntentComposerConfig",
+    "INTERPRETER_HASH", "INTERPRETER_REF", "INTENT_MODEL_PURPOSE",
+    "IntentComposerConfig",
     "IntentDispatcher",
     "InterpreterOutput", "NaturalLanguageComposerPlane",
     "OpenClawIntentInterpreter", "build_cockpit_intent_context",
     "build_intent_interpreter_prompt", "build_intent_interpreter_work_order",
+    "intent_scheduler_policy",
     "load_frozen_intent_corpus",
     "score_intent_calibration_case",
     "parse_interpreter_candidate_text", "revalidate_confirmation_context",

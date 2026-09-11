@@ -1,8 +1,10 @@
-"""Authority-bound executor for the approved SEC public research plan tree.
+"""Authority-bound executor for approved SEC research plan trees.
 
 This module connects the human-gated ResearchPlan task tree to the already
 built real components.  The executor runs the currently admitted node of one
-exact accepted + started SEC public plan, one node at a time:
+exact accepted + started SEC plan, one node at a time. Numeric plans use the
+four stages below. A qualitative registered annual-report plan runs one local
+retrieval node and stops before model drafting, verification or staging:
 
 - ``connector``: the plan root WorkOrder is claimed on the Scheduler and
   executed through the existing ``ConnectorTransportExecutor`` + SEC public
@@ -94,7 +96,9 @@ from .research_plan import (
     SEC_COMPANY_FACTS_OPERATION,
     SEC_OPERATION,
     SEC_RUNTIME_PROFILE_REF,
+    REGISTERED_ANNUAL_REPORT_OPERATION,
     _plan_work_orders,
+    _resolved_plan_work_orders,
     plan_start_ref_for,
     read_exact_research_plan_start,
     read_exact_research_plan_version,
@@ -103,12 +107,25 @@ from .research_plan import (
     sec_response_budget_bytes,
     sec_response_budget_tag,
 )
+from .registered_annual_report import (
+    RegisteredAnnualReportError,
+    RegisteredAnnualReportRegistry,
+    validate_retrieval_proof,
+)
+from .annual_report_qualitative import (
+    AnnualReportQualitativeError,
+    RegisteredAnnualReportDraftWorker,
+    RegisteredAnnualReportVerifierWorker,
+    stage_annual_report_candidate,
+    validate_model_proof,
+)
 from .research_plan_coordinator import (
     ResearchPlanCoordinator,
     _stage_output_ref,
 )
 from .research_verification import (
     CandidateStagingStore,
+    ResearchVerificationError,
     build_authority_source_material,
     build_candidate_claim,
     build_candidate_evidence,
@@ -179,9 +196,10 @@ def _derived_ref(prefix: str, identity: Mapping[str, Any]) -> str:
 
 def _plan_steps(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
     steps = plan_wire["execution_scope"]["steps"]
-    if not isinstance(steps, list) or len(steps) != 4:
+    expected_count = 4
+    if not isinstance(steps, list) or len(steps) != expected_count:
         raise ResearchPlanExecutorConflict(
-            "research plan must define the closed four-node tree"
+            "research plan does not define its operation's closed node tree"
         )
     return steps
 
@@ -507,6 +525,9 @@ class ResearchPlanExecutor:
         policy_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         principal_ref: str,
         runner_environment_hash: str,
+        annual_report_registry: RegisteredAnnualReportRegistry | None = None,
+        annual_report_draft_worker: RegisteredAnnualReportDraftWorker | None = None,
+        annual_report_verifier_worker: RegisteredAnnualReportVerifierWorker | None = None,
         actor_ref: str = _RUNNER_ACTOR_REF,
         capability_policy_ref: str = _DESCRIPTOR_POLICY_REF,
         fault_injector: Callable[[str], None] | None = None,
@@ -578,6 +599,32 @@ class ResearchPlanExecutor:
         self.runner_environment_hash = _hash(
             runner_environment_hash, "runner_environment_hash"
         )
+        if (
+            annual_report_registry is not None
+            and annual_report_registry.connection is not scheduler.connection
+        ):
+            raise TypeError(
+                "annual report registry must share the exact Core connection"
+            )
+        self.annual_report_registry = annual_report_registry
+        for worker, label, expected_type in (
+            (
+                annual_report_draft_worker,
+                "draft",
+                RegisteredAnnualReportDraftWorker,
+            ),
+            (
+                annual_report_verifier_worker,
+                "verifier",
+                RegisteredAnnualReportVerifierWorker,
+            ),
+        ):
+            if worker is not None and not isinstance(worker, expected_type):
+                raise TypeError(f"annual report {label} worker has the wrong type")
+            if worker is not None and worker.scheduler is not scheduler:
+                raise TypeError(f"annual report {label} worker must share Scheduler")
+        self.annual_report_draft_worker = annual_report_draft_worker
+        self.annual_report_verifier_worker = annual_report_verifier_worker
         self.capability_policy_ref = _text(
             capability_policy_ref, "capability_policy_ref"
         )
@@ -601,7 +648,11 @@ class ResearchPlanExecutor:
 
         work_orders = self._work_orders(plan_wire)
         upstream = work_orders[upstream_index]
-        if upstream_index == 0:
+        if (
+            upstream_index == 0
+            and plan_wire["execution_scope"]["operation"]
+            != REGISTERED_ANNUAL_REPORT_OPERATION
+        ):
             steps = _plan_steps(plan_wire)
             formal = self.scheduler.formal_result(upstream["id"])
             if formal is None or formal["terminal_state"] != "succeeded":
@@ -686,21 +737,44 @@ class ResearchPlanExecutor:
             return self._admit(plan_wire, current_index - 1)
 
         if current_index == 0:
-            outcome = self._execute_connector(plan_wire, steps[0], current)
+            if plan_wire["execution_scope"]["operation"] == (
+                REGISTERED_ANNUAL_REPORT_OPERATION
+            ):
+                outcome = self._execute_registered_annual_report(
+                    plan_wire, steps[0], current
+                )
+            else:
+                outcome = self._execute_connector(plan_wire, steps[0], current)
         else:
             outcome = self._execute_internal(
                 plan_wire, steps, work_orders, current_index
             )
         if outcome["status"] != "succeeded":
             return outcome
+        if (
+            plan_wire["execution_scope"]["operation"]
+            == REGISTERED_ANNUAL_REPORT_OPERATION
+            and current_index == len(work_orders) - 1
+        ):
+            self._audit_completed_tree(plan_wire, steps, work_orders)
+            return {
+                "status": "complete",
+                "plan_version_ref": plan_wire["id"],
+                "plan_version_hash": plan_wire["content_hash"],
+                **({
+                    "retrieval_proof_ref": outcome["retrieval_proof_ref"],
+                    "retrieval_proof_hash": outcome["retrieval_proof_hash"],
+                } if "retrieval_proof_ref" in outcome else {}),
+            }
         return self._admit(plan_wire, current_index)
 
     # ------------------------------------------------------------------ #
     # Connector node
 
-    @staticmethod
-    def _work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
-        return _plan_work_orders(plan_wire)
+    def _work_orders(self, plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return _resolved_plan_work_orders(
+            plan_wire, self.plan.connection.cursor()
+        )
 
     def _connector_authority(
         self,
@@ -1475,6 +1549,102 @@ class ResearchPlanExecutor:
             {"compiled": compiled, "actual": actual}, response,
         ))
 
+    def _execute_registered_annual_report(
+        self,
+        plan_wire: Mapping[str, Any],
+        step: Mapping[str, Any],
+        work_order: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Run the qualitative root against exact registered local bytes."""
+
+        if self.annual_report_registry is None:
+            raise ResearchPlanExecutorConflict(
+                "registered annual-report plan has no local registry"
+            )
+        formal = self.scheduler.formal_result(work_order["id"])
+        if formal is not None:
+            if formal["terminal_state"] != "succeeded":
+                return {
+                    "status": "blocked",
+                    "plan_version_ref": plan_wire["id"],
+                    "work_order_ref": work_order["id"],
+                    "stage": step["stage"],
+                }
+            try:
+                proof = validate_retrieval_proof(
+                    formal["result_envelope"]["outputs"],
+                    expected_request=plan_wire["execution_scope"]["parameters"],
+                )
+                recomputed = self.annual_report_registry.search(
+                    plan_wire["execution_scope"]["parameters"]
+                )
+            except RegisteredAnnualReportError as exc:
+                raise ResearchPlanExecutorConflict(str(exc)) from exc
+            if canonical_json(proof) != canonical_json(recomputed):
+                raise ResearchPlanExecutorConflict(
+                    "registered annual-report proof drifted from local source"
+                )
+            return {
+                "status": "succeeded",
+                "plan_version_ref": plan_wire["id"],
+                "retrieval_proof_ref": proof["id"],
+                "retrieval_proof_hash": proof["content_hash"],
+            }
+
+        try:
+            proof = self.annual_report_registry.search(
+                plan_wire["execution_scope"]["parameters"]
+            )
+        except RegisteredAnnualReportError as exc:
+            raise ResearchPlanExecutorConflict(str(exc)) from exc
+        claim = self.scheduler.claim(self.actor_ref, work_order_id=work_order["id"])
+        if claim is None:
+            return {
+                "status": "pending",
+                "plan_version_ref": plan_wire["id"],
+                "work_order_ref": work_order["id"],
+                "reason": "not_claimable",
+            }
+        created_at = _wire_time(self.clock())
+        result = ResultEnvelope(
+            schema_version="0.1",
+            id=_derived_ref("result-envelope:annual-report-retrieval", {
+                "plan_version_ref": plan_wire["id"],
+                "step_ref": step["id"],
+                "proof_hash": proof["content_hash"],
+            }),
+            created_at=created_at,
+            work_order_ref=work_order["id"],
+            invocation_ref=_derived_ref("execution:annual-report-retrieval", {
+                "plan_version_ref": plan_wire["id"],
+                "step_ref": step["id"],
+            }),
+            status="succeeded",
+            outputs=proof,
+            actual_side_effects=(),
+            usage_refs=(),
+            artifact_refs=(),
+            error=None,
+            metadata={"operation": REGISTERED_ANNUAL_REPORT_OPERATION},
+        )
+        wire = result.to_dict()
+        completed = self.scheduler.complete(
+            work_order["id"], claim["attempt"]["attempt_number"], self.actor_ref,
+            claim["lease_token"], wire,
+            idempotency_key=f"research-plan:{plan_wire['id']}:1:complete",
+            result_envelope_hash=content_hash(wire),
+        )
+        if completed["status"] != "fresh":
+            raise ResearchPlanExecutorConflict(
+                "registered annual-report completion did not converge"
+            )
+        return {
+            "status": "succeeded",
+            "plan_version_ref": plan_wire["id"],
+            "retrieval_proof_ref": proof["id"],
+            "retrieval_proof_hash": proof["content_hash"],
+        }
+
     def _execute_connector(
         self,
         plan_wire: Mapping[str, Any],
@@ -2017,6 +2187,75 @@ class ResearchPlanExecutor:
             raise ResearchPlanExecutorConflict(
                 "internal step upstream node is not terminally succeeded"
             )
+        if plan_wire["execution_scope"]["operation"] == REGISTERED_ANNUAL_REPORT_OPERATION:
+            if index in (1, 2):
+                worker = (
+                    self.annual_report_draft_worker
+                    if index == 1 else self.annual_report_verifier_worker
+                )
+                if worker is None:
+                    raise ResearchPlanExecutorConflict(
+                        f"registered annual-report {step['stage']} has no model worker"
+                    )
+                try:
+                    outcome = worker.run_once(work_order)
+                except AnnualReportQualitativeError as exc:
+                    raise ResearchPlanExecutorConflict(str(exc)) from exc
+                if outcome.get("status") == "succeeded":
+                    formal = self.scheduler.formal_result(work_order["id"])
+                    if formal is None:
+                        raise ResearchPlanExecutorConflict(
+                            "model worker reported success without formal result"
+                        )
+                    try:
+                        proof = validate_model_proof(
+                            formal["result_envelope"]["outputs"],
+                            stage=step["stage"], work=work_order,
+                        )
+                    except AnnualReportQualitativeError as exc:
+                        raise ResearchPlanExecutorConflict(str(exc)) from exc
+                    return {
+                        "status": "succeeded", "plan_version_ref": plan_wire["id"],
+                        "model_proof_ref": proof["id"],
+                        "model_proof_hash": proof["content_hash"],
+                    }
+                return {
+                    "status": outcome.get("status", "pending"),
+                    "plan_version_ref": plan_wire["id"],
+                    "work_order_ref": work_order["id"],
+                }
+            if index == 3:
+                try:
+                    verifier_proof = validate_model_proof(
+                        upstream_formal["result_envelope"]["outputs"],
+                        stage="independent_qualitative_verifier", work=upstream,
+                    )
+                    staged = stage_annual_report_candidate(
+                        self.staging, question_ref=plan_wire["question_ref"],
+                        question=work_order["metadata"]["question"],
+                        proof=work_order["metadata"]["retrieval_proof"],
+                        draft_proof=work_order["metadata"]["draft_proof"],
+                        verifier_proof=verifier_proof,
+                        draft_work=work_orders[index - 2],
+                        verifier_work=upstream,
+                        actor_ref=self.actor_ref,
+                        created_at=_wire_time(self.clock()),
+                        idempotency_key=(
+                            f"research-plan-annual-candidate:{plan_wire['id']}"
+                        ),
+                    )
+                except (AnnualReportQualitativeError, ResearchVerificationError) as exc:
+                    raise ResearchPlanExecutorConflict(str(exc)) from exc
+                return self._complete_internal(
+                    plan_wire, step, work_order, upstream, upstream_formal,
+                    [
+                        {"kind": "candidate_evidence", "ref": staged["evidence"]["id"],
+                         "hash": staged["evidence"]["content_hash"]},
+                        {"kind": "candidate_claim", "ref": staged["claim"]["id"],
+                         "hash": staged["claim"]["content_hash"]},
+                    ],
+                )
+            raise ResearchPlanExecutorConflict("unsupported qualitative node ordinal")
         if index == 1:
             return self._execute_resolver(
                 plan_wire, steps, work_orders, index, step, work_order,
@@ -2061,6 +2300,39 @@ class ResearchPlanExecutor:
         recomputation.  Any post-completion tamper therefore fails closed
         instead of being hidden by an early ``complete`` return.
         """
+
+        if plan_wire["execution_scope"]["operation"] == (
+            REGISTERED_ANNUAL_REPORT_OPERATION
+        ):
+            if len(steps) != 4 or len(work_orders) != 4:
+                raise ResearchPlanExecutorConflict(
+                    "registered annual-report plan drifted from its four-node tree"
+                )
+            outcome = self._execute_registered_annual_report(
+                plan_wire, steps[0], work_orders[0]
+            )
+            if outcome.get("status") != "succeeded":
+                raise ResearchPlanExecutorConflict(
+                    "registered annual-report retrieval is not complete"
+                )
+            coordinator_outcome = self.coordinator.admit_next_work_order(
+                plan_version_ref=plan_wire["id"],
+                upstream_work_order_ref=work_orders[-1]["id"],
+            )
+            if coordinator_outcome.get("status") != "complete":
+                raise ResearchPlanExecutorConflict(
+                    "qualitative candidate tree did not re-verify as complete"
+                )
+            for index, stage in ((1, "qualitative_model_draft"),
+                                 (2, "independent_qualitative_verifier")):
+                formal = self.scheduler.formal_result(work_orders[index]["id"])
+                if formal is None or formal["terminal_state"] != "succeeded":
+                    raise ResearchPlanExecutorConflict("qualitative model formal result is missing")
+                validate_model_proof(
+                    formal["result_envelope"]["outputs"], stage=stage,
+                    work=work_orders[index],
+                )
+            return
 
         outcome = self.coordinator.admit_next_work_order(
             plan_version_ref=plan_wire["id"],

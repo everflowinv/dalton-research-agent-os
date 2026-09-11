@@ -160,6 +160,50 @@ class WorkspaceLaunchAgentTests(unittest.TestCase):
             )
             self.assertEqual(again["port"], workspace.cockpit_port)
 
+    def test_control_setup_preserves_installed_human_intent_transport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._workspace(root, "analyst-a", 17411)
+            bootstrap(
+                workspace.state_dir,
+                workspace.config_path,
+                workspace_manifest=workspace.manifest_path,
+            )
+            kwargs = {
+                "owner_login": "owner@example.com",
+                "tailscale_host": "analyst-a.example.ts.net",
+                "tailscale_executable": "/usr/bin/false",
+            }
+            configure_workspace_control(workspace.manifest_path, **kwargs)
+            service = json.loads(workspace.config_path.read_text(encoding="utf-8"))
+            intent = {
+                "staging_path": str(workspace.state_dir / "intent.sqlite"),
+                "scheduler_db": str(workspace.state_dir / "intent-scheduler.sqlite"),
+                "model_router_db": str(workspace.state_dir / "model-router.sqlite"),
+                "broker_socket": str(workspace.writer_socket.parent / "broker.sock"),
+                "broker_auth_key": str(workspace.state_dir / "broker.key"),
+                "routing_policy_ref": "model-routing-policy-version:intent:1",
+                "credential_slot_refs": ["credential-slot:openclaw:intent"],
+                "broker_client_id": "client:dalton-intent",
+                "expected_agent_id": "dalton-model-broker",
+                "timeout_seconds": 180,
+                "max_input_tokens": 16000,
+                "max_output_tokens": 1200,
+                "max_cost_usd": 1.0,
+                "transport_retry": {
+                    "max_definitely_not_sent_retries": 1,
+                    "queue_wait_seconds": 15,
+                    "retry_backoff_seconds": 2,
+                },
+            }
+            service["control"]["config"]["intent_composer"] = intent
+            workspace.config_path.write_text(json.dumps(service), encoding="utf-8")
+            configure_workspace_control(workspace.manifest_path, **kwargs)
+            updated = json.loads(workspace.config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                updated["control"]["config"]["intent_composer"], intent
+            )
+
     def test_concurrent_workspace_creation_cannot_claim_the_same_port(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

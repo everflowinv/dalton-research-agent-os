@@ -158,6 +158,7 @@ _RESPONSE_KEYS = frozenset(
         "usage",
         "cost",
         "error",
+        "dispatchProof",
         "contentHash",
     }
 )
@@ -994,6 +995,11 @@ class OpenClawModelAdapter:
             raise
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             raise BrokerProtocolError("broker response is not valid strict JSON") from exc
+        # Response v0.1 gained an optional, closed dispatch proof. Preserve
+        # replay compatibility with already-journaled pre-proof responses;
+        # absence never grants the new definitely-not-sent authority.
+        if isinstance(value, Mapping) and set(value) == _RESPONSE_KEYS - {"dispatchProof"}:
+            return dict(value)
         return _closed(value, keys=_RESPONSE_KEYS, label="broker response")
 
     @staticmethod
@@ -1055,6 +1061,8 @@ class OpenClawModelAdapter:
         elif usd is not None:
             raise BrokerProtocolError("unavailable broker cost must have null usd")
         if response["ok"]:
+            if response.get("dispatchProof") is not None:
+                raise BrokerProtocolError("successful broker response cannot carry dispatchProof")
             if response["provider"] != profile["provider"]:
                 raise BrokerProtocolError("broker actual provider differs from accepted route")
             canonical_model = f"{profile['provider']}/{profile['model']}"
@@ -1083,6 +1091,21 @@ class OpenClawModelAdapter:
                 keys=frozenset({"code", "message"}),
                 label="broker error",
             )
+            dispatch_proof = response.get("dispatchProof")
+            if dispatch_proof is not None:
+                dispatch_proof = _closed(
+                    dispatch_proof,
+                    keys=frozenset({"authority", "state", "version"}),
+                    label="broker dispatchProof",
+                )
+                if dispatch_proof not in ({
+                    "authority": "openclaw-model-broker", "state": "definitely_not_sent",
+                    "version": "0.1",
+                }, {
+                    "authority": "openclaw-model-broker", "state": "provider_completed_failure",
+                    "version": "0.1",
+                }):
+                    raise BrokerProtocolError("broker dispatchProof is invalid")
             if not isinstance(error["code"], str) or not _ERROR_CODE_RE.fullmatch(error["code"]):
                 raise BrokerProtocolError("broker error code is invalid")
             if (
@@ -1447,6 +1470,10 @@ class OpenClawModelAdapter:
             "broker_response_hash": response["contentHash"],
             "broker_idempotency_status": response["idempotencyStatus"],
             "broker_request_mode": "replay_only" if replay_only else "execute",
+            "dispatch_proof": (
+                {"authority": "openclaw-model-adapter",
+                 "state": response["dispatchProof"]["state"], "version": "0.1"}
+                if response.get("dispatchProof") is not None else None),
             "required_provider_controls": required_controls is not None,
             "provider_control_mode": self._provider_control_mode,
             "provider_control_schema_hash": (

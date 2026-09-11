@@ -1,0 +1,661 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QualitativeRegisteredAnnualReportResearchPlanVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "created_at",
+    "planner_ref",
+    "planner_hash",
+    "version",
+    "prior_version_ref",
+    "question_ref",
+    "question_version_ref",
+    "question_version_hash",
+    "agenda_binding",
+    "context_binding_ref",
+    "context_binding_hash",
+    "execution_scope",
+    "actor_ref",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.2"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^research-plan:[0-9a-f]{32}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "planner_ref": {
+      "const": "planner:research-plan-thin:0.1"
+    },
+    "planner_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "version": {
+      "const": 1
+    },
+    "prior_version_ref": {
+      "type": "null"
+    },
+    "question_ref": {
+      "type": "string",
+      "pattern": "^research-question:[0-9a-f]{32}$"
+    },
+    "question_version_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "question_version_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "agenda_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_ref",
+        "decision_hash",
+        "cycle_ref",
+        "cycle_hash",
+        "candidate_ref",
+        "mandate_version_ref",
+        "mandate_version_hash",
+        "policy_version_ref",
+        "policy_version_hash"
+      ],
+      "properties": {
+        "decision_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cycle_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cycle_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mandate_version_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mandate_version_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "policy_version_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "policy_version_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "context_binding_ref": {
+      "type": "string",
+      "pattern": "^agenda-context-binding:[0-9a-f]{32}$"
+    },
+    "context_binding_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "execution_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref",
+        "connector_profile_ref",
+        "connector_profile_hash",
+        "operation",
+        "parameters",
+        "permission_scope",
+        "auth_mode",
+        "side_effect_class",
+        "declared_side_effects",
+        "verifier_ref",
+        "output_contract_ref",
+        "output_contract_hash",
+        "budget",
+        "steps"
+      ],
+      "properties": {
+        "source_ref": {
+          "const": "source:sec-edgar"
+        },
+        "connector_profile_ref": {
+          "const": "registered-source-profile:sec-annual-report:0.1"
+        },
+        "connector_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operation": {
+          "const": "search_registered_annual_report"
+        },
+        "parameters": {
+          "$ref": "#/$defs/request"
+        },
+        "permission_scope": {
+          "const": "registered_annual_report_read"
+        },
+        "auth_mode": {
+          "const": "none"
+        },
+        "side_effect_class": {
+          "const": "read_only_public"
+        },
+        "declared_side_effects": {
+          "const": []
+        },
+        "verifier_ref": {
+          "const": "verifier:registered-annual-report-retrieval:0.1"
+        },
+        "output_contract_ref": {
+          "const": "schema:registered-annual-report-retrieval-proof:0.2"
+        },
+        "output_contract_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_attempts",
+            "max_pages",
+            "max_response_bytes",
+            "max_seconds"
+          ],
+          "properties": {
+            "max_attempts": {
+              "const": 1
+            },
+            "max_pages": {
+              "const": 1
+            },
+            "max_response_bytes": {
+              "const": 524288
+            },
+            "max_seconds": {
+              "const": 30
+            }
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        }
+      }
+    },
+    "actor_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_version_ref",
+        "company_ref",
+        "review_ref",
+        "acquired_document_ref",
+        "acquired_document_hash",
+        "acquisition_ticket_ref",
+        "document_read_proof_ref",
+        "document_read_proof_hash",
+        "issuer_cik",
+        "accession",
+        "source_manifest_ref",
+        "source_manifest_hash",
+        "source_raw_hash",
+        "source_content_hash",
+        "source_renderer",
+        "query_terms",
+        "limits",
+        "model_execution"
+      ],
+      "properties": {
+        "mission_version_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issuer_cik": {
+          "type": "string",
+          "pattern": "^[0-9]{10}$"
+        },
+        "accession": {
+          "type": "string",
+          "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$"
+        },
+        "source_manifest_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "query_terms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 160
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_query_terms",
+            "max_results",
+            "max_source_bytes",
+            "context_before_chars",
+            "context_after_chars"
+          ],
+          "properties": {
+            "max_query_terms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "max_source_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 67108864
+            },
+            "context_before_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16000
+            },
+            "context_after_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16000
+            }
+          }
+        },
+        "acquired_document_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acquisition_ticket_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_read_proof_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source_renderer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acquired_document_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "document_read_proof_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_raw_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model_execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "draft",
+            "verifier"
+          ],
+          "properties": {
+            "draft": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "routing_policy_ref",
+                "credential_slot_refs",
+                "max_input_tokens",
+                "max_output_tokens",
+                "max_cost_usd",
+                "max_seconds",
+                "max_attempts",
+                "provider_retry"
+              ],
+              "properties": {
+                "routing_policy_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "credential_slot_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "max_input_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "max_output_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "max_cost_usd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 100
+                },
+                "max_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "max_attempts": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5
+                },
+                "provider_retry": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_same_profile_retries",
+                        "retry_backoff_seconds"
+                      ],
+                      "properties": {
+                        "max_same_profile_retries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3
+                        },
+                        "retry_backoff_seconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 300
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "verifier": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "routing_policy_ref",
+                "credential_slot_refs",
+                "max_input_tokens",
+                "max_output_tokens",
+                "max_cost_usd",
+                "max_seconds",
+                "max_attempts",
+                "provider_retry"
+              ],
+              "properties": {
+                "routing_policy_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "credential_slot_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "max_input_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "max_output_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "max_cost_usd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 100
+                },
+                "max_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "max_attempts": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5
+                },
+                "provider_retry": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_same_profile_retries",
+                        "retry_backoff_seconds"
+                      ],
+                      "properties": {
+                        "max_same_profile_retries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3
+                        },
+                        "retry_backoff_seconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 300
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "id",
+        "ordinal",
+        "stage",
+        "operation",
+        "parameters",
+        "depends_on",
+        "requested_capabilities",
+        "runtime_profile_ref",
+        "declared_side_effects",
+        "output_contract_ref",
+        "max_attempts",
+        "work_order_ref",
+        "content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "0.2"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "stage": {
+          "enum": [
+            "registered_filing_retrieval",
+            "qualitative_model_draft",
+            "independent_qualitative_verifier",
+            "qualitative_candidate_staging"
+          ]
+        },
+        "operation": {
+          "enum": [
+            "search_registered_annual_report",
+            "draft_registered_annual_report_answer",
+            "verify_registered_annual_report_draft",
+            "stage_verified_qualitative_candidate"
+          ]
+        },
+        "parameters": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/request"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "upstream_step_ref"
+              ],
+              "properties": {
+                "upstream_step_ref": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "requested_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "enum": [
+              "capability:dalton:local:registered-annual-report",
+              "capability:dalton:model:qualitative-research",
+              "capability:dalton:model:qualitative-verifier",
+              "capability:dalton:candidate-staging"
+            ]
+          }
+        },
+        "runtime_profile_ref": {
+          "enum": [
+            "runtime:dalton-core:registered-annual-report:0.2",
+            "runtime:dalton-core:qualitative-model-worker:0.1",
+            "runtime:dalton-core:candidate-staging:0.1"
+          ]
+        },
+        "declared_side_effects": {
+          "const": []
+        },
+        "output_contract_ref": {
+          "enum": [
+            "schema:registered-annual-report-retrieval-proof:0.2",
+            "schema:registered-annual-report-draft:0.1",
+            "schema:registered-annual-report-verification:0.1",
+            "schema:candidate-claim:0.1"
+          ]
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^research-plan-step:[A-Za-z0-9_:-]+:[0-9a-f]{32}$"
+        },
+        "work_order_ref": {
+          "type": "string",
+          "pattern": "^work:plan-[0-9a-f]{32}$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

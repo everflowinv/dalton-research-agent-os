@@ -12,6 +12,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.public_http_transport import PublicHttpTransport
+from dalton_core.annual_report_qualitative import (
+    RegisteredAnnualReportDraftWorker,
+    RegisteredAnnualReportVerifierWorker,
+)
+from dalton_core.model_router import ModelRouter
 from dalton_core.research_auto_commit import (
     COMPANY_FACTS_ANNUAL_RULE_REF,
     COMPANY_FACTS_RULE_REF,
@@ -35,6 +40,7 @@ from dalton_core.store import DaltonStore, content_hash
 from tests.test_research_plan_executor import _sec_company_facts_body
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_forecast_reconciliation import ForecastReconciliationFixture
+from tests.test_transcript_polish_model_worker import FakeAdapter, candidate, policy
 
 REPO = Path(__file__).resolve().parents[1]
 ISSUER = Issuer("AAPL", "320193", "company:sec-cik:0000320193", "Apple Inc")
@@ -159,6 +165,74 @@ class LaneTests(unittest.TestCase):
             # WorkOrders live in core.sqlite, not a separate scheduler db.
             self.assertFalse((self.state / "scheduler.sqlite").exists())
             self.assertIs(lane.scheduler.connection, lane.core.connection)
+
+    def test_production_constructor_wires_registered_annual_report_runtime(self) -> None:
+        router = ModelRouter(clock=self.clock)
+        self.addCleanup(router.close)
+        draft_policy = policy()
+        draft_policy.update({
+            "id": "model-routing-policy:annual-runtime-draft",
+            "policy_version_ref": "routing-policy:annual-runtime-draft:1",
+        })
+        verifier_policy = policy()
+        verifier_policy.update({
+            "id": "model-routing-policy:annual-runtime-verifier",
+            "policy_version_ref": "routing-policy:annual-runtime-verifier:1",
+        })
+        router.register_policy(draft_policy)
+        router.register_policy(verifier_policy)
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        common = {
+            "credential_slot_refs": ["credential-slot:openclaw:test"],
+            "max_input_tokens": 32_000,
+            "max_output_tokens": 4_000,
+            "max_cost_usd": 1.0,
+            "max_seconds": 120,
+            "max_attempts": 3,
+            "provider_retry": retry,
+        }
+        with self._lane(
+            annual_report_manifest_reader=lambda _ticket, _document: {},
+            annual_report_model_router=router,
+            annual_report_draft_adapter=FakeAdapter(candidate()),
+            annual_report_verifier_adapter=FakeAdapter(candidate()),
+            annual_report_draft_model_execution={
+                **common,
+                "routing_policy_ref": draft_policy["policy_version_ref"],
+            },
+            annual_report_verifier_model_execution={
+                **common,
+                "routing_policy_ref": verifier_policy["policy_version_ref"],
+            },
+        ) as lane:
+            self.assertIs(
+                lane.plans.annual_report_registry, lane.annual_report_registry
+            )
+            self.assertIs(
+                lane.executor.annual_report_registry, lane.annual_report_registry
+            )
+            self.assertIsInstance(
+                lane.executor.annual_report_draft_worker,
+                RegisteredAnnualReportDraftWorker,
+            )
+            self.assertIsInstance(
+                lane.executor.annual_report_verifier_worker,
+                RegisteredAnnualReportVerifierWorker,
+            )
+            self.assertEqual(
+                lane.executor.annual_report_draft_worker.provider_retry, retry
+            )
+            self.assertEqual(
+                lane.executor.annual_report_verifier_worker.provider_retry, retry
+            )
+
+    def test_production_constructor_refuses_partial_annual_runtime(self) -> None:
+        with self.assertRaisesRegex(
+            LanePreconditionError, "requires manifest reader"
+        ):
+            self._lane(
+                annual_report_manifest_reader=lambda _ticket, _document: {}
+            )
 
     def test_same_parameters_rerun_is_duplicate_and_counts_unchanged(self) -> None:
         install_lane_rules(self.state)
