@@ -90,6 +90,20 @@ from .guidance_profile import build_profile, render_profile_table
 from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
+
+
+def _verifier_contract_pairs(draft_digest, blocks, company, *, current):
+    current_pair = (
+        f"verify-{draft_digest[:24]}-{verifier_prompt_contract_fingerprint()[:16]}",
+        build_verifier_prompt(blocks, company=company),
+    )
+    if current:
+        return {current_pair}
+    return {current_pair, (
+        f"verify-{draft_digest[:24]}-{legacy_verifier_prompt_contract_fingerprint()[:16]}",
+        legacy_verifier_prompt_v02(blocks, company=company),
+    )}
+
 # The two deterministic checks a draft may not fail. Everything else the rubric
 # reports is recorded and read; these two are the blueprint's stop-loss for
 # this layer, so they are a gate rather than a score.
@@ -900,11 +914,16 @@ def validate_formal_unit_provenance(
                     raise ValueError(f"unit_provenance.{unit}.{role} authority binding drifted")
                 resolved[role] = {"work": work, "route": claimed["route_decision_ref"]}
                 if role == "verifier":
-                    expected_requests = {
-                        f"verify-{item['verified_draft_hash'][:24]}-{verifier_prompt_contract_fingerprint()[:16]}",
-                        f"verify-{item['verified_draft_hash'][:24]}-{legacy_verifier_prompt_contract_fingerprint()[:16]}",
-                    }
-                    if claimed["request_id"] not in expected_requests:
+                    allowed_pairs = (_verifier_contract_pairs(
+                        item["verified_draft_hash"], current_blocks,
+                        producer_input["company"], current=is_current)
+                        if is_current and current_blocks else {
+                            (f"verify-{item['verified_draft_hash'][:24]}-{verifier_prompt_contract_fingerprint()[:16]}", None),
+                            (f"verify-{item['verified_draft_hash'][:24]}-{legacy_verifier_prompt_contract_fingerprint()[:16]}", None),
+                        })
+                    if is_current and current_blocks and (claimed["request_id"], work.get("question")) not in allowed_pairs:
+                        raise ValueError(f"unit_provenance.{unit}.verifier contract pair drifted")
+                    if not is_current and claimed["request_id"] not in {row[0] for row in allowed_pairs}:
                         raise ValueError(f"unit_provenance.{unit}.verifier draft binding drifted")
                     try:
                         parsed = validate_verifier_output(json.loads(
@@ -913,14 +932,6 @@ def validate_formal_unit_provenance(
                         raise ValueError(f"unit_provenance.{unit}.verifier output is invalid") from exc
                     if parsed != {"verdict": "pass", "findings": []}:
                         raise ValueError(f"unit_provenance.{unit}.verifier did not pass")
-                    if is_current and current_blocks:
-                        expected_prompts = {
-                            build_verifier_prompt(current_blocks, company=producer_input["company"]),
-                            legacy_verifier_prompt_v02(current_blocks, company=producer_input["company"]),
-                        }
-                        if work.get("question") not in expected_prompts:
-                            raise ValueError(
-                                f"unit_provenance.{unit}.verifier prompt binding drifted")
                 else:
                     prompt_args = dict(
                         unit=unit, structure=producer_input["parse_input"]["structure"],

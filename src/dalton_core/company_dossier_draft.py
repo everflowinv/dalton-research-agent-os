@@ -311,9 +311,10 @@ def build_unit_prompt(
         "- NEVER write a C or N tag inside a sentence's text: not as a word, not in",
         "  brackets, not in a source list. The tags travel in refs; a sentence whose",
         "  subject is a tag becomes a sentence with no subject once the tag is gone.",
-        "- Every sentence must cite at least one tag. Analytical inference is allowed only when",
-        "  its cited rows contain the premises: label it as 判断/推断 and state the",
-        "  uncertainty. A sentence with no cited premise is a sentence you may not write.",
+        *(([] if _analytical_contract else [
+            "- Every sentence must cite at least one tag. A sentence you cannot cite is a",
+            "  sentence you may not write.",
+        ])),
         "- Copy any figure verbatim from the tag that carries it. Do not convert units",
         "  or scales, do not round, do not recompute a percentage.",
         f"- At most {SLOT_SENTENCE_CAP} sentences in a slot and {SECTION_SENTENCE_CAP} in this part.",
@@ -331,6 +332,9 @@ def build_unit_prompt(
     ]
     if _analytical_contract:
         lines += [
+            "- Every sentence must cite at least one tag. Analytical inference is allowed only when",
+            "  its cited rows contain the premises: label it as 判断/推断 and state the",
+            "  uncertainty. A sentence with no cited premise is a sentence you may not write.",
             "- When a slot asks for a view, driver, competitive position, catalyst, or risk,",
             "  choose the current evidence-weighted case. State the alternative trigger, expected",
             "  operating/earnings/valuation impact only where supported, its falsifier, and the next",
