@@ -585,12 +585,17 @@ class LaneStatusTests(unittest.TestCase):
             config = root / "model.json"
             config.write_text("{}", encoding="utf-8")
             with patch("dalton_core.research_planner_cli.CockpitModel") as model:
+                model.return_value.budget_for.return_value = {
+                    "max_input_tokens": 120_000, "max_output_tokens": 4_000,
+                    "max_cost_usd": 1.50, "timeout_seconds": 300,
+                }
                 model.return_value.call.side_effect = self.refusal()
                 summary = run_planner(
                     state_dir=state, model_config_path=config,
                     summary_dir=root / "out", scheduler_db=None,
                     plans_dir=state / "discovery-plans", dry_run=False,
                 )
+                model.return_value.call.assert_called_once()
         self.assertEqual(summary["status"], "succeeded")
         self.assertEqual(summary["plan_status"], POOL_EXHAUSTED_STATUS)
         self.assertIn("CockpitModelPoolExhausted", summary["failure_reason"])
