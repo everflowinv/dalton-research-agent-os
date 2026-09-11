@@ -1795,6 +1795,11 @@ class Rehearsal:
                     )
             if second.get("changed"):
                 findings.append("catalog sync is not idempotent: a second run reports changed=true")
+        # The sync process owns and closes its writable ModelRouter before this
+        # independent read. WAL mode remains durable in the main header while
+        # SQLite may remove empty sidecars on that close. Hold a real owner for
+        # the temp authority so the strict reader observes provisioned WAL/SHM;
+        # never synthesize empty sidecars or weaken the read-only contract.
         findings.extend(self._check_verifier_pin(router_db))
         return json.dumps(
             {k: v for k, v in report.items() if k != "profiles"}, sort_keys=True
@@ -1815,7 +1820,7 @@ class Rehearsal:
         from dalton_core.model_deployment import VERIFIER_POLICY_REF, VERIFIER_PROFILE_ID
         from dalton_core.model_router import ModelRouter
 
-        with ModelRouter(router_db, read_only=True) as router:
+        with ModelRouter(router_db), ModelRouter(router_db, read_only=True) as router:
             latest = {
                 profile.get("id"): profile for profile in router.latest_profiles()
             }

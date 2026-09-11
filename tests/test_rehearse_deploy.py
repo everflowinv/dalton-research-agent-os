@@ -22,6 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from dalton_core.model_router import ModelRouter
+
 from scripts.rehearse_deploy import (
     CORE_MIGRATIONS,
     Rehearsal,
@@ -69,6 +71,20 @@ from scripts.rehearse_deploy import (
 
 
 INSTALL_SH = REPO_ROOT / "deploy" / "macos" / "install.sh"
+
+
+class ModelCatalogWalBoundaryTests(unittest.TestCase):
+    def test_verifier_check_has_a_real_wal_owner_for_its_strict_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            router_db = Path(directory) / "model-router.sqlite"
+            # A closed WAL authority normally has no sidecars. This is the
+            # exact state left by each catalog-sync subprocess.
+            with ModelRouter(router_db):
+                pass
+            self.assertFalse(Path(str(router_db) + "-wal").exists())
+            rehearsal = object.__new__(Rehearsal)
+            findings = rehearsal._check_verifier_pin(router_db)
+            self.assertTrue(any("does not carry" in item for item in findings))
 
 
 def _install_script_code() -> str:
