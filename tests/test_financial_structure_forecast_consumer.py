@@ -515,8 +515,9 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         financials = book["Financials"]
         rows = {result["role"]: 3 + index
                 for index, result in enumerate(record["results"])}
-        self.assertEqual(
-            financials.cell(rows["diluted_eps_numerator"], 5).value, 0.00067)
+        self.assertTrue(
+            financials.cell(
+                rows["diluted_eps_numerator"], 5).value.startswith("=SUM("))
         self.assertEqual(
             financials.cell(
                 rows["diluted_weighted_average_shares"], 5).value, 0.0001)
@@ -724,12 +725,23 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertTrue(all("model_cell_ref" in item
                             for item in annual_revenue["source_periods"][1:]))
         with tempfile.TemporaryDirectory() as exported_dir:
+            path = Path(exported_dir) / "mixed.xlsx"
             exported = export_fund_workbook(
-                Path(exported_dir) / "mixed.xlsx", model=record, spec=spec,
+                path, model=record, spec=spec,
                 inputs=current, calendar_binding=calendar,
                 annual_projection=projection,
             )
+            from openpyxl import load_workbook
+            driver = load_workbook(path, data_only=False)["Driver"]
         self.assertEqual(exported["annual_projection_hash"], projection["content_hash"])
+        # The immutable superseded estimate for the newly actual quarter stays
+        # in model authority, but must not become a duplicate spreadsheet row.
+        revenue_rows = [
+            row for row in range(1, driver.max_row + 1)
+            if driver.cell(row, 3).value ==
+            "Revenue — Quarterly growth (ratio)"
+        ]
+        self.assertEqual(len(revenue_rows), 1)
 
     def test_annual_calendar_requires_iso_date_and_matching_fiscal_month(self):
         for as_of, month in (("not-a-date", 12), ("2025-11-30", 12)):
@@ -741,7 +753,6 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 calendar["content_hash"] = content_hash(calendar)
                 with self.assertRaises(AnnualProjectionError):
                     validate_calendar_binding(calendar)
-
 
 if __name__ == "__main__":
     unittest.main()

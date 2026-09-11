@@ -566,6 +566,12 @@ def export_fund_workbook(
     grouped_assumptions: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
     group_order: dict[tuple[str, str, str], int] = {}
     for ordinal, assumption in enumerate(model["assumptions"]):
+        # Actualization retains superseded estimates as immutable provenance.
+        # Display only the effective assumption; its predecessor remains in
+        # Sources/Formula Map authority rather than becoming a second value in
+        # the same period column.
+        if assumption.get("superseded_by") is not None:
+            continue
         key = (
             str(assumption["driver_ref"]), str(assumption["measure"]),
             str(assumption["unit"]),
@@ -818,8 +824,8 @@ def export_fund_workbook(
                         f"{coordinate}*{weight}"
                         for coordinate, weight in zip(coordinates, weights)
                     ) + f")/{sum(weights)}"
-                    target.font = Font(name="Arial", color="000000")
                     model_formula = "day_weighted_quarters"
+                    cell_style = "local_formula"
                 elif structured_line.get("annual_semantics") == "sum_quarters":
                     if len(coordinates) != 4 or not all(coordinates):
                         gaps.append(
@@ -828,19 +834,26 @@ def export_fund_workbook(
                         )
                         continue
                     target.value = f"=SUM({','.join(coordinates)})"
-                    target.font = Font(name="Arial", color="000000")
                     model_formula = "projection_sum_quarters"
+                    cell_style = "local_formula"
                 elif structured_line.get("annual_semantics") == "direct_annual":
                     if len(source_periods) != 1:
                         raise FundWorkbookExportError(
                             "computed direct annual projection lacks one source period")
-                    target.value = _number(projection_outcome["value"])
-                    target.font = Font(name="Arial", color="0000FF")
+                    target.value = _template_value(
+                        projection_outcome["value"], result["unit"],
+                        role=str(structured_role),
+                    )
                     model_formula = "direct_annual_filed_value"
+                    cell_style = "hardcoded_input"
                 else:
                     raise FundWorkbookExportError(
                         "computed structured annual result has unsupported semantics")
                 target.number_format = _number_format(result["unit"])
+                template_cell_styles["financials"].append({
+                    "range": target.coordinate, "style": cell_style,
+                    "number_kind": _template_number_kind(result["unit"]),
+                })
                 result_cells[(result["ref"], label)] = (
                     f"'Financials'!{target.coordinate}"
                 )
@@ -991,9 +1004,14 @@ def export_fund_workbook(
                     continue
                 if label in annual_eps_results:
                     target = financials.cell(eps_row, annual_columns[label])
-                    target.value = _number(outcome["value"])
-                    target.font = Font(name="Arial", color="0000FF")
-                    target.number_format = _number_format(eps_result["unit"])
+                    target.value = _template_value(
+                        outcome["value"], eps_result["unit"],
+                        role=str(eps_result.get("role") or ""),
+                    )
+                    template_cell_styles["financials"].append({
+                        "range": target.coordinate, "style": "hardcoded_input",
+                        "number_kind": _template_number_kind(eps_result["unit"]),
+                    })
                     result_cells[(eps_result["ref"], label)] = (
                         f"'Financials'!{target.coordinate}"
                     )
@@ -1027,9 +1045,12 @@ def export_fund_workbook(
                 )
                 formula_map.append({
                     "cell": f"Financials!{target.coordinate}",
-                    "model_cell_ref": "historical-structured-annual-diluted-eps",
+                    "model_cell_ref": (
+                        f"{annual_projection['projection_ref']}:"
+                        f"{eps_result['ref']}:{label}"
+                    ),
                     "formula": target.value,
-                    "model_formula": eps_result["formula"],
+                    "model_formula": "projected annual numerator / projected annual shares",
                     "model_label": eps_result["label"],
                 })
     if len(annual_groups) >= 2:
