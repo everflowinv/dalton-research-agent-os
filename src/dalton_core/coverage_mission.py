@@ -1787,6 +1787,65 @@ class CoverageMissionAuthority:
         params.append(limit)
         return [self._dispatch_row(row) for row in self.connection.execute(query, params).fetchall()]
 
+    def failed_discovery_dispatch_page(
+        self,
+        mission_version_ref: str,
+        *,
+        source_ref: str,
+        discovery_plan_ref: str,
+        discovery_plan_hash: str,
+        after: tuple[str, str] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Read one stable forward page of failed dispatches for local repair."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CoverageMissionValidationError("failed dispatch page limit must be 1..100")
+        params: list[Any] = [
+            _text(mission_version_ref, "mission_version_ref"),
+            _text(source_ref, "source_ref"),
+            _text(discovery_plan_ref, "discovery_plan_ref"),
+            _sha256(discovery_plan_hash, "discovery_plan_hash"),
+        ]
+        query = (
+            "SELECT * FROM coverage_mission_discovery_dispatches "
+            "WHERE mission_version_ref=? AND source_ref=? AND discovery_plan_ref=? "
+            "AND discovery_plan_hash=? AND status='failed'"
+        )
+        if after is not None:
+            if (
+                not isinstance(after, tuple) or len(after) != 2
+                or not all(isinstance(item, str) and item for item in after)
+            ):
+                raise CoverageMissionValidationError("failed dispatch cursor is invalid")
+            query += " AND (created_at>? OR (created_at=? AND dispatch_id>?))"
+            params.extend([after[0], after[0], after[1]])
+        query += " ORDER BY created_at,dispatch_id LIMIT ?"
+        params.append(limit)
+        return [self._dispatch_row(row) for row in self.connection.execute(query, params).fetchall()]
+
+    def source_discovery_for_envelope(
+        self, mission_version_ref: str, source_envelope_ref: str,
+    ) -> dict[str, Any] | None:
+        """Resolve the unique durable discovery for an exact mission/envelope pair."""
+
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_source_discoveries "
+            "WHERE mission_version_ref=? AND source_envelope_ref=?",
+            (
+                _text(mission_version_ref, "mission_version_ref"),
+                _text(source_envelope_ref, "source_envelope_ref"),
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        wire = validate_mission_source_discovery(
+            _canonical_record(row["record_json"], "mission source discovery")
+        )
+        if wire["id"] != row["record_id"] or wire["content_hash"] != row["content_hash"]:
+            raise CoverageMissionConflict("mission source discovery authority drifted")
+        return wire
+
     def settle_discovery_dispatch(
         self, dispatch_id: str, *, status: str, reason: str | None = None
     ) -> dict[str, Any]:
