@@ -1419,7 +1419,7 @@ class WriterServer:
         # The writer is the long-lived owner of the writable model authority.
         # Keeping this connection open also keeps WAL/SHM present for strict
         # read-only Cockpit and lane consumers between individual operations.
-        self._model_router_owner: Any | None = None
+        self._model_router_owners: list[Any] = []
         self._research_plan: ResearchPlanAuthority | None = None
         self._backlog: ResearchQuestionBacklog | None = None
         self._bounded_planner: BoundedPlannerAuthority | None = None
@@ -1650,6 +1650,15 @@ class WriterServer:
         try:
             self._store_executor.submit(self._open_store).result(timeout=STORE_REQUEST_TIMEOUT)
         except BaseException:
+            # `_open_store` is incremental.  If a later authority constructor
+            # fails, close everything already opened on the same store thread
+            # before destroying its executor.
+            try:
+                self._store_executor.submit(self._close_failed_open).result(
+                    timeout=STORE_REQUEST_TIMEOUT
+                )
+            except BaseException:
+                pass
             self._connection_executor.shutdown(wait=True, cancel_futures=True)
             self._connection_executor = None
             self._store_executor.shutdown(wait=True, cancel_futures=True)
@@ -1669,6 +1678,12 @@ class WriterServer:
 
     def _open_store(self) -> None:
         self._store = DaltonStore(self.db_path)
+        router_paths = self._model_router_paths()
+        if router_paths:
+            from .model_router import ModelRouter
+
+            for path in sorted(router_paths):
+                self._model_router_owners.append(ModelRouter(path))
         self._registry = CapabilityRegistry(self._store)
         self._observability = ObservabilityStore(self._store)
         # Open the connector authority schema on the same Core so that
@@ -1799,15 +1814,6 @@ class WriterServer:
             self._candidate_review = HumanReviewAuthority(self._candidate_staging_path)
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
-            if (
-                self._planner_model_config is not None
-                and Path(self._planner_model_config["model_router_db"]).is_file()
-            ):
-                from .model_router import ModelRouter
-
-                self._model_router_owner = ModelRouter(
-                    self._planner_model_config["model_router_db"]
-                )
             self._bounded_control = BoundedPlannerControlPlane(
                 self._bounded_planner,
                 self._observability,
@@ -1953,9 +1959,18 @@ class WriterServer:
         self._model_input = None
         self._industry_research = None
         self._transcript_spool = None
-        if self._model_router_owner is not None:
-            self._model_router_owner.close()
-            self._model_router_owner = None
+        self._close_model_router_owners()
+
+    def _close_failed_open(self) -> None:
+        try:
+            self._close_store()
+        finally:
+            self._close_model_router_owners()
+
+    def _close_model_router_owners(self) -> None:
+        owners, self._model_router_owners = self._model_router_owners, []
+        for router in reversed(owners):
+            router.close()
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")
@@ -2690,6 +2705,28 @@ class WriterServer:
             if isinstance(path, str) and Path(path).is_file():
                 return path
         raise WriterServerError("this Core has no model router database")
+
+    def _model_router_paths(self) -> set[str]:
+        """Existing router paths named by any installed model consumer."""
+
+        from .model_selection import ModelSelectionError, model_configs
+
+        try:
+            configs = model_configs(self.state_dir)
+        except ModelSelectionError as exc:
+            raise WriterServerError(str(exc)) from exc
+        candidates = [item["config"].get("model_router_db") for item in configs]
+        if self._planner_model_config is not None:
+            candidates.append(self._planner_model_config.get("model_router_db"))
+        if self._document_extraction_model_config is not None:
+            candidates.append(
+                self._document_extraction_model_config.get("model_router_db")
+            )
+        return {
+            str(Path(path).expanduser().resolve())
+            for path in candidates
+            if isinstance(path, str) and Path(path).is_file()
+        }
 
     def _op_acknowledge_model_fallback_notice(self, p: Mapping[str, Any]) -> Any:
         """P14-M2: the owner has read one "the model you were using has gone".

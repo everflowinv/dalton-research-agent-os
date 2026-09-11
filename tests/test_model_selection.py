@@ -1472,10 +1472,11 @@ class GovernanceOperationTests(unittest.TestCase):
                 "profile_hash": profile["content_hash"],
             })
             self.assertEqual(again["status"], "duplicate")
-            with ModelRouter(router_path) as router:
-                count = router.connection.execute(
-                    "SELECT COUNT(*) FROM model_profile_metadata_declarations"
-                ).fetchone()[0]
+            with ModelRouter(router_path):
+                with ModelRouter(router_path, read_only=True) as router:
+                    count = router.connection.execute(
+                        "SELECT COUNT(*) FROM model_profile_metadata_declarations"
+                    ).fetchone()[0]
             self.assertEqual(count, 1)
             self.assertNotIn("provider", writer_server.OPERATION_FIELDS[
                 "declare_model_profile_metadata"])
@@ -1499,8 +1500,9 @@ class GovernanceOperationTests(unittest.TestCase):
                     "profile_version_ref": profile["profile_version_ref"],
                     "profile_hash": "0" * 64,
                 })
-            with ModelRouter(router_path) as router:
-                self.assertIsNone(router.latest_profile_metadata(profile["id"]))
+            with ModelRouter(router_path):
+                with ModelRouter(router_path, read_only=True) as router:
+                    self.assertIsNone(router.latest_profile_metadata(profile["id"]))
 
     def test_writer_applies_the_declaration_to_the_routable_profile_now(self) -> None:
         from types import SimpleNamespace
@@ -1531,10 +1533,11 @@ class GovernanceOperationTests(unittest.TestCase):
                 "profile_hash": profile["content_hash"],
             })
             self.assertEqual(result["application_status"], "applied")
-            with ModelRouter(router_path) as router:
-                current = next(
-                    item for item in router.latest_profiles()
-                    if item["id"] == profile["id"])
+            with ModelRouter(router_path):
+                with ModelRouter(router_path, read_only=True) as router:
+                    current = next(
+                        item for item in router.latest_profiles()
+                        if item["id"] == profile["id"])
             self.assertEqual(current["family"], "owner-declared-family")
             self.assertEqual(current["capabilities"], ["research", "verify"])
             with ModelRouter(router_path) as router:

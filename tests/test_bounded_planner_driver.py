@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -909,14 +910,23 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         from dalton_core.model_router import ModelRouter
 
         router_path = self.root / "owned-model-router.sqlite"
+        second_router_path = self.root / "second-model-router.sqlite"
         with ModelRouter(router_path):
             pass
+        with ModelRouter(second_router_path):
+            pass
         config = {**self.UNBUDGETED, "model_router_db": str(router_path)}
+        (self.root / "initial-screen-model-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        (self.root / "dossier-model-config.json").write_text(
+            json.dumps({**config, "model_router_db": str(second_router_path)}),
+            encoding="utf-8",
+        )
         server = WriterServer(
             self.root / "owner-core.sqlite", str(self.root / "owner.sock"),
             dict(self.server.principals),
             scheduler_path=self.root / "owner-scheduler.sqlite",
-            planner_model_config=config,
         )
         server.start()
         self.addCleanup(server.stop)
@@ -926,6 +936,38 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
                 reader.connection.execute("PRAGMA journal_mode").fetchone()[0],
                 "wal",
             )
+        with ModelRouter(second_router_path, read_only=True):
+            pass
+        server.stop()
+        self.assertEqual(server._model_router_owners, [])
+        self.assertFalse(Path(str(router_path) + "-wal").exists())
+        self.assertFalse(Path(str(router_path) + "-shm").exists())
+        self.assertFalse(Path(str(second_router_path) + "-wal").exists())
+        self.assertFalse(Path(str(second_router_path) + "-shm").exists())
+
+    def test_failed_writer_start_closes_a_model_router_opened_earlier(self):
+        from dalton_core.model_router import ModelRouter
+
+        router_path = self.root / "failed-start-router.sqlite"
+        with ModelRouter(router_path):
+            pass
+        config = {**self.UNBUDGETED, "model_router_db": str(router_path)}
+        server = WriterServer(
+            self.root / "failed-core.sqlite", str(self.root / "failed.sock"),
+            dict(self.server.principals),
+            scheduler_path=self.root / "failed-scheduler.sqlite",
+            planner_model_config=config,
+        )
+        with patch(
+            "dalton_core.writer_server.BoundedPlannerControlPlane",
+            side_effect=RuntimeError("injected authority failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected authority failure"):
+                server.start()
+
+        self.assertEqual(server._model_router_owners, [])
+        self.assertFalse(Path(str(router_path) + "-wal").exists())
+        self.assertFalse(Path(str(router_path) + "-shm").exists())
 
     def test_the_projection_tells_the_driver_which_pool_the_loop_drinks_from(
             self) -> None:
