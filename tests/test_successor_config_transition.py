@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.document_research import build_document_research_policy
 from scripts.prepare_successor_config_transition import (
@@ -303,10 +304,11 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                 **model("owner"), "owner_metadata": {"signature": "owner:sig"}},
         }
         self.preserved = {}
-        for name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT):
+        for name, value in self.models.items():
             path = self.packet / name
-            write(path, self.models[name])
-            self.preserved[name] = path
+            write(path, value)
+            if name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT):
+                self.preserved[name] = path
         self.document = document_config("document-research-policy:production:1")
         self.lane = {"schema_version": "0.1", "enabled": True}
         for name, value in ((DOCUMENT_CONFIG, self.document), (LANE_CONFIG, self.lane)):
@@ -349,6 +351,7 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             packet_root=self.packet, release_ref="code-successor",
             source_commit="b" * 40,
             baseline_models_path=self.packet / "models.json",
+            model_config_paths={name: self.packet / name for name in self.models},
             preserved_config_paths=self.preserved,
             service_config_before_path=self.packet / "service.before.json",
             service_delta_path=self.packet / "service.delta.json",
@@ -413,6 +416,25 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             self.apply(manifest)
         self.assertEqual(service_before, self.service.read_bytes())
 
+    def test_semantically_equal_model_reformat_is_still_byte_drift(self):
+        manifest = self.build(); self.install_before()
+        target = self.state / "owner-preserved-model-config.json"
+        target.write_text(json.dumps(self.models[target.name], separators=(",", ":")))
+        with self.assertRaisesRegex(ConfigTransitionError, "full model"):
+            self.apply(manifest)
+
+    def test_nonfinite_service_budget_is_rejected_by_runtime_validator(self):
+        delta_path = self.packet / "service.delta.json"
+        delta = json.loads(delta_path.read_text())
+        delta["after"]["max_cost_usd"] = float("inf")
+        unsigned = {key: value for key, value in delta.items() if key != "content_hash"}
+        delta["content_hash"] = hashlib.sha256(json.dumps(
+            unsigned, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        write(delta_path, delta)
+        with self.assertRaisesRegex(ConfigTransitionError, "values are invalid"):
+            self.build()
+
     def test_late_failure_rolls_back_exact_service_bytes(self):
         manifest = self.build(); self.install_before()
         service_before = self.service.read_bytes()
@@ -441,6 +463,52 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             self.apply(manifest, fault_hook=fail)
         self.assertEqual({"owner": {"concurrent": True}},
                          json.loads(self.service.read_text()))
+
+    def test_receipt_publish_failure_leaves_no_partial_and_restores_service(self):
+        manifest = self.build(); self.install_before()
+        service_before = self.service.read_bytes()
+        receipt = self.packet / "receipt.json"
+        real_link = os.link
+
+        def fail_receipt_link(source, target, *args, **kwargs):
+            if Path(target) == receipt:
+                raise OSError("receipt publish failed")
+            return real_link(source, target, *args, **kwargs)
+
+        with patch.object(os, "link", side_effect=fail_receipt_link):
+            with self.assertRaisesRegex(OSError, "receipt publish failed"):
+                self.apply(manifest)
+        self.assertFalse(receipt.exists())
+        self.assertEqual(service_before, self.service.read_bytes())
+
+    def test_receipt_temp_failure_leaves_no_partial_and_restores_service(self):
+        manifest = self.build(); self.install_before()
+        service_before = self.service.read_bytes()
+
+        def fail(stage: str) -> None:
+            if stage == "receipt_temp_written":
+                raise OSError("receipt fsync boundary failed")
+
+        with self.assertRaisesRegex(OSError, "receipt fsync boundary failed"):
+            self.apply(manifest, fault_hook=fail)
+        self.assertFalse((self.packet / "receipt.json").exists())
+        self.assertEqual(service_before, self.service.read_bytes())
+
+    def test_atomic_service_create_does_not_overwrite_racing_owner(self):
+        manifest = self.build(); self.install_before()
+        real_link = os.link
+
+        def race_service_link(source, target, *args, **kwargs):
+            if Path(target).resolve() == self.service.resolve():
+                write(self.service, {"owner": {"concurrent": True}})
+            return real_link(source, target, *args, **kwargs)
+
+        with patch.object(os, "link", side_effect=race_service_link):
+            with self.assertRaises(FileExistsError):
+                self.apply(manifest)
+        self.assertEqual({"owner": {"concurrent": True}},
+                         json.loads(self.service.read_text()))
+        self.assertFalse((self.packet / "receipt.json").exists())
 
     def test_service_delta_cannot_overwrite_existing_budget_or_other_path(self):
         manifest = self.build(); self.install_before()

@@ -4,12 +4,15 @@ import json
 import plistlib
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.run_release_copied_state_rehearsal import RehearsalBindingError
 from scripts.run_successor_copied_state_rehearsal import (
-    derive_confined_transition, validate_successor_snapshots,
+    derive_confined_transition, replay_preserved_production_setup,
+    validate_successor_snapshots,
 )
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
@@ -129,6 +132,58 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         self.assertEqual(result["document_research_config_sha256"],
                          __import__('hashlib').sha256(path.read_bytes()).hexdigest())
         self.assertEqual(json.loads(path.read_text()), confined)
+
+    def test_preserved_setup_replays_actual_entrypoints_twice_without_byte_drift(self):
+        router = self.state / "model-router.sqlite"; router.touch()
+        service = json.loads(self.config.read_text())
+        service["model_router_db"] = str(router)
+        self.config.write_text(json.dumps(service))
+        rehearsal = SimpleNamespace(
+            confined=True, temp_root=self.state.parent.resolve(), temp_state=self.state,
+            temp_config=self.config, confine_to_temp_root=lambda: ("", []),
+        )
+        module = SimpleNamespace(configuration_setup_guard=lambda _path: nullcontext())
+        extraction = {"policy": {"status": "duplicate"}}
+        annual = {"created": []}
+        cockpit = {"service_config_changed": False}
+        with patch("dalton_core.document_extraction_setup.install",
+                   return_value=extraction) as extraction_install, \
+             patch("dalton_core.annual_report_setup.install",
+                   return_value=annual) as annual_install, \
+             patch("dalton_core.cockpit_setup.install",
+                   return_value=cockpit) as cockpit_install:
+            detail, findings = replay_preserved_production_setup(module, rehearsal)
+        self.assertIn("3 model configs", detail)
+        self.assertEqual([], findings)
+        self.assertEqual(2, extraction_install.call_count)
+        self.assertEqual(2, annual_install.call_count)
+        self.assertEqual(2, cockpit_install.call_count)
+
+    def test_preserved_setup_replay_refuses_installer_owned_config_drift(self):
+        router = self.state / "model-router.sqlite"; router.touch()
+        service = json.loads(self.config.read_text())
+        service["model_router_db"] = str(router)
+        self.config.write_text(json.dumps(service))
+        rehearsal = SimpleNamespace(
+            confined=True, temp_root=self.state.parent.resolve(), temp_state=self.state,
+            temp_config=self.config, confine_to_temp_root=lambda: ("", []),
+        )
+        module = SimpleNamespace(configuration_setup_guard=lambda _path: nullcontext())
+
+        def drift(_config):
+            value = json.loads(self.config.read_text())
+            value["owner_signature"] = "changed"
+            self.config.write_text(json.dumps(value))
+            return {"service_config_changed": False}
+
+        with patch("dalton_core.document_extraction_setup.install",
+                   return_value={"policy": {"status": "duplicate"}}), \
+             patch("dalton_core.annual_report_setup.install",
+                   return_value={"created": []}), \
+             patch("dalton_core.cockpit_setup.install", side_effect=drift):
+            with self.assertRaisesRegex(
+                    RehearsalBindingError, "changed preserved configuration"):
+                replay_preserved_production_setup(module, rehearsal)
 
     def test_confined_transition_derives_scratch_paths_without_weakening_original(self):
         root = self.state.parent
@@ -285,7 +340,9 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                            "health_acceptance_required": True},
             "model_inventory": {"before_count": 3, "after_count": 3,
                 "before_semantic_sha256": canonical_hash(live_models),
-                "after_semantic_sha256": canonical_hash(live_models)},
+                "after_semantic_sha256": canonical_hash(live_models),
+                "file_sha256": {name: digest(packet / name)
+                                for name in live_models}},
             "targets": targets,
             "service_transition": {"kind": "compare_and_patch", "mutation_count": 1,
                 "before": {"file": "service.before.json",
@@ -293,8 +350,11 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 "delta": {"file": "service.delta.json",
                           "sha256": digest(packet / "service.delta.json")},
                 "after_sha256": delta["expected_after_sha256"]},
-            "supporting_evidence": {"baseline_model_snapshot": {
-                "file": "models.json", "sha256": digest(packet / "models.json")}},
+            "supporting_evidence": {
+                "baseline_model_snapshot": {
+                    "file": "models.json", "sha256": digest(packet / "models.json")},
+                "model_config_files": {name: {"file": name,
+                    "sha256": digest(packet / name)} for name in live_models}},
             "preserved_authorities": [], "boundaries": {
                 "configuration_mutations": 0, "service_config_mutations": 1,
                 "live_mutation": False, "manifest_publication": False,

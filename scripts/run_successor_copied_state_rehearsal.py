@@ -78,6 +78,28 @@ def derive_confined_transition(
     _write_json(baseline_path, raw_models)
     supporting["baseline_model_snapshot"] = {
         "file": baseline_path.name, "sha256": _sha(baseline_path)}
+    confined_model_artifacts = {}
+    confined_model_hashes = {}
+    original_model_artifacts = manifest["supporting_evidence"].get(
+        "model_config_files")
+    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        _need(isinstance(original_model_artifacts, Mapping)
+              and set(original_model_artifacts) == set(raw_models),
+              "original full model artifact inventory differs")
+        model_artifact_root = derived_root / "model-config-files"
+        model_artifact_root.mkdir(mode=0o700)
+        for name in sorted(raw_models):
+            original = packet_root / original_model_artifacts[name]["file"]
+            _artifact(original, original_model_artifacts[name]["sha256"],
+                      f"original model config {name}")
+            confined = model_artifact_root / name
+            _write_exclusive(confined, (rehearsal.temp_state / name).read_bytes())
+            confined_model_artifacts[name] = {
+                "file": confined.relative_to(derived_root).as_posix(),
+                "sha256": _sha(confined),
+            }
+            confined_model_hashes[name] = _sha(confined)
+        supporting["model_config_files"] = confined_model_artifacts
     if manifest.get("schema_version") != PRESERVE_SCHEMA_VERSION:
         original_audit = packet_root / manifest["supporting_evidence"][
             "document_research_readonly_audit"]["file"]
@@ -147,6 +169,8 @@ def derive_confined_transition(
         "before_semantic_sha256": canonical_hash(raw_models),
         "after_semantic_sha256": canonical_hash(final_models),
     }
+    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        derived["model_inventory"]["file_sha256"] = confined_model_hashes
     derived.pop("content_hash", None)
     derived["content_hash"] = canonical_hash(derived)
     manifest_path = derived_root / "successor-config-transition.confined.json"
@@ -214,6 +238,55 @@ def validate_successor_snapshots(
     }
 
 
+def replay_preserved_production_setup(module: Any, rehearsal: Any) -> tuple[str, list[str]]:
+    """Run the install.sh setup entrypoints twice against only the confined copy."""
+
+    _need(rehearsal.confined, "production setup replay is not confined")
+    from dalton_core import (
+        annual_report_setup, cockpit_setup, document_extraction_setup,
+    )
+
+    model_before = {
+        path.name: path.read_bytes()
+        for path in sorted(rehearsal.temp_state.glob("*-model-config.json"))
+    }
+    service_before = rehearsal.temp_config.read_bytes()
+    document_before = (rehearsal.temp_state / DOCUMENT_CONFIG).read_bytes()
+    lane_before = (rehearsal.temp_state / LANE_CONFIG).read_bytes()
+    service = json.loads(service_before.decode("utf-8"))
+    router_db = Path(service["model_router_db"]).expanduser().resolve()
+    _need(router_db.is_relative_to(rehearsal.temp_root),
+          "production setup replay Router escapes scratch root")
+
+    def setup_once() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        extraction = document_extraction_setup.install(
+            rehearsal.temp_config, tier="cheap")
+        annual = annual_report_setup.install(rehearsal.temp_config)
+        cockpit = cockpit_setup.install(rehearsal.temp_config)
+        return extraction, annual, cockpit
+
+    with module.configuration_setup_guard(router_db):
+        first = setup_once()
+        second = setup_once()
+    for extraction, annual, cockpit in (first, second):
+        _need(extraction.get("policy", {}).get("status") == "duplicate"
+              and annual.get("created") == []
+              and cockpit.get("service_config_changed") is False,
+              "production setup replay was not an idempotent existing install")
+    model_after = {
+        path.name: path.read_bytes()
+        for path in sorted(rehearsal.temp_state.glob("*-model-config.json"))
+    }
+    _need(model_after == model_before
+          and rehearsal.temp_config.read_bytes() == service_before
+          and (rehearsal.temp_state / DOCUMENT_CONFIG).read_bytes() == document_before
+          and (rehearsal.temp_state / LANE_CONFIG).read_bytes() == lane_before,
+          "production setup replay changed preserved configuration bytes")
+    rehearsal.confine_to_temp_root()
+    return (f"production setup replay preserved {len(model_after)} model configs "
+            "and service/document/lane bytes across two installs", [])
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     source_root = args.source_root.expanduser().resolve(strict=True)
     live_root = args.live_root.expanduser().resolve(strict=True)
@@ -264,8 +337,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     class SuccessorRehearsal(module.Rehearsal):
         def post_catalog_sync_steps(self):
-            return (("apply successor configuration in scratch",
-                     self._apply_successor),)
+            steps = [("apply successor configuration in scratch",
+                      self._apply_successor)]
+            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+                steps.append(("replay production setup against preserved scratch config",
+                              self._replay_preserved_setup))
+            return tuple(steps)
+
+        def _replay_preserved_setup(self):
+            return replay_preserved_production_setup(module, self)
 
         def _apply_successor(self):
             baseline_row = manifest["supporting_evidence"]["baseline_model_snapshot"]

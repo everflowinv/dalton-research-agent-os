@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from dalton_core.annual_report_runtime import load_annual_report_model_config
+from dalton_core.call_budget import validate_budget_overrides
 from dalton_core.document_research_inventory import validate_inventory_config
 
 
@@ -239,14 +240,14 @@ def _validated_service_delta(value: Mapping[str, Any]) -> dict[str, Any]:
           == "all other service configuration, model configuration and routing authority remain unchanged",
           "planner service budget delta has an invalid closed shape")
     after = value.get("after")
-    _need(isinstance(after, Mapping) and set(after) == {
-        "max_input_tokens", "max_output_tokens", "max_cost_usd", "timeout_seconds"}
-        and all(isinstance(after[name], int) and not isinstance(after[name], bool)
-                and after[name] > 0
-                for name in ("max_input_tokens", "max_output_tokens", "timeout_seconds"))
-        and isinstance(after["max_cost_usd"], (int, float))
-        and not isinstance(after["max_cost_usd"], bool)
-        and after["max_cost_usd"] > 0
+    try:
+        validated_after = validate_budget_overrides(after)
+    except Exception as exc:
+        raise ConfigTransitionError("planner service budget delta values are invalid") from exc
+    _need(isinstance(after, Mapping)
+        and set(after) == {"max_input_tokens", "max_output_tokens",
+                           "max_cost_usd", "timeout_seconds"}
+        and validated_after == after
         and HEX64.fullmatch(str(value.get("expected_before_sha256", ""))) is not None
         and HEX64.fullmatch(str(value.get("expected_after_sha256", ""))) is not None,
         "planner service budget delta values are invalid")
@@ -277,6 +278,7 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
 def build_preserve_existing_transition(
     *, packet_root: Path, release_ref: str, source_commit: str,
     baseline_models_path: Path,
+    model_config_paths: Mapping[str, Path],
     preserved_config_paths: Mapping[str, Path],
     service_config_before_path: Path, service_delta_path: Path,
 ) -> dict[str, Any]:
@@ -297,12 +299,25 @@ def build_preserve_existing_transition(
           "baseline model inventory is invalid")
     _need(set(preserved_config_paths) == set(PRESERVED_TARGETS),
           "preserved target inventory differs from the five reviewed configs")
+    _need(set(model_config_paths) == set(baseline),
+          "model config artifact inventory differs from the full snapshot")
+    model_artifacts = {}
+    model_file_hashes = {}
+    for name in sorted(baseline):
+        path = model_config_paths[name]
+        value, data = _read_json(path, f"model config artifact {name}")
+        _need(value == baseline[name],
+              f"model config artifact differs from snapshot: {name}")
+        model_artifacts[name] = _artifact(path, packet_root)
+        model_file_hashes[name] = sha256_bytes(data)
 
     targets = []
     for name in PRESERVED_TARGETS:
         path = preserved_config_paths[name]
         value, data = _read_json(path, f"preserved config {name}")
         if name.endswith("-model-config.json"):
+            _need(path.resolve() == model_config_paths[name].resolve(),
+                  f"{name} critical artifact differs from full inventory artifact")
             _need(name in baseline and value == baseline[name],
                   f"{name} differs from the full model snapshot")
             try:
@@ -353,6 +368,7 @@ def build_preserve_existing_transition(
             "before_count": len(baseline), "after_count": len(baseline),
             "before_semantic_sha256": canonical_hash(baseline),
             "after_semantic_sha256": canonical_hash(baseline),
+            "file_sha256": model_file_hashes,
         },
         "targets": targets,
         "service_transition": {
@@ -364,6 +380,7 @@ def build_preserve_existing_transition(
         },
         "supporting_evidence": {
             "baseline_model_snapshot": _artifact(baseline_models_path, packet_root),
+            "model_config_files": model_artifacts,
         },
         "preserved_authorities": [
             "all_model_configs", "five_reviewed_runtime_configs",
@@ -510,7 +527,8 @@ def _apply_preserve_transition(
           "preserve-existing transition must contain the five reviewed configs")
     supporting = manifest.get("supporting_evidence")
     _need(isinstance(supporting, Mapping)
-          and set(supporting) == {"baseline_model_snapshot"},
+          and set(supporting) == {"baseline_model_snapshot", "model_config_files"}
+          and isinstance(supporting.get("model_config_files"), Mapping),
           "preserve-existing supporting evidence differs")
     _, baseline_bytes = _resolve_artifact(
         packet_root, supporting["baseline_model_snapshot"])
@@ -528,16 +546,28 @@ def _apply_preserve_transition(
         path.name: json.loads(path.read_text(encoding="utf-8"))
         for path in actual_model_paths
     }
+    model_byte_hashes = {path.name: sha256_bytes(path.read_bytes())
+                         for path in actual_model_paths}
     inventory = manifest.get("model_inventory")
+    reviewed_model_files = supporting["model_config_files"]
     _need(isinstance(inventory, Mapping)
+          and set(inventory) == {"before_count", "after_count",
+                                 "before_semantic_sha256", "after_semantic_sha256",
+                                 "file_sha256"}
+          and isinstance(inventory.get("file_sha256"), Mapping)
+          and set(reviewed_model_files) == set(baseline_models)
+          and dict(inventory["file_sha256"]) == model_byte_hashes
           and inventory.get("before_count") == len(baseline_models)
           and inventory.get("after_count") == len(baseline_models)
           and inventory.get("before_semantic_sha256") == canonical_hash(baseline_models)
           and inventory.get("after_semantic_sha256") == canonical_hash(baseline_models)
           and actual_models == baseline_models,
           "full model configuration inventory differs from preserved baseline")
-    model_byte_hashes = {path.name: sha256_bytes(path.read_bytes())
-                         for path in actual_model_paths}
+    for name in sorted(baseline_models):
+        _, reviewed_bytes = _resolve_artifact(packet_root, reviewed_model_files[name])
+        _need(sha256_bytes(reviewed_bytes) == inventory["file_sha256"][name]
+              and json.loads(reviewed_bytes.decode("utf-8")) == baseline_models[name],
+              f"reviewed model config artifact differs: {name}")
 
     for row in rows:
         _need(isinstance(row, Mapping)
@@ -582,7 +612,9 @@ def _apply_preserve_transition(
     _need(sha256_bytes(service_after) == service_row["after_sha256"],
           "service transition expected-after bytes differ")
 
-    before_mode = stat.S_IMODE(service_config_path.stat().st_mode)
+    before_stat = service_config_path.stat()
+    before_mode = stat.S_IMODE(before_stat.st_mode)
+    before_identity = (before_stat.st_dev, before_stat.st_ino)
     owned_identity: tuple[int, int] | None = None
 
     def rollback_service() -> bool:
@@ -614,15 +646,32 @@ def _apply_preserve_transition(
         fd, temporary_name = tempfile.mkstemp(
             prefix=".successor-service-", dir=service_config_path.parent)
         temporary = Path(temporary_name)
+        held_fd, held_name = tempfile.mkstemp(
+            prefix=".successor-service-held-", dir=service_config_path.parent)
+        os.close(held_fd)
+        held = Path(held_name)
+        held.unlink()
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(service_after); stream.flush(); os.fsync(stream.fileno())
             os.chmod(temporary, before_mode)
-            _need(service_config_path.read_bytes() == service_before,
-                  "service config changed during compare-and-patch")
-            os.replace(temporary, service_config_path)
+            os.rename(service_config_path, held)
+            moved = held.stat()
+            if ((moved.st_dev, moved.st_ino) != before_identity
+                    or held.is_symlink() or held.read_bytes() != service_before):
+                if not service_config_path.exists() and not service_config_path.is_symlink():
+                    os.rename(held, service_config_path)
+                raise ConfigTransitionError(
+                    "service config changed during compare-and-patch")
+            os.link(temporary, service_config_path)
+            temporary.unlink()
+            held.unlink()
         finally:
             temporary.unlink(missing_ok=True)
+            if held.exists() and not service_config_path.exists():
+                os.rename(held, service_config_path)
+            elif held.exists() and held.is_file() and not held.is_symlink():
+                held.unlink()
         current = service_config_path.stat()
         owned_identity = (current.st_dev, current.st_ino)
         _fsync_directory(service_config_path.parent)
@@ -665,9 +714,28 @@ def _apply_preserve_transition(
         receipt["content_hash"] = canonical_hash(receipt)
         if fault_hook is not None:
             fault_hook("before_receipt")
-        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(_json_bytes(receipt)); stream.flush(); os.fsync(stream.fileno())
+        receipt_fd, receipt_temp_name = tempfile.mkstemp(
+            prefix=".successor-receipt-", dir=receipt_path.parent)
+        receipt_temp = Path(receipt_temp_name)
+        receipt_published = False
+        try:
+            with os.fdopen(receipt_fd, "wb") as stream:
+                stream.write(_json_bytes(receipt)); stream.flush(); os.fsync(stream.fileno())
+            if fault_hook is not None:
+                fault_hook("receipt_temp_written")
+            os.chmod(receipt_temp, 0o600)
+            os.link(receipt_temp, receipt_path)
+            receipt_published = True
+            _fsync_directory(receipt_path.parent)
+        except Exception:
+            if (receipt_published and receipt_path.is_file()
+                    and not receipt_path.is_symlink()
+                    and receipt_path.stat().st_ino == receipt_temp.stat().st_ino):
+                receipt_path.unlink()
+                _fsync_directory(receipt_path.parent)
+            raise
+        finally:
+            receipt_temp.unlink(missing_ok=True)
     except Exception as exc:
         if not rollback_service():
             raise ConfigTransitionError(
