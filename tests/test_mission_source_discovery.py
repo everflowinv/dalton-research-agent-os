@@ -340,6 +340,15 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
             [(KNOWN_DOC, "already_in_authority"), (NEW_DOC, "discovered")],
         )
         self.assertEqual(self.missions.next_discovered_document()["document_ref"], NEW_DOC)
+        stop = [{"company_ref": ACN, "spec_ref": "earnings-call-transcripts"}]
+        self.assertIsNone(self.missions.next_discovered_document(
+            excluded_needs=stop, excluded_mission_version_ref=record["mission_version_ref"],
+        ))
+        # The same company/spec stop under another mission version has no
+        # authority over this queue row.
+        self.assertEqual(self.missions.next_discovered_document(
+            excluded_needs=stop, excluded_mission_version_ref=v1["id"],
+        )["document_ref"], NEW_DOC)
         listed = self.missions.source_discoveries(record["mission_version_ref"], company_ref=ACN)
         self.assertEqual([item["id"] for item in listed], [record["id"]])
         progress = self.missions.mission_progress("coverage-mission:us-it-services")

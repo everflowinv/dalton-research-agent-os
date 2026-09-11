@@ -1688,6 +1688,7 @@ class MissionSourceDiscoveryCoordinator:
             preferred_hosts=self.preferred_hosts, skip_hosts=self.skip_hosts,
             preferred_needs=needs,
             excluded_needs=stopped_needs,
+            excluded_mission_version_ref=None if mission is None else mission["id"],
         )
         if document is not None and self._document_in_authority(
             document["document_ref"], document.get("discovery_ref")
@@ -1721,6 +1722,7 @@ class MissionSourceDiscoveryCoordinator:
                 as_of=self.clock(),
                 source_ref=self.source_ref, skip_hosts=self.skip_hosts,
                 excluded_needs=stopped_needs,
+                excluded_mission_version_ref=None if mission is None else mission["id"],
             )
             retry = document is not None
         if document is None:
