@@ -32,6 +32,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.json$")
 # a CLI module should not have to be imported before its policy pin is updated.
 _SEED_NAMES = (
     "document-extraction-model-config.json",
+    "discovery-selection-model-config.json",
     "research-planner-model-config.json",
     "initial-screen-model-config.json",
     "claim-index-model-config.json",

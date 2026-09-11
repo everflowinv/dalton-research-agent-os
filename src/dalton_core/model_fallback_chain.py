@@ -120,6 +120,7 @@ _PURPOSE_TIERS: dict[str, str] = {
     "claim_index": TIER_CHEAP,
     "quality": TIER_CHEAP,
     "document_extraction": TIER_CHEAP,
+    "discovery_selection": TIER_CHEAP,
     "agenda_planning": TIER_BRAIN,
     "thesis_impact_assessment": TIER_BRAIN,
     "thesis_impact_verifier": TIER_VERIFIER,

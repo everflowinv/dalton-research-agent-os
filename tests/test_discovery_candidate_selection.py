@@ -89,3 +89,28 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class FreshProcessSelectionRegistryTests(unittest.TestCase):
+    def test_discovery_selection_is_editable_before_child_import(self):
+        import subprocess, sys
+        code = """
+import json,sys,tempfile
+from pathlib import Path
+from dalton_core.model_fallback_chain import purpose_tiers
+from dalton_core.model_configurations import model_config_names
+from dalton_core.model_selection import purpose_policy_bindings
+assert 'dalton_core.discovery_candidate_selection' not in sys.modules
+assert purpose_tiers()['discovery_selection']=='cheap'
+assert 'discovery-selection-model-config.json' in model_config_names()
+with tempfile.TemporaryDirectory() as root:
+    state=Path(root)/'state'/'dalton-core';state.mkdir(parents=True)
+    config=state/'discovery-selection-model-config.json'
+    config.write_text(json.dumps({'routing_policy_ref':'model-routing-policy-version:selector:1','model_router_db':str(state/'model-router.sqlite')}))
+    binding=purpose_policy_bindings(state)['discovery_selection']
+    assert binding['status']=='configured' and binding['editable'] is True
+    assert Path(binding['source'])==config.resolve()
+    assert binding['policy_version_ref']=='model-routing-policy-version:selector:1'
+"""
+        run = subprocess.run([sys.executable, '-c', code], text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stderr)

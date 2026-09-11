@@ -59,6 +59,7 @@ SELECTION_MODES: tuple[str, ...] = ("tier", "explicit")
 PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "draft": ("initial-screen-model-config.json",),
     "document_extraction": ("document-extraction-model-config.json",),
+    "discovery_selection": ("discovery-selection-model-config.json",),
     "claim_index": ("claim-index-model-config.json",),
     "quality_verifier": ("quality-verifier-model-config.json",),
     "quality": ("initial-screen-model-config.json",),
@@ -109,6 +110,7 @@ PURPOSE_LABELS: dict[str, str] = {
     "claim_index": "给结论打标签",
     "quality": "给产出打分",
     "document_extraction": "从文档抽取研究事实",
+    "discovery_selection": "从搜索结果选择研究资料",
     "agenda_planning": "旧议程规划",
     "thesis_impact_assessment": "评估新事实对论点的影响",
     "thesis_impact_verifier": "核验论点影响评估",

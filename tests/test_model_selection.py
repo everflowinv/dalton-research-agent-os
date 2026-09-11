@@ -616,6 +616,7 @@ class SetSelectionTests(StateDirectoryCase):
     def test_registry_covers_every_installed_role_configuration(self) -> None:
         self.assertEqual(set(model_config_names()), {
             "document-extraction-model-config.json",
+            "discovery-selection-model-config.json",
             "research-planner-model-config.json",
             "initial-screen-model-config.json",
             "claim-index-model-config.json",
