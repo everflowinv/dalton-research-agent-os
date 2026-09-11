@@ -558,6 +558,8 @@ def execute_chain(
     producer_decision_ref: str | None = None,
     producer_decision_refs: Sequence[str] = (),
     tier: str | None = None,
+    excluded_profile_ids: Sequence[str] = (),
+    required_profile_version_ref: str | None = None,
 ) -> dict[str, Any]:
     """Walk the chain until one link serves, and record every step of it.
 
@@ -666,6 +668,8 @@ def execute_chain(
             producer_family=producer_family,
             tier=tier,
             purpose=purpose,
+            excluded_profile_ids=excluded_profile_ids,
+            required_profile_version_ref=required_profile_version_ref,
         )
         if result.get("status") == "conflict":
             raise FallbackChainError(result.get("reason", "route request conflicted"))
@@ -755,6 +759,20 @@ def execute_chain(
         failure_class = str(outcome.get("failure_class", ""))
         failures.append(safe_failure_detail(profile_id, outcome))
         _record(served=False, skip_reason=failure_class or "unclassified")
+        if outcome.get("defer_attempt") is True:
+            return {
+                "status": "halted",
+                "tier": tier,
+                "purpose": purpose,
+                "reason": "provider_retry",
+                "route_decision_ref": route["id"],
+                "decision": route,
+                "profile": profile,
+                "value": outcome.get("value"),
+                "links": links,
+                "failures": failures,
+                "served": None,
+            }
         if not may_fall_back(failure_class):
             return {
                 "status": "halted",

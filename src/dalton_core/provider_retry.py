@@ -16,6 +16,10 @@ ELIGIBLE_RETURNED_CODES = frozenset({
     "PROVIDER_INTERNAL_ERROR", "UPSTREAM_SERVICE_ERROR",
 })
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
+DEFAULT_RETURNED_PROVIDER_RETRY = {
+    "max_same_profile_retries": 1,
+    "retry_backoff_seconds": 2,
+}
 
 
 def validate_provider_retry(value: Any) -> dict[str, Any]:
@@ -76,5 +80,5 @@ def returned_provider_failure_proof(invocation: Any, result: Any) -> dict[str, s
     return {"code": code, "broker_response_hash": metadata["broker_response_hash"]}
 
 
-__all__ = ["ELIGIBLE_RETURNED_CODES", "ProviderRetryError",
+__all__ = ["DEFAULT_RETURNED_PROVIDER_RETRY", "ELIGIBLE_RETURNED_CODES", "ProviderRetryError",
            "returned_provider_failure_proof", "validate_provider_retry"]

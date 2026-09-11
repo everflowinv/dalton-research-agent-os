@@ -22,7 +22,7 @@ import inspect
 import json
 import re
 from importlib import resources
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -431,6 +431,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                verifier_provider_schema_hash: str | None = None,
                mission_version_hash: str | None = None,
                request_identity: Mapping[str, Any] | None = None,
+               provider_retry: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
@@ -456,6 +457,10 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         identity["producer_route_decision_refs"] = list(producer_route_decision_refs)
     if request_identity is not None:
         identity["request_identity_hash"] = content_hash(request_identity)
+    if provider_retry is not None:
+        from .provider_retry import validate_provider_retry
+        provider_retry = validate_provider_retry(provider_retry)
+        identity["provider_retry"] = content_hash(provider_retry)
     digest = content_hash(identity)
     at = created_at or _now()
     capability = (
@@ -480,6 +485,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "producer_route_decision_refs": list(producer_route_decision_refs)}),
                                  **({} if request_identity is None else {
                                      "request_identity": dict(request_identity)}),
+                                 **({} if provider_retry is None else {
+                                     "provider_retry": dict(provider_retry)}),
                                  **({} if verifier_provider_contract is None else {
                                      "verifier_output_schema_version": "0.1",
                                      "verifier_provider_contract": verifier_provider_contract,
@@ -503,6 +510,11 @@ def dossier_request_identity(
         **(
             {"transport_retry": dict(config["transport_retry"])}
             if "transport_retry" in config
+            else {}
+        ),
+        **(
+            {"provider_retry": dict(config["provider_retry"])}
+            if "provider_retry" in config
             else {}
         ),
     }
@@ -545,13 +557,17 @@ def validate_dossier_request_identity(
         raise ValueError("Dossier request identity semantic binding drifted")
     exact = copied["exact_config"]
     if not isinstance(exact, Mapping) or set(exact) - {
-        "capacity_retry", "transport_retry"
+        "capacity_retry", "transport_retry", "provider_retry"
     }:
         raise ValueError("Dossier request identity config is invalid")
     if "transport_retry" in exact:
         from .document_extraction import validate_transport_retry
 
         validate_transport_retry(exact["transport_retry"])
+    if "provider_retry" in exact:
+        from .provider_retry import validate_provider_retry
+
+        validate_provider_retry(exact["provider_retry"])
     if "capacity_retry" in exact:
         retry = exact["capacity_retry"]
         if not isinstance(retry, Mapping) or set(retry) != {
@@ -937,6 +953,161 @@ class CockpitModel:
                     import time
                     time.sleep(backoff)
 
+    def _provider_retry_state(
+        self, scheduler: Scheduler, router: ModelRouter, work: WorkOrder
+    ) -> dict[str, Any] | None:
+        """Reconstruct the last accepted paid-retry decision from authority."""
+
+        policy = self.config.get("provider_retry")
+        if policy is None:
+            return None
+        if work.metadata.get("provider_retry") != policy:
+            raise CockpitModelError(
+                "the WorkOrder provider retry policy differs from this model config"
+            )
+        rows = scheduler.connection.execute(
+            "SELECT result_envelope_json,result_envelope_hash,attempt_number "
+            "FROM scheduler_result_envelopes "
+            "WHERE work_order_id=? AND outcome='retryable' "
+            "ORDER BY attempt_number DESC",
+            (work.id,),
+        ).fetchall()
+        selected = None
+        for row in rows:
+            try:
+                wire = json.loads(row["result_envelope_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise CockpitModelError(
+                    "the persisted provider retry result is invalid"
+                ) from exc
+            if (
+                canonical_json(wire) != row["result_envelope_json"]
+                or content_hash(wire) != row["result_envelope_hash"]
+            ):
+                raise CockpitModelError(
+                    "the persisted provider retry result has drifted"
+                )
+            metadata = wire.get("metadata") if isinstance(wire, Mapping) else None
+            if not isinstance(metadata, Mapping) or "provider_retry_proof" not in metadata:
+                continue
+            if "provider_retry_state" not in metadata:
+                raise CockpitModelError(
+                    "the persisted provider retry proof has no route state"
+                )
+            selected = (row, wire, metadata["provider_retry_state"])
+            break
+        if selected is None:
+            return {
+                "excluded_profile_ids": [],
+                "retry_profile_version_ref": None,
+                "same_profile_retries": 0,
+            }
+        row, wire, state = selected
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != {
+                "excluded_profile_ids", "retry_profile_version_ref",
+                "same_profile_retries",
+            }
+            or not isinstance(state.get("excluded_profile_ids"), list)
+            or not all(isinstance(item, str) and item
+                       for item in state["excluded_profile_ids"])
+            or len(set(state["excluded_profile_ids"]))
+               != len(state["excluded_profile_ids"])
+            or state.get("retry_profile_version_ref") is not None
+               and not isinstance(state["retry_profile_version_ref"], str)
+            or isinstance(state.get("same_profile_retries"), bool)
+            or not isinstance(state.get("same_profile_retries"), int)
+            or state["same_profile_retries"] < 0
+        ):
+            raise CockpitModelError(
+                "the persisted provider retry route state is invalid"
+            )
+        decisions = router.list_decisions(work_order_id=work.id)
+        matching = [
+            item for item in decisions
+            if item.get("attempt_number") == row["attempt_number"]
+        ]
+        proved_route = matching[-1] if matching else None
+        selected_version = (
+            None if proved_route is None
+            else proved_route.get("selected_profile_version_ref")
+        )
+        selected_id = (
+            None if selected_version is None
+            else router.get_profile(selected_version)["id"]
+        )
+        if (
+            wire.get("work_order_ref") != work.id
+            or wire.get("status") != "retryable"
+            or proved_route is None
+            or wire.get("metadata", {}).get("route_decision_ref")
+               != proved_route.get("id")
+            or state["retry_profile_version_ref"] is not None
+               and state["retry_profile_version_ref"] != selected_version
+            or state["retry_profile_version_ref"] is None
+               and selected_id not in state["excluded_profile_ids"]
+            or state["same_profile_retries"]
+               > policy["max_same_profile_retries"]
+        ):
+            raise CockpitModelError(
+                "the persisted provider retry state does not match route history"
+            )
+        return dict(state)
+
+    def _paid_retry_result(
+        self, *, work: WorkOrder, lease: Mapping[str, Any],
+        route: Mapping[str, Any], profile: Mapping[str, Any],
+        invocation: Any, result: ResultEnvelope,
+        state: Mapping[str, Any] | None,
+    ) -> ResultEnvelope | None:
+        """Turn only a proved returned provider failure into a new attempt."""
+
+        policy = self.config.get("provider_retry")
+        if policy is None or state is None:
+            return None
+        from .provider_retry import returned_provider_failure_proof
+
+        proof = returned_provider_failure_proof(invocation, result)
+        if proof is None:
+            return None
+        used = int(state.get("same_profile_retries", 0))
+        excluded = list(state.get("excluded_profile_ids", []))
+        if used < policy["max_same_profile_retries"]:
+            retry_profile = profile["profile_version_ref"]
+            used += 1
+        else:
+            if profile["id"] not in excluded:
+                excluded.append(profile["id"])
+            retry_profile = None
+            used = 0
+        status = (
+            "failed"
+            if int(lease["attempt"]["attempt_number"]) >= int(lease["max_attempts"])
+            else "retryable"
+        )
+        return ResultEnvelope(
+            schema_version=result.schema_version,
+            id=result.id,
+            created_at=result.created_at,
+            work_order_ref=result.work_order_ref,
+            invocation_ref=result.invocation_ref,
+            status=status,
+            outputs={},
+            actual_side_effects=result.actual_side_effects,
+            usage_refs=result.usage_refs,
+            artifact_refs=result.artifact_refs,
+            error=dict(result.error or {}),
+            metadata=dict(result.metadata) | {
+                "provider_retry_proof": proof,
+                "provider_retry_state": {
+                    "excluded_profile_ids": excluded,
+                    "retry_profile_version_ref": retry_profile,
+                    "same_profile_retries": used,
+                },
+            },
+        )
+
     def call(self, *, purpose: str, request_id: str, prompt: str,
              mission: Mapping[str, Any],
              producer_route_decision_refs: Sequence[str] = (),
@@ -952,6 +1123,7 @@ class CockpitModel:
             and (
                 "capacity_retry" in self.config
                 or "transport_retry" in self.config
+                or "provider_retry" in self.config
                 or _dossier_recovery_parent is not None
             )
         ):
@@ -1045,6 +1217,7 @@ class CockpitModel:
                 else None
             ),
             "producer_route_decision_refs": producer_refs,
+            "provider_retry": self.config.get("provider_retry"),
         }
         work = build_work(
             request_id=request_id,
@@ -1082,6 +1255,14 @@ class CockpitModel:
             if entry.get("mode") == "explicit"
         ]
         candidates = max([1, *declared_chains])
+        provider = self.config.get("provider_retry") or {}
+        provider_attempts = (
+            candidates * (int(provider["max_same_profile_retries"]) + 1)
+            if provider else 1
+        )
+        scheduler_attempts = max(
+            capacity_retry["scheduler_max_attempts"], provider_attempts
+        )
         lease_seconds = (candidates * (retries + 1) * per_try
                          + candidates * retries * int(transport.get("retry_backoff_seconds", 0))
                          + _LEASE_GRACE_SECONDS)
@@ -1095,9 +1276,9 @@ class CockpitModel:
             self.scheduler_db,
             clock=self.clock,
             policy_version_id=(f"scheduler-policy-lease-{int(lease_seconds)}s-"
-                               f"attempts-{capacity_retry['scheduler_max_attempts']}-"
+                               f"attempts-{scheduler_attempts}-"
                                f"routes-{lease_policy['content_hash'][:16]}-0.1"),
-            max_attempts=capacity_retry["scheduler_max_attempts"],
+            max_attempts=scheduler_attempts,
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
@@ -1285,6 +1466,9 @@ class CockpitModel:
                             work.id, attempt, WORKER_REF, lease["lease_token"], result,
                             idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
                         raise CockpitModelError("verifier_not_independent")
+                    provider_retry_state = self._provider_retry_state(
+                        scheduler, router, work
+                    )
                     tier = self._chain_tier(router, purpose)
                     if tier is not None:
                         # P14-M: the pinned policy carries this tier's fallback
@@ -1296,15 +1480,50 @@ class CockpitModel:
                             attempt=attempt, prompt_bytes=prompt_bytes, scope=scope,
                             call_budget=effective,
                             producer_route_decision_refs=producer_refs,
+                            provider_retry_state=provider_retry_state,
                         )
                         result = outcome["result"]
                         failure = outcome["failure"]
                         cost_micros, cost_status = outcome["cost_micros"], outcome["cost_status"]
+                        if outcome.get("invocation") is not None:
+                            paid_retry = self._paid_retry_result(
+                                work=work, lease=lease,
+                                route=outcome["route"], profile=outcome["profile"],
+                                invocation=outcome["invocation"], result=result,
+                                state=provider_retry_state,
+                            )
+                            if paid_retry is not None:
+                                result = paid_retry
                         completion = scheduler.complete(
                             work.id, attempt, WORKER_REF, lease["lease_token"], result,
-                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
+                            retry_at=(
+                                self.clock() + timedelta(
+                                    seconds=self.config["provider_retry"][
+                                        "retry_backoff_seconds"])
+                                if result.status == "retryable"
+                                and result.metadata.get("provider_retry_proof") is not None
+                                else None
+                            ),
+                        )
                         if completion["status"] == "conflict":
                             raise CockpitModelError("the request completion conflicted; ask again")
+                        if (
+                            result.status == "retryable"
+                            and completion["work_state"] == "ready"
+                            and result.metadata.get("provider_retry_proof") is not None
+                        ):
+                            backoff = self.config["provider_retry"][
+                                "retry_backoff_seconds"]
+                            if backoff:
+                                import time
+                                time.sleep(backoff)
+                            return self.call(
+                                purpose=purpose, request_id=semantic_request_id,
+                                prompt=prompt, mission=mission,
+                                producer_route_decision_refs=producer_refs,
+                                _dossier_recovery_parent=_dossier_recovery_parent,
+                            )
                         if failure is not None:
                             _raise_failure(
                                 failure, outcome.get("pool_rejection"),
@@ -1319,6 +1538,7 @@ class CockpitModel:
                                 scheduler, work, purpose=purpose,
                                 request_id=base_request_id),
                         )
+                    prior_routes = router.list_decisions(work_order_id=work.id)
                     route = router.route(
                         work, attempt_number=attempt,
                         capability=work.requested_capabilities[0],
@@ -1328,6 +1548,19 @@ class CockpitModel:
                         estimated_input_tokens=prompt_bytes, estimated_output_tokens=effective["max_output_tokens"],
                         idempotency_key=f"cockpit-route:{work.id}:{attempt}",
                         producer_family=next(iter(producer_families), None),
+                        decision_kind="initial" if not prior_routes else "retry",
+                        previous_decision_ref=(
+                            None if not prior_routes else prior_routes[-1]["id"]
+                        ),
+                        purpose=purpose,
+                        excluded_profile_ids=(
+                            () if provider_retry_state is None
+                            else provider_retry_state["excluded_profile_ids"]
+                        ),
+                        required_profile_version_ref=(
+                            None if provider_retry_state is None
+                            else provider_retry_state["retry_profile_version_ref"]
+                        ),
                     )["decision"]
                     if route["outcome"] != "selected":
                         result = _failure(work, "MODEL_ROUTE_REJECTED", route["id"])
@@ -1369,6 +1602,7 @@ class CockpitModel:
                             pool_rejection = decision["rejection"]
                             result = _failure(work, "POOL_EXHAUSTED", route["id"])
                             failure = decision["failure"]
+                        paid_retry = None
                         if admission is not None:
                             try:
                                 invocation, result = self._execute_with_safe_retry(
@@ -1386,12 +1620,26 @@ class CockpitModel:
                                         "BUSY", "CONCURRENCY_LIMIT",
                                         "BROKER_CONCURRENCY_LIMIT",
                                         "QUEUE_TIMEOUT", "BROKER_CLOSED",
-                                    }
+                                    } and result.metadata.get(
+                                        "dispatch_proof"
+                                    ) == _LOCAL_NOT_SENT_PROOF
                                     if broker_local_not_sent:
                                         cost_micros, cost_status = 0, "failed"
                                     elif cost_status != "actual":
-                                        cost_micros, cost_status = reserved, "reserved"
+                                        from .provider_retry import returned_provider_failure_proof
+
+                                        if returned_provider_failure_proof(
+                                            invocation, result
+                                        ) is None:
+                                            cost_micros, cost_status = reserved, "reserved"
                                     failure = str(error.get("message") or "the model call failed")
+                                    paid_retry = self._paid_retry_result(
+                                        work=work, lease=lease, route=route,
+                                        profile=profile, invocation=invocation,
+                                        result=result, state=provider_retry_state,
+                                    )
+                                    if paid_retry is not None:
+                                        result = paid_retry
                             except OpenClawModelAdapterError as exc:
                                 result = _failure(work, "MODEL_ADAPTER_REJECTED_OR_FAILED", route["id"])
                                 if isinstance(exc, BrokerDefinitelyNotSent):
@@ -1401,9 +1649,33 @@ class CockpitModel:
                                 failure = f"the model call failed: {exc}"
                             settle_day_ledger(budget, admission, actual_micros=cost_micros)
                     completion = scheduler.complete(work.id, attempt, WORKER_REF, lease["lease_token"], result,
-                                                    idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                                                    idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
+                                                    retry_at=(
+                                                        self.clock() + timedelta(
+                                                            seconds=self.config["provider_retry"][
+                                                                "retry_backoff_seconds"])
+                                                        if result.status == "retryable"
+                                                        and result.metadata.get("provider_retry_proof") is not None
+                                                        else None
+                                                    ))
                     if completion["status"] == "conflict":
                         raise CockpitModelError("the request completion conflicted; ask again")
+                    if (
+                        result.status == "retryable"
+                        and completion["work_state"] == "ready"
+                        and result.metadata.get("provider_retry_proof") is not None
+                    ):
+                        backoff = self.config["provider_retry"][
+                            "retry_backoff_seconds"]
+                        if backoff:
+                            import time
+                            time.sleep(backoff)
+                        return self.call(
+                            purpose=purpose, request_id=semantic_request_id,
+                            prompt=prompt, mission=mission,
+                            producer_route_decision_refs=producer_refs,
+                            _dossier_recovery_parent=_dossier_recovery_parent,
+                        )
                     if failure is not None:
                         _raise_failure(
                             failure, pool_rejection,
@@ -1514,7 +1786,8 @@ class CockpitModel:
                  tier: str, attempt: int, prompt_bytes: int,
                  scope: Mapping[str, Any],
                  call_budget: Mapping[str, Any],
-                 producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
+                 producer_route_decision_refs: Sequence[str] = (),
+                 provider_retry_state: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Walk the tier's chain under one reservation, retaining uncertain spend."""
 
         from .model_fallback_chain import classify_model_failure, execute_chain
@@ -1575,6 +1848,25 @@ class CockpitModel:
                                           if definitely_not_sent else "unclassified_failure"),
                         "reason": f"the model call failed: {exc}"}
             if envelope.status != "succeeded":
+                if provider_retry_state is not None:
+                    from .provider_retry import returned_provider_failure_proof
+
+                    if returned_provider_failure_proof(invocation, envelope) is not None:
+                        spend[route["id"]] = _cost_micros(
+                            invocation, route, profile, ceiling
+                        )
+                        # A provider-completed failure is chargeable, but it did
+                        # not serve model content. Stop this Scheduler attempt;
+                        # the caller records its proof before another route.
+                        return {
+                            "outcome": "failed",
+                            "failure_class": "provider_failure",
+                            "error_code": (envelope.error or {}).get("code"),
+                            "reason": (envelope.error or {}).get(
+                                "message", "the provider call failed"),
+                            "defer_attempt": True,
+                            "value": (invocation, envelope),
+                        }
                 # The broker answered and the answer is a failure. Its error
                 # code, not a guess, decides whether another model may be asked.
                 failure_class = classify_model_failure(envelope.error or {})
@@ -1610,7 +1902,7 @@ class CockpitModel:
                         "reason": (envelope.error or {}).get("message", "the model call failed"),
                         "value": envelope}
             spend[route["id"]] = _cost_micros(invocation, route, profile, ceiling)
-            return {"outcome": "served", "value": envelope}
+            return {"outcome": "served", "value": (invocation, envelope)}
 
         served_micros, served_status = 0, "failed"
         try:
@@ -1627,8 +1919,19 @@ class CockpitModel:
                 idempotency_prefix=f"cockpit-route:{work.id}:{attempt}",
                 call=call, admit=admit,
                 producer_decision_refs=producer_route_decision_refs,
+                excluded_profile_ids=(
+                    () if provider_retry_state is None
+                    else provider_retry_state["excluded_profile_ids"]
+                ),
+                required_profile_version_ref=(
+                    None if provider_retry_state is None
+                    else provider_retry_state["retry_profile_version_ref"]
+                ),
             )
-            if outcome["status"] == "served":
+            if outcome["status"] == "served" or (
+                outcome.get("reason") == "provider_retry"
+                and outcome.get("value") is not None
+            ):
                 served_micros, served_status = spend.get(
                     outcome["route_decision_ref"], (0, "failed"))
         finally:
@@ -1640,10 +1943,20 @@ class CockpitModel:
                 budget.settle(admission["admission_id"], actual_micros=settlement)
 
         route_ref = outcome.get("route_decision_ref") or first_route_ref
-        if outcome["status"] == "served":
-            return {"result": outcome["value"], "failure": None,
+        if outcome["status"] == "served" or (
+            outcome.get("reason") == "provider_retry"
+            and outcome.get("value") is not None
+        ):
+            invocation, envelope = outcome["value"]
+            failure = (
+                None if envelope.status == "succeeded"
+                else str((envelope.error or {}).get(
+                    "message", "the model call failed"))
+            )
+            return {"result": envelope, "failure": failure,
                     "cost_micros": served_micros, "cost_status": served_status,
-                    "pool_rejection": None}
+                    "pool_rejection": None, "route": outcome["decision"],
+                    "profile": outcome["profile"], "invocation": invocation}
         if outcome["status"] == "halted" and outcome.get("reason") == "budget_refused":
             if pool_rejection is not None:
                 return {"result": _failure(work, "POOL_EXHAUSTED", route_ref),

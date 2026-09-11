@@ -150,6 +150,61 @@ class BusyThenAvailableAdapter(ChainAdapter):
         return super().execute(work, route, profile)
 
 
+class ReturnedProviderSequenceAdapter(ChainAdapter):
+    """Return formal paid failures before eventually serving a response."""
+
+    def __init__(self, failures):
+        super().__init__({})
+        self.failures = list(failures)
+        self.invocation_ids = []
+
+    def execute(self, work, route, profile):
+        invocation, envelope = super().execute(work, route, profile)
+        identity = content_hash({"route": route["id"], "call": len(self.served)})[:32]
+        invocation = replace(
+            invocation,
+            id="invocation:provider-retry-" + identity,
+            parent_ref=route["id"],
+            usage={
+                "raw_provider_telemetry": {
+                    "cost": {"available": True, "usd": 0.001}
+                }
+            },
+        )
+        self.invocation_ids.append(invocation.id)
+        if not self.failures:
+            return invocation, replace(
+                envelope,
+                id="result:provider-retry-" + identity,
+                invocation_ref=invocation.id,
+            )
+        code = self.failures.pop(0)
+        return invocation, replace(
+            envelope,
+            id="result:provider-retry-" + identity,
+            invocation_ref=invocation.id,
+            status="failed",
+            outputs={},
+            error={
+                "code": code,
+                "message": "provider asked the caller to retry",
+                "source": "openclaw-model-broker",
+            },
+            metadata={
+                "route_decision_ref": route["id"],
+                "broker_response_hash": content_hash(
+                    {"route": route["id"], "code": code}
+                ),
+                "broker_request_mode": "execute",
+                "dispatch_proof": {
+                    "authority": "openclaw-model-adapter",
+                    "state": "provider_completed_failure",
+                    "version": "0.1",
+                },
+            },
+        )
+
+
 class CockpitChainTests(unittest.TestCase):
     def test_only_a_proved_pre_send_failure_may_fall_back(self) -> None:
         adapter = ChainAdapter({
@@ -580,7 +635,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def _model(self, adapter: ChainAdapter, *, policy_version_ref: str,
                slots: list[str] | None = None, capacity_retry=None,
-               transport_retry=None, clock=None) -> CockpitModel:
+               transport_retry=None, provider_retry=None, clock=None) -> CockpitModel:
         config = {
             "routing_policy_ref": policy_version_ref,
             "credential_slot_refs": list(slots if slots is not None else self.slots),
@@ -593,6 +648,7 @@ class CockpitChainTests(unittest.TestCase):
             "budget_policy_ref": BUDGET_POLICY,
             **({} if capacity_retry is None else {"capacity_retry": capacity_retry}),
             **({} if transport_retry is None else {"transport_retry": transport_retry}),
+            **({} if provider_retry is None else {"provider_retry": provider_retry}),
         }
         return CockpitModel(
             config, scheduler_db=str(self.root / "scheduler.sqlite"),
@@ -633,6 +689,82 @@ class CockpitChainTests(unittest.TestCase):
         decisions = self._decisions()
         self.assertEqual([item["decision_kind"] for item in decisions], ["initial", "switch"])
         self.assertEqual(answer["route_decision_ref"], decisions[1]["id"])
+
+    def test_paid_provider_retry_uses_new_attempts_before_chain_fallback(self) -> None:
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        adapter = ReturnedProviderSequenceAdapter(
+            ["RATE_LIMITED", "PROVIDER_INTERNAL_ERROR"]
+        )
+        answer = self._model(
+            adapter, policy_version_ref=self.chain_policy,
+            provider_retry=retry,
+        ).call(
+            purpose="plan", request_id="paid-retry-chain",
+            prompt="what next?", mission=self.mission,
+        )
+        self.assertEqual(
+            adapter.served,
+            ["profile:gpt-6-astra", "profile:gpt-6-astra",
+             "profile:claude-fable-5-1"],
+        )
+        self.assertEqual(len(set(adapter.invocation_ids)), 3)
+        decisions = self._decisions()
+        self.assertEqual(
+            [(item["attempt_number"], item["decision_kind"])
+             for item in decisions],
+            [(1, "initial"), (2, "retry"), (3, "retry")],
+        )
+        self.assertEqual(answer["route_decision_ref"], decisions[-1]["id"])
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            history = scheduler.attempt_history(answer["work_order_ref"])
+        self.assertEqual(
+            [(event["attempt_number"], event["state"])
+             for event in history if event["state"] in {"retryable", "succeeded"}],
+            [(1, "retryable"), (2, "retryable"), (3, "succeeded")],
+        )
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            charges = ledger.connection.execute(
+                "SELECT a.attempt_number,s.actual_micros "
+                "FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s "
+                "ON s.admission_id=a.admission_id ORDER BY a.attempt_number"
+            ).fetchall()
+        self.assertEqual([(row[0], row[1]) for row in charges],
+                         [(1, 1000), (2, 1000), (3, 1000)])
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            work = scheduler.work_order_authority(answer["work_order_ref"])[
+                "work_order"]
+        self.assertEqual(work["metadata"]["provider_retry"], retry)
+
+    def test_single_pin_unproved_busy_is_charged_and_never_paid_retried(self) -> None:
+        class UnprovedBusy(ChainAdapter):
+            def execute(self, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                return replace(invocation, parent_ref=route["id"]), replace(
+                    envelope,
+                    status="failed", outputs={},
+                    error={"code": "BUSY", "message": "provider said busy"},
+                    metadata={"route_decision_ref": route["id"]},
+                )
+
+        adapter = UnprovedBusy({})
+        with self.assertRaisesRegex(CockpitModelError, "provider said busy"):
+            self._model(
+                adapter, policy_version_ref=self.pinned_policy,
+                provider_retry={
+                    "max_same_profile_retries": 1,
+                    "retry_backoff_seconds": 0,
+                },
+            ).call(
+                purpose="plan", request_id="unproved-busy-paid",
+                prompt="what next?", mission=self.mission,
+            )
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            settlement = ledger.connection.execute(
+                "SELECT actual_micros FROM thesis_impact_day_settlements"
+            ).fetchone()
+        self.assertGreater(settlement[0], 0)
 
     def test_proved_pre_send_failure_retries_same_model_before_fallback(self) -> None:
         class Once(ChainAdapter):

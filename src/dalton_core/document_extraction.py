@@ -104,7 +104,7 @@ def validate_model_config(value):
     required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
-                "capacity_retry", "reading_limits", "transport_retry"}
+                "capacity_retry", "reading_limits", "transport_retry", "provider_retry"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -147,6 +147,14 @@ def validate_model_config(value):
                 raise ResearchVerificationError("invalid capacity retry configuration")
     if "transport_retry" in config:
         validate_transport_retry(config["transport_retry"])
+    if "provider_retry" in config:
+        from .provider_retry import ProviderRetryError, validate_provider_retry
+        try:
+            config["provider_retry"] = validate_provider_retry(config["provider_retry"])
+        except ProviderRetryError as exc:
+            raise ResearchVerificationError(
+                f"invalid provider retry configuration: {exc}"
+            ) from exc
     return config
 
 
@@ -362,7 +370,19 @@ def extraction_scheduler_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         route_binding = str(policy["content_hash"])[:16]
     lease_seconds = (candidates * (retries + 1) * per_try
                      + candidates * retries * int(retry.get("retry_backoff_seconds", 0)) + 30)
-    attempts = int((config.get("capacity_retry") or {}).get("scheduler_max_attempts", 3))
+    capacity_attempts = int(
+        (config.get("capacity_retry") or {}).get("scheduler_max_attempts", 3)
+    )
+    paid_retries = config.get("provider_retry") or {}
+    provider_attempts = (
+        candidates * (int(paid_retries["max_same_profile_retries"]) + 1)
+        if paid_retries else 1
+    )
+    # Each provider-completed failure is a separate paid Scheduler attempt.
+    # The two configured policies independently authorize attempts, so the
+    # frozen Scheduler ceiling must cover either policy rather than silently
+    # truncating the provider chain at the historical capacity default.
+    attempts = max(capacity_attempts, provider_attempts)
     return {
         "policy_version_id": (f"scheduler-policy-extraction-lease-{lease_seconds}s-"
                               f"attempts-{attempts}-routes-{route_binding}-0.1"),
@@ -385,6 +405,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
     ))
     explicit = explicit or resolved != LEGACY_CALL_BUDGET
     transport_retry = dict(configured.get("transport_retry") or {})
+    provider_retry = dict(configured.get("provider_retry") or {})
     prompt = build_prompt(context)
     # The installed extraction worker and ModelRouter deliberately use this
     # conservative counter too.  Refuse before enqueue when a full canonical
@@ -405,6 +426,8 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
         identity["call_budget"] = budget_hash
     if transport_retry:
         identity["transport_retry"] = content_hash(transport_retry)
+    if provider_retry:
+        identity["provider_retry"] = content_hash(provider_retry)
     digest = content_hash(identity)
     return WorkOrder(
         schema_version="0.1", id="work:document-extraction-" + digest[:32],
@@ -423,6 +446,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
                   **({"call_budget": resolved, "call_budget_fingerprint": budget_hash}
                      if explicit else {}),
                   **({"transport_retry": transport_retry} if transport_retry else {}),
+                  **({"provider_retry": provider_retry} if provider_retry else {}),
                   "execution_mode": "broker" if context.get("model_binding") else "hermetic_fixture", "candidate_only": True},
     )
 
@@ -742,6 +766,20 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         return "failed"
 
     @staticmethod
+    def _provider_failure_status(lease):
+        attempt = lease.get("attempt", {}).get("attempt_number")
+        maximum = lease.get("max_attempts")
+        if (
+            isinstance(attempt, bool) or not isinstance(attempt, int)
+            or isinstance(maximum, bool) or not isinstance(maximum, int)
+            or attempt < 1 or maximum < attempt
+        ):
+            raise ResearchVerificationConflict(
+                "Scheduler provider retry bounds are invalid"
+            )
+        return "failed" if attempt >= maximum else "retryable"
+
+    @staticmethod
     def _validate_scheduler_store(scheduler, store):
         # The deployed Scheduler is separate; its public authority reader
         # verifies canonical bytes, as in LLMResearchPlannerModelWorker.
@@ -773,21 +811,24 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         from .metric_discovery_extraction import TASK_REF as DISCOVERY_TASK_REF
         from .metric_discovery_extraction import build_work as build_discovery_work
 
+        retry_config = {
+            key: work.metadata[key]
+            for key in ("transport_retry", "provider_retry")
+            if work.metadata.get(key) is not None
+        } or None
+
         if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
             return build_numeric_work(current, work.metadata.get("requests") or (),
                                       call_budget=work.metadata.get("call_budget"),
-                                      model_config={"transport_retry": work.metadata["transport_retry"]}
-                                      if work.metadata.get("transport_retry") else None)
+                                      model_config=retry_config)
         if work.metadata.get("task_ref") == DISCOVERY_TASK_REF:
             return build_discovery_work(
                 current, call_budget=work.metadata.get("call_budget"),
-                model_config={"transport_retry": work.metadata["transport_retry"]}
-                if work.metadata.get("transport_retry") else None)
+                model_config=retry_config)
         return build_work(
             current,
             call_budget=work.metadata.get("call_budget"),
-            model_config={"transport_retry": work.metadata["transport_retry"]}
-            if work.metadata.get("transport_retry") else None,
+            model_config=retry_config,
         )
 
     def _parse_candidate(self, text, work):
@@ -1714,12 +1755,29 @@ class DocumentExtractionService:
                     "max_definitely_not_sent_retries", 0),
                 retry_backoff_seconds=(config.get("transport_retry") or {}).get(
                     "retry_backoff_seconds", 0),
+                provider_retry=config.get("provider_retry"),
                 lease_seconds=worker_lease,
+                clock=self.writer._scheduler.clock,
                 token_counter=lambda text: len(text.encode("utf-8")))
             saved = worker.scheduler.enqueue(work)
             if saved["status"] == "conflict":
                 raise ResearchVerificationConflict("extraction enqueue conflict")
-            worker.run_once(work)
+            while True:
+                outcome = worker.run_once(work)
+                result_wire = outcome.get("result") or {}
+                provider_retry = (
+                    outcome.get("status") == "retryable"
+                    and isinstance(result_wire, Mapping)
+                    and result_wire.get("metadata", {}).get(
+                        "provider_retry_proof"
+                    ) is not None
+                )
+                if not provider_retry:
+                    break
+                backoff = int(config["provider_retry"]["retry_backoff_seconds"])
+                if backoff:
+                    import time
+                    time.sleep(backoff)
 
     ADMISSION_GRANTS = frozenset({"claim", "evidence", "stage_record"})
 

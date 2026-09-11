@@ -240,6 +240,13 @@ class DocumentExtractionTests(unittest.TestCase):
             "retry_backoff_seconds": 0,
         })
 
+    def test_provider_retry_policy_changes_work_identity(self):
+        context = self.h.context()
+        policy = {"max_same_profile_retries": 1, "retry_backoff_seconds": 2}
+        retried = build_work(context, model_config={"provider_retry": policy})
+        self.assertNotEqual(retried.id, build_work(context).id)
+        self.assertEqual(retried.metadata["provider_retry"], policy)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

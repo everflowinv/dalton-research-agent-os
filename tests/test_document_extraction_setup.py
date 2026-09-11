@@ -49,6 +49,10 @@ class ExtractionSetupTests(unittest.TestCase):
                 "run_budget": {"max_units": 9},
                 "purpose_run_budgets": {"document_extraction": {"max_calls": 4}},
                 "transport_retry": {"max_definitely_not_sent_retries": 1, "queue_wait_seconds": 0, "retry_backoff_seconds": 0},
+                "provider_retry": {
+                    "max_same_profile_retries": 4,
+                    "retry_backoff_seconds": 7,
+                },
             }
             wire.update(budgets)
             wire["unknown_private_field"] = "must not survive"
@@ -95,7 +99,12 @@ class ExtractionSetupTests(unittest.TestCase):
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
             written = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(set(written), {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
-                                            "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"})
+                                            "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref",
+                                            "provider_retry"})
+            self.assertEqual(written["provider_retry"], {
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 2,
+            })
             self.assertEqual((written["credential_slot_refs"], written["expected_agent_id"], written["budget_policy_ref"]),
                              (["credential-slot:openclaw:deepseek"], "chem", "thesis-impact-day-budget-policy:production:1"))
             service = json.loads(config_path.read_text(encoding="utf-8"))

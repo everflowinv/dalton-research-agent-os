@@ -33,6 +33,7 @@ from typing import Any
 from .document_extraction import validate_model_config
 from .model_deployment import ADAPTER_REF
 from .model_router import ModelRouter
+from .provider_retry import DEFAULT_RETURNED_PROVIDER_RETRY
 from .store import canonical_json, content_hash
 
 POLICY_ID = "model-routing-policy:dalton-openclaw-extraction"
@@ -171,6 +172,7 @@ def install(
         "expected_agent_id": planner["planner_expected_agent_id"],
         "budget_db": str(Path(thesis["budget_db"]).resolve()),
         "budget_policy_ref": thesis["budget_policy_version_id"],
+        "provider_retry": dict(DEFAULT_RETURNED_PROVIDER_RETRY),
         **budget_overrides,
     })
     changed = not target.exists() or json.loads(target.read_text(encoding="utf-8")) != model_config

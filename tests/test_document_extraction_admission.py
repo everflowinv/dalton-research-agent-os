@@ -233,7 +233,12 @@ class BrokerAdmissionTests(unittest.TestCase):
         if before_send is not None:
             before_send()
         self.calls+=1
-        self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0],1)
+        self.assertEqual(
+            self.b.connection.execute(
+                'SELECT count(*) FROM thesis_impact_day_admissions'
+            ).fetchone()[0],
+            route['attempt_number'],
+        )
         context=work.metadata['context']
         wire={'schema_version':'0.1','suggestions':[{'quote_id':context['quotes'][0]['quote_id'],
             'normalized_statement':'Management described cautious decisions.','metric_or_aspect':'aspect:decisions',
@@ -285,6 +290,55 @@ class BrokerAdmissionTests(unittest.TestCase):
         row=self.b.connection.execute('SELECT actual_micros,usage_entry_ref FROM thesis_impact_day_settlements').fetchone()
         self.assertEqual(row['actual_micros'],1000);self.assertTrue(row['usage_entry_ref'])
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM model_mission_budget_bindings').fetchone()[0],1)
+
+    def test_returned_provider_failure_is_paid_and_retried_as_new_attempt(self):
+        retry = {'max_same_profile_retries': 1, 'retry_backoff_seconds': 0}
+        self.h.writer._document_extraction_model_config['provider_retry'] = retry
+        original = self.execute
+        profiles = []
+
+        def returned_once(adapter, work, route, profile, *, before_send=None):
+            profiles.append(profile['id'])
+            invocation, result = original(
+                adapter, work, route, profile, before_send=before_send)
+            if len(profiles) != 1:
+                return invocation, result
+            return invocation, replace(
+                result, status='failed', outputs={},
+                error={
+                    'code': 'RATE_LIMITED', 'message': 'temporary',
+                    'source': 'openclaw-model-broker',
+                },
+                metadata=dict(result.metadata) | {
+                    'broker_response_hash': content_hash({
+                        'route': route['id'], 'code': 'RATE_LIMITED'}),
+                    'broker_request_mode': 'execute',
+                    'dispatch_proof': {
+                        'authority': 'openclaw-model-adapter',
+                        'state': 'provider_completed_failure',
+                        'version': '0.1',
+                    },
+                },
+            )
+
+        with patch.object(OpenClawModelAdapter, 'execute', autospec=True,
+                          side_effect=returned_once):
+            result = self.h.generate()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(profiles, [self.pr['id'], self.pr['id']])
+        decisions = self.router.list_decisions(
+            work_order_id=result['work_order_ref'])
+        self.assertEqual(
+            [(item['attempt_number'], item['decision_kind']) for item in decisions],
+            [(1, 'initial'), (2, 'retry')],
+        )
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0], 2)
+        self.assertEqual(self.b.connection.execute(
+            'SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0], 2)
+        authority = self.h.h.scheduler.work_order_authority(
+            result['work_order_ref'])['work_order']
+        self.assertEqual(authority['metadata']['provider_retry'], retry)
 
     def test_definitely_unsent_link_falls_back_and_admission_names_served_route(self):
         backup=copy.deepcopy(self.pr);backup.update({

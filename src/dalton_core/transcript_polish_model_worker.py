@@ -253,6 +253,11 @@ class RoutedTranscriptPolishModelWorker:
             )
         return "failed" if attempt >= maximum else "retryable"
 
+    def _provider_failure_status(self, lease: Mapping[str, Any]) -> str:
+        """Provider retry may be bounded differently from output rejection."""
+
+        return self._bounded_failure_status(lease)
+
     def _control_result(
         self,
         work: WorkOrder,
@@ -817,7 +822,7 @@ class RoutedTranscriptPolishModelWorker:
                         excluded.append(profile["id"])
                     next_profile = None
                     used = 0
-                status = self._bounded_failure_status(lease)
+                status = self._provider_failure_status(lease)
                 result = ResultEnvelope(
                     schema_version=adapter_result.schema_version,
                     id=adapter_result.id,
