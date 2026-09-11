@@ -496,6 +496,38 @@ class MigrationCoverageTests(unittest.TestCase):
             with self.subTest(schema=spec.schema):
                 self.assertEqual(spec.database, "core.sqlite")
 
+    def test_schema_only_core_migrations_are_the_closed_model_source_authority_set(self) -> None:
+        self.assertEqual(
+            {spec.schema for spec in CORE_MIGRATIONS if spec.kind == "core_sql"},
+            {
+                "mission_annual_research_schema.sql",
+                "mission_annual_research_executor_schema.sql",
+                "mission_document_research_schema.sql",
+                "mission_document_research_executor_schema.sql",
+            },
+        )
+        self.assertTrue(all(spec.kind in {"root", "core", "core_sql"}
+                            for spec in CORE_MIGRATIONS))
+
+    def test_schema_only_model_source_migrations_execute_on_a_scratch_core(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live = root / "live"; live.mkdir()
+            scratch = root / "scratch"
+            (scratch / "state/dalton-core").mkdir(parents=True)
+            openclaw = root / "openclaw.json"; openclaw.write_text("{}\n")
+            rehearsal = Rehearsal(
+                live, scratch, openclaw_config=openclaw, log=lambda _line: None,
+            )
+            _detail, findings = rehearsal.run_migrations()
+            for name in (
+                "mission_annual_research_schema.sql",
+                "mission_annual_research_executor_schema.sql",
+                "mission_document_research_schema.sql",
+                "mission_document_research_executor_schema.sql",
+            ):
+                self.assertFalse(any(name in finding for finding in findings), findings)
+
     def test_document_read_proof_migration_uses_the_shared_connection(self) -> None:
         from scripts.rehearse_deploy import _construct_core_authority
         from dalton_core.store import DaltonStore

@@ -1148,8 +1148,10 @@ class MigrationSpec:
 
     ``kind`` is ``core`` for an authority constructed on the shared
     ``DaltonStore`` (its ``__init__`` runs the ``executescript`` and any
-    ``ALTER``/rebuild migration), or ``sidecar`` for a store that owns its own
-    database file.
+    ``ALTER``/rebuild migration), ``core_sql`` for a schema-only authority
+    whose production constructor requires model/source collaborators that a
+    migration must never exercise, or ``sidecar`` for a store that owns its
+    own database file.
     """
 
     schema: str
@@ -1208,6 +1210,14 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("research_playbook_schema.sql", "dalton_core.research_playbook", "ResearchPlaybookAuthority", "core"),
     MigrationSpec("research_quality_schema.sql", "dalton_core.research_quality_score", "QualityScoreAuthority", "core"),
     MigrationSpec("research_question_backlog_schema.sql", "dalton_core.research_question_backlog", "ResearchQuestionBacklog", "core"),
+    # These four authorities apply static CREATE-only schemas, but their
+    # production constructors intentionally require exact source/model
+    # collaborators.  A deploy rehearsal validates the SQL against the copied
+    # Core without fabricating those capabilities or permitting a model call.
+    MigrationSpec("mission_annual_research_schema.sql", "dalton_core.mission_annual_research", "MissionAnnualResearchAuthority", "core_sql"),
+    MigrationSpec("mission_annual_research_executor_schema.sql", "dalton_core.mission_annual_research_executor", "MissionAnnualResearchExecutor", "core_sql"),
+    MigrationSpec("mission_document_research_schema.sql", "dalton_core.mission_document_research", "MissionDocumentResearchAuthority", "core_sql"),
+    MigrationSpec("mission_document_research_executor_schema.sql", "dalton_core.mission_document_research_executor", "MissionDocumentResearchExecutor", "core_sql"),
     MigrationSpec("runner_journal_schema.sql", "dalton_core.runner_journal", "RunnerJournal", "core"),
     MigrationSpec("statement_snapshot_schema.sql", "dalton_core.statement_snapshot", "StatementSnapshotAuthority", "core"),
     # P11b: the broker notes those expectations were read out of.
@@ -1833,6 +1843,19 @@ class Rehearsal:
             with Scheduler(scheduler_path) as scheduler:
                 for spec in CORE_MIGRATIONS:
                     if spec.kind == "root":
+                        applied += 1
+                        continue
+                    if spec.kind == "core_sql":
+                        try:
+                            store.connection.executescript(
+                                (package_dir / spec.schema).read_text(encoding="utf-8")
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            findings.append(
+                                f"{spec.schema} ({spec.symbol}) failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            continue
                         applied += 1
                         continue
                     symbol = getattr(importlib.import_module(spec.module), spec.symbol)
