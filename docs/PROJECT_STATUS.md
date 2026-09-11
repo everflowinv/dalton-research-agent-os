@@ -2,7 +2,15 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-11，03:22 UTC）
+## 当前检查点（2026-09-11，03:29 UTC）
+
+**R8 性能候选全量与副本演练通过，尚未部署；补上 writer 队列恢复后准备 R8a 统一验收。** R8 `86ad4dc` 全量 6,871 tests / 1 skip、wheel 556 文件/3 JS、67 schemas / 40 entries / 0 escaped 均通过。真实 Core 一致副本的 4 家公司 × 12 单元旧/新 canonical 输入逐字一致，148→4 次 Claim snapshot，118.56→13.22 秒，约 8.97 倍加速。
+
+Live R7b heartbeat 目前观察正常，但真实 Dossier0.3 仍未出现。已定位 `unavailable:RemoteError` 为 writer 单线程 store 队列超过 30 秒服务端 deadline；客户端超时后，旧实现的未开始请求仍排队执行。新增修复仅通过 Future.cancel() 取消确定未开始的工作；已经运行的写入不取消、不重试。日志增加封闭操作名与取消结果，无请求参数或凭证。真实 socketpair 的排队取消/运行完成/后续恢复回归及独立审查通过；184 项整合测试通过。
+
+**Next step：** R8a 合并性能和队列修复，同一冻结全量/wheel/副本演练后部署；R7b 45 次运行观察完成后单独记录健康结论，Dossier 产品条件保持 pending，直到正常队列产生可核验新记录。其余高级功能不抢占基础闭环。
+
+## 前一检查点（2026-09-11，03:22 UTC）
 
 **R7b `e312fbf` 已部署，代码与配置验收通过；11 分钟健康观察和真实 Dossier0.3 验收进行中。** 同一干净冻结全量 6,867 tests / 1 skip、556 个 wheel 文件与完整文件集、67 schemas / 40 entries / 0 escaped 副本演练均通过。安装 exit 0，备份 `deploy-backup-20260911T031747Z`；实际 556 个运行文件、1,850 个保留源码文件逐字一致。12 份模型/预算/credential、mission v14、broker 及精确历史 pending 均保留。
 
