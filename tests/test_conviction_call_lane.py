@@ -310,6 +310,27 @@ class GateRunTests(ConvictionHarness):
         self.assertEqual(found["metrics"], [])
         self.assertIn(ACN, found["reason"])
 
+    def test_held_consensus_with_no_comparable_model_period_names_the_gap(self):
+        import types
+
+        module = types.ModuleType("dalton_core.consensus_estimate")
+        module.latest_consensus = lambda store, company: {
+            "metrics": [],
+            "rule_ref": "rule:consensus-fiscal-period-join:1",
+            "unavailable_periods": [{
+                "metric": "revenue", "period": "FY2026",
+                "period_kind": "fiscal_year",
+                "reason": "forecast_fiscal_year_incomplete", "refs": ["r"],
+            }],
+        }
+        self.inject(module)
+        found = consensus_gap(self.store, ACN)
+        self.assertEqual(found["status"], "unavailable")
+        self.assertEqual(found["metrics"], [])
+        self.assertIn("consensus is held", found["reason"])
+        self.assertIn("forecast_fiscal_year_incomplete", found["reason"])
+        self.assertNotIn("no consensus estimate is held", found["reason"])
+
     def test_a_consensus_reader_of_the_wrong_shape_degrades_to_unavailable(self):
         # P11b is on the other side of a name lookup and is not this slice's
         # code. A row of the wrong shape must not reach the gate -- and must

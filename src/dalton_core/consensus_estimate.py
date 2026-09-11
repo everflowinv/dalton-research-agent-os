@@ -983,8 +983,6 @@ class ConsensusEstimateAuthority:
 # reported as an absence rather than as agreement: a conviction call whose
 # consensus section quietly vanished would read as "we agree with the street",
 # which is the one thing it must never accidentally say.
-_EPS_WORDS = ("eps", "earnings per share")
-_REVENUE_WORDS = ("revenue", "revenues", "net revenue", "sales")
 MAX_GAP_METRICS = 12
 # Changing the join changes the answer even when neither source version did.
 # It is returned beside every gap and folded into the sensitivity rule hash,
@@ -992,7 +990,15 @@ MAX_GAP_METRICS = 12
 CONSENSUS_GAP_RULE_REF = "rule:consensus-fiscal-period-join:1"
 
 
-def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[Any, Any], str | None]:
+def _unit_key(value: Any) -> str:
+    """Normalize spelling only; different unit semantics remain different."""
+
+    return str(value or "").strip().casefold()
+
+
+def _forecast_cells(
+    store: Any, company_ref: str,
+) -> tuple[dict[Any, Any], str | None, str | None]:
     """Our quarterly estimates keyed by metric and exact fiscal window.
 
     A fiscal Q4 and its fiscal year end on the same day. End date alone loses
@@ -1002,24 +1008,95 @@ def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[Any, Any], str |
     """
 
     try:
-        from .model_forecast_driver import ForecastModelAuthority
+        from .model_forecast_driver import (
+            ForecastModelAuthority,
+            ForecastModelUnavailable,
+            quarterly_history,
+            revenue_anchor,
+        )
 
         latest = ForecastModelAuthority(store).latest(company_ref)
-    except Exception:  # noqa: BLE001 - no model here is no gap, not an outage
-        return {}, None
+    except Exception as exc:  # noqa: BLE001 - unreadable model is unavailable
+        return {}, None, f"forecast_model_unavailable:{type(exc).__name__}:{exc}"
     if not latest:
-        return {}, None
-    found: dict[str, Any] = {}
-    for line in latest.get("results") or ():
+        return {}, None, "forecast_model_unavailable"
+    forecast_ref = str(latest.get("id") or latest.get("version_ref") or "") or None
+    found: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+    def metric_for(line: Mapping[str, Any]) -> str | None:
+        # The current formal model defines one exact street-comparable metric.
+        # Labels are display text and may contain words such as "revenue
+        # growth" without being revenue currency. EPS is unavailable until
+        # the model has an exact share-count/per-share result contract.
+        if line.get("ref") == "result:revenue" and line.get("role") == "revenue":
+            return "revenue"
+        return None
+
+    result_lines = [line for line in (latest.get("results") or ())
+                    if isinstance(line, Mapping)]
+    try:
+        anchor = revenue_anchor(latest.get("drivers") or ())
+    except ForecastModelUnavailable as exc:
+        return {}, forecast_ref, f"forecast_revenue_anchor_unavailable:{exc}"
+    revenue_lines = [line for line in result_lines if metric_for(line) == "revenue"]
+    if len(revenue_lines) != 1 or revenue_lines[0].get("driver_ref") != anchor.get("ref"):
+        return {}, forecast_ref, "forecast_revenue_definition_unavailable"
+    revenue_line = revenue_lines[0]
+
+    if _unit_key(anchor.get("unit")) != _unit_key(revenue_line.get("unit")):
+        return {}, forecast_ref, "forecast_revenue_unit_conflict"
+
+    def put(metric: str, item: Mapping[str, Any]) -> bool:
+        period = item["period"]
+        key = (metric, "quarter", period["start"], period["end"])
+        standing = found.get(key)
+        if standing is None:
+            found[key] = dict(item)
+            return True
+        if (
+            Decimal(str(standing["value"])) != Decimal(str(item["value"]))
+            or _unit_key(standing.get("unit")) != _unit_key(item.get("unit"))
+            or str(standing.get("label")) != str(item.get("label"))
+        ):
+            return False
+        # A filed/actual value is stronger than the estimate it replaced.
+        if item.get("kind") == "actual" and standing.get("kind") != "actual":
+            found[key] = dict(item)
+        return True
+
+    # The formal model keeps reported quarters on the unique revenue driver,
+    # while results contain the future quarters. Project the history through
+    # the exact result definition, as the workbook does, before merging them.
+    for cell in quarterly_history(anchor):
+        start, end, value = (
+            cell.get("period_start"), cell.get("period_end"), cell.get("value")
+        )
+        if not isinstance(start, str) or not isinstance(end, str) or value is None:
+            return {}, forecast_ref, "forecast_revenue_history_period_unavailable"
+        try:
+            if date.fromisoformat(start) > date.fromisoformat(end):
+                return {}, forecast_ref, "forecast_revenue_history_period_unavailable"
+            parsed = Decimal(str(value))
+            if not parsed.is_finite():
+                raise InvalidOperation
+        except (ValueError, InvalidOperation):
+            return {}, forecast_ref, "forecast_revenue_history_value_unavailable"
+        if not put("revenue", {
+            "value": str(value), "unit": str(revenue_line.get("unit") or ""),
+            "label": str(revenue_line.get("label") or "revenue"), "kind": "actual",
+            "period": {"calendar": "company:fiscal", "kind": "quarter",
+                       "start": start, "end": end},
+        }):
+            return {}, forecast_ref, "forecast_revenue_period_overlap_conflict"
+
+    for line in result_lines:
         if not isinstance(line, Mapping):
             continue
-        name = f"{line.get('role') or ''} {line.get('label') or ''}".lower()
-        if any(word in name for word in _EPS_WORDS):
-            metric = "eps"
-        elif any(word in name for word in _REVENUE_WORDS):
-            metric = "revenue"
-        else:
+        metric = metric_for(line)
+        if metric is None:
             continue
+        if metric == "revenue" and line is not revenue_line:
+            return {}, forecast_ref, "forecast_revenue_definition_unavailable"
         for cell in line.get("cells") or ():
             if not isinstance(cell, Mapping):
                 continue
@@ -1054,24 +1131,22 @@ def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[Any, Any], str |
                     continue
             except ValueError:
                 continue
-            key = (metric, "quarter", start, end)
-            standing = found.get(key)
-            # D: prefer the actualised cell. Once a period has been reported,
-            # our number for it is what happened, not what we expected -- and
-            # the street's estimate beside it is then a record of what the
-            # street expected, which is the more interesting row of the two.
-            if standing is not None and not (
-                kind == "actual" and standing["kind"] == "estimate"
-            ):
-                continue
-            found[key] = {
+            try:
+                parsed = Decimal(str(value))
+                if not parsed.is_finite():
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                return {}, forecast_ref, "forecast_result_value_unavailable"
+            item = {
                 "value": str(value),
                 "unit": str(line.get("unit") or ""),
                 "label": str(line.get("label") or metric),
                 "kind": kind,
                 "period": dict(period),
             }
-    return found, str(latest.get("id") or latest.get("version_ref") or "") or None
+            if not put(metric, item):
+                return {}, forecast_ref, f"forecast_{metric}_period_overlap_conflict"
+    return found, forecast_ref, None
 
 
 def _gap_percent(ours: str, street: str) -> str | None:
@@ -1118,7 +1193,13 @@ def _ours_for_street_period(
     if mapped["period_kind"] == "quarter":
         start, end_text = _quarter_window(cal, end)
         found = ours.get((metric, "quarter", start, end_text))
-        return (None, "forecast_quarter_unavailable") if found is None else (dict(found), None)
+        if found is None:
+            return None, "forecast_quarter_unavailable"
+        if street.get("currency") is not None and (
+            _unit_key(found.get("unit")) != _unit_key(street.get("currency"))
+        ):
+            return None, "forecast_street_unit_conflict"
+        return dict(found), None
 
     # The workbook's established annual-model convention is a sum of four
     # typed duration quarters for non-ratio flow lines. The current formal
@@ -1141,8 +1222,12 @@ def _ours_for_street_period(
     if len(units) != 1 or len(labels) != 1:
         return None, "forecast_fiscal_year_components_conflict"
     unit = next(iter(units))
-    if unit == "ratio":
+    if _unit_key(unit) == "ratio":
         return None, "forecast_fiscal_year_ratio_unavailable"
+    if street.get("currency") is not None and (
+        _unit_key(unit) != _unit_key(street.get("currency"))
+    ):
+        return None, "forecast_street_unit_conflict"
     try:
         total = sum((Decimal(str(item["value"])) for item in quarters), Decimal(0))
     except (InvalidOperation, ValueError):
@@ -1169,9 +1254,23 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
         return None
     if not held:
         return None
-    ours, forecast_ref = _forecast_cells(store, company_ref)
+    ours, forecast_ref, forecast_reason = _forecast_cells(store, company_ref)
     if not ours:
-        return {"metrics": []}
+        result = {"metrics": []}
+        # Preserve the legacy successful replay for a company that simply has
+        # no model yet. A held but unreadable or semantically incomparable
+        # model is different: its reason must survive to the caller.
+        if forecast_reason != "forecast_model_unavailable":
+            result.update({
+                "rule_ref": CONSENSUS_GAP_RULE_REF,
+                "unavailable_periods": [{
+                    "metric": "revenue", "period": "all",
+                    "period_kind": "unknown", "reason": forecast_reason,
+                    "refs": [held["version_ref"]] + (
+                        [forecast_ref] if forecast_ref else []),
+                }],
+            })
+        return result
     refs = [held["version_ref"]] + ([forecast_ref] if forecast_ref else [])
     rows: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []

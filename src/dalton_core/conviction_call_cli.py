@@ -28,7 +28,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .catalyst_calendar import CatalystCalendarAuthority
 from .cockpit_model import CockpitModel, CockpitModelError
@@ -198,9 +198,23 @@ def consensus_gap(store: Any, company_ref: str) -> dict[str, Any]:
         return {"status": "unavailable", "metrics": [],
                 "reason": f"the consensus authority could not be read: "
                           f"{type(exc).__name__}: {exc}"}
-    if not found or not (found.get("metrics") or ()):
+    if not found:
         return {"status": "unavailable", "metrics": [],
                 "reason": f"no consensus estimate is held for {company_ref}"}
+    if not (found.get("metrics") or ()):
+        unavailable = found.get("unavailable_periods") or ()
+        if unavailable:
+            reasons = sorted({
+                str(row.get("reason") or "comparable model period unavailable")
+                for row in unavailable if isinstance(row, Mapping)
+            })
+            detail = ", ".join(reasons[:3])
+            return {"status": "unavailable", "metrics": [],
+                    "reason": "consensus is held, but its comparable model "
+                              f"periods are unavailable for {company_ref}: {detail}"}
+        return {"status": "unavailable", "metrics": [],
+                "reason": "consensus is held, but no comparable forecast model "
+                          f"period is available for {company_ref}"}
     gap = {"status": "available", "reason": None,
            "metrics": [dict(row) for row in found["metrics"]]}
     # Checked here, before the gate reads it and long before a model call is

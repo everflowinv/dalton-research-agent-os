@@ -477,8 +477,11 @@ class ForecastGapTests(AuthorityTestCase):
     """
 
     def line(self, label, unit, cells, role="revenue"):
-        return {"ref": f"result:{label}", "role": role, "label": label,
-                "unit": unit, "formula": None, "driver_ref": None,
+        is_revenue = role == "revenue"
+        return {"ref": "result:revenue" if is_revenue else f"result:{label}",
+                "role": role, "label": label,
+                "unit": unit, "formula": None,
+                "driver_ref": "concept:test:Revenue" if is_revenue else None,
                 "status": "computed", "reason": None, "cells": cells}
 
     def cell(self, end, value, kind="estimate", superseded_by=None, status="computed"):
@@ -505,14 +508,28 @@ class ForecastGapTests(AuthorityTestCase):
             for end in ends
         ]
 
-    def install_forecast(self, results):
+    def history_cell(self, start, end, value):
+        return {"period_start": start, "period_end": end, "value": str(value),
+                "concept": "test:Revenue", "basis": "reported",
+                "accessions": ["0001467373-26-000001"]}
+
+    def install_forecast(self, results, *, revenue_history=None,
+                         revenue_unit="usd", extra_drivers=()):
         """A real model body, read by the real reader."""
 
         from unittest.mock import patch
 
         from dalton_core.model_forecast_driver import ForecastModelAuthority
 
+        if revenue_history is None:
+            revenue_history = [self.history_cell(
+                "2024-06-01", "2024-08-31", "1",
+            )]
         model = {"id": "forecast-model-version:acn:3", "company_ref": ACN,
+                 "drivers": [{"ref": "concept:test:Revenue",
+                              "concept": "test:Revenue", "role": "revenue",
+                              "status": "filed", "unit": revenue_unit,
+                              "history": revenue_history}, *extra_drivers],
                  "results": results}
         patcher = patch.object(
             ForecastModelAuthority, "latest", autospec=True,
@@ -567,20 +584,27 @@ class ForecastGapTests(AuthorityTestCase):
         self.assertEqual(row["gap_percent"], "100.00")
 
     def test_annual_eps_is_unavailable_without_the_models_share_contract(self):
+        from unittest.mock import patch
+
         from dalton_core.consensus_estimate import latest_consensus
+        from dalton_core.model_forecast_driver import ForecastModelAuthority
+        from tests.test_model_forecast_driver import model
 
         self.publish(wire=wire(
             revenue_estimates=[], eps_estimates=[estimate_row("+1y", "4")],
         ))
-        self.install_forecast([
-            self.line("Diluted EPS", "USD", self.annual_cells("8"), role="eps"),
-        ])
-        found = latest_consensus(self.store, ACN)
+        # This is the real, closed model schema, not a test-only EPS role. The
+        # schema has no EPS output, so neither a quarterly nor annual EPS gap
+        # may be inferred from labels or an impossible synthetic row.
+        legal = model()
+        with patch.object(ForecastModelAuthority, "latest", autospec=True,
+                          return_value=legal):
+            found = latest_consensus(self.store, ACN)
         self.assertEqual(found["metrics"], [])
-        self.assertEqual(
-            found["unavailable_periods"][0]["reason"],
-            "forecast_fiscal_year_aggregation_unavailable",
-        )
+        annual = next(row for row in found["unavailable_periods"]
+                      if row["metric"] == "eps")
+        self.assertEqual(annual["reason"],
+                         "forecast_fiscal_year_aggregation_unavailable")
 
     def test_q4_is_not_used_as_the_fiscal_year_that_ends_the_same_day(self):
         from dalton_core.consensus_estimate import (
@@ -609,24 +633,106 @@ class ForecastGapTests(AuthorityTestCase):
         self.publish(wire=wire(
             eps_estimates=[], revenue_estimates=[estimate_row("0y", "100")],
         ))
-        cells = self.annual_cells("120", ends=(
-            "2025-11-30", "2026-02-28", "2026-05-31", "2026-08-31",
-        ))
-        self.install_forecast([self.line("Revenue", "USD", cells)])
+        history = [
+            self.history_cell("2025-09-01", "2025-11-30", "20"),
+            self.history_cell("2025-12-01", "2026-02-28", "30"),
+            self.history_cell("2026-03-01", "2026-05-31", "30"),
+        ]
+        self.install_forecast([self.line("Revenue", "USD", [
+            self.cell("2026-08-31", "40"),
+        ])], revenue_history=history)
         row = latest_consensus(self.store, ACN)["metrics"][0]
         self.assertEqual(row["period"], "FY2026")
         self.assertEqual(row["ours"], "120")
         self.assertEqual(row["gap_percent"], "20.00")
 
+    def test_a_revenue_unit_spelling_difference_is_not_a_semantic_difference(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish(wire=wire(
+            eps_estimates=[], revenue_estimates=[estimate_row("0q", "40")],
+        ))
+        self.install_forecast([self.line("Revenue", "USD", [
+            self.cell("2026-08-31", "40"),
+        ])], revenue_unit="usd")
+        self.assertEqual(latest_consensus(self.store, ACN)["metrics"][0]["ours"], "40")
+
+    def test_multiple_filed_revenue_anchors_fail_closed(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish(wire=wire(eps_estimates=[], revenue_estimates=[
+            estimate_row("0q", "40"),
+        ]))
+        second = {
+            "ref": "concept:test:OtherRevenue", "concept": "test:OtherRevenue",
+            "role": "revenue", "status": "filed", "unit": "USD",
+            "history": [self.history_cell("2026-03-01", "2026-05-31", "30")],
+        }
+        self.install_forecast([self.line("Revenue", "USD", [
+            self.cell("2026-08-31", "40"),
+        ])], extra_drivers=(second,))
+        found = latest_consensus(self.store, ACN)
+        self.assertEqual(found["metrics"], [])
+        self.assertIn("more than one", found["unavailable_periods"][0]["reason"])
+
+    def test_revenue_anchor_and_result_unit_mismatch_fails_closed(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish(wire=wire(eps_estimates=[], revenue_estimates=[
+            estimate_row("0q", "40"),
+        ]))
+        self.install_forecast([self.line("Revenue", "USD", [
+            self.cell("2026-08-31", "40"),
+        ])], revenue_unit="shares")
+        found = latest_consensus(self.store, ACN)
+        self.assertEqual(found["metrics"], [])
+        self.assertEqual(found["unavailable_periods"][0]["reason"],
+                         "forecast_revenue_unit_conflict")
+
+    def test_conflicting_filed_and_result_quarters_fail_closed(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish(wire=wire(eps_estimates=[], revenue_estimates=[
+            estimate_row("0q", "40"),
+        ]))
+        history = [self.history_cell("2026-06-01", "2026-08-31", "39")]
+        self.install_forecast([self.line("Revenue", "USD", [
+            self.cell("2026-08-31", "40"),
+        ])], revenue_history=history)
+        found = latest_consensus(self.store, ACN)
+        self.assertEqual(found["metrics"], [])
+        self.assertEqual(found["unavailable_periods"][0]["reason"],
+                         "forecast_revenue_period_overlap_conflict")
+
+    def test_revenue_growth_label_does_not_authorise_a_revenue_gap(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish(wire=wire(eps_estimates=[], revenue_estimates=[
+            estimate_row("0q", "40"),
+        ]))
+        self.install_forecast([self.line(
+            "Revenue growth", "ratio", [self.cell("2026-08-31", "0.1")],
+            role="growth",
+        )])
+        found = latest_consensus(self.store, ACN)
+        self.assertEqual(found["metrics"], [])
+        self.assertEqual(found["unavailable_periods"][0]["reason"],
+                         "forecast_revenue_definition_unavailable")
+
     def test_three_quarters_leave_the_fiscal_year_explicitly_unavailable(self):
         from dalton_core.consensus_estimate import latest_consensus
 
         self.publish(wire=wire(
-            eps_estimates=[], revenue_estimates=[estimate_row("+1y", "100")],
+            eps_estimates=[], revenue_estimates=[estimate_row("0y", "100")],
         ))
-        self.install_forecast([
-            self.line("Revenue", "USD", self.annual_cells("120")[:-1]),
-        ])
+        history = [
+            self.history_cell("2025-09-01", "2025-11-30", "20"),
+            self.history_cell("2025-12-01", "2026-02-28", "30"),
+        ]
+        self.install_forecast([self.line("Revenue", "USD", [
+            # Q3 is absent: two actual quarters plus Q4 do not make a year.
+            self.cell("2026-08-31", "40"),
+        ])], revenue_history=history)
         found = latest_consensus(self.store, ACN)
         self.assertEqual(found["metrics"], [])
         self.assertEqual(
@@ -654,22 +760,22 @@ class ForecastGapTests(AuthorityTestCase):
 
         self.publish()
         self.install_forecast([
-            self.line("Diluted EPS", "USD", [
+            self.line("Revenue", "USD", [
                 self.cell("2027-08-31", "11.00", superseded_by="cell:later"),
-            ], role="eps"),
+            ]),
         ])
-        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+        self.assertEqual(latest_consensus(self.store, ACN)["metrics"], [])
 
     def test_an_actualised_period_is_read_as_the_actual(self):
         from dalton_core.consensus_estimate import latest_consensus
 
-        self.publish(wire=wire(eps_estimates=[estimate_row("0q", "14.65516")],
-                               revenue_estimates=[]))
+        self.publish(wire=wire(eps_estimates=[],
+                               revenue_estimates=[estimate_row("0q", "14.65516")]))
         self.install_forecast([
-            self.line("Diluted EPS", "USD", [
+            self.line("Revenue", "USD", [
                 self.cell("2026-08-31", "11.00", superseded_by="cell:actual"),
                 self.cell("2026-08-31", "15.00", kind="actual"),
-            ], role="eps"),
+            ]),
         ])
         row = latest_consensus(self.store, ACN)["metrics"][0]
         self.assertEqual(row["ours"], "15.00")
@@ -679,19 +785,19 @@ class ForecastGapTests(AuthorityTestCase):
 
         self.publish()
         self.install_forecast([
-            self.line("Diluted EPS", "USD", [
+            self.line("Revenue", "USD", [
                 self.cell("2027-08-31", None, status="unavailable"),
-            ], role="eps"),
+            ]),
         ])
-        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+        self.assertEqual(latest_consensus(self.store, ACN)["metrics"], [])
 
     def test_a_period_the_street_does_not_cover_produces_no_row(self):
         from dalton_core.consensus_estimate import latest_consensus
 
         self.publish()
         self.install_forecast([
-            self.line("Diluted EPS", "USD",
-                      [self.cell("2031-08-31", "20.00")], role="eps"),
+            self.line("Revenue", "USD",
+                      [self.cell("2031-08-31", "20.00")]),
         ])
         self.assertEqual(latest_consensus(self.store, ACN)["metrics"], [])
 
@@ -703,7 +809,10 @@ class ForecastGapTests(AuthorityTestCase):
             self.line("Headcount", "count",
                       [self.cell("2027-08-31", "800000")], role="operating"),
         ])
-        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+        found = latest_consensus(self.store, ACN)
+        self.assertEqual(found["metrics"], [])
+        self.assertEqual(found["unavailable_periods"][0]["reason"],
+                         "forecast_revenue_definition_unavailable")
 
     def test_no_forecast_at_all_is_an_absence_never_agreement(self):
         from dalton_core.consensus_estimate import latest_consensus
