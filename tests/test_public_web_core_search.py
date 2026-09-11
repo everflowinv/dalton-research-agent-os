@@ -322,6 +322,30 @@ class ExecutorTests(unittest.TestCase):
             count_recent_web_search_calls(h.core.connection, as_of=h.clock()), 2
         )
 
+    def test_full_ranked_page_keeps_verified_urls_and_replays_without_another_call(self) -> None:
+        citations = [{"url": f"https://example.com/source/{index}"}
+                     for index in range(13)]
+        h = WebSearchHarness(self.root, FakeWebSearchHandle(citations))
+        self.addCleanup(h.close)
+        request = h.search.build_request(SPEC)
+        receipt = h.search.search(request)
+        self.assertEqual("succeeded", receipt["outcome"])
+        self.assertEqual("partial", receipt["source_status"])
+        self.assertIsNone(receipt["next_cursor"])
+        source = h.search.receipts.get_source_envelope(receipt["source_envelope_ref"])
+        original_source = canonical_json(source)
+        urls = h.search.url_authorities(receipt["source_envelope_ref"])
+        self.assertEqual(10, len(urls))
+        self.assertEqual(receipt["document_refs"], [row["url_ref"] for row in urls])
+        self.assertEqual([item["url"] for item in citations[:10]],
+                         [row["canonical_url"] for row in urls])
+        replay = h.search.search(request)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(0, replay["provider_calls"])
+        self.assertEqual(1, len(h.handle.calls))
+        self.assertEqual(original_source, canonical_json(
+            h.search.receipts.get_source_envelope(receipt["source_envelope_ref"])))
+
     def test_antigravity_contract_rejects_a_gemini_payload_before_raw_commit(self) -> None:
         handle = FakeWebSearchHandle(CITATIONS, provider="gemini")
         h = WebSearchHarness(
