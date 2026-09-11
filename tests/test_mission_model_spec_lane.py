@@ -79,7 +79,9 @@ class FakeMissions:
         return [{"statement": "income", "concept": concept,
                  "label": concept.split(":")[-1], "level": 0,
                  "parent_concept": None, "is_breakdown": 0,
-                 "dimension_axis": None, "dimension_member": None}
+                 "dimension_axis": None, "dimension_member": None,
+                 "unit": "USD", "period_start": "2026-04-01",
+                 "period_end": "2026-06-30"}
                 for concept in self.lines.get(company_ref, [])]
 
     def discloses(self, company_ref, concept):

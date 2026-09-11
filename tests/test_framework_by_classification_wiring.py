@@ -84,7 +84,8 @@ class StubMissions:
         return [{"statement": "income", "concept": "us-gaap:Revenues",
                  "label": "Revenues", "level": 1, "parent_concept": None,
                  "is_breakdown": False, "dimension_axis": None,
-                 "dimension_member": None}]
+                 "dimension_member": None, "unit": "USD",
+                 "period_start": "2026-04-01", "period_end": "2026-06-30"}]
 
 
 class ModelStateTests(unittest.TestCase):

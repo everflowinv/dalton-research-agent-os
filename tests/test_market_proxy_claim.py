@@ -125,7 +125,8 @@ class MarketProxyClaimTests(unittest.TestCase):
                 return [{"statement": "income", "concept": "Revenue",
                          "label": "Revenue", "level": 0, "parent_concept": None,
                          "is_breakdown": False, "dimension_axis": None,
-                         "dimension_member": None}]
+                         "dimension_member": None, "unit": "USD",
+                         "period_start": "2026-04-01", "period_end": "2026-06-30"}]
         state = build_company_model_state(Missions(), TARGET)
         self.assertEqual(state["market_proxies"][0]["mapping_ref"], MAPPING["mapping_ref"])
         self.assertNotIn("market_proxy", json.dumps(state["statements"]))
