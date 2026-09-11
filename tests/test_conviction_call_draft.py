@@ -146,11 +146,11 @@ class InputTableTests(unittest.TestCase):
         self.assertEqual(built["citable"]["T1"], THESIS)
         self.assertEqual(built["citable"]["K1"], CATALYST)
 
-    def test_the_prompt_says_agreement_is_worth_nothing(self):
+    def test_the_prompt_distinguishes_pricing_from_shared_direction(self):
         prompt = build_prompt(table())
-        self.assertIn("differs from the market", prompt)
-        self.assertIn("Being bullish while the street is bullish is worth nothing",
-                      prompt)
+        self.assertIn("Agreement on business direction can still", prompt)
+        self.assertIn("magnitude, timing, probability or valuation", prompt)
+        self.assertIn("Do not invent disagreement", prompt)
         self.assertIn("DIVERGENT means we already stand somewhere the street", prompt)
         self.assertIn("Do not write dates", prompt)
         self.assertIn("a fact, a timing, a transmission or a multiple", prompt)
@@ -179,6 +179,18 @@ class InputTableTests(unittest.TestCase):
         self.assertEqual(prompt_drafter("wo", prompt), prompt_drafter("wo", prompt))
         self.assertNotEqual(prompt_drafter("wo", prompt),
                             prompt_drafter("wo", prompt + " "))
+
+    def test_prompt_states_the_same_signal_bound_the_parser_enforces(self):
+        from dalton_core.conviction_call_draft import MAX_SIGNAL_CHARS
+
+        self.assertIn(f"event_pathway.signal at most {MAX_SIGNAL_CHARS}", build_prompt(table()))
+        self.assertNotIn("Being bullish while the street is bullish is worth nothing", build_prompt(table()))
+        good = json.loads(draft_reply())
+        good["event_pathway"][0]["signal"] = "观" * MAX_SIGNAL_CHARS
+        parse_draft(json.dumps(good), table())
+        good["event_pathway"][0]["signal"] += "测"
+        with self.assertRaises(ConvictionDraftRefused):
+            parse_draft(json.dumps(good), table())
 
 
 class ParseDraftTests(unittest.TestCase):
