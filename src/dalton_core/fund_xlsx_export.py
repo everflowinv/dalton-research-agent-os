@@ -1214,6 +1214,28 @@ def export_fund_workbook(
                     "model_formula": "projected annual numerator / projected annual shares",
                     "model_label": eps_result["label"],
                 })
+    # A newly built model carries forecast cells only; its filed history was
+    # rendered from driver/annual authority above. Preserve that distinction
+    # when describing a row whose forecasts are unavailable.
+    historical_labels = set(history) | {
+        label for label, group in annual_groups
+        if group and all(period in history for period in group)
+    }
+    for result in model["results"]:
+        if result["status"] == "computed" or not any(
+            (result["ref"], period) in result_cells for period in historical_labels
+        ):
+            continue
+        for column in range(1, 5):
+            label_cell = financials.cell(result_rows[result["ref"]], column)
+            if isinstance(label_cell.value, str) and label_cell.value.endswith(
+                " — Not available"
+            ):
+                label_cell.value = (
+                    label_cell.value.removesuffix(" — Not available")
+                    + " — Forecast unavailable"
+                )
+                break
     if len(annual_groups) >= 2:
         annual_positions = {
             label: index for index, (label, _) in enumerate(annual_groups)

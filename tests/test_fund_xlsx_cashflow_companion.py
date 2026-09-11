@@ -111,6 +111,22 @@ class FundXlsxCashFlowCompanionTests(unittest.TestCase):
             "Capital expenditure — Share of line (ratio)", assumption_labels)
         self.assertEqual(exported["annual_projection_hash"], annual["content_hash"])
 
+    def test_new_model_preserves_visible_history_when_forecast_is_unavailable(self):
+        _path, book, model, _annual, _exported = self.export()
+        self.assertEqual(model["realised_periods"], [])
+        rows, _section = _financial_result_layout(model)
+        financials = book["Financials"]
+        for role in ("diluted_weighted_average_shares", "diluted_eps"):
+            result = next(item for item in model["results"]
+                          if item.get("role") == role)
+            row = rows[result["ref"]]
+            labels = " ".join(str(financials.cell(row, column).value or "")
+                              for column in range(1, 5))
+            self.assertIn("Forecast unavailable", labels)
+            actual_column = next(column for column in range(1, financials.max_column + 1)
+                                 if financials.cell(1, column).value == "1Q25")
+            self.assertIsNotNone(financials.cell(row, actual_column).value)
+
     def test_unavailable_cash_companion_stays_blank(self):
         _path, book, model, annual, exported = self.export(cash=False)
         financials = book["Financials"]
