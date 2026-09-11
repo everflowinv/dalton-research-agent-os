@@ -586,11 +586,16 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
         ).fetchone()
         with mission_authority._transaction() as cursor:
             cursor.execute(
-                "INSERT INTO coverage_mission_pointer("
+                "INSERT OR IGNORE INTO coverage_mission_pointer("
                 "mission_ref,mission_version_id,version_number,content_hash,updated_at) "
                 "VALUES(?,?,?,?,?)",
                 tuple(mission_row),
             )
+            pointer = cursor.execute(
+                "SELECT mission_ref,mission_version_id,version_number,content_hash,updated_at "
+                "FROM coverage_mission_pointer WHERE mission_ref=?", (mission_row["mission_ref"],),
+            ).fetchone()
+            self.assertEqual(tuple(pointer), tuple(mission_row))
 
         launcher_view = SimpleNamespace(
             state_dir=Path(fixture.harness.planner.temp.name),
