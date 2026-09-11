@@ -823,11 +823,13 @@ def _verified_search_discoveries(
         source.get("source") != "source:public-web"
         or source.get("operation") != "search_web"
         or source.get("completeness") != "ranked"
-        or source.get("status") not in {"complete", "empty"}
+        # A full ranked page is partial coverage of the web, not a failed
+        # response. Its admitted citations retain exact raw/envelope authority.
+        or source.get("status") not in {"complete", "partial", "empty"}
         or source.get("cursor") is not None
     ):
         raise PublicWebAuthorityConflict(
-            "URL authority requires a completed ranked Gemini discovery source"
+            "URL authority requires a verified ranked search response"
         )
     source_hash = source.get("content_hash")
     if not isinstance(source_hash, str) or _HASH_RE.fullmatch(source_hash) is None:
