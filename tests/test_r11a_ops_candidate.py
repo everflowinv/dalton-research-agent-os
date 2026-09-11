@@ -30,6 +30,24 @@ def write_json(path: Path, value) -> None:
 
 
 class R11aOpsCandidateTests(unittest.TestCase):
+    def test_health_command_preserves_venv_symlink_path(self) -> None:
+        health = load("observe_r11a_health_candidate")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_python = root / "system-python"
+            real_python.touch()
+            venv_python = root / "venv-python"
+            venv_python.symlink_to(real_python)
+            with patch.object(health, "observe", return_value={"accepted": True}) as observe:
+                self.assertEqual(health.main([
+                    "--approved-manifest", str(root / "manifest.json"),
+                    "--deployment-receipt", str(root / "deploy.json"),
+                    "--output", str(root / "health"),
+                    "--runtime-python", str(venv_python),
+                    "--service-config", str(root / "service.json"),
+                ]), 0)
+            self.assertEqual(observe.call_args.args[3][0], str(venv_python))
+
     def test_staging_preserves_installable_wheel_filename(self) -> None:
         stage = load("stage_r11a_ops_candidate")
         with tempfile.TemporaryDirectory() as temporary:

@@ -95,18 +95,19 @@ def observe(manifest_path: Path, deployment_receipt_path: Path, output: Path,
         if index:
             sleep(INTERVAL_SECONDS)
         at = datetime.now(timezone.utc).isoformat()
+        raw: dict[str, Any] = {"at": at}
         try:
             result = invoke(list(health_command), capture_output=True, text=True, timeout=8)
-            wire = json.loads(result.stdout)
-            heartbeat = wire.get("heartbeat") or {}
             raw = {"at": at, "exit_code": result.returncode,
                    "stdout": result.stdout, "stderr": result.stderr}
+            wire = json.loads(result.stdout)
+            heartbeat = wire.get("heartbeat") or {}
             sample = {"at": at, "exit_code": result.returncode, "ok": wire.get("ok") is True,
                       "checks": wire.get("checks"), "pid": heartbeat.get("pid"),
                       "started_at": heartbeat.get("started_at"),
                       "last_tick_at": heartbeat.get("last_tick_at")}
         except Exception as exc:
-            raw = {"at": at, "exception": f"{type(exc).__name__}: {exc}"}
+            raw["exception"] = f"{type(exc).__name__}: {exc}"
             sample = {"at": at, "ok": False, "exception": raw["exception"]}
         raw_name = f"{index:02d}.json"; exclusive_json(output / raw_name, raw)
         sample.update(raw_file=raw_name, raw_sha256=sha(output / raw_name)); samples.append(sample)
@@ -130,7 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--service-config", type=Path, required=True)
     args = parser.parse_args(argv)
     summary = observe(args.approved_manifest.resolve(), args.deployment_receipt.resolve(),
-                      args.output.resolve(), [str(args.runtime_python.resolve()), "-m", "dalton_core.health",
+                      args.output.resolve(), [str(args.runtime_python.absolute()), "-m", "dalton_core.health",
                                               "--config", str(args.service_config.resolve())])
     print(json.dumps({"status": "passed" if summary["accepted"] else "failed",
                       "summary": str((args.output / "summary.json").resolve())}))
