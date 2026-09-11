@@ -84,7 +84,7 @@ All five companies now have current metadata-bearing specifications and working 
 
 Next: resolve only the maintenance guard using immutable proof and no ledger mutation, retry the already accepted deployment, then verify actual model publication and Dossier/event execution with the reviewed broker capacity.
 
-## Reviewed maintenance retry, 2026-09-11 00:26 UTC
+## Reviewed maintenance retry, 2026-09-11 00:22 UTC
 
 The exact historical pending record is now bound to its invocation/request/time tuple and SHA-256, with proof that it predates the reviewed gateway process. The maintenance helper permits that unchanged record only; missing, altered or additional pending calls block maintenance. It never writes the journal or authorizes replay. Independent review additionally fixed rollback receipt binding to the accepted proposal; 18 fault/positive tests pass in both reviewer and root execution. Helper SHA-256 `530c4092c15df320acfb6bb1defb87ad8bc8491a08570f4eed3ac327f467512c`, proposal SHA-256 `91b403b4fc1d8af9c4739da39c53c7dff78738914ae0d330842b7fb9e4f20cd2`.
 
@@ -93,3 +93,11 @@ The already accepted r3 retry has started with the original mission verified and
 The historical invocation also exposed an independent pre-existing accounting discrepancy: its unknown completion was settled at zero despite a 1,500,000-micro reservation. That needs a separately reviewed append-only correction; the maintenance exception does not repair accounting or imply a known provider charge.
 
 Next: finish the accepted install, verify source/wheel/configuration and stable service health, then inspect actual formal forecast, Dossier and event records.
+
+## Installed r3 runtime and bounded accounting repair, 2026-09-11 00:28 UTC
+
+The retry installed accepted commit `2e94acdaa12f54fc369551f374521ed7b9084e64` from retained source `.release-source.AyDNxr`. The installer's fixed approximately 30-second health wait returned failure while the first tick was still initializing; the same controller PID 36513 became running after approximately 85 seconds. Subsequent three checks passed with heartbeat ages 5.93 / 2.89 / 23.12 seconds. The recovery verifier checked all 556 runtime files against the accepted wheel and all 1,833 source files against the exact Git archive before updating the retained-source pointer. Runtime verification SHA-256 `592c1f9790e2b93626a921b9deb66c9388aba39fdeaac7f43ea1f1f2d428acfb`. Backup: `deploy-backup-20260911T002220Z`.
+
+The broker capacity operation succeeded at 00:23:50 UTC, with capacity 8 and the exact historical pending record preserved. All 12 model configuration selections/budgets/prior credentials and selected credential admission pass preservation checks. A separate official accounting correction `thesis-impact-correction:fcda5cd9cda556f0ca4ebf638286aeda` conservatively records the historical unknown call at its original 1,500,000-micro ceiling, after a snapshot fresh/duplicate check. Both original authority rows and the journal record remain unchanged; no redrive was authorized. Receipt SHA-256 `ed380df6cb1a070ade41cb205b382572dfbea5d98773992327fd985f591572d9`.
+
+At 00:27:26 UTC, the live read-only forecast check reports one current formal model, four pending models, five valid specifications, and zero input blockers. The independent five-company isolated acceptance is not substituted for these live counts.

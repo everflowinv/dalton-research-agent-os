@@ -2,7 +2,17 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-10，23:56 UTC）
+## 当前检查点（2026-09-11，00:28 UTC）
+
+**基础版本 2e94acd 已安装并完成实际运行核验。** 同一冻结完整测试 6,785 项 / 1 skip；556 个运行文件与 wheel 一致，1,833 个 retained source 文件与冻结 Git archive 一致。安装器原固定 30 秒健康等待先超时，但同一控制器 PID 36513 约 85 秒完成初始化，随后三次健康检查通过；没有重复安装或放宽健康门槛。该安装器等待缺口正在另行修复为可配置、有界期限。
+
+Broker 现有容量配置已由 2 调到 8，12 份模型选择、预算和 credential 准入保持，原 mission v14 未改。精确历史 pending 记录在维护前后保持不变，不授权重试。另通过正式 append-only authority 将该历史未知完成的费用从错误的零恢复到原预留 1,500,000 micros；原 admission/settlement 不变，这不是实际 provider 费用确认。
+
+首次 live 快照已有 1/5 当前正式 forecast model，其余四份规格/input 均有效并等待调度；隔离 5/5、44 条预测线验收仍与 live 分开。EPAM Dossier 已报告独立核验后发布，正式 authority/provenance 正在交叉验收。来源许可、CTSH 滚动额度和人类研究裁决继续保持。
+
+**Next step：** 验收实际 forecast/Dossier/event/交付物链，完成启动等待修复和新发现的基础缺口；继续 commit/push。高阶投资判断能力保持后排。
+
+## 前一检查点（2026-09-10，23:56 UTC）
 
 **下一基础修复冻结为 2e94acd；live 仍为已运行核验的 b5ee132。** 实际 IBM 发布暴露了生成器已有 `cost_driver_slots`、正式校验器却拒绝该字段的缺口。已将字段纳入严格可选合同：字段缺省兼容旧记录，出现时必须是冻结词表中的非空、不重复列表；null/标量/未知值均拒绝。恢复身份使用明确版本 3 的 admission contract，成功模型的 generator 和 digest 不变。
 
