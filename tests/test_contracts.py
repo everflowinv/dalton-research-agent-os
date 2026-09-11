@@ -54,6 +54,8 @@ class ContractTests(unittest.TestCase):
                     "LLMPlannerCandidateV0.1",
                     "TranscriptPolishCandidateV0.1",
                     "DocumentExtractionSuggestionsV0.1",
+                    "RegisteredAnnualReportDraftOutputV0.1",
+                    "RegisteredAnnualReportVerifierOutputV0.1",
                     # W4's driver templates are a frozen constants table, not a
                     # record any authority writes: there is no instance of one,
                     # so there is nothing for an id or a created_at to name. Its
@@ -70,9 +72,32 @@ class ContractTests(unittest.TestCase):
                         set(schema["required"]).issubset(schema["properties"])
                     )
                     continue
+                if schema["title"] == "RegisteredAnnualReportRetrievalProof":
+                    # A deterministic derivation of registered source bytes and
+                    # query, not a newly timed event. Replaying that derivation
+                    # must preserve its ID/hash; Scheduler timestamps the call.
+                    self.assertTrue({"id", "content_hash", "request", "registration",
+                                     "matches"}.issubset(schema["required"]))
+                    self.assertNotIn("created_at", schema["properties"])
+                    self.assertTrue(set(schema["required"]).issubset(schema["properties"]))
+                    continue
                 self.assertIn("id", schema["required"])
                 self.assertIn("created_at", schema["required"])
                 self.assertTrue(set(schema["required"]).issubset(schema["properties"]))
+
+    def test_annual_model_output_schemas_match_the_actual_prompt_contracts(self):
+        from dalton_core.annual_report_qualitative import (
+            DRAFT_OUTPUT_SCHEMA, VERIFIER_OUTPUT_SCHEMA,
+        )
+        for name, runtime in (
+            ("registered-annual-report-draft-0.1.schema.json", DRAFT_OUTPUT_SCHEMA),
+            ("registered-annual-report-verification-0.1.schema.json", VERIFIER_OUTPUT_SCHEMA),
+        ):
+            with self.subTest(schema=name):
+                published = json.loads((ROOT / "contracts" / name).read_text())
+                shape = lambda value: {key: item for key, item in value.items()
+                                       if key not in {"$id", "$schema", "title"}}
+                self.assertEqual(shape(published), shape(runtime))
 
     def test_json_required_fields_match_python_required_fields(self):
         by_title = {

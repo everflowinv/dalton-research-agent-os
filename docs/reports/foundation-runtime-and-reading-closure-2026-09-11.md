@@ -179,3 +179,12 @@ Root removed the document reader's arbitrary three-not-sent-retries, 3,600-secon
 The 63-test run exposed two old synthetic capacity tests that changed only an error code after constructing a completed model invocation. The shared provider-proof repair correctly rejects those unproved capacity claims. Tests now require terminal failure and retention of actual paid usage; production proof checks were not weakened. The final affected assertion and adapter/budget/provider suite passed 32 tests in 1.607 seconds. Initial failed test logs remain in `/tmp/dalton-r10-configurable-transport-tests.log` and `...-v2.log`.
 
 Annual budget and transport configuration bindings are now in the immutable plan and WorkOrder metadata (40 focused tests). The first actual budget-hook implementation is merged, but independent review is still checking active mission/outer budget/pool authority, cross-day replay, overrun accounting and an actual broker subprocess path. Direct hook tests and the CLI fixture adapter do not establish those production conditions. The isolated full-suite preflight at `ee39177` is running; it is explicitly not deployment acceptance.
+
+
+### Isolated full preflight failed and targeted repairs passed — 08:14 UTC
+
+The immutable preflight `ee39177bad8edf5ae962e095ba2055788ca2d138` ran 7,040 tests in 601.117 seconds and failed with four failures, three errors and one skip. It was not staged or deployed. Full log SHA-256 `e188281d2cd9a2dd161c361f2b18c84b90cde3c152267d3d22c03e977c20db57`; receipt `/tmp/dalton-foundation-followup-r10-preflight-full-suite-receipt.json`.
+
+Two failures were the unproved-capacity fixtures already corrected above. Two annual raw model-output schema files lacked titles; they now declare their identity while preserving the exact runtime prompt schema. The deterministic registered annual retrieval proof is now tested as a content-addressed derivation, not incorrectly required to carry an event timestamp that would change on replay. Model configuration registration again preserves the original first three names and appends discovery selection after them. The 121-test affected contract/registry/model-selection/annual suite passed in 5.476 seconds; a separate shape check confirmed both published model schemas match the actual prompt schemas excluding annotations.
+
+Next: finish actual budget authority and crash/unknown recovery review, then freeze a new complete candidate and repeat the full suite. This failed preflight remains explicit evidence, regardless of the targeted checks.

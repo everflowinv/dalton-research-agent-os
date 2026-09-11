@@ -1,10 +1,10 @@
 # Dalton 项目进度
 
-Current checkpoint (2026-09-11 07:55 UTC): R9c `c29b3e22808cb900b458eeb00d9e5447b72f5db6` remains deployed and verified (6,960 tests / one skip; 561 runtime files; 45/45 healthy samples over 676.57 seconds). Three actual ACN Dossier 0.3 versions passed persisted producer/verifier proof checks. Web failed-host cooldown is live; persistent quarantine and a single low-priority recovery probe passed independent SQLite restart tests but are not deployed. AlphaEngine earnings-call and sell-side selection both precede downloads. Registered annual-report production Writer/CLI/config setup is merged, and 243 integrated tests passed. Independent review confirmed uninterrupted 429 recovery, but found no automatic relaunch after child death; that concrete P0 is being fixed. Further review found that annual model execution lacks real mission/day budget admission and settlement; this undeployed release blocker is being fixed first. Post-send unknown recovery needs budgeted new WorkOrders with preserved old settlements and explicit recovery provenance; it remains under development. Full release acceptance follows those closures, not just helper tests.
+Current checkpoint (2026-09-11 08:14 UTC): Live R9c remains deployed and verified, and the initial web host cooldown remains active. Persistent quarantine/single-probe recovery, AlphaEngine pre-download selection, and annual-report execution are next-release candidates. Isolated preflight `ee39177` ran 7,040 tests and failed (four failures, three errors, one skip); it was not deployed. Contract/registry and unproved-capacity fixture repairs passed targeted checks. Annual budget authority, autonomous child-death resume, and budgeted unknown-result recovery remain under independent development/review. Final release requires a new immutable full-suite/wheel/copied-state acceptance and postdeployment health. Three actual ACN Dossier 0.3 versions remain verified; no claim is made that all company deliverables are complete.
 
 更新日期：2026-09-11（基础执行、年报阅读和模型调用真实路径验收；以下历史记录保留）
 
-## 当前检查点（2026-09-11，R9a 部署后）
+## 历史检查点（2026-09-11，R9a 部署后）
 
 **R9a `b6cbddc` 已部署，代码/配置核验通过，持续健康验收未通过，正在修复实际运行发现。** 同版 6,946 Python tests / 1 skip、29 broker JS tests、561 个运行文件逐字一致，68 schemas / 40 entries / 0 escaped 副本演练通过。模型并发已调为 16、队列 64、最长等待 600 秒；12 份模型选择、凭证和 mission v14 保留。45 次健康采样中有 1 次数据库锁竞争降级，下一采样恢复；失败证据保留，不标为持续健康通过。
 

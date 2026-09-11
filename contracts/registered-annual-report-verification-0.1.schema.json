@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "schema:registered-annual-report-verification:0.1",
+  "title": "RegisteredAnnualReportVerifierOutputV0.1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "verdict", "verified_statement", "findings"],
