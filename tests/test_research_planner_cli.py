@@ -146,18 +146,6 @@ class PlannerChildTests(unittest.TestCase):
         self.assertGreater(_LEASE_GRACE_SECONDS, 0)
         self.assertGreater(TIMEOUT_SECONDS + _LEASE_GRACE_SECONDS, TIMEOUT_SECONDS)
 
-    def test_a_cockpit_call_claims_a_lease_covering_its_timeout(self):
-        import inspect
-
-        from dalton_core import cockpit_model
-
-        source = inspect.getsource(cockpit_model.CockpitModel.call)
-        self.assertIn("lease_seconds=lease_seconds", source)
-        self.assertIn("max_lease_seconds=lease_seconds", source)
-        # The bounds are a frozen versioned policy: reusing the shared id with
-        # different settings is a SchedulerConflict, so the version is named
-        # after the bound it carries and the two can never disagree.
-        self.assertIn("scheduler-policy-lease-", source)
 
 
 if __name__ == "__main__":

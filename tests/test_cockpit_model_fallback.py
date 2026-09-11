@@ -672,6 +672,33 @@ class CockpitChainTests(unittest.TestCase):
         with ModelRouter(self.router_db, read_only=True) as router:
             return router.list_decisions()
 
+    def test_queue_and_full_call_timeout_complete_under_their_versioned_lease(self):
+        clock = MutableClock()
+        seen = []
+
+        class SlowAdapter(ChainAdapter):
+            def execute(adapter, work, route, profile):
+                elapsed = queue + work.budget["max_seconds"]
+                clock.advance(elapsed)
+                seen.append((work.id, elapsed))
+                return super().execute(work, route, profile)
+
+        for queue in (600, 7200):
+            model = self._model(
+                SlowAdapter({}), policy_version_ref=self.pinned_policy, clock=clock,
+                transport_retry={"max_definitely_not_sent_retries": 0,
+                                 "queue_wait_seconds": queue,
+                                 "retry_backoff_seconds": 0},
+            )
+            answer = model.call(purpose="plan", request_id=f"long-queue-{queue}",
+                                prompt="what next?", mission=self.mission)
+            self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")
+            with Scheduler(self.root / "scheduler.sqlite", clock=clock) as scheduler:
+                formal = scheduler.formal_result(seen[-1][0])
+            self.assertEqual(formal["terminal_state"], "succeeded")
+        self.assertEqual(len(seen), 2)
+        self.assertGreater(seen[-1][1], 7200)
+
     def test_a_failed_first_link_falls_back_inside_the_same_attempt(self) -> None:
         adapter = ChainAdapter({
             "profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed")
