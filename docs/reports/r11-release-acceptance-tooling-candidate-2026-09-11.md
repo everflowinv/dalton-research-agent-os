@@ -2,11 +2,13 @@
 
 ## Boundary
 
-The R11 source freeze is
+The first R11 source freeze candidate was
 `/Users/everflow/Projects/dalton-foundation-followup-r11-acceptance-worktree`
-at `62f35597b2ca3c57d02bc06e688a2484829c1309`. The full-suite, wheel,
-rehearsal and final activated-configuration hashes are deliberately unresolved
-in the committed template. The helper can produce only
+at `62f35597b2ca3c57d02bc06e688a2484829c1309`. A subsequent live finding showed
+that synchronous backup integrity checks can stall the controller heartbeat,
+so an R11a successor may replace it. The release ref, source, full-suite,
+wheel, rehearsal and final activated-configuration hashes are therefore all
+deliberately unresolved in the committed template. The helper can produce only
 `candidate_pending_owner_acceptance`; it has no accept, publish, install, live
 mutation, or manifest replacement operation.
 
@@ -65,8 +67,8 @@ bounded changes before R11 acceptance:
 
 ## Candidate artifacts
 
-`deploy/release/r11-acceptance-inputs.template.json` contains the known source
-identity and explicit nulls for every result that does not exist yet.
+`deploy/release/r11-acceptance-inputs.template.json` contains explicit nulls
+for the final release identity and every result that does not exist yet.
 `scripts/prepare_release_acceptance_candidate.py` checks a clean exact source,
 closed packet-local paths, regular-file hashes, the dynamic model-config
 snapshot, the latest retained backup, and the exact service-config delta. It
