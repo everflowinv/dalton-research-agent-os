@@ -75,6 +75,48 @@ class FundXlsxExportTests(unittest.TestCase):
                   if book["Formula Map"].cell(row, 1).value == "Formula map SHA-256"]
         self.assertEqual(hashes, [result["formula_map_hash"]])
 
+    def test_humanized_expense_label_keeps_concept_bound_formula_chain(self):
+        from openpyxl import load_workbook
+
+        missions = ledger()
+        for line in missions.lines:
+            if line["concept"] == "us-gaap:SellingGeneralAndAdministrativeExpense":
+                line["label"] = "Selling, general and administrative"
+        inputs = build_model_inputs(missions, self.specification)
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        forecast = ForecastModelAuthority(store).publish(
+            model(missions=missions, specification=self.specification))
+        expense = next(
+            item for item in forecast["results"]
+            if item["ref"] ==
+            "result:operating_expense:us-gaap:SellingGeneralAndAdministrativeExpense"
+        )
+        self.assertEqual(expense["label"], "Selling, general and administrative")
+        self.assertEqual(
+            expense["formula"],
+            "SellingGeneralAndAdministrativeExpense[k] = revenue[k] * share[k]",
+        )
+        result = export_fund_workbook(
+            self.path, model=forecast, spec=self.specification, inputs=inputs,
+            calendar_binding=self.calendar())
+        book = load_workbook(self.path, data_only=False)
+        sheet = book["Financials"]
+        headers = {cell.value: cell.column for cell in sheet[4]}
+        forecast_col = headers["Q4 FY2026E"]
+        result_rows = {item["ref"]: 5 + index
+                       for index, item in enumerate(forecast["results"])}
+        expense_formula = sheet.cell(result_rows[expense["ref"]], forecast_col).value
+        self.assertIsInstance(expense_formula, str)
+        self.assertIn("*'Driver'!", expense_formula)
+        for ref in ("result:operating_income", "result:income_tax_expense",
+                    "result:net_income"):
+            self.assertTrue(str(sheet.cell(result_rows[ref], forecast_col).value).startswith("="))
+        self.assertFalse(any(
+            expense["ref"] in gap and "unavailable or unsupported" in gap
+            for gap in result["gaps"]
+        ))
+
     def test_complete_year_is_formula_and_partial_year_stays_blank(self):
         from openpyxl import load_workbook
 

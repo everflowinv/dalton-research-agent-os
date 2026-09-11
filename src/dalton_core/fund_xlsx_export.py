@@ -136,6 +136,21 @@ def _financial_line_label(result: Mapping[str, Any]) -> str:
     return humanized[:1].upper() + humanized[1:] if humanized else "Financial line"
 
 
+def _is_operating_expense_share_formula(
+    result: Mapping[str, Any], formula: str,
+) -> bool:
+    prefix = "result:operating_expense:"
+    ref = str(result.get("ref") or "")
+    if not ref.startswith(prefix):
+        return False
+    # The authority formula is frozen against the XBRL concept while the
+    # result label is intentionally reader-facing and may be humanized or
+    # localized. Derive only the exact local concept from the closed result
+    # ref; never use display text to decide executable formula semantics.
+    concept = ref[len(prefix):].rsplit(":", 1)[-1]
+    return bool(concept) and formula == f"{concept}[k] = revenue[k] * share[k]"
+
+
 def _formula_for(
     result: Mapping[str, Any], cell: Mapping[str, Any], period: str,
     result_cells: Mapping[tuple[str, str], str], assumption_cells: Mapping[str, str],
@@ -160,8 +175,7 @@ def _formula_for(
     if (formula in {
             "cost_of_revenue[k] = revenue[k] * share[k]",
             "income_tax_expense[k] = operating_income[k] * share[k]",
-            } or (result["ref"].startswith("result:operating_expense:")
-                  and formula == f"{result['label']}[k] = revenue[k] * share[k]")) \
+            } or _is_operating_expense_share_formula(result, formula)) \
             and len(refs) == 1 and len(assumptions) == 1:
         return f"={refs[0]}*{assumptions[0]}"
     if (formula in {
@@ -192,11 +206,10 @@ def _verify_translated_value(
             prior = history_values.get((source.get("concept"), source.get("period_end")))
         if prior is not None:
             expected = prior * (Decimal(1) + assumptions[0])
-    elif (formula in {
+    if expected is None and (formula in {
             "cost_of_revenue[k] = revenue[k] * share[k]",
             "income_tax_expense[k] = operating_income[k] * share[k]",
-            } or (result["ref"].startswith("result:operating_expense:")
-                  and formula == f"{result['label']}[k] = revenue[k] * share[k]")):
+            } or _is_operating_expense_share_formula(result, formula)):
         if refs and assumptions:
             expected = refs[0] * assumptions[0]
     elif formula in {
