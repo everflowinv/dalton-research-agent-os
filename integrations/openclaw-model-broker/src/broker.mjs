@@ -20,6 +20,9 @@ const DEFAULTS = Object.freeze({
   journalMaxRecords: 1_000,
   journalMaxBytes: 8_388_608,
 });
+// Node timers clamp larger delays to 1 ms. This is the runtime's actual
+// representability ceiling, not a product policy for how long owners may wait.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const PROVIDER_CONTROL_MODES = Object.freeze({
   "openai-responses-input-count-v1": Object.freeze({
@@ -216,7 +219,10 @@ function validateConfig(input) {
     maxOutputBytes: integer(config.maxOutputBytes, "maxOutputBytes", DEFAULTS.maxOutputBytes, 1, 1_048_576),
     maxConcurrent: integer(config.maxConcurrent, "maxConcurrent", DEFAULTS.maxConcurrent, 1, 32),
     maxQueued: integer(config.maxQueued, "maxQueued", DEFAULTS.maxQueued, 0, 1024),
-    maxQueueWaitMs: integer(config.maxQueueWaitMs, "maxQueueWaitMs", DEFAULTS.maxQueueWaitMs, 1, 3_600_000),
+    maxQueueWaitMs: integer(
+      config.maxQueueWaitMs, "maxQueueWaitMs", DEFAULTS.maxQueueWaitMs,
+      1, MAX_TIMER_DELAY_MS,
+    ),
     idleTimeoutMs: integer(config.idleTimeoutMs, "idleTimeoutMs", DEFAULTS.idleTimeoutMs, 100, 60_000),
     authMaxSkewMs: integer(config.authMaxSkewMs, "authMaxSkewMs", DEFAULTS.authMaxSkewMs, 1_000, 300_000),
     journalTtlMs: integer(config.journalTtlMs, "journalTtlMs", DEFAULTS.journalTtlMs, 60_000, 604_800_000),

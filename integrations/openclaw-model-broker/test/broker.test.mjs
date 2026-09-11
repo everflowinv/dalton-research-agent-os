@@ -303,6 +303,24 @@ test("closed request rejects all credential and transport authority fields", () 
   );
 });
 
+test("queue wait accepts owner policy beyond the former one-hour cap", () => {
+  const longWait = 7_200_000;
+  assert.equal(validateRequest({ ...request(), queueWaitMs: longWait }, 4096).queueWaitMs,
+    longWait);
+  const broker = new ModelBroker(
+    fakeRuntime(async () => result()),
+    config({ maxQueueWaitMs: longWait }),
+  );
+  assert.equal(broker.limits.maxQueueWaitMs, longWait);
+  assert.throws(
+    () => new ModelBroker(
+      fakeRuntime(async () => result()),
+      config({ maxQueueWaitMs: 2_147_483_648 }),
+    ),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_CONFIG",
+  );
+});
+
 test("provider control profiles reject stale or mismatched rate cards", () => {
   const base = providerControlProfile();
   const cases = [

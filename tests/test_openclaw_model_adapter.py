@@ -474,10 +474,10 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             execution.pop("queueWaitMs")
             return success_response(execution)
 
-        (_, _), broker = self.run_with(queued_success, queue_wait=7)
+        (_, _), broker = self.run_with(queued_success, queue_wait=7200)
         broker.close()
         request = broker.requests[0]
-        self.assertEqual(request["queueWaitMs"], 7000)
+        self.assertEqual(request["queueWaitMs"], 7_200_000)
         unsigned = dict(request)
         unsigned["auth"] = {
             key: value for key, value in request["auth"].items() if key != "mac"

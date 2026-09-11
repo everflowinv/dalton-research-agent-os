@@ -23,6 +23,7 @@ import secrets
 import socket
 import stat
 import time
+import threading
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
@@ -805,8 +806,15 @@ class OpenClawModelAdapter:
         if (isinstance(queue_wait_seconds, bool)
                 or not isinstance(queue_wait_seconds, (int, float))
                 or not math.isfinite(float(queue_wait_seconds))
-                or not 0 <= float(queue_wait_seconds) <= 3600):
-            raise ValueError("queue_wait_seconds must be finite and between 0 and 3600")
+                or float(queue_wait_seconds) < 0
+                or float(queue_wait_seconds) + float(timeout_seconds)
+                   > threading.TIMEOUT_MAX
+                or int(float(queue_wait_seconds) * 1000)
+                   > 9_007_199_254_740_991):
+            raise ValueError(
+                "queue_wait_seconds must be finite, non-negative, and representable "
+                "by the socket and broker runtimes"
+            )
         if (
             isinstance(max_frame_bytes, bool)
             or not isinstance(max_frame_bytes, int)

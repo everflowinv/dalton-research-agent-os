@@ -240,8 +240,8 @@ export function validateRequest(input, maxFrameBytes) {
   if ("replayOnly" in input && typeof input.replayOnly !== "boolean") {
     throw new ProtocolError("INVALID_REQUEST", "replayOnly must be boolean");
   }
-  if ("queueWaitMs" in input && (!Number.isInteger(input.queueWaitMs) || input.queueWaitMs < 0 || input.queueWaitMs > 3_600_000)) {
-    throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be an integer 0..3600000");
+  if ("queueWaitMs" in input && (!Number.isSafeInteger(input.queueWaitMs) || input.queueWaitMs < 0)) {
+    throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be a non-negative safe integer");
   }
   const maxTokens = positiveInteger(input.maxTokens, "maxTokens");
   const request = Object.freeze({
