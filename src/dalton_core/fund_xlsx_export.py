@@ -785,6 +785,16 @@ def export_fund_workbook(
         gaps.append("annual columns unavailable: no bound fiscal calendar")
     for result in model["results"]:
         rr = result_rows[result["ref"]]
+        by_period = {c["period"]["end"]: c for c in result["cells"]}
+        if result["status"] == "computed":
+            availability_suffix = ""
+        elif any(
+            cell.get("status") == "computed" and period in history
+            for period, cell in by_period.items()
+        ):
+            availability_suffix = " — Forecast unavailable"
+        else:
+            availability_suffix = " — Not available"
         if result["ref"] in _CASH_FLOW_RESULT_REFS and cash_flow_section_row is not None:
             level = 1
             row_style = (
@@ -799,12 +809,11 @@ def export_fund_workbook(
             level + 1,
             f"{_financial_line_label(result)}"
             f"{_model_unit_suffix(result['unit'], role=result.get('role'))}"
-            + (" — Not available" if result["status"] != "computed" else ""),
+            + availability_suffix,
         )
         template_row_styles["financials"].append({
             "row": rr, "style": row_style, "level": level,
         })
-        by_period = {c["period"]["end"]: c for c in result["cells"]}
         for period in periods:
             ci = period_columns[period]
             cell = by_period.get(period)

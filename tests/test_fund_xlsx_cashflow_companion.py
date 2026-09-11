@@ -238,6 +238,14 @@ class FundXlsxCashFlowCompanionTests(unittest.TestCase):
             f"='Financials'!{column_letter}{result_rows['result:operating_cash_flow']}"
             f"-SUM('Financials'!{column_letter}{result_rows['result:capital_expenditure']})",
         )
+        for role in ("diluted_weighted_average_shares", "diluted_eps"):
+            result = next(item for item in model["results"]
+                          if item.get("role") == role)
+            label = " ".join(
+                str(financials.cell(result_rows[result["ref"]], column).value or "")
+                for column in range(1, 5)
+            )
+            self.assertIn("Forecast unavailable", label)
 
 
 if __name__ == "__main__":
