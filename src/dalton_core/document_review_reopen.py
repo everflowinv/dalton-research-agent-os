@@ -21,7 +21,7 @@ class FailedDocumentWindowReader:
         if authority.get("work_order_hash") != content_hash(work):
             raise ValueError("failed extraction WorkOrder drifted")
         context = (work.get("metadata") or {}).get("context") or {}
-        if context.get("review_id") != review_id or context.get("review_hash") != prior_review_hash:
+        if context.get("review_id") != review_id:
             raise ValueError("failed extraction WorkOrder belongs to another review")
         envelope = formal.get("result_envelope")
         if not isinstance(envelope, dict) or formal.get("result_envelope_hash") != content_hash(envelope):
