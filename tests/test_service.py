@@ -320,6 +320,27 @@ class InstallerSeedTests(unittest.TestCase):
         self.assertIn("openclaw_config_path", block)
         self.assertIn('"cockpit"', block)
 
+    def test_gateway_catalog_binding_is_byte_idempotent_when_already_exact(self) -> None:
+        import subprocess
+        import sys
+
+        block = self.script().split("<<'PYBROKER'", 1)[1].split("PYBROKER", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            broker = root / "openclaw.json"
+            broker.write_text("{}\n", encoding="utf-8")
+            config = root / "service.json"
+            value = {"owner": {"signature": "preserve"}, "control": {"config": {
+                "cockpit": {"openclaw_config_path": str(broker)}}}}
+            config.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+            before = config.read_bytes()
+            for _ in range(2):
+                result = subprocess.run(
+                    [sys.executable, "-", str(config), str(broker)], input=block,
+                    capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(before, config.read_bytes())
+
     def test_the_script_parses(self) -> None:
         import subprocess
 

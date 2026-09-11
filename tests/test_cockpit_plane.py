@@ -435,6 +435,37 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertFalse(second["service_config_changed"])
         self.assertEqual(json.loads(config.read_text())["control"]["config"]["cockpit"], first["cockpit"])
 
+    def test_setup_preserves_valid_existing_gateway_path_and_exact_bytes(self) -> None:
+        root = (self.c.root / "svc-preserved").resolve(); root.mkdir()
+        broker = root / "openclaw.json"
+        config = root / "service.json"
+        cockpit = {
+            "core_db": str(root / "core.sqlite"),
+            "state_dir": str(root),
+            "heartbeat_path": str(root / "run" / "heartbeat.json"),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "journal_path": str(root / "cockpit" / "journal.sqlite"),
+            "model_config_path": str(root / "m.json"),
+            "openclaw_config_path": str(broker),
+        }
+        config.write_text(json.dumps({
+            "core_db": cockpit["core_db"],
+            "heartbeat_path": cockpit["heartbeat_path"],
+            "scheduler_db": cockpit["scheduler_db"],
+            "control": {"config": {
+                "research_review": {
+                    "document_extraction_model_config_path": cockpit["model_config_path"]},
+                "cockpit": cockpit,
+            }},
+        }, indent=2) + "\n", encoding="utf-8")
+        before = config.read_bytes()
+        first = install_cockpit(config)
+        second = install_cockpit(config)
+        self.assertFalse(first["service_config_changed"])
+        self.assertFalse(second["service_config_changed"])
+        self.assertEqual(str(broker), first["cockpit"]["openclaw_config_path"])
+        self.assertEqual(before, config.read_bytes())
+
     def test_unwrap_json_object_tolerates_fences_and_prose(self) -> None:
         self.assertEqual(unwrap_json_object('```json\n{"a": 1}\n```'), {"a": 1})
         self.assertEqual(unwrap_json_object('Sure. {"a": [1, 2]} That is all.'), {"a": [1, 2]})

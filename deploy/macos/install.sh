@@ -994,7 +994,7 @@ from pathlib import Path
 path, broker = Path(sys.argv[1]), sys.argv[2]
 config = json.loads(path.read_text(encoding="utf-8"))
 cockpit = ((config.get("control") or {}).get("config") or {}).get("cockpit")
-if isinstance(cockpit, dict):
+if isinstance(cockpit, dict) and cockpit.get("openclaw_config_path") != broker:
     cockpit["openclaw_config_path"] = broker
     path.write_text(
         json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
