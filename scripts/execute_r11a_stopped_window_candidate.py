@@ -355,11 +355,11 @@ class Orchestrator:
         # this captured loaded set, including a failure part-way through stop.
         self.stopped = True
         for label in reversed(LABELS[1:]): self.stop(label)
+        self.stop(LABELS[0])
         self.command(["/opt/homebrew/bin/python3", str(source / "src/dalton_core/controller_singleton.py"),
                       "--check", "--config", str(SERVICE_CONFIG)])
         self.command(["/opt/homebrew/bin/python3", str(source / "src/dalton_core/launch_drain.py"),
                       "--state-dir", str(STATE), "--timeout", "600"])
-        self.stop(LABELS[0])
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         rollback = self.packet / f"deploy-rollback-{stamp}"
         rollback.mkdir(mode=0o700); self.rollback_root = rollback
@@ -405,6 +405,21 @@ class Orchestrator:
         self.command([str(VENV / "bin/python"), str(retention), "--service-config", str(SERVICE_CONFIG),
                       "--expected-before-sha256", sha(artifacts["service_config_before"]),
                       "--receipt", str(self.rollback_root / "retention-install-receipt.json")])
+        rendered = self.rollback_root / "reviewed-rendered-plists"
+        self.command([str(VENV / "bin/python"), "-m", "dalton_core.macos_launchagent",
+                      "--launch-agents-dir", str(rendered),
+                      "--python-env-bin", str(VENV / "bin"),
+                      "--state-dir", str(STATE), "--config", str(SERVICE_CONFIG),
+                      "--log-dir", str(HOME / "Library/Logs/Dalton")])
+        rendered_hashes = {label: sha(rendered / f"{label}.plist")
+                           for label in LABELS
+                           if (rendered / f"{label}.plist").is_file()}
+        initial_path = self.rollback_root / "initial-state.json"
+        initial = load_json(initial_path)
+        initial["reviewed_rendered_plist_sha256"] = rendered_hashes
+        replacement = initial_path.with_name(".initial-state.rendered")
+        replacement.write_text(json.dumps(initial, indent=2) + "\n", encoding="utf-8")
+        os.replace(replacement, initial_path)
         env = dict(os.environ)
         env.update({"DALTON_STARTUP_TIMEOUT_SECONDS": "900", "DRAIN_TIMEOUT": "600"})
         self.command(["/bin/zsh", str(source / "deploy/macos/install.sh")], env=env)
@@ -431,8 +446,9 @@ class Orchestrator:
         initial = load_json(self.rollback_root / "initial-state.json")
         for label, present in initial["plists"].items():
             target = LAUNCH_AGENTS / f"{label}.plist"
-            need(target.is_file() == present and not target.is_symlink()
-                 and (not present or sha(target) == initial["plist_sha256"][label]),
+            rendered_hash = initial["reviewed_rendered_plist_sha256"].get(label)
+            need(target.is_file() == (rendered_hash is not None) and not target.is_symlink()
+                 and (rendered_hash is None or sha(target) == rendered_hash),
                  f"installed LaunchAgent bytes differ: {label}")
         need([label for label in LABELS if self.loaded(label)] == self.initially_loaded,
              "installed service set differs from the stopped-window precondition")
@@ -501,11 +517,14 @@ class Orchestrator:
         preserved_unknown_databases = sorted(current_databases - expected_databases)
         inventory = initial["plists"]
         plist_hashes = initial["plist_sha256"]
+        rendered_hashes = initial.get("reviewed_rendered_plist_sha256", {})
         for label in LABELS:
             target = LAUNCH_AGENTS / f"{label}.plist"
             if target.exists():
+                allowed = {plist_hashes[label]} if inventory[label] else set()
+                if label in rendered_hashes: allowed.add(rendered_hashes[label])
                 need(target.is_file() and not target.is_symlink()
-                     and inventory[label] and sha(target) == plist_hashes[label],
+                     and sha(target) in allowed,
                      f"LaunchAgent changed outside reviewed installer output: {label}")
             else:
                 need(inventory[label] or not target.is_symlink(),
