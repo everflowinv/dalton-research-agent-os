@@ -154,7 +154,9 @@ def _process_started_at(pid: int) -> float | None:
         return None
 
 
-def _ticket_process_matches(record: dict[str, Any]) -> bool | None:
+def _ticket_process_matches(
+    record: dict[str, Any], ticket_path: Path | None = None,
+) -> bool | None:
     """True/False for proved identity; None when the OS cannot prove it."""
 
     pid = record.get("pid")
@@ -179,11 +181,16 @@ def _ticket_process_matches(record: dict[str, Any]) -> bool | None:
     process_time = _process_started_at(pid)
     if process_time is None:
         return command_match
-    # The ticket is written immediately after Popen. Whole-second macOS ps
-    # truncates the birth time, so allow the process to precede the ticket by
-    # three seconds. A process born after the ticket is definitively a reused
-    # PID even when argv is identical.
-    return ticket_time - 3.0 <= process_time <= ticket_time
+    if ticket_path is None:
+        return command_match
+    try:
+        written_time = ticket_path.stat().st_mtime
+    except OSError:
+        return command_match
+    # Launchers capture started_at before filesystem preparation/Popen and
+    # write ticket.json after Popen. The child must have been born inside that
+    # interval. One second on either side covers whole-second BSD ps output.
+    return ticket_time - 1.0 <= process_time <= written_time + 1.0
 
 
 def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
@@ -207,7 +214,7 @@ def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
                 continue
             if not _pid_alive(record.get("pid")):
                 continue
-            identity = _ticket_process_matches(record)
+            identity = _ticket_process_matches(record, ticket_path)
             if identity is False:
                 continue
             found.append({

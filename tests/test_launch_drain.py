@@ -164,15 +164,33 @@ class LaunchDrainTests(unittest.TestCase):
         record = {"pid": os.getpid(), "command": ["python3", "child.py"],
                   "started_at": "2026-09-11T01:00:00+00:00"}
         ticket_epoch = datetime.fromisoformat(record["started_at"]).timestamp()
+        ticket_path = mock.Mock()
+        ticket_path.stat.return_value.st_mtime = ticket_epoch + 10
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
-             mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 3):
-            self.assertTrue(_ticket_process_matches(record))
+             mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 1):
+            self.assertTrue(_ticket_process_matches(record, ticket_path))
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
-             mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 3.001):
-            self.assertFalse(_ticket_process_matches(record))
+             mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 1.001):
+            self.assertFalse(_ticket_process_matches(record, ticket_path))
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
-             mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch + 0.001):
-            self.assertFalse(_ticket_process_matches(record))
+             mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch + 11.001):
+            self.assertFalse(_ticket_process_matches(record, ticket_path))
+
+    def test_delayed_launch_inside_ticket_write_interval_is_live(self) -> None:
+        from dalton_core.launch_drain import _ticket_process_matches
+        from datetime import datetime
+        record = {"pid": os.getpid(), "command": ["python3", "child.py"],
+                  "started_at": "2026-09-11T01:00:00+00:00"}
+        started = datetime.fromisoformat(record["started_at"]).timestamp()
+        ticket_path = mock.Mock()
+        ticket_path.stat.return_value.st_mtime = started + 11
+        with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
+             mock.patch("dalton_core.launch_drain._process_started_at", return_value=started + 10):
+            self.assertTrue(_ticket_process_matches(record, ticket_path))
+        ticket_path.stat.side_effect = OSError("identity unavailable")
+        with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=None), \
+             mock.patch("dalton_core.launch_drain._process_started_at", return_value=started + 10):
+            self.assertIsNone(_ticket_process_matches(record, ticket_path))
 
     def test_python_interpreter_alias_is_accepted_on_proc(self) -> None:
         from dalton_core.launch_drain import _process_command_matches
