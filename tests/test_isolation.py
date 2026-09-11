@@ -23,6 +23,9 @@ class IsolationTests(unittest.TestCase):
         offenders: list[str] = []
         bridge_allowances = {
             "legacy_migration.py": {"workspace-chem", "coverage.db"},
+            # Explicit network bridge: resolves only beside the supplied broker
+            # socket (or an explicit config path), never a global home directory.
+            "web_search_provider.py": {"openclaw.json"},
         }
 
         for path in sorted(PACKAGE_ROOT.rglob("*.py")):

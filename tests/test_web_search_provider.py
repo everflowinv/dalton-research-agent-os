@@ -37,9 +37,15 @@ class ProviderSelectionTests(unittest.TestCase):
 
     def test_rehearsal_never_reads_live_config(self):
         self.config.write_text("not json")
-        self.assertEqual(resolve_web_search_provider(
-            networked=False, openclaw_config_path=self.config,
-        ), "gemini")
+        with patch.object(Path, "read_text", side_effect=AssertionError("unexpected host read")):
+            self.assertEqual(resolve_web_search_provider(
+                networked=False, openclaw_config_path=self.config,
+            ), "gemini")
+
+    def test_network_without_explicit_host_never_guesses_home(self):
+        with patch.object(Path, "read_text", side_effect=AssertionError("unexpected host read")):
+            with self.assertRaises(WebSearchProviderConfigurationError):
+                resolve_web_search_provider(networked=True)
 
     def test_missing_or_invalid_selection_refuses_without_leaking_config(self):
         for body in ({}, {"tools": {"web": {"search": {"provider": "secret invalid"}}}}):
