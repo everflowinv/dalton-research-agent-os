@@ -72,6 +72,8 @@ from tests.test_model_forecast_driver import (
     QUARTERS,
     REVENUE_CONCEPT,
     SERIES,
+    SGA_CONCEPT,
+    TAX_CONCEPT,
     filed_quarter,
     ledger,
     model,
@@ -80,6 +82,49 @@ from tests.test_model_forecast_driver import (
 
 ACN = "company:sec-cik:0001467373"
 OWNER = "human:owner"
+OPERATING_CONCEPT = "us-gaap:OperatingIncomeLoss"
+NET_CONCEPT = "us-gaap:NetIncomeLoss"
+
+
+def statement_structure(*, full=False):
+    accession = "0001467373-26-000001"
+    def filed(ref, role, concept, method, base=None):
+        return {"ref": ref, "role": role, "label": ref, "kind": "filed",
+                "concept": concept, "statement": "income", "unit": "usd",
+                "period_kind": "duration", "annual_semantics": "sum_quarters",
+                "forecast_method": method, "forecast_base_ref": base}
+    def derived(ref, role):
+        return {"ref": ref, "role": role, "label": ref, "kind": "derived",
+                "concept": None, "statement": "income", "unit": "usd",
+                "period_kind": "duration", "annual_semantics": "sum_quarters",
+                "forecast_method": "formula", "forecast_base_ref": None}
+    lines = [
+        filed("revenue", "revenue", REVENUE_CONCEPT, "quarterly_growth"),
+        filed("cost", "cost_of_revenue", COST_CONCEPT, "share_of_line", "revenue"),
+    ]
+    operating_terms = [
+        {"line_ref": "revenue", "coefficient": "1"},
+        {"line_ref": "cost", "coefficient": "-1"},
+    ]
+    if full:
+        lines.append(filed("sga", "operating_expense", SGA_CONCEPT,
+                           "share_of_line", "revenue"))
+        operating_terms.append({"line_ref": "sga", "coefficient": "-1"})
+    lines.append(derived("operating", "operating_income"))
+    formulas = [{"output_ref": "operating", "operator": "sum",
+                 "terms": operating_terms, "tie_out_concept": OPERATING_CONCEPT,
+                 "evidence_refs": [accession]}]
+    if full:
+        lines.extend([
+            filed("tax", "income_tax_expense", TAX_CONCEPT,
+                  "share_of_line", "operating"),
+            derived("net", "net_income"),
+        ])
+        formulas.append({"output_ref": "net", "operator": "sum", "terms": [
+            {"line_ref": "operating", "coefficient": "1"},
+            {"line_ref": "tax", "coefficient": "-1"},
+        ], "tie_out_concept": NET_CONCEPT, "evidence_refs": [accession]})
+    return {"schema_version": "0.1", "lines": lines, "formulas": formulas}
 
 
 class PublishedLineTests(unittest.TestCase):
@@ -209,6 +254,19 @@ class LaneStateTests(unittest.TestCase):
             authorization=authorization, attempt=self._filed - 1)
         self.missions.mark_statement_dispatch_launched(
             dispatch["dispatch_id"], f"sec-financials-run:{self._filed:024d}")
+        series = dict(series)
+        if REVENUE_CONCEPT in series and COST_CONCEPT in series:
+            operating = [Decimal(revenue) - Decimal(cost)
+                         for revenue, cost in zip(series[REVENUE_CONCEPT],
+                                                  series[COST_CONCEPT])]
+            if SGA_CONCEPT in series:
+                operating = [value - Decimal(sga)
+                             for value, sga in zip(operating, series[SGA_CONCEPT])]
+            series[OPERATING_CONCEPT] = [str(value) for value in operating]
+            if TAX_CONCEPT in series:
+                series[NET_CONCEPT] = [str(value - Decimal(tax))
+                                       for value, tax in zip(operating,
+                                                             series[TAX_CONCEPT])]
         lines = []
         for concept, values in series.items():
             for (start, end), value in zip(quarters, values):
@@ -240,7 +298,7 @@ class LaneStateTests(unittest.TestCase):
     def record_spec(self) -> dict:
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
         body = {
-            "schema_version": "0.2",
+            "schema_version": "0.3",
             "revenue_anchor_concept": REVENUE_CONCEPT,
             "assessment": "Delivery revenue times realised rate, less delivery cost.",
             "revenue_drivers": [{
@@ -261,6 +319,7 @@ class LaneStateTests(unittest.TestCase):
             "operating_metrics": [],
             "horizon": {"historical_quarters": 12, "forecast_quarters": 4,
                         "because": "Three years spans the cycle."},
+            "financial_statement_structure": statement_structure(),
         }
         return self.missions.record_company_model_spec(
             spec_from_response(state, body, decided_by="automation:coverage-mission"),
@@ -372,12 +431,12 @@ class LaneStateTests(unittest.TestCase):
         }
 
         current = self.missions.latest_company_model_spec(ACN)
-        replacement = {"schema_version": "0.2", **{
+        replacement = {"schema_version": "0.3", **{
             key: current[key] for key in (
                 "company_ref", "state_hash", "assessment",
                 "revenue_anchor_concept", "revenue_drivers", "expense_lines",
                 "forecast_statements", "operating_metrics", "horizon",
-                "decided_by",
+                "financial_statement_structure", "decided_by",
             )
         }}
         replacement["task_hash"] = "f" * 64
@@ -560,7 +619,7 @@ class LaneStateTests(unittest.TestCase):
         })
         current = self.missions.latest_company_model_spec(ACN)
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
-        body = {"schema_version": "0.2", **{key: current[key] for key in (
+        body = {"schema_version": "0.3", **{key: current[key] for key in (
             "assessment", "revenue_anchor_concept", "revenue_drivers", "expense_lines", "forecast_statements",
             "operating_metrics", "horizon")}}
         body["expense_lines"] = [*body["expense_lines"],
@@ -572,6 +631,7 @@ class LaneStateTests(unittest.TestCase):
              "basis_concept": "us-gaap:IncomeTaxExpenseBenefit",
              "behaviour": "variable_with_revenue", "driver_ref": None,
              "because": "Tax follows taxable income."}]
+        body["financial_statement_structure"] = statement_structure(full=True)
         specification = self.missions.record_company_model_spec(
             spec_from_response(state, body, decided_by="automation:coverage-mission"),
             mission_version_ref=self.mission["id"])

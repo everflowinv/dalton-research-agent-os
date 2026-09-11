@@ -33,11 +33,17 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from .company_model_inputs import build_model_inputs
+from .company_financial_statement_structure import (
+    forecast_structure_binding,
+    materialize_financial_statement_structure,
+)
 from .forecast_reconciliation import METRIC_BINDINGS
 from .model_forecast import (
     DRIVER_FORMULA_HASH,
     DRIVER_FORMULA_REF,
     ModelForecastAuthority,
+    STRUCTURED_DRIVER_FORMULA_HASH,
+    STRUCTURED_DRIVER_FORMULA_REF,
 )
 from .model_forecast_driver import (
     AUTOMATION_ACTOR,
@@ -48,8 +54,10 @@ from .model_forecast_driver import (
     SOURCE_VERSION_KEY,
     actualize_model,
     build_forecast_model,
+    build_structured_forecast_model,
     model_readiness,
     realised_ends,
+    structure_formula_hash,
 )
 from .store import canonical_json, content_hash
 
@@ -104,12 +112,18 @@ def model_digest(spec: Mapping[str, Any], table: Mapping[str, Any]) -> str:
     moved is the same run rather than a second one.
     """
 
+    statement_binding = None
+    if isinstance(spec.get("financial_statement_structure"), Mapping):
+        structure, replay = materialize_financial_statement_structure(spec, table)
+        statement_binding = forecast_structure_binding(structure, replay, table)
     return content_hash({
         "spec_ref": str(spec.get("spec_id") or ""),
         "spec_hash": str(spec.get("content_hash") or ""),
         "inputs_hash": inputs_hash(table),
         "generator_ref": GENERATOR_REF,
-        "formula_hash": DRIVER_FORMULA_HASH,
+        "formula_hash": (DRIVER_FORMULA_HASH if statement_binding is None
+                         else structure_formula_hash(structure, statement_binding)),
+        "forecast_structure_binding": statement_binding,
     })
 
 
@@ -170,6 +184,11 @@ def publish_forecast_lines(
             f"filed unit {record.get('unit')!r} has no forecast line scale")
     company_ref = str(record["company_ref"])
     version_ref = str(record["id"])
+    line_formula_ref, line_formula_hash = (
+        (STRUCTURED_DRIVER_FORMULA_REF, STRUCTURED_DRIVER_FORMULA_HASH)
+        if record.get("schema_version") == "0.3" else
+        (DRIVER_FORMULA_REF, DRIVER_FORMULA_HASH)
+    )
     ahead = {str(item["end"]) for item in (record.get("forecast_periods") or [])}
     published: list[dict[str, Any]] = []
     by_role = {str(item.get("role")): item for item in (record.get("results") or [])}
@@ -193,7 +212,8 @@ def publish_forecast_lines(
             ).fetchone()
             if prior is not None:
                 held = json.loads(prior["record_json"])
-                if (held.get("formula_ref") == DRIVER_FORMULA_REF
+                if (held.get("formula_ref") == line_formula_ref
+                        and held.get("formula_hash") == line_formula_hash
                         and Decimal(str(held.get("value"))) == Decimal(str(cell["value"]))):
                     published.append({
                         "line_ref": line_ref, "version_ref": prior["version_id"],
@@ -216,8 +236,8 @@ def publish_forecast_lines(
                 # fell out of; nothing else would let a reader replay it.
                 scenario_version_ref=version_ref,
                 scenario_version_hash=str(record["content_hash"]),
-                formula_ref=DRIVER_FORMULA_REF,
-                formula_hash=DRIVER_FORMULA_HASH,
+                formula_ref=line_formula_ref,
+                formula_hash=line_formula_hash,
                 actor_ref=actor_ref,
                 version_id=f"forecast-line-version:{line_ref.split('forecast-line:')[-1]}:{number}",
                 prior_version_ref=None if prior is None else prior["version_id"],
@@ -249,6 +269,10 @@ def run_company_forecast(
 
     company_ref = str(spec.get("company_ref"))
     table = build_model_inputs(missions, spec)
+    structure = replay = binding = None
+    if isinstance(spec.get("financial_statement_structure"), Mapping):
+        structure, replay = materialize_financial_statement_structure(spec, table)
+        binding = forecast_structure_binding(structure, replay, table)
     prior = models.latest(company_ref)
     action = pending_action(prior, spec, table)
     backfill_proof = (
@@ -263,18 +287,25 @@ def run_company_forecast(
         body = prior
         action = "filing_proof_backfill"
     elif action in {"first", "new_specification"}:
-        body = build_forecast_model(
+        builder = (build_forecast_model if structure is None
+                   else build_structured_forecast_model)
+        structured = ({} if structure is None else {
+            "structure": structure, "replay": replay, "binding": binding,
+        })
+        body = builder(
             spec, table, actor_ref=actor_ref,
             mission_version_ref=mission_version_ref,
             change_reason=("assumption_review" if action == "new_specification"
-                           else "evidence_thicker"))
+                           else "evidence_thicker"), **structured)
         if action == "new_specification":
             # This is a fresh model identity, while the authority still owns
             # one append-only company history. Bind the append to the head we
             # inspected so a concurrent revision cannot be overwritten.
             body[SOURCE_VERSION_KEY] = str(prior["id"])
     else:
-        body = actualize_model(prior, table, actor_ref=actor_ref)
+        body = actualize_model(
+            prior, table, actor_ref=actor_ref, structure=structure,
+            replay=replay, binding=binding)
     # A comparative quarter can occur in several filings.  Segment arithmetic
     # must use one coherent filing's consolidated row and breakdown members;
     # flattening every filing would add repeated members while the normalizer

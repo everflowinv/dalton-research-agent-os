@@ -80,9 +80,26 @@ DRIVER_FORMULA_HASH = content_hash({
     ),
     "value_kind": "derived_deterministic",
 })
+STRUCTURED_DRIVER_FORMULA_REF = "formula:structured-driver-model-result:1"
+STRUCTURED_DRIVER_FORMULA_HASH = content_hash({
+    "formula_ref": STRUCTURED_DRIVER_FORMULA_REF,
+    "semantics": (
+        "one computed result cell copied from the exact ForecastModelVersion "
+        "bound by scenario_version_ref/hash; that model version freezes its "
+        "validated company financial-statement structure, formula DAG, current "
+        "financial-input replay, drivers, assumptions, and result provenance"
+    ),
+    "binding": (
+        "scenario_version_ref is the forecast-model-version id and "
+        "scenario_version_hash its content hash; no Model Input Ledger "
+        "bindings and no model run"
+    ),
+    "value_kind": "derived_deterministic",
+})
 DERIVED_FORMULA_HASHES: dict[str, str] = {
     FORMULA_REF: FORMULA_HASH,
     DRIVER_FORMULA_REF: DRIVER_FORMULA_HASH,
+    STRUCTURED_DRIVER_FORMULA_REF: STRUCTURED_DRIVER_FORMULA_HASH,
 }
 
 _SCHEMA_PATH = Path(__file__).with_name("model_forecast_schema.sql")
@@ -649,7 +666,9 @@ def driver_model_version_ref(line: Mapping[str, Any]) -> str | None:
     model said this?" without knowing how driver-model lines bind their model.
     """
 
-    if line.get("formula_ref") != DRIVER_FORMULA_REF:
+    if line.get("formula_ref") not in {
+        DRIVER_FORMULA_REF, STRUCTURED_DRIVER_FORMULA_REF,
+    }:
         return None
     ref = line.get("scenario_version_ref")
     return ref if isinstance(ref, str) and ref else None
@@ -661,6 +680,8 @@ __all__ = [
     "DRIVER_FORMULA_HASH",
     "DRIVER_FORMULA_REF",
     "DRIVER_MODEL_VERSION_PREFIX",
+    "STRUCTURED_DRIVER_FORMULA_HASH",
+    "STRUCTURED_DRIVER_FORMULA_REF",
     "FORMULA_HASH",
     "FORMULA_REF",
     "FORECAST_VALUE_KINDS",

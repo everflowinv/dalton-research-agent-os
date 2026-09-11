@@ -8,6 +8,7 @@ import unittest
 
 from dalton_core.company_financial_statement_structure import (
     forecast_structure_binding,
+    materialize_financial_statement_structure,
     replay_historical_structure,
     validate_financial_statement_structure,
 )
@@ -24,6 +25,12 @@ from dalton_core.model_forecast_driver import (
     revise_assumptions,
 )
 from dalton_core.forecast_sensitivity import build_projection, measure_series, recompute
+from dalton_core.company_model_forecast import publish_forecast_lines
+from dalton_core.model_forecast import (
+    ModelForecastAuthority,
+    STRUCTURED_DRIVER_FORMULA_HASH,
+    STRUCTURED_DRIVER_FORMULA_REF,
+)
 from dalton_core.store import DaltonStore
 from tests.test_company_financial_statement_structure import (
     ACCESSION,
@@ -144,11 +151,15 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                             if item["ref"] == line["ref"])
             line["forecast_method"] = original["forecast_method"]
             line["forecast_base_ref"] = original["forecast_base_ref"]
-        structure, replay = validate_financial_statement_structure(
-            candidate, company_spec(), inputs)
+        spec = {**company_spec(), "decided_by": "automation:test",
+                "financial_statement_structure": {
+                    "schema_version": "0.1", "lines": candidate["lines"],
+                    "formulas": candidate["formulas"],
+                }}
+        structure, replay = materialize_financial_statement_structure(spec, inputs)
         binding = forecast_structure_binding(structure, replay, inputs)
         body = build_structured_forecast_model(
-            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+            spec, inputs, structure=structure, replay=replay, binding=binding)
         with tempfile.TemporaryDirectory() as temporary:
             store = DaltonStore(str(Path(temporary) / "core.sqlite"))
             self.addCleanup(store.close)
@@ -170,16 +181,12 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                     "unit": next(iter(line["cells"].values()))["unit"],
                     "basis": "reported", "source_accessions": ["0000000000-26-000002"],
                 }
-            current_candidate = proposal(current)
-            for line in current_candidate["lines"]:
-                original = next(item for item in structure["lines"]
-                                if item["ref"] == line["ref"])
-                line["forecast_method"] = original["forecast_method"]
-                line["forecast_base_ref"] = original["forecast_base_ref"]
-            current_structure, current_replay = validate_financial_statement_structure(
-                current_candidate, company_spec(), current)
+            current_structure, current_replay = materialize_financial_statement_structure(
+                spec, current)
             current_binding = forecast_structure_binding(
                 current_structure, current_replay, current)
+            self.assertNotEqual(current_structure["structure_ref"],
+                                structure["structure_ref"])
             updated = actualize_model(
                 prior, current, structure=current_structure, replay=current_replay,
                 binding=current_binding)
@@ -307,6 +314,31 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertLess(after, before)
         self.assertEqual(record["financial_statement_structure"], structure)
         self.assertEqual(record["formula_hash"], prior["formula_hash"])
+
+    def test_v03_published_line_keeps_exact_structure_formula_authority(self):
+        inputs, structure = self.authority()
+        candidate = proposal(inputs)
+        for line in candidate["lines"]:
+            original = next(item for item in structure["lines"]
+                            if item["ref"] == line["ref"])
+            line["forecast_method"] = original["forecast_method"]
+            line["forecast_base_ref"] = original["forecast_base_ref"]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            record = ForecastModelAuthority(store).publish(body)
+            lines = ModelForecastAuthority(store)
+            published = publish_forecast_lines(lines, record)
+            held = lines.line(published[0]["version_ref"])
+        self.assertEqual(held["formula_ref"], STRUCTURED_DRIVER_FORMULA_REF)
+        self.assertEqual(held["formula_hash"], STRUCTURED_DRIVER_FORMULA_HASH)
+        self.assertEqual(held["scenario_version_ref"], record["id"])
+        self.assertEqual(held["scenario_version_hash"], record["content_hash"])
 
 
 if __name__ == "__main__":
