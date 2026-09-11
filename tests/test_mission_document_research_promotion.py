@@ -166,6 +166,8 @@ class DocumentPromotionTests(unittest.TestCase):
 
     def test_public_persist_hook_rejects_fabricated_ledger_rows(self):
         fixture, executor, admission, _, records, _, _, _ = self._completed()
+        prior_promotions = fixture.store.connection.execute(
+            'SELECT record_json,content_hash FROM mission_document_research_promotions').fetchall()
         fixture.store.connection.executescript(Path(
             promotion_module.__file__).with_name(
                 'mission_document_research_promotion_schema.sql').read_text(encoding='utf-8'))
@@ -229,7 +231,7 @@ class DocumentPromotionTests(unittest.TestCase):
                     cursor, executor, decision, forged_evidence, forged_claim,
                     bundle['material'])
         self.assertEqual(fixture.store.connection.execute(
-            'SELECT count(*) FROM mission_document_research_promotions').fetchone()[0], 0)
+            'SELECT record_json,content_hash FROM mission_document_research_promotions').fetchall(), prior_promotions)
         self.assertEqual(bundle['material']['normalized_payload'][
             'mission_document_admission']['ref'], admission['id'])
 
