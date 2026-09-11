@@ -14,6 +14,30 @@ launch_agents_dir="$HOME/Library/LaunchAgents"
 python_source=${PYTHON_SOURCE:-/opt/homebrew/bin/python3}
 domain="gui/$(id -u)"
 
+# A large existing Core can spend well over thirty seconds replaying durable
+# lane state before its first healthy tick. Keep the wait finite and operator
+# configurable, while leaving dalton-health as the sole success criterion.
+startup_timeout_seconds=${DALTON_STARTUP_TIMEOUT_SECONDS:-180}
+if [[ "$startup_timeout_seconds" != <-> ]] \
+    || (( startup_timeout_seconds < 1 || startup_timeout_seconds > 1800 )); then
+  print -u2 "DALTON_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 1800."
+  exit 2
+fi
+
+wait_for_healthy_runtime() {
+  local elapsed=0
+  while (( elapsed < startup_timeout_seconds )); do
+    if "$venv_dir/bin/dalton-health" --config "$config_path" --max-age-seconds 45; then
+      return 0
+    fi
+    sleep 2
+    (( elapsed += 2 ))
+  done
+  # Preserve the final diagnostic and exit status from dalton-health. A
+  # controller that is still `starting` never becomes an installer success.
+  "$venv_dir/bin/dalton-health" --config "$config_path" --max-age-seconds 45
+}
+
 # Validate every independently verified model pair before install changes the
 # filesystem, Python environment, or running services.
 validate_model_pair() {
@@ -1014,11 +1038,4 @@ if [[ "$control_enabled" == "true" ]]; then
   "$tailscale_source" serve --bg --yes --https="$control_port" "http://$control_host:$control_port"
 fi
 
-for attempt in {1..15}; do
-  if "$venv_dir/bin/dalton-health" --config "$config_path" --max-age-seconds 45; then
-    exit 0
-  fi
-  sleep 2
-done
-
-"$venv_dir/bin/dalton-health" --config "$config_path" --max-age-seconds 45
+wait_for_healthy_runtime
