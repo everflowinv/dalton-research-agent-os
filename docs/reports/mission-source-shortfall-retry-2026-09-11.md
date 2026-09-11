@@ -34,6 +34,25 @@ issuer records and records that were read successfully but yielded no new
 admissible statement. Those categories must remain distinct; a dismissed row
 alone is not evidence of wrong-company attribution.
 
+The latest plan was
+`mission-research-plan:2363e4431d419e144f1d981867f95e14`, created at
+2026-09-11T03:46:33.937808Z with content hash
+`8494f78c4882398f9052505aa36d4d32b861ca114aef47f6a051ac4cc5dda1cf`.
+It explicitly stops EPAM earnings-call acquisition because the shared allowance
+has zero calls remaining and one queued transcript would still leave the floor
+short. It separately stops ACN earnings-call acquisition while the allowance is
+exhausted, placing renewed capacity after EPAM's shorter completion path. It
+also stops the industry-demand and competitive-landscape queues because they
+already hold 57 and 55 documents against floors of three. Before the companion
+acquisition fix, discovery honored these directives but acquisition selected
+already-queued documents without consulting the plan. Thus continued web-page
+work could coexist with an explicit planner stop.
+
+The companion repair filters only exact stopped company/spec pairs from fresh
+and retry acquisition selection. It does not delete or settle those rows. A
+later plan change therefore makes the same rows eligible again, and unrelated
+queued work remains selectable.
+
 Private refs-only evidence is retained outside the repository at
 `stage-checklist-audit-20260911T0350Z.json` (SHA-256
 `1003dddc823435c3f29d8babf17d29c9c28ff0a9d2c2f888c8d2bf858fd14326`).
