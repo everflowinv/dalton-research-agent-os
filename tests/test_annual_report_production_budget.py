@@ -17,6 +17,10 @@ from dalton_core.annual_report_runtime import (
     load_annual_report_model_configs,
     plan_model_execution,
 )
+from dalton_core.annual_report_qualitative import (
+    VERIFIER_OUTPUT_SCHEMA,
+    VERIFIER_PROVIDER_SCHEMA_HASH,
+)
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.model_router import ModelRouter
 from dalton_core.store import canonical_json
@@ -321,6 +325,25 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
         self.assertEqual(len(broker.requests), 3)
         self.assertEqual(
             {request["queueWaitMs"] for request in broker.requests}, {600_000}
+        )
+        structured = broker.requests[-1]["requiredControls"]["structuredOutput"]
+        provider_schema = json.loads(
+            (Path(__file__).parents[1] / "src" / "dalton_core" /
+             "annual-report-verifier-provider-output-v0.1.schema.json").read_text(
+                 encoding="utf-8"
+             )
+        )
+        self.assertEqual(
+            structured["schemaName"],
+            "annual_report_verifier_provider_output_v0_1",
+        )
+        self.assertEqual(structured["jsonSchema"], provider_schema)
+        self.assertEqual(structured["schemaHash"], VERIFIER_PROVIDER_SCHEMA_HASH)
+        # The provider projection is portable; the trusted parser still uses
+        # the stricter internal contract after the response returns.
+        self.assertEqual(
+            VERIFIER_OUTPUT_SCHEMA["properties"]["schema_version"],
+            {"const": "0.1"},
         )
 
         core_connection = sqlite3.connect(state / "core.sqlite")

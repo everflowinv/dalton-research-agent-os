@@ -1,4 +1,6 @@
 {
+  "$id": "https://dalton.local/schemas/annual-report-verifier-provider-output-v0.1.schema.json",
+  "title": "AnnualReportVerifierProviderOutputV0.1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,7 +11,9 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "0.1"
+      "enum": [
+        "0.1"
+      ]
     },
     "verdict": {
       "enum": [
@@ -18,9 +22,13 @@
       ]
     },
     "verified_statement": {
-      "type": [
-        "string",
-        "null"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "findings": {
@@ -35,8 +43,7 @@
         ],
         "properties": {
           "code": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "severity": {
             "enum": [
@@ -46,8 +53,7 @@
             ]
           },
           "detail": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           }
         }
       }

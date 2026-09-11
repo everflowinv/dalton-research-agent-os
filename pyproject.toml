@@ -118,6 +118,7 @@ dalton_core = [
   "investment-memo-verifier-provider-output-v0.1.schema.json",
   "debate-map-verifier-provider-output-v0.1.schema.json",
   "conviction-call-verifier-provider-output-v0.1.schema.json",
+  "annual-report-verifier-provider-output-v0.1.schema.json",
   "call_budget_defaults.json",
   "run_budget_defaults.json",
   "dashboard.html",

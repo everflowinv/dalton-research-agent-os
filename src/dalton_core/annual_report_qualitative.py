@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from datetime import timedelta, timezone
 from decimal import Decimal
+from importlib import resources
 from typing import Any
 
 from .contracts import ResultEnvelope, WorkOrder
@@ -79,7 +80,14 @@ VERIFIER_OUTPUT_SCHEMA = {
 }
 
 VERIFIER_PROVIDER_CONTRACT_REF = "annual-report-verifier-provider-output-0.1"
-VERIFIER_PROVIDER_SCHEMA_HASH = content_hash(VERIFIER_OUTPUT_SCHEMA)
+_VERIFIER_PROVIDER_SCHEMA_RESOURCE = (
+    "annual-report-verifier-provider-output-v0.1.schema.json"
+)
+VERIFIER_PROVIDER_SCHEMA_HASH = content_hash(json.loads(
+    resources.files("dalton_core")
+    .joinpath(_VERIFIER_PROVIDER_SCHEMA_RESOURCE)
+    .read_text(encoding="utf-8")
+))
 
 
 class AnnualReportQualitativeError(ResearchVerificationError):
