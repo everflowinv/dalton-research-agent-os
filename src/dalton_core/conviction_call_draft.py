@@ -80,6 +80,7 @@ TIMEOUT_SECONDS = 240
 
 MAX_SIGNAL_CHARS = 300
 MAX_STATEMENT_OUT_CHARS = 800
+MAX_VERIFIER_FINDINGS = 8
 
 VERIFIER_VERDICTS: tuple[str, ...] = ("pass", "reject")
 VERIFIER_FINDING_CODES: tuple[str, ...] = (
@@ -532,6 +533,10 @@ def parse_draft(text: Any, table: Mapping[str, Any]) -> dict[str, Any]:
     raw_steps = wire["event_pathway"]
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ConvictionDraftRefused("event_pathway must name at least one signal")
+    if len(raw_steps) > MAX_SIGNALS:
+        raise ConvictionDraftRefused(
+            f"event_pathway carries more than {MAX_SIGNALS} steps"
+        )
     calendar = {row["row_id"]: row for row in table["catalysts"]}
     for index, raw in enumerate(raw_steps):
         step = _closed_reply(raw, _STEP_KEYS, f"event_pathway[{index}]")
@@ -575,6 +580,10 @@ def parse_draft(text: Any, table: Mapping[str, Any]) -> dict[str, Any]:
     raw_falsifiers = wire["falsifiers"]
     if not isinstance(raw_falsifiers, list) or not raw_falsifiers:
         raise ConvictionDraftRefused("falsifiers must name at least one")
+    if len(raw_falsifiers) > MAX_FALSIFIERS:
+        raise ConvictionDraftRefused(
+            f"falsifiers carries more than {MAX_FALSIFIERS} entries"
+        )
     falsifiers: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_falsifiers):
         row = _closed_reply(raw, _FALSIFIER_KEYS, f"falsifiers[{index}]")
@@ -743,7 +752,8 @@ def build_verifier_prompt(
         "A pass verdict has no findings; a reject verdict has at least one.",
         "Use this_is_not_a_disagreement only when there is no supported pricing",
         "difference in the claimed magnitude, timing, probability or valuation.",
-        f"Return at most 8 findings; each detail is at most {MAX_STATEMENT_OUT_CHARS} "
+        f"Return at most {MAX_VERIFIER_FINDINGS} findings; each detail is at most "
+        f"{MAX_STATEMENT_OUT_CHARS} "
         "characters, not words. State the specific unsupported claim concisely.",
     ]
     prompt = "\n".join(lines)
@@ -770,6 +780,10 @@ def parse_verdict(text: Any) -> dict[str, Any]:
     rows = parsed["findings"]
     if not isinstance(rows, list):
         raise ConvictionDraftRefused("findings must be an array")
+    if len(rows) > MAX_VERIFIER_FINDINGS:
+        raise ConvictionDraftRefused(
+            f"findings carries more than {MAX_VERIFIER_FINDINGS} entries"
+        )
     findings: list[dict[str, str]] = []
     for raw in rows:
         if not isinstance(raw, Mapping) or set(raw) != {"code", "detail"}:

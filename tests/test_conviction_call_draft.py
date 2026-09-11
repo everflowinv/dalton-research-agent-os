@@ -192,6 +192,19 @@ class InputTableTests(unittest.TestCase):
         with self.assertRaises(ConvictionDraftRefused):
             parse_draft(json.dumps(good), table())
 
+    def test_prompt_collection_bounds_are_enforced_before_verification(self):
+        from dalton_core.conviction_call import MAX_FALSIFIERS, MAX_SIGNALS
+
+        too_many_steps = json.loads(draft_reply())
+        too_many_steps["event_pathway"] *= MAX_SIGNALS + 1
+        with self.assertRaisesRegex(ConvictionDraftRefused, "more than 8 steps"):
+            parse_draft(json.dumps(too_many_steps), table())
+
+        too_many_falsifiers = json.loads(draft_reply())
+        too_many_falsifiers["falsifiers"] *= MAX_FALSIFIERS + 1
+        with self.assertRaisesRegex(ConvictionDraftRefused, "more than 8 entries"):
+            parse_draft(json.dumps(too_many_falsifiers), table())
+
 
 class ParseDraftTests(unittest.TestCase):
     def setUp(self):
@@ -380,6 +393,19 @@ class VerifierTests(unittest.TestCase):
         with self.assertRaises(ConvictionDraftRefused):
             parse_verdict(json.dumps({"verdict": "reject", "findings": [
                 {"code": "i_do_not_like_it", "detail": "x"}]}))
+
+    def test_more_findings_than_the_prompt_bound_are_refused(self):
+        from dalton_core.conviction_call_draft import MAX_VERIFIER_FINDINGS
+
+        finding = {
+            "code": "our_view_not_in_the_thesis",
+            "detail": "unsupported",
+        }
+        with self.assertRaisesRegex(ConvictionDraftRefused, "more than 8 entries"):
+            parse_verdict(json.dumps({
+                "verdict": "reject",
+                "findings": [finding] * (MAX_VERIFIER_FINDINGS + 1),
+            }))
 
     def test_a_verifier_that_rewrites_instead_of_judging_is_refused(self):
         with self.assertRaises(ConvictionDraftRefused):
