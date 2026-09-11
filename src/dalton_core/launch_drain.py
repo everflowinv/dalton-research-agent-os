@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,113 @@ def _pid_alive(pid: Any) -> bool:
     return not _is_zombie(pid)
 
 
+def _process_command_matches(pid: int, expected: list[Any]) -> bool | None:
+    """Compare a live process to recorded argv; None means unavailable."""
+
+    try:
+        proc = Path("/proc") / str(pid) / "cmdline"
+        if proc.is_file():
+            raw = proc.read_bytes()
+            if not raw:
+                return None
+            actual = [part.decode() for part in raw.split(b"\0") if part]
+            wanted = [str(part) for part in expected]
+            if not actual:
+                return None
+            actual_name = Path(actual[0]).name.lower()
+            wanted_name = Path(wanted[0]).name.lower()
+            executable_matches = (
+                actual_name == wanted_name
+                or (actual_name.startswith("python") and wanted_name.startswith("python"))
+            )
+            return executable_matches and actual[1:] == wanted[1:]
+        completed = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return None
+        rendered = completed.stdout.strip()
+        wanted_rendered = " ".join(str(part) for part in expected)
+        if rendered == wanted_rendered:
+            return True
+        # BSD ps loses argv boundaries and quoting. When the executable or an
+        # argument contains spaces, a non-equal rendering is ambiguous and
+        # cannot prove PID reuse.
+        if any(" " in str(part) for part in expected):
+            return None
+        executable, separator, arguments = rendered.partition(" ")
+        wanted_executable = Path(str(expected[0])).name.lower()
+        actual_executable = Path(executable).name.lower()
+        executable_matches = (
+            actual_executable == wanted_executable
+            or (actual_executable.startswith("python")
+                and wanted_executable.startswith("python"))
+        )
+        if not executable_matches:
+            return False
+        return bool(separator and arguments == " ".join(str(part) for part in expected[1:]))
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _process_started_at(pid: int) -> float | None:
+    """Best-effort process start timestamp on Linux and macOS."""
+
+    try:
+        proc_stat = Path("/proc") / str(pid) / "stat"
+        if proc_stat.is_file():
+            fields = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            start_ticks = int(fields[19])
+            boot_line = next(
+                line for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines()
+                if line.startswith("btime ")
+            )
+            return float(boot_line.split()[1]) + start_ticks / float(os.sysconf("SC_CLK_TCK"))
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return None
+        parsed = time.strptime(completed.stdout.strip(), "%a %b %d %H:%M:%S %Y")
+        return time.mktime(parsed)
+    except (OSError, StopIteration, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _ticket_process_matches(record: dict[str, Any]) -> bool | None:
+    """True/False for proved identity; None when the OS cannot prove it."""
+
+    pid = record.get("pid")
+    command = record.get("command")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    command_match: bool | None = None
+    if isinstance(command, list) and command:
+        command_match = _process_command_matches(pid, command)
+        if command_match is False:
+            return False
+    started = record.get("started_at")
+    if not isinstance(started, str):
+        return command_match
+    try:
+        parsed = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return command_match
+        ticket_time = parsed.timestamp()
+    except ValueError:
+        return command_match
+    process_time = _process_started_at(pid)
+    if process_time is None:
+        return command_match
+    # The ticket is written immediately after Popen. Whole-second macOS ps
+    # truncates the birth time, so allow the process to precede the ticket by
+    # three seconds. A process born after the ticket is definitively a reused
+    # PID even when argv is identical.
+    return ticket_time - 3.0 <= process_time <= ticket_time
+
+
 def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
     """Tickets that say ``running`` and whose pid is still alive."""
 
@@ -98,6 +206,9 @@ def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
             if not isinstance(record, dict) or record.get("status") != "running":
                 continue
             if not _pid_alive(record.get("pid")):
+                continue
+            identity = _ticket_process_matches(record)
+            if identity is False:
                 continue
             found.append({
                 "lane": name,
