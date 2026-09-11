@@ -446,6 +446,9 @@ def export_fund_workbook(
     if not periods:
         periods = sorted({c["period"]["end"] for r in model["results"] for c in r["cells"]})
     history = list(model["history_periods"])
+    display_currency = str(model["currency"]).upper()
+    if re.fullmatch(r"[A-Z]{3}", display_currency) is None:
+        raise FundWorkbookExportError("forecast model currency must be an ISO code")
     calendar_binding = _calendar_binding(calendar_binding)
     annual_groups = _fiscal_groups(periods, calendar_binding, set(history))
     if model.get("schema_version") == "0.3" and calendar_binding is not None:
@@ -479,7 +482,13 @@ def export_fund_workbook(
     template_plan = build_fund_xlsx_template_plan(
         sheet_names={"valuation": "Valuation", "financials": "Financials", "driver": "Driver"},
         annual_periods=displayed_annual_labels, quarterly_periods=quarter_labels,
-        unit_labels={"financials": "(USD MM)", "driver": "(US$mm)"},
+        unit_labels={
+            "financials": f"({display_currency} MM)",
+            "driver": (
+                "(US$mm)" if display_currency == "USD"
+                else f"({display_currency} mm)"
+            ),
+        },
     )
     annual_columns = {
         original: item["column"]
@@ -555,7 +564,7 @@ def export_fund_workbook(
                 if isinstance(value.get("period_start"), str):
                     history_flow_periods.add((item["ref"], period))
         row += 1
-    driver.cell(row, 2, "Forecast assumptions")
+    driver.cell(row, 2, "Actual ratios / Forecast assumptions")
     template_row_styles["driver"].append({"row": row, "style": "section", "level": 1})
     row += 1
     assumption_cells: dict[str, str] = {}
@@ -608,7 +617,10 @@ def export_fund_workbook(
                 driver.cell(row, ci, _number(assumption["value"]))
                 template_cell_styles["driver"].append({
                     "range": driver.cell(row, ci).coordinate,
-                    "style": "assumption_input",
+                    "style": (
+                        "local_formula" if assumption.get("kind") == "actual"
+                        else "assumption_input"
+                    ),
                     "number_kind": _template_number_kind(unit),
                 })
                 assumption_cells[assumption["ref"]] = f"'Driver'!{_col(ci)}{row}"
@@ -900,7 +912,8 @@ def export_fund_workbook(
                         "formula": str(target.value),
                         "model_formula": (
                             "direct_annual_filed_value / 1000000"
-                            if result["unit"].casefold() == "usd"
+                            if re.fullmatch(
+                                r"[a-z]{3}", result["unit"].casefold())
                             or structured_role == "diluted_weighted_average_shares"
                             else "direct_annual_filed_value"
                         ),
@@ -1110,12 +1123,12 @@ def export_fund_workbook(
     debt = (latest_roles.get("total_debt") or {}).get("value")
     scenario_net_cash = (valuation_scenario or {}).get("net_cash")
     summary = [
-        (4, 1, "Current Price", price_value, "per_share"),
+        (4, 1, f"Current Price ({display_currency})", price_value, "per_share"),
         (5, 1, "TSO (MM)", shares_value, "shares"),
-        (2, 4, "Market Cap ($M)", market_cap, "currency"),
-        (3, 4, "Cash ($MM)", cash, "currency"),
-        (4, 4, "Debt ($MM)", debt, "currency"),
-        (5, 4, "Net Cash ($MM)", scenario_net_cash, "currency"),
+        (2, 4, f"Market Cap ({display_currency} M)", market_cap, "currency"),
+        (3, 4, f"Cash ({display_currency} MM)", cash, "currency"),
+        (4, 4, f"Debt ({display_currency} MM)", debt, "currency"),
+        (5, 4, f"Net Cash ({display_currency} MM)", scenario_net_cash, "currency"),
     ]
     for row, column, label, value, kind in summary:
         valuation_ws.cell(row, column, label if value is not None else f"{label} — N/A")
@@ -1135,24 +1148,25 @@ def export_fund_workbook(
         ev_value = (
             _number(market_cap) + _number(debt) - _number(cash)
         ) / FUND_MONETARY_DISPLAY_SCALE
-    valuation_ws.cell(6, 4, "EV ($MM)" if ev_value is not None else "EV ($MM) — N/A")
+    ev_label = f"EV ({display_currency} MM)"
+    valuation_ws.cell(6, 4, ev_label if ev_value is not None else f"{ev_label} — N/A")
     if ev_value is not None:
         valuation_ws.cell(6, 5, ev_value)
         template_cell_styles["valuation"].append({
             "range": "E6", "style": "local_formula", "number_kind": "amount",
         })
     else:
-        gaps.append("valuation summary EV ($MM): authority unavailable")
+        gaps.append(f"valuation summary {ev_label}: authority unavailable")
 
     results_by_role = {
         str(item.get("role") or item.get("ref")): item for item in model["results"]
     }
     annual_blocks = [
-        ("GAAP EPS (USD)", "diluted_eps", "result:diluted_eps", "per_share"),
-        ("Total Revenue (USD MM)", "revenue", "result:revenue", "amount"),
-        ("GAAP Operating Profit (USD MM)", "operating_income",
+        (f"GAAP EPS ({display_currency})", "diluted_eps", "result:diluted_eps", "per_share"),
+        (f"Total Revenue ({display_currency} MM)", "revenue", "result:revenue", "amount"),
+        (f"GAAP Operating Profit ({display_currency} MM)", "operating_income",
          "result:operating_income", "amount"),
-        ("GAAP Net Income (USD MM)", "net_income", "result:net_income", "amount"),
+        (f"GAAP Net Income ({display_currency} MM)", "net_income", "result:net_income", "amount"),
     ]
     valuation_period_cells: list[str] = []
     valuation_row = 8
@@ -1220,7 +1234,8 @@ def export_fund_workbook(
         valuation_ws.cell(valuation_row, 1, "Valuation bridge")
         bridge_rows = [
             ("Selected multiple", _number(scenario["multiple"]), "multiple"),
-            ("Net cash (USD MM)", _template_value(scenario["net_cash"], "USD"), "amount"),
+            (f"Net cash ({display_currency} MM)",
+             _template_value(scenario["net_cash"], display_currency), "amount"),
             ("Diluted shares (MM)",
              _number(scenario["diluted_shares"]) / FUND_MONETARY_DISPLAY_SCALE, "amount"),
             ("Required return", _number(scenario["required_return"]), "percentage"),
@@ -1245,7 +1260,8 @@ def export_fund_workbook(
             model_row = result_rows[target_ref]
             base = f"'Financials'!{_col(annual_col)}{model_row}"
             formulas = [
-                ("Forecast (USD MM)", f"={base}", "cross_sheet_formula", "amount"),
+                (f"Forecast ({display_currency} MM)", f"={base}",
+                 "cross_sheet_formula", "amount"),
                 ("Equity value (MM)",
                  f"=B{output_row}*B{first_bridge_row}+B{first_bridge_row + 1}"
                  if scenario["multiple_kind"] == "ev_revenue"
@@ -1368,7 +1384,13 @@ def export_fund_workbook(
     template_plan = build_fund_xlsx_template_plan(
         sheet_names={"valuation": "Valuation", "financials": "Financials", "driver": "Driver"},
         annual_periods=displayed_annual_labels, quarterly_periods=quarter_labels,
-        unit_labels={"financials": "(USD MM)", "driver": "(US$mm)"},
+        unit_labels={
+            "financials": f"({display_currency} MM)",
+            "driver": (
+                "(US$mm)" if display_currency == "USD"
+                else f"({display_currency} mm)"
+            ),
+        },
         row_styles=template_row_styles, cell_styles=template_cell_styles,
     )
     apply_fund_xlsx_template(wb, template_plan)

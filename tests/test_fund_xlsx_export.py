@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import shutil
 import sqlite3
 import subprocess
@@ -16,7 +17,9 @@ from dalton_core.fund_xlsx_export import (
     export_company_workbook,
     export_fund_workbook,
 )
-from dalton_core.model_forecast_driver import ForecastModelAuthority
+from dalton_core.model_forecast_driver import (
+    ForecastModelAuthority, body_hash as forecast_body_hash,
+)
 from dalton_core.store import DaltonStore, content_hash
 from tests.test_model_forecast_driver import ledger, model, spec
 
@@ -274,6 +277,40 @@ class FundXlsxExportTests(unittest.TestCase):
             if formula_map.cell(row, 1).value == "Monetary display transform"
         )
         self.assertIn("divided by 1,000,000", transform)
+
+    def test_non_usd_model_uses_its_bound_currency_in_reader_labels(self):
+        from openpyxl import load_workbook
+
+        def translate(value):
+            if isinstance(value, dict):
+                return {key: translate(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [translate(item) for item in value]
+            return {"usd": "eur", "usd_per_share": "eur_per_share",
+                    "USD": "EUR"}.get(value, value)
+
+        inputs = translate(copy.deepcopy(self.inputs))
+        candidate = translate(copy.deepcopy(self.model))
+        candidate.pop("status", None)
+        candidate["inputs_hash"] = content_hash(inputs)
+        candidate["body_hash"] = forecast_body_hash(candidate)
+        candidate["content_hash"] = content_hash({
+            key: value for key, value in candidate.items()
+            if key != "content_hash"
+        })
+        export_fund_workbook(
+            self.path, model=candidate, spec=self.specification, inputs=inputs,
+            valuation_scenario=self.scenario(), calendar_binding=self.calendar(),
+        )
+        book = load_workbook(self.path, data_only=False)
+        self.assertEqual(book["Financials"]["A1"].value, "(EUR MM)")
+        self.assertEqual(book["Driver"]["A1"].value, "(EUR mm)")
+        valuation = book["Valuation"]
+        self.assertEqual(valuation["A4"].value, "Current Price (EUR) — N/A")
+        self.assertEqual(valuation["D2"].value, "Market Cap (EUR M) — N/A")
+        self.assertEqual(valuation["D5"].value, "Net Cash (EUR MM)")
+        self.assertEqual(valuation["A8"].value, "GAAP EPS (EUR)")
+        self.assertEqual(valuation["A12"].value, "Total Revenue (EUR MM)")
 
     def test_financial_lines_are_reader_labels_and_audit_keeps_originals(self):
         from openpyxl import load_workbook
