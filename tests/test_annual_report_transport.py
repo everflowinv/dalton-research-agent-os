@@ -301,6 +301,9 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
             clock=clock,
         )
         wire = work_order().to_dict()
+        wire["requested_capabilities"] = [
+            "capability:dalton:model:qualitative-research", "research",
+        ]
         wire["question"] = "Answer from one registered annual report excerpt."
         wire["budget"].update({
             "max_seconds": 600,

@@ -221,10 +221,10 @@ class MissionDocumentResearchTests(unittest.TestCase):
             work_order_ref=work.id,
         )
 
-    def _fixture(self):
+    def _fixture(self, *, auto_commit=False):
         fixture = MissionAnnualFixture(
             self, additional_connected_source=COMPANY_WIKI_SOURCE_REF,
-            company_in_mandate=True,
+            company_in_mandate=True, auto_commit=auto_commit,
         )
         spool = RawSpool(str(fixture.state / "document-research-spool"), max_total_bytes=2_000_000)
         text = (
