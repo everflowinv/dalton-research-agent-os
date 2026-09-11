@@ -685,6 +685,10 @@ class PromptAssemblyTests(AgendaContextTestCase):
                 company_ref=context["company_ref"],
                 cycle_id=self.cycle["cycle_id"],
             )
+        self.assertEqual(parse_candidates(
+            '{"candidates": []}', allowed_source_refs=context["allowed_source_refs"],
+            company_ref=context["company_ref"], cycle_id=self.cycle["cycle_id"]), [])
+        self.assertIn("padding is not research", build_prompt(context["rendered_text"]))
 
 
 if __name__ == "__main__":
