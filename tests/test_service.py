@@ -715,6 +715,39 @@ class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    def test_backup_retention_is_explicit_and_runs_only_after_a_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = {
+                "schema_version": "0.1", "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"), "tick_seconds": 1,
+                "projection_min_interval_seconds": 1, "plugin_retry_seconds": 1,
+                "plugins": [], "backup": {"enabled": True,
+                    "root": str(root / "backups"), "interval_seconds": 86400},
+            }
+            self.assertIsNone(ServiceConfig.from_mapping(raw).backup_keep_latest)
+            for invalid in (0, True, -1):
+                with self.subTest(invalid=invalid), self.assertRaises(ServiceConfigError):
+                    ServiceConfig.from_mapping({
+                        **raw, "backup": {**raw["backup"], "keep_latest": invalid}})
+            raw["backup"]["keep_latest"] = 3
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            retention = {"status": "pruned", "keep_latest": 3,
+                         "deleted_count": 2, "deleted_bytes": 100}
+            with mock.patch.object(service._backup, "snapshot",
+                                   return_value={"snapshot_id": "snapshot-new"}) as snapshot, \
+                    mock.patch.object(service._backup, "prune_verified",
+                                      return_value=retention) as prune:
+                service._run_backup()
+            snapshot.assert_called_once_with()
+            prune.assert_called_once_with(keep_latest=3)
+            self.assertEqual(service._backup_state["last_retention"], retention)
+            self.assertEqual(service._backup_state["state"], "ready")
+
     def test_one_cycle_sweeps_projects_and_renders_without_an_llm(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

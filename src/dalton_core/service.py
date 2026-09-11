@@ -111,6 +111,7 @@ class ServiceConfig:
     control: AgendaControlConfig | None
     backup_root: Path | None
     backup_interval_seconds: float | None
+    backup_keep_latest: int | None
     thesis_impact: ThesisImpactProductionConfig | None
     thesis_impact_interval_seconds: float | None
     # P10h: reading throughput. It lives in the config rather than in the
@@ -234,12 +235,21 @@ class ServiceConfig:
                 )
         backup_root = None
         backup_interval = None
+        backup_keep_latest = None
         backup_raw = raw.get("backup")
         if backup_raw is not None:
-            if not isinstance(backup_raw, Mapping) or set(backup_raw) != {
-                "enabled", "root", "interval_seconds",
-            } or not isinstance(backup_raw["enabled"], bool):
+            backup_fields = {"enabled", "root", "interval_seconds"}
+            if (not isinstance(backup_raw, Mapping)
+                    or set(backup_raw) not in (backup_fields, backup_fields | {"keep_latest"})
+                    or not isinstance(backup_raw["enabled"], bool)):
                 raise ServiceConfigError("backup service config is invalid")
+            if "keep_latest" in backup_raw:
+                keep = backup_raw["keep_latest"]
+                if (isinstance(keep, bool) or not isinstance(keep, int) or keep < 1
+                        or not backup_raw["enabled"]):
+                    raise ServiceConfigError(
+                        "backup.keep_latest must be a positive integer on an enabled backup")
+                backup_keep_latest = keep
             if backup_raw["enabled"]:
                 backup_root = _absolute_path(backup_raw["root"], "backup.root")
                 backup_interval = _positive_number(backup_raw["interval_seconds"], "backup.interval_seconds")
@@ -408,6 +418,7 @@ class ServiceConfig:
             control=control_config,
             backup_root=backup_root,
             backup_interval_seconds=backup_interval,
+            backup_keep_latest=backup_keep_latest,
             thesis_impact=thesis_impact_config,
             thesis_impact_interval_seconds=thesis_impact_interval,
         )
@@ -581,7 +592,8 @@ class DaltonService:
         self._last_backup_monotonic = 0.0
         self._backup_state: dict[str, Any] = {
             "state": "disabled" if self._backup is None else "pending",
-            "last_success_at": None, "last_snapshot_id": None, "last_error": None,
+            "last_success_at": None, "last_snapshot_id": None,
+            "last_retention": None, "last_error": None,
         }
 
     def _sources(self) -> tuple[Any, ...]:
@@ -798,6 +810,15 @@ class DaltonService:
             state="ready", last_success_at=_utc_now(),
             last_snapshot_id=manifest["snapshot_id"], last_error=None,
         )
+        if self.config.backup_keep_latest is not None:
+            try:
+                retention = self._backup.prune_verified(
+                    keep_latest=self.config.backup_keep_latest)
+            except Exception as exc:
+                self._backup_state.update(
+                    state="error", last_error=f"retention {type(exc).__name__}: {exc}")
+                return
+            self._backup_state["last_retention"] = retention
 
     def _build_projection(
         self, source_signature: tuple[Any, ...]
