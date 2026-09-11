@@ -189,7 +189,13 @@ class LaneTests(unittest.TestCase):
             "max_cost_usd": 1.0,
             "max_seconds": 120,
             "max_attempts": 3,
+            "max_elapsed_seconds": 7200,
             "provider_retry": retry,
+            "transport_retry": {
+                "max_definitely_not_sent_retries": 5,
+                "queue_wait_seconds": 600,
+                "retry_backoff_seconds": 2,
+            },
         }
         with self._lane(
             annual_report_manifest_reader=lambda _ticket, _document: {},
@@ -225,6 +231,14 @@ class LaneTests(unittest.TestCase):
             self.assertEqual(
                 lane.executor.annual_report_verifier_worker.provider_retry, retry
             )
+            # One Scheduler attempt routes one provider profile when provider
+            # retry is configured: six safe transport tries each have the
+            # real 600s queue plus 120s provider window, with five backoffs.
+            self.assertEqual(
+                lane.executor.annual_report_draft_worker.lease_seconds, 4330
+            )
+            self.assertEqual(lane.scheduler.max_lease_seconds, 7200)
+            self.assertEqual(lane.scheduler.max_total_lease_seconds, 7200)
 
     def test_production_constructor_refuses_partial_annual_runtime(self) -> None:
         with self.assertRaisesRegex(

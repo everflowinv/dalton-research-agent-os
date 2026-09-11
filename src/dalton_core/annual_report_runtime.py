@@ -40,6 +40,10 @@ def validate_annual_transport_retry(value: Any) -> dict[str, int]:
         raise AnnualReportRuntimeError(
             "transport_retry values must be finite non-negative integers"
         )
+    if normalized["queue_wait_seconds"] > 3600:
+        raise AnnualReportRuntimeError(
+            "transport_retry.queue_wait_seconds exceeds the broker maximum of 3600"
+        )
     return normalized
 
 
@@ -130,7 +134,7 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
         + max(0, attempts - 1) * (0 if retry is None else retry["retry_backoff_seconds"])
     )
     max_elapsed = run.get("max_seconds", default_elapsed)
-    return {
+    execution = {
         "routing_policy_ref": config["routing_policy_ref"],
         "credential_slot_refs": list(config["credential_slot_refs"]),
         "budget_db": config["budget_db"],
@@ -144,6 +148,27 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
         "provider_retry": retry,
         "transport_retry": config.get("transport_retry"),
     }
+    # With provider retry enabled the shared worker routes one candidate per
+    # Scheduler attempt. Refuse a plan that cannot fit even that single
+    # configured queue/call/retry window inside its hard elapsed budget. The
+    # legacy multi-route case is checked later against the actual Router.
+    if retry is not None:
+        transport = config.get("transport_retry") or {
+            "max_definitely_not_sent_retries": 0,
+            "queue_wait_seconds": 0,
+            "retry_backoff_seconds": 0,
+        }
+        tries = int(transport["max_definitely_not_sent_retries"]) + 1
+        required = (
+            tries * (call["timeout_seconds"] + transport["queue_wait_seconds"])
+            + (tries - 1) * transport["retry_backoff_seconds"]
+        )
+        if required > max_elapsed:
+            raise AnnualReportRuntimeError(
+                f"annual-report {purpose} one-attempt transport bound {required}s "
+                f"exceeds run max_seconds {max_elapsed}s"
+            )
+    return execution
 
 
 def adapter_for_config(config: Mapping[str, Any], *, router: Any, purpose: str) -> Any:
@@ -166,19 +191,88 @@ def adapter_for_config(config: Mapping[str, Any], *, router: Any, purpose: str) 
     )
 
 
+def annual_attempt_lease_seconds(
+    model_execution: Mapping[str, Any], *, router: Any, purpose: str
+) -> int:
+    """Return one claim's worst-case broker wall time from frozen authority.
+
+    Provider retries make every paid call a separate Scheduler attempt, so a
+    claim reaches one route.  Legacy plans without that policy can still walk
+    the pinned fallback chain inside one claim; those claims cover every live
+    link the shared worker can visit.  A definitely-not-sent retry is local to
+    each route and therefore multiplies only that route's queue/call window.
+    """
+
+    retry = model_execution.get("transport_retry")
+    transport = (
+        {"max_definitely_not_sent_retries": 0,
+         "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
+        if retry is None else validate_annual_transport_retry(retry)
+    )
+    candidates = 1
+    if model_execution.get("provider_retry") is None:
+        from .model_fallback_chain import (
+            resolve_chain, tier_chain, tier_for,
+        )
+
+        policy = router.get_policy(model_execution["routing_policy_ref"])
+        has_chain = bool(policy.get("fallback_chains")) or purpose in (
+            policy.get("purpose_overrides") or {}
+        )
+        if has_chain:
+            profiles = {item["id"]: item for item in router.latest_profiles()}
+            tier = tier_for(purpose)
+            resolved = resolve_chain(
+                policy, tier=tier, purpose=purpose, profiles=profiles,
+            )
+            chain = (
+                tuple(resolved["chain"])
+                if resolved is not None else tier_chain(tier)
+            )
+            candidates = max(1, len(chain))
+    tries = transport["max_definitely_not_sent_retries"] + 1
+    per_route = (
+        tries * (
+            int(model_execution["max_seconds"])
+            + transport["queue_wait_seconds"]
+        )
+        + (tries - 1) * transport["retry_backoff_seconds"]
+    )
+    required = candidates * per_route
+    maximum = int(model_execution.get(
+        "max_elapsed_seconds",
+        int(model_execution["max_seconds"]) * int(model_execution["max_attempts"]),
+    ))
+    if required > maximum:
+        raise AnnualReportRuntimeError(
+            f"annual-report {purpose} one-attempt transport bound {required}s "
+            f"exceeds Work max_elapsed_seconds {maximum}s"
+        )
+    return required
+
+
 def scheduler_policy(model_executions: tuple[Mapping[str, Any], Mapping[str, Any]]) -> dict[str, Any]:
-    """Scheduler authority for the maximum attempts frozen into either model node."""
+    """Scheduler authority spanning each model Work's hard elapsed bound."""
 
     maximum = max(3, *(int(item["max_attempts"]) for item in model_executions))
-    call_seconds = max(60, *(int(item["max_seconds"]) for item in model_executions))
-    total_lease_seconds = max(300, call_seconds)
+    # Worker claims use their exact queue/call/retry bound.  The Scheduler is
+    # shared by both annual stages and cannot read the Router here, so its
+    # immutable ceiling is the largest already-frozen Work elapsed budget.
+    # This admits the exact claim without creating authority beyond the Work.
+    total_lease_seconds = max(
+        300,
+        *(int(item.get(
+            "max_elapsed_seconds",
+            int(item["max_seconds"]) * int(item["max_attempts"]),
+        )) for item in model_executions),
+    )
     return {
         "max_attempts": maximum,
-        "max_lease_seconds": call_seconds,
+        "max_lease_seconds": total_lease_seconds,
         "max_total_lease_seconds": total_lease_seconds,
         "policy_version_id": "scheduler-policy:registered-annual-report:" + content_hash({
             "max_attempts": maximum,
-            "max_lease_seconds": call_seconds,
+            "max_lease_seconds": total_lease_seconds,
             "max_total_lease_seconds": total_lease_seconds,
         })[:24],
     }
@@ -187,6 +281,7 @@ def scheduler_policy(model_executions: tuple[Mapping[str, Any], Mapping[str, Any
 __all__ = [
     "AnnualReportRuntimeError", "DRAFT_MODEL_CONFIG_NAME",
     "VERIFIER_MODEL_CONFIG_NAME", "adapter_for_config",
+    "annual_attempt_lease_seconds",
     "load_annual_report_model_config", "load_annual_report_model_configs",
     "plan_model_execution", "validate_annual_transport_retry",
     "scheduler_policy",

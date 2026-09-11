@@ -578,16 +578,34 @@ class SecCompanyFactsLane:
                 )
                 self.annual_report_draft_model_execution = draft_config
                 self.annual_report_verifier_model_execution = verifier_config
+                from .annual_report_runtime import annual_attempt_lease_seconds
+
+                try:
+                    draft_lease = annual_attempt_lease_seconds(
+                        draft_config,
+                        router=annual_report_model_router,
+                        purpose="registered_annual_report_draft",
+                    )
+                    verifier_lease = annual_attempt_lease_seconds(
+                        verifier_config,
+                        router=annual_report_model_router,
+                        purpose="registered_annual_report_verifier",
+                    )
+                except Exception as exc:
+                    raise LanePreconditionError(
+                        "annual-report transport/lease policy is invalid"
+                    ) from exc
                 self.annual_report_draft_worker = RegisteredAnnualReportDraftWorker(
                     **common,
                     adapter=annual_report_draft_adapter,
                     routing_policy_ref=draft_config["routing_policy_ref"],
                     credential_slot_refs=draft_config["credential_slot_refs"],
                     provider_retry=draft_config["provider_retry"],
+                    transport_retry=draft_config.get("transport_retry"),
                     budget_store=self.annual_budget,
                     budget_policy_ref=budget_policy_ref,
                     mission_resolver=mission_resolver,
-                    lease_seconds=draft_config["max_seconds"],
+                    lease_seconds=draft_lease,
                 )
                 self.annual_report_verifier_worker = RegisteredAnnualReportVerifierWorker(
                     **common,
@@ -595,10 +613,11 @@ class SecCompanyFactsLane:
                     routing_policy_ref=verifier_config["routing_policy_ref"],
                     credential_slot_refs=verifier_config["credential_slot_refs"],
                     provider_retry=verifier_config["provider_retry"],
+                    transport_retry=verifier_config.get("transport_retry"),
                     budget_store=self.annual_budget,
                     budget_policy_ref=budget_policy_ref,
                     mission_resolver=mission_resolver,
-                    lease_seconds=verifier_config["max_seconds"],
+                    lease_seconds=verifier_lease,
                 )
             self.plans = ResearchPlanAuthority(
                 self.core,

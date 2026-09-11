@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from datetime import timezone
+from datetime import timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -229,6 +229,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
 
     def __init__(self, *, budget_store=None, budget_policy_ref=None,
                  mission_resolver: Callable[[str, str], Mapping[str, Any]] | None = None,
+                 transport_retry: Mapping[str, Any] | None = None,
                  **kwargs):
         """Bind production annual calls to the same durable mission budget.
 
@@ -252,6 +253,13 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
         self.budget_store = budget_store
         self.budget_policy_ref = budget_policy_ref
         self.mission_resolver = mission_resolver
+        if transport_retry is None:
+            self.transport_retry = None
+        else:
+            from .annual_report_runtime import validate_annual_transport_retry
+
+            self.transport_retry = validate_annual_transport_retry(transport_retry)
+        self._production_adapter = production
         self.admission = None
         self._admission_identity = None
         super().__init__(**kwargs)
@@ -268,6 +276,55 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
             raise OpenClawModelAdapterError(
                 "annual-report budget/mission admission rejected"
             ) from exc
+
+    def _before_transport_send(self, work, route, profile):
+        """Recheck the Work deadline at the last boundary before broker send."""
+
+        from .openclaw_model_adapter import OpenClawModelAdapterError
+
+        deadline = self._work_deadline(work)
+        if deadline is not None:
+            queue_seconds = int((self.transport_retry or {}).get(
+                "queue_wait_seconds", 0
+            ))
+            required = int(work.budget["max_seconds"]) + queue_seconds
+            if (self.clock().astimezone(timezone.utc)
+                    + timedelta(seconds=required)
+                    > deadline):
+                raise OpenClawModelAdapterError(
+                    "annual-report Work has insufficient elapsed budget for "
+                    "another broker send"
+                )
+        self._before_model_call(work, route, profile, False)
+
+    def _execute_model(self, work, route, profile):
+        """Retry only adapter-proved pre-send failures within the frozen bound."""
+
+        if not self._production_adapter:
+            return super()._execute_model(work, route, profile)
+        from .openclaw_model_adapter import BrokerDefinitelyNotSent
+
+        retry = self.transport_retry or {
+            "max_definitely_not_sent_retries": 0,
+            "queue_wait_seconds": 0,
+            "retry_backoff_seconds": 0,
+        }
+        maximum = retry["max_definitely_not_sent_retries"]
+        for retry_number in range(maximum + 1):
+            try:
+                return self.adapter.execute(
+                    work, route, profile,
+                    before_send=lambda: self._before_transport_send(
+                        work, route, profile
+                    ),
+                )
+            except BrokerDefinitelyNotSent:
+                if retry_number >= maximum:
+                    raise
+                if retry["retry_backoff_seconds"]:
+                    import time
+
+                    time.sleep(retry["retry_backoff_seconds"])
 
     def _admit_model_call(self, work, route, profile, replayed):
         if (work.metadata.get("budget_db") != self.budget_store.path
@@ -384,6 +441,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
             )
         if (metadata.get("routing_policy_ref") != self.routing_policy_ref
                 or metadata.get("credential_slot_refs") != list(self.credential_slot_refs)
+                or metadata.get("transport_retry") != self.transport_retry
                 or metadata.get("prompt_hash") != content_hash(work.question)):
             raise AnnualReportQualitativeError("model WorkOrder routing/prompt binding drifted")
         return work

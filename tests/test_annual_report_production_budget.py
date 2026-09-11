@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from dalton_core.annual_report_runtime import (
@@ -180,13 +181,15 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
 
         def respond(request):
             reply = next(replies)
+            semantic_request = dict(request)
+            semantic_request.pop("queueWaitMs", None)
             if reply == "capacity":
-                return failure_response(request, dispatch_proof={
+                return failure_response(semantic_request, dispatch_proof={
                     "version": "0.1",
                     "state": "definitely_not_sent",
                     "authority": "openclaw-model-broker",
                 })
-            return success_response(request, text=reply)
+            return success_response(semantic_request, text=reply)
 
         broker = FakeBroker(state, respond, connections=3)
         self.addCleanup(broker.close)
@@ -213,7 +216,12 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
                 "max_cost_usd": 2.0,
                 "timeout_seconds": 30,
             },
-            "run_budget": {"max_units": 1, "max_seconds": 90},
+            "run_budget": {"max_units": 1, "max_seconds": 2000},
+            "transport_retry": {
+                "max_definitely_not_sent_retries": 1,
+                "queue_wait_seconds": 600,
+                "retry_backoff_seconds": 2,
+            },
         }
         for path, policy, profile in (
             (state / DRAFT_MODEL_CONFIG_NAME, draft_policy, draft_profile),
@@ -225,7 +233,7 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
                 "credential_slot_refs": [profile["credential_slot_ref"]],
             }
             if path.name == DRAFT_MODEL_CONFIG_NAME:
-                config["run_budget"] = {"max_units": 2, "max_seconds": 90}
+                config["run_budget"] = {"max_units": 2, "max_seconds": 2000}
             path.write_text(canonical_json(config) + "\n", encoding="utf-8")
             os.chmod(path, 0o600)
         configs = load_annual_report_model_configs(state)
@@ -311,6 +319,22 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
         result = json.loads((output / "summary.json").read_text(encoding="utf-8"))
         self.assertTrue(result["ok"], result)
         self.assertEqual(len(broker.requests), 3)
+        self.assertEqual(
+            {request["queueWaitMs"] for request in broker.requests}, {600_000}
+        )
+
+        core_connection = sqlite3.connect(state / "core.sqlite")
+        core_connection.row_factory = sqlite3.Row
+        self.addCleanup(core_connection.close)
+        leases = core_connection.execute(
+            "SELECT issued_at,expires_at FROM scheduler_leases "
+            "WHERE owner_ref='worker:registered-annual-report-model'"
+        ).fetchall()
+        self.assertEqual(len(leases), 3)
+        for lease in leases:
+            issued = datetime.fromisoformat(lease["issued_at"])
+            expires = datetime.fromisoformat(lease["expires_at"])
+            self.assertEqual((expires - issued).total_seconds(), 1262)
 
         connection = sqlite3.connect(budget_path)
         connection.row_factory = sqlite3.Row
