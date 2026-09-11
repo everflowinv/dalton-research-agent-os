@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import string
 import subprocess
 import sys
 import threading
@@ -269,6 +270,21 @@ def _plan_text(value: Any, name: str, *, maximum: int = 200) -> str:
         raise DiscoveryPlanError(f"{name} must be non-empty text (<= {maximum} chars)")
     return value.strip()
 
+def _query_template(value: Any) -> str:
+    template=_plan_text(value,"query_template")
+    fields=[]
+    try:
+        for _,field,format_spec,conversion in string.Formatter().parse(template):
+            if field is not None:
+                if field not in {"name","ticker","aliases","quarter"} or format_spec or conversion:
+                    raise DiscoveryPlanError("query variant placeholders are invalid")
+                fields.append(field)
+    except ValueError as exc:
+        raise DiscoveryPlanError("query variant template braces are invalid") from exc
+    if not fields:
+        raise DiscoveryPlanError("query variant requires a company or period placeholder")
+    return template
+
 
 def _plan_time(value: Any) -> str:
     if not isinstance(value, str):
@@ -401,7 +417,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
             for variant in variants:
                 if not isinstance(variant,Mapping) or set(variant)!={"query_template","filters"}:
                     raise DiscoveryPlanError("query variant has an invalid closed shape")
-                template=_plan_text(variant["query_template"],"query_template")
+                template=_query_template(variant["query_template"])
                 allowed={"{name}","{ticker}","{aliases}","{quarter}"}
                 tokens=set(re.findall(r"\{[^{}]+\}",template))
                 if not tokens or not tokens <= allowed:
@@ -1424,10 +1440,22 @@ class MissionSourceDiscoveryCoordinator:
         )
         if not cadence or cadence == "previous discovery still open":
             return cadence
-        if (shortfall
-                and self._continuation_page(mission["id"], company_ref, spec_ref)):
+        if (shortfall and self._continuation_page(
+                mission["id"], company_ref, spec_ref,
+                missing_periods=self._missing_periods(mission,company_ref,spec))):
             return None
         return cadence
+
+    def _missing_periods(self, mission: Mapping[str,Any], company_ref: str,
+                         spec: Mapping[str,Any]) -> tuple[str,...]:
+        if (self.plan['schema_version'] != DISCOVERY_PLAN_SCHEMA_VERSION_V6
+                or spec.get('document_type') != 'meeting_minutes'):
+            return ()
+        from .mission_stage import evaluate_mission
+        stage=next(row for row in evaluate_mission(self.store.connection,mission)
+                   if row['company_ref']==company_ref)
+        calls=next(row for row in stage['items'] if row['item_ref']=='earnings_calls')
+        return tuple(calls.get('missing_periods') or ())
 
     def _checklist_shortfall(self, mission: Mapping[str, Any], company_ref: str,
                              spec_ref: str) -> bool:
@@ -1500,12 +1528,14 @@ class MissionSourceDiscoveryCoordinator:
                 variant_index=index; break
         if variant_index is None:
             return None
-        if self.selection_launcher is None:
-            return None
-        current=self.selection_launcher.currently_consumed(
-            mission_ref=mission_version_ref,missing_periods_by_company={company_ref:list(missing_periods)})
-        if discoveries[0]['id'] not in current:
-            return None
+        requires_selection=spec.get('document_type')=='meeting_minutes'
+        if requires_selection:
+            if self.selection_launcher is None:
+                return None
+            current=self.selection_launcher.currently_consumed(
+                mission_ref=mission_version_ref,missing_periods_by_company={company_ref:list(missing_periods)})
+            if discoveries[0]['id'] not in current and envelope.get('source_record_refs'):
+                return None
         if continuation is not None:
             return {**continuation,'variant_index':variant_index}
         # A page without a cursor advances only after candidate selection has
@@ -1709,13 +1739,7 @@ class MissionSourceDiscoveryCoordinator:
                 budget = self._budget(authorization["max_alphaengine_calls_24h"])
                 if budget["remaining"] < 1:
                     return {"status": "budget_exhausted", "budget": budget, "skipped": skipped}
-                missing_periods=()
-                if self.plan['schema_version'] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
-                    from .mission_stage import evaluate_mission
-                    company_stage=next(row for row in evaluate_mission(self.store.connection,mission)
-                                       if row['company_ref']==company_ref)
-                    calls=next(row for row in company_stage['items'] if row['item_ref']=='earnings_calls')
-                    missing_periods=tuple(calls.get('missing_periods') or ())
+                missing_periods=self._missing_periods(mission,company_ref,spec)
                 continuation = self._continuation_page(
                     mission["id"], company_ref, spec["spec_ref"],missing_periods=missing_periods)
                 request_date = (
@@ -1930,6 +1954,8 @@ class MissionSourceDiscoveryCoordinator:
                 excluded_needs=stopped_needs,
                 excluded_mission_version_ref=None if mission is None else mission["id"],
                 included_document_refs=current_selection_refs,
+                restricted_spec_refs=tuple(spec['spec_ref'] for spec in self.plan['specs']
+                                           if spec.get('document_type')=='meeting_minutes'),
             )
             retry = document is not None
         if document is None:

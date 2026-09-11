@@ -13,7 +13,8 @@ from typing import Any, Iterable
 
 from .lane_registry import LaunchAgentContext, lane_argv
 from .service import ServiceConfig
-from .mission_source_discovery import SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF, load_discovery_plan
+from .mission_source_discovery import (ALPHAENGINE_SOURCE_REF, SEC_SOURCE_REF,
+                                       WEB_SEARCH_SOURCE_REF, load_discovery_plan)
 from .store import content_hash
 
 
@@ -26,6 +27,7 @@ CONTROL_LABEL = "space.lumos.dalton.control"
 THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
 SEC_PLAN_SELECTOR = "sec-filings-plan-selection-v1.json"
 WEB_PLAN_SELECTOR = "web-search-plan-selection-v1.json"
+ALPHAENGINE_PLAN_SELECTOR = "alphaengine-plan-selection-v1.json"
 
 
 def _selected_discovery_plan(
@@ -79,6 +81,13 @@ def _sec_discovery_plan(state: Path) -> Path:
         default_filename="us-it-services-sec-filings-v1.json",
         source_ref=SEC_SOURCE_REF,
         selector_schema="sec-discovery-plan-selection-0.1", label="SEC")
+
+def _alphaengine_discovery_plan(state: Path) -> Path:
+    return _selected_discovery_plan(
+        state, selector_filename=ALPHAENGINE_PLAN_SELECTOR,
+        default_filename="us-it-services-alphaengine-v1.json",
+        source_ref=ALPHAENGINE_SOURCE_REF,
+        selector_schema="alphaengine-discovery-plan-selection-0.1", label="AlphaEngine")
 
 
 def _web_discovery_plan(state: Path) -> Path:
@@ -236,7 +245,7 @@ def render(
             "--alphaengine-search-governance",
             str(state / "connector-governance" / "alphaengine-search-library-v1.json"),
             "--alphaengine-discovery-plan",
-            str(state / "discovery-plans" / "us-it-services-alphaengine-v1.json"),
+            str(_alphaengine_discovery_plan(state)),
             # P9d-4a: web search discovery.  Same seed-once rule for the
             # proposed governance record and the hash-bound plan.  A networked
             # search needs the host broker below; without it the launcher
