@@ -2,7 +2,15 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-11，02:59 UTC）
+## 当前检查点（2026-09-11，03:03 UTC）
+
+**Writer 的真实 WAL 生命周期修复已合并并独立复核；325 项集成检查通过，准备冻结 R7b。** Writer 在 store executor 线程持有所有明确配置的现存 router，支持多个不同数据库，脱离 planner/scheduler 开关；不创建缺失的可选库。正常关闭、启动中途失败均在同一线程释放 owner。测试覆盖双 router、空闲期 strict reader、停止后 sidecar 释放及启动失败清理。旧的直接调用夹具保留真实外层 owner 与严格只读内部检查，没有放宽只读保护。
+
+此前 13 项失败的根因已在关联测试中关闭，部分 Dossier 的 rubric/freshness 含义保持独立。Live 仍为 R6，所有失败的 R7/R7a 证据和原接受状态均保留；不以候选测试通过冒充已部署。
+
+**Next step：** R7b 同一干净冻结全量、wheel、当前状态副本演练通过后部署，再做配置/代码逐字核对、跨调度周期健康观察和真实 Dossier0.3 证明验收。高阶投资能力与最终视觉继续后排。
+
+## 前一检查点（2026-09-11，02:59 UTC）
 
 **R7 / R7a 全量各有 8 failures、5 errors，均未部署；live 仍是 R6，稳定性修复等待完整验收。** R7 6,864 项、R7a 6,865 项，均 1 skip；失败主要是 WAL 最后一个临时 owner 关闭后缺少 sidecars，ModelSelection/Cockpit 严格只读消费者被拒绝。独立代码与运行审查确认生产 writer 也只有逐请求 ModelRouter，故这是实际生命周期缺口，不能只调整测试夹具。正在让 writer 在 store executor 线程持续持有明确配置的全部现存 router，脱离 planner/scheduler 开关，并覆盖启动失败和关闭清理。
 

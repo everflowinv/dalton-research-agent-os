@@ -39,3 +39,28 @@ No source evidence showed network or model calls inside a Scheduler transaction.
 Constructor schema checks can still briefly require the writer lock, and WAL
 still permits only one writer. Further changes require a new concrete trace;
 this patch does not claim to eliminate every possible Scheduler collision.
+
+## Quiet-period lifecycle correction
+
+The first complete R7/R7a suites exposed another necessary WAL boundary. The
+writer used only request-scoped ModelRouter connections, so after the final
+operation SQLite could remove empty WAL/SHM files while leaving the WAL header.
+A strict read-only Cockpit consumer then correctly refused to open it. This
+was independently reproduced as a production lifecycle gap, not dismissed as
+a fixture problem.
+
+The writer now owns each distinct existing router named by registered model
+configurations or explicit planner/document model configuration. Owners open
+on the store executor thread independently of planner and scheduler enablement;
+no missing optional database is created. Dependent authorities close before
+owners, which close in reverse order on that same thread. If store startup
+fails partway through, same-thread cleanup releases all already opened owners.
+
+Lifecycle tests cover two configured routers with planner disabled, strict
+read-only consumers during quiet periods, sidecar release after explicit stop,
+and an injected startup failure after owner creation. Direct-operation fixtures
+retain an outer real owner and an inner strict reader. The integrated model
+selection, bounded planner, writer service, controller, rehearsal, readiness and
+W4 regression passes 325 tests in 18.669 seconds. An earlier command mistakenly
+named nonexistent `tests.test_writer_server`; the corrected module is
+`tests.test_writer_service`. The failed command was not a product failure.
