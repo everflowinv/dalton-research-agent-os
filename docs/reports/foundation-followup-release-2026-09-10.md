@@ -83,3 +83,13 @@ The first r3 deployment attempt verified/drained all live children and created v
 All five companies now have current metadata-bearing specifications and working real input tables in live. Same-freeze isolated formal publication was extended to all five: ACN 8, CTSH 8, EPAM 8, DXC 8, IBM 12 forecast lines, all with available economic checks, no invariant reasons, and replaying model hashes. This totals 44 isolated forecast lines and does not claim live publication. Evidence SHA-256 `a8be030a66f34a8337e249fbf88a1900f14eb12fb7c8a2521788a66c822ce2d5`.
 
 Next: resolve only the maintenance guard using immutable proof and no ledger mutation, retry the already accepted deployment, then verify actual model publication and Dossier/event execution with the reviewed broker capacity.
+
+## Reviewed maintenance retry, 2026-09-11 00:26 UTC
+
+The exact historical pending record is now bound to its invocation/request/time tuple and SHA-256, with proof that it predates the reviewed gateway process. The maintenance helper permits that unchanged record only; missing, altered or additional pending calls block maintenance. It never writes the journal or authorizes replay. Independent review additionally fixed rollback receipt binding to the accepted proposal; 18 fault/positive tests pass in both reviewer and root execution. Helper SHA-256 `530c4092c15df320acfb6bb1defb87ad8bc8491a08570f4eed3ac327f467512c`, proposal SHA-256 `91b403b4fc1d8af9c4739da39c53c7dff78738914ae0d330842b7fb9e4f20cd2`.
+
+The already accepted r3 retry has started with the original mission verified and 3,588,583,098 bytes required / 6,492,164,096 available. Six older task-owned deployment backups were converted to restricted tar.gz archives only after full member content/metadata comparison and empty open-handle checks; the latest five expanded backup directories remain untouched. All backup contents remain recoverable with private restore receipts.
+
+The historical invocation also exposed an independent pre-existing accounting discrepancy: its unknown completion was settled at zero despite a 1,500,000-micro reservation. That needs a separately reviewed append-only correction; the maintenance exception does not repair accounting or imply a known provider charge.
+
+Next: finish the accepted install, verify source/wheel/configuration and stable service health, then inspect actual formal forecast, Dossier and event records.
