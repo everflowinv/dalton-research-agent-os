@@ -467,6 +467,18 @@ def _unit_was_drafted(record: Mapping[str, Any], unit: str) -> bool:
         return (record.get("variant_view") or {}).get("status") == "drafted"
     return any(item.get("aspect") == unit and item.get("status") == "drafted"
                for item in record.get("sections") or [])
+
+
+def dossier_completeness(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe drafted coverage only; this does not assert quality or freshness."""
+
+    drafted = [unit for unit in UNITS if _unit_was_drafted(record, unit)]
+    unavailable = [unit for unit in UNITS if unit not in drafted]
+    return {
+        "status": "all_units_drafted" if not unavailable else "partial",
+        "drafted_units": len(drafted), "total_units": len(UNITS),
+        "unavailable_units": unavailable,
+    }
 _BINDING_FIELDS = frozenset({
     "constitution_version", "playbook_version", "mission_version_ref",
     "policy_ref", "policy_hash", "causal_chain_hash", "rubric_ref", "rubric_hash",
@@ -1378,6 +1390,7 @@ __all__ = [
     "chain_assignment",
     "company_slug",
     "dossier_artefact",
+    "dossier_completeness",
     "dossier_ref_for",
     "evidence_scope",
     "load_policy",
