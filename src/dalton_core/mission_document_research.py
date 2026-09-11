@@ -155,6 +155,11 @@ class MissionDocumentResearchAuthority:
             self.connection, "dalton_mission_document_research_authorized"
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        # CoverageMissionAuthority installs and migrates its schema in its
+        # constructor.  Do that once while this authority itself is being
+        # initialized: constructing it from a read path would make SQLite's
+        # executescript commit a caller-owned Ledger transaction.
+        self._missions = CoverageMissionAuthority(self.store)
 
     def _planner_origin(
         self, plan: Mapping[str, Any], row: Mapping[str, Any],
@@ -279,7 +284,7 @@ class MissionDocumentResearchAuthority:
             self._authorized = False
 
     def _mission(self, ref: str, digest: str, company_ref: str, source_ref: str) -> dict[str, Any]:
-        missions = CoverageMissionAuthority(self.store)
+        missions = self._missions
         mission = missions.mission(ref)
         active = missions.active_mission(mission["mission_ref"])
         if active["id"] != ref or active["content_hash"] != digest:
@@ -378,7 +383,7 @@ class MissionDocumentResearchAuthority:
         ):
             raise MissionDocumentResearchError("document registration does not match planner strategy")
         mission_ref = plan["mission_version_ref"]
-        mission = CoverageMissionAuthority(self.store).mission(mission_ref)
+        mission = self._missions.mission(mission_ref)
         mission = self._mission(
             mission_ref, mission["content_hash"], inquiry["company_ref"], registration["source_ref"]
         )

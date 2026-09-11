@@ -372,6 +372,36 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "SELECT count(*) FROM mission_document_research_admissions"
         ).fetchone()[0], 1)
 
+    def test_execution_resolution_preserves_caller_owned_ledger_transaction(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admitted = authority.admit_from_plan(**args)
+        connection = fixture.store.connection
+        connection.execute(
+            "CREATE TABLE mission_document_resolution_sentinel(value TEXT NOT NULL)"
+        )
+        connection.commit()
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                "INSERT INTO mission_document_resolution_sentinel VALUES(?)",
+                ("must-rollback",),
+            )
+            resolved = authority.resolve_for_execution(admitted["id"])
+            active = authority.active_budget_mission(admitted["id"])
+            self.assertEqual(resolved["content_hash"], admitted["content_hash"])
+            self.assertEqual(active["id"], admitted["mission_version_ref"])
+            self.assertTrue(connection.in_transaction)
+        finally:
+            connection.rollback()
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM mission_document_resolution_sentinel"
+            ).fetchone()[0],
+            0,
+        )
+
     def test_foreign_question_or_registration_and_stale_source_refused(self):
         fixture, authority, args, registration, launcher = self._fixture()
         with self.assertRaisesRegex(MissionDocumentResearchError, "ResearchQuestionVersion"):
