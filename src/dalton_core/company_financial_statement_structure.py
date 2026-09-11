@@ -13,7 +13,12 @@ from decimal import Decimal
 import re
 from typing import Any, Callable, Mapping, Sequence
 
-from .company_model_series import ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS
+from .company_model_series import (
+    ANNUAL_MAX_DAYS,
+    NINE_MONTH_MAX_DAYS,
+    QUARTER_MAX_DAYS,
+    QUARTER_MIN_DAYS,
+)
 from .store import content_hash
 
 
@@ -335,7 +340,13 @@ def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
                 start = _text(period["period_start"], "note evidence period_start")
                 end = _text(period["period_end"], "note evidence period_end")
                 try:
-                    days = (date.fromisoformat(end) - date.fromisoformat(start)).days
+                    # SEC duration facts and company_model_series use inclusive
+                    # day counts.  The note authority must use the same boundary
+                    # or a one-day period can be accepted by one side and refused
+                    # by the other.
+                    days = (
+                        date.fromisoformat(end) - date.fromisoformat(start)
+                    ).days + 1
                 except ValueError as exc:
                     raise FinancialStatementStructureError(
                         "note evidence period must use ISO dates"
@@ -343,7 +354,7 @@ def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
                 correct_kind = (
                     NINE_MONTH_MAX_DAYS < days <= ANNUAL_MAX_DAYS
                     if wire["applicability_kind"] == "annual"
-                    else 80 <= days <= 100
+                    else QUARTER_MIN_DAYS <= days <= QUARTER_MAX_DAYS
                 )
                 if not correct_kind:
                     raise FinancialStatementStructureError(

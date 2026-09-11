@@ -408,6 +408,51 @@ class FinancialStatementStructureTests(unittest.TestCase):
                 note_evidence=[note], note_evidence_resolver=lambda _ref: note,
             )
 
+    def test_typed_note_period_boundaries_use_inclusive_shared_day_counts(self):
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        valid = (
+            typed_note(kind="quarter", periods=[{
+                "period_start": "2024-01-01", "period_end": "2024-03-20",
+            }]),
+            typed_note(kind="quarter", periods=[{
+                "period_start": "2024-01-01", "period_end": "2024-04-09",
+            }]),
+            typed_note(periods=[{
+                "period_start": "2024-01-01", "period_end": "2024-10-17",
+            }]),
+            typed_note(periods=[{
+                "period_start": "2024-01-01", "period_end": "2025-01-14",
+            }]),
+        )
+        for note in valid:
+            validate_financial_statement_structure(
+                candidate, company_spec(), inputs, note_evidence=[note],
+                note_evidence_resolver=lambda _ref, item=note: item,
+            )
+
+        invalid = (
+            typed_note(kind="quarter", periods=[{
+                "period_start": "2024-01-01", "period_end": "2024-03-19",
+            }]),
+            typed_note(kind="quarter", periods=[{
+                "period_start": "2024-01-01", "period_end": "2024-04-10",
+            }]),
+            typed_note(periods=[{
+                "period_start": "2024-01-01", "period_end": "2024-10-16",
+            }]),
+            typed_note(periods=[{
+                "period_start": "2024-01-01", "period_end": "2025-01-15",
+            }]),
+        )
+        for note in invalid:
+            with self.assertRaisesRegex(
+                FinancialStatementStructureError, "applicability kind",
+            ):
+                validate_financial_statement_structure(
+                    candidate, company_spec(), inputs, note_evidence=[note],
+                    note_evidence_resolver=lambda _ref, item=note: item,
+                )
+
     def test_structure_0_2_replays_with_its_exact_prior_shape(self):
         inputs = financial_inputs()
         candidate = proposal(inputs)
