@@ -220,3 +220,15 @@ R7 `0f88f9c69900507a431627e65038d86f2f94a6e3` completed 6,864 tests with eight f
 R7a `ff4e723ce697709b3a3cd7742577cf49ffa6af55` includes that harness correction. Wheel SHA-256 `25a70c0c4d5f401ac592a8f18030b6ebabc149dbdb6fd582a7a397eebf37d303` matches all 556 runtime files and the complete tracked file set, with three JS checks. Its current-state rehearsal passed 67 schemas, 40 tick entries and zero escaped paths; binding SHA-256 `632ed8b59006e694c2350dcac1b93d89d3b860d9f3e4526d5a3d0394c323c8c7`. However, its 6,865-test suite repeated the same eight failures/five errors, one skip (log SHA-256 `fe9f9e36d541ffdd637e3a35c2de08a92f85cb497883eb1f366bc80f3ac7e8b1`). Neither candidate was staged or deployed.
 
 Independent review confirmed the WAL failures are not merely fixtures: the live writer only held per-operation ModelRouter connections. During quiet periods the last owner could remove empty sidecars while the main DB retained its WAL header, so strict read-only Cockpit consumers would refuse. The next candidate must establish a real persistent writer-owned lifecycle, including configurations without planner/scheduler and startup-failure cleanup. The two remaining Dossier expectations were corrected to assert partial publication plus a failed rubric, without removing their freshness/order/immutability checks; 26 focused tests pass. All old full-suite and rehearsal failures remain intact.
+
+
+## R7b 验收进度（2026-09-11 03:13 UTC）
+
+冻结 `e312fbf3225d6a4f601eacc8862a95e2bcbe04c7` 已推送。完整测试进行中，尚未部署；live R6 继续保持运行稳定性待验收。
+
+- Wheel 556 个运行文件与完整 tracked runtime 文件集逐字一致，3 处 JavaScript 语法检查通过；SHA `f4432686c4e38849516a5550aadf99207e8de11996eadf8ef269e7cd5d6e92a0`。
+- 当前状态副本演练通过：67/67 schemas、40 entries、0 escaped；仅临时 writer / 一个 controller tick，无 live mutation / external / model calls。Report SHA `9deb032e669dda294637284f2f8b33865c7422e24fbb491d7a691e462fa0f688`，release-binding SHA `e459989cd3b340f0723b5fd44a97cd3c420391e18a91c04a8c599b3954f6fc2d`。无句柄/进程后清理本轮自有 state/home，保留证据。
+- 12 份模型/预算/credential 配置、mission v14、broker 和精确历史 pending 的部署前核对通过。外部会话 heartbeat target 改动保留，以新完整 broker 配置 hash 为准。
+- 私有健康观察器经独立审查修正：绑定成功部署及 installed-bytes receipts，拒绝旧 controller 和观察期重启；45 次健康、同一非空进程身份、启动时间落在部署窗口、至少 660 秒才能 accepted。4 项故障回归通过，尚未运行 live observer。
+
+重新阅读 analyst onboarding / vision 后，旧蓝图的“无”不再作为当前缺口：市场 authority、Excel/HTML、Debate/Event/Reflection/预算池已有实现。接下来的明确基础工程是单次 Dossier 重建共享一致输入投影，消除逐单元重复构建；独立工作区推进，不混入本次冻结。真实来源许可、错误 issuer Claim 退役、阶段裁决及 thesis-impact 人类绑定继续按既有 packet 等待裁决。高级投资能力、最终视觉与多 workspace 激活继续后排。
