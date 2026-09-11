@@ -291,7 +291,10 @@ class ExtractionBranchTests(unittest.TestCase):
         )
         service = object.__new__(DocumentExtractionService)
         service.writer = writer
-        text = service._document_text({"review_id": "review:x"})
+        import hashlib
+        expected_excerpt = guidepoint_excerpt_records({"data": ROWS})[0]["excerpt_text"]
+        text = service._document_text({"review_id": "review:x",
+            "source_content_hash": hashlib.sha256(expected_excerpt.encode()).hexdigest()})
         self.assertIn(ROWS[0]["answer"], text)
         # And the licence gate reads the same text extraction just returned.
         excerpt = guidepoint_excerpt_records({"data": ROWS})[0]

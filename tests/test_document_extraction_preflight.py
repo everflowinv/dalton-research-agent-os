@@ -202,7 +202,7 @@ class ExtractionPreflightTests(unittest.TestCase):
         def route(router, work, **kw):
             self.assertEqual(router.path, ':memory:')
             self.assertEqual(router.connection.execute('PRAGMA database_list').fetchone()[2], '')
-            self.assertEqual(kw['required_context_tokens'], len(work.question.encode('utf-8')) + 3000)
+            self.assertEqual(kw['required_context_tokens'], len(work.question.encode('utf-8')) + work.budget['max_output_tokens'])
             self.assertEqual(kw['credential_slot_refs'], self.h.writer._document_extraction_model_config['credential_slot_refs'])
             self.assertEqual(kw['idempotency_key'], f'document-extraction-route:{work.id}:1')
             calls.append('route')
@@ -377,7 +377,7 @@ class ExtractionPreflightTests(unittest.TestCase):
         from dataclasses import replace
         import dalton_core.document_extraction_preflight as module
         work_builder = module.build_work
-        with patch.object(module, 'build_work', side_effect=lambda c: replace(work_builder(c), question='中' * 6000)):
+        with patch.object(module, 'build_work', side_effect=lambda c: replace(work_builder(c), question='中' * (int(work_builder(c).budget['max_input_tokens']) // 3 + 1))):
             r = self.check()
         self.assert_blocked(r, 'model_route_rejected')
         self.assertIn('work_order_budget_input_exceeded', r['route_preview']['rejection_reasons'])

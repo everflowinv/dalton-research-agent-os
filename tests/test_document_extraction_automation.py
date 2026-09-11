@@ -407,7 +407,8 @@ class OutputContractTests(unittest.TestCase):
         prompt = build_prompt({"company_ref": "company:sec-cik:0001058290", "company_ticker": "CTSH", "document_ref": "d",
                                "offset": 0, "end": 10, "quotes": [{"quote_id": "q", "raw_text": "t"}]})
         self.assertIn("The subject company is CTSH.", prompt)
-        self.assertIn("legal disclaimer", prompt)
+        self.assertIn("generic disclaimers", prompt)
+        self.assertIn("revenue recognition", prompt)
 
 
 class WebAdmissionTests(unittest.TestCase):

@@ -496,6 +496,16 @@ class MigrationCoverageTests(unittest.TestCase):
             with self.subTest(schema=spec.schema):
                 self.assertEqual(spec.database, "core.sqlite")
 
+    def test_document_read_proof_migration_uses_the_shared_connection(self) -> None:
+        from scripts.rehearse_deploy import _construct_core_authority
+        from dalton_core.store import DaltonStore
+        from dalton_core.document_read_completion import DocumentReadCompletionAuthority
+        with DaltonStore(":memory:") as store:
+            authority = _construct_core_authority(DocumentReadCompletionAuthority, store, None)
+            self.assertIs(authority.connection, store.connection)
+            self.assertIsNotNone(store.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='document_read_completion_proofs'").fetchone())
+
     def test_the_two_migrations_this_deploy_actually_changes_are_present(self) -> None:
         schemas = {spec.schema for spec in CORE_MIGRATIONS + SIDECAR_MIGRATIONS}
         self.assertIn("budget_pools_schema.sql", schemas, "C2's nullable pool column")

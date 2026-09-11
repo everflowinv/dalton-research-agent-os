@@ -1001,6 +1001,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("consensus_estimate_schema.sql", "dalton_core.consensus_estimate", "ConsensusEstimateAuthority", "core"),
     MigrationSpec("conviction_call_schema.sql", "dalton_core.conviction_call", "ConvictionCallAuthority", "core"),
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
+    MigrationSpec("document_read_completion_schema.sql", "dalton_core.document_read_completion", "DocumentReadCompletionAuthority", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),
     MigrationSpec("prior_model_schema.sql", "dalton_core.prior_model_import", "PriorModelAuthority", "core"),
@@ -2189,7 +2190,7 @@ def _rehearsal_raw_spool(directory: Path) -> Any:
 #: Same database, same migration, different constructor -- worth naming rather
 #: than sniffing, so that a class that grows a store argument later fails here
 #: instead of quietly being handed the wrong object.
-_CONNECTION_AUTHORITIES: frozenset[str] = frozenset({"DocumentProvenanceStore"})
+_CONNECTION_AUTHORITIES: frozenset[str] = frozenset({"DocumentProvenanceStore", "DocumentReadCompletionAuthority"})
 
 _RESOLVER_KWARGS: dict[str, tuple[str, ...]] = {
     "CredentialAuthorityStore": ("handle_resolver",),
