@@ -976,6 +976,7 @@ class ResearchQuestionBacklog:
         source_refs: Sequence[str],
         actor_ref: str,
         idempotency_key: str | None = None,
+        mission_binding: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Record one question under an exact MandateVersion.
 
@@ -999,13 +1000,49 @@ class ResearchQuestionBacklog:
             "source_refs": source_refs,
             "actor_ref": actor_ref,
         }
+        if mission_binding is not None:
+            if (not isinstance(mission_binding, Mapping)
+                    or set(mission_binding) != {"ref", "hash"}):
+                raise ResearchQuestionValidationError("mission_binding requires exact ref/hash")
+            mission_binding = {
+                key: _text(mission_binding[key], "mission_binding." + key)
+                for key in ("ref", "hash")
+            }
+            request["mission_binding"] = mission_binding
         request_hash = content_hash(request)
+        # Authority constructors initialize schemas with executescript; keep
+        # them outside BEGIN so they cannot commit the question transaction.
+        missions = None
+        if mission_binding is not None:
+            from .coverage_mission import CoverageMissionAuthority
+            missions = CoverageMissionAuthority(self.store)
         with self.store._transaction() as cur:
+            # A coverage mission explicitly binds an industry mandate and its
+            # company universe. Validate that authority, not a caller-provided
+            # expansion of scope. Unbound backlog calls retain exact scope.
+            mission = None
+            if mission_binding is not None:
+                mission = missions.mission(mission_binding["ref"])
+                active = missions.active_mission(mission["mission_ref"])
+                if (active["id"] != mission["id"]
+                        or mission["content_hash"] != mission_binding["hash"]
+                        or mission["bindings"]["mandate_version"]["ref"] != mandate_version_ref
+                        or actor_ref != mission["autonomy"]["automation_principal"]
+                        or "research_question" not in mission["autonomy"]["may_write"]
+                        or company_ref not in {item["company_ref"] for item in mission["universe"]}):
+                    raise ResearchQuestionConflict("question is outside the exact active mission authority")
+                missions._validate_mandate_binding(
+                    cur, mission["bindings"]["mandate_version"], mission["industry_ref"]
+                )
+                connected = {item["source_ref"] for item in mission["source_plan"]
+                             if item["status"] == "connected"}
+                if not set(source_refs).issubset(connected):
+                    raise ResearchQuestionConflict("question source is not connected in the active mission")
             duplicate = self._idem(cur, idempotency_key, "record_backlog_question", request_hash)
             if duplicate is not None:
                 return duplicate
             mandate = read_exact_mandate_version(cur, mandate_version_ref)
-            if company_ref not in mandate["scope_refs"]:
+            if mission is None and company_ref not in mandate["scope_refs"]:
                 raise ResearchQuestionConflict(
                     "company_ref is outside the exact MandateVersion scope"
                 )
@@ -1106,7 +1143,8 @@ class ResearchQuestionBacklog:
             )
             event = self._event(
                 cur, question_ref, "open", "recorded",
-                {"mandate_version_ref": mandate_version_ref}, actor_ref,
+                {"mandate_version_ref": mandate_version_ref,
+                 **({"mission_binding": dict(mission_binding)} if mission_binding is not None else {})}, actor_ref,
             )
             result = {
                 "status": "fresh",

@@ -18,6 +18,7 @@ from .model_router import ModelRouter
 from .readonly_sqlite import connect_read_only
 from .research_question_backlog import ResearchQuestionBacklog
 from .research_task import inquiry_content_hash, inquiry_ref_for
+from .store import canonical_json
 
 
 class MissionDocumentAdmissionHostError(RuntimeError):
@@ -172,6 +173,17 @@ def admit_directed_inquiry(
             "selected document registration is unavailable"
         )
     digest = inquiry_content_hash(inquiry)
+    origin = authority.question_origin_from_plan(
+        plan_ref=plan["plan_id"], inquiry_ref=inquiry_ref_for(digest),
+        document_authority_ref=registration["id"],
+    )
+    if (origin["mission"]["id"] != mission["id"]
+            or origin["mission"]["content_hash"] != mission["content_hash"]
+            or origin["plan"]["content_hash"] != plan["content_hash"]
+            or canonical_json(origin["inquiry"]) != canonical_json(inquiry)):
+        raise MissionDocumentAdmissionHostError("caller differs from the exact planner question origin")
+    # Derive the write from replayed server authority, never caller fields.
+    mission, inquiry, registration = origin["mission"], origin["inquiry"], origin["registration"]
     principal = mission["autonomy"]["automation_principal"]
     question = backlog.record_question(
         mandate_version_ref=mission["bindings"]["mandate_version"]["ref"],
@@ -180,7 +192,8 @@ def admit_directed_inquiry(
         answer_criteria=inquiry["wants"].strip(),
         source_refs=[registration["source_ref"]],
         actor_ref=principal,
-        idempotency_key="mission-document:question:" + digest[:32],
+        idempotency_key="mission-document:question:v2:" + digest[:32],
+        mission_binding={"ref": mission["id"], "hash": mission["content_hash"]},
     )
     admitted = authority.admit_from_plan(
         plan_ref=plan["plan_id"],
