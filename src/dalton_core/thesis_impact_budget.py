@@ -247,14 +247,42 @@ class ThesisImpactBudgetStore:
         return {**wire, "status": "fresh"}
 
     def policy(self, policy_version_id: str) -> dict[str, Any]:
+        policy_version_id = _text(policy_version_id, "policy_version_id")
         row = self.connection.execute(
-            "SELECT record_json FROM thesis_impact_budget_policies "
+            "SELECT * FROM thesis_impact_budget_policies "
             "WHERE policy_version_id=?",
-            (_text(policy_version_id, "policy_version_id"),),
+            (policy_version_id,),
         ).fetchone()
         if row is None:
             raise ThesisImpactBudgetConflict("budget policy is not registered")
-        return json.loads(row["record_json"])
+        try:
+            wire = json.loads(row["record_json"])
+        except (TypeError, ValueError) as exc:
+            raise ThesisImpactBudgetConflict(
+                "budget policy record is not canonical JSON"
+            ) from exc
+        base = dict(wire) if isinstance(wire, Mapping) else {}
+        asserted = base.pop("content_hash", None)
+        expected_fields = {
+            "schema_version", "policy_version_id", "day_cap_micros",
+            "currency", "prior_version_id", "created_at", "content_hash",
+        }
+        if (
+            not isinstance(wire, Mapping)
+            or set(wire) != expected_fields
+            or canonical_json(wire) != row["record_json"]
+            or wire.get("schema_version") != SCHEMA_VERSION
+            or wire.get("policy_version_id") != policy_version_id
+            or wire.get("policy_version_id") != row["policy_version_id"]
+            or wire.get("day_cap_micros") != row["day_cap_micros"]
+            or wire.get("currency") != row["currency"]
+            or wire.get("prior_version_id") != row["prior_version_id"]
+            or wire.get("created_at") != row["created_at"]
+            or asserted != row["content_hash"]
+            or asserted != content_hash(base)
+        ):
+            raise ThesisImpactBudgetConflict("budget policy authority drifted")
+        return dict(wire)
 
     @staticmethod
     def _day_committed(cur: sqlite3.Cursor, policy_version_id: str, day: str) -> int:
@@ -616,6 +644,120 @@ class ThesisImpactBudgetStore:
         return {**wire, "status": "fresh", "pool": pool_name,
                 "borrowed_from": (None if borrowed_from is None
                                   else json.loads(borrowed_from))}
+
+    def admission(
+        self, *, work_order_ref: str, attempt_number: int, phase: str,
+    ) -> dict[str, Any] | None:
+        """Read and re-verify one exact admission and its attached authority.
+
+        Recovery callers use this instead of treating a matching SQL row as
+        proof.  The immutable JSON, indexed columns, mission binding and any
+        settlement must all agree before the record is returned.
+        """
+
+        work_order_ref = _text(work_order_ref, "work_order_ref")
+        if (isinstance(attempt_number, bool) or not isinstance(attempt_number, int)
+                or attempt_number < 1):
+            raise ThesisImpactBudgetValidationError(
+                "attempt_number must be a positive integer"
+            )
+        if phase not in {"assessment", "verification"}:
+            raise ThesisImpactBudgetValidationError("phase is not admitted")
+        row = self.connection.execute(
+            "SELECT * FROM thesis_impact_day_admissions "
+            "WHERE work_order_ref=? AND attempt_number=? AND phase=?",
+            (work_order_ref, attempt_number, phase),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            wire = json.loads(row["record_json"])
+        except (TypeError, ValueError) as exc:
+            raise ThesisImpactBudgetConflict("admission record is not canonical JSON") from exc
+        base = dict(wire) if isinstance(wire, Mapping) else {}
+        asserted = base.pop("content_hash", None)
+        columns = {
+            "admission_id": row["admission_id"],
+            "policy_version_id": row["policy_version_id"],
+            "day": row["day"],
+            "work_order_ref": row["work_order_ref"],
+            "attempt_number": row["attempt_number"],
+            "phase": row["phase"],
+            "route_decision_ref": row["route_decision_ref"],
+            "reserved_micros": row["reserved_micros"],
+            "created_at": row["created_at"],
+        }
+        if (
+            not isinstance(wire, Mapping)
+            or canonical_json(wire) != row["record_json"]
+            or wire.get("schema_version") != SCHEMA_VERSION
+            or asserted != row["content_hash"]
+            or asserted != content_hash(base)
+            or any(wire.get(key) != value for key, value in columns.items())
+            or wire.get("admission_id") != "thesis-impact-admission:" + content_hash({
+                "work_order_ref": work_order_ref,
+                "attempt_number": attempt_number,
+                "phase": phase,
+            })[:32]
+        ):
+            raise ThesisImpactBudgetConflict("admission authority drifted")
+        binding_row = self.connection.execute(
+            "SELECT mission_ref,record_json FROM model_mission_budget_bindings "
+            "WHERE admission_id=?", (row["admission_id"],),
+        ).fetchone()
+        binding = None
+        if binding_row is not None:
+            try:
+                binding = json.loads(binding_row["record_json"])
+            except (TypeError, ValueError) as exc:
+                raise ThesisImpactBudgetConflict(
+                    "admission mission binding is not canonical JSON"
+                ) from exc
+            if (not isinstance(binding, Mapping)
+                    or canonical_json(binding) != binding_row["record_json"]
+                    or binding.get("mission_ref") != binding_row["mission_ref"]):
+                raise ThesisImpactBudgetConflict("admission mission binding drifted")
+            binding = dict(binding)
+        settlement_row = self.connection.execute(
+            "SELECT * FROM thesis_impact_day_settlements WHERE admission_id=?",
+            (row["admission_id"],),
+        ).fetchone()
+        settlement = None
+        if settlement_row is not None:
+            try:
+                settlement = json.loads(settlement_row["record_json"])
+            except (TypeError, ValueError) as exc:
+                raise ThesisImpactBudgetConflict(
+                    "admission settlement is not canonical JSON"
+                ) from exc
+            settlement_base = dict(settlement) if isinstance(settlement, Mapping) else {}
+            settlement_hash = settlement_base.pop("content_hash", None)
+            settlement_columns = {
+                "settlement_id": settlement_row["settlement_id"],
+                "admission_id": settlement_row["admission_id"],
+                "actual_micros": settlement_row["actual_micros"],
+                "usage_entry_ref": settlement_row["usage_entry_ref"],
+                "created_at": settlement_row["created_at"],
+            }
+            if (
+                not isinstance(settlement, Mapping)
+                or canonical_json(settlement) != settlement_row["record_json"]
+                or settlement.get("schema_version") != SCHEMA_VERSION
+                or settlement_hash != settlement_row["content_hash"]
+                or settlement_hash != content_hash(settlement_base)
+                or any(settlement.get(key) != value
+                       for key, value in settlement_columns.items())
+                or settlement.get("settlement_id")
+                != "thesis-impact-settlement:"
+                + content_hash({"admission_id": row["admission_id"]})[:32]
+            ):
+                raise ThesisImpactBudgetConflict("admission settlement drifted")
+            settlement = dict(settlement)
+        return {
+            "admission": dict(wire),
+            "mission_binding": binding,
+            "settlement": settlement,
+        }
 
     def settle(
         self,

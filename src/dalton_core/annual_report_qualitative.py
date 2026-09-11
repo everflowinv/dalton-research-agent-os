@@ -78,6 +78,9 @@ VERIFIER_OUTPUT_SCHEMA = {
     },
 }
 
+VERIFIER_PROVIDER_CONTRACT_REF = "annual-report-verifier-provider-output-0.1"
+VERIFIER_PROVIDER_SCHEMA_HASH = content_hash(VERIFIER_OUTPUT_SCHEMA)
+
 
 class AnnualReportQualitativeError(ResearchVerificationError):
     pass
@@ -225,7 +228,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
     expected_stage: str | None = None
 
     def __init__(self, *, budget_store=None, budget_policy_ref=None,
-                 mission_resolver: Callable[[str], Mapping[str, Any]] | None = None,
+                 mission_resolver: Callable[[str, str], Mapping[str, Any]] | None = None,
                  **kwargs):
         """Bind production annual calls to the same durable mission budget.
 
@@ -256,15 +259,32 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
     def _before_model_call(self, work, route, profile, replayed):
         if self.budget_store is None:
             return
+        from .openclaw_model_adapter import OpenClawModelAdapterError
+        try:
+            self._admit_model_call(work, route, profile, replayed)
+        except OpenClawModelAdapterError:
+            raise
+        except Exception as exc:
+            raise OpenClawModelAdapterError(
+                "annual-report budget/mission admission rejected"
+            ) from exc
+
+    def _admit_model_call(self, work, route, profile, replayed):
         if (work.metadata.get("budget_db") != self.budget_store.path
                 or work.metadata.get("budget_policy_ref") != self.budget_policy_ref):
             raise AnnualReportQualitativeError("annual-report budget binding drifted")
-        mission_ref = work.metadata["retrieval_proof"]["registration"][
-            "mission_version_ref"
-        ]
-        mission = self.mission_resolver(mission_ref)
-        if mission.get("id") != mission_ref:
+        registration = work.metadata["retrieval_proof"]["registration"]
+        mission_ref = registration["mission_version_ref"]
+        company_ref = registration["company_ref"]
+        mission = self.mission_resolver(mission_ref, company_ref)
+        if (mission.get("id") != mission_ref
+                or not isinstance(mission.get("outer_budget"), Mapping)):
             raise AnnualReportQualitativeError("annual-report mission authority drifted")
+        phase = (
+            "verification"
+            if work.metadata["stage"] == "independent_qualitative_verifier"
+            else "assessment"
+        )
         identity = (work.id, int(route["attempt_number"]))
         if self._admission_identity != identity:
             self.admission = None
@@ -272,6 +292,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
         if self.admission is not None:
             return
         ceiling = int(Decimal(str(work.budget["max_cost_usd"])) * 1_000_000)
+        from .budget_pools import mission_pool_scope
         scope = {
             "mission_ref": mission["mission_ref"],
             "mission_version_ref": mission["id"],
@@ -280,12 +301,27 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
             "max_daily_cost_micros": int(
                 Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000
             ),
+            "outer_budget": dict(mission["outer_budget"]),
+            **mission_pool_scope(mission, purpose=self.purpose),
         }
+        prior = self.budget_store.admission(
+            work_order_ref=work.id,
+            attempt_number=int(route["attempt_number"]),
+            phase=phase,
+        )
+        if replayed and prior is None:
+            raise AnnualReportQualitativeError(
+                "annual-report recovery has no original budget admission"
+            )
+        day = (
+            prior["admission"]["day"] if prior is not None
+            else self.clock().astimezone(timezone.utc).date().isoformat()
+        )
         self.admission = self.budget_store.admit(
             policy_version_id=self.budget_policy_ref,
-            day=self.clock().astimezone(timezone.utc).date().isoformat(),
+            day=day,
             work_order_ref=work.id,
-            attempt_number=route["attempt_number"], phase="assessment",
+            attempt_number=route["attempt_number"], phase=phase,
             route_decision_ref=route["id"], reserved_micros=ceiling,
             mission_binding=scope,
         )
@@ -297,6 +333,27 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
             return None
         cost = accounting["cost"]
         if cost["amount_micros"] > self.admission["reserved_micros"]:
+            phase = (
+                "verification"
+                if work.metadata["stage"] == "independent_qualitative_verifier"
+                else "assessment"
+            )
+            self.budget_store.record_alert(
+                alert_id="annual-report-overrun:" + content_hash({
+                    "work_order_ref": work.id,
+                    "attempt_number": route["attempt_number"],
+                    "cost_entry_ref": cost["id"],
+                }),
+                kind="work_order_failed", severity="high",
+                work_order_ref=work.id, phase=phase,
+                detail={
+                    "reason": "model_reservation_overrun",
+                    "cost_entry_ref": cost["id"],
+                    "amount_micros": cost["amount_micros"],
+                    "cost_status": cost["cost_status"],
+                    "reserved_micros": self.admission["reserved_micros"],
+                },
+            )
             return "MODEL_COST_EXCEEDED_RESERVATION"
         # Estimated/unknown usage retains the full reservation.  It is not a
         # zero-cost failure and is the only safe basis for later redrive.

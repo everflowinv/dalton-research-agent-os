@@ -2925,6 +2925,7 @@ def _resolve_qualitative_child_work_order(
     """Bind a child to exact formal upstream output before admission."""
 
     from .annual_report_qualitative import (
+        VERIFIER_PROVIDER_CONTRACT_REF, VERIFIER_PROVIDER_SCHEMA_HASH,
         draft_prompt, validate_model_proof, verifier_prompt,
     )
     from .contracts import WorkOrder
@@ -2986,6 +2987,10 @@ def _resolve_qualitative_child_work_order(
             "source_content_hash": request["source_content_hash"],
             "context_hash": upstream_work["metadata"]["context_hash"],
             "producer_route_decision_ref": draft_proof["route_decision_ref"],
+            "purpose": "registered_annual_report_verifier",
+            "verifier_output_schema_version": "0.1",
+            "verifier_provider_contract": VERIFIER_PROVIDER_CONTRACT_REF,
+            "verifier_provider_schema_hash": VERIFIER_PROVIDER_SCHEMA_HASH,
             "routing_policy_ref": metadata["routing_policy_ref"],
             "credential_slot_refs": metadata["credential_slot_refs"],
             "provider_retry": metadata["provider_retry"],
@@ -2999,6 +3004,10 @@ def _resolve_qualitative_child_work_order(
             "draft": draft_proof["output"], "draft_proof": draft_proof,
             "producer_model_family": draft_proof["model_family"],
             "producer_route_decision_ref": draft_proof["route_decision_ref"],
+            "purpose": "registered_annual_report_verifier",
+            "verifier_output_schema_version": "0.1",
+            "verifier_provider_contract": VERIFIER_PROVIDER_CONTRACT_REF,
+            "verifier_provider_schema_hash": VERIFIER_PROVIDER_SCHEMA_HASH,
             "source_content_hash": request["source_content_hash"],
             "context_hash": upstream_work["metadata"]["context_hash"],
             "upstream_result_ref": upstream_envelope["id"],

@@ -37,6 +37,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -282,6 +283,130 @@ def check_core_governance_rules(core: DaltonStore) -> dict[str, Any]:
     return active
 
 
+def _annual_budget_mission(
+    missions: CoverageMissionAuthority,
+    mission_version_ref: str,
+    company_ref: str,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Resolve one active mission and its enclosing paid-research authority."""
+
+    from .contracts import GovernancePolicyVersion
+
+    mission = missions.mission(mission_version_ref)
+    active = missions.active_mission(mission["mission_ref"])
+    if (active["id"] != mission["id"]
+            or active["content_hash"] != mission["content_hash"]):
+        raise LanePreconditionError(
+            "annual-report model execution requires the active mission version"
+        )
+    if company_ref not in {
+        item["company_ref"] for item in mission["universe"]
+    }:
+        raise LanePreconditionError(
+            "annual-report company is outside the active mission universe"
+        )
+    source = next(
+        (item for item in mission["source_plan"]
+         if item["source_ref"] == "source:sec-edgar"),
+        None,
+    )
+    if source is None or source["status"] != "connected":
+        raise LanePreconditionError(
+            "active mission does not authorize connected SEC source use"
+        )
+    if "model_run" not in set(mission["autonomy"]["may_write"]):
+        raise LanePreconditionError(
+            "active mission does not authorize annual-report model execution"
+        )
+    cur = missions.connection.cursor()
+    try:
+        missions._validate_playbook_binding(
+            cur, mission["bindings"]["playbook_version"]
+        )
+        constitution = missions._validate_constitution_binding(
+            cur, mission["bindings"]["constitution_version"],
+            mission["industry_ref"],
+        )
+        mandate = missions._validate_mandate_binding(
+            cur, mission["bindings"]["mandate_version"],
+            mission["industry_ref"],
+        )
+    finally:
+        cur.close()
+    policy = missions.store.active_policy_version().to_dict()
+    bound = constitution["bindings"]["governance_policy_version"]
+    if (
+        constitution["bindings"]["mandate_version"]
+        != mission["bindings"]["mandate_version"]
+        or policy["id"] != bound["ref"]
+        or policy["content_hash"] != bound["hash"]
+        or content_hash({key: value for key, value in policy.items()
+                         if key != "content_hash"}) != policy["content_hash"]
+    ):
+        raise LanePreconditionError(
+            "annual-report mission does not bind current governance policy"
+        )
+    GovernancePolicyVersion.from_dict(policy)
+    moment = now.astimezone(timezone.utc)
+    for field, is_end in (("effective_from", False), ("effective_until", True)):
+        value = policy[field]
+        if value is None:
+            continue
+        boundary = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if boundary.tzinfo is None or (boundary <= moment if is_end else boundary > moment):
+            raise LanePreconditionError(
+                "annual-report governance policy is outside its effective window"
+            )
+    constraints = mandate["constraints"]
+    if constraints.get("research_execution") is False:
+        raise LanePreconditionError(
+            "mandate explicitly forbids annual-report model execution"
+        )
+    fields = {
+        "max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h",
+    }
+    caps: list[Mapping[str, Any]] = []
+    for name, parent in (("mandate", constraints), ("governance", policy["policy"])):
+        cap = parent.get("research_budget")
+        if not isinstance(cap, Mapping) or set(cap) != fields:
+            raise LanePreconditionError(
+                f"{name} lacks explicit closed research budget authority"
+            )
+        for key in fields:
+            value = cap[key]
+            if key == "max_daily_cost_usd":
+                valid = (type(value) in (int, float)
+                         and Decimal(str(value)).is_finite() and value >= 0)
+            else:
+                valid = type(value) is int and value >= 0
+            if not valid:
+                raise LanePreconditionError(f"{name} research budget is invalid")
+            if mission["budget"][key] > value:
+                raise LanePreconditionError(
+                    f"mission exceeds {name} research budget: {key}"
+                )
+        caps.append(cap)
+    return {
+        **mission,
+        "outer_budget": {
+            "mandate_ref": mandate["mandate_ref"],
+            "mandate_version_ref": mandate["id"],
+            "mandate_version_hash": mandate["content_hash"],
+            "governance_policy_ref": policy["policy_ref"],
+            "governance_policy_version_ref": policy["id"],
+            "governance_policy_version_hash": policy["content_hash"],
+            "max_daily_paid_calls": min(
+                int(cap["max_daily_paid_calls"]) for cap in caps
+            ),
+            "max_daily_cost_micros": int(min(
+                Decimal(str(cap["max_daily_cost_usd"])) for cap in caps
+            ) * 1_000_000),
+        },
+    }
+
+
 class SecCompanyFactsLane:
     """Assemble the full research-plan stack on an existing Core state directory."""
 
@@ -410,6 +535,13 @@ class SecCompanyFactsLane:
                     budget_policy_ref = draft_config["budget_policy_ref"]
                     self.annual_budget.policy(budget_policy_ref)
                     mission_authority = CoverageMissionAuthority(self.core)
+                mission_resolver = (
+                    None if mission_authority is None else
+                    lambda mission_ref, company_ref: _annual_budget_mission(
+                        mission_authority, mission_ref, company_ref,
+                        now=self.clock(),
+                    )
+                )
                 self.annual_report_draft_model_execution = draft_config
                 self.annual_report_verifier_model_execution = verifier_config
                 self.annual_report_draft_worker = RegisteredAnnualReportDraftWorker(
@@ -420,7 +552,7 @@ class SecCompanyFactsLane:
                     provider_retry=draft_config["provider_retry"],
                     budget_store=self.annual_budget,
                     budget_policy_ref=budget_policy_ref,
-                    mission_resolver=(None if mission_authority is None else mission_authority.mission),
+                    mission_resolver=mission_resolver,
                     lease_seconds=draft_config["max_seconds"],
                 )
                 self.annual_report_verifier_worker = RegisteredAnnualReportVerifierWorker(
@@ -431,7 +563,7 @@ class SecCompanyFactsLane:
                     provider_retry=verifier_config["provider_retry"],
                     budget_store=self.annual_budget,
                     budget_policy_ref=budget_policy_ref,
-                    mission_resolver=(None if mission_authority is None else mission_authority.mission),
+                    mission_resolver=mission_resolver,
                     lease_seconds=verifier_config["max_seconds"],
                 )
             self.plans = ResearchPlanAuthority(

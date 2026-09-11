@@ -60,6 +60,12 @@ ProviderControlMode = Literal[
     "calibration-posthoc-v1",
 ]
 _VERIFIER_PROVIDER_CONTRACTS = {
+    "annual-report-verifier-provider-output-0.1": (
+        "0.1",
+        "annual-report-verifier-provider-output-v0.1.schema.json",
+        "annual_report_verifier_provider_output_v0_1",
+        frozenset({"registered_annual_report_verifier"}),
+    ),
     "dossier-verifier-provider-output-0.1": (
         "0.1",
         "dossier-verifier-provider-output-v0.1.schema.json",
