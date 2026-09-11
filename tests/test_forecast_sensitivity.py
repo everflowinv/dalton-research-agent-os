@@ -62,6 +62,8 @@ REVENUE = "us-gaap:Revenues"
 COST = "us-gaap:CostOfGoodsAndServicesSold"
 SGA = "us-gaap:SellingGeneralAndAdministrativeExpense"
 TAX = "us-gaap:IncomeTaxExpenseBenefit"
+RND = "us-gaap:ResearchAndDevelopmentExpense"
+DA = "us-gaap:DepreciationAndAmortization"
 
 REVENUE_DRIVER = f"concept:{REVENUE}"
 COST_DRIVER = f"concept:{COST}"
@@ -317,6 +319,40 @@ class RankingTests(unittest.TestCase):
         first = [item["driver"]["ref"] for item in select_drivers(record)["ranked"]]
         second = [item["driver"]["ref"] for item in select_drivers(record)["ranked"]]
         self.assertEqual(first, second)
+
+    def test_a_filed_tax_benefit_is_not_carried_forward_as_a_rate(self):
+        # IBM's held history has a profitable quarter with a tax benefit.  The
+        # observation is real, but holding that negative effective rate flat
+        # makes the economic-invariant gate refuse the entire sensitivity
+        # table.  With five other filed candidates, the selector must use
+        # those rather than clamp the benefit or lose the table.
+        history = dict(SERIES)
+        history[TAX] = (*TAXES[:-1], "-10000000")
+        history[RND] = tuple(str(Decimal(value) * Decimal("0.05"))
+                             for value in REVENUES)
+        history[DA] = tuple(str(Decimal(value) * Decimal("0.07"))
+                            for value in REVENUES)
+        specification = spec()
+        specification["expense_lines"] = [
+            *specification["expense_lines"],
+            {"ref": "research", "label": "Research", "basis_concept": RND,
+             "behaviour": "semi_variable", "driver_ref": None,
+             "because": "Research supports the service."},
+            {"ref": "depreciation", "label": "Depreciation", "basis_concept": DA,
+             "behaviour": "fixed", "driver_ref": None,
+             "because": "Assets are consumed over time."},
+        ]
+        record = model(ledger(history), specification)
+        picked = select_drivers(record)
+        refs = [item["driver"]["ref"] for item in picked["ranked"]]
+
+        self.assertEqual(picked["selection"]["status"], "available")
+        self.assertEqual(len(refs), MAX_DRIVERS)
+        self.assertNotIn(TAX_DRIVER, refs)
+        projection = build_projection(record)
+        self.assertEqual(len(projection["drivers"]), MAX_DRIVERS)
+        self.assertNotIn(TAX_DRIVER,
+                         [item["driver_ref"] for item in projection["drivers"]])
 
     def test_no_more_than_five_drivers_are_named(self):
         self.assertLessEqual(len(select_drivers(model())["ranked"]), MAX_DRIVERS)

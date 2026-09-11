@@ -137,7 +137,7 @@ WHAT_IF_LINES: tuple[str, ...] = (
 )
 
 SELECTION_RULE_REF = "rule:swing-rank:1"
-BAND_RULE_REF = "rule:historical-band:1"
+BAND_RULE_REF = "rule:historical-band:2"
 
 #: The rule itself, hashed into every projection. Changing any word of this
 #: changes ``SELECTION_RULE_HASH``, which changes every projection's
@@ -163,6 +163,9 @@ SELECTION_RULE: dict[str, Any] = {
                      "it ranks below every driver that has one, and among those "
                      "by its unit-move elasticity. A driver with neither a swing "
                      "nor an elasticity is the only one dropped",
+    "rate_domain": "a historical tax-rate band containing a value outside [0, 1] "
+                   "is retained as history but is unavailable as a forecast "
+                   "scenario; it is never clamped or carried forward",
     "order": "largest swing first; ties broken by driver ref",
     "why_not_elasticity": "a one-point move ranks every share driver identically, "
                           "because each is a share of the same revenue and one "
@@ -738,6 +741,45 @@ def _measure_of(record: Mapping[str, Any], driver_ref: str) -> str | None:
     return None
 
 
+def _scenario_band(
+    driver: Mapping[str, Any], measure: str | None, band: Mapping[str, Any],
+) -> dict[str, Any]:
+    """A historical band only when each extreme can be used as an assumption.
+
+    A tax benefit is a real filed observation, so it stays in
+    :func:`measure_series`.  It is not a tax *rate* that can be held flat over
+    the forecast horizon.  Mark the entire band unavailable when any summary
+    point falls outside the model's closed tax-rate domain.  Dropping just the
+    offending quarter would manufacture a narrower history; clamping it would
+    manufacture a scenario.
+    """
+
+    wire = dict(band)
+    if (wire.get("status") != "available"
+            or driver.get("role") != "income_tax_expense"
+            or measure != "operating_income_share"):
+        return wire
+    values = []
+    for name in ("trough", "mean", "peak"):
+        point = wire.get(name)
+        if isinstance(point, Mapping) and point.get("value") is not None:
+            values.append(_decimal(point["value"], f"band.{name}"))
+    if values and all(Decimal(0) <= value <= Decimal(1) for value in values):
+        return wire
+    return {
+        "status": "unavailable",
+        "measure": wire.get("measure"),
+        "count": wire.get("count", 0),
+        "reason": "the filed tax-rate history contains a value outside [0, 1]; "
+                  "a tax benefit or charge above profit cannot be held flat as "
+                  "a forecast tax rate",
+        "peak": None,
+        "trough": None,
+        "mean": None,
+        "latest": None,
+    }
+
+
 def candidate_drivers(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Every driver that carries a live assumption, in the model's own order."""
 
@@ -773,7 +815,10 @@ def select_drivers(record: Mapping[str, Any]) -> dict[str, Any]:
     for driver in considered:
         ref = str(driver["ref"])
         measure = _measure_of(record, ref)
-        band = historical_band(measure_series(record, ref, str(measure)))
+        band = _scenario_band(
+            driver, measure,
+            historical_band(measure_series(record, ref, str(measure))),
+        )
         impact = driver_impact(record, ref, metric)
         swing = driver_swing(record, ref, band, metric)
         # Dropped only when neither number exists. The two are independently

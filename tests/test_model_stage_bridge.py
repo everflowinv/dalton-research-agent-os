@@ -111,6 +111,48 @@ class ModelStageReadinessTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("active_mission_model_sensitivity_binding", result["reasons"])
 
+    def test_unselected_estimated_driver_does_not_fail_filed_history_check(self):
+        model = {
+            "id": "forecast-model-version:company-a:1", "content_hash": "b" * 64,
+            "company_ref": "company:a", "mission_version_ref": "mission:v14",
+            "history_periods": [{}] * 8, "forecast_periods": [{}],
+            "drivers": [
+                {"ref": f"driver:{n}", "history": [{}] * 8, "role": "revenue",
+                 "status": "filed"} for n in range(3)
+            ] + [{"ref": "driver:qualitative-volume", "history": [], "role": None,
+                  "status": "estimated"}],
+            "assumptions": [
+                {"driver_ref": f"driver:{n}", "because": "filed history",
+                 "refs": [{"ref": f"filing:{n}"}]} for n in range(3)
+            ],
+            "results": [{"ref": "result:revenue", "status": "computed"}],
+        }
+        sensitivity = {
+            "id": "sensitivity:v1", "company_ref": "company:a",
+            "mission_version_ref": "mission:v14",
+            "model_version_ref": model["id"], "model_version_hash": model["content_hash"],
+            "selection": {"status": "available"}, "impact_metric": {
+                "result_ref": "result:revenue"}, "horizon": [{}],
+            "history_window": {"quarters": 8},
+            "drivers": [
+                {"driver_ref": f"driver:{n}", "band": {"status": "available"},
+                 "what_if": [{"lines": [{"cells": [{"status": "computed"}]}]}]}
+                for n in range(3)
+            ],
+            "consensus_bridge": {"status": "available", "metrics": [{}]},
+        }
+        filing_proof = {
+            "model_version_ref": model["id"],
+            "model_content_hash": model["content_hash"],
+            "invariant_report": {"status": "available"},
+        }
+
+        result = company_model_readiness(
+            model, sensitivity, mission=mission(), company_ref="company:a",
+            filing_proof=filing_proof)
+
+        self.assertTrue(result["passed"], result)
+
     def test_baseline_cadence_is_not_completed_calendar_proof(self):
         source = {"ref": "claim:1", "period": "2026-09-10"}
         block = {"status": "drafted", "sources": [source]}

@@ -99,9 +99,13 @@ def company_model_readiness(
         return {"passed": False, "checks": [], "reasons": ["no_forecast_model"],
                 "evidence_refs": []}
     ready = model_readiness(model)
-    historical = (
-        ready["history_quarters"] >= 8 and not ready["drivers_without_history"]
-    )
+    # The historical model check is a check of the filed model window.  A
+    # specification may also name qualitative or estimated operating drivers
+    # that have no filed counterpart; requiring every such row to carry XBRL
+    # history makes a truthful ``estimated`` row an impossible gate.  The
+    # separate band check below is the exact proof that each of the selected
+    # three-to-five sensitivity drivers has usable history.
+    historical = ready["history_quarters"] >= 8
     assumptions = list(model.get("assumptions") or [])
     assumptions_explicit = bool(assumptions) and all(
         item.get("because") and item.get("refs") for item in assumptions)
