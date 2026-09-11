@@ -439,11 +439,11 @@ class MissionDocumentResearchCoordinator:
                 expected_old_deadline = failed_at + timedelta(
                     seconds=policy["max_elapsed_seconds"],
                 )
-                # A current-contract stopped row has a deadline at or beyond
-                # its eligible instant.  Only the exact old cross-UTC shape is
+                # A current-contract stopped row has a deadline beyond its
+                # eligible instant.  Only the exact old cross-UTC shape is
                 # eligible for this compatibility path.
                 if (due != expected_due or prior_deadline != expected_old_deadline
-                        or prior_deadline >= due):
+                        or prior_deadline > due):
                     return {
                         "action": "recovery_required", "reason": recovery["reason"],
                         "work_order_ref": work_ref,

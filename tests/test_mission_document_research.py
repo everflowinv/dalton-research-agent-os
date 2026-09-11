@@ -1100,9 +1100,9 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(link["failure_proof"]["classification"],
                          "atomic_day_budget_refusal")
 
-    def test_legacy_stopped_day_budget_observation_reopens_at_utc_reset(self):
+    def test_legacy_equal_deadline_day_budget_reopens_only_for_bounded_window(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
-        self._enable_recovery(fixture, maximum=1, elapsed=7200)
+        self._enable_recovery(fixture, maximum=1, elapsed=43200)
         admission = authority.admit_from_plan(**args)
         consumed = fixture.budget.admit(
             policy_version_id="budget-policy:mission-annual:1",
@@ -1123,7 +1123,10 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "eligible": False, "used_fresh_work_orders": 0,
             "max_fresh_work_orders": 1,
             "retry_at": "2026-09-12T00:00:00.000000+00:00",
-            "deadline": "2026-09-11T14:00:00.000000+00:00",
+            # The old executor used eligible_at >= deadline, so equality was
+            # also persisted as stopped even though midnight was the first
+            # instant at which the daily authority could admit a fresh Work.
+            "deadline": "2026-09-12T00:00:00.000000+00:00",
             "proof": proof,
         })
         lane = MissionDocumentResearchCoordinator(
@@ -1142,13 +1145,13 @@ class MissionDocumentResearchTests(unittest.TestCase):
             lane._typed_recovery_state(admission, work["id"])["action"], "resume",
         )
         fixture.harness.clock.value = datetime(
-            2026, 9, 12, 1, 59, 59, tzinfo=timezone.utc,
+            2026, 9, 12, 11, 59, 59, tzinfo=timezone.utc,
         )
         self.assertEqual(
             lane._typed_recovery_state(admission, work["id"])["action"], "resume",
         )
         fixture.harness.clock.value = datetime(
-            2026, 9, 12, 2, 1, tzinfo=timezone.utc,
+            2026, 9, 12, 12, 1, tzinfo=timezone.utc,
         )
         expired = lane._typed_recovery_state(admission, work["id"])
         self.assertEqual(expired, {
