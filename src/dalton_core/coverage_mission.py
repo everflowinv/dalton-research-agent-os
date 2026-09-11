@@ -1051,6 +1051,13 @@ class CoverageMissionAuthority:
           transport_code TEXT, transport_evidence_ref TEXT, transport_evidence_hash TEXT,
           created_at TEXT NOT NULL, content_hash TEXT NOT NULL,
           UNIQUE(record_id,ticket_ref));
+        CREATE TRIGGER IF NOT EXISTS coverage_mission_acquisition_attempts_authorized_insert
+        BEFORE INSERT ON coverage_mission_acquisition_attempts WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+          SELECT RAISE(ABORT, 'acquisition attempt insert requires CoverageMissionAuthority'); END;
+        CREATE TRIGGER IF NOT EXISTS coverage_mission_acquisition_attempts_no_update
+        BEFORE UPDATE ON coverage_mission_acquisition_attempts BEGIN SELECT RAISE(ABORT, 'acquisition attempts are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS coverage_mission_acquisition_attempts_no_delete
+        BEFORE DELETE ON coverage_mission_acquisition_attempts BEGIN SELECT RAISE(ABORT, 'acquisition attempts are append-only'); END;
         """)
 
     @contextmanager
@@ -2786,7 +2793,7 @@ class CoverageMissionAuthority:
             raise CoverageMissionValidationError("transport evidence ref and hash travel together")
         if transport_evidence_ref is not None:
             transport_evidence_ref = _text(transport_evidence_ref, "transport_evidence_ref")
-            transport_evidence_hash = _text(transport_evidence_hash, "transport_evidence_hash")
+            transport_evidence_hash = _sha256(transport_evidence_hash, "transport_evidence_hash")
         with self._transaction() as cur:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
@@ -2809,9 +2816,10 @@ class CoverageMissionAuthority:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
             ).fetchone()
+            proven_transport = bool(transport_code and transport_evidence_ref and transport_evidence_hash)
             outcome = ("acquired" if status == "acquired" else
-                       "transport_terminal" if failure_retryable is False and transport_code else
-                       "transport_retryable" if failure_retryable is True and transport_code else
+                       "transport_terminal" if failure_retryable is False and proven_transport else
+                       "transport_retryable" if failure_retryable is True and proven_transport else
                        "unknown_failure")
             event = {"record_id": record_id, "mission_version_ref": row["mission_version_ref"],
                      "source_ref": row["source_ref"], "host": row["host"],
@@ -2831,10 +2839,20 @@ class CoverageMissionAuthority:
     def host_failure_cooldowns(self, *, source_ref: str, minimum_distinct_urls: int,
                                window_seconds: int, cooldown_seconds: int,
                                as_of: datetime) -> list[dict[str, Any]]:
+        source_ref = _text(source_ref, "source_ref")
+        for value, name, maximum in ((minimum_distinct_urls, "minimum_distinct_urls", 100),
+                                     (window_seconds, "window_seconds", 2592000),
+                                     (cooldown_seconds, "cooldown_seconds", 2592000)):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise CoverageMissionValidationError(f"{name} must be an integer 1..{maximum}")
+        if not isinstance(as_of, datetime) or as_of.tzinfo is None:
+            raise CoverageMissionValidationError("as_of must be timezone-aware")
         cutoff = (as_of - timedelta(seconds=window_seconds)).isoformat(timespec="microseconds")
+        upper = as_of.isoformat(timespec="microseconds")
         rows = self.connection.execute(
             "SELECT * FROM coverage_mission_acquisition_attempts WHERE source_ref=? AND host IS NOT NULL "
-            "AND created_at>=? ORDER BY created_at,attempt_ref", (source_ref, cutoff)).fetchall()
+            "AND created_at>=? AND created_at<=? ORDER BY created_at,attempt_ref",
+            (source_ref, cutoff, upper)).fetchall()
         by_host: dict[str, list[Any]] = {}
         for row in rows: by_host.setdefault(row["host"], []).append(row)
         result = []

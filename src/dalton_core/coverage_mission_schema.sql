@@ -161,6 +161,13 @@ CREATE TABLE IF NOT EXISTS coverage_mission_acquisition_attempts (
     content_hash TEXT NOT NULL,
     UNIQUE(record_id,ticket_ref)
 );
+CREATE TRIGGER IF NOT EXISTS coverage_mission_acquisition_attempts_authorized_insert
+BEFORE INSERT ON coverage_mission_acquisition_attempts WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+ SELECT RAISE(ABORT, 'acquisition attempt insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_acquisition_attempts_no_update
+BEFORE UPDATE ON coverage_mission_acquisition_attempts BEGIN SELECT RAISE(ABORT, 'acquisition attempts are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_acquisition_attempts_no_delete
+BEFORE DELETE ON coverage_mission_acquisition_attempts BEGIN SELECT RAISE(ABORT, 'acquisition attempts are append-only'); END;
 
 CREATE TABLE IF NOT EXISTS coverage_mission_idempotency (
     idempotency_key TEXT PRIMARY KEY,

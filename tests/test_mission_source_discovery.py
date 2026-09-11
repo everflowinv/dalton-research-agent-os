@@ -433,7 +433,9 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
             self.missions.mark_discovered_document_launched(row["record_id"], f"fetch:{index}")
             self.missions.settle_discovered_document(
                 row["record_id"], status="acquisition_failed", reason="forbidden",
-                failure_retryable=False, transport_code="HTTP_403")
+                failure_retryable=False, transport_code="HTTP_403",
+                transport_evidence_ref=f"connector-invocation:{index}",
+                transport_evidence_hash=f"{index + 1}" * 64)
             failed_rows.append(row)
         now = datetime.now(timezone.utc)
         held = self.missions.host_failure_cooldowns(
@@ -444,11 +446,19 @@ class MissionDiscoveryAuthorityTests(unittest.TestCase):
         self.missions.settle_discovered_document(failed_rows[0]["record_id"], status="acquired")
         self.assertEqual(self.missions.host_failure_cooldowns(
             source_ref="source:alphaengine", minimum_distinct_urls=2,
-            window_seconds=86400, cooldown_seconds=21600, as_of=now), [])
+            window_seconds=86400, cooldown_seconds=21600,
+            as_of=now + timedelta(minutes=1)), [])
         self.assertEqual(self.missions.host_failure_cooldowns(
             source_ref="source:alphaengine", minimum_distinct_urls=2,
             window_seconds=86400, cooldown_seconds=1,
-            as_of=now + timedelta(seconds=2)), [])
+            as_of=now + timedelta(minutes=1)), [])
+        for bad in (True, 0, 101):
+            with self.assertRaises(CoverageMissionValidationError):
+                self.missions.host_failure_cooldowns(
+                    source_ref="source:alphaengine", minimum_distinct_urls=bad,
+                    window_seconds=1, cooldown_seconds=1, as_of=now)
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.h.core.connection.execute("DELETE FROM coverage_mission_acquisition_attempts")
 
 
 class FakeAcquisitionLauncher:

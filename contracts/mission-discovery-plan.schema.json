@@ -21,6 +21,7 @@
         "0.1",
         "0.2",
         "0.3",
+        "0.4",
         "0.5"
       ]
     },
@@ -40,80 +41,168 @@
       "type": "string",
       "enum": [
         "source:alphaengine",
-        "source:web-search"
+        "source:web-search",
+        "source:sec-edgar"
       ]
     },
     "companies": {
       "type": "object",
       "minProperties": 1,
       "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "search_terms"
-        ],
-        "properties": {
-          "search_terms": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 120
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "search_terms"
+            ],
+            "properties": {
+              "search_terms": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cik"
+            ],
+            "properties": {
+              "cik": {
+                "type": "string",
+                "pattern": "^[0-9]{10}$"
+              }
+            }
           }
-        }
+        ]
       }
     },
     "specs": {
       "type": "array",
       "minItems": 1,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "spec_ref",
-          "query_template",
-          "lookback_days",
-          "rediscovery_interval_days",
-          "retry_interval_days"
-        ],
-        "properties": {
-          "spec_ref": {
-            "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "spec_ref",
+              "lookback_days",
+              "rediscovery_interval_days",
+              "retry_interval_days",
+              "query_template",
+              "document_type"
+            ],
+            "properties": {
+              "spec_ref": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+              },
+              "lookback_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3650
+              },
+              "rediscovery_interval_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "retry_interval_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "query_template": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "\\{terms\\}"
+              },
+              "document_type": {
+                "type": "string"
+              }
+            }
           },
-          "document_type": {
-            "type": "string",
-            "enum": [
-              "research_report",
-              "foreign_report",
-              "domestic_report",
-              "sell_side_report",
-              "sell_side_comment",
-              "meeting_minutes",
-              "announcement",
-              "news"
-            ]
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "spec_ref",
+              "lookback_days",
+              "rediscovery_interval_days",
+              "retry_interval_days",
+              "query_template"
+            ],
+            "properties": {
+              "spec_ref": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+              },
+              "lookback_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3650
+              },
+              "rediscovery_interval_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "retry_interval_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "query_template": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "\\{terms\\}"
+              }
+            }
           },
-          "query_template": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200,
-            "pattern": "\\{terms\\}"
-          },
-          "lookback_days": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 3650
-          },
-          "rediscovery_interval_days": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 365
-          },
-          "retry_interval_days": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 365
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "spec_ref",
+              "lookback_days",
+              "rediscovery_interval_days",
+              "retry_interval_days",
+              "form"
+            ],
+            "properties": {
+              "spec_ref": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+              },
+              "lookback_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3650
+              },
+              "rediscovery_interval_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "retry_interval_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "form": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
+              }
+            }
           }
-        }
+        ]
       }
     },
     "budget": {
@@ -220,7 +309,6 @@
       "if": {
         "properties": {
           "schema_version": {
-            "const": "0.3",
             "enum": [
               "0.3",
               "0.5"
@@ -249,32 +337,15 @@
     {
       "if": {
         "properties": {
-          "source_ref": {
-            "const": "source:alphaengine"
+          "schema_version": {
+            "const": "0.4"
           }
         }
       },
       "then": {
         "properties": {
-          "specs": {
-            "items": {
-              "required": [
-                "document_type"
-              ]
-            }
-          }
-        }
-      },
-      "else": {
-        "properties": {
-          "specs": {
-            "items": {
-              "not": {
-                "required": [
-                  "document_type"
-                ]
-              }
-            }
+          "source_ref": {
+            "const": "source:sec-edgar"
           }
         }
       }
