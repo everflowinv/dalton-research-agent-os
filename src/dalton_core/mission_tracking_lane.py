@@ -59,8 +59,16 @@ class MissionTrackingLaneCoordinator:
 
     def window_ref(self, mission: Mapping[str, Any]) -> str:
         now = self.clock()
-        bucket = int(now.timestamp()) // WINDOW_SECONDS
-        return f"{mission['id']}:{bucket}"
+        interval, suffix = WINDOW_SECONDS, ""
+        policy_path = getattr(self.launcher, "policy_path", None)
+        if policy_path is not None:
+            from .tracking_cadence import load_policy
+            policy = load_policy(policy_path)
+            if "execution" in policy:
+                interval = policy["execution"]["interval_seconds"]
+                suffix = ":" + policy["content_hash"]
+        bucket = int(now.timestamp()) // interval
+        return f"{mission['id']}:{bucket}{suffix}"
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:

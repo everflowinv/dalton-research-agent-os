@@ -177,6 +177,14 @@ def load_policy(path: str | Path | None = None) -> dict[str, Any]:
             "within_seconds": int(pull.get("within_seconds") or 0),
         },
     }
+    execution = wire.get("execution")
+    if "execution" in wire:
+        fields = {"interval_seconds", "max_events_per_run", "max_candidates_per_source", "lookback_days"}
+        if not isinstance(execution, Mapping) or set(execution) != fields:
+            raise TrackingCadenceValidationError("tracking execution has an invalid closed shape")
+        if any(type(value) is not int or value <= 0 for value in execution.values()):
+            raise TrackingCadenceValidationError("tracking execution limits must be positive integers")
+        policy["execution"] = dict(execution)
     policy["content_hash"] = content_hash({
         "policy_ref": policy["policy_ref"],
         "cadences": {key: dict(value) for key, value in cadences.items()},
@@ -186,6 +194,7 @@ def load_policy(path: str | Path | None = None) -> dict[str, Any]:
             key: list(value) if isinstance(value, tuple) else value
             for key, value in policy["immediate_pull"].items()
         },
+        **({"execution": policy["execution"]} if "execution" in policy else {}),
     })
     return policy
 

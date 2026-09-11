@@ -99,7 +99,7 @@ def price_events(
     policy: Any,
     *,
     tracked: list[str],
-    lookback: int = PRICE_LOOKBACK_DAYS,
+    lookback: int | None = None,
 ) -> list[dict[str, Any]]:
     """Abnormal moves for the tracked companies over the last few settled days.
 
@@ -112,6 +112,10 @@ def price_events(
     universe = [member["company_ref"] for member in mission["universe"]]
     series = {ref: prices.series(ref) for ref in universe}
     thresholds = policy["abnormal_move"]
+    if lookback is None:
+        lookback = thresholds.get("max_lookback_trading_days", PRICE_LOOKBACK_DAYS)
+    if type(lookback) is not int or lookback <= 0:
+        raise TrackingCadenceError("max_lookback_trading_days must be a positive integer")
     benchmark_ref = next(iter(thresholds.get("benchmark_refs") or ()), None)
     benchmark = prices.series(benchmark_ref) if benchmark_ref else None
     dates = recent_settled_dates(series, limit=lookback)
@@ -204,19 +208,24 @@ def company_events(
     company_ref: str,
     now: datetime,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    max_candidates_per_source: int | None = None,
 ) -> list[dict[str, Any]]:
     """The three ledger scans for one company, newest first."""
 
     connection = store.connection
+    ledger_limit = 60 if max_candidates_per_source is None else max_candidates_per_source
+    disclosure_limit = 40 if max_candidates_per_source is None else max_candidates_per_source
     candidates = document_event_candidates(
         connection, company_ref=company_ref, mission_ref=mission["mission_ref"],
-        now=now, lookback_days=lookback_days,
+        now=now, lookback_days=lookback_days, limit=ledger_limit,
     )
     candidates += claim_event_candidates(
         connection, company_ref=company_ref, now=now, lookback_days=lookback_days,
+        limit=ledger_limit,
     )
     candidates += reconciliation_event_candidates(
         connection, company_ref=company_ref, now=now, lookback_days=lookback_days,
+        limit=ledger_limit,
     )
     # W4: what the company did with its own shares. Not windowed by
     # ``lookback_days`` like the three above, and deliberately: a US issuer
@@ -225,9 +234,9 @@ def company_events(
     # again. The scan is bounded by the number of filings held instead, and
     # re-reading one costs a lookup because the ledger is idempotent on what
     # the event says.
-    buybacks = buyback_event_candidates(connection, company_ref=company_ref)
+    buybacks = buyback_event_candidates(connection, company_ref=company_ref, limit=disclosure_limit)
     candidates += buybacks["events"]
-    plans = trading_plan_event_candidates(connection, company_ref=company_ref)
+    plans = trading_plan_event_candidates(connection, company_ref=company_ref, limit=disclosure_limit)
     candidates += plans["events"]
     for candidate in candidates:
         candidate.setdefault("company_ref", company_ref)
@@ -264,8 +273,8 @@ def run_tracking(
     summary_dir: Path,
     policy_path: Path | None = None,
     company_ref: str | None = None,
-    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-    max_events: int = MAX_EVENTS_PER_RUN,
+    lookback_days: int | None = None,
+    max_events: int | None = None,
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -291,6 +300,19 @@ def run_tracking(
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
         policy = load_policy(policy_path)
+        execution = policy.get("execution", {})
+        if max_events is None:
+            max_events = execution.get("max_events_per_run", MAX_EVENTS_PER_RUN)
+        if lookback_days is None:
+            lookback_days = execution.get("lookback_days", DEFAULT_LOOKBACK_DAYS)
+        if any(type(value) is not int or value <= 0 for value in (max_events, lookback_days)):
+            raise TrackingCadenceError("tracking run limits must be positive integers")
+        scan_limit = execution.get("max_candidates_per_source")
+        summary["effective_limits"] = {"max_events_per_run": max_events,
+                                       "lookback_days": lookback_days,
+                                       "max_candidates_per_source": scan_limit,
+                                       "ledger_scan_limit": scan_limit if scan_limit is not None else 60,
+                                       "disclosure_scan_limit": scan_limit if scan_limit is not None else 40}
         summary["policy_ref"] = policy["policy_ref"]
         missions = CoverageMissionAuthority(store)
         pointer = store.connection.execute(
@@ -337,7 +359,8 @@ def run_tracking(
         for ref in tracked:
             by_company[ref].extend(
                 company_events(store, mission, company_ref=ref, now=moment,
-                               lookback_days=lookback_days)
+                               lookback_days=lookback_days,
+                               max_candidates_per_source=scan_limit)
             )
         candidates = round_robin(by_company, order=tracked)
 
@@ -412,8 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-policy", type=Path,
                         help="the baselines and thresholds; defaults to the packaged file")
     parser.add_argument("--company-ref", help="track this company rather than all of them")
-    parser.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS)
-    parser.add_argument("--max-events", type=int, default=MAX_EVENTS_PER_RUN)
+    parser.add_argument("--lookback-days", type=int, default=None,
+                        help="override the installed tracking execution lookback")
+    parser.add_argument("--max-events", type=int, default=None,
+                        help="override the installed tracking execution write cap")
     parser.add_argument("--dry-run", action="store_true", help="count and stop; no writes")
     parser.add_argument("--quiet", action="store_true")
     return parser
