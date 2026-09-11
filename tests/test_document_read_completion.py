@@ -3,6 +3,7 @@ import unittest
 from dalton_core.document_read_completion import (
     DocumentReadCompletionAuthority, DocumentReadCompletionError,
 )
+from dalton_core.document_review_reopen import LEGACY_TASK_HASH, PUBLISHED_TASK_HASHES
 from dalton_core.store import content_hash
 from tests.test_mission_stage import ACN, AUTOMATION, REPORTS, StageHarness
 
@@ -59,6 +60,14 @@ class DocumentReadCompletionTests(StageHarness):
             self.record([self.window()], validator=lambda value: {**value, "work_order_ref": "work:other"})
         self.assertEqual(self.store.connection.execute(
             "SELECT COUNT(*) FROM document_read_completion_proofs").fetchone()[0], 0)
+
+    def test_failed_window_task_hashes_are_an_exact_published_registry(self):
+        self.assertEqual(
+            LEGACY_TASK_HASH,
+            "e97a9f0db960da000959f02fd41c978c2745dde1c516e87be95c61208987c55e",
+        )
+        self.assertIn(LEGACY_TASK_HASH, PUBLISHED_TASK_HASHES)
+        self.assertNotIn("f" * 64, PUBLISHED_TASK_HASHES)
 
     def test_failed_or_incomplete_window_chain_is_rejected(self):
         with self.assertRaisesRegex(DocumentReadCompletionError, "did not succeed"):

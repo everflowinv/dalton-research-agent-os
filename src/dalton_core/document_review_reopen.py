@@ -9,7 +9,20 @@ from typing import Any, Mapping
 from .contracts import ResultEnvelope, WorkOrder
 from .readonly_sqlite import connect_read_only
 from .store import content_hash
-from .document_extraction import TASK_HASH, TASK_REF
+from .document_extraction import OUTPUT_SCHEMA, QUOTE_CHARS, TASK_HASH, TASK_REF, WINDOW_CHARS
+
+
+# Failed windows are immutable and remain eligible after the qualitative prompt
+# contract is revised.  Keep the exact hashes of published task contracts here;
+# never accept a merely well-formed digest supplied by a caller.
+LEGACY_TASK_HASH = content_hash({
+    "task": TASK_REF,
+    "output": OUTPUT_SCHEMA,
+    "window_chars": WINDOW_CHARS,
+    "quote_chars": QUOTE_CHARS,
+    "authority": "suggestions_only_human_citation_and_accept",
+})
+PUBLISHED_TASK_HASHES = frozenset({LEGACY_TASK_HASH, TASK_HASH})
 
 
 class FailedDocumentWindowReader:
@@ -30,7 +43,8 @@ class FailedDocumentWindowReader:
         metadata = work.get("metadata") or {}
         prior_review = getattr(self, "prior_review", None)
         if (metadata.get("control_plane") != "mission-document-extraction"
-                or metadata.get("task_ref") != TASK_REF or metadata.get("task_hash") != TASK_HASH):
+                or metadata.get("task_ref") != TASK_REF
+                or metadata.get("task_hash") not in PUBLISHED_TASK_HASHES):
             raise ValueError("failed WorkOrder is not qualitative document extraction")
         if (not isinstance(context, dict) or content_hash(
                 {key: value for key, value in context.items() if key != "content_hash"}
