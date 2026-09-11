@@ -18,7 +18,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -1313,6 +1313,51 @@ class TruncationTests(unittest.TestCase):
 
 
 class RunnerBoundaryTests(unittest.TestCase):
+    def test_governance_hold_precedes_both_runners_and_recovers_after_approval(self) -> None:
+        from dalton_core import mission_feed_lane
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for rejected_operation, rejected_kind in (
+                ("list_notes", SALES_NOTES_LIST_KIND), ("get_note", SALES_NOTES_GET_KIND),
+            ):
+                with self.subTest(operation=rejected_operation):
+                    paths = {
+                        "list_notes": write_governance(root, SALES_NOTES_LIST_KIND),
+                        "get_note": write_governance(root, SALES_NOTES_GET_KIND),
+                    }
+                    pending = write_governance(root, rejected_kind, status="proposed")
+                    paths[rejected_operation] = pending
+                    launcher = SalesNotesFeedLauncher(
+                        digest_dir=FIXTURES, state_dir=root, governance_paths=paths,
+                    )
+                    self.addCleanup(launcher.close)
+                    launcher.feed_plan_path = root / "plan.json"
+                    server = SimpleNamespace(
+                        lane_launcher=lambda _: launcher, _transcript_spool=object(),
+                        _connectors=object(), store=object(), observability=object(),
+                        coverage_mission=object(),
+                    )
+                    with (
+                        mock.patch.object(mission_feed_lane, "load_feed_discovery_plan", return_value={}),
+                        mock.patch.object(mission_feed_lane, "build_feed_runner") as runner,
+                        mock.patch.object(mission_feed_lane, "FeedDiscoveryCoordinator") as coordinator,
+                        mock.patch.object(mission_feed_lane, "_mission_universe", return_value=UNIVERSE),
+                    ):
+                        blocked = mission_feed_lane.dispatch_sales_notes(server, {})
+                        self.assertEqual(blocked["status"], "blocked")
+                        self.assertEqual(blocked["reason_code"], "connector_governance_rejected")
+                        self.assertEqual(blocked["operation"], rejected_operation)
+                        self.assertIn("not approved", blocked["reason"])
+                        runner.assert_not_called()
+                        coordinator.assert_not_called()
+                        # A genuine updated file is re-read without replacing the launcher.
+                        pending.write_bytes(write_governance(root, rejected_kind).read_bytes())
+                        coordinator.return_value.dispatch_once.return_value = {"status": "idle"}
+                        self.assertEqual(mission_feed_lane.dispatch_sales_notes(server, {}), {"status": "idle"})
+                        self.assertEqual(runner.call_count, 2)
+                        coordinator.return_value.dispatch_once.assert_called_once_with(universe=UNIVERSE)
+
     def test_the_runner_refuses_a_template_that_is_not_a_host_tool(self) -> None:
         from dalton_core.host_tool_runner import HostToolRunError, HostToolRunner
         from dalton_core.sec_financials_core import sec_financials_identity

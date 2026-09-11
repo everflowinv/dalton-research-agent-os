@@ -1388,16 +1388,31 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         return {"status": "unconfigured",
                 "reason": "this writer has no connector spool for feed acquisition"}
     plan = load_feed_discovery_plan(plan_path)
+    from .feed_launcher import FeedLaunchRejected
+
+    operations = (
+        ("enumerator", launcher.LIST_OPERATION), ("runner", launcher.GET_OPERATION),
+    )
+    governance = {}
+    for name, operation in operations:
+        try:
+            governance[name] = launcher.load_governance(operation)
+        except FeedLaunchRejected as exc:
+            # A known authority refusal is a lane hold, not an unmapped Writer
+            # failure. Check BOTH operations before constructing either runner;
+            # reload on the next tick so a real approval can unblock the lane.
+            return {
+                "status": "blocked", "reason_code": "connector_governance_rejected",
+                "source_ref": source_ref, "operation": operation, "reason": str(exc),
+            }
     runners = {
         name: build_feed_runner(
             launcher=launcher, operation=operation,
-            governance=launcher.load_governance(operation),
+            governance=governance[name],
             store=server.store, connectors=connectors,
             observability=server.observability, spool=spool, source_ref=source_ref,
         )
-        for name, operation in (
-            ("enumerator", launcher.LIST_OPERATION), ("runner", launcher.GET_OPERATION),
-        )
+        for name, operation in operations
     }
     coordinator = FeedDiscoveryCoordinator(
         missions=server.coverage_mission, launcher=launcher, source_ref=source_ref,
