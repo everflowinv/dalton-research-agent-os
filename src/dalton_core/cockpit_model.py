@@ -137,6 +137,11 @@ _LEASE_GRACE_SECONDS = 30.0
 IDENTITY_VERSION = 2
 DOSSIER_REQUEST_IDENTITY_VERSION = "0.1"
 _DOSSIER_PURPOSES = frozenset({"dossier", "dossier_verifier"})
+_LOCAL_NOT_SENT_PROOF = {
+    "authority": "openclaw-model-adapter",
+    "state": "definitely_not_sent",
+    "version": "0.1",
+}
 
 
 class CockpitModelError(RuntimeError):
@@ -483,27 +488,6 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
     )
 
 
-def _legacy_decorated_request_id(
-    request_id: str,
-    config: Mapping[str, Any],
-    producer_refs: Sequence[str],
-) -> str:
-    """Rebuild the pre-binding identity solely for exact successful replay."""
-
-    decorated = request_id
-    if "capacity_retry" in config:
-        decorated += ":capacity-policy:" + content_hash(
-            _capacity_retry(config)
-        )[:16]
-    if "transport_retry" in config:
-        decorated += ":transport-policy:" + content_hash(
-            config["transport_retry"]
-        )[:16]
-    if producer_refs:
-        decorated += ":producer:" + content_hash(list(producer_refs))[:16]
-    return decorated
-
-
 def dossier_request_identity(
     *,
     semantic_request_id: str,
@@ -515,11 +499,7 @@ def dossier_request_identity(
 
     producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
     exact_config = {
-        **(
-            {"capacity_retry": dict(config["capacity_retry"])}
-            if "capacity_retry" in config
-            else {}
-        ),
+        "capacity_retry": _capacity_retry(config),
         **(
             {"transport_retry": dict(config["transport_retry"])}
             if "transport_retry" in config
@@ -664,6 +644,142 @@ def _make_dossier_recovery_parent(
     return parent
 
 
+def _dossier_capacity_epoch(scheduler: Scheduler, identity: Mapping[str, Any]) -> int:
+    """Read the complete recovery ancestry and enforce one monotonic epoch series."""
+
+    semantic = str(identity["semantic_request_id"])
+    producer_refs = tuple(identity["producer_route_decision_refs"])
+    exact_config = identity["exact_config"]
+    capacity = exact_config.get("capacity_retry") or _capacity_retry({})
+    policy_hash = content_hash(capacity)[:16]
+    epochs: list[int] = []
+    seen: set[str] = set()
+    current = dict(identity)
+    while current.get("recovery_parent") is not None:
+        parent = current["recovery_parent"]
+        work_ref = parent["work_order_ref"]
+        if work_ref in seen:
+            raise CockpitModelError("Dossier recovery ancestry contains a cycle")
+        seen.add(work_ref)
+        if len(seen) > 32:
+            raise CockpitModelError("Dossier recovery ancestry is too deep")
+        if parent["kind"] == "capacity":
+            match = re.fullmatch(
+                r"capacity-recovery:([1-9][0-9]*):([0-9a-f]{16})",
+                parent["proof_ref"],
+            )
+            if match is None or match.group(2) != policy_hash:
+                raise CockpitModelError("Dossier capacity recovery proof drifted")
+            epochs.append(int(match.group(1)))
+        try:
+            authority = scheduler.work_order_authority(work_ref)
+        except SchedulerConflict as exc:
+            raise CockpitModelError("Dossier recovery parent authority drifted") from exc
+        metadata = ((authority or {}).get("work_order") or {}).get("metadata") or {}
+        parent_identity = metadata.get("request_identity")
+        if parent_identity is None:
+            legacy_request = semantic
+            if producer_refs:
+                legacy_request += ":producer:" + content_hash(list(producer_refs))[:16]
+            if (
+                exact_config != {"capacity_retry": _capacity_retry({})}
+                or metadata.get("request_id") != legacy_request
+            ):
+                raise CockpitModelError("Dossier legacy recovery root drifted")
+            break
+        try:
+            parent_identity = validate_dossier_request_identity(
+                parent_identity,
+                semantic_request_id=semantic,
+                producer_route_decision_refs=producer_refs,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CockpitModelError("Dossier recovery parent identity drifted") from exc
+        if (
+            canonical_json(parent_identity["exact_config"])
+            != canonical_json(exact_config)
+            or metadata.get("request_id") != parent_identity["decorated_request_id"]
+        ):
+            raise CockpitModelError("Dossier recovery parent configuration drifted")
+        current = parent_identity
+    chronological = list(reversed(epochs))
+    if chronological != list(range(1, len(chronological) + 1)):
+        raise CockpitModelError("Dossier capacity recovery epochs are not contiguous")
+    if len(chronological) > capacity["max_recovery_epochs"]:
+        raise CockpitModelError("capacity_recovery_exhausted")
+    return len(chronological)
+
+
+def _validated_dossier_success(
+    scheduler: Scheduler,
+    expected_work: WorkOrder,
+) -> dict[str, Any] | None:
+    """Return an exact immutable Dossier success, rejecting corrupt authority."""
+
+    try:
+        authority = scheduler.work_order_authority(expected_work.id)
+    except SchedulerConflict as exc:
+        raise CockpitModelError("Dossier WorkOrder authority drifted") from exc
+    if authority is None:
+        return None
+    expected_wire = expected_work.to_dict()
+    if (
+        canonical_json(authority["work_order"]) != canonical_json(expected_wire)
+        or authority["work_order_hash"] != content_hash(expected_wire)
+    ):
+        raise CockpitModelError("Dossier WorkOrder differs from this request")
+    row = scheduler.connection.execute(
+        "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+        (expected_work.id,),
+    ).fetchone()
+    if row is None:
+        return None
+    formal = dict(row)
+    try:
+        envelope = ResultEnvelope.from_dict(
+            json.loads(formal["result_envelope_json"])
+        ).to_dict()
+    except Exception as exc:
+        raise CockpitModelError("Dossier result authority is invalid") from exc
+    record = {
+        "id": formal["result_record_id"],
+        "work_order_id": formal["work_order_id"],
+        "attempt_number": formal["attempt_number"],
+        "result_envelope_id": formal["result_envelope_id"],
+        "result_envelope_hash": formal["result_envelope_hash"],
+        "terminal_state": formal["terminal_state"],
+        "created_at": formal["created_at"],
+    }
+    receipt = scheduler.connection.execute(
+        "SELECT * FROM scheduler_result_envelopes WHERE result_envelope_id=?",
+        (formal["result_envelope_id"],),
+    ).fetchone()
+    receipt_body = None if receipt is None else {
+        "result_envelope_id": receipt["result_envelope_id"],
+        "work_order_id": receipt["work_order_id"],
+        "attempt_number": receipt["attempt_number"],
+        "result_envelope_hash": receipt["result_envelope_hash"],
+        "outcome": receipt["outcome"],
+        "created_at": receipt["created_at"],
+    }
+    if (
+        formal["terminal_state"] != "succeeded"
+        or formal["work_order_id"] != expected_work.id
+        or envelope["work_order_ref"] != expected_work.id
+        or envelope["id"] != formal["result_envelope_id"]
+        or canonical_json(envelope) != formal["result_envelope_json"]
+        or content_hash(envelope) != formal["result_envelope_hash"]
+        or content_hash(record) != formal["content_hash"]
+        or receipt is None
+        or canonical_json(envelope) != receipt["result_envelope_json"]
+        or receipt["result_envelope_hash"] != formal["result_envelope_hash"]
+        or receipt["outcome"] != "succeeded"
+        or content_hash(receipt_body) != receipt["content_hash"]
+    ):
+        raise CockpitModelError("Dossier success authority drifted")
+    return {**formal, "result_envelope": envelope}
+
+
 def _failure(work: WorkOrder, code: str, route_ref: str | None,
              *, message: str | None = None,
              chain_failures: Sequence[Mapping[str, Any]] = (),
@@ -704,9 +820,9 @@ def _legacy_broker_busy_failure(formal: Mapping[str, Any] | None) -> bool:
     )
 
 
-def _capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
-    if _legacy_broker_busy_failure(formal):
-        return True
+def _proved_capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
+    """Require the adapter's closed proof that no provider call was sent."""
+
     if not isinstance(formal, Mapping) or formal.get("terminal_state") != "failed":
         return False
     envelope = formal.get("result_envelope") or {}
@@ -717,9 +833,17 @@ def _capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
         and len(failures) == 1
         and isinstance(failures[0], Mapping)
         and failures[0].get("failure_class") == "capacity_busy"
+        and failures[0].get("dispatch_proof") == _LOCAL_NOT_SENT_PROOF
         and failures[0].get("code") in {
             "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
             "QUEUE_TIMEOUT", "BROKER_CLOSED"}
+    )
+
+
+def _capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
+    return (
+        _legacy_broker_busy_failure(formal)
+        or _proved_capacity_busy_terminal(formal)
     )
 
 
@@ -823,7 +947,6 @@ class CockpitModel:
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         semantic_request_id = request_id
         request_identity = None
-        legacy_request_id = None
         if (
             purpose in _DOSSIER_PURPOSES
             and (
@@ -840,10 +963,6 @@ class CockpitModel:
             )
             request_id = request_identity["decorated_request_id"]
             base_request_id = request_id
-            if _dossier_recovery_parent is None:
-                legacy_request_id = _legacy_decorated_request_id(
-                    semantic_request_id, self.config, producer_refs
-                )
         else:
             base_request_id = request_id
             if "capacity_retry" in self.config:
@@ -932,11 +1051,6 @@ class CockpitModel:
             request_identity=request_identity,
             **work_args,
         )
-        legacy_work = (
-            build_work(request_id=legacy_request_id, **work_args)
-            if legacy_request_id is not None
-            else None
-        )
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
@@ -987,24 +1101,17 @@ class CockpitModel:
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
-            if legacy_work is not None:
-                legacy_formal = scheduler.formal_result(legacy_work.id)
-                if legacy_formal is not None:
-                    # Old successful work remains replayable byte-for-byte.
-                    # Failed history has no closed request/config/recovery
-                    # binding, so it remains terminal rather than becoming a
-                    # newly decorated paid call.
-                    return self._answer(
-                        legacy_formal,
-                        legacy_work,
-                        True,
-                        0,
-                        "replayed",
-                    )
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            if (
+                purpose in _DOSSIER_PURPOSES
+                and formal is not None
+                and formal.get("terminal_state") == "succeeded"
+            ):
+                formal = _validated_dossier_success(scheduler, work)
             dossier_bound = request_identity is not None
+            dossier_purpose = purpose in _DOSSIER_PURPOSES
             prior_recovery_kind = (
                 (request_identity.get("recovery_parent") or {}).get("kind")
                 if dossier_bound
@@ -1026,7 +1133,7 @@ class CockpitModel:
                     mission=mission,
                 )
                 if recovery_suffix is not None:
-                    if dossier_bound:
+                    if dossier_purpose:
                         parent = _make_dossier_recovery_parent(
                             kind="operator",
                             proof_ref=recovery_suffix.removeprefix(":"),
@@ -1054,7 +1161,7 @@ class CockpitModel:
                 config=self.config,
             )
             if recovery_request is not None:
-                if dossier_bound:
+                if dossier_purpose:
                     marker = ":route-admission:"
                     proof = recovery_request.rsplit(marker, 1)[-1]
                     parent = _make_dossier_recovery_parent(
@@ -1098,19 +1205,23 @@ class CockpitModel:
                     base_request_id,
                 )
             )
-            if dossier_bound and prior_recovery_kind == "capacity":
-                proof_ref = (request_identity["recovery_parent"] or {})["proof_ref"]
-                epoch = int(proof_ref.split(":", 2)[1])
+            if dossier_bound:
+                epoch = _dossier_capacity_epoch(scheduler, request_identity)
             else:
                 epoch = int(match.group(1)) if match else 0
-            if (_capacity_busy_terminal(capacity_terminal)
+            capacity_recoverable = (
+                _proved_capacity_busy_terminal(capacity_terminal)
+                if dossier_purpose
+                else _capacity_busy_terminal(capacity_terminal)
+            )
+            if (capacity_recoverable
                     and epoch < capacity_retry["max_recovery_epochs"]):
                 completed_at = datetime.fromisoformat(str(capacity_terminal["created_at"]))
                 elapsed = (self.clock().astimezone(timezone.utc)
                            - completed_at.astimezone(timezone.utc)).total_seconds()
                 if elapsed >= capacity_retry["cooldown_seconds"]:
                     policy_hash = content_hash(capacity_retry)[:16]
-                    if dossier_bound:
+                    if dossier_purpose:
                         parent = _make_dossier_recovery_parent(
                             kind="capacity",
                             proof_ref=(
@@ -1414,6 +1525,7 @@ class CockpitModel:
         admission: dict[str, Any] | None = None
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
+        local_dispatch_proofs: dict[str, dict[str, str]] = {}
         uncertain_spend = False
         refusal: list[str] = []
         pool_rejection: dict[str, Any] | None = None
@@ -1470,10 +1582,17 @@ class CockpitModel:
                 # a provider call. Every other failed host envelope may have
                 # consumed the full bounded call before validation failed.
                 code = str((envelope.error or {}).get("code", "")).upper()
-                may_have_reached_provider = code not in {
+                broker_local_code = code in {
                     "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
                     "QUEUE_TIMEOUT", "BROKER_CLOSED",
                 }
+                dispatch_proof = (envelope.metadata or {}).get("dispatch_proof")
+                broker_local_not_sent = (
+                    broker_local_code and dispatch_proof == _LOCAL_NOT_SENT_PROOF
+                )
+                may_have_reached_provider = not broker_local_not_sent
+                if broker_local_not_sent:
+                    local_dispatch_proofs[profile["id"]] = dict(dispatch_proof)
                 spend[route["id"]] = ((ceiling, "reserved")
                                       if may_have_reached_provider else (0, "failed"))
                 uncertain_spend = uncertain_spend or may_have_reached_provider
@@ -1483,6 +1602,8 @@ class CockpitModel:
                             if may_have_reached_provider and failure_class in {
                                 "transport_failure", "provider_failure", "model_unavailable"
                             }
+                            else "unclassified_failure"
+                            if broker_local_code and not broker_local_not_sent
                             else failure_class
                         ),
                         "error_code": (envelope.error or {}).get("code"),
@@ -1544,7 +1665,17 @@ class CockpitModel:
             f"{link['profile_id']} ({link['skip_reason']})"
             for link in outcome["links"] if not link["served"]
         )
-        details = list(outcome.get("failures") or [])
+        details = [
+            {
+                **item,
+                **(
+                    {"dispatch_proof": local_dispatch_proofs[item["profile_id"]]}
+                    if item.get("profile_id") in local_dispatch_proofs
+                    else {}
+                ),
+            }
+            for item in (outcome.get("failures") or [])
+        ]
         detail_text = "; ".join(
             f"{item['profile_id']} [{item['code']}]: {item['message']}"
             for item in details)

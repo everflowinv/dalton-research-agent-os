@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -811,6 +812,240 @@ def dossier_input_fingerprint(value: Mapping[str, Any]) -> str:
     return content_hash(dict(value))
 
 
+def _validate_dossier_recovery_ancestry(
+    scheduler: sqlite3.Connection,
+    router: sqlite3.Connection,
+    *,
+    request_identity: Mapping[str, Any],
+    child_work: Mapping[str, Any],
+    semantic_request_id: str,
+    purpose: str,
+    prompt_hash: str,
+    mission: Mapping[str, Any],
+    producer_refs: Sequence[str],
+) -> None:
+    """Resolve every recovery edge to same-request immutable authorities."""
+
+    from .cockpit_model import (
+        _capacity_retry,
+        _proved_capacity_busy_terminal,
+        validate_dossier_request_identity,
+    )
+    from .contracts import ResultEnvelope, WorkOrder
+
+    root_config = request_identity["exact_config"]
+    capacity_config = root_config.get("capacity_retry") or _capacity_retry({})
+    expected_capacity_hash = content_hash(capacity_config)[:16]
+    capacity_epochs: list[int] = []
+    seen: set[str] = set()
+    current_identity = dict(request_identity)
+    current_child = dict(child_work)
+    while current_identity.get("recovery_parent") is not None:
+        recovery = current_identity["recovery_parent"]
+        parent_ref = recovery["work_order_ref"]
+        if parent_ref in seen or len(seen) >= 32:
+            raise ValueError("Dossier recovery ancestry is cyclic or too deep")
+        seen.add(parent_ref)
+        work_row = scheduler.execute(
+            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+            "WHERE work_order_id=?", (parent_ref,),
+        ).fetchone()
+        result_row = scheduler.execute(
+            "SELECT * FROM scheduler_result_envelopes WHERE work_order_id=? "
+            "ORDER BY attempt_number DESC LIMIT 1", (parent_ref,),
+        ).fetchone()
+        if work_row is None or result_row is None:
+            raise ValueError("Dossier recovery parent authority is missing")
+        try:
+            parent_work = WorkOrder.from_dict(
+                json.loads(work_row["work_order_json"])
+            ).to_dict()
+            envelope = ResultEnvelope.from_dict(
+                json.loads(result_row["result_envelope_json"])
+            ).to_dict()
+        except Exception as exc:
+            raise ValueError("Dossier recovery parent authority is invalid") from exc
+        receipt = {
+            "result_envelope_id": result_row["result_envelope_id"],
+            "work_order_id": result_row["work_order_id"],
+            "attempt_number": result_row["attempt_number"],
+            "result_envelope_hash": result_row["result_envelope_hash"],
+            "outcome": result_row["outcome"],
+            "created_at": result_row["created_at"],
+        }
+        parent_metadata = parent_work.get("metadata") or {}
+        parent_refs = sorted(set(
+            parent_metadata.get("producer_route_decision_refs") or []
+        ))
+        raw_parent_identity = parent_metadata.get("request_identity")
+        if raw_parent_identity is None:
+            legacy_request = semantic_request_id
+            if parent_refs:
+                legacy_request += ":producer:" + content_hash(parent_refs)[:16]
+            legacy_default_config = {"capacity_retry": _capacity_retry({})}
+            if (
+                root_config != legacy_default_config
+                or parent_refs != sorted(set(producer_refs))
+                or parent_metadata.get("request_id") != legacy_request
+            ):
+                raise ValueError("Dossier legacy recovery root drifted")
+            parent_identity = {
+                "exact_config": legacy_default_config,
+                "recovery_parent": None,
+                "decorated_request_id": legacy_request,
+            }
+        else:
+            try:
+                parent_identity = validate_dossier_request_identity(
+                    raw_parent_identity,
+                    semantic_request_id=semantic_request_id,
+                    producer_route_decision_refs=parent_refs,
+                )
+            except Exception as exc:
+                raise ValueError("Dossier recovery parent identity is invalid") from exc
+        if (
+            canonical_json(parent_work) != work_row["work_order_json"]
+            or content_hash(parent_work) != work_row["work_order_hash"]
+            or parent_work["id"] != parent_ref
+            or canonical_json(envelope) != result_row["result_envelope_json"]
+            or content_hash(envelope) != result_row["result_envelope_hash"]
+            or content_hash(receipt) != result_row["content_hash"]
+            or envelope["work_order_ref"] != parent_ref
+            or result_row["result_envelope_hash"]
+            != recovery["result_envelope_hash"]
+            or parent_metadata.get("purpose") != purpose
+            or parent_metadata.get("mission_version_ref") != mission.get("ref")
+            or parent_metadata.get("mission_version_hash") != mission.get("hash")
+            or content_hash(parent_work.get("question")) != prompt_hash
+            or parent_refs != sorted(set(producer_refs))
+            or parent_metadata.get("request_id")
+            != parent_identity["decorated_request_id"]
+            or canonical_json(parent_identity["exact_config"])
+            != canonical_json(root_config)
+        ):
+            raise ValueError("Dossier recovery parent binding drifted")
+
+        formal = scheduler.execute(
+            "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+            (parent_ref,),
+        ).fetchone()
+        if recovery["kind"] == "capacity":
+            match = re.fullmatch(
+                r"capacity-recovery:([1-9][0-9]*):([0-9a-f]{16})",
+                recovery["proof_ref"],
+            )
+            latest_event = scheduler.execute(
+                "SELECT state FROM scheduler_attempt_events WHERE work_order_id=? "
+                "ORDER BY event_seq DESC LIMIT 1", (parent_ref,),
+            ).fetchone()
+            child_event = scheduler.execute(
+                "SELECT created_at FROM scheduler_attempt_events WHERE work_order_id=? "
+                "ORDER BY event_seq LIMIT 1", (current_child["id"],),
+            ).fetchone()
+            elapsed = None
+            if child_event is not None:
+                elapsed = (
+                    datetime.fromisoformat(child_event["created_at"])
+                    - datetime.fromisoformat(result_row["created_at"])
+                ).total_seconds()
+            if (
+                match is None
+                or match.group(2) != expected_capacity_hash
+                or result_row["outcome"] != "retryable"
+                or latest_event is None
+                or latest_event["state"] != "failed"
+                or not _proved_capacity_busy_terminal({
+                    "terminal_state": "failed", "result_envelope": envelope,
+                })
+                or elapsed is None
+                or elapsed < capacity_config["cooldown_seconds"]
+            ):
+                raise ValueError("Dossier capacity recovery proof is ineligible")
+            capacity_epochs.append(int(match.group(1)))
+        else:
+            if formal is None:
+                raise ValueError("Dossier recovery has no formal failed parent")
+            formal_body = {
+                "id": formal["result_record_id"],
+                "work_order_id": formal["work_order_id"],
+                "attempt_number": formal["attempt_number"],
+                "result_envelope_id": formal["result_envelope_id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "terminal_state": formal["terminal_state"],
+                "created_at": formal["created_at"],
+            }
+            if (
+                formal["terminal_state"] != "failed"
+                or formal["result_envelope_hash"] != result_row["result_envelope_hash"]
+                or canonical_json(envelope) != formal["result_envelope_json"]
+                or content_hash(formal_body) != formal["content_hash"]
+            ):
+                raise ValueError("Dossier formal recovery parent drifted")
+        if recovery["kind"] == "route_admission":
+            route_ref = (envelope.get("metadata") or {}).get("route_decision_ref")
+            route_row = router.execute(
+                "SELECT * FROM model_route_decisions WHERE decision_id=?",
+                (route_ref,),
+            ).fetchone()
+            child_route = router.execute(
+                "SELECT decision_json FROM model_route_decisions "
+                "WHERE work_order_id=? ORDER BY decision_sequence LIMIT 1",
+                (current_child["id"],),
+            ).fetchone()
+            if route_row is None or child_route is None:
+                raise ValueError("Dossier route recovery authority is missing")
+            route = json.loads(route_row["decision_json"])
+            child_decision = json.loads(child_route["decision_json"])
+            expected_proof = "route-admission:" + content_hash({
+                "policy_hash": child_decision["policy_hash"],
+                "credential_slot_refs": sorted(
+                    child_decision["constraints"]["credential_slot_refs"]
+                ),
+            })
+            route_body = {key: value for key, value in route.items()
+                          if key != "content_hash"}
+            if (
+                (envelope.get("error") or {}).get("code") != "MODEL_ROUTE_REJECTED"
+                or route.get("outcome") != "rejected"
+                or route.get("work_order_ref") != parent_ref
+                or route_row["work_order_hash"] != work_row["work_order_hash"]
+                or route.get("content_hash") != route_row["decision_hash"]
+                or content_hash(route_body) != route_row["decision_hash"]
+                or recovery["proof_ref"] != expected_proof
+            ):
+                raise ValueError("Dossier route recovery proof is ineligible")
+        elif recovery["kind"] == "operator":
+            redrive = scheduler.execute(
+                "SELECT record_json,content_hash FROM controlled_failure_redrives "
+                "WHERE old_work_order_ref=?", (parent_ref,),
+            ).fetchone()
+            if redrive is None:
+                raise ValueError("Dossier operator recovery authority is missing")
+            record = json.loads(redrive["record_json"])
+            record_body = {key: value for key, value in record.items()
+                           if key != "content_hash"}
+            if (
+                canonical_json(record) != redrive["record_json"]
+                or record.get("content_hash") != redrive["content_hash"]
+                or content_hash(record_body) != redrive["content_hash"]
+                or record.get("old_work_order_ref") != parent_ref
+                or record.get("old_work_order_hash") != work_row["work_order_hash"]
+                or record.get("formal_result_envelope_hash")
+                != result_row["result_envelope_hash"]
+                or recovery["proof_ref"]
+                != "operator-recovery:" + redrive["content_hash"][:16]
+            ):
+                raise ValueError("Dossier operator recovery proof is ineligible")
+        current_child = parent_work
+        current_identity = parent_identity
+    chronological = list(reversed(capacity_epochs))
+    if (
+        chronological != list(range(1, len(chronological) + 1))
+        or len(chronological) > capacity_config["max_recovery_epochs"]
+    ):
+        raise ValueError("Dossier capacity recovery epoch chain drifted")
+
+
 def validate_formal_unit_provenance(
     provenance: Mapping[str, Any], *, mission_ref: str, current_prior_ref: str | None,
     company_ref: str | None = None, current_units: set[str] | None = None,
@@ -909,43 +1144,17 @@ def validate_formal_unit_provenance(
                         metadata.get("request_id")
                         == validated_request["decorated_request_id"]
                     )
-                    recovery_parent = validated_request["recovery_parent"]
-                    if recovery_parent is not None:
-                        parent = scheduler.execute(
-                            "SELECT terminal_state,result_envelope_hash "
-                            "FROM scheduler_formal_results WHERE work_order_id=?",
-                            (recovery_parent["work_order_ref"],),
-                        ).fetchone()
-                        parent_matches = (
-                            parent is not None
-                            and parent["terminal_state"] == "failed"
-                            and parent["result_envelope_hash"]
-                            == recovery_parent["result_envelope_hash"]
-                        )
-                        if not parent_matches:
-                            parent_result = scheduler.execute(
-                                "SELECT outcome,result_envelope_hash FROM "
-                                "scheduler_result_envelopes WHERE work_order_id=? "
-                                "ORDER BY attempt_number DESC LIMIT 1",
-                                (recovery_parent["work_order_ref"],),
-                            ).fetchone()
-                            parent_event = scheduler.execute(
-                                "SELECT state FROM scheduler_attempt_events "
-                                "WHERE work_order_id=? ORDER BY event_seq DESC LIMIT 1",
-                                (recovery_parent["work_order_ref"],),
-                            ).fetchone()
-                            parent_matches = (
-                                parent_result is not None
-                                and parent_result["outcome"] == "retryable"
-                                and parent_result["result_envelope_hash"]
-                                == recovery_parent["result_envelope_hash"]
-                                and parent_event is not None
-                                and parent_event["state"] == "failed"
-                            )
-                        if not parent_matches:
-                            raise ValueError(
-                                f"unit_provenance.{unit}.{role} recovery parent drifted"
-                            )
+                    _validate_dossier_recovery_ancestry(
+                        scheduler,
+                        router,
+                        request_identity=validated_request,
+                        child_work=work,
+                        semantic_request_id=claimed["request_id"],
+                        purpose=purpose,
+                        prompt_hash=claimed["prompt_hash"],
+                        mission=bound_mission,
+                        producer_refs=producer_refs,
+                    )
                 else:
                     # Historical successful work remains valid only in the
                     # exact pre-decoration forms that were authoritative then.
