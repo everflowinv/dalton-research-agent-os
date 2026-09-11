@@ -624,6 +624,45 @@ class CoordinatorTests(unittest.TestCase):
             as_of=self.clock().date(),variant_index=1,missing_periods=search.starts[-1]['missing_periods'])
         self.assertIn('results webcast',compiled['query'])
 
+    def test_v06_missing_selector_never_falls_back_to_fetch_all(self):
+        v1=self.create_mission(); mission=self.mission_v2(v1)
+        company_ref=mission['universe'][0]['company_ref']
+        plan=build_discovery_plan(plan_id='discovery-plan:selection-required:test',
+            created_at=NOW.isoformat(timespec='microseconds'),mission_ref=self.plan['mission_ref'],
+            source_ref='source:alphaengine',max_calls_24h=30,
+            companies={company_ref:{'name':'Accenture plc','ticker':'ACN','aliases':['Accenture']}},specs=[{
+                'spec_ref':'earnings-call-transcripts','document_type':'meeting_minutes',
+                'query_variants':[{'query_template':'{name} {quarter} earnings call transcript','filters':{}}],
+                'lookback_days':400,'rediscovery_interval_days':7,'retry_interval_days':1}])
+        search=FakeSearchLauncher(self.h,self.missions,plan)
+        acquisition=FakeAcquisitionLauncher(self.h)
+        class Selection:
+            def currently_consumed(self,**kwargs):return []
+            def current_selections(self,**kwargs):return {}
+        seeded=MissionSourceDiscoveryCoordinator(store=self.h.core,missions=self.missions,plan=plan,
+            search_launcher=search,acquisition_launcher=acquisition,clock=self.clock,selection_launcher=Selection())
+        self.assertEqual(seeded.launch_discovery()['status'],'launched')
+        seeded.settle_dispatches()
+        coordinator=MissionSourceDiscoveryCoordinator(store=self.h.core,missions=self.missions,plan=plan,
+            search_launcher=search,acquisition_launcher=acquisition,clock=self.clock,selection_launcher=None)
+        blocked=coordinator.launch_acquisition()
+        self.assertEqual(blocked['status'],'selection_unavailable')
+        self.assertEqual(acquisition.calls,[])
+
+        searches=len(search.starts)
+        self.assertEqual(coordinator.launch_discovery()['status'],'idle')
+        self.assertEqual(len(search.starts),searches)
+
+        # A failed acquisition from the governed spec also cannot bypass the
+        # selector through the retry path.
+        row=self.missions.next_discovered_document(source_ref='source:alphaengine')
+        self.missions.mark_discovered_document_launched(row['record_id'],'ticket:failed')
+        self.missions.settle_discovered_document(row['record_id'],status='acquisition_failed',
+                                                 reason='provider failed',failure_retryable=True)
+        self.clock.advance(days=2)
+        self.assertEqual(coordinator.launch_acquisition()['status'],'selection_unavailable')
+        self.assertEqual(acquisition.calls,[])
+
     def mission_v2(self, v1, *, cap: int = 30):
         params = mission_params(self.state)
         params["autonomy"]["may_write"] = list(params["autonomy"]["may_write"]) + ["source_discovery"]

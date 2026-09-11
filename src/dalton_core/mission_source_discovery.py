@@ -1713,6 +1713,13 @@ class MissionSourceDiscoveryCoordinator:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})
                 continue
             for spec in self.plan["specs"]:
+                if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
+                        and self.source_ref == ALPHAENGINE_SOURCE_REF
+                        and spec.get("document_type") == "meeting_minutes"
+                        and self.selection_launcher is None):
+                    skipped.append({"company_ref": company_ref, "spec_ref": spec["spec_ref"],
+                                    "reason": "discovery_selection configuration is required"})
+                    continue
                 block = self._spec_block(mission, company_ref, spec)
                 if block is not None:
                     skipped.append({
@@ -1851,6 +1858,17 @@ class MissionSourceDiscoveryCoordinator:
         }
         empty_discoveries = ()
         current_selection_refs = None
+        selection_required = (
+            self.source_ref == ALPHAENGINE_SOURCE_REF
+            and self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
+            and any(spec.get("document_type") == "meeting_minutes" for spec in self.plan["specs"])
+        )
+        # An empty tuple deliberately keeps failed meeting-minute acquisitions
+        # behind the selection boundary when the configured selector is absent.
+        # ``None`` would disable the restriction and restore the legacy fetch-all
+        # path for a v0.6 plan.
+        if selection_required:
+            current_selection_refs = ()
         if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF:
             from .mission_stage import evaluate_mission
             periods_by_company={}
@@ -1874,6 +1892,13 @@ class MissionSourceDiscoveryCoordinator:
             excluded_mission_version_ref=None if mission is None else mission["id"],
             excluded_discovery_refs=empty_discoveries,
         )
+        if document is not None and selection_required and self.selection_launcher is None:
+            discovery = self.missions.discovery_record(document["discovery_ref"])
+            spec = next((item for item in self.plan["specs"]
+                         if item["spec_ref"] == discovery["spec_ref"]), None)
+            if spec is not None and spec.get("document_type") == "meeting_minutes":
+                return {"status": "selection_unavailable",
+                        "reason": "discovery_selection configuration is required"}
         if (document is not None and self.selection_launcher is not None
                 and self.source_ref == ALPHAENGINE_SOURCE_REF):
             if mission is None or self.spool_dir is None:
