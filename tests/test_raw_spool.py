@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import unittest
+import subprocess
+import sys
+from unittest.mock import patch
 from pathlib import Path
 
 from dalton_core.raw_spool import (
@@ -55,6 +58,57 @@ class RawSpoolTests(unittest.TestCase):
         del orphan
         self.assertEqual(spool.gc_orphans(), 1)
         self.assertEqual(spool.gc_orphans(), 0)
+
+    def test_other_instance_gc_preserves_inflight_download_and_completed_original(self):
+        first = RawSpool(self.temp.name, max_total_bytes=4096)
+        second = RawSpool(self.temp.name, max_total_bytes=4096)
+        sink = first.open_sink(self.sink_ref("7"), max_response_bytes=1024)
+        sink.write(b"original paragraph not represented by any Claim")
+        self.assertEqual(second.gc_orphans(), 0)
+        original = sink.finalize()
+        self.assertEqual(second.gc_orphans(), 0)
+        self.assertEqual(second.read_object(original.content_hash), b"original paragraph not represented by any Claim")
+
+    def test_activity_lock_survives_flush_until_object_publication(self):
+        writer = RawSpool(self.temp.name, max_total_bytes=4096)
+        collector = RawSpool(self.temp.name, max_total_bytes=4096)
+        sink = writer.open_sink(self.sink_ref("9"), max_response_bytes=1024)
+        sink.write(b"publish without an unlocked gap")
+        publish = writer._finalize
+
+        def interleaved(*args):
+            self.assertEqual(collector.gc_orphans(), 0)
+            return publish(*args)
+
+        with patch.object(writer, "_finalize", side_effect=interleaved):
+            original = sink.finalize()
+        self.assertEqual(collector.read_object(original.content_hash), b"publish without an unlocked gap")
+
+    def test_another_process_download_is_protected_until_that_process_exits(self):
+        script = (
+            "import os,sys; sys.path.insert(0,sys.argv[2]); "
+            "from dalton_core.raw_spool import RawSpool; "
+            "s=RawSpool(sys.argv[1],max_total_bytes=4096); "
+            "sink=s.open_sink('raw-sink:'+'8'*64,max_response_bytes=1024); "
+            "sink.write(b'active original'); print('ready',flush=True); "
+            "sys.stdin.readline(); os._exit(0)"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, self.temp.name, str(Path(__file__).resolve().parents[1] / "src")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            collector = RawSpool(self.temp.name, max_total_bytes=4096)
+            self.assertEqual(collector.gc_orphans(), 0)
+            process.communicate("exit\n", timeout=10)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(collector.gc_orphans(), 1)
+            self.assertEqual(collector.gc_orphans(), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
 
 
 if __name__ == "__main__":

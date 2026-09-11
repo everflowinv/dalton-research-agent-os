@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import os
 import re
+import stat
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -97,24 +100,23 @@ class BoundedRawSink:
             raise RawSpoolError("raw sink is closed")
         self._file.flush()
         os.fsync(self._file.fileno())
-        self._file.close()
         self._closed = True
         digest = self._digest.hexdigest()
         try:
             return self._spool._finalize(self._temporary, digest, self._size)
         finally:
+            # Keep the cross-process activity lock through publication. A
+            # collector must not unlink the partial between close and link.
+            self._file.close()
             self._spool._release_reservation(self._sink_ref)
 
     def abort(self) -> None:
         if not self._closed:
             try:
-                self._file.close()
+                self._temporary.unlink(missing_ok=True)
             finally:
+                self._file.close()
                 self._closed = True
-        try:
-            self._temporary.unlink()
-        except FileNotFoundError:
-            pass
         self._spool._release_reservation(self._sink_ref)
 
     def __del__(self) -> None:
@@ -171,6 +173,16 @@ class RawSpool:
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(directory, 0o700)
 
+    @contextmanager
+    def _temporary_directory_lock(self):
+        """Serialize partial creation/claim with collection across processes."""
+        descriptor = os.open(self._tmp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
     def open_sink(self, sink_ref: str, *, max_response_bytes: int) -> BoundedRawSink:
         match = _SINK_RE.fullmatch(sink_ref)
         if match is None:
@@ -181,7 +193,7 @@ class RawSpool:
             or max_response_bytes < 1
         ):
             raise RawSpoolError("max_response_bytes must be a positive integer")
-        with self._lock:
+        with self._lock, self._temporary_directory_lock():
             projected = (
                 self.total_bytes()
                 + sum(self._open_reservations.values())
@@ -196,6 +208,12 @@ class RawSpool:
                 descriptor = os.open(temporary, flags, 0o600)
             except FileExistsError as exc:
                 raise RawSpoolError("raw sink already has an unfinished partial") from exc
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BaseException:
+                os.close(descriptor)
+                temporary.unlink(missing_ok=True)
+                raise
             self._open_reservations[sink_ref] = max_response_bytes
         handle = os.fdopen(descriptor, "wb", buffering=0)
         return BoundedRawSink(
@@ -239,14 +257,33 @@ class RawSpool:
 
     def gc_orphans(self) -> int:
         removed = 0
-        with self._lock:
+        with self._lock, self._temporary_directory_lock():
             for path in self._tmp.glob("*.partial"):
-                if path.is_file() and not path.is_symlink():
+                if not path.is_file() or path.is_symlink():
+                    continue
+                try:
+                    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                except FileNotFoundError:
+                    continue
+                try:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue  # another downloader still owns this file
+                    opened = os.fstat(descriptor)
+                    try:
+                        current = path.lstat()
+                    except FileNotFoundError:
+                        continue
+                    if (not stat.S_ISREG(opened.st_mode)
+                            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+                        continue
                     path.unlink()
                     self._open_reservations.pop(
-                        f"raw-sink:{path.name.removesuffix('.partial')}", None
-                    )
+                        f"raw-sink:{path.name.removesuffix('.partial')}", None)
                     removed += 1
+                finally:
+                    os.close(descriptor)
         return removed
 
     def _release_reservation(self, sink_ref: str) -> None:
