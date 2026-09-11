@@ -76,6 +76,9 @@ from .alphaengine_acquisition_launcher import (
     AlphaEngineAcquisitionLauncher,
 )
 from .sec_lane_launcher import (
+    DEFAULT_ANNUAL_PROCESS_RESTARTS,
+    DEFAULT_ANNUAL_PROCESS_RESTART_BACKOFF_SECONDS,
+    DEFAULT_ANNUAL_PROCESS_RESTART_ELAPSED_SECONDS,
     LaneLaunchConflict,
     LaneLaunchError,
     LaneLaunchRejected,
@@ -4978,6 +4981,21 @@ def main(argv: list[str] | None = None) -> int:
         help="independent annual-report verifier router/broker/budget JSON; defaults to its registered state file",
     )
     parser.add_argument(
+        "--annual-report-process-restart-max-attempts", type=int,
+        default=DEFAULT_ANNUAL_PROCESS_RESTARTS,
+        help="maximum replacement child processes for one persisted annual-plan ticket",
+    )
+    parser.add_argument(
+        "--annual-report-process-restart-backoff-seconds", type=int,
+        default=DEFAULT_ANNUAL_PROCESS_RESTART_BACKOFF_SECONDS,
+        help="delay before each annual-plan child process replacement",
+    )
+    parser.add_argument(
+        "--annual-report-process-restart-max-elapsed-seconds", type=int,
+        default=DEFAULT_ANNUAL_PROCESS_RESTART_ELAPSED_SECONDS,
+        help="absolute elapsed bound for annual-plan child process replacement",
+    )
+    parser.add_argument(
         "--alphaengine-search-governance",
         help="approved AlphaEngine search_library governance record; enables mission "
              "source discovery launches (requires --alphaengine-discovery-plan)",
@@ -5138,6 +5156,15 @@ def main(argv: list[str] | None = None) -> int:
                 web_fetch_governance_path=args.web_fetch_governance,
                 annual_report_draft_model_config_path=annual_draft_config_path,
                 annual_report_verifier_model_config_path=annual_verifier_config_path,
+                annual_report_process_restart_max_attempts=(
+                    args.annual_report_process_restart_max_attempts
+                ),
+                annual_report_process_restart_backoff_seconds=(
+                    args.annual_report_process_restart_backoff_seconds
+                ),
+                annual_report_process_restart_max_elapsed_seconds=(
+                    args.annual_report_process_restart_max_elapsed_seconds
+                ),
                 spool_dir=args.transcript_spool_dir,
             )
         # P14-0: every registered lane builds its own launcher from the

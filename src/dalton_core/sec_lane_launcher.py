@@ -35,6 +35,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -64,6 +65,9 @@ LIVE_MODE_ARGS = ("--allow-network",)
 STACK_DUMP_SECONDS = 60
 CLI_MODULE = "dalton_core.sec_lane_cli"
 MAX_ISSUERS = 8
+DEFAULT_ANNUAL_PROCESS_RESTARTS = 2
+DEFAULT_ANNUAL_PROCESS_RESTART_BACKOFF_SECONDS = 2
+DEFAULT_ANNUAL_PROCESS_RESTART_ELAPSED_SECONDS = 7200
 
 
 class LaneLaunchError(RuntimeError):
@@ -140,6 +144,9 @@ class SecLaneLauncher:
         annual_report_verifier_model_config_path: str | Path | None = None,
         annual_report_draft_fixture_path: str | Path | None = None,
         annual_report_verifier_fixture_path: str | Path | None = None,
+        annual_report_process_restart_max_attempts: int = DEFAULT_ANNUAL_PROCESS_RESTARTS,
+        annual_report_process_restart_backoff_seconds: int = DEFAULT_ANNUAL_PROCESS_RESTART_BACKOFF_SECONDS,
+        annual_report_process_restart_max_elapsed_seconds: int = DEFAULT_ANNUAL_PROCESS_RESTART_ELAPSED_SECONDS,
         governance_loader: Callable[[Path], Any] | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser().resolve()
@@ -174,16 +181,38 @@ class SecLaneLauncher:
         if ((self.annual_report_draft_fixture_path is None)
                 != (self.annual_report_verifier_fixture_path is None)):
             raise LaneLaunchError("annual-report rehearsal fixtures must be configured as a pair")
+        process_values = (
+            annual_report_process_restart_max_attempts,
+            annual_report_process_restart_backoff_seconds,
+            annual_report_process_restart_max_elapsed_seconds,
+        )
+        if (any(isinstance(item, bool) or not isinstance(item, int) for item in process_values)
+                or annual_report_process_restart_max_attempts < 0
+                or annual_report_process_restart_backoff_seconds < 0
+                or annual_report_process_restart_max_elapsed_seconds < 1):
+            raise LaneLaunchError(
+                "annual-report process restart policy requires non-negative integer "
+                "attempts/backoff and a positive integer elapsed bound"
+            )
+        self.annual_report_process_restart_policy = {
+            "max_restart_attempts": annual_report_process_restart_max_attempts,
+            "retry_backoff_seconds": annual_report_process_restart_backoff_seconds,
+            "max_elapsed_seconds": annual_report_process_restart_max_elapsed_seconds,
+        }
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._governance_loader = governance_loader or _default_governance_loader
         self._lock = threading.Lock()
         self._current: tuple[str, subprocess.Popen[bytes]] | None = None
+        self._reserved_ticket: tuple[str, int | None] | None = None
+        self._last_ticket_id: str | None = None
         self._stop = threading.Event()
-        self._monitor: threading.Thread | None = None
+        self._supervisor: threading.Thread | None = None
         if not self.state_dir.is_dir():
             raise LaneLaunchError("lane state directory is missing")
         self.tickets_dir = _secure_dir(self.state_dir / "sec-lane-runs")
-        self._recover_annual_ticket()
+        with self._lock:
+            self._supervise_once_locked()
+        self._start_supervisor()
 
     # ------------------------------------------------------------------
     @property
@@ -329,9 +358,10 @@ class SecLaneLauncher:
             raise LaneLaunchRejected("candidate staging directory is missing")
         governance = self.load_governance()
         with self._lock:
-            if self._current is not None and self._current[1].poll() is None:
+            if ((self._current is not None and self._current[1].poll() is None)
+                    or self._reserved_ticket is not None):
                 raise LaneLaunchConflict(
-                    f"lane run {self._current[0]} is still running"
+                    f"lane run {(self._current or self._reserved_ticket)[0]} is still running"
                 )
             started_at = _wire_time(self.clock())
             digest = hashlib.sha256(
@@ -389,6 +419,7 @@ class SecLaneLauncher:
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
+            self._last_ticket_id = ticket_id
             return dict(record)
 
     def start_registered_annual_report(
@@ -420,8 +451,11 @@ class SecLaneLauncher:
             raise LaneLaunchRejected(str(exc)) from exc
         governance = self.load_governance()
         with self._lock:
-            if self._current is not None and self._current[1].poll() is None:
-                raise LaneLaunchConflict(f"lane run {self._current[0]} is still running")
+            if ((self._current is not None and self._current[1].poll() is None)
+                    or self._reserved_ticket is not None):
+                raise LaneLaunchConflict(
+                    f"lane run {(self._current or self._reserved_ticket)[0]} is still running"
+                )
             started_at = _wire_time(self.clock())
             digest = hashlib.sha256(canonical_json({
                 "operation": "registered_annual_report",
@@ -445,12 +479,25 @@ class SecLaneLauncher:
                 "transport": "local-registered-sec-source",
                 "staging_path": str(self.staging_path), "started_at": started_at,
                 "pid": process.pid, "status": "running", "exit_code": None,
+                "pid_identity": self._pid_identity(process.pid),
                 "completed_at": None, "resume_count": 0,
                 "deadline_resume_attempted": False,
+                "process_restart_policy": dict(self.annual_report_process_restart_policy),
+                "process_restart_count": 0,
+                "process_restart_not_before": None,
+                "process_restart_deadline": _wire_time(
+                    self.clock() + timedelta(
+                        seconds=self.annual_report_process_restart_policy[
+                            "max_elapsed_seconds"
+                        ]
+                    )
+                ),
+                "last_process_exit_code": None,
+                "failure_reason": None,
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
-            self._start_monitor(ticket_id, process)
+            self._last_ticket_id = ticket_id
             return dict(record)
 
     def _annual_configuration_errors(self) -> list[str]:
@@ -583,7 +630,7 @@ class SecLaneLauncher:
         except Exception:
             return False, False
 
-    def _resume_annual_locked(self, ticket_id: str, record: dict[str, Any]) -> bool:
+    def _annual_resume_authorized(self, ticket_id: str, record: dict[str, Any]) -> tuple[bool, bool]:
         if (record.get("id") != ticket_id
                 or _TICKET_RE.fullmatch(ticket_id) is None
                 or not isinstance(record.get("plan_version_ref"), str)
@@ -591,9 +638,9 @@ class SecLaneLauncher:
                 or not isinstance(record.get("actor_ref"), str)
                 or _HUMAN_RE.fullmatch(record["actor_ref"]) is None
                 or record.get("staging_path") != str(self.staging_path)):
-            return False
+            return False, False
         if self._annual_configuration_errors():
-            return False
+            return False, False
         try:
             from .annual_report_runtime import load_annual_report_model_configs
 
@@ -604,13 +651,28 @@ class SecLaneLauncher:
             )
             governance = self.load_governance()
         except Exception:
-            return False
+            return False, False
         if (governance.id != record.get("governance_ref")
                 or governance.content_hash != record.get("governance_hash")):
-            return False
-        resumable, expired = self._annual_resume_state(record)
-        if not resumable or (expired and record.get("deadline_resume_attempted")):
-            return False
+            return False, False
+        return self._annual_resume_state(record)
+
+    @staticmethod
+    def _process_restart_policy(record: Mapping[str, Any]) -> dict[str, int] | None:
+        policy = record.get("process_restart_policy")
+        fields = {"max_restart_attempts", "retry_backoff_seconds", "max_elapsed_seconds"}
+        if (not isinstance(policy, Mapping) or set(policy) != fields
+                or any(isinstance(policy.get(name), bool)
+                       or not isinstance(policy.get(name), int) for name in fields)
+                or policy["max_restart_attempts"] < 0
+                or policy["retry_backoff_seconds"] < 0
+                or policy["max_elapsed_seconds"] < 1):
+            return None
+        return dict(policy)
+
+    def _spawn_annual_resume_locked(
+        self, ticket_id: str, record: dict[str, Any], *, expired: bool
+    ) -> None:
         ticket_dir = self._ticket_path(ticket_id).parent
         (ticket_dir / "summary.json").unlink(missing_ok=True)
         command = self._annual_command(
@@ -619,102 +681,167 @@ class SecLaneLauncher:
         )
         process = self._spawn(command, ticket_dir, append=True)
         record["pid"] = process.pid
+        record["pid_identity"] = self._pid_identity(process.pid)
         record["status"] = "running"
         record["exit_code"] = None
         record["completed_at"] = None
         record["resume_count"] = int(record.get("resume_count", 0)) + 1
+        record["process_restart_count"] = int(record.get("process_restart_count", 0)) + 1
+        record["process_restart_not_before"] = None
+        record["last_process_exit_code"] = None
+        record["failure_reason"] = None
         if expired:
             record["deadline_resume_attempted"] = True
         _write_owner_only(self._ticket_path(ticket_id), record)
         self._current = (ticket_id, process)
-        return True
+        self._last_ticket_id = ticket_id
 
-    def _start_monitor(self, ticket_id: str, process: subprocess.Popen[bytes]) -> None:
-        def monitor() -> None:
-            current = process
-            while not self._stop.is_set():
-                code = current.wait()
-                if self._stop.is_set():
-                    return
-                with self._lock:
-                    path = self._ticket_path(ticket_id)
-                    try:
-                        record = json.loads(path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        return
-                    summary_exists = path.with_name("summary.json").is_file()
-                    if code != 0 and not summary_exists and self._resume_annual_locked(
-                        ticket_id, record
-                    ):
-                        current = self._current[1]
-                        continue
-                    record["exit_code"] = code
-                    record["completed_at"] = _wire_time(self.clock())
-                    record["status"] = "succeeded" if code == 0 else "failed"
-                    _write_owner_only(path, record)
-                    return
+    def _terminalize_process_failure(
+        self, path: Path, record: dict[str, Any], reason: str
+    ) -> None:
+        record["status"] = "failed"
+        record["exit_code"] = record.get("last_process_exit_code")
+        record["completed_at"] = _wire_time(self.clock())
+        record["failure_reason"] = reason
+        record["process_restart_not_before"] = None
+        _write_owner_only(path, record)
 
-        self._monitor = threading.Thread(
-            target=monitor, name=f"annual-resume-{ticket_id[-8:]}", daemon=True
-        )
-        self._monitor.start()
+    def _supervise_once_locked(self) -> None:
+        now = self.clock().astimezone(timezone.utc)
+        if self._current is not None:
+            ticket_id, process = self._current
+            code = process.poll()
+            if code is None:
+                return
+            self._current = None
+            path = self._ticket_path(ticket_id)
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            if record.get("operation") != "registered_annual_report":
+                record["exit_code"] = code
+                record["completed_at"] = _wire_time(now)
+                record["status"] = "succeeded" if code == 0 else "failed"
+                _write_owner_only(path, record)
+                return
+            if path.with_name("summary.json").is_file():
+                record["exit_code"] = code
+                record["completed_at"] = _wire_time(now)
+                record["status"] = "succeeded" if code == 0 else "failed"
+                _write_owner_only(path, record)
+                return
+            record["last_process_exit_code"] = code
+            record["status"] = "orphaned"
+            _write_owner_only(path, record)
 
-    def _recover_annual_ticket(self) -> None:
-        if self._annual_configuration_errors():
-            return
-        candidates = sorted(self.tickets_dir.glob("*/ticket.json"), reverse=True)
-        for path in candidates:
+        self._reserved_ticket = None
+        for path in sorted(self.tickets_dir.glob("*/ticket.json"), reverse=True):
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
             if (record.get("operation") != "registered_annual_report"
-                    or record.get("status") not in {"running", "orphaned"}
-                    or path.with_name("summary.json").is_file()):
+                    or record.get("status") not in {"running", "orphaned"}):
                 continue
-            if self._pid_alive(record.get("pid")):
-                self._start_orphan_monitor(record["id"], int(record["pid"]))
+            summary_path = path.with_name("summary.json")
+            if summary_path.is_file():
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    summary = {}
+                record["completed_at"] = _wire_time(now)
+                record["status"] = "succeeded" if summary.get("ok") is True else "failed"
+                _write_owner_only(path, record)
+                continue
+            if self._pid_matches(record):
+                self._reserved_ticket = (record["id"], int(record["pid"]))
+                self._last_ticket_id = record["id"]
                 return
-            with self._lock:
-                if self._resume_annual_locked(record["id"], record):
-                    self._start_monitor(record["id"], self._current[1])
+            resumable, expired = self._annual_resume_authorized(record.get("id", ""), record)
+            if not resumable or (expired and record.get("deadline_resume_attempted")):
+                # An inactive old plan must not hide a later valid orphan.
+                continue
+            policy = self._process_restart_policy(record)
+            if policy is None:
+                self._terminalize_process_failure(
+                    path, record, "annual child process restart policy is missing or invalid"
+                )
+                continue
+            count = record.get("process_restart_count")
+            deadline_text = record.get("process_restart_deadline")
+            if (isinstance(count, bool) or not isinstance(count, int) or count < 0
+                    or not isinstance(deadline_text, str)):
+                self._terminalize_process_failure(
+                    path, record, "annual child process restart state is invalid"
+                )
+                continue
+            try:
+                deadline = datetime.fromisoformat(deadline_text).astimezone(timezone.utc)
+            except ValueError:
+                self._terminalize_process_failure(
+                    path, record, "annual child process restart deadline is invalid"
+                )
+                continue
+            if count >= policy["max_restart_attempts"] or now >= deadline:
+                self._terminalize_process_failure(
+                    path, record, "annual child process restart budget exhausted"
+                )
+                continue
+            not_before_text = record.get("process_restart_not_before")
+            if not_before_text is None:
+                not_before = min(
+                    deadline, now + timedelta(seconds=policy["retry_backoff_seconds"])
+                )
+                record["process_restart_not_before"] = _wire_time(not_before)
+                record["status"] = "orphaned"
+                _write_owner_only(path, record)
+            else:
+                try:
+                    not_before = datetime.fromisoformat(not_before_text).astimezone(timezone.utc)
+                except ValueError:
+                    self._terminalize_process_failure(
+                        path, record, "annual child process restart eligibility is invalid"
+                    )
+                    continue
+            self._reserved_ticket = (record["id"], None)
+            self._last_ticket_id = record["id"]
+            if now < not_before:
+                return
+            try:
+                self._spawn_annual_resume_locked(record["id"], record, expired=expired)
+            except (OSError, subprocess.SubprocessError) as exc:
+                record["process_restart_count"] = count + 1
+                record["process_restart_not_before"] = None
+                record["last_process_exit_code"] = None
+                record["failure_reason"] = (
+                    "annual child replacement could not start: " + type(exc).__name__
+                )
+                _write_owner_only(path, record)
+            self._reserved_ticket = None
             return
 
-    def _start_orphan_monitor(self, ticket_id: str, pid: int) -> None:
-        """Watch a child inherited from the prior Writer and resume on death."""
-
-        def monitor() -> None:
-            while not self._stop.wait(0.25):
-                if self._pid_alive(pid):
-                    continue
+    def _start_supervisor(self) -> None:
+        def supervise() -> None:
+            while not self._stop.is_set():
                 with self._lock:
-                    path = self._ticket_path(ticket_id)
-                    try:
-                        record = json.loads(path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        return
-                    if (record.get("status") not in {"running", "orphaned"}
-                            or record.get("pid") != pid
-                            or path.with_name("summary.json").is_file()):
-                        return
-                    if self._resume_annual_locked(ticket_id, record):
-                        self._start_monitor(ticket_id, self._current[1])
-                return
+                    self._supervise_once_locked()
+                self._stop.wait(0.1)
 
-        self._monitor = threading.Thread(
-            target=monitor, name=f"annual-orphan-{ticket_id[-8:]}", daemon=True
+        self._supervisor = threading.Thread(
+            target=supervise, name="annual-plan-child-supervisor", daemon=True
         )
-        self._monitor.start()
+        self._supervisor.start()
 
     def status(self, ticket_ref: str) -> dict[str, Any]:
         if not isinstance(ticket_ref, str) or _TICKET_RE.fullmatch(ticket_ref) is None:
             raise LaneLaunchRejected(f"ticket_ref must be {TICKET_PREFIX}:<hex>")
         path = self._ticket_path(ticket_ref)
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise LaneTicketNotFound(ticket_ref) from exc
         with self._lock:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError as exc:
+                raise LaneTicketNotFound(ticket_ref) from exc
             process = None
             if self._current is not None and self._current[0] == ticket_ref:
                 process = self._current[1]
@@ -722,7 +849,7 @@ class SecLaneLauncher:
                 if process is not None:
                     code = process.poll()
                     if (code is not None
-                            and (self._monitor is None or not self._monitor.is_alive())):
+                            and record.get("operation") != "registered_annual_report"):
                         record["exit_code"] = code
                         record["completed_at"] = _wire_time(self.clock())
                         record["status"] = "succeeded" if code == 0 else "failed"
@@ -751,48 +878,68 @@ class SecLaneLauncher:
             return True
         return True
 
-    def wait(self, timeout: float | None = None) -> int | None:
-        """Test hook: follow automatic annual resumes through terminal exit."""
+    @staticmethod
+    def _pid_identity(pid: Any) -> str | None:
+        if not SecLaneLauncher._pid_alive(pid):
+            return None
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "lstart=", "-o", "command=", "-p", str(pid)],
+                capture_output=True, check=False, text=True, timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        identity = completed.stdout.strip()
+        if completed.returncode != 0 or not identity:
+            return None
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
-        deadline = None if timeout is None else datetime.now().timestamp() + timeout
-        seen = False
+    @classmethod
+    def _pid_matches(cls, record: Mapping[str, Any]) -> bool:
+        expected = record.get("pid_identity")
+        return (
+            isinstance(expected, str)
+            and re.fullmatch(r"[0-9a-f]{64}", expected) is not None
+            and cls._pid_identity(record.get("pid")) == expected
+        )
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        """Test hook: follow the supervised slot through terminal exit."""
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._lock:
+            held = self._current or self._reserved_ticket
+            ticket_id = held[0] if held is not None else self._last_ticket_id
+        if ticket_id is None:
+            return None
         while True:
-            with self._lock:
-                current = self._current
-                monitor = self._monitor
-            if current is None:
-                return None if not seen else 0
-            seen = True
-            remaining = None if deadline is None else max(0.0, deadline - datetime.now().timestamp())
-            try:
-                code = current[1].wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                raise
-            if monitor is not None:
-                remaining = None if deadline is None else max(0.0, deadline - datetime.now().timestamp())
-                monitor.join(timeout=remaining)
-                if monitor.is_alive():
-                    raise subprocess.TimeoutExpired(current[1].args, timeout)
-            with self._lock:
-                if self._current is current:
-                    return code
+            state = self.status(ticket_id)
+            if state["status"] in {"succeeded", "failed"}:
+                return 0 if state["status"] == "succeeded" else state.get("exit_code")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(ticket_id, timeout)
+            self._stop.wait(0.05)
 
     def close(self) -> None:
         self._stop.set()
         with self._lock:
             current, self._current = self._current, None
+            self._reserved_ticket = None
         if current is not None and current[1].poll() is None:
             current[1].terminate()
             try:
                 current[1].wait(timeout=5)
             except subprocess.TimeoutExpired:
                 current[1].kill()
-        if self._monitor is not None and self._monitor is not threading.current_thread():
-            self._monitor.join(timeout=5)
+        if self._supervisor is not None and self._supervisor is not threading.current_thread():
+            self._supervisor.join(timeout=5)
 
 
 __all__ = [
     "CLI_MODULE",
+    "DEFAULT_ANNUAL_PROCESS_RESTARTS",
+    "DEFAULT_ANNUAL_PROCESS_RESTART_BACKOFF_SECONDS",
+    "DEFAULT_ANNUAL_PROCESS_RESTART_ELAPSED_SECONDS",
     "LIVE_MODE_ARGS",
     "LaneLaunchConflict",
     "LaneLaunchError",

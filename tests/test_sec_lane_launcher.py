@@ -11,10 +11,11 @@ import json
 import os
 import stat
 import tempfile
-import textwrap
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from dalton_core.sec_lane_launcher import (
     CLI_MODULE,
@@ -59,7 +60,10 @@ def _governance(*, approved: bool = True, approved_by: str = OWNER) -> SimpleNam
     )
 
 
-def _stub_child(root: Path, *, exit_code: int = 0, sleep_seconds: float = 0.0) -> Path:
+def _stub_child(
+    root: Path, *, exit_code: int = 0, sleep_seconds: float = 0.0,
+    write_summary: bool = True,
+) -> Path:
     """A stand-in for ``python -m dalton_core.sec_lane_cli``.
 
     It records the argv it received, writes ``summary.json`` into
@@ -67,19 +71,23 @@ def _stub_child(root: Path, *, exit_code: int = 0, sleep_seconds: float = 0.0) -
     """
 
     stub = root / "stub-python"
-    stub.write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env python3
-        import json, os, sys, time
-        argv = sys.argv[1:]
-        summary_dir = argv[argv.index("--summary-dir") + 1]
-        time.sleep({sleep_seconds!r})
-        with open(os.path.join(summary_dir, "argv.json"), "w") as handle:
-            json.dump(argv, handle)
-        with open(os.path.join(summary_dir, "summary.json"), "w") as handle:
-            json.dump({{"schema_version": "0.1", "status": "stub", "argv_count": len(argv)}}, handle)
-        os.chmod(os.path.join(summary_dir, "summary.json"), 0o600)
-        sys.exit({exit_code})
-        """), encoding="utf-8")
+    lines = [
+        "#!/usr/bin/env python3", "import json, os, sys, time",
+        "argv = sys.argv[1:]",
+        'summary_dir = argv[argv.index("--summary-dir") + 1]',
+        f"time.sleep({sleep_seconds!r})",
+        'with open(os.path.join(summary_dir, "argv.json"), "w") as handle:',
+        "    json.dump(argv, handle)",
+    ]
+    if write_summary:
+        lines.extend([
+            'with open(os.path.join(summary_dir, "summary.json"), "w") as handle:',
+            '    json.dump({"schema_version": "0.1", "status": "stub", '
+            '"argv_count": len(argv)}, handle)',
+            'os.chmod(os.path.join(summary_dir, "summary.json"), 0o600)',
+        ])
+    lines.append(f"sys.exit({exit_code})")
+    stub.write_text("\n".join(lines) + "\n", encoding="utf-8")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     return stub
 
@@ -196,6 +204,153 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertEqual(
                 argv[argv.index("--annual-draft-model-config") + 1], str(paths[0].resolve())
             )
+
+    def test_annual_child_initialization_failure_exhausts_persisted_restart_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            spool = state / "spool"
+            spool.mkdir()
+            web_governance = root / "web-governance.json"
+            web_governance.write_text("{}\n", encoding="utf-8")
+            configs = (state / "annual-draft.json", state / "annual-verifier.json")
+            for path in configs:
+                path.write_text("{}\n", encoding="utf-8")
+                os.chmod(path, 0o600)
+            launcher = self._launcher(
+                root,
+                python_executable=str(_stub_child(
+                    root, exit_code=9, write_summary=False
+                )),
+                spool_dir=spool,
+                web_fetch_governance_path=web_governance,
+                annual_report_draft_model_config_path=configs[0],
+                annual_report_verifier_model_config_path=configs[1],
+                annual_report_process_restart_max_attempts=2,
+                annual_report_process_restart_backoff_seconds=0,
+                annual_report_process_restart_max_elapsed_seconds=60,
+            )
+            with (
+                patch(
+                    "dalton_core.annual_report_runtime.load_annual_report_model_configs",
+                    return_value=({}, {}),
+                ),
+                patch.object(
+                    SecLaneLauncher, "_annual_resume_authorized",
+                    return_value=(True, False),
+                ),
+            ):
+                ticket = launcher.start_registered_annual_report(
+                    plan_version_ref="research-plan:" + "c" * 32,
+                    actor_ref=OWNER,
+                )
+                self.assertEqual(launcher.wait(timeout=10), 9)
+            failed = launcher.status(ticket["id"])
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["process_restart_count"], 2)
+            self.assertEqual(failed["resume_count"], 2)
+            self.assertEqual(
+                failed["failure_reason"],
+                "annual child process restart budget exhausted",
+            )
+            self.assertIsNone(failed["process_restart_not_before"])
+
+    def test_writer_restart_adopts_exact_live_child_and_preserves_single_flight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            spool = state / "spool"
+            spool.mkdir()
+            web_governance = root / "web-governance.json"
+            web_governance.write_text("{}\n", encoding="utf-8")
+            configs = (state / "annual-draft.json", state / "annual-verifier.json")
+            for path in configs:
+                path.write_text("{}\n", encoding="utf-8")
+            executable = str(_stub_child(root, sleep_seconds=5))
+            kwargs = {
+                "python_executable": executable, "spool_dir": spool,
+                "web_fetch_governance_path": web_governance,
+                "annual_report_draft_model_config_path": configs[0],
+                "annual_report_verifier_model_config_path": configs[1],
+            }
+            first = self._launcher(root, **kwargs)
+            with patch(
+                "dalton_core.annual_report_runtime.load_annual_report_model_configs",
+                return_value=({}, {}),
+            ):
+                ticket = first.start_registered_annual_report(
+                    plan_version_ref="research-plan:" + "d" * 32,
+                    actor_ref=OWNER,
+                )
+            second = self._launcher(root, **kwargs)
+            limit = time.monotonic() + 3
+            while time.monotonic() < limit and second._reserved_ticket is None:
+                time.sleep(0.05)
+            self.assertEqual(second._reserved_ticket, (ticket["id"], ticket["pid"]))
+            with self.assertRaises(LaneLaunchConflict):
+                second.start(
+                    issuers=["ACN"], filed_from="2026-06-01",
+                    filed_to="2026-08-26", actor_ref=OWNER,
+                )
+
+    def test_inactive_orphan_does_not_hide_later_resumable_ticket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            spool = state / "spool"
+            spool.mkdir()
+            web_governance = root / "web-governance.json"
+            web_governance.write_text("{}\n", encoding="utf-8")
+            configs = (state / "annual-draft.json", state / "annual-verifier.json")
+            for path in configs:
+                path.write_text("{}\n", encoding="utf-8")
+            with patch.object(SecLaneLauncher, "_start_supervisor", return_value=None):
+                launcher = self._launcher(
+                    root, python_executable=str(_stub_child(root, sleep_seconds=5)),
+                    spool_dir=spool, web_fetch_governance_path=web_governance,
+                    annual_report_draft_model_config_path=configs[0],
+                    annual_report_verifier_model_config_path=configs[1],
+                    annual_report_process_restart_max_attempts=1,
+                    annual_report_process_restart_backoff_seconds=0,
+                )
+            base = {
+                "schema_version": "0.1", "operation": "registered_annual_report",
+                "actor_ref": OWNER, "governance_ref": _governance().id,
+                "governance_hash": _governance().content_hash,
+                "staging_path": str((root / "review" / "candidate-staging.sqlite").resolve()),
+                "started_at": "2026-09-11T10:00:00.000000+00:00",
+                "pid": 2**22 - 1, "pid_identity": "0" * 64,
+                "status": "orphaned", "exit_code": None, "completed_at": None,
+                "resume_count": 0, "deadline_resume_attempted": False,
+                "process_restart_policy": {
+                    "max_restart_attempts": 1, "retry_backoff_seconds": 0,
+                    "max_elapsed_seconds": 7200,
+                },
+                "process_restart_count": 0, "process_restart_not_before": None,
+                "process_restart_deadline": "2099-09-11T10:00:00.000000+00:00",
+                "last_process_exit_code": -9, "failure_reason": None,
+            }
+            blocker = "sec-lane-run:" + "f" * 24
+            resumable = "sec-lane-run:" + "e" * 24
+            for ticket_id in (blocker, resumable):
+                ticket_dir = state / "sec-lane-runs" / ticket_id.split(":", 1)[1]
+                ticket_dir.mkdir(mode=0o700)
+                record = {
+                    **base, "id": ticket_id,
+                    "plan_version_ref": "research-plan:" + ticket_id[-24:] + "0" * 8,
+                }
+                (ticket_dir / "ticket.json").write_text(json.dumps(record), encoding="utf-8")
+            with patch.object(
+                launcher, "_annual_resume_authorized",
+                side_effect=lambda ticket_id, _record: (ticket_id == resumable, False),
+            ):
+                with launcher._lock:
+                    launcher._supervise_once_locked()
+            self.assertIsNotNone(launcher._current)
+            self.assertEqual(launcher._current[0], resumable)
 
     def test_ticket_lifecycle_command_shape_and_single_slot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
