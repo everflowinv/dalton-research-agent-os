@@ -341,6 +341,24 @@ BEFORE UPDATE ON coverage_mission_document_reviews WHEN dalton_coverage_mission_
 CREATE TRIGGER IF NOT EXISTS coverage_mission_document_reviews_no_delete
 BEFORE DELETE ON coverage_mission_document_reviews BEGIN SELECT RAISE(ABORT, 'mission document reviews cannot be deleted'); END;
 
+CREATE TABLE IF NOT EXISTS coverage_mission_document_review_reopens (
+    reopen_id TEXT PRIMARY KEY,
+    review_id TEXT NOT NULL,
+    prior_review_hash TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(review_id, prior_review_hash)
+);
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_review_reopens_authorized_insert
+BEFORE INSERT ON coverage_mission_document_review_reopens WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'document review reopen requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_review_reopens_no_update
+BEFORE UPDATE ON coverage_mission_document_review_reopens BEGIN SELECT RAISE(ABORT, 'document review reopens are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_review_reopens_no_delete
+BEFORE DELETE ON coverage_mission_document_review_reopens BEGIN SELECT RAISE(ABORT, 'document review reopens are append-only'); END;
+
 -- Human confirmation journal for the multi-store correction -> citation ->
 -- CandidateStaging workflow. Not a second candidate or evidence authority.
 CREATE TABLE IF NOT EXISTS coverage_mission_document_staging_requests (

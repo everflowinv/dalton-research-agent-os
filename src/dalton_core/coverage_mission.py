@@ -3175,6 +3175,93 @@ class CoverageMissionAuthority:
             ).fetchone()
         return {"status": "fresh", **self._review_row(row)}
 
+    def reopen_document_review(
+        self, review_id: str, *, expected_review_hash: str, actor_ref: str,
+        decision_ref: str, failed_windows: Sequence[Mapping[str, Any]],
+        formal_reader: Any,
+    ) -> dict[str, Any]:
+        """Human-authorize a supplemental read without erasing the old decision."""
+
+        review_id = _text(review_id, "review_id")
+        expected_review_hash = _sha256(expected_review_hash, "expected_review_hash")
+        actor_ref = _actor(actor_ref, "actor_ref")
+        decision_ref = _text(decision_ref, "decision_ref")
+        if _HUMAN_RE.fullmatch(actor_ref) is None:
+            raise CoverageMissionValidationError("document review reopen requires a human actor")
+        if not isinstance(failed_windows, Sequence) or isinstance(failed_windows, (str, bytes)) or not failed_windows:
+            raise CoverageMissionValidationError("document review reopen requires failed formal windows")
+        fields = {"work_order_ref", "work_order_hash", "result_envelope_ref",
+                  "result_envelope_hash", "error_code"}
+        verified: list[dict[str, Any]] = []
+        reader = getattr(formal_reader, "read_failed_window", None)
+        if not callable(reader):
+            raise CoverageMissionValidationError("authoritative failed-window reader is required")
+        for index, claimed in enumerate(failed_windows):
+            if not isinstance(claimed, Mapping) or set(claimed) != fields:
+                raise CoverageMissionValidationError(f"failed_windows[{index}] has invalid shape")
+            item = dict(claimed)
+            if any(not isinstance(item[key], str) or not item[key] for key in fields):
+                raise CoverageMissionValidationError(f"failed_windows[{index}] has invalid values")
+            for key in ("work_order_hash", "result_envelope_hash"):
+                _sha256(item[key], f"failed_windows[{index}].{key}")
+            authoritative = reader(
+                work_order_ref=item["work_order_ref"],
+                result_envelope_ref=item["result_envelope_ref"],
+                review_id=review_id, prior_review_hash=expected_review_hash,
+            )
+            if not isinstance(authoritative, Mapping) or dict(authoritative) != item:
+                raise CoverageMissionValidationError("failed formal window authority drifted")
+            verified.append(item)
+        now = _now()
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("document review was not found")
+            prior = self._review_row(row)
+            if content_hash(prior) != expected_review_hash:
+                raise CoverageMissionConflict("document review changed; reload before reopening")
+            if row["state"] != "dismissed":
+                raise CoverageMissionConflict("only a dismissed document review can be reopened")
+            pointer = cur.execute(
+                "SELECT p.mission_version_id FROM coverage_mission_pointer p "
+                "JOIN coverage_mission_versions v ON v.mission_ref=p.mission_ref "
+                "WHERE p.mission_version_id=?", (row["mission_version_ref"],)
+            ).fetchone()
+            if pointer is None:
+                raise CoverageMissionConflict("document review mission is not current")
+            body = {"schema_version": "0.1", "review_id": review_id,
+                    "prior_review": prior, "prior_review_hash": expected_review_hash,
+                    "decision_ref": decision_ref, "failed_windows": verified,
+                    "actor_ref": actor_ref, "created_at": now}
+            record = {**body, "reopen_id": _ref("mission-document-review-reopen", body)}
+            record["content_hash"] = content_hash(record)
+            existing = cur.execute(
+                "SELECT record_json FROM coverage_mission_document_review_reopens "
+                "WHERE review_id=? AND prior_review_hash=?", (review_id, expected_review_hash)
+            ).fetchone()
+            if existing is not None:
+                saved = _canonical_record(existing["record_json"], "document review reopen")
+                if saved != record:
+                    raise CoverageMissionConflict("document review reopen payload changed")
+                return {"status": "duplicate", **saved}
+            cur.execute(
+                "INSERT INTO coverage_mission_document_review_reopens"
+                "(reopen_id,review_id,prior_review_hash,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (record["reopen_id"], review_id, expected_review_hash, canonical_json(record),
+                 record["content_hash"], actor_ref, now),
+            )
+            cur.execute(
+                "UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
+                "candidate_claim_version_ref=NULL,rationale=NULL,updated_at=? WHERE review_id=? AND state='dismissed'",
+                (now, review_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("document review changed concurrently")
+        return {"status": "fresh", **record}
+
     def document_review(self, review_id: str) -> dict[str, Any]:
         row = self.connection.execute(
             "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?",

@@ -109,6 +109,46 @@ class DocumentReadCompletionTests(StageHarness):
         self.assertEqual(self.store.connection.execute(
             "SELECT COUNT(*) FROM document_read_completion_proofs").fetchone()[0], 0)
 
+    def test_human_supplement_preserves_old_dismissal_and_reopens_normal_queue(self):
+        self.missions.resolve_document_review(
+            self.review["review_id"], resolution="dismissed", actor_ref=AUTOMATION,
+            rationale="legacy false completion", expected_review_hash=self.source_hash)
+        dismissed = self.missions.document_review(self.review["review_id"])
+        failed = {"work_order_ref": "work:old", "work_order_hash": "8" * 64,
+                  "result_envelope_ref": "result:old", "result_envelope_hash": "9" * 64,
+                  "error_code": "MODEL_CHAIN_EXHAUSTED"}
+        class FormalReader:
+            def read_failed_window(_self, **_kwargs): return dict(failed)
+        reopened = self.missions.reopen_document_review(
+            self.review["review_id"], expected_review_hash=content_hash(dismissed),
+            actor_ref="human:owner", decision_ref="owner-decision:supplemental-read:1",
+            failed_windows=[failed], formal_reader=FormalReader())
+        self.assertEqual(reopened["prior_review"], dismissed)
+        self.assertEqual(self.missions.document_review(self.review["review_id"])["state"],
+                         "awaiting_human_extraction")
+        saved = self.store.connection.execute(
+            "SELECT record_json FROM coverage_mission_document_review_reopens").fetchone()[0]
+        self.assertEqual(__import__("json").loads(saved)["prior_review"], dismissed)
+
+    def test_supplement_rejects_drifted_formal_failure_without_writes(self):
+        self.missions.resolve_document_review(
+            self.review["review_id"], resolution="dismissed", actor_ref=AUTOMATION,
+            rationale="legacy false completion", expected_review_hash=self.source_hash)
+        dismissed = self.missions.document_review(self.review["review_id"])
+        failed = {"work_order_ref": "work:old", "work_order_hash": "8" * 64,
+                  "result_envelope_ref": "result:old", "result_envelope_hash": "9" * 64,
+                  "error_code": "MODEL_CHAIN_EXHAUSTED"}
+        class Drifted:
+            def read_failed_window(_self, **_kwargs):
+                return {**failed, "error_code": "OTHER"}
+        with self.assertRaisesRegex(Exception, "authority drifted"):
+            self.missions.reopen_document_review(
+                self.review["review_id"], expected_review_hash=content_hash(dismissed),
+                actor_ref="human:owner", decision_ref="owner-decision:supplemental-read:1",
+                failed_windows=[failed], formal_reader=Drifted())
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM coverage_mission_document_review_reopens").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
