@@ -1416,6 +1416,10 @@ class WriterServer:
         self._transcript_spool: RawSpool | None = None
         self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
         self._scheduler: Scheduler | None = None
+        # The writer is the long-lived owner of the writable model authority.
+        # Keeping this connection open also keeps WAL/SHM present for strict
+        # read-only Cockpit and lane consumers between individual operations.
+        self._model_router_owner: Any | None = None
         self._research_plan: ResearchPlanAuthority | None = None
         self._backlog: ResearchQuestionBacklog | None = None
         self._bounded_planner: BoundedPlannerAuthority | None = None
@@ -1795,6 +1799,15 @@ class WriterServer:
             self._candidate_review = HumanReviewAuthority(self._candidate_staging_path)
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
+            if (
+                self._planner_model_config is not None
+                and Path(self._planner_model_config["model_router_db"]).is_file()
+            ):
+                from .model_router import ModelRouter
+
+                self._model_router_owner = ModelRouter(
+                    self._planner_model_config["model_router_db"]
+                )
             self._bounded_control = BoundedPlannerControlPlane(
                 self._bounded_planner,
                 self._observability,
@@ -1940,6 +1953,9 @@ class WriterServer:
         self._model_input = None
         self._industry_research = None
         self._transcript_spool = None
+        if self._model_router_owner is not None:
+            self._model_router_owner.close()
+            self._model_router_owner = None
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")

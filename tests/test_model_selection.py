@@ -1472,7 +1472,7 @@ class GovernanceOperationTests(unittest.TestCase):
                 "profile_hash": profile["content_hash"],
             })
             self.assertEqual(again["status"], "duplicate")
-            with ModelRouter(router_path, read_only=True) as router:
+            with ModelRouter(router_path) as router:
                 count = router.connection.execute(
                     "SELECT COUNT(*) FROM model_profile_metadata_declarations"
                 ).fetchone()[0]
@@ -1499,7 +1499,7 @@ class GovernanceOperationTests(unittest.TestCase):
                     "profile_version_ref": profile["profile_version_ref"],
                     "profile_hash": "0" * 64,
                 })
-            with ModelRouter(router_path, read_only=True) as router:
+            with ModelRouter(router_path) as router:
                 self.assertIsNone(router.latest_profile_metadata(profile["id"]))
 
     def test_writer_applies_the_declaration_to_the_routable_profile_now(self) -> None:
@@ -1531,7 +1531,7 @@ class GovernanceOperationTests(unittest.TestCase):
                 "profile_hash": profile["content_hash"],
             })
             self.assertEqual(result["application_status"], "applied")
-            with ModelRouter(router_path, read_only=True) as router:
+            with ModelRouter(router_path) as router:
                 current = next(
                     item for item in router.latest_profiles()
                     if item["id"] == profile["id"])
@@ -1613,6 +1613,12 @@ class CockpitModelPageTests(unittest.TestCase):
         self.calls: list[tuple[str, dict]] = []
 
     def plane(self, *, with_model_config: bool) -> CockpitPlane:
+        if self.router_db.exists() and not hasattr(self, "router_owner"):
+            # The installed writer owns this writable authority for its full
+            # lifetime. Mirror that lifecycle so strict readers attach to
+            # existing WAL sidecars instead of manufacturing them.
+            self.router_owner = ModelRouter(self.router_db)
+            self.addCleanup(self.router_owner.close)
         (self.root / "run").mkdir(exist_ok=True)
         heartbeat = self.root / "run" / "heartbeat.json"
         heartbeat.write_text("{}", encoding="utf-8")
@@ -1792,6 +1798,8 @@ class CockpitModelPageTests(unittest.TestCase):
         (self.root / "initial-screen-model-config.json").write_text(json.dumps({
             "routing_policy_ref": shared_ref, "model_router_db": str(secondary_db),
         }), encoding="utf-8")
+        secondary_owner = ModelRouter(secondary_db)
+        self.addCleanup(secondary_owner.close)
         view = self.plane(with_model_config=True).models()
         self.assertTrue(view["available"])
         draft = next(row for row in view["purposes"] if row["purpose"] == "draft")

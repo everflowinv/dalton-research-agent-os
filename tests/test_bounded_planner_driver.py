@@ -905,6 +905,28 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
             "as_of": NOW.isoformat(timespec="microseconds"),
         })["id"]
 
+    def test_writer_keeps_the_model_router_wal_available_to_strict_readers(self):
+        from dalton_core.model_router import ModelRouter
+
+        router_path = self.root / "owned-model-router.sqlite"
+        with ModelRouter(router_path):
+            pass
+        config = {**self.UNBUDGETED, "model_router_db": str(router_path)}
+        server = WriterServer(
+            self.root / "owner-core.sqlite", str(self.root / "owner.sock"),
+            dict(self.server.principals),
+            scheduler_path=self.root / "owner-scheduler.sqlite",
+            planner_model_config=config,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        with ModelRouter(router_path, read_only=True) as reader:
+            self.assertEqual(
+                reader.connection.execute("PRAGMA journal_mode").fetchone()[0],
+                "wal",
+            )
+
     def test_the_projection_tells_the_driver_which_pool_the_loop_drinks_from(
             self) -> None:
         loops = self.core.call("bounded_planner_active_loops", {})["loops"]
