@@ -164,17 +164,16 @@ class LaunchDrainTests(unittest.TestCase):
         record = {"pid": os.getpid(), "command": ["python3", "child.py"],
                   "started_at": "2026-09-11T01:00:00+00:00"}
         ticket_epoch = datetime.fromisoformat(record["started_at"]).timestamp()
-        ticket_path = mock.Mock()
-        ticket_path.stat.return_value.st_mtime = ticket_epoch + 10
+        ticket_mtime = ticket_epoch + 10
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 1):
-            self.assertTrue(_ticket_process_matches(record, ticket_path))
+            self.assertTrue(_ticket_process_matches(record, ticket_mtime))
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 1.001):
-            self.assertFalse(_ticket_process_matches(record, ticket_path))
+            self.assertFalse(_ticket_process_matches(record, ticket_mtime))
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch + 11.001):
-            self.assertFalse(_ticket_process_matches(record, ticket_path))
+            self.assertFalse(_ticket_process_matches(record, ticket_mtime))
 
     def test_delayed_launch_inside_ticket_write_interval_is_live(self) -> None:
         from dalton_core.launch_drain import _ticket_process_matches
@@ -182,15 +181,45 @@ class LaunchDrainTests(unittest.TestCase):
         record = {"pid": os.getpid(), "command": ["python3", "child.py"],
                   "started_at": "2026-09-11T01:00:00+00:00"}
         started = datetime.fromisoformat(record["started_at"]).timestamp()
-        ticket_path = mock.Mock()
-        ticket_path.stat.return_value.st_mtime = started + 11
+        ticket_mtime = started + 11
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=started + 10):
-            self.assertTrue(_ticket_process_matches(record, ticket_path))
-        ticket_path.stat.side_effect = OSError("identity unavailable")
+            self.assertTrue(_ticket_process_matches(record, ticket_mtime))
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=None), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=started + 10):
-            self.assertIsNone(_ticket_process_matches(record, ticket_path))
+            self.assertIsNone(_ticket_process_matches(record, None))
+
+    def test_changed_ticket_snapshot_and_malformed_interval_are_conservative(self) -> None:
+        from dalton_core.launch_drain import _ticket_process_matches
+        from datetime import datetime
+        record = {"pid": os.getpid(), "command": ["python3", "child.py"],
+                  "started_at": "2026-09-11T01:00:00+00:00"}
+        started = datetime.fromisoformat(record["started_at"]).timestamp()
+        with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=None), \
+             mock.patch("dalton_core.launch_drain._process_started_at", return_value=started + 100):
+            self.assertIsNone(_ticket_process_matches(record, None))
+            self.assertIsNone(_ticket_process_matches(record, started - 1))
+
+    def test_running_ticket_changed_during_read_remains_blocking(self) -> None:
+        from dalton_core.launch_drain import _read_ticket_snapshot
+        path = _ticket(self.root, "research-plans", "9" * 24,
+                       command=["python3", "child.py"])
+        record = json.loads(path.read_text())
+        with mock.patch("dalton_core.launch_drain._read_ticket_snapshot",
+                        return_value=(record, None)), \
+             mock.patch("dalton_core.launch_drain._process_command_matches", return_value=None):
+            self.assertEqual(len(running_tickets(self.root)), 1)
+        stable_record, stable_mtime = _read_ticket_snapshot(path)
+        self.assertEqual(stable_record, record)
+        self.assertIsInstance(stable_mtime, float)
+
+    def test_fstat_unavailable_keeps_running_ticket_conservative(self) -> None:
+        path = _ticket(self.root, "research-plans", "8" * 24,
+                       command=["python3", "child.py"])
+        with mock.patch("dalton_core.launch_drain.os.fstat",
+                        side_effect=OSError("fstat unavailable")), \
+             mock.patch("dalton_core.launch_drain._process_command_matches", return_value=None):
+            self.assertEqual(len(running_tickets(self.root)), 1)
 
     def test_python_interpreter_alias_is_accepted_on_proc(self) -> None:
         from dalton_core.launch_drain import _process_command_matches

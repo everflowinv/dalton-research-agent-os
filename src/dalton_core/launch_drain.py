@@ -155,7 +155,7 @@ def _process_started_at(pid: int) -> float | None:
 
 
 def _ticket_process_matches(
-    record: dict[str, Any], ticket_path: Path | None = None,
+    record: dict[str, Any], ticket_mtime: float | None = None,
 ) -> bool | None:
     """True/False for proved identity; None when the OS cannot prove it."""
 
@@ -181,16 +181,36 @@ def _ticket_process_matches(
     process_time = _process_started_at(pid)
     if process_time is None:
         return command_match
-    if ticket_path is None:
+    if ticket_mtime is None:
         return command_match
-    try:
-        written_time = ticket_path.stat().st_mtime
-    except OSError:
+    if ticket_mtime < ticket_time:
         return command_match
     # Launchers capture started_at before filesystem preparation/Popen and
     # write ticket.json after Popen. The child must have been born inside that
     # interval. One second on either side covers whole-second BSD ps output.
-    return ticket_time - 1.0 <= process_time <= written_time + 1.0
+    return ticket_time - 1.0 <= process_time <= ticket_mtime + 1.0
+
+
+def _read_ticket_snapshot(ticket_path: Path) -> tuple[dict[str, Any], float | None]:
+    """Read ticket bytes and mtime from one stable file generation."""
+
+    with ticket_path.open("rb") as stream:
+        try:
+            before = os.fstat(stream.fileno())
+        except OSError:
+            before = None
+        payload = stream.read()
+        try:
+            after = os.fstat(stream.fileno())
+        except OSError:
+            after = None
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    stable = before is not None and after is not None and all(
+        getattr(before, field) == getattr(after, field) for field in stable_fields)
+    record = json.loads(payload.decode("utf-8"))
+    if not isinstance(record, dict):
+        raise ValueError("ticket must be an object")
+    return record, (after.st_mtime if stable and after is not None else None)
 
 
 def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
@@ -206,15 +226,15 @@ def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:
         name = directory.name
         for ticket_path in sorted(directory.glob("*/ticket.json")):
             try:
-                record = json.loads(ticket_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                record, ticket_mtime = _read_ticket_snapshot(ticket_path)
+            except (OSError, UnicodeError, ValueError):
                 # An unreadable ticket is not evidence of a running child.
                 continue
             if not isinstance(record, dict) or record.get("status") != "running":
                 continue
             if not _pid_alive(record.get("pid")):
                 continue
-            identity = _ticket_process_matches(record, ticket_path)
+            identity = _ticket_process_matches(record, ticket_mtime)
             if identity is False:
                 continue
             found.append({

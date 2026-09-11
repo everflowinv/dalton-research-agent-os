@@ -31,10 +31,15 @@ also remains blocking.
 
 ## Verification
 
-`PYTHONPATH=src python3 -m unittest tests.test_launch_drain tests.test_lane_child_launcher`
+`PYTHONPATH=src python3 -m unittest tests.test_launch_drain tests.test_lane_child_launcher tests.test_installer_controller_preflight tests.test_mission_sec_quarters`
 
-38 tests pass. Coverage includes a real child, an exited zombie, a live reused
+53 tests pass. Coverage includes a real child, an exited zombie, a live reused
 PID with different argv, matching argv with older and newer process starts,
 the start-time precision boundary, a ten-second pre-Popen delay, Python
 interpreter aliases, ambiguous paths with spaces, identity lookup failure,
 timeout behavior, and read-only ticket preservation.
+
+Ticket JSON and filesystem metadata come from one opened descriptor. `fstat`
+before and after the read must agree on device, inode, size, mtime, and ctime;
+otherwise the interval is unknown and the drain waits. This prevents pairing
+an old ticket payload with metadata from a replacement generation.
