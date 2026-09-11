@@ -55,6 +55,29 @@ class ConfigurationRetryTests(unittest.TestCase):
             self.assertEqual(coordinator.dispatch_once()["status"], "held")
             self.assertEqual(len(launcher.started), 2)
 
+    def test_corrected_prompt_reopens_refused_event_after_settlement(self):
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            judge, verifier = state / "judge.json", state / "verifier.json"
+            judge.write_text('{"routing_policy_ref":"judge:1"}')
+            verifier.write_text('{"routing_policy_ref":"verifier:1"}')
+            real = EventJudgementLauncher(
+                state_dir=state, judge_model_config=judge, verifier_model_config=verifier)
+            launcher = FakeLauncher()
+            launcher.configuration_signature = real.configuration_signature
+            coordinator = MissionEventJudgementLaneCoordinator(
+                launcher=launcher, mission=lambda: {"id": "mission:14"},
+                pending=lambda mission: "event:unchanged")
+            with patch("dalton_core.event_judgement.EVENT_PROMPT_CONTRACT_VERSION", "old"):
+                first = coordinator.dispatch_once()
+                launcher.settle(first["ticket_ref"], {"judged": 0, "refused": 1})
+                self.assertEqual(coordinator.dispatch_once()["status"], "held")
+            second = coordinator.dispatch_once()
+            self.assertEqual(second["status"], "launched")
+            self.assertNotEqual(first["batch_ref"], second["batch_ref"])
+            self.assertEqual(coordinator.dispatch_once()["status"], "busy")
+            self.assertEqual(len(launcher.started), 2)
+
     def test_unreadable_configuration_preserves_the_tick_and_previous_ticket(self):
         launcher = FakeLauncher()
         def unreadable():

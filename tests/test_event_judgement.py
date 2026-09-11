@@ -159,6 +159,14 @@ class ContextTests(JudgementHarness):
         self.assertIn("alphaengine | news | sell_side", prompt)
         self.assertIn(self.event["id"], prompt)
 
+    def test_judge_prompt_exposes_the_actual_text_contract(self):
+        from dalton_core.event_judgement import MAX_BECAUSE_CHARS, MAX_NOTE_CHARS
+        prompt = build_judge_prompt(self.context())
+        self.assertIn("characters, not words", prompt)
+        self.assertIn(f"each allow at most {MAX_BECAUSE_CHARS}", prompt)
+        self.assertIn(f"note at most {MAX_NOTE_CHARS} characters", prompt)
+        self.assertIn("research_question at most 500 characters", prompt)
+
     def test_the_prompt_names_the_five_words_and_the_six_actions(self):
         prompt = build_judge_prompt(self.context())
         for word in DECISION_VOCABULARY:

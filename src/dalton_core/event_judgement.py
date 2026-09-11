@@ -62,6 +62,7 @@ from .research_playbook import DECISION_VOCABULARY
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
+EVENT_PROMPT_CONTRACT_VERSION = "event-output-constraints:0.3"
 _SCHEMA_PATH = Path(__file__).with_name("event_judgement_schema.sql")
 
 # Registered at import: anything that can call ``judge()`` has already run this
@@ -418,6 +419,14 @@ def build_judge_prompt(
     lines.append(
         'Add "research_question": "<one question>" if and only if action is "research".'
     )
+    lines.extend([
+        f"Text limits are characters, not words: because, forecast_change.because and "
+        f"forecast_change.outside_band_reason each allow at most {MAX_BECAUSE_CHARS}; "
+        f"note at most {MAX_NOTE_CHARS} characters and {MAX_NOTE_SENTENCES} sentences; "
+        "research_question at most 500 characters.",
+        "Use the available space for the decision, decisive evidence and the specific "
+        "condition that would change it. Do not repeat the source table or write a full memo.",
+    ])
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
     prompt = "\n".join(lines)
     return _bounded_prompt(prompt, max_bytes=max_prompt_bytes)

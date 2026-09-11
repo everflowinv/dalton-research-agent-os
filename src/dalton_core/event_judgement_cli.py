@@ -37,6 +37,7 @@ from .call_budget import resolve_run_budget
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
+    EVENT_PROMPT_CONTRACT_VERSION,
     MAX_PROMPT_BYTES,
     PURPOSE,
     REFLECTION_PURPOSE,
@@ -92,6 +93,7 @@ def event_model_contract_ref(budget: dict[str, Any] | None = None) -> str:
     }
     fingerprint = content_hash({
         "version": EVENT_MODEL_CONTRACT_VERSION,
+        "prompt_contract": EVENT_PROMPT_CONTRACT_VERSION,
         "max_input_bytes": limits["max_input_tokens"],
         "max_output_tokens": limits["max_output_tokens"],
         "max_cost_usd": str(limits["max_cost_usd"]),

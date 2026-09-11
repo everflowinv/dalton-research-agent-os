@@ -55,8 +55,10 @@ class EventJudgementLauncher(LaneChildLauncher):
     def configuration_signature(self) -> str:
         """Changing a Cockpit route makes an unjudged batch retryable."""
         from .cockpit_model import verifier_provider_contract_fingerprint
+        from .event_judgement import EVENT_PROMPT_CONTRACT_VERSION
 
         digest = hashlib.sha256(b"event-configuration:1")
+        digest.update(EVENT_PROMPT_CONTRACT_VERSION.encode("ascii"))
         for path in (self.judge_model_config, self.verifier_model_config, self.policy_path):
             if path is None:
                 digest.update(b"\0absent")

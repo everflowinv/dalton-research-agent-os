@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -110,6 +111,21 @@ class EventRouteBudgetTests(unittest.TestCase):
         )
         self.assertNotEqual(old.id, revised.id)
         self.assertNotEqual(old.idempotency_key, revised.idempotency_key)
+
+    def test_prompt_contract_revision_changes_work_with_unchanged_context(self) -> None:
+        common = {
+            "purpose": "event_judgement", "prompt": "unchanged context",
+            "mission_version_ref": "coverage-mission-version:test:1",
+            "max_cost_usd": MAX_COST_USD, "max_seconds": TIMEOUT_SECONDS,
+            "max_input_tokens": MAX_INPUT_TOKENS,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "created_at": NOW.isoformat(timespec="microseconds"),
+        }
+        with patch("dalton_core.event_judgement_cli.EVENT_PROMPT_CONTRACT_VERSION", "old"):
+            old = build_work(request_id=f"{event_model_contract_ref()}:same-event", **common)
+        current = build_work(request_id=f"{event_model_contract_ref()}:same-event", **common)
+        self.assertNotEqual(old.id, current.id)
+        self.assertNotEqual(old.idempotency_key, current.idempotency_key)
 
     def test_configured_limits_change_the_event_contract_identity(self) -> None:
         root = Path(self.directory.name)
