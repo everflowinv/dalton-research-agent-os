@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +19,11 @@ from dalton_core.budget_pools import (
     POOL_EXHAUSTED_STATUS,
     mission_pool_scope,
 )
-from dalton_core.llm_research_planner_worker import LLMResearchPlannerModelWorker
+from dalton_core.llm_research_planner_worker import (
+    LLMResearchPlannerModelWorker,
+    LLMResearchPlannerWorkerRejected,
+    planner_provider_attempt_bound,
+)
 from dalton_core.model_router import ModelRouter
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
@@ -100,6 +105,32 @@ def policy() -> dict:
         "ordered_preferences": [
             {"field": "profile_version_ref", "direction": "asc"}
         ],
+    }
+
+
+def alternate_profile() -> dict:
+    return {
+        **profile(),
+        "profile_version_ref": "model-profile-version:test-planner-z:1",
+        "id": "profile:test-planner-z",
+        "provider": "test-z",
+        "model": "planner-z",
+        "family": "test-planner-z",
+        "credential_slot_ref": "credential-slot:openclaw:test-z",
+    }
+
+
+def retry_policy() -> dict:
+    return {
+        **policy(),
+        "policy_version_ref": "model-routing-policy-version:test-planner-retry:1",
+        "id": "model-routing-policy:test-planner-retry",
+        "filters": {
+            **policy()["filters"],
+            "allowed_profile_ids": [
+                "profile:test-planner", "profile:test-planner-z",
+            ],
+        },
     }
 
 
@@ -194,6 +225,59 @@ class FakeAdapter:
         return invocation, result
 
 
+class ReturnedProviderPlannerAdapter(FakeAdapter):
+    """Return formally proved paid failures, then one valid candidate."""
+
+    def __init__(self, candidate: dict, failures: list[str]) -> None:
+        super().__init__(candidate)
+        self.failures = list(failures)
+        self.profiles: list[str] = []
+
+    def execute(self, work: WorkOrder, route: dict, selected: dict):
+        invocation, result = super().execute(work, route, selected)
+        self.profiles.append(selected["id"])
+        suffix = content_hash({"route": route["id"], "n": len(self.profiles)})[:32]
+        invocation = replace(
+            invocation,
+            id="invocation:test-planner-retry-" + suffix,
+            parent_ref=route["id"],
+            usage=(
+                {} if self.failures else invocation.usage
+            ),
+        )
+        if not self.failures:
+            return invocation, replace(
+                result,
+                id="result:test-planner-retry-" + suffix,
+                invocation_ref=invocation.id,
+            )
+        code = self.failures.pop(0)
+        return invocation, replace(
+            result,
+            id="result:test-planner-retry-" + suffix,
+            invocation_ref=invocation.id,
+            status="failed",
+            outputs={},
+            error={
+                "code": code,
+                "message": "provider asked the caller to retry",
+                "source": "openclaw-model-broker",
+            },
+            metadata={
+                "route_decision_ref": route["id"],
+                "broker_response_hash": content_hash(
+                    {"route": route["id"], "code": code}
+                ),
+                "broker_request_mode": "execute",
+                "dispatch_proof": {
+                    "authority": "openclaw-model-adapter",
+                    "state": "provider_completed_failure",
+                    "version": "0.1",
+                },
+            },
+        )
+
+
 class LLMResearchPlannerWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -253,6 +337,69 @@ class LLMResearchPlannerWorkerTests(unittest.TestCase):
         self.assertEqual(result["status"], "retryable")
         self.assertEqual(result["result"]["error"]["code"], "MODEL_OUTPUT_CONTRACT_REJECTED")
         self.assertEqual(self.scheduler.status(work.id)["state"], "ready")
+
+    def test_provider_retry_policy_is_part_of_the_work_identity(self) -> None:
+        first_policy = {
+            "max_same_profile_retries": 1, "retry_backoff_seconds": 2,
+        }
+        second_policy = {
+            "max_same_profile_retries": 2, "retry_backoff_seconds": 2,
+        }
+        first = build_planner_work_order(context(), provider_retry=first_policy)
+        second = build_planner_work_order(context(), provider_retry=second_policy)
+        legacy = build_planner_work_order(context())
+        self.assertNotEqual(first.id, second.id)
+        self.assertNotEqual(first.id, legacy.id)
+        self.assertEqual(first.metadata["provider_retry"], first_policy)
+
+    def test_worker_refuses_a_retry_policy_that_differs_from_the_work(self) -> None:
+        work = build_planner_work_order(
+            context(), provider_retry={
+                "max_same_profile_retries": 1, "retry_backoff_seconds": 0,
+            },
+        )
+        self.assertEqual(self.scheduler.enqueue(work)["status"], "fresh")
+        worker = LLMResearchPlannerModelWorker(
+            scheduler=self.scheduler,
+            router=self.router,
+            adapter=FakeAdapter({
+                "schema_version": "0.1",
+                "action": {"kind": "terminal", "reason": "coverage_complete"},
+                "rationale": "Done.",
+            }),
+            store=self.store,
+            observability=self.observability,
+            routing_policy_ref="model-routing-policy-version:test-planner:1",
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            provider_retry={
+                "max_same_profile_retries": 2, "retry_backoff_seconds": 0,
+            },
+            clock=lambda: NOW,
+        )
+        with self.assertRaisesRegex(
+            LLMResearchPlannerWorkerRejected, "provider retry policy differs"
+        ):
+            worker.run_once(work)
+
+    def test_scheduler_attempt_bound_covers_each_profile_and_its_retries(self) -> None:
+        self.assertEqual(
+            self.router.register_profile(alternate_profile())["status"], "fresh"
+        )
+        self.assertEqual(
+            self.router.register_policy(retry_policy())["status"], "fresh"
+        )
+        attempts, policy_hash = planner_provider_attempt_bound(
+            self.router,
+            "model-routing-policy-version:test-planner-retry:1",
+            {"max_same_profile_retries": 4, "retry_backoff_seconds": 2},
+        )
+        self.assertEqual(attempts, 10)
+        self.assertEqual(
+            policy_hash,
+            self.router.get_policy(
+                "model-routing-policy-version:test-planner-retry:1"
+            )["content_hash"],
+        )
 
 
 
@@ -342,6 +489,67 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
         self.assertEqual(result["budget"]["pool"], "adhoc")
         self.assertEqual(result["budget"]["settled_micros"], 1_000)
         self.assertEqual(result["budget"]["cost_status"], "actual")
+
+    def test_paid_retry_uses_new_attempts_then_fallback_and_keeps_unknown_cost(self) -> None:
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        self.assertEqual(
+            self.router.register_profile(alternate_profile())["status"], "fresh"
+        )
+        self.assertEqual(
+            self.router.register_policy(retry_policy())["status"], "fresh"
+        )
+        work = build_planner_work_order(
+            context(), max_cost_usd=0.5, provider_retry=retry
+        )
+        self.assertEqual(self.scheduler.enqueue(work)["status"], "fresh")
+        adapter = ReturnedProviderPlannerAdapter(
+            self.ACTION, ["RATE_LIMITED", "PROVIDER_INTERNAL_ERROR"]
+        )
+        worker = LLMResearchPlannerModelWorker(
+            scheduler=self.scheduler,
+            router=self.router,
+            adapter=adapter,
+            store=self.store,
+            observability=self.observability,
+            routing_policy_ref=(
+                "model-routing-policy-version:test-planner-retry:1"
+            ),
+            credential_slot_refs=(
+                "credential-slot:openclaw:test",
+                "credential-slot:openclaw:test-z",
+            ),
+            budget=self.ledger,
+            budget_policy_ref=BUDGET_POLICY,
+            mission_binding=self._binding(budget_mission()),
+            provider_retry=retry,
+            clock=lambda: NOW,
+        )
+        runs = [worker.run_once(work), worker.run_once(work), worker.run_once(work)]
+        self.assertEqual([item["status"] for item in runs], [
+            "retryable", "retryable", "succeeded",
+        ])
+        self.assertEqual(adapter.profiles[0], adapter.profiles[1])
+        self.assertNotEqual(adapter.profiles[1], adapter.profiles[2])
+        self.assertEqual(work.metadata["provider_retry"], retry)
+        decisions = self.router.list_decisions(work_order_id=work.id)
+        self.assertEqual(
+            [item["attempt_number"] for item in decisions], [1, 2, 3]
+        )
+        self.assertEqual(
+            len({item["invocation"]["id"] for item in runs}), 3
+        )
+        rows = self.ledger.connection.execute(
+            "SELECT a.attempt_number,a.reserved_micros,s.actual_micros "
+            "FROM thesis_impact_day_admissions a "
+            "JOIN thesis_impact_day_settlements s "
+            "ON s.admission_id=a.admission_id "
+            "WHERE a.work_order_ref=? ORDER BY a.attempt_number",
+            (work.id,),
+        ).fetchall()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0][2], rows[0][1])
+        self.assertEqual(rows[1][2], rows[1][1])
+        self.assertEqual(rows[2][2], 1_000)
 
     def test_a_spent_pool_is_returned_before_the_work_order_is_leased(self) -> None:
         work = self._work()

@@ -229,15 +229,10 @@ def install(
         budget_overrides = preserved_budget_overrides(target)
     except BudgetConfigInstallError as exc:
         raise PlannerSetupError(str(exc)) from exc
-    # The research planner has its own worker and does not yet consume this
-    # contract. Role configs are consumed by CockpitModel and receive an
-    # explicit, owner-editable paid retry default on first install; an existing
-    # owner policy in budget_overrides wins unchanged.
+    # Both the research planner worker and Cockpit role workers consume this
+    # exact contract. An existing owner policy in budget_overrides wins
+    # unchanged; otherwise first install makes the bounded behavior explicit.
     from .provider_retry import DEFAULT_RETURNED_PROVIDER_RETRY
-    role_retry = (
-        {} if config_file_name == CONFIG_FILE_NAME
-        else {"provider_retry": dict(DEFAULT_RETURNED_PROVIDER_RETRY)}
-    )
     model_config = validate_model_config({
         "routing_policy_ref": policy["policy_version_ref"],
         "credential_slot_refs": slots,
@@ -248,7 +243,7 @@ def install(
         "expected_agent_id": planner["planner_expected_agent_id"],
         "budget_db": str(Path(thesis["budget_db"]).resolve()),
         "budget_policy_ref": thesis["budget_policy_version_id"],
-        **role_retry,
+        "provider_retry": dict(DEFAULT_RETURNED_PROVIDER_RETRY),
         **budget_overrides,
     })
     changed = (not target.exists()

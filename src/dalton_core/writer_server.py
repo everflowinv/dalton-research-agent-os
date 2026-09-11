@@ -1114,7 +1114,7 @@ def _require_owner_only(path: Path, label: str) -> None:
         raise WriterServerError(f"{label} must be owner-only")
 
 
-def planner_budget_config(state_dir: str | Path) -> dict[str, str]:
+def planner_budget_config(state_dir: str | Path) -> dict[str, Any]:
     """The day-ledger wiring for the planner's model calls, if it is installed.
 
     C2b.  Every Tier-1 bounded planner loop's model call used to bypass the
@@ -1149,9 +1149,25 @@ def planner_budget_config(state_dir: str | Path) -> dict[str, str]:
     policy_ref = installed.get("budget_policy_ref")
     if not isinstance(budget_db, str) or not isinstance(policy_ref, str):
         return {}
-    if not budget_db or not policy_ref or not Path(budget_db).is_absolute():
-        return {}
-    return {"budget_db": budget_db, "budget_policy_ref": policy_ref}
+    result: dict[str, Any] = {}
+    if budget_db and policy_ref and Path(budget_db).is_absolute():
+        result.update({"budget_db": budget_db, "budget_policy_ref": policy_ref})
+    if "provider_retry" in installed:
+        from .provider_retry import ProviderRetryError, validate_provider_retry
+
+        try:
+            result["provider_retry"] = validate_provider_retry(
+                installed["provider_retry"]
+            )
+        except ProviderRetryError as exc:
+            raise WriterServerError(
+                f"planner provider retry configuration is invalid: {exc}"
+            ) from exc
+        if "unknown_recovery" in result["provider_retry"]:
+            raise WriterServerError(
+                "planner provider retry does not support unknown-result recovery"
+            )
+    return result
 
 
 def load_principals(
@@ -1898,6 +1914,42 @@ class WriterServer:
                 from .document_extraction import extraction_scheduler_policy
                 scheduler_kwargs = extraction_scheduler_policy(
                     self._document_extraction_model_config)
+            planner_retry = (
+                None if self._planner_model_config is None
+                else self._planner_model_config.get("provider_retry")
+            )
+            if planner_retry is not None:
+                from .model_router import ModelRouter
+                from .llm_research_planner_worker import (
+                    planner_provider_attempt_bound,
+                )
+
+                with ModelRouter(
+                    self._planner_model_config["model_router_db"]
+                ) as planner_router:
+                    planner_attempts, planner_policy_hash = (
+                        planner_provider_attempt_bound(
+                            planner_router,
+                            self._planner_model_config["routing_policy_ref"],
+                            planner_retry,
+                        )
+                    )
+                scheduler_kwargs["max_attempts"] = max(
+                    int(scheduler_kwargs.get("max_attempts", 3)),
+                    planner_attempts,
+                )
+                scheduler_kwargs["policy_version_id"] = (
+                    "scheduler-policy-model-provider-retry-"
+                    + content_hash({
+                        "base": scheduler_kwargs.get(
+                            "policy_version_id", "scheduler-policy-0.1"
+                        ),
+                        "planner_routing_policy_hash": planner_policy_hash,
+                        "planner_provider_retry": planner_retry,
+                        "max_attempts": scheduler_kwargs["max_attempts"],
+                    })[:24]
+                    + "-0.1"
+                )
             self._scheduler = Scheduler(self._scheduler_path, **scheduler_kwargs)
             self._bounded_control = BoundedPlannerControlPlane(
                 self._bounded_planner,
@@ -3430,7 +3482,14 @@ class WriterServer:
         values = dict(p)
         context_pack_ref = values.pop("context_pack_ref")
         budget = {key: value for key, value in values.items() if value is not None}
-        return self._llm_planner_coordinator().prepare(context_pack_ref, **budget)
+        return self._llm_planner_coordinator().prepare(
+            context_pack_ref,
+            provider_retry=(
+                None if self._planner_model_config is None
+                else self._planner_model_config.get("provider_retry")
+            ),
+            **budget,
+        )
 
     def _op_llm_planner_advance(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
@@ -3534,7 +3593,11 @@ class WriterServer:
             raise WriterServerError("pool is not one of the mission's capacity pools")
         budget = {key: value for key, value in values.items() if value is not None}
         coordinator = self._llm_planner_coordinator()
-        prepared = coordinator.prepare(context_pack_ref, **budget)
+        prepared = coordinator.prepare(
+            context_pack_ref,
+            provider_retry=config.get("provider_retry"),
+            **budget,
+        )
         if prepared.get("status") != "model_work_ready":
             return prepared
         work_order = prepared["work_order"]
@@ -3577,6 +3640,7 @@ class WriterServer:
                 budget_policy_ref=(
                     None if ledger is None else config["budget_policy_ref"]),
                 mission_binding=binding,
+                provider_retry=config.get("provider_retry"),
             )
             run = worker.run_once(work_order)
         # C2b: the default when the worker said nothing is read off the ledger

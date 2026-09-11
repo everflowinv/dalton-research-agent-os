@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.agenda import AgendaStore
@@ -984,6 +984,74 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         # not been upgraded sends what it always sent. The driver tests cover
         # the other half -- a projection with no pool sends no pool.
         self.assertIn("pool", OPERATION_FIELDS["llm_planner_execute"])
+
+    def test_writer_binds_planner_retry_and_sizes_scheduler_for_the_route(self) -> None:
+        from dalton_core.model_router import ModelRouter
+        from tests.test_llm_research_planner_worker import (
+            ReturnedProviderPlannerAdapter,
+            alternate_profile,
+            profile,
+            retry_policy,
+        )
+
+        router_path = self.root / "planner-retry-router.sqlite"
+        with ModelRouter(router_path, clock=lambda: NOW) as router:
+            primary = profile()
+            alternate = alternate_profile()
+            for item in (primary, alternate):
+                item["availability"] = {
+                    **item["availability"],
+                    "checked_at": NOW.isoformat(),
+                    "valid_until": (NOW + timedelta(days=365)).isoformat(),
+                }
+            router.register_profile(primary)
+            router.register_profile(alternate)
+            router.register_policy(retry_policy())
+        retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        config = {
+            **self.UNBUDGETED,
+            "routing_policy_ref": (
+                "model-routing-policy-version:test-planner-retry:1"
+            ),
+            "credential_slot_refs": [
+                "credential-slot:openclaw:test",
+                "credential-slot:openclaw:test-z",
+            ],
+            "model_router_db": str(router_path),
+            "provider_retry": retry,
+        }
+        server = WriterServer(
+            self.root / "core.sqlite", str(self.root / "planner-retry.sock"),
+            dict(self.server.principals),
+            scheduler_path=self.root / "planner-retry-scheduler.sqlite",
+            planner_model_config=config,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+        adapter = ReturnedProviderPlannerAdapter({}, ["RATE_LIMITED"])
+        context_ref = self._context_ref()
+        with patch(
+            "dalton_core.openclaw_model_adapter.OpenClawModelAdapter",
+            return_value=adapter,
+        ):
+            result = server._store_executor.submit(
+                server._op_llm_planner_execute,
+                {"context_pack_ref": context_ref, "max_cost_usd": 0.5},
+            ).result(timeout=30)
+        authority, status, formal = server._store_executor.submit(
+            lambda: (
+                server._scheduler.work_order_authority(result["work_order_ref"]),
+                server._scheduler.status(result["work_order_ref"]),
+                server._scheduler.formal_result(result["work_order_ref"]),
+            )
+        ).result(timeout=30)
+        self.assertEqual(
+            result["status"], "model_retryable", (result, status, formal)
+        )
+        self.assertEqual(status["max_attempts"], 4)
+        self.assertEqual(
+            authority["work_order"]["metadata"]["provider_retry"], retry
+        )
 
     def _budget_binding(self) -> dict:
         from dalton_core.budget_pools import mission_pool_scope

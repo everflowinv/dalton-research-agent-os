@@ -258,6 +258,10 @@ class PlannerBudgetConfigTests(unittest.TestCase):
                 "budget_db": str(state_dir / "budget.sqlite"),
                 "budget_policy_ref":
                     "thesis-impact-day-budget-policy:production:1",
+                "provider_retry": {
+                    "max_same_profile_retries": 1,
+                    "retry_backoff_seconds": 2,
+                },
             })
             # The very same two keys the installed configuration carries: one
             # file, one repoint, and no way for them to disagree.
@@ -266,6 +270,34 @@ class PlannerBudgetConfigTests(unittest.TestCase):
             self.assertEqual(installed["budget_db"], found["budget_db"])
             self.assertEqual(
                 installed["budget_policy_ref"], found["budget_policy_ref"])
+            self.assertEqual(installed["provider_retry"], found["provider_retry"])
+
+    def test_setup_preserves_an_existing_owner_provider_retry_policy(self) -> None:
+        from tests.test_document_extraction_setup import _service
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = _service(root)
+            service = json.loads(config_path.read_text(encoding="utf-8"))
+            with ModelRouter(service["model_router_db"]) as router:
+                for profile_wire in openclaw_broker_profiles(checked_at=NOW):
+                    router.register_profile(profile_wire)
+            install(config_path, tier="cheap", now=NOW)
+            state_dir = Path(service["core_db"]).resolve().parent
+            target = state_dir / CONFIG_FILE_NAME
+            configured = json.loads(target.read_text(encoding="utf-8"))
+            configured["provider_retry"] = {
+                "max_same_profile_retries": 4,
+                "retry_backoff_seconds": 17,
+            }
+            target.write_text(json.dumps(configured), encoding="utf-8")
+
+            install(config_path, tier="cheap", now=NOW)
+
+            preserved = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                preserved["provider_retry"], configured["provider_retry"]
+            )
 
     def test_no_configuration_at_all_is_todays_behaviour(self) -> None:
         # An install that has not re-run the planner setup keeps working. The

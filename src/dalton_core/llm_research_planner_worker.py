@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
 
@@ -62,6 +62,40 @@ def _utc(clock: Callable[[], datetime]) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+def planner_provider_attempt_bound(
+    router: ModelRouter,
+    routing_policy_ref: str,
+    provider_retry: Mapping[str, Any],
+) -> tuple[int, str]:
+    """Return attempts needed to exhaust each admitted profile exactly once."""
+
+    from .provider_retry import ProviderRetryError, validate_provider_retry
+
+    try:
+        retry = validate_provider_retry(provider_retry)
+    except ProviderRetryError as exc:
+        raise LLMResearchPlannerWorkerRejected(
+            f"invalid planner provider retry policy: {exc}"
+        ) from exc
+    if "unknown_recovery" in retry:
+        raise LLMResearchPlannerWorkerRejected(
+            "planner provider retry does not support unknown-result recovery"
+        )
+    try:
+        policy = router.get_policy(routing_policy_ref)
+    except RoutingPolicyNotFound as exc:
+        raise LLMResearchPlannerWorkerRejected(
+            "planner routing policy is not registered"
+        ) from exc
+    allowed = policy.get("filters", {}).get("allowed_profile_ids")
+    if not isinstance(allowed, list) or not allowed:
+        raise LLMResearchPlannerWorkerRejected(
+            "planner routing policy must admit at least one model profile"
+        )
+    attempts = len(allowed) * (int(retry["max_same_profile_retries"]) + 1)
+    return attempts, str(policy["content_hash"])
+
+
 class LLMResearchPlannerModelWorker:
     """Route, execute, account, and close one exact planner model call."""
 
@@ -78,6 +112,7 @@ class LLMResearchPlannerModelWorker:
         budget: Any | None = None,
         budget_policy_ref: str | None = None,
         mission_binding: Mapping[str, Any] | None = None,
+        provider_retry: Mapping[str, Any] | None = None,
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -100,9 +135,9 @@ class LLMResearchPlannerModelWorker:
                 "planner routing policy is not registered"
             ) from exc
         allowed = policy.get("filters", {}).get("allowed_profile_ids")
-        if not isinstance(allowed, list) or len(allowed) != 1:
+        if not isinstance(allowed, list) or not allowed:
             raise LLMResearchPlannerWorkerRejected(
-                "planner routing policy must pin exactly one model profile"
+                "planner routing policy must admit at least one model profile"
             )
         self.scheduler = scheduler
         self.router = router
@@ -125,6 +160,19 @@ class LLMResearchPlannerModelWorker:
         self.budget = budget
         self.budget_policy_ref = budget_policy_ref
         self.mission_binding = None if mission_binding is None else dict(mission_binding)
+        if provider_retry is None:
+            self.provider_retry = None
+        else:
+            from .provider_retry import ProviderRetryError, validate_provider_retry
+
+            try:
+                self.provider_retry = validate_provider_retry(provider_retry)
+            except ProviderRetryError as exc:
+                raise ValueError(f"invalid planner provider retry policy: {exc}") from exc
+            if "unknown_recovery" in self.provider_retry:
+                raise ValueError(
+                    "planner provider retry does not support unknown-result recovery"
+                )
         self.token_counter = token_counter
         self.lease_seconds = lease_seconds
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -155,6 +203,12 @@ class LLMResearchPlannerModelWorker:
         ):
             raise LLMResearchPlannerWorkerRejected(
                 "WorkOrder is not an admitted LLM planner call"
+            )
+
+    def _validate_retry_binding(self, work: WorkOrder) -> None:
+        if work.metadata.get("provider_retry") != self.provider_retry:
+            raise LLMResearchPlannerWorkerRejected(
+                "planner WorkOrder provider retry policy differs from the worker"
             )
 
     @staticmethod
@@ -225,6 +279,158 @@ class LLMResearchPlannerModelWorker:
             (invocation_id,),
         ).fetchone()
         return None if row is None else json.loads(row["invocation_json"])
+
+    def _provider_retry_state(self, work: WorkOrder) -> dict[str, Any] | None:
+        """Rebuild the last accepted paid retry from Scheduler/Router authority."""
+
+        if self.provider_retry is None:
+            return None
+        rows = self.scheduler.connection.execute(
+            "SELECT result_envelope_json,result_envelope_hash,attempt_number "
+            "FROM scheduler_result_envelopes "
+            "WHERE work_order_id=? AND outcome='retryable' "
+            "ORDER BY attempt_number DESC",
+            (work.id,),
+        ).fetchall()
+        selected = None
+        for row in rows:
+            try:
+                wire = json.loads(row["result_envelope_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise LLMResearchPlannerWorkerConflict(
+                    "persisted planner provider retry result is invalid"
+                ) from exc
+            if (
+                canonical_json(wire) != row["result_envelope_json"]
+                or content_hash(wire) != row["result_envelope_hash"]
+            ):
+                raise LLMResearchPlannerWorkerConflict(
+                    "persisted planner provider retry result drifted"
+                )
+            metadata = wire.get("metadata") if isinstance(wire, Mapping) else None
+            if not isinstance(metadata, Mapping) or "provider_retry_proof" not in metadata:
+                continue
+            if "provider_retry_state" not in metadata:
+                raise LLMResearchPlannerWorkerConflict(
+                    "persisted planner provider retry proof has no route state"
+                )
+            selected = (row, wire, metadata["provider_retry_state"])
+            break
+        if selected is None:
+            return {
+                "excluded_profile_ids": [],
+                "retry_profile_version_ref": None,
+                "same_profile_retries": 0,
+            }
+        row, wire, state = selected
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != {
+                "excluded_profile_ids", "retry_profile_version_ref",
+                "same_profile_retries",
+            }
+            or not isinstance(state.get("excluded_profile_ids"), list)
+            or not all(
+                isinstance(item, str) and item
+                for item in state["excluded_profile_ids"]
+            )
+            or len(set(state["excluded_profile_ids"]))
+               != len(state["excluded_profile_ids"])
+            or state.get("retry_profile_version_ref") is not None
+               and not isinstance(state["retry_profile_version_ref"], str)
+            or isinstance(state.get("same_profile_retries"), bool)
+            or not isinstance(state.get("same_profile_retries"), int)
+            or state["same_profile_retries"] < 0
+        ):
+            raise LLMResearchPlannerWorkerConflict(
+                "persisted planner provider retry route state is invalid"
+            )
+        decisions = self.router.list_decisions(work_order_id=work.id)
+        matching = [
+            item for item in decisions
+            if item.get("attempt_number") == row["attempt_number"]
+        ]
+        proved_route = matching[-1] if matching else None
+        selected_version = (
+            None if proved_route is None
+            else proved_route.get("selected_profile_version_ref")
+        )
+        selected_id = (
+            None if selected_version is None
+            else self.router.get_profile(selected_version)["id"]
+        )
+        if (
+            wire.get("work_order_ref") != work.id
+            or wire.get("status") != "retryable"
+            or proved_route is None
+            or wire.get("metadata", {}).get("route_decision_ref")
+               != proved_route.get("id")
+            or state["retry_profile_version_ref"] is not None
+               and state["retry_profile_version_ref"] != selected_version
+            or state["retry_profile_version_ref"] is None
+               and selected_id not in state["excluded_profile_ids"]
+            or state["same_profile_retries"]
+               > self.provider_retry["max_same_profile_retries"]
+        ):
+            raise LLMResearchPlannerWorkerConflict(
+                "persisted planner provider retry state does not match route history"
+            )
+        return dict(state)
+
+    def _paid_retry_result(
+        self,
+        *,
+        work: WorkOrder,
+        lease: Mapping[str, Any],
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+        invocation: ModelInvocation,
+        result: ResultEnvelope,
+        state: Mapping[str, Any] | None,
+    ) -> ResultEnvelope | None:
+        if self.provider_retry is None or state is None:
+            return None
+        from .provider_retry import returned_provider_failure_proof
+
+        proof = returned_provider_failure_proof(invocation, result)
+        if proof is None:
+            return None
+        used = int(state.get("same_profile_retries", 0))
+        excluded = list(state.get("excluded_profile_ids", []))
+        if used < self.provider_retry["max_same_profile_retries"]:
+            retry_profile = profile["profile_version_ref"]
+            used += 1
+        else:
+            if profile["id"] not in excluded:
+                excluded.append(profile["id"])
+            retry_profile = None
+            used = 0
+        status = (
+            "failed"
+            if int(lease["attempt"]["attempt_number"]) >= int(lease["max_attempts"])
+            else "retryable"
+        )
+        return ResultEnvelope(
+            schema_version=result.schema_version,
+            id=result.id,
+            created_at=result.created_at,
+            work_order_ref=result.work_order_ref,
+            invocation_ref=result.invocation_ref,
+            status=status,
+            outputs={},
+            actual_side_effects=result.actual_side_effects,
+            usage_refs=result.usage_refs,
+            artifact_refs=result.artifact_refs,
+            error=dict(result.error or {}),
+            metadata=dict(result.metadata) | {
+                "provider_retry_proof": proof,
+                "provider_retry_state": {
+                    "excluded_profile_ids": excluded,
+                    "retry_profile_version_ref": retry_profile,
+                    "same_profile_retries": used,
+                },
+            },
+        )
 
     @staticmethod
     def _reuse_invocation(
@@ -410,6 +616,7 @@ class LLMResearchPlannerModelWorker:
     def run_once(self, work_order: WorkOrder | Mapping[str, Any]) -> dict[str, Any]:
         work = self._work(work_order)
         self._validate_work(work)
+        self._validate_retry_binding(work)
         status = self.scheduler.status(work.id)
         if status["work_order_hash"] != content_hash(work.to_dict()):
             raise LLMResearchPlannerWorkerConflict(
@@ -441,6 +648,7 @@ class LLMResearchPlannerModelWorker:
                 "Scheduler lease does not retain the exact WorkOrder"
             )
         attempt_number = lease["attempt"]["attempt_number"]
+        provider_retry_state = self._provider_retry_state(work)
         prior = self.router.list_decisions(work_order_id=work.id)
         accepted_attempts = self._accepted_attempts(work.id)
         recovery_route = (
@@ -468,6 +676,14 @@ class LLMResearchPlannerModelWorker:
                 previous_decision_ref=None if not prior else prior[-1]["id"],
                 producer_family=None,
                 purpose="plan",
+                excluded_profile_ids=(
+                    () if provider_retry_state is None
+                    else provider_retry_state["excluded_profile_ids"]
+                ),
+                required_profile_version_ref=(
+                    None if provider_retry_state is None
+                    else provider_retry_state["retry_profile_version_ref"]
+                ),
                 idempotency_key=f"llm-planner-route:{work.id}:{attempt_number}",
             )
             route = routed["decision"]
@@ -609,11 +825,24 @@ class LLMResearchPlannerModelWorker:
         # Settled with the rate card of the link that actually served, exactly
         # as a cockpit call is; a non-succeeded envelope means the broker
         # refused rather than served, and is charged nothing.
+        from .provider_retry import returned_provider_failure_proof
+
+        provider_failure_proof = returned_provider_failure_proof(
+            invocation, adapter_result
+        )
         if adapter_result.status == "succeeded":
             from .cockpit_model import call_cost_micros
 
             cost_micros, cost_status = call_cost_micros(
                 invocation, route, profile, reserved)
+        elif provider_failure_proof is not None:
+            from .cockpit_model import call_cost_micros
+
+            cost_micros, cost_status = call_cost_micros(
+                invocation, route, profile, reserved
+            )
+            if cost_status != "actual":
+                cost_micros, cost_status = reserved, "reserved"
         else:
             cost_micros, cost_status = 0, "failed"
         self._settle(admission, cost_micros)
@@ -679,6 +908,18 @@ class LLMResearchPlannerModelWorker:
                     usage_refs=adapter_result.usage_refs,
                     created_at=adapter_result.created_at,
                 )
+        elif provider_failure_proof is not None:
+            paid_retry = self._paid_retry_result(
+                work=work,
+                lease=lease,
+                route=route,
+                profile=profile,
+                invocation=invocation,
+                result=result,
+                state=provider_retry_state,
+            )
+            if paid_retry is not None:
+                result = paid_retry
         completion = self.scheduler.complete(
             work.id,
             attempt_number,
@@ -686,6 +927,15 @@ class LLMResearchPlannerModelWorker:
             lease["lease_token"],
             result,
             idempotency_key=f"llm-planner-complete:{work.id}:{attempt_number}",
+            retry_at=(
+                self.clock() + timedelta(
+                    seconds=self.provider_retry["retry_backoff_seconds"]
+                )
+                if self.provider_retry is not None
+                and result.status == "retryable"
+                and result.metadata.get("provider_retry_proof") is not None
+                else None
+            ),
         )
         if result.status == "succeeded":
             normalized = "succeeded"
@@ -714,4 +964,5 @@ __all__ = [
     "LLMResearchPlannerWorkerConflict",
     "LLMResearchPlannerWorkerError",
     "LLMResearchPlannerWorkerRejected",
+    "planner_provider_attempt_bound",
 ]

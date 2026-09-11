@@ -424,6 +424,7 @@ def build_planner_work_order(
     max_output_tokens: int = 1_200,
     max_cost_usd: float = 5.0,
     max_seconds: int = 180,
+    provider_retry: Mapping[str, Any] | None = None,
 ) -> WorkOrder:
     """Create the exact Scheduler contract for one model planning call."""
 
@@ -440,6 +441,19 @@ def build_planner_work_order(
         or max_cost_usd <= 0
     ):
         raise LLMResearchPlannerValidationError("max_cost_usd must be positive")
+    if provider_retry is not None:
+        from .provider_retry import ProviderRetryError, validate_provider_retry
+
+        try:
+            provider_retry = validate_provider_retry(provider_retry)
+        except ProviderRetryError as exc:
+            raise LLMResearchPlannerValidationError(
+                f"invalid provider retry policy: {exc}"
+            ) from exc
+        if "unknown_recovery" in provider_retry:
+            raise LLMResearchPlannerValidationError(
+                "planner provider retry does not support unknown-result recovery"
+            )
     visible = planner_visible_context(context)
     identity = {
         "planner_ref": LLM_RESEARCH_PLANNER_REF,
@@ -448,6 +462,8 @@ def build_planner_work_order(
         "context_hash": visible["context_hash"],
         "candidate_contract_hash": PLANNER_CANDIDATE_CONTRACT_HASH,
     }
+    if provider_retry is not None:
+        identity["provider_retry_hash"] = content_hash(provider_retry)
     digest = content_hash(identity)[:32]
     created_at = _text(context.get("created_at"), "planner context created_at")
     return WorkOrder(
@@ -477,6 +493,10 @@ def build_planner_work_order(
             "planner_context_pack_ref": visible["context_ref"],
             "planner_context_pack_hash": visible["context_hash"],
             "candidate_contract_hash": PLANNER_CANDIDATE_CONTRACT_HASH,
+            **(
+                {} if provider_retry is None
+                else {"provider_retry": dict(provider_retry)}
+            ),
         },
     )
 
@@ -591,14 +611,24 @@ class LLMResearchPlannerCoordinator:
         self.authority = authority
         self.scheduler = scheduler
 
-    def prepare(self, context_pack_ref: str, **work_budget: Any) -> dict[str, Any]:
+    def prepare(
+        self,
+        context_pack_ref: str,
+        *,
+        provider_retry: Mapping[str, Any] | None = None,
+        **work_budget: Any,
+    ) -> dict[str, Any]:
         disposition = planner_disposition(self.authority, context_pack_ref)
         if disposition["status"] != "model_required":
             if disposition["status"] == "core_action_required":
                 proposal = self.authority.propose_next_with_context(context_pack_ref)
                 return {"status": "core_action", "result": proposal}
             return disposition
-        work = build_planner_work_order(disposition["context"], **work_budget)
+        work = build_planner_work_order(
+            disposition["context"],
+            provider_retry=provider_retry,
+            **work_budget,
+        )
         enqueued = self.scheduler.enqueue(work)
         if enqueued["status"] not in {"fresh", "duplicate"}:
             raise LLMResearchPlannerRejected("planner WorkOrder did not converge")
