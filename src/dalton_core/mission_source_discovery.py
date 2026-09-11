@@ -1464,6 +1464,23 @@ class MissionSourceDiscoveryCoordinator:
         calls=next(row for row in stage['items'] if row['item_ref']=='earnings_calls')
         return tuple(calls.get('missing_periods') or ())
 
+    @staticmethod
+    def _selection_context(mission: Mapping[str, Any], spec: Mapping[str, Any]) -> dict[str, str]:
+        if spec.get("document_type") == "meeting_minutes":
+            return {"research_purpose": "earnings_call_transcript",
+                    "research_question": "Find the specified company's missing quarterly earnings-call transcript."}
+        questions = mission.get("research_questions") or ()
+        selected: list[str] = []
+        for question in questions:
+            candidate = " ".join((*selected, str(question).strip()))
+            if len(candidate) > 480:
+                break
+            selected.append(str(question).strip())
+        if not selected:
+            raise DiscoveryPlanError("sell-side selection requires a current mission research question")
+        return {"research_purpose": "sell_side_research",
+                "research_question": "Current mission questions: " + " ".join(selected)}
+
     def _checklist_shortfall(self, mission: Mapping[str, Any], company_ref: str,
                              spec_ref: str) -> bool:
         """Whether this spec's actual accepted material is below its floor."""
@@ -1934,16 +1951,7 @@ class MissionSourceDiscoveryCoordinator:
                         "ticker":member["ticker"],"aliases":list(company_plan.get("aliases") or [member["ticker"]])},
                         missing_periods=(list(item.get("missing_periods") or ())
                                          if spec["document_type"] == "meeting_minutes" else []),
-                        selection_context={
-                            "research_purpose": ("earnings_call_transcript"
-                                                 if spec["document_type"] == "meeting_minutes"
-                                                 else "sell_side_research"),
-                            "research_question": (
-                                "Find the specified company's missing quarterly earnings-call transcript."
-                                if spec["document_type"] == "meeting_minutes" else
-                                "Find research about the company, a relevant peer, or its industry that helps assess its business and key drivers."
-                            ),
-                        })
+                        selection_context=self._selection_context(mission, spec))
                 except Exception as exc:
                     return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
                 if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
