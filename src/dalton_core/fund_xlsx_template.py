@@ -354,6 +354,16 @@ def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
         for cell in row:
             cell.font = _font(Font, valuation_grid["font"])
     valuation_last = max(valuation.max_column, 5)
+    for column in range(6, valuation_last + 1):
+        valuation.column_dimensions[get_column_letter(column)].width = (
+            valuation_grid["column_widths"]["E"]
+        )
+    for cell in next(valuation.iter_rows(
+        min_row=1, max_row=1, min_col=1, max_col=valuation_last,
+    )):
+        _apply_style(cell, style["styles"]["unit_header"], Font=Font,
+                     PatternFill=PatternFill, Border=Border, Side=Side,
+                     Alignment=Alignment)
     for row in plan["row_styles"].get("valuation", []):
         for cell in next(valuation.iter_rows(min_row=row["row"], max_row=row["row"],
                                              min_col=1, max_col=valuation_last)):

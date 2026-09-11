@@ -60,16 +60,16 @@ class FundXlsxExportTests(unittest.TestCase):
         self.assertEqual(book.sheetnames,
                          ["Valuation", "Financials", "Driver", "Sources", "Formula Map"])
         headers = {cell.value: cell.column for cell in book["Financials"][1]}
-        revenue = book["Financials"].cell(3, headers["Q4 FY2026E"])
+        revenue = book["Financials"].cell(3, headers["4Q26E"])
         self.assertTrue(revenue.value.startswith("='Driver'!"), revenue.value)
         self.assertIn("*(1+", revenue.value)
         assumption_row = next(
             row for row in range(3, book["Driver"].max_row + 1)
-            if "Revenues (ratio) — quarterly_growth — assumption"
+            if "Revenues — Quarterly growth (ratio)"
             in str(book["Driver"].cell(row, 3).value)
         )
         assumption = book["Driver"].cell(
-            assumption_row, headers["Q4 FY2026E"]
+            assumption_row, headers["4Q26E"]
         )
         self.assertEqual(assumption.font.color.rgb[-6:], "0000FF")
         self.assertIn(self.model["content_hash"],
@@ -107,7 +107,7 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         sheet = book["Financials"]
         headers = {cell.value: cell.column for cell in sheet[1]}
-        forecast_col = headers["Q4 FY2026E"]
+        forecast_col = headers["4Q26E"]
         result_rows = {item["ref"]: 3 + index
                        for index, item in enumerate(forecast["results"])}
         expense_formula = sheet.cell(result_rows[expense["ref"]], forecast_col).value
@@ -128,9 +128,9 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         sheet = book["Financials"]
         headers = {cell.value: cell.column for cell in sheet[1]}
-        self.assertIsNone(sheet.cell(3, headers["FY2025A"]).value)
-        self.assertTrue(sheet.cell(3, headers["FY2026A/E"]).value.startswith("=SUM("))
-        self.assertTrue(sheet.cell(3, headers["FY2027E"]).value.startswith("=SUM("))
+        self.assertIsNone(sheet.cell(3, headers["2025"]).value)
+        self.assertTrue(sheet.cell(3, headers["2026A/E"]).value.startswith("=SUM("))
+        self.assertTrue(sheet.cell(3, headers["2027E"]).value.startswith("=SUM("))
         self.assertTrue(any("FY2025A: annual unavailable" in gap for gap in result["gaps"]))
 
     def test_annual_sum_requires_four_typed_duration_quarters(self):
@@ -159,13 +159,12 @@ class FundXlsxExportTests(unittest.TestCase):
         sheet = book["Financials"]
         headers = [cell.value for cell in sheet[1]]
         self.assertEqual(headers[4:8], [
-            "FY2025A", "FY2026A/E", "FY2027E", "FY2028E (partial)",
+            "2025", "2026A/E", "2027E", "2028E*",
         ])
         self.assertIsNone(headers[8])
-        self.assertEqual(headers[9:12], ["CAGR", None, "Q4 FY2025A"])
+        self.assertEqual(headers[9:12], ["CAGR", None, "4Q25"])
         self.assertEqual(headers[11:16], [
-            "Q4 FY2025A", "Q1 FY2026A", "Q2 FY2026A",
-            "Q3 FY2026A", "Q4 FY2026E",
+            "4Q25", "1Q26", "2Q26", "3Q26", "4Q26E",
         ])
         self.assertEqual(sheet["A1"].fill.fgColor.rgb[-6:], "3366FF")
         self.assertEqual(sheet["A1"].font.color.rgb[-6:], "FFFFFF")
@@ -182,20 +181,57 @@ class FundXlsxExportTests(unittest.TestCase):
         self.assertEqual(sheet["P5"].font.color.rgb[-6:], "000000")
         self.assertEqual(sheet["F3"].font.color.rgb[-6:], "000000")
         self.assertEqual(sheet["J3"].number_format, "0.0%")
-        self.assertIn("#,##0.0", sheet["F3"].number_format)
-        self.assertEqual(book["Valuation"]["B8"].number_format, "0.0%")
-        self.assertIn("#,##0.00", book["Valuation"]["B13"].number_format)
-        self.assertEqual(sheet["B3"].value, "Revenue (USD millions)")
-        self.assertEqual(sheet["C4"].value, "Cost of revenue (USD millions)")
+        self.assertNotIn("#,##0.0", sheet["F3"].number_format)
+        valuation = book["Valuation"]
+        valuation_rows = {
+            valuation.cell(row, 1).value: row
+            for row in range(1, valuation.max_row + 1)
+        }
+        self.assertEqual(
+            valuation.cell(valuation_rows["Required return"], 2).number_format,
+            "0.0%",
+        )
+        self.assertIn(
+            "#,##0.00",
+            valuation.cell(valuation_rows["Discounted target price"], 2).number_format,
+        )
+        self.assertEqual(sheet["B3"].value, "Revenue")
+        self.assertEqual(sheet["C4"].value, "Cost of revenue")
         self.assertTrue(sheet["B3"].font.bold)
         self.assertEqual(sheet["P3"].font.name, "Arial")
         self.assertEqual(sheet["P3"].font.sz, 8)
+        self.assertEqual(sheet["A2"].fill.fgColor.rgb[-6:], "99CCFF")
+        self.assertEqual(book["Driver"]["A2"].fill.fgColor.rgb[-6:], "993300")
         self.assertEqual(
             sheet["J3"].value,
             '=IF(AND(F3>0,G3>0),(G3/F3)^(1/1)-1,"")',
         )
-        self.assertEqual(book["Valuation"]["B6"].value, 100)
-        self.assertEqual(book["Valuation"]["B7"].value, 100)
+        self.assertEqual(valuation["B5"].value, 100)
+        self.assertEqual(valuation["E5"].value, 100)
+        driver = book["Driver"]
+        revenue_assumption_rows = [
+            row for row in range(3, driver.max_row + 1)
+            if driver.cell(row, 3).value == "Revenues — Quarterly growth (ratio)"
+        ]
+        self.assertEqual(revenue_assumption_rows, [10])
+        self.assertEqual(
+            sum(driver.cell(10, column).value is not None
+                for column in range(12, driver.max_column + 1)),
+            8,
+        )
+        self.assertEqual(valuation["A1"].fill.fgColor.rgb[-6:], "3366FF")
+        self.assertEqual(valuation["A2"].value, "Ticker")
+        self.assertEqual(valuation["A8"].value, "GAAP EPS (USD)")
+        self.assertEqual(valuation["A9"].value, "House — N/A")
+        self.assertEqual(valuation["A10"].value, "Street — N/A")
+        self.assertEqual(valuation["A12"].value, "Total Revenue (USD MM)")
+        self.assertEqual(valuation["A13"].value, "House")
+        self.assertEqual(valuation["A12"].fill.fgColor.rgb[-6:], "99CCFF")
+        self.assertFalse(any(
+            str(cell.value).startswith("result:")
+            for row in valuation.iter_rows() for cell in row
+            if cell.value is not None
+        ))
 
     def test_monetary_display_scales_cells_and_preserves_formula_dimensions(self):
         from openpyxl import load_workbook
@@ -217,8 +253,8 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         financials = book["Financials"]
         headers = {cell.value: cell.column for cell in financials[1]}
-        revenue = financials.cell(3, headers["Q4 FY2026E"])
-        self.assertIn("(USD millions)", financials["B3"].value)
+        revenue = financials.cell(3, headers["4Q26E"])
+        self.assertEqual(financials["B3"].value, "Revenue")
         self.assertTrue(revenue.value.startswith("='Driver'!"))
         self.assertNotIn(",,", revenue.number_format)
         self.assertEqual(book["Driver"]["L3"].value, 1_000)
@@ -248,9 +284,9 @@ class FundXlsxExportTests(unittest.TestCase):
                   if financials.cell(row, column).value is not None), None)
             for row in range(3, financials.max_row + 1)
         ]
-        self.assertIn("Revenue (USD millions)", labels)
-        self.assertIn("Selling, general & administrative (USD millions)", labels)
-        self.assertIn("Free cash flow (USD millions) — Not available", labels)
+        self.assertIn("Revenue", labels)
+        self.assertIn("Selling, general & administrative", labels)
+        self.assertIn("Free cash flow — Not available", labels)
         self.assertEqual(financials["A2"].value, "Income statement")
         for label in labels:
             self.assertNotIn("formula output", label)
@@ -324,10 +360,10 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         revenue_assumption = next(
             row for row in range(3, book["Driver"].max_row + 1)
-            if "Revenues (ratio) — quarterly_growth — assumption"
+            if "Revenues — Quarterly growth (ratio)"
             in str(book["Driver"].cell(row, 3).value))
         headers = {cell.value: cell.column for cell in book["Driver"][1]}
-        book["Driver"].cell(revenue_assumption, headers["Q4 FY2026E"], 0.20)
+        book["Driver"].cell(revenue_assumption, headers["4Q26E"], 0.20)
         changed = Path(self.temp.name) / "changed" / "changed.xlsx"
         changed.parent.mkdir()
         book.save(changed)
@@ -340,12 +376,16 @@ class FundXlsxExportTests(unittest.TestCase):
         ], check=True, capture_output=True, text=True)
         calculated = load_workbook(out / "changed.xlsx", data_only=True)
         headers = {cell.value: cell.column for cell in calculated["Financials"][1]}
-        revenue = calculated["Financials"].cell(3, headers["Q4 FY2026E"]).value
-        operating_income = calculated["Financials"].cell(7, headers["Q4 FY2026E"]).value
+        revenue = calculated["Financials"].cell(3, headers["4Q26E"]).value
+        operating_income = calculated["Financials"].cell(7, headers["4Q26E"]).value
         self.assertAlmostEqual(revenue, 1597.2, places=2)
         self.assertAlmostEqual(operating_income, 159.72, places=2)
-        self.assertIsNotNone(calculated["Financials"].cell(3, headers["FY2027E"]).value)
-        self.assertAlmostEqual(calculated["Valuation"]["B13"].value,
+        self.assertIsNotNone(calculated["Financials"].cell(3, headers["2027E"]).value)
+        discounted_row = next(
+            row for row in range(1, calculated["Valuation"].max_row + 1)
+            if calculated["Valuation"].cell(row, 1).value == "Discounted target price"
+        )
+        self.assertAlmostEqual(calculated["Valuation"].cell(discounted_row, 2).value,
                                149.161194909091, places=5)
 
     def test_tampered_valuation_scenario_is_refused(self):
