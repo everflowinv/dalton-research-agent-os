@@ -6,7 +6,9 @@ import sqlite3
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+from dalton_core.cockpit_model import CockpitModel
 from dalton_core.contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.document_research import (
@@ -37,6 +39,8 @@ from dalton_core.annual_report_runtime import (
 )
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_question_backlog import ResearchQuestionBacklog
+from dalton_core.research_planner import build_prompt, project_state_for_prompt
+from dalton_core.research_planner_cli import run_planner
 from dalton_core.research_task import inquiry_content_hash, inquiry_ref_for
 from dalton_core.store import content_hash
 from tests.test_document_research import FakeLauncher, FakeReceiptReader
@@ -371,6 +375,131 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_admissions"
         ).fetchone()[0], 1)
+
+    def test_projected_cli_prompt_records_full_state_plan_that_generic_admission_accepts(self):
+        fixture, authority, args, registration, _launcher = self._fixture()
+        existing_plan = json.loads(fixture.store.connection.execute(
+            "SELECT plan_json FROM coverage_mission_research_plans WHERE plan_id=?",
+            (args["plan_ref"],),
+        ).fetchone()[0])
+        inquiry = existing_plan["inquiries"][0]
+        selected_document = {
+            "company_ref": COMPANY,
+            "document_ref": registration["document_ref"],
+            "document_version_hash": registration["content_hash"],
+            "authority_ref": registration["id"],
+            "authority_hash": registration["content_hash"],
+            "source_ref": registration["source_ref"],
+            "source_content_hash": registration["normalized_text"]["text_sha256"],
+            "title": "Managed services accounting policy",
+            "readable": True, "completeness": "complete",
+            "operations": ["search_registered_document", "read_registered_document"],
+        }
+        documents = []
+        for index in range(12):
+            if index == 0:
+                document = dict(selected_document)
+            else:
+                digest = f"{index:064x}"
+                document = {
+                    **selected_document,
+                    "document_ref": f"wiki-document:other:{index}",
+                    "document_version_hash": digest,
+                    "authority_ref": f"registered-document:sha256:{digest}",
+                    "authority_hash": digest,
+                    "source_content_hash": digest,
+                }
+            document.update({
+                "original_preview": (f"verified original {index} " * 260),
+                "preview_proof_ref": f"document-read-proof:{index:032x}",
+                "preview_proof_hash": f"{index + 20:064x}",
+            })
+            documents.append(document)
+        full_state = {
+            "schema_version": "0.1",
+            "goal": {"mission_version_ref": fixture.mission["id"]},
+            "companies": [{
+                "company_ref": COMPANY, "ticker": "TEST", "stage": "initial_screen",
+                "gaps": [], "figures": {"total": 0}, "items": [],
+                "readable_documents": documents,
+            }],
+            "document_research_policy": {
+                "max_query_terms": 16, "max_query_term_chars": 240,
+            },
+            "as_of": NOW.isoformat(timespec="microseconds"),
+        }
+        full_state["content_hash"] = content_hash(full_state)
+        full_prompt_bytes = len(build_prompt(full_state).encode("utf-8"))
+        input_bound = full_prompt_bytes - 12_000
+        projected = project_state_for_prompt(
+            full_state, max_input_bytes=input_bound)
+        self.assertGreater(
+            projected["prompt_projection"]["preview_triplets_omitted"], 0)
+
+        raw_response = {
+            "schema_version": "0.1",
+            "assessment": "Read the selected original document.",
+            "directives": [],
+            "inquiries": [{
+                key: value for key, value in inquiry.items()
+                if key not in {"rank", "repair_target_hash"}
+            }],
+            "sufficiency": [],
+        }
+        adapter = RouteBoundCountingFakeAdapter(raw_response)
+        model_config_path = fixture.state / "projected-planner-model-config.json"
+        model_config = json.loads(
+            (fixture.state / DRAFT_MODEL_CONFIG_NAME).read_text(encoding="utf-8"))
+        model_config["purpose_call_budgets"] = {"plan": {
+            "max_input_tokens": input_bound,
+            "max_output_tokens": 4_000,
+            "max_cost_usd": 1.0,
+            "timeout_seconds": 120,
+        }}
+        model_config_path.write_text(
+            json.dumps(model_config, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        fixture.store.connection.commit()
+
+        def cockpit(config, **kwargs):
+            return CockpitModel(
+                config, adapter_factory=lambda _router: adapter,
+                clock=fixture.harness.clock, **kwargs,
+            )
+
+        with (
+            patch("dalton_core.research_planner_cli.build_state", return_value=full_state),
+            patch("dalton_core.research_planner_cli.CockpitModel", side_effect=cockpit),
+        ):
+            summary = run_planner(
+                state_dir=fixture.state,
+                model_config_path=model_config_path,
+                summary_dir=fixture.state / "projected-planner-summary",
+                scheduler_db=Path(fixture.store.path),
+                plans_dir=fixture.state / "discovery-plans",
+                dry_run=False,
+            )
+
+        self.assertEqual(summary["plan_status"], "fresh")
+        self.assertGreater(summary["prompt_input"]["projection"][
+            "preview_triplets_omitted"], 0)
+        stored = fixture.store.connection.execute(
+            "SELECT plan_json,work_order_ref FROM coverage_mission_research_plans "
+            "WHERE plan_id=?", (summary["plan_ref"],),
+        ).fetchone()
+        recorded_plan = json.loads(stored["plan_json"])
+        self.assertEqual(recorded_plan["state_hash"], full_state["content_hash"])
+        archived_work = fixture.harness.scheduler().work_order_authority(
+            stored["work_order_ref"])
+        self.assertIn('"prompt_projection":', archived_work["work_order"]["question"])
+
+        admitted = authority.admit_from_plan(
+            **{**args, "plan_ref": summary["plan_ref"]})
+        self.assertEqual(admitted["status_marker"], "fresh")
+        self.assertEqual(admitted["plan_hash"], recorded_plan["content_hash"])
+        self.assertEqual(admitted["document_authority_ref"], registration["id"])
+        self.assertEqual(adapter.calls, 1)
 
     def test_execution_resolution_preserves_caller_owned_ledger_transaction(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
