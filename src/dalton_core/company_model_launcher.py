@@ -13,10 +13,12 @@ directory of runs that all say "unchanged".
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .store import content_hash
 
 TICKET_PREFIX = "company-model-spec-run"
 
@@ -52,14 +54,27 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
         return self.model_config_path is not None
 
+    def repair_policy_hash(self) -> str:
+        from .company_model_cli import structured_output_repair_config
+        from .document_extraction import validate_model_config
+
+        config = None
+        if self.model_config_path is not None:
+            config = validate_model_config(json.loads(
+                self.model_config_path.read_text(encoding="utf-8")
+            ))
+        return content_hash(structured_output_repair_config(config))
+
     def _command(self, *, ticket_dir: Path, company_ref: str,
-                 expected_state_hash: str, expected_task_hash: str) -> list[str]:
+                 expected_state_hash: str, expected_task_hash: str,
+                 expected_repair_policy_hash: str) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--company-ref", company_ref,
             "--expected-state-hash", expected_state_hash,
             "--expected-task-hash", expected_task_hash,
+            "--expected-repair-policy-hash", expected_repair_policy_hash,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
         if self.model_config_path is not None:
@@ -69,7 +84,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         return command
 
     def start(self, *, company_ref: str, state_hash: str,
-              task_hash: str | None = None) -> dict[str, Any]:
+              task_hash: str | None = None,
+              repair_policy_hash: str | None = None) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a model specification run needs a company")
         if not isinstance(state_hash, str) or len(state_hash) != 64:
@@ -82,16 +98,28 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         if not isinstance(task_hash, str) or len(task_hash) != 64:
             raise LaneChildRejected("task_hash must be a sha256 digest")
         identity += f"|{task_hash}"
+        actual_repair_policy_hash = self.repair_policy_hash()
+        if repair_policy_hash is None:
+            repair_policy_hash = actual_repair_policy_hash
+        if (
+            not isinstance(repair_policy_hash, str)
+            or len(repair_policy_hash) != 64
+            or repair_policy_hash != actual_repair_policy_hash
+        ):
+            raise LaneChildRejected("repair policy hash changed before launch")
+        identity += f"|repair:{repair_policy_hash}"
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         return self.spawn(
             digest=digest,
             record={
                 "company_ref": company_ref, "state_hash": state_hash,
                 "task_hash": task_hash,
+                "repair_policy_hash": repair_policy_hash,
                 "model_configured": self.configured,
             },
             company_ref=company_ref, expected_state_hash=state_hash,
             expected_task_hash=task_hash,
+            expected_repair_policy_hash=repair_policy_hash,
         )
 
 

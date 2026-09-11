@@ -18,18 +18,22 @@ specification is stored, there is nothing left to decide.
 from __future__ import annotations
 
 import json
+import copy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.company_model_cli import (
-    choose_company, filed_classifications, model_spec_request_id, run_model_spec,
+    _validated_spec_with_repair, choose_company, filed_classifications,
+    model_spec_request_id, run_model_spec, structured_output_repair_config,
 )
 from dalton_core.company_model_spec import TASK_HASH, spec_from_response
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.company_model_state import build_company_model_state
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.store import DaltonStore
+from dalton_core.store import content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_company_dossier import body as dossier_body, classification
 
@@ -140,6 +144,12 @@ class ChooseCompanyTests(unittest.TestCase):
                          model_spec_request_id(state_hash, "b" * 64))
         self.assertNotEqual(model_spec_request_id(state_hash, "b" * 64),
                             model_spec_request_id(state_hash, "c" * 64))
+        disabled = {"max_attempts": 0}
+        enabled = {"max_attempts": 1}
+        self.assertNotEqual(
+            model_spec_request_id(state_hash, "b" * 64, repair_config=disabled),
+            model_spec_request_id(state_hash, "b" * 64, repair_config=enabled),
+        )
 
     def test_a_named_company_is_used_as_given(self):
         company_ref, state = choose_company(
@@ -234,6 +244,204 @@ class ChooseCompanyTests(unittest.TestCase):
         self.assertEqual(summary["status"], "idle")
         self.assertEqual(summary["spec_status"], "nothing_to_decide")
         self.assertEqual(summary["cost_micros"], 0)
+
+    def test_full_run_repairs_then_stores_the_accepted_work_and_total_cost(self):
+        _, state = choose_company(self.missions, self.mission)
+        original = _spec_body()
+        original["assessment"] = "x" * 1201
+        repaired = copy.deepcopy(original)
+        repaired["assessment"] = "x" * 1199
+        calls = [
+            {
+                "text": json.dumps(original), "work_order_ref": "work:original",
+                "work_order_hash": "1" * 64,
+                "result_envelope_ref": "result:original",
+                "result_envelope_hash": "2" * 64,
+                "invocation_ref": "invocation:original",
+                "route_decision_ref": "route:original", "cost_micros": 11,
+                "replayed": False,
+            },
+            {
+                "text": json.dumps(repaired), "work_order_ref": "work:repair",
+                "work_order_hash": "3" * 64,
+                "result_envelope_ref": "result:repair",
+                "result_envelope_hash": "4" * 64,
+                "invocation_ref": "invocation:repair",
+                "route_decision_ref": "route:repair", "cost_micros": 13,
+                "replayed": False,
+            },
+        ]
+
+        class Model:
+            def __init__(inner, config, **kwargs):
+                inner.config = config
+                inner.requests = []
+
+            def call(inner, **kwargs):
+                inner.requests.append(kwargs)
+                return calls.pop(0)
+
+        config = self.state_dir / "model.json"
+        config.write_text(json.dumps({
+            "structured_output_repair": {"max_attempts": 1}
+        }), encoding="utf-8")
+        with patch("dalton_core.company_model_cli.CockpitModel", Model):
+            summary = run_model_spec(
+                state_dir=self.state_dir, model_config_path=config,
+                summary_dir=self.state_dir / "repair-summary",
+                scheduler_db=self.state_dir / "scheduler.sqlite",
+                company_ref=ACN, expected_state_hash=state["state_hash"],
+                expected_task_hash=TASK_HASH,
+                expected_repair_policy_hash=content_hash({"max_attempts": 1}),
+            )
+        self.assertEqual(summary["spec_status"], "fresh")
+        self.assertEqual(summary["cost_micros"], 24)
+        self.assertEqual(summary["repair_attempts"][0]["work_order_ref"],
+                         "work:repair")
+        stored = self.missions.company_model_specs(ACN)[-1]
+        self.assertEqual(stored["work_order_ref"], "work:repair")
+
+
+class StructuredOutputRepairTests(unittest.TestCase):
+    def call(self, text, suffix="0", cost=0):
+        return {
+            "text": text,
+            "work_order_ref": "work:" + suffix,
+            "work_order_hash": ("a" if suffix == "0" else "b") * 64,
+            "result_envelope_ref": "result:" + suffix,
+            "result_envelope_hash": ("c" if suffix == "0" else "d") * 64,
+            "invocation_ref": "invocation:" + suffix,
+            "route_decision_ref": "route:" + suffix,
+            "cost_micros": cost,
+            "replayed": False,
+        }
+
+    def state(self):
+        return {
+            "company_ref": ACN,
+            "state_hash": "a" * 64,
+            "concepts": ["us-gaap:Revenues"],
+            "statements": {"income": [{
+                "concept": "us-gaap:Revenues", "level": 0,
+                "parent_concept": None, "is_breakdown": False,
+            }]},
+        }
+
+    def mission(self):
+        return {"autonomy": {"automation_principal": "automation:test"}}
+
+    def test_text_length_repair_preserves_every_other_semantic_node(self):
+        original = _spec_body()
+        original["assessment"] = "x" * 1201
+        repaired = copy.deepcopy(original)
+        repaired["assessment"] = "x" * 1199
+
+        class Model:
+            def __init__(self, answer):
+                self.answer = answer
+                self.calls = []
+
+            def call(inner, **kwargs):
+                inner.calls.append(kwargs)
+                return self.call(json.dumps(inner.answer), "1", 71)
+
+        model = Model(repaired)
+        spec, attempts, accepted = _validated_spec_with_repair(
+            model=model, state=self.state(), mission=self.mission(),
+            original_call=self.call(json.dumps(original)),
+            repair_config={"max_attempts": 1}, decided_by="automation:test",
+        )
+        self.assertEqual(spec["assessment"], repaired["assessment"])
+        self.assertEqual(accepted["work_order_ref"], "work:1")
+        self.assertEqual(attempts[0]["cost_micros"], 71)
+        binding = model.calls[0]["_structured_output_repair"]
+        self.assertEqual(binding["root_original"]["work_order_ref"], "work:0")
+        self.assertEqual(binding["repair_parent"]["result_envelope_ref"], "result:0")
+        self.assertEqual(binding["repair_config"], {"max_attempts": 1})
+        self.assertEqual(binding["state_hash"], "a" * 64)
+        self.assertEqual(binding["repair_number"], 1)
+
+    def test_semantic_drift_in_a_length_repair_refuses_whole_and_keeps_cost(self):
+        original = _spec_body()
+        original["assessment"] = "x" * 1201
+        hostile = copy.deepcopy(original)
+        hostile["assessment"] = "short"
+        hostile["horizon"]["forecast_quarters"] = 9
+        attempts = []
+
+        class Model:
+            def call(inner, **kwargs):
+                return self.call(json.dumps(hostile), "1", 91)
+
+        with self.assertRaisesRegex(Exception, "already valid"):
+            _validated_spec_with_repair(
+                model=Model(), state=self.state(), mission=self.mission(),
+                original_call=self.call(json.dumps(original)),
+                repair_config={"max_attempts": 1}, decided_by="automation:test",
+                repair_attempts=attempts,
+            )
+        self.assertEqual(attempts[0]["cost_micros"], 91)
+
+    def test_semantic_failure_never_calls_repair(self):
+        semantic = _spec_body()
+        semantic["revenue_anchor_concept"] = "us-gaap:NotFiled"
+
+        class Model:
+            calls = 0
+            def call(inner, **kwargs):
+                inner.calls += 1
+                raise AssertionError("semantic failures must not call the model")
+
+        model = Model()
+        with self.assertRaisesRegex(Exception, "not a concept"):
+            _validated_spec_with_repair(
+                model=model, state=self.state(), mission=self.mission(),
+                original_call=self.call(json.dumps(semantic)),
+                repair_config={"max_attempts": 1000}, decided_by="automation:test",
+            )
+        self.assertEqual(model.calls, 0)
+
+    def test_zero_and_one_attempt_limits_are_exact(self):
+        original = _spec_body()
+        original["assessment"] = "x" * 1201
+
+        class Model:
+            def __init__(inner):
+                inner.calls = 0
+
+            def call(inner, **kwargs):
+                inner.calls += 1
+                return self.call(json.dumps(original), str(inner.calls), 7)
+
+        disabled = Model()
+        with self.assertRaisesRegex(Exception, "longer than 1200"):
+            _validated_spec_with_repair(
+                model=disabled, state=self.state(), mission=self.mission(),
+                original_call=self.call(json.dumps(original)),
+                repair_config={"max_attempts": 0}, decided_by="automation:test",
+            )
+        self.assertEqual(disabled.calls, 0)
+
+        one = Model()
+        attempts = []
+        with self.assertRaisesRegex(Exception, "did not replace"):
+            _validated_spec_with_repair(
+                model=one, state=self.state(), mission=self.mission(),
+                original_call=self.call(json.dumps(original)),
+                repair_config={"max_attempts": 1}, decided_by="automation:test",
+                repair_attempts=attempts,
+            )
+        self.assertEqual(one.calls, 1)
+        self.assertEqual(len(attempts), 1)
+
+    def test_absent_and_zero_disable_while_large_nonnegative_limits_are_retained(self):
+        self.assertEqual(structured_output_repair_config({}), {"max_attempts": 0})
+        self.assertEqual(
+            structured_output_repair_config({
+                "structured_output_repair": {"max_attempts": 1000}
+            }),
+            {"max_attempts": 1000},
+        )
 
 
 if __name__ == "__main__":

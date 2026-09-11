@@ -59,7 +59,7 @@ from .driver_template import (
 from .store import content_hash
 
 SCHEMA_VERSION = "0.2"
-TASK_REF = "task:company-model-spec:0.3"
+TASK_REF = "task:company-model-spec:0.4"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -262,12 +262,17 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "cost_driver_template_metadata:0.1",
-    "prompt_contract": "company-model-spec-prompt:0.4",
+    "prompt_contract": "company-model-spec-prompt:0.5",
+    "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
 
 class CompanyModelSpecError(ValueError):
     """The specification is malformed, or rests on something not in the filings."""
+
+    def __init__(self, message: str, *, code: str = "semantic") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _statement_table(state: Mapping[str, Any]) -> str:
@@ -386,7 +391,7 @@ def parse_response(text: Any) -> dict[str, Any]:
     if isinstance(text, Mapping):
         return dict(text)
     if not isinstance(text, str) or not text.strip():
-        raise CompanyModelSpecError("model returned no specification")
+        raise CompanyModelSpecError("model returned no specification", code="format")
     body = text.strip()
     if body.startswith("```"):
         body = body.split("\n", 1)[-1]
@@ -394,21 +399,33 @@ def parse_response(text: Any) -> dict[str, Any]:
             body = body.rstrip()[: -3]
     start, end = body.find("{"), body.rfind("}")
     if start < 0 or end <= start:
-        raise CompanyModelSpecError("model response contains no JSON object")
+        raise CompanyModelSpecError(
+            "model response contains no JSON object", code="format"
+        )
     try:
         value = json.loads(body[start:end + 1])
     except json.JSONDecodeError as exc:
-        raise CompanyModelSpecError(f"model response is not JSON: {exc}") from exc
+        raise CompanyModelSpecError(
+            f"model response is not JSON: {exc}", code="format"
+        ) from exc
     if not isinstance(value, dict):
-        raise CompanyModelSpecError("model response is not an object")
+        raise CompanyModelSpecError("model response is not an object", code="format")
     return value
 
 
-def _text(value: Any, name: str, *, limit: int) -> str:
+def _text(
+    value: Any, name: str, *, limit: int, repairable_length: bool = False,
+) -> str:
     if not isinstance(value, str) or not value.strip():
+        # Once JSON parsed, absent or empty semantic fields are a judgement
+        # failure. In particular refs, slots and reasons must never become
+        # eligible merely because their wire value was blank.
         raise CompanyModelSpecError(f"{name} must be a non-empty string")
     if len(value) > limit:
-        raise CompanyModelSpecError(f"{name} is longer than {limit} characters")
+        raise CompanyModelSpecError(
+            f"{name} is longer than {limit} characters",
+            code="text_length" if repairable_length else "semantic",
+        )
     return value.strip()
 
 
@@ -504,7 +521,7 @@ def spec_from_response(
                 f"revenue_drivers[{index}].basis_concept"),
             "unit": _text(item.get("unit"), f"revenue_drivers[{index}].unit", limit=40),
             "because": _text(item.get("because"), f"revenue_drivers[{index}].because",
-                             limit=400),
+                             limit=400, repairable_length=True),
         })
 
     expenses: list[dict[str, Any]] = []
@@ -535,7 +552,7 @@ def spec_from_response(
                                  f"expense_lines[{index}].behaviour"),
             "driver_ref": driver_ref,
             "because": _text(item.get("because"), f"expense_lines[{index}].because",
-                             limit=400),
+                             limit=400, repairable_length=True),
         }
         if "cost_driver_slot" in item:
             slot = item.get("cost_driver_slot")
@@ -543,7 +560,8 @@ def spec_from_response(
             if slot is None:
                 expense["cost_driver_slot"] = None
                 expense["cost_driver_unbound_reason"] = _text(
-                    reason, f"expense_lines[{index}].cost_driver_unbound_reason", limit=400)
+                    reason, f"expense_lines[{index}].cost_driver_unbound_reason",
+                    limit=400, repairable_length=True)
             else:
                 slot = _text(slot, f"expense_lines[{index}].cost_driver_slot", limit=60)
                 if slot not in cost_slot_ids(state.get("industry_classification")):
@@ -576,7 +594,8 @@ def spec_from_response(
             "importance": _one_of(item.get("importance"), IMPORTANCE,
                                   f"forecast_statements[{index}].importance"),
             "because": _text(item.get("because"),
-                             f"forecast_statements[{index}].because", limit=400),
+                             f"forecast_statements[{index}].because", limit=400,
+                             repairable_length=True),
         }
     missing = [name for name in STATEMENTS if name not in statements]
     if missing:
@@ -611,7 +630,7 @@ def spec_from_response(
                                    f"operating_metrics[{index}].periodicity"),
             "disclosed": disclosed,
             "because": _text(item.get("because"), f"operating_metrics[{index}].because",
-                             limit=400),
+                             limit=400, repairable_length=True),
         })
 
     raw_horizon = body.get("horizon")
@@ -628,7 +647,8 @@ def spec_from_response(
     horizon = {
         "historical_quarters": int(historical),
         "forecast_quarters": int(forecast),
-        "because": _text(raw_horizon.get("because"), "horizon.because", limit=400),
+        "because": _text(raw_horizon.get("because"), "horizon.because", limit=400,
+                         repairable_length=True),
     }
 
     if not isinstance(decided_by, str) or not decided_by.startswith(
@@ -641,7 +661,8 @@ def spec_from_response(
         "schema_version": SCHEMA_VERSION,
         "company_ref": company_ref,
         "state_hash": state.get("state_hash"),
-        "assessment": _text(body.get("assessment"), "assessment", limit=1200),
+        "assessment": _text(body.get("assessment"), "assessment", limit=1200,
+                            repairable_length=True),
         "revenue_anchor_concept": revenue_anchor,
         "revenue_drivers": drivers,
         "expense_lines": expenses,

@@ -301,6 +301,7 @@ class PlannerBudgetConfigTests(unittest.TestCase):
                 "queue_wait_seconds": 901,
                 "retry_backoff_seconds": 19,
             }
+            configured["structured_output_repair"] = {"max_attempts": 37}
             target.write_text(json.dumps(configured), encoding="utf-8")
 
             install(config_path, tier="cheap", now=NOW)
@@ -311,6 +312,10 @@ class PlannerBudgetConfigTests(unittest.TestCase):
             )
             self.assertEqual(
                 preserved["transport_retry"], configured["transport_retry"]
+            )
+            self.assertEqual(
+                preserved["structured_output_repair"],
+                configured["structured_output_repair"],
             )
 
     def test_no_configuration_at_all_is_todays_behaviour(self) -> None:

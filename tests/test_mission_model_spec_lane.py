@@ -18,6 +18,7 @@ from unittest import mock
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildTicketNotFound
 import dalton_core.mission_model_spec_lane as model_spec_lane
 from dalton_core.mission_model_spec_lane import MissionModelSpecLaneCoordinator
+from dalton_core.store import content_hash
 
 
 class FakeLauncher:
@@ -25,17 +26,24 @@ class FakeLauncher:
         self.tickets: dict[str, dict] = {}
         self.started: list[dict] = []
         self.raise_on_start: Exception | None = None
+        self.repair_config = {"max_attempts": 0}
 
-    def start(self, *, company_ref, state_hash, task_hash=None):
+    def repair_policy_hash(self):
+        return content_hash(self.repair_config)
+
+    def start(self, *, company_ref, state_hash, task_hash=None,
+              repair_policy_hash=None):
         if self.raise_on_start is not None:
             raise self.raise_on_start
         self.started.append({"company_ref": company_ref, "state_hash": state_hash,
-                             "task_hash": task_hash})
+                             "task_hash": task_hash,
+                             "repair_policy_hash": repair_policy_hash})
         ticket_id = f"company-model-spec-run:{len(self.started):024d}"
         self.tickets[ticket_id] = {
             "id": ticket_id, "status": "running", "summary": None,
             "company_ref": company_ref, "state_hash": state_hash,
             "task_hash": task_hash,
+            "repair_policy_hash": repair_policy_hash,
         }
         return {"id": ticket_id}
 
@@ -195,6 +203,21 @@ class ModelSpecLaneTests(unittest.TestCase):
             resumed = lane.dispatch_once()
             self.assertEqual(resumed["status"], "launched")
             self.assertEqual(resumed["company_ref"], ACN)
+
+    def test_repair_policy_change_releases_the_exact_held_judgement(self):
+        missions = FakeMissions([ACN])
+        lane = MissionModelSpecLaneCoordinator(
+            missions=missions, launcher=self.launcher,
+            mission=lambda: self.mission)
+        first = lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "spec_status": "refused", "failure_reason": "length repair disabled"})
+        self.assertEqual(lane.dispatch_once()["status"], "held")
+        self.launcher.repair_config = {"max_attempts": 1}
+        resumed = lane.dispatch_once()
+        self.assertEqual(resumed["status"], "launched")
+        self.assertNotEqual(
+            resumed["repair_policy_hash"], first["repair_policy_hash"])
 
     def test_an_old_contract_failure_does_not_hold_a_new_contract(self):
         missions = FakeMissions([ACN])

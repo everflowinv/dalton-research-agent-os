@@ -104,7 +104,8 @@ def validate_model_config(value):
     required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
-                "capacity_retry", "reading_limits", "transport_retry", "provider_retry"}
+                "capacity_retry", "reading_limits", "transport_retry", "provider_retry",
+                "structured_output_repair"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -155,6 +156,21 @@ def validate_model_config(value):
             raise ResearchVerificationError(
                 f"invalid provider retry configuration: {exc}"
             ) from exc
+    if "structured_output_repair" in config:
+        repair = config["structured_output_repair"]
+        if (
+            not isinstance(repair, Mapping)
+            or set(repair) != {"max_attempts"}
+            or isinstance(repair["max_attempts"], bool)
+            or not isinstance(repair["max_attempts"], int)
+            or repair["max_attempts"] < 0
+        ):
+            raise ResearchVerificationError(
+                "invalid structured output repair configuration"
+            )
+        config["structured_output_repair"] = {
+            "max_attempts": repair["max_attempts"]
+        }
     return config
 
 

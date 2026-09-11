@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import inspect
 import sqlite3
 import tempfile
@@ -366,6 +367,136 @@ class CockpitChainTests(unittest.TestCase):
                         capacity_retry={"cooldown_seconds": 0,
                                         "max_recovery_epochs": 2,
                                         "scheduler_max_attempts": 4})
+
+    def test_structured_output_repair_policy_is_closed_and_install_preserved(self) -> None:
+        from dalton_core.budget_config_install import preserved_budget_overrides
+        from dalton_core.document_extraction import validate_model_config
+
+        config = {
+            **self._model(
+                ChainAdapter({}), policy_version_ref=self.pinned_policy
+            ).config,
+            "structured_output_repair": {"max_attempts": 1000},
+        }
+        validated = validate_model_config(config)
+        self.assertEqual(
+            validated["structured_output_repair"], {"max_attempts": 1000})
+        path = self.root / "repair-model-config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        self.assertEqual(
+            preserved_budget_overrides(path)["structured_output_repair"],
+            {"max_attempts": 1000},
+        )
+        for invalid in (
+            {"max_attempts": -1}, {"max_attempts": True},
+            {"max_attempts": 1, "extra": 1},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                Exception, "structured output repair"
+            ):
+                validate_model_config({
+                    **config, "structured_output_repair": invalid,
+                })
+
+    def test_model_spec_repair_is_a_second_budgeted_scheduler_work(self) -> None:
+        from dalton_core.company_model_cli import _validated_spec_with_repair
+        from tests.test_company_model_spec import STATE, _spec
+
+        initial_body = _spec(assessment="x" * 1201)
+        repaired_body = copy.deepcopy(initial_body)
+        repaired_body["assessment"] = "x" * 1199
+
+        class SequenceAdapter(ChainAdapter):
+            def __init__(inner):
+                super().__init__({})
+                inner.outputs = [initial_body, repaired_body]
+
+            def execute(inner, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                body = inner.outputs.pop(0)
+                return invocation, replace(
+                    envelope, outputs={"text": json.dumps(body)}
+                )
+
+        adapter = SequenceAdapter()
+        model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        first = model.call(
+            purpose="model_spec", request_id="real-model-spec-repair",
+            prompt="decide model structure", mission=self.mission,
+        )
+        spec, repairs, accepted = _validated_spec_with_repair(
+            model=model, state=STATE, mission=self.mission,
+            original_call=first, repair_config={"max_attempts": 1},
+            decided_by="automation:test",
+        )
+        self.assertEqual(spec["assessment"], repaired_body["assessment"])
+        self.assertEqual(len(adapter.served), 2)
+        self.assertEqual(len(repairs), 1)
+        self.assertNotEqual(first["work_order_ref"], accepted["work_order_ref"])
+
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            rows = scheduler.connection.execute(
+                "SELECT work_order_json FROM scheduler_work_orders "
+                "WHERE work_order_id IN (?,?) ORDER BY work_order_id",
+                (first["work_order_ref"], accepted["work_order_ref"]),
+            ).fetchall()
+            works = [json.loads(row["work_order_json"]) for row in rows]
+        self.assertEqual(len(works), 2)
+        repair_work = next(
+            work for work in works
+            if work["id"] == accepted["work_order_ref"]
+        )
+        binding = repair_work["metadata"]["structured_output_repair"]
+        self.assertEqual(
+            binding["repair_parent"]["result_envelope_ref"],
+            first["result_envelope_ref"],
+        )
+        self.assertEqual(binding["repair_config"], {"max_attempts": 1})
+        self.assertEqual(binding["state_hash"], STATE["state_hash"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admissions = [
+                ledger.admission(
+                    work_order_ref=work_ref, attempt_number=1,
+                    phase="assessment",
+                )
+                for work_ref in (
+                    first["work_order_ref"], accepted["work_order_ref"]
+                )
+            ]
+        self.assertTrue(all(item is not None for item in admissions))
+        self.assertEqual(
+            {item["mission_binding"]["mission_version_ref"] for item in admissions},
+            {self.mission["id"]},
+        )
+        replayed_spec, replayed_repairs, replayed_call = (
+            _validated_spec_with_repair(
+                model=model, state=STATE, mission=self.mission,
+                original_call=first, repair_config={"max_attempts": 1},
+                decided_by="automation:test",
+            )
+        )
+        self.assertEqual(replayed_spec["content_hash"], spec["content_hash"])
+        self.assertEqual(replayed_call["work_order_ref"], accepted["work_order_ref"])
+        self.assertTrue(replayed_repairs[0]["replayed"])
+        self.assertEqual(len(adapter.served), 2)
+
+        forged = copy.deepcopy(binding)
+        forged["repair_parent"]["result_envelope_hash"] = "f" * 64
+        with self.assertRaisesRegex(
+            CockpitModelError, "parent authority drifted"
+        ):
+            model.call(
+                purpose="model_spec",
+                request_id="model-spec-repair:" + content_hash(forged)[:32],
+                prompt=repair_work["question"], mission=self.mission,
+                _structured_output_repair=forged,
+            )
+        self.assertEqual(len(adapter.served), 2)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            count = scheduler.connection.execute(
+                "SELECT count(*) FROM scheduler_work_orders"
+            ).fetchone()[0]
+        self.assertEqual(count, 2)
 
     def test_explicit_capacity_policy_versions_base_work_but_default_does_not(self) -> None:
         default_adapter = ChainAdapter({})

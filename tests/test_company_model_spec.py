@@ -141,6 +141,31 @@ class CompanyModelSpecTests(unittest.TestCase):
         # Same judgement, same hash: a spec is identified by what it says.
         self.assertEqual(self.verify()["content_hash"], spec["content_hash"])
 
+    def test_only_syntax_and_schema_text_bounds_are_typed_for_repair(self):
+        with self.assertRaises(CompanyModelSpecError) as malformed:
+            self.verify("not json")
+        self.assertEqual(malformed.exception.code, "format")
+
+        overlong = _spec(assessment="x" * 1201)
+        with self.assertRaises(CompanyModelSpecError) as length:
+            self.verify(overlong)
+        self.assertEqual(length.exception.code, "text_length")
+
+        semantic = _spec(revenue_anchor_concept="us-gaap:NotFiled")
+        with self.assertRaises(CompanyModelSpecError) as authority:
+            self.verify(semantic)
+        self.assertEqual(authority.exception.code, "semantic")
+        missing_ref = _spec()
+        missing_ref["revenue_drivers"][0]["ref"] = ""
+        with self.assertRaises(CompanyModelSpecError) as slot:
+            self.verify(missing_ref)
+        self.assertEqual(slot.exception.code, "semantic")
+        overlong_ref = _spec()
+        overlong_ref["revenue_drivers"][0]["ref"] = "x" * 61
+        with self.assertRaises(CompanyModelSpecError) as ref:
+            self.verify(overlong_ref)
+        self.assertEqual(ref.exception.code, "semantic")
+
     def test_a_line_may_not_rest_on_a_concept_the_company_never_filed(self):
         for field, entry in (
             ("revenue_drivers", {"basis_concept": "us-gaap:Revenue"}),

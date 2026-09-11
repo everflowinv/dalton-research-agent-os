@@ -10,7 +10,8 @@ from typing import Any
 from .call_budget import validate_budget_overrides, validate_run_budget_overrides
 
 BUDGET_KEYS = ("call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
-               "capacity_retry", "transport_retry", "provider_retry", "reading_limits")
+               "capacity_retry", "transport_retry", "provider_retry", "reading_limits",
+               "structured_output_repair")
 
 
 class BudgetConfigInstallError(ValueError):
@@ -46,6 +47,12 @@ def preserved_budget_overrides(path: str | Path) -> dict[str, Any]:
     if "provider_retry" in wire:
         from .provider_retry import validate_provider_retry
         kept["provider_retry"] = validate_provider_retry(wire["provider_retry"])
+    if "structured_output_repair" in wire:
+        from .document_extraction import validate_model_config
+        validated = validate_model_config(wire)
+        kept["structured_output_repair"] = dict(
+            validated["structured_output_repair"]
+        )
     for key in ("call_budget", "run_budget"):
         if key in wire:
             validator = validate_budget_overrides if key == "call_budget" else validate_run_budget_overrides

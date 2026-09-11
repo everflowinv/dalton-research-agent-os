@@ -81,6 +81,7 @@ class MissionModelSpecLaneCoordinator:
             "company_ref": ticket.get("company_ref"),
             "state_hash": ticket.get("state_hash"),
             "task_hash": ticket.get("task_hash"),
+            "repair_policy_hash": ticket.get("repair_policy_hash"),
             "spec_status": summary.get("spec_status"),
             "spec_ref": summary.get("spec_ref"),
             "cost_micros": summary.get("cost_micros"),
@@ -113,8 +114,9 @@ class MissionModelSpecLaneCoordinator:
         company_ref = settled.get("company_ref")
         state_hash = settled.get("state_hash")
         task_hash = settled.get("task_hash")
-        if failed and company_ref and state_hash and task_hash:
-            key = f"{company_ref}|{state_hash}|{task_hash}"
+        repair_policy_hash = settled.get("repair_policy_hash")
+        if failed and company_ref and state_hash and task_hash and repair_policy_hash:
+            key = f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}"
             spec_status = settled.get("spec_status")
             reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
             settled["failure"] = record_controlled_failure(
@@ -123,9 +125,9 @@ class MissionModelSpecLaneCoordinator:
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(spec_status or settled.get("status")),
             ).as_wire()
-        elif company_ref and state_hash and task_hash:
+        elif company_ref and state_hash and task_hash and repair_policy_hash:
             settled["resumed"] = self.budget.clear(
-                f"{company_ref}|{state_hash}|{task_hash}")
+                f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}")
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -136,6 +138,11 @@ class MissionModelSpecLaneCoordinator:
                     "settled": settled}
         excluded: set[str] = set()
         held_companies: dict[str, Any] = {}
+        try:
+            repair_policy_hash = self.launcher.repair_policy_hash()
+        except Exception as exc:  # noqa: BLE001 - malformed config cannot launch
+            return {"status": "unavailable", "settled": settled,
+                    "reason": f"{type(exc).__name__}: {exc}"}
         try:
             classifications = (
                 filed_classifications(self.missions.store)
@@ -168,7 +175,9 @@ class MissionModelSpecLaneCoordinator:
             # Keeping that exact state beside the company also lets a held
             # first candidate be skipped without rebuilding a different one.
             state_hash = state["state_hash"]
-            business_key = f"{company_ref}|{state_hash}|{TASK_HASH}"
+            business_key = (
+                f"{company_ref}|{state_hash}|{TASK_HASH}|{repair_policy_hash}"
+            )
 
             permission = current_permission(
                 self.budget, business_key, mission, self.launcher,
@@ -183,7 +192,8 @@ class MissionModelSpecLaneCoordinator:
             excluded.add(company_ref)
         try:
             ticket = self.launcher.start(
-                company_ref=company_ref, state_hash=state_hash, task_hash=TASK_HASH)
+                company_ref=company_ref, state_hash=state_hash, task_hash=TASK_HASH,
+                repair_policy_hash=repair_policy_hash)
         except LaneChildConflict as exc:
             return {"status": "busy", "company_ref": company_ref, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -194,6 +204,7 @@ class MissionModelSpecLaneCoordinator:
         return {
             "status": "launched", "company_ref": company_ref,
             "state_hash": state_hash, "ticket_ref": ticket["id"],
+            "repair_policy_hash": repair_policy_hash,
             "settled": settled, "held": held_companies,
         }
 

@@ -431,6 +431,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                verifier_provider_schema_hash: str | None = None,
                mission_version_hash: str | None = None,
                request_identity: Mapping[str, Any] | None = None,
+               structured_output_repair: Mapping[str, Any] | None = None,
                provider_retry: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
     if purpose not in _PURPOSES:
@@ -457,6 +458,10 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         identity["producer_route_decision_refs"] = list(producer_route_decision_refs)
     if request_identity is not None:
         identity["request_identity_hash"] = content_hash(request_identity)
+    if structured_output_repair is not None:
+        identity["structured_output_repair_hash"] = content_hash(
+            structured_output_repair
+        )
     if provider_retry is not None:
         from .provider_retry import validate_provider_retry
         provider_retry = validate_provider_retry(provider_retry)
@@ -485,6 +490,9 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "producer_route_decision_refs": list(producer_route_decision_refs)}),
                                  **({} if request_identity is None else {
                                      "request_identity": dict(request_identity)}),
+                                 **({} if structured_output_repair is None else {
+                                     "structured_output_repair": dict(
+                                         structured_output_repair)}),
                                  **({} if provider_retry is None else {
                                      "provider_retry": dict(provider_retry)}),
                                  **({} if verifier_provider_contract is None else {
@@ -493,6 +501,66 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "verifier_provider_schema_hash": verifier_provider_schema_hash,
                                  })},
     )
+
+
+def _validate_structured_output_repair_authority(
+    scheduler: Scheduler, binding: Mapping[str, Any]
+) -> None:
+    """Prove both named parent results before admitting a repair Work."""
+
+    for name in ("root_original", "repair_parent"):
+        proof = binding.get(name)
+        if not isinstance(proof, Mapping):
+            raise CockpitModelError("structured output repair authority is invalid")
+        work_ref = proof.get("work_order_ref")
+        work = scheduler.work_order_authority(work_ref)
+        formal_row = scheduler.connection.execute(
+            "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+            (work_ref,),
+        ).fetchone()
+        if work is None or formal_row is None or formal_row["terminal_state"] != "succeeded":
+            raise CockpitModelError("structured output repair parent is not a succeeded Work")
+        try:
+            envelope = ResultEnvelope.from_dict(
+                json.loads(formal_row["result_envelope_json"])
+            ).to_dict()
+        except Exception as exc:
+            raise CockpitModelError(
+                "structured output repair result authority is invalid"
+            ) from exc
+        formal_record = {
+            "id": formal_row["result_record_id"],
+            "work_order_id": formal_row["work_order_id"],
+            "attempt_number": formal_row["attempt_number"],
+            "result_envelope_id": formal_row["result_envelope_id"],
+            "result_envelope_hash": formal_row["result_envelope_hash"],
+            "terminal_state": formal_row["terminal_state"],
+            "created_at": formal_row["created_at"],
+        }
+        receipt = scheduler.connection.execute(
+            "SELECT * FROM scheduler_result_envelopes WHERE result_envelope_id=?",
+            (formal_row["result_envelope_id"],),
+        ).fetchone()
+        if receipt is None:
+            raise CockpitModelError("structured output repair result authority is invalid")
+        if (
+            proof.get("work_order_hash") != work.get("work_order_hash")
+            or formal_row["work_order_id"] != work_ref
+            or envelope["work_order_ref"] != work_ref
+            or envelope["id"] != formal_row["result_envelope_id"]
+            or canonical_json(envelope) != formal_row["result_envelope_json"]
+            or content_hash(envelope) != formal_row["result_envelope_hash"]
+            or content_hash(formal_record) != formal_row["content_hash"]
+            or receipt["work_order_id"] != work_ref
+            or receipt["result_envelope_hash"] != formal_row["result_envelope_hash"]
+            or receipt["outcome"] != "succeeded"
+            or proof.get("result_envelope_ref") != formal_row["result_envelope_id"]
+            or proof.get("result_envelope_hash") != formal_row["result_envelope_hash"]
+            or proof.get("invocation_ref") != envelope.get("invocation_ref")
+            or proof.get("route_decision_ref")
+               != (envelope.get("metadata") or {}).get("route_decision_ref")
+        ):
+            raise CockpitModelError("structured output repair parent authority drifted")
 
 
 def dossier_request_identity(
@@ -1112,6 +1180,7 @@ class CockpitModel:
              mission: Mapping[str, Any],
              producer_route_decision_refs: Sequence[str] = (),
              _dossier_recovery_parent: Mapping[str, Any] | None = None,
+             _structured_output_repair: Mapping[str, Any] | None = None,
              ) -> dict[str, Any]:
         """Run configured paid retries without retaining prior call contexts."""
 
@@ -1123,6 +1192,7 @@ class CockpitModel:
                 mission=mission,
                 producer_route_decision_refs=producer_route_decision_refs,
                 _dossier_recovery_parent=_dossier_recovery_parent,
+                _structured_output_repair=_structured_output_repair,
             )
             if "_provider_retry_backoff_seconds" not in outcome:
                 return outcome
@@ -1135,11 +1205,25 @@ class CockpitModel:
                    mission: Mapping[str, Any],
                    producer_route_decision_refs: Sequence[str] = (),
                    _dossier_recovery_parent: Mapping[str, Any] | None = None,
+                   _structured_output_repair: Mapping[str, Any] | None = None,
                    ) -> dict[str, Any]:
         """Run one Scheduler attempt and request another through a private marker."""
         capacity_retry = _capacity_retry(self.config)
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         semantic_request_id = request_id
+        if _structured_output_repair is not None:
+            if purpose != "model_spec" or not isinstance(
+                _structured_output_repair, Mapping
+            ):
+                raise CockpitModelError(
+                    "structured output repair binding is invalid"
+                )
+            from .company_model_cli import (
+                validate_structured_output_repair_binding,
+            )
+            _structured_output_repair = validate_structured_output_repair_binding(
+                _structured_output_repair, prompt=prompt, request_id=request_id,
+            )
         request_identity = None
         if (
             purpose in _DOSSIER_PURPOSES
@@ -1241,6 +1325,7 @@ class CockpitModel:
             ),
             "producer_route_decision_refs": producer_refs,
             "provider_retry": self.config.get("provider_retry"),
+            "structured_output_repair": _structured_output_repair,
         }
         work = build_work(
             request_id=request_id,
@@ -1305,6 +1390,10 @@ class CockpitModel:
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
+            if _structured_output_repair is not None:
+                _validate_structured_output_repair_authority(
+                    scheduler, _structured_output_repair
+                )
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
@@ -1351,6 +1440,7 @@ class CockpitModel:
                             mission=mission,
                             producer_route_decision_refs=producer_refs,
                             _dossier_recovery_parent=parent,
+                            _structured_output_repair=_structured_output_repair,
                         )
                     return self.call(
                         purpose=purpose,
@@ -1358,6 +1448,7 @@ class CockpitModel:
                         prompt=prompt,
                         mission=mission,
                         producer_route_decision_refs=producer_refs,
+                        _structured_output_repair=_structured_output_repair,
                     )
             from .model_route_recovery import route_recovery_request
             recovery_request = route_recovery_request(
@@ -1381,10 +1472,12 @@ class CockpitModel:
                         mission=mission,
                         producer_route_decision_refs=producer_refs,
                         _dossier_recovery_parent=parent,
+                        _structured_output_repair=_structured_output_repair,
                     )
                 return self.call(
                     purpose=purpose, request_id=recovery_request, prompt=prompt,
                     mission=mission, producer_route_decision_refs=producer_refs,
+                    _structured_output_repair=_structured_output_repair,
                 )
             capacity_terminal = formal
             if formal is None and scheduler.status(work.id)["state"] == "failed":
@@ -1441,6 +1534,7 @@ class CockpitModel:
                             mission=mission,
                             producer_route_decision_refs=producer_refs,
                             _dossier_recovery_parent=parent,
+                            _structured_output_repair=_structured_output_repair,
                         )
                     clean_request = (base_request_id[:match.start()] if match
                                      else base_request_id)
@@ -1452,6 +1546,7 @@ class CockpitModel:
                         prompt=prompt,
                         mission=mission,
                         producer_route_decision_refs=producer_refs,
+                        _structured_output_repair=_structured_output_repair,
                     )
             if _capacity_busy_terminal(capacity_terminal):
                 if epoch >= capacity_retry["max_recovery_epochs"]:
@@ -1722,10 +1817,17 @@ class CockpitModel:
         text = envelope.get("outputs", {}).get("text")
         if not isinstance(text, str):
             raise CockpitModelError("the model returned no text")
-        return {"text": text, "replayed": replayed, "cost_micros": cost_micros, "cost_status": cost_status,
-                "work_order_ref": work.id, "result_envelope_ref": formal["result_envelope_id"],
-                "invocation_ref": envelope.get("invocation_ref"),
-                "route_decision_ref": envelope.get("metadata", {}).get("route_decision_ref")}
+        answer = {"text": text, "replayed": replayed, "cost_micros": cost_micros,
+                  "cost_status": cost_status, "work_order_ref": work.id,
+                  "result_envelope_ref": formal["result_envelope_id"],
+                  "invocation_ref": envelope.get("invocation_ref"),
+                  "route_decision_ref": envelope.get("metadata", {}).get("route_decision_ref")}
+        if work.metadata.get("purpose") == "model_spec":
+            answer.update({
+                "work_order_hash": content_hash(work.to_dict()),
+                "result_envelope_hash": formal["result_envelope_hash"],
+            })
+        return answer
 
     def _chain_tier(self, router: ModelRouter, purpose: str) -> str | None:
         """The tier to walk, or None to route the single-shot way.
