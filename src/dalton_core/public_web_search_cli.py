@@ -103,6 +103,8 @@ def run_discovery(
 ) -> dict[str, Any]:
     """Authorize, search, and append the discovery record; return the summary."""
 
+    from .web_search_provider import PROVIDER_SELECTION_POLICY
+
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
     spool_root = secure_dir(spool_dir if spool_dir is not None else state / "connector-spool")
@@ -128,6 +130,7 @@ def run_discovery(
         "source_ref": WEB_SEARCH_SOURCE_REF,
         "transport": transport,
         "expected_provider": expected_provider,
+        "provider_selection_policy": PROVIDER_SELECTION_POLICY,
         "governance_ref": governance.id,
         "governance_hash": governance.content_hash,
         "governance_status": governance.status,

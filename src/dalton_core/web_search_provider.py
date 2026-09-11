@@ -12,6 +12,8 @@ from pathlib import Path
 from .connector_runner import RunnerValidationError
 from .public_web_connector import LEGACY_WEB_SEARCH_PROVIDER, validate_web_search_provider
 
+PROVIDER_SELECTION_POLICY = "openclaw-search-selection:0.1"
+
 
 class WebSearchProviderConfigurationError(ValueError):
     """The host search selection cannot be determined before a call."""

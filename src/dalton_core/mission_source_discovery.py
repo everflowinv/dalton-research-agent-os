@@ -1012,6 +1012,10 @@ class WebSearchLauncher(_SearchLauncherBase):
     def _load_governance_record(self) -> WebSearchConnectorGovernance:
         return WebSearchConnectorGovernance.load(self.governance_path)
 
+    def provider_recovery_available(self, dispatch: Mapping[str, Any], connection: Any) -> bool:
+        from .web_search_recovery import provider_recovery_available
+        return provider_recovery_available(self, dispatch, connection)
+
     def _refuse_networked_launch(self) -> None:
         # P9d-4d: a networked search goes through the host-owned OpenClaw
         # search broker.  Without its socket and key there is nothing to call,
@@ -1669,6 +1673,10 @@ class MissionSourceDiscoveryCoordinator:
                 return f"{kind} {age.days}d ago; interval {interval}d"
             return None
         if age < timedelta(days=spec["retry_interval_days"]):
+            recover = getattr(self.search_launcher, "provider_recovery_available", None)
+            if self.source_ref == WEB_SEARCH_SOURCE_REF and callable(recover):
+                if recover(row, self.store.connection):
+                    return None
             return f"last attempt {row['status']} {age.days}d ago; retry interval {spec['retry_interval_days']}d"
         return None
 
