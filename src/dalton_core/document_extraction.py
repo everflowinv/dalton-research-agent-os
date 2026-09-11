@@ -299,6 +299,20 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
     resolved = dict(call_budget or resolve_call_budget(
         model_config or {}, "document_extraction", defaults=LEGACY_CALL_BUDGET,
     ))
+    prompt = build_prompt(context)
+    # The installed extraction worker and ModelRouter deliberately use this
+    # conservative counter too.  Refuse before enqueue when a full canonical
+    # prompt cannot fit the owner's configured ceiling; otherwise the router
+    # records MODEL_CHAIN_EXHAUSTED for a task no candidate could ever accept.
+    # Never truncate the source window here: doing so while retaining the
+    # context hash would falsely certify bytes the model did not receive.
+    required_input = len(prompt.encode("utf-8"))
+    if required_input > resolved["max_input_tokens"]:
+        raise ResearchVerificationError(
+            "canonical extraction prompt requires "
+            f"{required_input} conservative input tokens but configured call budget allows "
+            f"{resolved['max_input_tokens']}"
+        )
     budget_hash = budget_fingerprint(resolved)
     identity = {"task": TASK_HASH, "context": context["content_hash"]}
     if explicit:
@@ -307,7 +321,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
     return WorkOrder(
         schema_version="0.1", id="work:document-extraction-" + digest[:32],
         created_at=context["created_at"], updated_at=context["created_at"],
-        question=build_prompt(context), requested_capabilities=("research",),
+        question=prompt, requested_capabilities=("research",),
         runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
         budget={"max_input_tokens": resolved["max_input_tokens"],
                 "max_output_tokens": resolved["max_output_tokens"],

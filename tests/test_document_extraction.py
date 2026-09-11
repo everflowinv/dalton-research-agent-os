@@ -12,7 +12,7 @@ from dalton_core.alphaengine_acquisition_launcher import AlphaEngineAcquisitionL
 from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
 from dalton_core.document_extraction import (
     DocumentExtractionService, DocumentExtractionModelWorker, HermeticExtractionAdapter,
-    build_work, parse_suggestions, verified_source, GATE_REASON, WINDOW_CHARS, OUTPUT_SCHEMA,
+    build_prompt, build_work, parse_suggestions, verified_source, GATE_REASON, WINDOW_CHARS, OUTPUT_SCHEMA,
 )
 from dalton_core.model_router import ModelRouter
 from dalton_core.research_verification import ResearchVerificationConflict, ResearchVerificationError
@@ -163,6 +163,41 @@ class ExtractionHarness:
 
 
 class DocumentExtractionTests(unittest.TestCase):
+    def test_configured_budget_must_fit_exact_canonical_prompt(self):
+        context = self.h.context()
+        prompt_bytes = len(build_prompt(context).encode("utf-8"))
+        with self.assertRaisesRegex(Exception, rf"requires {prompt_bytes} .* allows {prompt_bytes - 1}"):
+            build_work(context, call_budget={
+                "max_input_tokens": prompt_bytes - 1, "max_output_tokens": 700,
+                "max_cost_usd": 0.04, "timeout_seconds": 91,
+            })
+        work = build_work(context, call_budget={
+            "max_input_tokens": prompt_bytes, "max_output_tokens": 700,
+            "max_cost_usd": 0.04, "timeout_seconds": 91,
+        })
+        self.assertEqual(len(work.question.encode("utf-8")), prompt_bytes)
+        self.assertEqual(work.budget, {
+            "max_input_tokens": prompt_bytes, "max_output_tokens": 700,
+            "max_total_tokens": prompt_bytes + 700,
+            "max_cost_usd": 0.04, "max_seconds": 91,
+        })
+
+    def test_unicode_window_uses_same_utf8_counter_as_router(self):
+        context = self.h.context()
+        context = {**context, "quotes": [{**context["quotes"][0], "raw_text": "研究🙂" * 3000}]}
+        context["content_hash"] = content_hash({k: v for k, v in context.items() if k != "content_hash"})
+        generous = {
+            "max_input_tokens": 100000, "max_output_tokens": 1000,
+            "max_cost_usd": 0.05, "timeout_seconds": 180,
+        }
+        work = build_work(context, call_budget=generous)
+        counted = len(work.question.encode("utf-8"))
+        self.assertGreater(counted, len(work.question))
+        self.assertLessEqual(counted + work.budget["max_output_tokens"],
+                             work.budget["max_total_tokens"])
+        with self.assertRaisesRegex(Exception, "canonical extraction prompt requires"):
+            build_work(context, call_budget={**generous, "max_input_tokens": counted - 1})
+
     def test_qualitative_budget_override_is_hash_bound(self):
         context = self.h.context()
         configured = build_work(context, model_config={"purpose_call_budgets": {
