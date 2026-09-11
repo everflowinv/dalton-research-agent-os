@@ -197,6 +197,45 @@ class AutomationAdmissionTests(AutomationDraftingTests):
         )[0]
         self.assertEqual(review["state"], "awaiting_human_extraction")
 
+    def test_cached_failed_formal_result_stays_open_on_every_replay(self) -> None:
+        self._grant_automation()
+        self._policy_with_document_rule()
+        original = DocumentExtractionService.view
+
+        def cached_failure(service, **kwargs):
+            result = original(service, **kwargs)
+            if result.get("status") == "not_generated":
+                return {
+                    **result, "status": "failed", "error_code": "BUSY",
+                    "work_order_ref": "work:document-extraction:cached-failure",
+                }
+            return result
+
+        fixture = self.root / "unused-cached-fixture.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        for run_number in (1, 2):
+            with patch.object(DocumentExtractionService, "view", cached_failure):
+                summary = run_extraction(
+                    state_dir=self.root, model_config_path=self._model_config(),
+                    summary_dir=self.root / f"cached-summary-{run_number}",
+                    spool_dir=self.root / "spool", scheduler_db=self.root / "scheduler.sqlite",
+                    requested_by=None, max_windows=2, max_numeric_windows=0,
+                    max_discovery_windows=0, connector_governance=None,
+                    web_fetch_governance=None, hermetic_fixture=fixture,
+                    candidate_staging=self.root / "staging.sqlite",
+                )
+            self.assertEqual(summary["reviews_complete"], 0)
+            self.assertEqual(summary["resolved_reviews"], [])
+            self.assertEqual(
+                {(item["error_code"], item["work_order_ref"])
+                 for item in summary["qualitative_failures"]},
+                {("BUSY", "work:document-extraction:cached-failure")},
+            )
+            review = self.h.missions.document_reviews(
+                self.h.missions.active_mission("coverage-mission:us-it-services")["id"]
+            )[0]
+            self.assertEqual(review["state"], "awaiting_human_extraction")
+
     def test_one_failed_window_prevents_mixed_review_dismissal(self) -> None:
         summary = self._run_with_generation_results([
             {"status": "succeeded", "suggestions": [],

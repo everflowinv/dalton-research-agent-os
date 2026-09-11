@@ -244,6 +244,7 @@ def run_extraction(
         "reviews_scanned": 0,
         "reviews_complete": 0,
         "drafted": [],
+        "qualitative_failures": [],
         # P11m: the figures pass, counted separately from the prose pass. A
         # window that owes nothing appears here as nothing_owed and costs no
         # model call, so the two counts are not interchangeable.
@@ -426,6 +427,8 @@ def run_extraction(
                         if isinstance(budget, dict) and budget.get("status"):
                             entry["budget"] = budget["status"]
                         summary["drafted"].append(entry)
+                        if result.get("status") != "succeeded":
+                            summary["qualitative_failures"].append(dict(entry))
                         if result.get("status") == "gated":
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
@@ -440,8 +443,25 @@ def run_extraction(
                             stop_reason = "budget_rejected"
                             complete = False
                             break
-                    elif view["status"] == "pending":
+                    elif view["status"] != "succeeded":
+                        # Includes cached formal failures.  They are replayed
+                        # on later runs without entering generate(), so this
+                        # guard must live on the read path as well.
                         complete = False
+                        if view["status"] == "failed":
+                            failure = {
+                                "review_id": review["review_id"],
+                                "source_ref": review["source_ref"],
+                                "document_ref": review["document_ref"],
+                                "offset": offset,
+                                "status": "failed",
+                                "replayed": True,
+                            }
+                            for field in ("error_code", "work_order_ref"):
+                                value = view.get(field)
+                                if isinstance(value, str) and value:
+                                    failure[field] = value
+                            summary["qualitative_failures"].append(failure)
                     if context["next_offset"] is None:
                         break
                     offset = context["next_offset"]
@@ -673,6 +693,16 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
         unattributed: str | None = None
         for offset in offsets:
             try:
+                view = service.view(
+                    review_id=review["review_id"], expected_review_hash=review_hash,
+                    offset=offset, actor_ref=actor,
+                )
+                if view.get("status") != "succeeded":
+                    gated = (
+                        "qualitative window is not successfully readable: "
+                        f"{view.get('status') or 'unknown'}"
+                    )
+                    break
                 result = service.admit_suggestions(
                     review_id=review["review_id"], expected_review_hash=review_hash, offset=offset, actor_ref=actor,
                 )
