@@ -7,12 +7,13 @@ or an exact character range.  Claims and deliverables are deliberately not a
 source adapter: a derived assertion cannot stand in for the document from
 which it was derived.
 
-The registration contract's current version supports the two complete-text
-human feeds, complete AlphaEngine acquisitions, and complete deterministic
-public-web renderings. Feed manifests bind normalized UTF-8 but no separate
-original source container, so those registrations say ``raw_source`` is
-``not_bound`` rather than pretending the connector's JSON response is the
-original document.
+The registration contract's current version supports complete-text human
+feeds, complete AlphaEngine acquisitions, and complete deterministic
+public-web renderings. Sales-note and wiki feed manifests bind normalized
+UTF-8 but no separate original source container, so those registrations say
+``raw_source`` is ``not_bound``. Prior-research manifest 0.2 instead binds and
+re-renders the exact original container; historical normalized-only manifests
+cannot register as complete original documents.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from typing import Any
 
 from .feed_acquisition import (
     COMPANY_WIKI_SOURCE_REF,
+    PRIOR_MANIFEST_SCHEMA_VERSION,
+    PRIOR_RESEARCH_SOURCE_REF,
     SALES_NOTES_SOURCE_REF,
     verified_feed_source,
 )
@@ -45,6 +48,7 @@ READ_OPERATION = "read_registered_document"
 SUPPORTED_FEED_SOURCE_REFS = frozenset({
     SALES_NOTES_SOURCE_REF,
     COMPANY_WIKI_SOURCE_REF,
+    PRIOR_RESEARCH_SOURCE_REF,
 })
 SUPPORTED_FETCH_DISCOVERY_SOURCE_REFS = frozenset({
     "source:public-web", "source:web-search", "source:sec-edgar",
@@ -195,7 +199,7 @@ class FeedDocumentSourceAdapter:
     ) -> None:
         if source_ref not in SUPPORTED_FEED_SOURCE_REFS:
             raise DocumentResearchError(
-                "feed document research supports sales notes and company wiki in v0.1"
+                "feed document research source is unsupported"
             )
         for method in (
             "read_completed_manifest", "locate_completed_manifest",
@@ -280,6 +284,72 @@ class FeedDocumentSourceAdapter:
         ):
             policies[name] = _text(profile.get(name), f"connector profile {name}")
         source_identity = profile["source_identity"]
+        if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
+            if manifest["schema_version"] != PRIOR_MANIFEST_SCHEMA_VERSION:
+                raise DocumentResearchConflict(
+                    "legacy prior-research acquisition does not bind its original source"
+                )
+            bundle = manifest["original_source_bundle"]
+            projection = bundle["normalized_projection"]
+            if projection["complete"] is not True:
+                raise DocumentResearchConflict(
+                    "prior-research normalized projection is incomplete"
+                )
+            original = bundle["source_object"]
+            raw_source = {
+                "status": "bound",
+                "representation": "original-source-container",
+                "reason": None,
+                "artifact_refs": [original["storage_locator"]],
+                "content_hashes": [original["content_hash"]],
+                "total_size_bytes": original["size_bytes"],
+            }
+            normalized_text = {
+                "status": "complete",
+                "representation": "rendered-original-source",
+                "renderer_ref": projection["renderer"],
+                "object_hash": manifest["assembled_object"]["content_hash"],
+                "size_bytes": manifest["assembled_object"]["size_bytes"],
+                "text_sha256": manifest["declared_content_sha256"],
+                "characters": manifest["content_chars"],
+                "truncated": False,
+            }
+            reader = _record({
+                "ref": "document-reader:prior-original-render:0.1",
+                "config": {
+                    "format": projection["format"],
+                    "renderer": projection["renderer"],
+                    "preserves": list(projection["preserves"]),
+                    "omits": list(projection["omits"]),
+                    "original_source_bundle_hash": bundle["content_hash"],
+                },
+            })
+        else:
+            raw_source = {
+                "status": "not_bound",
+                "representation": None,
+                "reason": (
+                    "feed manifest binds assembled UTF-8 text, not a separate "
+                    "original container"
+                ),
+                "artifact_refs": [],
+                "content_hashes": [],
+                "total_size_bytes": None,
+            }
+            normalized_text = {
+                "status": "complete",
+                "representation": "assembled-utf8",
+                "renderer_ref": None,
+                "object_hash": manifest["assembled_object"]["content_hash"],
+                "size_bytes": manifest["assembled_object"]["size_bytes"],
+                "text_sha256": manifest["declared_content_sha256"],
+                "characters": manifest["content_chars"],
+                "truncated": False,
+            }
+            reader = _record({
+                "ref": "document-reader:feed-acquisition:0.1",
+                "config": {},
+            })
         body = {
             "schema_version": REGISTRATION_SCHEMA_VERSION,
             "authority_kind": "feed-acquisition-manifest",
@@ -305,28 +375,9 @@ class FeedDocumentSourceAdapter:
             "doc_date": manifest["doc_date"],
             "origin_ref": manifest["origin_ref"],
             "subject_tickers": list(manifest["subject_tickers"]),
-            "raw_source": {
-                "status": "not_bound",
-                "representation": None,
-                "reason": "feed manifest binds assembled UTF-8 text, not a separate original container",
-                "artifact_refs": [],
-                "content_hashes": [],
-                "total_size_bytes": None,
-            },
-            "normalized_text": {
-                "status": "complete",
-                "representation": "assembled-utf8",
-                "renderer_ref": None,
-                "object_hash": manifest["assembled_object"]["content_hash"],
-                "size_bytes": manifest["assembled_object"]["size_bytes"],
-                "text_sha256": manifest["declared_content_sha256"],
-                "characters": manifest["content_chars"],
-                "truncated": False,
-            },
-            "reader": _record({
-                "ref": "document-reader:feed-acquisition:0.1",
-                "config": {},
-            }),
+            "raw_source": raw_source,
+            "normalized_text": normalized_text,
+            "reader": reader,
             "connector_invocation_ref": invocation_ref,
             "connector_invocation_hash": invocation_hash,
             "connector_profile_ref": profile_ref,
@@ -976,7 +1027,11 @@ def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise DocumentResearchError("registration raw_source is invalid")
     raw_contracts = {
-        "feed-acquisition-manifest": ("not_bound", None),
+        "feed-acquisition-manifest": (
+            ("bound", "original-source-container")
+            if wire["source_ref"] == PRIOR_RESEARCH_SOURCE_REF
+            else ("not_bound", None)
+        ),
         "alphaengine-document-acquisition-manifest": (
             "bound", "paged-connector-responses"
         ),
@@ -1017,7 +1072,11 @@ def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise DocumentResearchError("registration normalized_text is invalid")
     normalized_contracts = {
-        "feed-acquisition-manifest": ("assembled-utf8", False, False),
+        "feed-acquisition-manifest": (
+            ("rendered-original-source", True, False)
+            if wire["source_ref"] == PRIOR_RESEARCH_SOURCE_REF
+            else ("assembled-utf8", False, False)
+        ),
         "alphaengine-document-acquisition-manifest": (
             "assembled-utf8", True, False
         ),
@@ -1050,6 +1109,34 @@ def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise DocumentResearchError("registration reader identity is invalid")
     _text(reader["ref"], "reader.ref")
+    if wire["source_ref"] == PRIOR_RESEARCH_SOURCE_REF:
+        config = reader["config"]
+        if (
+            reader["ref"] != "document-reader:prior-original-render:0.1"
+            or set(config) != {
+                "format", "renderer", "preserves", "omits",
+                "original_source_bundle_hash",
+            }
+            or config["renderer"] != normalized["renderer_ref"]
+        ):
+            raise DocumentResearchError(
+                "prior-research reader identity is invalid"
+            )
+        _text(config["format"], "reader.config.format")
+        _text(config["renderer"], "reader.config.renderer")
+        _sha256(
+            config["original_source_bundle_hash"],
+            "reader.config.original_source_bundle_hash",
+        )
+        for name in ("preserves", "omits"):
+            if (
+                not isinstance(config[name], list)
+                or len(config[name]) != len(set(config[name]))
+                or any(not isinstance(item, str) or not item for item in config[name])
+            ):
+                raise DocumentResearchError(
+                    f"prior-research reader {name} are invalid"
+                )
     return wire
 
 
@@ -1546,6 +1633,7 @@ def build_document_research_registry_from_writer(
     for source_ref, key in (
         (SALES_NOTES_SOURCE_REF, "sales_notes_feed_launcher"),
         (COMPANY_WIKI_SOURCE_REF, "company_wiki_feed_launcher"),
+        (PRIOR_RESEARCH_SOURCE_REF, "prior_research_feed_launcher"),
     ):
         launcher = writer.lane_launcher(key)
         if launcher is not None:

@@ -34,7 +34,10 @@ from .company_wiki_core import (
     SOURCE_REF as COMPANY_WIKI_SOURCE_REF,
 )
 from .connector_governance import ConnectorGovernance
-from .feed_acquisition import validate_feed_acquisition_manifest
+from .feed_acquisition import (
+    PRIOR_RESEARCH_SOURCE_REF,
+    validate_feed_acquisition_manifest,
+)
 from .lane_child_launcher import (
     TICKET_SCHEMA_VERSION,
     LaneChildLauncher,
@@ -424,7 +427,7 @@ class CompanyWikiFeedLauncher(FeedChildLauncher):
 
 
 class ReadOnlyFeedManifestReader:
-    """Read completed sales-note/wiki manifests without mutating state."""
+    """Read completed feed manifests without mutating state."""
 
     _CONFIG = {
         SALES_NOTES_SOURCE_REF: (
@@ -434,6 +437,10 @@ class ReadOnlyFeedManifestReader:
         COMPANY_WIKI_SOURCE_REF: (
             CompanyWikiFeedLauncher.TICKET_PREFIX,
             CompanyWikiFeedLauncher.TICKETS_DIRNAME,
+        ),
+        PRIOR_RESEARCH_SOURCE_REF: (
+            "prior-research-run",
+            "feed-acquisitions-prior-research",
         ),
     }
 

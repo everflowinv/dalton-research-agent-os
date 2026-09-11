@@ -7,12 +7,12 @@ word is quoted. The manifest shapes differ because their provenance differs --
 a fetched page binds a URL and a body hash, an acquired transcript binds a
 declared document hash and its pages.
 
-A local feed binds neither a URL nor a provider's declaration. What it can
-bind, and what this manifest binds, is: which feed, which operation, which
-document, which governance record authorised it, and the sha256 of the exact
-text the spool holds. That is enough for the property the review path actually
-depends on -- the words quoted are the bytes acquired -- and it does not
-pretend to the byte-level source authority that a network transport earns.
+A local feed binds neither a URL nor a provider's declaration. Sales notes and
+wiki bind which feed, operation, document and governance record authorised the
+read plus the exact normalized text in the spool. Prior-research manifest 0.2
+also binds the original file container, its structural/loss description and a
+deterministic normalized projection, because a PDF or workbook projection is
+not the source file itself.
 
 The connector-authority fields are present and null. When the host-tool runner
 lands, a feed acquisition will carry a real invocation and profile the way a
@@ -31,6 +31,7 @@ from .research_verification import ResearchVerificationConflict, ResearchVerific
 from .store import canonical_json, content_hash
 
 MANIFEST_SCHEMA_VERSION = "0.1"
+PRIOR_MANIFEST_SCHEMA_VERSION = "0.2"
 
 SALES_NOTES_SOURCE_REF = "source:sales-notes"
 COMPANY_WIKI_SOURCE_REF = "source:company-wiki"
@@ -58,7 +59,16 @@ _MANIFEST_FIELDS = frozenset({
     "assembled_object", "connector_invocation_ref", "connector_invocation_hash",
     "content_hash",
 })
+_PRIOR_MANIFEST_FIELDS = _MANIFEST_FIELDS | {"original_source_bundle"}
 _OBJECT_FIELDS = frozenset({"content_hash", "size_bytes", "storage_locator"})
+_ORIGINAL_BUNDLE_FIELDS = frozenset({
+    "schema_version", "document_ref", "source_file_sha256", "source_file_bytes",
+    "source_object", "structure", "normalized_projection", "content_hash",
+})
+_PROJECTION_FIELDS = frozenset({
+    "format", "renderer", "text_sha256", "text_chars", "complete",
+    "preserves", "omits",
+})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9-]*$")
@@ -92,13 +102,115 @@ def _hash(value: Any, name: str) -> str:
     return value
 
 
+def _string_list(value: Any, name: str) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or len(value) != len(set(value))
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise FeedManifestError(f"feed manifest {name} must be unique text")
+    return list(value)
+
+
+def _validate_original_source_bundle(
+    value: Any, *, document_ref: str, declared_text_hash: str,
+    declared_text_chars: int,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _ORIGINAL_BUNDLE_FIELDS:
+        raise FeedManifestError("prior-research original source bundle is malformed")
+    bundle = json.loads(canonical_json(value))
+    if bundle["schema_version"] != "prior-import-artifact-bundle-0.2":
+        raise FeedManifestError("unsupported prior-research original source bundle")
+    if bundle["document_ref"] != document_ref:
+        raise FeedManifestError("prior-research original bundle names another document")
+    source_hash = _hash(bundle["source_file_sha256"], "source_file_sha256")
+    size = bundle["source_file_bytes"]
+    if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= MAX_DOCUMENT_BYTES:
+        raise FeedManifestError("prior-research original source size is out of range")
+    source_object = bundle["source_object"]
+    if not isinstance(source_object, Mapping) or set(source_object) != _OBJECT_FIELDS:
+        raise FeedManifestError("prior-research source object is malformed")
+    source_object = dict(source_object)
+    if _hash(source_object["content_hash"], "source_object.content_hash") != source_hash:
+        raise FeedManifestError("prior-research source object hash differs from the file")
+    if source_object["size_bytes"] != size:
+        raise FeedManifestError("prior-research source object size differs from the file")
+    _text(source_object["storage_locator"], "source_object.storage_locator")
+    bundle["source_object"] = source_object
+    structure = bundle["structure"]
+    if not isinstance(structure, Mapping) or not isinstance(
+        structure.get("text_projection"), Mapping
+    ):
+        raise FeedManifestError("prior-research structure has no text projection")
+    if structure.get("file_sha256") != source_hash:
+        raise FeedManifestError(
+            "prior-research structure differs from the original source"
+        )
+    projection = bundle["normalized_projection"]
+    if not isinstance(projection, Mapping) or set(projection) != _PROJECTION_FIELDS:
+        raise FeedManifestError("prior-research normalized projection is malformed")
+    projection = dict(projection)
+    for name in ("format", "renderer"):
+        projection[name] = _text(projection[name], f"normalized_projection.{name}")
+    if projection["format"] not in {"markdown", "text", "pdf", "docx", "xlsx"}:
+        raise FeedManifestError("prior-research normalized format is unsupported")
+    _hash(projection["text_sha256"], "normalized_projection.text_sha256")
+    if (
+        isinstance(projection["text_chars"], bool)
+        or not isinstance(projection["text_chars"], int)
+        or projection["text_chars"] < 0
+    ):
+        raise FeedManifestError(
+            "prior-research normalized projection text_chars must be a count"
+        )
+    if projection["text_sha256"] != declared_text_hash \
+            or projection["text_chars"] != declared_text_chars:
+        raise FeedManifestError(
+            "prior-research normalized projection differs from assembled text"
+        )
+    if type(projection["complete"]) is not bool:
+        raise FeedManifestError("prior-research projection completeness must be boolean")
+    projection["preserves"] = _string_list(
+        projection["preserves"], "normalized_projection.preserves"
+    )
+    projection["omits"] = _string_list(
+        projection["omits"], "normalized_projection.omits"
+    )
+    structure_projection = structure["text_projection"]
+    for name in ("complete", "preserves", "omits"):
+        if structure_projection.get(name) != projection[name]:
+            raise FeedManifestError(
+                "prior-research structure and normalized projection disagree"
+            )
+    if structure.get("format") != projection["format"]:
+        raise FeedManifestError(
+            "prior-research structure and projection formats disagree"
+        )
+    bundle["normalized_projection"] = projection
+    asserted_hash = _hash(bundle.pop("content_hash"), "original_source_bundle.content_hash")
+    if content_hash(bundle) != asserted_hash:
+        raise FeedManifestError("prior-research original source bundle hash is invalid")
+    bundle["content_hash"] = asserted_hash
+    return bundle
+
+
 def validate_feed_acquisition_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate one closed feed acquisition manifest."""
 
-    if not isinstance(value, Mapping) or set(value) != _MANIFEST_FIELDS:
+    if not isinstance(value, Mapping):
+        raise FeedManifestError("feed acquisition manifest has an invalid closed shape")
+    schema_version = value.get("schema_version")
+    fields = (
+        _PRIOR_MANIFEST_FIELDS
+        if schema_version == PRIOR_MANIFEST_SCHEMA_VERSION
+        else _MANIFEST_FIELDS
+    )
+    if set(value) != fields:
         raise FeedManifestError("feed acquisition manifest has an invalid closed shape")
     wire = json.loads(canonical_json(value))
-    if wire["schema_version"] != MANIFEST_SCHEMA_VERSION:
+    if wire["schema_version"] not in {
+        MANIFEST_SCHEMA_VERSION, PRIOR_MANIFEST_SCHEMA_VERSION,
+    }:
         raise FeedManifestError("unsupported feed acquisition manifest schema_version")
     for name in ("id", "created_at", "operation", "document_ref", "target_ref",
                  "governance_ref", "doc_kind", "origin_ref"):
@@ -135,6 +247,17 @@ def validate_feed_acquisition_manifest(value: Mapping[str, Any]) -> dict[str, An
     if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= MAX_DOCUMENT_BYTES:
         raise FeedManifestError("feed acquisition manifest assembled_object size is out of range")
     wire["assembled_object"] = obj
+    if wire["schema_version"] == PRIOR_MANIFEST_SCHEMA_VERSION:
+        if wire["source_ref"] != PRIOR_RESEARCH_SOURCE_REF:
+            raise FeedManifestError(
+                "only prior research may carry an original source bundle"
+            )
+        wire["original_source_bundle"] = _validate_original_source_bundle(
+            wire["original_source_bundle"],
+            document_ref=wire["document_ref"],
+            declared_text_hash=wire["declared_content_sha256"],
+            declared_text_chars=wire["content_chars"],
+        )
     paired = (wire["connector_invocation_ref"] is None) == (
         wire["connector_invocation_hash"] is None
     )
@@ -174,6 +297,7 @@ def build_feed_acquisition_manifest(
     assembled_object: Mapping[str, Any],
     connector_invocation_ref: str | None = None,
     connector_invocation_hash: str | None = None,
+    original_source_bundle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One manifest for one acquired feed document.
 
@@ -183,8 +307,16 @@ def build_feed_acquisition_manifest(
     """
 
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if original_source_bundle is not None \
+            and source_ref != PRIOR_RESEARCH_SOURCE_REF:
+        raise FeedManifestError(
+            "only prior research may carry an original source bundle"
+        )
     base = {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "schema_version": (
+            PRIOR_MANIFEST_SCHEMA_VERSION
+            if original_source_bundle is not None else MANIFEST_SCHEMA_VERSION
+        ),
         "id": "feed-document-acquisition:" + content_hash(
             {"document_ref": document_ref, "content_sha256": digest}
         ),
@@ -207,6 +339,8 @@ def build_feed_acquisition_manifest(
         "connector_invocation_ref": connector_invocation_ref,
         "connector_invocation_hash": connector_invocation_hash,
     }
+    if original_source_bundle is not None:
+        base["original_source_bundle"] = dict(original_source_bundle)
     base["content_hash"] = content_hash(base)
     return validate_feed_acquisition_manifest(base)
 
@@ -283,6 +417,45 @@ def verified_feed_source(
             and invocation["content_hash"] == manifest["connector_invocation_hash"],
             "feed acquisition invocation authority drifted",
         )
+    if manifest["schema_version"] == PRIOR_MANIFEST_SCHEMA_VERSION:
+        bundle = manifest["original_source_bundle"]
+        source = bundle["source_object"]
+        original = spool.read_object(source["content_hash"])
+        _require(original is not None, "prior-research original source is not in the spool")
+        _require(
+            len(original) == source["size_bytes"],
+            "prior-research original source byte count drifted",
+        )
+        _require(
+            hashlib.sha256(original).hexdigest() == source["content_hash"],
+            "prior-research original source hash drifted",
+        )
+        from .prior_research_core import (
+            describe_archived_text_projection,
+            render_document_archive,
+        )
+
+        rendered, renderer = render_document_archive(
+            original, bundle["normalized_projection"]["format"]
+        )
+        projection = bundle["normalized_projection"]
+        _require(
+            renderer == projection["renderer"],
+            "prior-research normalized renderer drifted",
+        )
+        _require(
+            rendered == text,
+            "prior-research original source no longer renders to assembled text",
+        )
+        expected_semantics = describe_archived_text_projection(
+            original, projection["format"], rendered
+        )
+        _require(
+            projection["complete"] is expected_semantics["complete"]
+            and projection["preserves"] == expected_semantics["preserves"]
+            and projection["omits"] == expected_semantics["omits"],
+            "prior-research normalized projection semantics drifted",
+        )
     return manifest, text
 
 
@@ -291,7 +464,9 @@ __all__ = [
     "EVIDENCE_TIERS",
     "FEED_SOURCE_REFS",
     "MANIFEST_SCHEMA_VERSION",
+    "PRIOR_MANIFEST_SCHEMA_VERSION",
     "MAX_DOCUMENT_BYTES",
+    "PRIOR_RESEARCH_SOURCE_REF",
     "SALES_NOTES_SOURCE_REF",
     "FeedManifestError",
     "FeedSourceConflict",

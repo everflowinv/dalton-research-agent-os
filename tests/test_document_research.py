@@ -24,6 +24,7 @@ from dalton_core.document_research import (
 )
 from dalton_core.feed_acquisition import (
     COMPANY_WIKI_SOURCE_REF,
+    PRIOR_RESEARCH_SOURCE_REF,
     SALES_NOTES_SOURCE_REF,
     build_feed_acquisition_manifest,
 )
@@ -173,6 +174,18 @@ class FakeSpool:
         return self.replacement
 
 
+class SelectiveFakeSpool:
+    def __init__(self, inner: RawSpool, replacements: dict[str, bytes]):
+        self.inner = inner
+        self.replacements = replacements
+
+    def read_object(self, content_hash_value: str) -> bytes:
+        if content_hash_value in self.replacements:
+            self.inner.read_object(content_hash_value)
+            return self.replacements[content_hash_value]
+        return self.inner.read_object(content_hash_value)
+
+
 class DocumentResearchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -237,6 +250,80 @@ class DocumentResearchTests(unittest.TestCase):
 
     def _registry(self, adapters):
         return DocumentResearchRegistry(adapters=adapters, policy=self.policy)
+
+    def _prior_source(self, *, complete: bool = True):
+        raw = (
+            b"# Prior view\nBookings growth reflected mix shift.\n"
+            b"The claim summary omitted delivery attrition.\n"
+        )
+        if not complete:
+            raw = b"A" * 600_100
+        from dalton_core.prior_research_core import render_document_archive
+
+        text, renderer = render_document_archive(raw, "markdown")
+        objects = []
+        for label, payload in (("original", raw), ("assembled", text.encode("utf-8"))):
+            sink = self.spool.open_sink(
+                "raw-sink:" + hashlib.sha256(
+                    f"prior-{label}".encode("utf-8")
+                ).hexdigest(),
+                max_response_bytes=1_000_000,
+            )
+            sink.write(payload)
+            objects.append(sink.finalize().to_dict())
+        original, assembled = objects
+        document_ref = "prior-research-doc:sha256:" + "a" * 64
+        projection = {
+            "complete": complete,
+            "truncated_at_chars": None if complete else 600_000,
+            "preserves": ["utf8_text_order"],
+            "omits": [] if complete else ["text_after_configured_ceiling"],
+        }
+        bundle_body = {
+            "schema_version": "prior-import-artifact-bundle-0.2",
+            "document_ref": document_ref,
+            "source_file_sha256": hashlib.sha256(raw).hexdigest(),
+            "source_file_bytes": len(raw),
+            "source_object": original,
+            "structure": {
+                "schema_version": "prior-text-artifact-0.1",
+                "format": "markdown",
+                "text_projection": projection,
+                "file_sha256": hashlib.sha256(raw).hexdigest(),
+            },
+            "normalized_projection": {
+                "format": "markdown",
+                "renderer": renderer,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "text_chars": len(text),
+                "complete": complete,
+                "preserves": list(projection["preserves"]),
+                "omits": list(projection["omits"]),
+            },
+        }
+        bundle = {**bundle_body, "content_hash": content_hash(bundle_body)}
+        receipts = FakeReceiptReader(source_ref=PRIOR_RESEARCH_SOURCE_REF)
+        manifest = build_feed_acquisition_manifest(
+            created_at="2026-09-11T12:00:00.000000+00:00",
+            source_ref=PRIOR_RESEARCH_SOURCE_REF,
+            operation="get_document", document_ref=document_ref,
+            target_ref="host-tool:source:prior-research",
+            governance_ref="connector-governance:prior:get:approved",
+            governance_hash="1" * 64, doc_kind="initial_screen",
+            evidence_tier="internal_prior", doc_date="2024-03-28",
+            origin_ref="fixture:prior-research", subject_tickers=["ACN"],
+            text=text, assembled_object=assembled,
+            connector_invocation_ref=receipts.invocation["id"],
+            connector_invocation_hash=receipts.invocation["content_hash"],
+            original_source_bundle=bundle,
+        )
+        ticket_ref = "prior-research-run:fixture"
+        launcher = FakeLauncher(manifest, ticket_ref)
+        adapter = FeedDocumentSourceAdapter(
+            source_ref=PRIOR_RESEARCH_SOURCE_REF, launcher=launcher,
+            core=object(), spool=self.spool, receipt_reader=receipts,
+        )
+        return adapter, launcher, receipts, document_ref, ticket_ref, raw
 
     def _registration(self, registry, source_ref, document_ref, ticket_ref):
         return registry.register(
@@ -722,6 +809,12 @@ class DocumentResearchTests(unittest.TestCase):
             for path in before
         }
         self.assertEqual(after, before)
+        prior_tickets = Path(self.temp.name) / "feed-acquisitions-prior-research"
+        prior_tickets.mkdir(mode=0o700)
+        prior_reader = ReadOnlyFeedManifestReader(
+            state_dir=self.temp.name, source_ref=PRIOR_RESEARCH_SOURCE_REF
+        )
+        self.assertEqual(prior_reader.tickets_dir, prior_tickets.resolve())
         state_link = Path(self.temp.name).with_name(
             Path(self.temp.name).name + "-state-link"
         )
@@ -730,6 +823,99 @@ class DocumentResearchTests(unittest.TestCase):
         with self.assertRaisesRegex(FeedLaunchRejected, "symlink"):
             ReadOnlyFeedManifestReader(
                 state_dir=state_link, source_ref=SALES_NOTES_SOURCE_REF
+            )
+
+
+    def test_prior_research_search_replays_original_container_not_claim_summary(self):
+        adapter, _launcher, _receipts, document_ref, ticket_ref, raw = (
+            self._prior_source()
+        )
+        registry = self._registry({PRIOR_RESEARCH_SOURCE_REF: adapter})
+        registration = self._registration(
+            registry, PRIOR_RESEARCH_SOURCE_REF, document_ref, ticket_ref
+        )
+        self.assertEqual(registration["raw_source"]["status"], "bound")
+        self.assertEqual(
+            registration["raw_source"]["content_hashes"],
+            [hashlib.sha256(raw).hexdigest()],
+        )
+        self.assertEqual(
+            registration["normalized_text"]["representation"],
+            "rendered-original-source",
+        )
+        proof = registry.search({
+            "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
+            "operation": SEARCH_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "What did the prior source say beyond its claims?",
+            "registration": registration,
+            "query_terms": ["delivery attrition"],
+            "limits": {
+                "max_results": 2,
+                "context_before_chars": 20,
+                "context_after_chars": 20,
+            },
+            "policy_ref": self.policy["policy_ref"],
+            "policy_hash": self.policy["content_hash"],
+        })
+        self.assertEqual(len(proof["matches"]), 1)
+        self.assertIn("summary omitted", proof["matches"][0]["excerpt"])
+        self.assertEqual(registry.verify_search_proof(proof), proof)
+
+    def test_prior_research_refuses_raw_drift(self):
+        _adapter, launcher, receipts, document_ref, ticket_ref, raw = (
+            self._prior_source()
+        )
+        source_hash = hashlib.sha256(raw).hexdigest()
+        drifted = FeedDocumentSourceAdapter(
+            source_ref=PRIOR_RESEARCH_SOURCE_REF,
+            launcher=launcher,
+            core=object(),
+            spool=SelectiveFakeSpool(self.spool, {source_hash: b"changed"}),
+            receipt_reader=receipts,
+        )
+        with self.assertRaisesRegex(
+            Exception, "(acquired feed document|original source) .*drifted"
+        ):
+            drifted.materialize(
+                document_ref=document_ref, acquisition_ticket_ref=ticket_ref
+            )
+
+    def test_prior_research_refuses_incomplete_projection_and_legacy_manifest(self):
+        incomplete, _, _, incomplete_ref, incomplete_ticket, _ = (
+            self._prior_source(complete=False)
+        )
+        with self.assertRaisesRegex(DocumentResearchConflict, "projection is incomplete"):
+            incomplete.materialize(
+                document_ref=incomplete_ref,
+                acquisition_ticket_ref=incomplete_ticket,
+            )
+
+        _adapter, launcher, receipts, document_ref, ticket_ref, raw = (
+            self._prior_source()
+        )
+        legacy = build_feed_acquisition_manifest(
+            created_at="2026-09-11T12:00:00.000000+00:00",
+            source_ref=PRIOR_RESEARCH_SOURCE_REF, operation="get_document",
+            document_ref=document_ref, target_ref="host-tool:prior",
+            governance_ref="connector-governance:prior:get:approved",
+            governance_hash="1" * 64, doc_kind="initial_screen",
+            evidence_tier="internal_prior", doc_date="2024-03-28",
+            origin_ref="fixture:legacy", subject_tickers=["ACN"],
+            text=raw.decode("utf-8"),
+            assembled_object=launcher.manifest["assembled_object"],
+            connector_invocation_ref=receipts.invocation["id"],
+            connector_invocation_hash=receipts.invocation["content_hash"],
+        )
+        legacy_launcher = FakeLauncher(legacy, ticket_ref)
+        legacy_adapter = FeedDocumentSourceAdapter(
+            source_ref=PRIOR_RESEARCH_SOURCE_REF,
+            launcher=legacy_launcher, core=object(), spool=self.spool,
+            receipt_reader=receipts,
+        )
+        with self.assertRaisesRegex(DocumentResearchConflict, "legacy.*original"):
+            legacy_adapter.materialize(
+                document_ref=document_ref, acquisition_ticket_ref=ticket_ref
             )
 
 

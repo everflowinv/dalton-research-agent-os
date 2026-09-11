@@ -82,6 +82,7 @@ from dalton_core.prior_research_core import (
     parse_manifest,
     prior_research_identity,
     read_document,
+    read_document_artifact,
 )
 from dalton_core.prior_screen_import import (
     attach_prior_views,
@@ -134,6 +135,34 @@ def build_corpus(root: Path, *, entries: list[dict[str, Any]] | None = None,
 
 
 class ManifestTests(unittest.TestCase):
+    def test_text_artifact_marks_decode_loss_and_configured_truncation(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        corpus = build_corpus(root / "corpus")
+        company = corpus / "ACN"
+        (company / "invalid.txt").write_bytes(b"valid prefix\xfflost byte")
+        (company / "large.txt").write_bytes(b"x" * 600_100)
+        (company / MANIFEST_NAME).write_text(json.dumps({"documents": [
+            {"path": "invalid.txt", "kind": "notes", "as_of": "2024-03-28"},
+            {"path": "large.txt", "kind": "notes", "as_of": "2024-03-28"},
+        ]}), encoding="utf-8")
+        _header, _text, invalid = read_document_artifact(
+            corpus, document_ref("ACN", "invalid.txt")
+        )
+        self.assertFalse(invalid["text_projection"]["complete"])
+        self.assertEqual(
+            invalid["text_projection"]["omits"],
+            ["invalid_utf8_bytes_replaced"],
+        )
+        _header, _text, large = read_document_artifact(
+            corpus, document_ref("ACN", "large.txt")
+        )
+        self.assertFalse(large["text_projection"]["complete"])
+        self.assertIn(
+            "text_after_configured_ceiling", large["text_projection"]["omits"]
+        )
+
     def test_an_entry_with_no_as_of_is_refused_with_its_reason(self) -> None:
         entries, refusals = parse_manifest(
             {"documents": [
@@ -309,6 +338,12 @@ class ChildTests(unittest.TestCase):
         self.assertIn("as_of", wire["refused"][0]["reason"])
 
     def test_a_document_acquires_with_a_manifest_dated_by_the_owner(self) -> None:
+        from dalton_core.feed_acquisition import (
+            validate_feed_acquisition_manifest,
+            verified_feed_source,
+        )
+        from dalton_core.raw_spool import RawSpool
+
         summary = self.run_child(
             governance=self.governance(PRIOR_RESEARCH_GET_KIND),
             operation="get_document",
@@ -316,12 +351,67 @@ class ChildTests(unittest.TestCase):
             summary_dir=self.state,
         )
         self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
-        manifest = json.loads((self.state / "manifest.json").read_text(encoding="utf-8"))
+        manifest = validate_feed_acquisition_manifest(json.loads(
+            (self.state / "manifest.json").read_text(encoding="utf-8")
+        ))
+        self.assertEqual(manifest["schema_version"], "0.2")
         self.assertEqual(manifest["source_ref"], PRIOR_RESEARCH)
         self.assertEqual(manifest["evidence_tier"], "internal_prior")
         # The document's date, not the day it was read.
         self.assertEqual(manifest["doc_date"], "2024-03-28")
         self.assertEqual(manifest["subject_tickers"], ["ACN"])
+        bundle = manifest["original_source_bundle"]
+        self.assertTrue(bundle["normalized_projection"]["complete"])
+        spool = RawSpool(
+            str(self.state / "connector-spool"),
+            max_total_bytes=1_000_000_000,
+        )
+        original = spool.read_object(bundle["source_object"]["content_hash"])
+        self.assertEqual(original, (self.corpus / "ACN/2024/screen.md").read_bytes())
+        _verified, text = verified_feed_source(None, spool, manifest)
+        self.assertEqual(text, SCREEN_TEXT)
+
+    def test_a_workbook_acquisition_rerenders_the_original_spool_object(self) -> None:
+        from dalton_core.feed_acquisition import (
+            validate_feed_acquisition_manifest,
+            verified_feed_source,
+        )
+        from dalton_core.raw_spool import RawSpool
+
+        workbook = self.corpus / "ACN/model.xlsx"
+        PriorModelTests.build_workbook(workbook)
+        manifest_path = self.corpus / "ACN" / MANIFEST_NAME
+        corpus_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        corpus_manifest["documents"].append({
+            "path": "model.xlsx", "kind": "model_excel",
+            "as_of": "2024-06-30", "author": "human:analyst",
+            "source_note": "maintained model",
+        })
+        manifest_path.write_text(json.dumps(corpus_manifest), encoding="utf-8")
+        summary = self.run_child(
+            governance=self.governance(PRIOR_RESEARCH_GET_KIND),
+            operation="get_document",
+            document_id=document_ref("ACN", "model.xlsx"),
+            summary_dir=self.state,
+        )
+        self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
+        manifest = validate_feed_acquisition_manifest(json.loads(
+            (self.state / "manifest.json").read_text(encoding="utf-8")
+        ))
+        spool = RawSpool(
+            str(self.state / "connector-spool"),
+            max_total_bytes=1_000_000_000,
+        )
+        bundle = manifest["original_source_bundle"]
+        original = spool.read_object(bundle["source_object"]["content_hash"])
+        self.assertEqual(original, workbook.read_bytes())
+        self.assertNotEqual(
+            bundle["source_object"]["content_hash"],
+            manifest["assembled_object"]["content_hash"],
+        )
+        _verified, text = verified_feed_source(None, spool, manifest)
+        self.assertIn("# Drivers", text)
+        self.assertEqual(bundle["normalized_projection"]["format"], "xlsx")
 
     def test_an_unapproved_or_wrong_capability_record_stops_the_run(self) -> None:
         summary = self.run_child(
@@ -1205,6 +1295,70 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual({row["document_ref"] for row in queued},
                          {document_ref("ACN", "2024/screen.md")})
         self.assertEqual({row["status"] for row in queued}, {"acquired"})
+
+        from dalton_core.connector_authority_port import (
+            ConnectorCompletionReceiptReader,
+        )
+        from dalton_core.document_research import (
+            SEARCH_OPERATION,
+            SEARCH_REQUEST_SCHEMA_VERSION,
+            build_document_research_policy,
+            build_document_research_registry,
+        )
+        from dalton_core.host_tool_runner import ACCESS_POLICY_REF
+        from dalton_core.feed_launcher import ReadOnlyFeedManifestReader
+
+        policy = build_document_research_policy(
+            policy_ref="document-research-policy:prior-fixture",
+            allowed_purposes=["qualitative_research"],
+            allowed_access_policy_refs=[ACCESS_POLICY_REF],
+            max_question_chars=2_000, max_query_terms=8,
+            max_query_term_chars=200, max_results=4,
+            max_context_before_chars=100, max_context_after_chars=100,
+            max_read_chars=10_000,
+        )
+        registry = build_document_research_registry(
+            core=self.core, state_dir=self.state, spool=self.spool,
+            receipt_reader=ConnectorCompletionReceiptReader(
+                connectors=self.connectors, observability=self.observability
+            ),
+            policy=policy, feed_launchers={
+                PRIOR_RESEARCH: ReadOnlyFeedManifestReader(
+                    state_dir=self.state, source_ref=PRIOR_RESEARCH
+                )
+            },
+            alphaengine_launcher=None, public_web_launcher=None,
+            public_web_source_refs=[], source_reading_limits={
+                "alphaengine_max_document_chars": 100_000,
+                "public_web_max_source_chars": 100_000,
+                "public_web_max_pdf_pages": 20,
+                "public_web_max_decompressed_bytes": 1_000_000,
+            },
+        )
+        registration = registry.register_acquired_document(
+            record_id=queued[0]["record_id"], purpose="qualitative_research"
+        )
+        self.assertEqual(registration["source_ref"], PRIOR_RESEARCH)
+        self.assertEqual(
+            registration["raw_source"]["representation"],
+            "original-source-container",
+        )
+        proof = registry.search({
+            "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
+            "operation": SEARCH_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "What did the older screen say about bookings?",
+            "registration": registration,
+            "query_terms": ["mix shift"],
+            "limits": {
+                "max_results": 2, "context_before_chars": 40,
+                "context_after_chars": 40,
+            },
+            "policy_ref": policy["policy_ref"],
+            "policy_hash": policy["content_hash"],
+        })
+        self.assertEqual(len(proof["matches"]), 1)
+        self.assertEqual(registry.verify_search_proof(proof), proof)
 
         specs = {
             row["spec_ref"] for row in self.core.connection.execute(

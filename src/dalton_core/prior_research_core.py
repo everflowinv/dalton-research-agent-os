@@ -550,7 +550,7 @@ def _docx_text(raw: bytes) -> str:
     return text
 
 
-def _xlsx_text(path: Path) -> tuple[str, str]:
+def _xlsx_text(source: Path | bytes) -> tuple[str, str]:
     """A workbook rendered as text, for reading -- never for numbers.
 
     The numbers a prior model holds go through ``prior_model_import``, cell by
@@ -569,7 +569,11 @@ def _xlsx_text(path: Path) -> tuple[str, str]:
         ) from exc
     import openpyxl
 
-    workbook = load_workbook(filename=str(path), read_only=True, data_only=True)
+    workbook = load_workbook(
+        filename=(str(source) if isinstance(source, Path) else _BytesReader(source)),
+        read_only=True,
+        data_only=True,
+    )
     try:
         lines: list[str] = []
         for sheet in workbook.worksheets:
@@ -639,18 +643,88 @@ def read_body(path: Path, *, relative_path: str) -> tuple[str, str, str, bytes]:
             "this document exceeds the feed size ceiling"
         )
     raw = path.read_bytes()
+    text, renderer = render_document_archive(raw, doc_format)
+    return text, doc_format, renderer, raw
+
+
+def render_document_archive(raw: bytes, doc_format: str) -> tuple[str, str]:
+    """Render exact archived bytes with the acquisition's deterministic reader."""
+
+    if not isinstance(raw, bytes):
+        raise PriorResearchError("archived prior-research source must be bytes")
     if doc_format in {"markdown", "text"}:
         text, renderer = raw.decode("utf-8", errors="replace"), _TEXT_RENDERER
     elif doc_format == "pdf":
         text, renderer = _pdf_text(raw), "pdf-pypdf:0.1"
     elif doc_format == "docx":
         text, renderer = _docx_text(raw), _DOCX_RENDERER
+    elif doc_format == "xlsx":
+        text, renderer = _xlsx_text(raw)
     else:
-        text, renderer = _xlsx_text(path)
+        raise PriorResearchError("unsupported archived prior-research format")
     if len(text) > MAX_TEXT_CHARS:
         keep = MAX_TEXT_CHARS - len(TEXT_TRUNCATION_MARKER)
         text = text[:keep] + TEXT_TRUNCATION_MARKER
-    return text, doc_format, renderer, raw
+    return text, renderer
+
+
+def describe_archived_text_projection(
+    raw: bytes, doc_format: str, rendered: str,
+) -> dict[str, Any]:
+    """Re-derive the loss contract from archived bytes, not manifest claims."""
+
+    text_truncated = rendered.endswith(TEXT_TRUNCATION_MARKER)
+    text_omissions = (
+        ["text_after_configured_ceiling"] if text_truncated else []
+    )
+    decode_loss = False
+    sheet_truncated = False
+    if doc_format in {"markdown", "text"}:
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            decode_loss = True
+        preserves = ["utf8_text_order"]
+        omits = (
+            (["invalid_utf8_bytes_replaced"] if decode_loss else [])
+            + text_omissions
+        )
+    elif doc_format == "pdf":
+        preserves = ["extractable_page_text_order"]
+        omits = ["layout", "images", "non_extractable_text", *text_omissions]
+    elif doc_format == "docx":
+        preserves = ["ordered_paragraph_and_table_text"]
+        omits = ["layout", "styles", "rendered_chart_text", *text_omissions]
+    elif doc_format == "xlsx":
+        try:
+            from openpyxl import load_workbook
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional extra
+            raise PriorResearchRefusal(
+                "verifying .xlsx needs the optional `prior-models` extra"
+            ) from exc
+        workbook = load_workbook(
+            filename=_BytesReader(raw), read_only=False, data_only=False
+        )
+        try:
+            sheet_truncated = any(
+                sheet.max_row > MAX_SHEET_ROWS
+                or sheet.max_column > MAX_SHEET_COLUMNS
+                for sheet in workbook.worksheets
+            )
+        finally:
+            workbook.close()
+        preserves = ["cached_values", "sheet_order"]
+        omits = ["formulas", "styles", "charts", "external_link_targets"]
+        if sheet_truncated:
+            omits.append("rows_or_columns_beyond_read_limits")
+        omits.extend(text_omissions)
+    else:
+        raise PriorResearchError("unsupported archived prior-research format")
+    return {
+        "complete": not (text_truncated or decode_loss or sheet_truncated),
+        "preserves": preserves,
+        "omits": omits,
+    }
 
 
 def build_header(
@@ -816,6 +890,7 @@ def read_document_artifact(
     root = Path(corpus_root).expanduser().resolve()
     path = _resolve(_company_dir(root, header["company"]), header["relative_path"])
     text_complete = not text.endswith(TEXT_TRUNCATION_MARKER)
+    text_omissions = [] if text_complete else ["text_after_configured_ceiling"]
     if header["doc_format"] == "docx":
         from .prior_import_assets import docx_artifact_manifest
         artifact = docx_artifact_manifest(path.read_bytes())
@@ -823,7 +898,7 @@ def read_document_artifact(
             "complete": text_complete,
             "truncated_at_chars": None if text_complete else MAX_TEXT_CHARS,
             "preserves": ["ordered_paragraph_and_table_text"],
-            "omits": ["layout", "styles", "rendered_chart_text"],
+            "omits": ["layout", "styles", "rendered_chart_text", *text_omissions],
         }
     elif header["doc_format"] == "xlsx":
         from .prior_import_assets import xlsx_artifact_manifest
@@ -838,12 +913,42 @@ def read_document_artifact(
             "truncated_sheets": truncated_sheets,
             "truncated_at_chars": None if text_complete else MAX_TEXT_CHARS,
             "preserves": ["cached_values", "sheet_order"],
-            "omits": ["formulas", "styles", "charts", "external_link_targets"],
+            "omits": [
+                "formulas", "styles", "charts", "external_link_targets",
+                *(["rows_or_columns_beyond_read_limits"] if truncated_sheets else []),
+                *text_omissions,
+            ],
+        }
+    elif header["doc_format"] in {"markdown", "text"}:
+        raw = path.read_bytes()
+        try:
+            raw.decode("utf-8")
+            decode_losses: list[str] = []
+        except UnicodeDecodeError:
+            decode_losses = ["invalid_utf8_bytes_replaced"]
+        artifact = {
+            "schema_version": "prior-text-artifact-0.1",
+            "format": header["doc_format"],
+            "text_projection": {
+                "complete": text_complete and not decode_losses,
+                "truncated_at_chars": None if text_complete else MAX_TEXT_CHARS,
+                "preserves": ["utf8_text_order"],
+                "omits": [*decode_losses, *text_omissions],
+            },
         }
     else:
-        artifact = {"schema_version": "prior-office-artifact-0.1",
-                    "format": header["doc_format"],
-                    "text_projection": {"complete": True, "omits": []}}
+        artifact = {
+            "schema_version": "prior-pdf-artifact-0.1",
+            "format": header["doc_format"],
+            "text_projection": {
+                "complete": text_complete,
+                "truncated_at_chars": None if text_complete else MAX_TEXT_CHARS,
+                "preserves": ["extractable_page_text_order"],
+                "omits": [
+                    "layout", "images", "non_extractable_text", *text_omissions,
+                ],
+            },
+        }
     artifact["file_sha256"] = header["file_sha256"]
     return header, text, artifact
 
@@ -910,6 +1015,7 @@ __all__ = [
     "build_prior_research_governance_record",
     "company_folders",
     "document_ref",
+    "describe_archived_text_projection",
     "enumerate_documents",
     "manifest_for",
     "format_for",
@@ -926,4 +1032,5 @@ __all__ = [
     "read_document",
     "read_document_artifact",
     "read_document_archive",
+    "render_document_archive",
 ]

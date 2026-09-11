@@ -37,7 +37,7 @@ PDF and a connector response is not automatically the document it describes.
 | Ordinary fetched web pages and fetched earnings-call transcript pages | Yes: raw HTTP body | Yes when deterministic HTML/text/PDF/gzip rendering succeeds without truncation | Same public-web manifest and Core chain; earnings-call projection additionally proves issuer, fiscal period, document markers and raw-body hash | Fixed-window extraction plus the fetched-document search/read adapter in this branch | Search result URLs/snippets are not page bodies. Unsupported charset/media, malformed PDF, or truncated rendering remains explicitly unavailable. |
 | Sales notes | The normalized note body is retained; a separate original digest/mail-container object is not bound by the feed manifest | Yes: complete assembled UTF-8 note body | Completed owner-only ticket + summary + `feed-document-acquisition` manifest + connector invocation/profile + spool object hash/size/text hash | Source-specific extraction and, in this slice, `DocumentResearch` search/read | Connector raw artifact is the child JSON response, not the original digest. Registration therefore reports `raw_source.status=not_bound`. |
 | Company wiki | The normalized whole file text is retained; no separate original-file artifact is bound | Yes: assembled UTF-8 text including frontmatter | Same completed feed ticket/manifest/invocation/profile/spool chain | Source-specific extraction and, in this slice, `DocumentResearch` search/read | The current reader uses UTF-8 replacement on invalid bytes. The normalized text is authoritative for reading; it is not proof that every original byte is preserved. |
-| Prior research (`md`, `txt`, `pdf`, `docx`, `xlsx`) | Yes in the GET child: `source_artifact` and `artifact-manifest.json` archive the source container | A rendered assembled UTF-8 projection is retained | Feed manifest binds normalized text. Summary separately names source artifact and artifact-manifest hash | Fixed-window extraction | **Authority gap:** the feed acquisition manifest does not bind the raw source artifact/bundle. Text may also be truncated at 600k characters and workbook sheets have bounds. Do not register as complete until the raw bundle is joined into the acquisition authority and loss/truncation is explicit. |
+| Prior research (`md`, `txt`, `pdf`, `docx`, `xlsx`) | Yes for new 0.2 acquisitions: the original source container is a content-addressed spool object | A deterministic rendered UTF-8 projection is retained and re-derived from the original object | Feed manifest 0.2 binds the original source bundle/object, structure, renderer, normalized hash/count, and explicit preserves/omits/completeness | Fixed-window extraction plus `DocumentResearch` for verified complete projections | Historical 0.1 manifests bind only normalized text and remain readable by legacy extraction, but are refused as generic full-document registrations. Invalid UTF-8, 600k-character truncation, and bounded workbook rows/columns are explicit incomplete projections and cannot register as complete. PDF/Office renderings explicitly list layout, image, style, formula and other omissions even when their text projection completed. |
 | Guidepoint | Yes: raw `search_library` response | Yes, but the authorized document is one complete Q&A excerpt | Guidepoint excerpt manifest replays all Core receipts, re-derives the excerpt ordinal/text from the raw response, verifies the excerpt object, and binds quote policy | Source-specific extraction | Upstream has no `get_transcript`. It is false to describe an excerpt as a full interview. Verbatim reproduction remains limited to the bound policy (currently at most 20 words). |
 | HKEX next-day disclosure / interests operations | Operation capture is spooled; daily buyback cache also retains the source workbook | Parsed, typed rows are retained; source-document URL/hash/size metadata is recorded | HKEX summary/capture/invocation identities and operation-specific parser hash | Event generation and index output | Not a generic full-document acquisition manifest. Monthly returns and announcements are intentionally indexes; their PDFs/announcements are not read. A later adapter must distinguish the workbook/capture from linked filing documents. |
 | SEC/HKEX/web/AlphaEngine discovery and index rows without a successful GET | No document body | No | Discovery/SourceEnvelope proves the index response and listed document refs | Discovery and selection only | Metadata-only. Must be rejected by a document reader. |
@@ -146,10 +146,12 @@ policy outside that configured grant is refused.
    creating directories, or changing permissions. This lets a planner compose
    the registry entirely from read-only spool, receipt, Core, and manifest
    ports.
-2. **Prior research authority closure:** version the feed manifest so it binds
-   `source_artifact` and `artifact-manifest.json`, records renderer/loss and
-   truncation explicitly, and proves the normalized projection came from that
-   original object. Only then add the adapter.
+2. **Landed in this branch:** prior-research feed manifest 0.2 binds the exact
+   original source object and deterministic normalized projection. Replay
+   rereads and hashes the original, reruns the same renderer, and re-derives
+   its loss/truncation semantics before serving text. The read-only feed
+   manifest port now supports prior-research ticket directories. Historical
+   0.1 acquisitions need reacquisition before they can enter this registry.
 3. **Guidepoint adapter:** preserve excerpt document identity and quote policy;
    expose no transcript-level completeness claim.
 4. **Recall and context:** project registrations into `DocumentIndex`, then
@@ -180,3 +182,21 @@ policy outside that configured grant is refused.
   `company_research_view.py`
 - Core schemas for connectors, observability, coverage missions, document read
   completion, Claims, Evidence, and candidate staging.
+
+## Focused validation
+
+The generic registry, prior-research, human-feed, and existing extraction
+regressions ran with the project Python 3.13 environment:
+
+```text
+PYTHONPATH=src .../.venv/bin/python -m unittest \
+  tests.test_s1_human_feeds tests.test_document_research \
+  tests.test_prior_research tests.test_document_extraction
+
+Ran 168 tests in 49.684s — OK
+```
+
+The live compatibility audit used read-only SQLite, spool, connector-receipt,
+and manifest-reader ports. It registered 89 AlphaEngine documents, five SEC
+filings, and six carried `source:web-search` documents. It made no acquisition,
+model, Claim, configuration, or Core write.

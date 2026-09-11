@@ -130,9 +130,24 @@ def _archive_bundle(*, corpus_root: str | Path, document_id: str,
         raise PriorResearchRunError("document changed before artifact archival")
     source = _spool_bytes(spool, read_document_archive(
         corpus_root, document_id, expected_sha256=header["file_sha256"]))
-    body = {"schema_version": "prior-import-artifact-bundle-0.1",
-            "document_ref": document_id, "source_file_sha256": header["file_sha256"],
-            "source_object": source, "structure": structure}
+    projection = structure["text_projection"]
+    body = {
+        "schema_version": "prior-import-artifact-bundle-0.2",
+        "document_ref": document_id,
+        "source_file_sha256": header["file_sha256"],
+        "source_file_bytes": header["file_bytes"],
+        "source_object": source,
+        "structure": structure,
+        "normalized_projection": {
+            "format": header["doc_format"],
+            "renderer": header["renderer"],
+            "text_sha256": header["text_sha256"],
+            "text_chars": header["text_chars"],
+            "complete": projection["complete"],
+            "preserves": list(projection.get("preserves", [])),
+            "omits": list(projection["omits"]),
+        },
+    }
     bundle = {**body, "content_hash": hashlib.sha256(
         canonical_json(body).encode("utf-8")).hexdigest()}
     _write_owner_only(output_dir / "artifact-manifest.json", bundle)
@@ -185,7 +200,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "refused": [],
         "observation": None,
     }
-    archive_header: dict[str, Any] | None = None
     try:
         governance = _load_governance(
             Path(args.governance).expanduser().resolve(), args.operation
@@ -226,12 +240,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             summary["refused"] = refused
         else:
             header, text = read_document(args.corpus_root, args.document_id)
-            archive_header = header
             artifact = _spool_bytes(
                 spool, canonical_json({"document": header}).encode("utf-8")
             )
             assembled = _spool_bytes(spool, text.encode("utf-8"))
             summary["artifact"] = artifact
+            bundle = _archive_bundle(
+                corpus_root=args.corpus_root,
+                document_id=args.document_id,
+                header=header,
+                spool=spool,
+                output_dir=summary_dir,
+            )
             manifest = build_feed_acquisition_manifest(
                 created_at=summary["created_at"],
                 source_ref=PRIOR_RESEARCH_SOURCE_REF,
@@ -251,6 +271,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 assembled_object=assembled,
                 connector_invocation_ref=args.connector_invocation_ref,
                 connector_invocation_hash=args.connector_invocation_hash,
+                original_source_bundle=bundle,
             )
             _write_owner_only(summary_dir / "manifest.json", manifest)
             summary["manifest_ref"] = manifest["id"]
@@ -258,6 +279,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             summary["document_ref"] = header["document_id"]
             summary["document_count"] = 1
             summary["doc_kinds"] = {header["kind"]: 1}
+            summary["source_artifact"] = bundle["source_object"]
+            summary["artifact_manifest_hash"] = bundle["content_hash"]
             wire = {
                 "schema_version": WIRE_SCHEMA_VERSION,
                 "document": header,
@@ -270,12 +293,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         from .authority_resolver import _schema_matches
 
         _schema_matches(wire, _output_schema(args.operation), "output")
-        if archive_header is not None:
-            bundle = _archive_bundle(
-                corpus_root=args.corpus_root, document_id=args.document_id,
-                header=archive_header, spool=spool, output_dir=summary_dir)
-            summary["source_artifact"] = bundle["source_object"]
-            summary["artifact_manifest_hash"] = bundle["content_hash"]
         summary["status"] = "succeeded"
         summary["observation"] = wire
     except (PriorResearchRunError, PriorResearchError, ConnectorGovernanceError) as exc:
