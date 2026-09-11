@@ -87,7 +87,7 @@ def _claim_rows(
         for row in snapshot.get("claim_versions") or []
     }
     connection = store.connection
-    rows: list[dict[str, Any]] = []
+    selected: list[tuple[str, str, dict[str, Any]]] = []
     for claim_ref, version_ref in sorted(latest.items()):
         row = versions.get(version_ref)
         if row is None:
@@ -95,17 +95,35 @@ def _claim_rows(
         claim = row["claim"]
         if company_ref is not None and claim.get("subject_ref") != company_ref:
             continue
-        status = DaltonStore.project_claim_status(snapshot, version_ref)
-        evidence_rows = connection.execute(
-            "SELECT e.evidence_json FROM evidence_relations r "
+        selected.append((claim_ref, version_ref, row))
+
+    # Fetch evidence metadata in bounded batches. The former query lived in
+    # the loop below, so rebuilding one company scanned the whole unindexed
+    # evidence_relations table once per ClaimVersion (an N+1 full scan).
+    # Source types are a set and retrieved_at is a maximum, so row order has
+    # never contributed to the projection's bytes.
+    evidence_by_version: dict[str, list[dict[str, Any]]] = {
+        version_ref: [] for _, version_ref, _ in selected
+    }
+    refs = list(evidence_by_version)
+    for offset in range(0, len(refs), 400):
+        batch = refs[offset:offset + 400]
+        placeholders = ",".join("?" for _ in batch)
+        for evidence_row in connection.execute(
+            "SELECT r.claim_version_id,e.evidence_json FROM evidence_relations r "
             "JOIN evidence_versions e ON e.evidence_version_id=r.evidence_version_id "
-            "WHERE r.claim_version_id=?",
-            (version_ref,),
-        ).fetchall()
+            f"WHERE r.claim_version_id IN ({placeholders})", batch,
+        ).fetchall():
+            evidence_by_version[evidence_row["claim_version_id"]].append(
+                json.loads(evidence_row["evidence_json"]))
+
+    rows: list[dict[str, Any]] = []
+    for claim_ref, version_ref, row in selected:
+        claim = row["claim"]
+        status = DaltonStore.project_claim_status(snapshot, version_ref)
         retrieved: list[str] = []
         source_types: list[str] = []
-        for evidence_row in evidence_rows:
-            evidence = json.loads(evidence_row["evidence_json"])
+        for evidence in evidence_by_version[version_ref]:
             if isinstance(evidence.get("retrieved_at"), str):
                 retrieved.append(evidence["retrieved_at"])
             if isinstance(evidence.get("source_type"), str):

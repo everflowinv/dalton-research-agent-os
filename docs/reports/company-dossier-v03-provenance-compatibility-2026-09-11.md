@@ -38,3 +38,13 @@ The body hash excludes provenance so adding proof does not alter research meanin
 ## Limits
 
 The contract proves what newly produced units saw and what the verifier accepted. It does not retrofit evidence onto old versions, assert dossier quality, or make a partial dossier complete. Historical units with null proof remain explicitly unavailable for formal replay until they are legitimately redrafted.
+
+## Coherent-snapshot correction
+
+The first compatibility pass copied the SQLite main/WAL/SHM files sequentially while R6 was installed. That copy method does not prove a coherent SQLite snapshot, so it is not used as acceptance evidence. The corrected pass opened the source database with `mode=ro` and `query_only=ON`, then used SQLite's backup API to create one coherent 397,873,152-byte owner-only copy in 1.184 seconds. The temporary copies were removed after inspection.
+
+Against that coherent copy, current R6 code reconstructed all 12 unit inputs for each of four current company heads without a shape failure: 48 canonical inputs covering 1,713 bounded material rows. Per-company times after the evidence batching fix were 28.896, 32.228, 29.370, and 27.911 seconds (118.405 seconds total). This closes input-shape compatibility, but it also shows a remaining projection performance issue: each unit independently rebuilds the ClaimIndex snapshot and company research view.
+
+The performance fix in this branch removes the worst inner N+1: the prior `_claim_rows` executed an unindexed full scan of `evidence_relations` for every selected ClaimVersion. Live `EXPLAIN QUERY PLAN` reported `SCAN r`; the table held 2,442 relations at inspection time. The replacement fetches evidence in batches of at most 400 claim-version refs. A fixture regression compares every projected `source_types` and `latest_evidence_retrieved_at` value against direct per-claim authority queries and asserts that two selected claims issue one evidence query. It preserves ordering and content because these two outputs are respectively a sorted set and a maximum.
+
+The remaining repeated-snapshot cost is outside this bounded patch and should be handled by passing one immutable snapshot/research projection through `plan_units`, rather than by adding an arbitrary cache or weakening freshness.
