@@ -621,6 +621,8 @@ def replay_preserved_production_setup(module: Any, rehearsal: Any) -> tuple[str,
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    from scripts.successor_ops_binding import frozen_ops_binding
+
     source_root = args.source_root.expanduser().resolve(strict=True)
     live_root = args.live_root.expanduser().resolve(strict=True)
     packet_root = args.packet_root.expanduser().resolve(strict=True)
@@ -634,6 +636,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _need(not output.exists() and not output.is_symlink(),
               f"output already exists: {output}")
     _verify_frozen_source(source_root, args.code_commit)
+    ops_execution_binding = frozen_ops_binding()
     ops_root = Path(__file__).resolve().parent.parent
     _need(subprocess.check_output(
         ["git", "-C", str(ops_root), "rev-parse", "HEAD"], text=True).strip()
@@ -812,6 +815,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
               "confined OpenClaw result changes more than reviewed paths")
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
     _verify_frozen_source(source_root, args.code_commit)
+    _need(frozen_ops_binding() == ops_execution_binding,
+          "release operations changed during copied-state rehearsal")
     binding = {
         "schema_version": "successor-copied-state-rehearsal-binding-0.1",
         "status": "passed", "acceptance_state": "candidate_evidence_only",
@@ -826,6 +831,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "confined_transition_derivation":
                         rehearsal.successor_derivation},
         "ops_helpers": {
+            "execution_binding": ops_execution_binding,
             "git_commit": args.ops_code_commit,
             "runner_sha256": _sha(Path(__file__).resolve()),
             "transition_helper_sha256": _sha(
