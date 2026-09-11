@@ -130,6 +130,7 @@ class MissionDocumentResearchAuthority:
         registration_resolver: Callable[[str], Mapping[str, Any]],
         model_execution_resolver: Callable[[], tuple[Mapping[str, Any], Mapping[str, Any]]],
         planner_scheduler_connection: sqlite3.Connection,
+        planner_router_connection: sqlite3.Connection,
         clock: Callable[[], datetime] = _now,
     ) -> None:
         if not isinstance(store, DaltonStore):
@@ -140,12 +141,15 @@ class MissionDocumentResearchAuthority:
             raise TypeError("authority resolvers must be callable")
         if not callable(getattr(planner_scheduler_connection, "execute", None)):
             raise TypeError("planner_scheduler_connection must be a SQLite authority")
+        if not callable(getattr(planner_router_connection, "execute", None)):
+            raise TypeError("planner_router_connection must be a SQLite authority")
         self.store = store
         self.connection = store.connection
         self.registry = registry
         self.registration_resolver = registration_resolver
         self.model_execution_resolver = model_execution_resolver
         self.planner_scheduler_connection = planner_scheduler_connection
+        self.planner_router_connection = planner_router_connection
         self.clock = clock
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_authorized"
@@ -235,23 +239,33 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError(
                 "selected inquiry is absent or ambiguous in planner formal output"
             )
-        invocation_row = self.connection.execute(
-            "SELECT invocation_json FROM model_invocations WHERE invocation_id=?",
-            (envelope["invocation_ref"],),
+        route_ref = envelope["metadata"].get("route_decision_ref")
+        route_row = self.planner_router_connection.execute(
+            "SELECT * FROM model_route_decisions WHERE decision_id=?",
+            (route_ref,),
         ).fetchone()
-        if invocation_row is None:
-            raise MissionDocumentResearchError("planner ModelInvocation is unavailable")
+        if route_row is None:
+            raise MissionDocumentResearchError("planner route authority is unavailable")
         try:
-            invocation = json.loads(invocation_row["invocation_json"])
+            route = json.loads(route_row["decision_json"])
         except (TypeError, ValueError, RecursionError) as exc:
-            raise MissionDocumentResearchError("planner ModelInvocation is invalid") from exc
+            raise MissionDocumentResearchError("planner route authority is invalid") from exc
+        route_body = dict(route)
+        route_hash = route_body.pop("content_hash", None)
         if (
-            invocation.get("id") != envelope["invocation_ref"]
-            or invocation.get("work_order_ref") != work["id"]
-            or invocation.get("parent_ref")
-            != envelope["metadata"].get("route_decision_ref")
+            canonical_json(route) != route_row["decision_json"]
+            or route_hash != route_row["decision_hash"]
+            or route_hash != content_hash(route_body)
+            or route.get("id") != route_ref
+            or route.get("outcome") != "selected"
+            or route.get("work_order_ref") != work["id"]
+            or route.get("work_order_hash") != work_row["work_order_hash"]
+            or route.get("selected_profile_version_ref")
+            != envelope["metadata"].get("profile_version_ref")
+            or route_row["work_order_id"] != work["id"]
+            or route_row["work_order_hash"] != work_row["work_order_hash"]
         ):
-            raise MissionDocumentResearchError("planner ModelInvocation drifted")
+            raise MissionDocumentResearchError("planner route authority drifted")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:

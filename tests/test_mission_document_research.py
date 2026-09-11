@@ -3,11 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
-from datetime import timedelta
 from pathlib import Path
 
-from dalton_core.cockpit_model import build_work
-from dalton_core.contracts import ResultEnvelope
+from dalton_core.contracts import ResultEnvelope, WorkOrder
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.document_research import (
     CoreAcquiredDocumentSourceAdapter, DocumentResearchRegistry, FeedDocumentSourceAdapter,
@@ -45,31 +43,37 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "sufficiency": [],
         }
         text = json.dumps(raw)
-        work = build_work(
-            purpose="plan", request_id=plan["state_hash"][:32], prompt="fixture plan",
-            mission_version_ref=fixture.mission["id"], max_input_tokens=1_000,
-            max_output_tokens=1_000, max_cost_usd=1.0, max_seconds=30,
-            created_at=fixture.mission["created_at"],
-        )
+        work = WorkOrder.from_dict({
+            "schema_version": "0.1",
+            "id": "work:cockpit-plan-" + plan["state_hash"][:32],
+            "created_at": fixture.mission["created_at"],
+            "updated_at": fixture.mission["created_at"], "question": "fixture plan",
+            "requested_capabilities": ["capability:dalton:model:qualitative-research"],
+            "runtime_profile_ref": "runtime-profile:dalton-model-broker:0.1",
+            "budget": {"max_input_tokens": 1_000, "max_output_tokens": 1_000,
+                       "max_total_tokens": 2_000, "max_cost_usd": 1.0,
+                       "max_seconds": 30},
+            "idempotency_key": "fixture-plan:" + plan["state_hash"],
+            "declared_side_effects": [], "status": "ready", "input_refs": [],
+            "metadata": {"control_plane": "cockpit", "purpose": "plan",
+                         "request_id": plan["state_hash"][:32],
+                         "mission_version_ref": fixture.mission["id"]},
+        })
         scheduler = fixture.harness.scheduler()
         self.assertIn(scheduler.enqueue(work.to_dict())["status"], {"fresh", "duplicate"})
         claim = scheduler.claim("worker:fixture-planner", work_order_id=work.id)
         invocation_ref = "model-invocation:fixture-planner:" + plan["state_hash"][:16]
-        route_ref = "route-decision:fixture-planner:" + plan["state_hash"][:16]
-        with fixture.store._transaction() as cursor:
-            fixture.store._ensure_invocation(cursor, {
-                "schema_version": "0.1", "id": invocation_ref,
-                "created_at": NOW.isoformat(), "work_order_ref": work.id,
-                "profile_ref": "model-profile-version:fixture-planner",
-                "granularity": "work_order", "capability": "research",
-                "provider": "fixture", "model": "planner",
-                "model_family": "fixture-planner", "input_refs": [],
-                "output_refs": [], "started_at": NOW.isoformat(),
-                "completed_at": (NOW + timedelta(seconds=1)).isoformat(),
-                "usage": {}, "side_effects": [],
-                "runtime_ref": "runtime:fixture", "actor_ref": "worker:fixture-planner",
-                "parent_ref": route_ref, "environment_hash": None,
-            })
+        route = fixture.router.route(
+            work, attempt_number=claim["attempt"]["attempt_number"],
+            capability="capability:dalton:model:qualitative-research",
+            policy_version_ref=fixture.draft_policy["policy_version_ref"],
+            credential_slot_refs=[fixture.draft_profile["credential_slot_ref"]],
+            required_modalities=["text"], required_context_tokens=1_000,
+            estimated_input_tokens=100, estimated_output_tokens=100,
+            idempotency_key="fixture-planner-route:" + plan["state_hash"],
+            tier="brain", purpose="registered_annual_report_draft",
+        )["decision"]
+        route_ref = route["id"]
         envelope = ResultEnvelope(
             schema_version="0.1",
             id="result-envelope:fixture-planner:" + plan["state_hash"][:16],
@@ -77,7 +81,8 @@ class MissionDocumentResearchTests(unittest.TestCase):
             invocation_ref=invocation_ref, status="succeeded",
             outputs={"text": text, "content_hash": hashlib.sha256(text.encode()).hexdigest()},
             actual_side_effects=(), usage_refs=(), artifact_refs=(), error=None,
-            metadata={"route_decision_ref": route_ref},
+            metadata={"route_decision_ref": route_ref,
+                      "profile_version_ref": route["selected_profile_version_ref"]},
         ).to_dict()
         scheduler.complete(
             work.id, claim["attempt"]["attempt_number"], "worker:fixture-planner",
@@ -200,6 +205,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             registration_resolver=lambda ref: registrations[ref],
             model_execution_resolver=fixture.authority._model_authority,
             planner_scheduler_connection=fixture.harness.scheduler().connection,
+            planner_router_connection=fixture.router.connection,
             clock=fixture.harness.clock,
         )
         args = {
