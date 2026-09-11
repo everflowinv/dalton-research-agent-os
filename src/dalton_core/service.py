@@ -919,7 +919,7 @@ class DaltonService:
         ) and self._projection_future is None and not self._plugin_futures
         if should_project:
             self._project(current_signature)
-        else:
+        elif self._projection_future is None:
             self._retry_plugins()
         if wait_for_projection:
             future = self._projection_future
@@ -931,7 +931,7 @@ class DaltonService:
                 concurrent.futures.wait(plugin_futures)
             self._poll_plugins()
         self._last_tick_at = _utc_now()
-        self._last_error = None
+        self._last_error = self._projection_error
         degraded = self._projection_error is not None or any(
             plugin["state"] == "error" for plugin in self._plugin_states.values()
         ) or self._agenda_state["state"] == "error" or self._weekly_brief_state[
@@ -956,6 +956,15 @@ class DaltonService:
             "expired_lease_count": self._expired_lease_count,
             "last_projection_at": self._last_projection_at,
             "projection_watermark": self._projection_watermark,
+            "projection": {
+                "state": (
+                    "running" if self._projection_future is not None
+                    else "error" if self._projection_error is not None
+                    else "ready" if self._projection_watermark is not None
+                    else "pending"
+                ),
+                "last_error": self._projection_error,
+            },
             "writer_socket_present": self.config.writer_socket.exists(),
             "plugins": plugin_states,
             "agenda": dict(self._agenda_state),

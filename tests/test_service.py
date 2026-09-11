@@ -836,7 +836,10 @@ class ServiceTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
 
+            calls = []
+
             def blocked(*_args, **_kwargs):
+                calls.append(True)
                 entered.set()
                 release.wait(5)
                 return {"metadata": {"source_watermark": "sha256:" + "a" * 64}}
@@ -859,9 +862,103 @@ class ServiceTests(unittest.TestCase):
                     self.assertEqual(
                         heartbeat["projection_watermark"], "sha256:" + "a" * 64
                     )
+                    # A source change observed during the old snapshot is not
+                    # swallowed by completing that snapshot.
+                    with mock.patch.object(service, "_sources", return_value=("new",)):
+                        service._last_projection_monotonic = 0.0
+                        service.run_once()
+                        for _ in range(100):
+                            if len(calls) == 2:
+                                break
+                            time.sleep(0.01)
+                        self.assertEqual(len(calls), 2)
             finally:
                 release.set()
                 service.close()
+
+    def test_projection_blocks_retry_of_old_failed_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            with DaltonStore(core) as store:
+                ObservabilityStore(store)
+            raw = {
+                "schema_version": "0.1", "core_db": str(core),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "run" / "heartbeat.json"),
+                "writer_socket": str(root / "run" / "writer.sock"),
+                "tick_seconds": 1, "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [{"type": "static_dashboard", "enabled": True,
+                             "output_path": str(root / "public" / "index.html"),
+                             "publisher": None}],
+            }
+            entered, release = threading.Event(), threading.Event()
+
+            def blocked(*_args, **_kwargs):
+                entered.set(); release.wait(5)
+                return {"metadata": {"source_watermark": "sha256:" + "b" * 64}}
+
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            try:
+                state = service._plugin_states["static_dashboard"]
+                state.update(state="error", retry_at_monotonic=0.0)
+                with mock.patch("dalton_core.service.project_dashboard", blocked), mock.patch.object(
+                    service, "_run_plugin", wraps=service._run_plugin
+                ) as run_plugin:
+                    heartbeat = service.run_once(force_projection=True)
+                    self.assertTrue(entered.wait(1))
+                    service.run_once()
+                    run_plugin.assert_not_called()
+                    self.assertEqual(heartbeat["projection"]["state"], "running")
+            finally:
+                release.set(); service.close()
+
+    def test_failed_refresh_keeps_ready_until_failure_is_observed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = {
+                "schema_version": "0.1", "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "run" / "heartbeat.json"),
+                "writer_socket": str(root / "run" / "writer.sock"),
+                "tick_seconds": 1, "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 60,
+                "plugins": [{"type": "static_dashboard", "enabled": True,
+                             "output_path": str(root / "public" / "index.html"),
+                             "publisher": None}],
+            }
+            service = DaltonService(ServiceConfig.from_mapping(raw)); service.start()
+            entered, release = threading.Event(), threading.Event()
+            service._plugin_states["static_dashboard"].update(
+                state="ready", result={"old": True}, last_success_at="old"
+            )
+
+            def fail(_plugin, _projection):
+                entered.set(); release.wait(5); raise RuntimeError("publish failed")
+
+            try:
+                with mock.patch(
+                    "dalton_core.plugins.static_dashboard.StaticDashboardPlugin.on_projection", fail
+                ):
+                    service._run_plugin(service.config.plugins[0])
+                    self.assertTrue(entered.wait(1))
+                    self.assertEqual(service._plugin_states["static_dashboard"]["state"], "ready")
+                    release.set()
+                    for _ in range(100):
+                        service._poll_plugins()
+                        if service._plugin_states["static_dashboard"]["state"] == "error": break
+                        time.sleep(0.01)
+                    state = service._plugin_states["static_dashboard"]
+                    self.assertEqual(state["state"], "error")
+                    self.assertEqual(state["result"], {"old": True})
+                    self.assertIn("publish failed", state["last_error"])
+            finally:
+                release.set(); service.close()
 
     def test_bounded_planner_block_parses_and_reports_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
