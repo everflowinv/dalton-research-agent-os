@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from .lane_registry import LaunchAgentContext, lane_argv
 from .service import ServiceConfig
-from .mission_source_discovery import SEC_SOURCE_REF, load_discovery_plan
+from .mission_source_discovery import SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF, load_discovery_plan
 from .store import content_hash
 
 
@@ -25,48 +25,68 @@ CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"
 THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
 SEC_PLAN_SELECTOR = "sec-filings-plan-selection-v1.json"
+WEB_PLAN_SELECTOR = "web-search-plan-selection-v1.json"
 
 
-def _sec_discovery_plan(state: Path) -> Path:
-    """Resolve an explicitly approved, hash-bound SEC plan or fixed v1."""
+def _selected_discovery_plan(
+    state: Path, *, selector_filename: str, default_filename: str,
+    source_ref: str, selector_schema: str, label: str,
+) -> Path:
+    """Resolve a selected plan without overwriting previous plan versions."""
 
     plans = (state / "discovery-plans").resolve()
-    selector_path = plans / SEC_PLAN_SELECTOR
-    default = plans / "us-it-services-sec-filings-v1.json"
+    selector_path = plans / selector_filename
+    default = plans / default_filename
     if not selector_path.exists() and not selector_path.is_symlink():
         return default
     try:
         selector = json.loads(selector_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("SEC plan selector is unreadable") from exc
+        raise ValueError(f"{label} plan selector is unreadable") from exc
     expected_keys = {
         "schema_version", "id", "status", "source_ref", "plan_ref",
         "plan_hash", "plan_path", "content_hash",
     }
     if not isinstance(selector, dict) or set(selector) != expected_keys:
-        raise ValueError("SEC plan selector has an invalid schema")
+        raise ValueError(f"{label} plan selector has an invalid schema")
     body = {key: value for key, value in selector.items() if key != "content_hash"}
     if selector["content_hash"] != content_hash(body):
-        raise ValueError("SEC plan selector content hash does not match")
-    if (selector["schema_version"] != "sec-discovery-plan-selection-0.1"
+        raise ValueError(f"{label} plan selector content hash does not match")
+    if (selector["schema_version"] != selector_schema
             or selector["status"] != "approved"
-            or selector["source_ref"] != SEC_SOURCE_REF):
-        raise ValueError("SEC plan selector is not an approved SEC selection")
+            or selector["source_ref"] != source_ref):
+        raise ValueError(f"{label} plan selector is not an approved {label} selection")
     if not all(isinstance(selector[key], str) and selector[key] for key in (
             "id", "plan_ref", "plan_hash", "plan_path")):
-        raise ValueError("SEC plan selector fields must be non-empty strings")
+        raise ValueError(f"{label} plan selector fields must be non-empty strings")
     relative = Path(selector["plan_path"])
     if relative.is_absolute() or len(relative.parts) != 1:
-        raise ValueError("SEC selected plan must be a file in discovery-plans")
+        raise ValueError(f"{label} selected plan must be a file in discovery-plans")
     selected = (plans / relative).resolve()
     if selected.parent != plans:
-        raise ValueError("SEC selected plan escapes discovery-plans")
+        raise ValueError(f"{label} selected plan escapes discovery-plans")
     plan = load_discovery_plan(selected)
-    if (plan["source_ref"] != SEC_SOURCE_REF
+    if (plan["source_ref"] != source_ref
             or plan["id"] != selector["plan_ref"]
             or plan["content_hash"] != selector["plan_hash"]):
-        raise ValueError("SEC selected plan does not match its ref, hash, and source")
+        raise ValueError(f"{label} selected plan does not match its ref, hash, and source")
     return selected
+
+
+def _sec_discovery_plan(state: Path) -> Path:
+    return _selected_discovery_plan(
+        state, selector_filename=SEC_PLAN_SELECTOR,
+        default_filename="us-it-services-sec-filings-v1.json",
+        source_ref=SEC_SOURCE_REF,
+        selector_schema="sec-discovery-plan-selection-0.1", label="SEC")
+
+
+def _web_discovery_plan(state: Path) -> Path:
+    return _selected_discovery_plan(
+        state, selector_filename=WEB_PLAN_SELECTOR,
+        default_filename="us-it-services-web-search-v3.json",
+        source_ref=WEB_SEARCH_SOURCE_REF,
+        selector_schema="web-discovery-plan-selection-0.1", label="web")
 
 
 def _atomic_plist(path: Path, value: dict[str, Any]) -> None:
@@ -120,6 +140,7 @@ def render(
             for role in ("writer", "controller", "control", "thesis_impact")
         }
     sec_discovery_plan = _sec_discovery_plan(state)
+    web_discovery_plan = _web_discovery_plan(state)
     logs.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(logs, 0o700)
     service_config = ServiceConfig.from_file(config) if config.is_file() else None
@@ -219,7 +240,7 @@ def render(
             "--web-search-governance",
             str(state / "connector-governance" / "gemini-web-search-v1.json"),
             "--web-search-discovery-plan",
-            str(state / "discovery-plans" / "us-it-services-web-search-v3.json"),
+            str(web_discovery_plan),
             # P9d-4b: public-web fetch of cited URLs.  Proposed record seeded
             # by install.sh; launches are refused until the owner approves it,
             # and nothing is queued until web search itself is connected.
