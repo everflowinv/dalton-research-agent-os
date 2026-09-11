@@ -250,7 +250,8 @@ class LaneStateTests(unittest.TestCase):
 
     # -- fixture plumbing --------------------------------------------------
 
-    def file_quarters(self, quarters, series, *, form="10-Q") -> None:
+    def file_quarters(self, quarters, series, *, form="10-Q",
+                      statement="income") -> None:
         self._filed += 1
         accession = f"0001467373-26-0000{self._filed:02d}"
         authorization = self.missions.authorize_sec_lane(
@@ -262,7 +263,7 @@ class LaneStateTests(unittest.TestCase):
         self.missions.mark_statement_dispatch_launched(
             dispatch["dispatch_id"], f"sec-financials-run:{self._filed:024d}")
         series = dict(series)
-        if REVENUE_CONCEPT in series and COST_CONCEPT in series:
+        if statement == "income" and REVENUE_CONCEPT in series and COST_CONCEPT in series:
             operating = [Decimal(revenue) - Decimal(cost)
                          for revenue, cost in zip(series[REVENUE_CONCEPT],
                                                   series[COST_CONCEPT])]
@@ -279,7 +280,7 @@ class LaneStateTests(unittest.TestCase):
         for concept, values in series.items():
             for (start, end), value in zip(quarters, values):
                 lines.append({
-                    "statement": "income", "concept": concept,
+                    "statement": statement, "concept": concept,
                     "label": concept.split(":")[-1], "level": 0,
                     "parent_concept": None, "is_breakdown": False,
                     "dimension_axis": None, "dimension_member": None,
@@ -303,7 +304,7 @@ class LaneStateTests(unittest.TestCase):
         self.missions.settle_statement_dispatch(
             dispatch["dispatch_id"], outcome="succeeded")
 
-    def record_spec(self) -> dict:
+    def record_spec(self, *, cash_concepts=None) -> dict:
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
         body = {
             "schema_version": "0.4",
@@ -322,22 +323,30 @@ class LaneStateTests(unittest.TestCase):
                  "because": "Revenue and margin are the question."},
                 {"statement": "balance", "importance": "supporting",
                  "because": "Capital light."},
-                {"statement": "cash", "importance": "not_material",
-                 "because": "Nothing turns on it here."}],
+                {"statement": "cash",
+                 "importance": "required" if cash_concepts else "not_material",
+                 "because": ("Free cash flow is part of this model."
+                             if cash_concepts else "Nothing turns on it here.")}],
             "operating_metrics": [],
             "horizon": {"historical_quarters": 12, "forecast_quarters": 4,
                         "because": "Three years spans the cycle."},
             "financial_statement_structure": statement_structure(full=True),
             "cash_flow_companion": {
                 "schema_version": "0.1",
-                "lines": [
+                "lines": ([
+                    {"role": role, "concept": concept,
+                     "forecast_method": "share_of_line",
+                     "forecast_base_ref": "revenue",
+                     "because": f"The company's {role} follows revenue."}
+                    for role, concept in cash_concepts.items()
+                ] if cash_concepts else [
                     {"role": "operating_cash_flow", "concept": None,
                      "forecast_method": "unavailable", "forecast_base_ref": None,
                      "because": "Cash is outside this fixture's model scope."},
                     {"role": "capital_expenditure", "concept": None,
                      "forecast_method": "unavailable", "forecast_base_ref": None,
                      "because": "Cash is outside this fixture's model scope."},
-                ],
+                ]),
                 "formula": {"output_ref": "free_cash_flow", "operator": "sum",
                             "terms": [
                                 {"role": "operating_cash_flow", "coefficient": "1"},
@@ -405,6 +414,46 @@ class LaneStateTests(unittest.TestCase):
         ).fetchone()["n"], 1)
         third = self.child()
         self.assertEqual(third["forecast_status"], "nothing_to_model")
+
+    def test_v04_custom_cash_spec_runs_through_authorities_and_annual_projection(self):
+        concepts = {
+            "operating_cash_flow": "acn:CashGeneratedFromOperations",
+            "capital_expenditure": "acn:PurchasesOfEquipment",
+        }
+        self.file_quarters(
+            QUARTERS,
+            {concepts["operating_cash_flow"]: ("100", "110", "120", "130"),
+             concepts["capital_expenditure"]: ("20", "22", "24", "26")},
+            form="10-K", statement="cash",
+        )
+        held_spec = self.record_spec(cash_concepts=concepts)
+        replayed_spec = self.missions.latest_company_model_spec(ACN)
+        self.assertEqual(replayed_spec["content_hash"], held_spec["content_hash"])
+        self.assertEqual(
+            {line["role"]: line["concept"]
+             for line in replayed_spec["cash_flow_companion"]["lines"]},
+            concepts,
+        )
+
+        inputs = build_model_inputs(self.missions, replayed_spec)
+        self.assertEqual(
+            {line["role"]: line.get("concept")
+             for line in inputs["cash_flow_inputs"]}, concepts)
+        summary = self.child()
+        self.assertEqual(summary["status"], "succeeded")
+        models = ForecastModelAuthority(self.store)
+        model = models.latest(ACN)
+        self.assertEqual(model["schema_version"], "0.4")
+        self.assertEqual(models.model(model["id"])["content_hash"],
+                         model["content_hash"])
+        projection = models.annual_projection(model["id"])
+        self.assertIsNotNone(projection)
+        historical = next(
+            period for period in projection["periods"]
+            if period["label"].endswith("A") and not period["label"].endswith("A/E")
+        )
+        self.assertEqual(
+            historical["line_outcomes"]["result:free_cash_flow"]["value"], "368")
 
     def test_projection_authority_rejects_rehashed_calendar_report_date(self):
         summary = self.child()
