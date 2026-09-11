@@ -21,7 +21,8 @@ from .store import content_hash
 CONFIG_FILENAME = "document-research-config.json"
 CONFIG_SCHEMA = "document-research-config-0.1"
 _SOURCES = frozenset({"source:alphaengine", "source:public-web", "source:web-search",
-                      "source:sec-edgar", "source:sales-notes", "source:company-wiki"})
+                      "source:sec-edgar", "source:sales-notes", "source:company-wiki",
+                      "source:prior-research"})
 _LIMITS = frozenset({"alphaengine_max_document_chars", "public_web_max_source_chars",
                      "public_web_max_pdf_pages", "public_web_max_decompressed_bytes"})
 
@@ -166,7 +167,7 @@ def load_document_inventory_authority(*, core: Any, mission: Mapping[str, Any],
             return None
 
     feeds = {}
-    for source in ("source:sales-notes", "source:company-wiki"):
+    for source in ("source:sales-notes", "source:company-wiki", "source:prior-research"):
         if source in sources:
             reader = existing_reader(source, lambda s=source: ReadOnlyFeedManifestReader(
                 state_dir=state_dir, source_ref=s))
