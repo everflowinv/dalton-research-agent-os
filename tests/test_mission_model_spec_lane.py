@@ -172,6 +172,14 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertEqual(other["status"], "launched")
         self.assertNotEqual(first["state_hash"], other["state_hash"])
 
+    def test_an_overbudget_fixed_prompt_is_reported_without_launching(self):
+        self.launcher.prompt_byte_limit = 1_000
+        result = self.lane.dispatch_once()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["prompt_budget_report"]["prompt_byte_limit"], 1_000)
+        self.assertGreater(result["prompt_budget_report"]["over_by_bytes"], 0)
+        self.assertEqual(self.launcher.started, [])
+
     def test_the_next_tick_settles_the_last_child_before_starting_another(self):
         first = self.lane.dispatch_once()
         self.succeed(first["ticket_ref"], ACN)
