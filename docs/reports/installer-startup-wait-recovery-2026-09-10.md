@@ -34,3 +34,14 @@ PYTHONPATH=src python3 -m unittest \
 
 Ran 10 tests in 7.004s — OK
 ```
+
+
+Full R4 acceptance found one compatibility regression in 6,809 tests: the
+existing installer contract parses the script with both bash and zsh, while
+zsh's `<->` numeric pattern is not accepted by bash's parser. The startup
+validation now uses shared shell digit syntax, refuses overlong values before
+arithmetic, and normalizes leading zeros as decimal. The actual installer
+remains a zsh script. The focused installer and existing seed/parser suite
+passes 17 tests, including zero, out-of-range, expression, huge-integer and
+leading-zero cases. The failed R4 evidence is retained; no R4 deployment was
+performed, and a new exact freeze will receive full acceptance.

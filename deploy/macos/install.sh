@@ -18,8 +18,13 @@ domain="gui/$(id -u)"
 # lane state before its first healthy tick. Keep the wait finite and operator
 # configurable, while leaving dalton-health as the sole success criterion.
 startup_timeout_seconds=${DALTON_STARTUP_TIMEOUT_SECONDS:-180}
-if [[ "$startup_timeout_seconds" != <-> ]] \
-    || (( startup_timeout_seconds < 1 || startup_timeout_seconds > 1800 )); then
+if [[ -z "$startup_timeout_seconds" || "$startup_timeout_seconds" == *[!0-9]* \
+    || ${#startup_timeout_seconds} -gt 4 ]]; then
+  print -u2 "DALTON_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 1800."
+  exit 2
+fi
+startup_timeout_seconds=$(( 10#$startup_timeout_seconds ))
+if (( startup_timeout_seconds < 1 || startup_timeout_seconds > 1800 )); then
   print -u2 "DALTON_STARTUP_TIMEOUT_SECONDS must be an integer from 1 to 1800."
   exit 2
 fi

@@ -79,10 +79,18 @@ class InstallerStartupWaitTests(unittest.TestCase):
         self.assertLess(elapsed, 2.4)
 
     def test_invalid_timeout_is_refused_before_health(self):
-        completed, calls = self._run(timeout="unbounded", healthy_on=1)
-        self.assertEqual(completed.returncode, 2)
-        self.assertEqual(calls, 0)
-        self.assertIn("must be an integer", completed.stderr)
+        for timeout in ("unbounded", "0", "1801", "-1", "1.5", "1+1",
+                        "18446744073709551617"):
+            with self.subTest(timeout=timeout):
+                completed, calls = self._run(timeout=timeout, healthy_on=1)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(calls, 0)
+                self.assertIn("must be an integer", completed.stderr)
+
+    def test_leading_zero_timeout_is_decimal(self):
+        completed, calls = self._run(timeout="0008", healthy_on=1)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(calls, 1)
 
     def test_default_allows_three_minutes_for_large_core_replay(self):
         source = INSTALL.read_text(encoding="utf-8")
