@@ -469,7 +469,9 @@ class ChooseCompanyTests(unittest.TestCase):
                 return call
 
         config = self.state_dir / "false-tie-model.json"
-        config.write_text("{}", encoding="utf-8")
+        config.write_text(json.dumps({
+            "structured_output_repair": {"max_attempts": 1}
+        }), encoding="utf-8")
         with patch("dalton_core.company_model_cli.CockpitModel", Model):
             summary = run_model_spec(
                 state_dir=self.state_dir, model_config_path=config,
@@ -477,7 +479,7 @@ class ChooseCompanyTests(unittest.TestCase):
                 scheduler_db=self.state_dir / "scheduler.sqlite",
                 company_ref=ACN, expected_state_hash=state["state_hash"],
                 expected_task_hash=TASK_HASH,
-                expected_repair_policy_hash=content_hash({"max_attempts": 0}),
+                expected_repair_policy_hash=content_hash({"max_attempts": 1}),
             )
         self.assertEqual(summary["spec_status"], "refused")
         self.assertEqual(summary["pre_persistence_validation"], "refused")
