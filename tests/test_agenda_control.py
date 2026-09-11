@@ -428,11 +428,19 @@ class AgendaControlTests(unittest.TestCase):
                 "max_input_tokens": 16000,
                 "max_output_tokens": 1200,
                 "max_cost_usd": 1.0,
+                "provider_retry": {
+                    "max_same_profile_retries": 1,
+                    "retry_backoff_seconds": 2,
+                },
             },
         }
         config = AgendaControlConfig.from_mapping(raw)
         self.assertIsNotNone(config.research_review)
         self.assertIsNotNone(config.intent_composer)
+        self.assertEqual(config.intent_composer.provider_retry, {
+            "max_same_profile_retries": 1,
+            "retry_backoff_seconds": 2,
+        })
         raw["research_review"]["core_db"] = str(
             Path(self.temp.name) / "core.sqlite"
         )

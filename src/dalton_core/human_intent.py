@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
@@ -26,6 +26,7 @@ from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
+    PostSendUnknownEvidence,
 )
 from .research_context import count_dalton_search_tokens
 from .scheduler import Scheduler
@@ -192,13 +193,17 @@ def _path(value: Any, name: str) -> Path:
     return Path(value)
 
 
-def _positive_int(value: Any, name: str, *, maximum: int) -> int:
+def _positive_int(
+    value: Any, name: str, *, maximum: int | None = None
+) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, int)
-        or not 1 <= value <= maximum
+        or value < 1
+        or maximum is not None and value > maximum
     ):
-        raise HumanIntentValidationError(f"{name} must be 1..{maximum}")
+        bound = f"1..{maximum}" if maximum is not None else "a positive integer"
+        raise HumanIntentValidationError(f"{name} must be {bound}")
     return value
 
 
@@ -549,6 +554,7 @@ class IntentComposerConfig:
     max_output_tokens: int
     max_cost_usd: float
     transport_retry: Mapping[str, int] | None = None
+    provider_retry: Mapping[str, Any] | None = None
     max_scheduler_attempts: int | None = None
 
     @classmethod
@@ -559,7 +565,7 @@ class IntentComposerConfig:
             "broker_client_id", "expected_agent_id", "timeout_seconds",
             "max_input_tokens", "max_output_tokens", "max_cost_usd",
         }
-        optional = {"transport_retry", "max_scheduler_attempts"}
+        optional = {"transport_retry", "provider_retry", "max_scheduler_attempts"}
         if not isinstance(raw, Mapping) or set(raw) - optional != required:
             raise HumanIntentValidationError(
                 "intent_composer config has an invalid closed shape"
@@ -593,6 +599,20 @@ class IntentComposerConfig:
                 raise HumanIntentValidationError(
                     "invalid intent transport retry configuration"
                 ) from exc
+        provider_retry = None
+        if "provider_retry" in value:
+            from .provider_retry import ProviderRetryError, validate_provider_retry
+
+            try:
+                provider_retry = validate_provider_retry(value["provider_retry"])
+            except ProviderRetryError as exc:
+                raise HumanIntentValidationError(
+                    "invalid intent provider retry configuration"
+                ) from exc
+            if "unknown_recovery" in provider_retry:
+                raise HumanIntentValidationError(
+                    "intent provider retry does not support unknown-result recovery"
+                )
         return cls(
             staging_path=_path(value["staging_path"], "staging_path"),
             scheduler_db=_path(value["scheduler_db"], "scheduler_db"),
@@ -620,11 +640,11 @@ class IntentComposerConfig:
             ),
             max_cost_usd=float(cost),
             transport_retry=transport_retry,
+            provider_retry=provider_retry,
             max_scheduler_attempts=(
                 _positive_int(
                     value["max_scheduler_attempts"],
                     "max_scheduler_attempts",
-                    maximum=10,
                 )
                 if "max_scheduler_attempts" in value
                 else None
@@ -1175,7 +1195,9 @@ def build_intent_interpreter_work_order(
     max_cost_usd: float,
     max_seconds: int,
     transport_retry: Mapping[str, int] | None = None,
+    provider_retry: Mapping[str, Any] | None = None,
     max_scheduler_attempts: int | None = None,
+    model_execution: Mapping[str, Any] | None = None,
 ) -> WorkOrder:
     context_wire = validate_intent_context_pack(context)
     utterance_ref = _text(
@@ -1204,11 +1226,21 @@ def build_intent_interpreter_work_order(
         "utterance_ref": utterance_ref,
         "utterance_hash": utterance_hash,
         "candidate_contract_hash": INTERPRETER_CANDIDATE_CONTRACT_HASH,
+        "budget": {
+            "max_input_tokens": max_input_tokens,
+            "max_output_tokens": max_output_tokens,
+            "max_cost_usd": max_cost_usd,
+            "max_seconds": max_seconds,
+        },
     }
     if transport_retry is not None:
         identity["transport_retry"] = content_hash(transport_retry)
     if max_scheduler_attempts is not None:
         identity["max_scheduler_attempts"] = max_scheduler_attempts
+    if provider_retry is not None:
+        identity["provider_retry"] = content_hash(provider_retry)
+    if model_execution is not None:
+        identity["model_execution"] = content_hash(model_execution)
     digest = content_hash(identity)
     return WorkOrder(
         schema_version=SCHEMA_VERSION,
@@ -1245,6 +1277,16 @@ def build_intent_interpreter_work_order(
                 else {}
             ),
             **(
+                {"provider_retry": dict(provider_retry)}
+                if provider_retry is not None
+                else {}
+            ),
+            **(
+                {"model_execution": dict(model_execution)}
+                if model_execution is not None
+                else {}
+            ),
+            **(
                 {"max_scheduler_attempts": max_scheduler_attempts}
                 if max_scheduler_attempts is not None
                 else {}
@@ -1268,7 +1310,17 @@ def intent_scheduler_policy(config: IntentComposerConfig) -> dict[str, Any]:
         purpose=INTENT_MODEL_PURPOSE,
         profiles=profiles,
     )
-    candidates = max(1, len(resolved["chain"]) if resolved is not None else 1)
+    if resolved is not None:
+        candidates = max(1, len(resolved["chain"]))
+    else:
+        allowed = policy.get("filters", {}).get("allowed_profile_ids")
+        candidates = max(
+            1,
+            len([
+                profile_id for profile_id in (allowed or [])
+                if profile_id in profiles
+            ]),
+        )
     transport = config.transport_retry or {}
     retries = int(transport.get("max_definitely_not_sent_retries", 0))
     queue_wait = int(transport.get("queue_wait_seconds", 0))
@@ -1278,9 +1330,24 @@ def intent_scheduler_policy(config: IntentComposerConfig) -> dict[str, Any]:
         + candidates * retries * backoff
         + INTENT_LEASE_GRACE_SECONDS
     )
-    max_attempts = config.max_scheduler_attempts or 3
+    provider_attempts = candidates * (
+        int((config.provider_retry or {}).get("max_same_profile_retries", 0)) + 1
+    )
+    if (
+        config.provider_retry is not None
+        and config.max_scheduler_attempts is not None
+        and config.max_scheduler_attempts < provider_attempts
+    ):
+        raise HumanIntentValidationError(
+            "max_scheduler_attempts cannot exhaust the configured provider retry chain"
+        )
+    max_attempts = config.max_scheduler_attempts or (
+        provider_attempts if config.provider_retry is not None else 3
+    )
     binding = content_hash({
         "routing_policy_hash": policy["content_hash"],
+        "provider_retry": config.provider_retry,
+        "transport_retry": config.transport_retry,
         "max_attempts": max_attempts,
         "lease_seconds": lease_seconds,
     })[:16]
@@ -1293,6 +1360,7 @@ def intent_scheduler_policy(config: IntentComposerConfig) -> dict[str, Any]:
         "max_lease_seconds": lease_seconds,
         "max_total_lease_seconds": lease_seconds * 2,
         "route_candidate_count": candidates,
+        "provider_attempt_bound": provider_attempts,
     }
 
 
@@ -1352,6 +1420,7 @@ class OpenClawIntentInterpreter:
         invocation_ref: str | None = None,
         attempt_number: int = 1,
         retryable: bool = False,
+        definitely_not_sent: bool = False,
     ) -> ResultEnvelope:
         identity = {
             "work_order_ref": work.id,
@@ -1379,6 +1448,15 @@ class OpenClawIntentInterpreter:
                 "control_plane_failure": True,
                 "capacity_deferred": retryable,
                 "route_decision_ref": route_ref,
+                **(
+                    {"dispatch_proof": {
+                        "authority": "openclaw-model-adapter",
+                        "state": "definitely_not_sent",
+                        "version": "0.1",
+                    }}
+                    if definitely_not_sent
+                    else {}
+                ),
             },
         )
 
@@ -1404,6 +1482,17 @@ class OpenClawIntentInterpreter:
             max_lease_seconds=policy["max_lease_seconds"],
             max_total_lease_seconds=policy["max_total_lease_seconds"],
         )
+
+    def _model_execution(self, router: ModelRouter) -> dict[str, Any]:
+        policy = router.get_policy(self.config.routing_policy_ref)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "purpose": INTENT_MODEL_PURPOSE,
+            "capability": "extract",
+            "routing_policy_ref": self.config.routing_policy_ref,
+            "routing_policy_hash": policy["content_hash"],
+            "credential_slot_refs": list(self.config.credential_slot_refs),
+        }
 
     def _execute_with_safe_retry(
         self,
@@ -1466,61 +1555,224 @@ class OpenClawIntentInterpreter:
         }
         return ResultEnvelope.from_dict(wire)
 
+    def _provider_retry_state(
+        self, scheduler: Scheduler, router: ModelRouter, work: WorkOrder
+    ) -> dict[str, Any] | None:
+        if self.config.provider_retry is None:
+            return None
+        rows = scheduler.connection.execute(
+            "SELECT result_envelope_json,result_envelope_hash,attempt_number "
+            "FROM scheduler_result_envelopes "
+            "WHERE work_order_id=? AND outcome='retryable' "
+            "ORDER BY attempt_number DESC",
+            (work.id,),
+        ).fetchall()
+        selected = None
+        for row in rows:
+            try:
+                wire = json.loads(row["result_envelope_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise HumanIntentInterpreterError(
+                    "persisted intent provider retry result is invalid"
+                ) from exc
+            if (
+                canonical_json(wire) != row["result_envelope_json"]
+                or content_hash(wire) != row["result_envelope_hash"]
+            ):
+                raise HumanIntentInterpreterError(
+                    "persisted intent provider retry result drifted"
+                )
+            metadata = wire.get("metadata") if isinstance(wire, Mapping) else None
+            if not isinstance(metadata, Mapping) or "provider_retry_proof" not in metadata:
+                continue
+            if "provider_retry_state" not in metadata:
+                raise HumanIntentInterpreterError(
+                    "persisted intent provider retry proof has no route state"
+                )
+            selected = (row, wire, metadata["provider_retry_state"])
+            break
+        if selected is None:
+            return {
+                "excluded_profile_ids": [],
+                "retry_profile_version_ref": None,
+                "same_profile_retries": 0,
+            }
+        row, wire, state = selected
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != {
+                "excluded_profile_ids", "retry_profile_version_ref",
+                "same_profile_retries",
+            }
+            or not isinstance(state.get("excluded_profile_ids"), list)
+            or not all(isinstance(item, str) and item for item in state["excluded_profile_ids"])
+            or len(set(state["excluded_profile_ids"])) != len(state["excluded_profile_ids"])
+            or state.get("retry_profile_version_ref") is not None
+               and not isinstance(state["retry_profile_version_ref"], str)
+            or isinstance(state.get("same_profile_retries"), bool)
+            or not isinstance(state.get("same_profile_retries"), int)
+            or state["same_profile_retries"] < 0
+        ):
+            raise HumanIntentInterpreterError(
+                "persisted intent provider retry route state is invalid"
+            )
+        decisions = router.list_decisions(work_order_id=work.id)
+        matching = [
+            item for item in decisions
+            if item.get("attempt_number") == row["attempt_number"]
+        ]
+        route = matching[-1] if matching else None
+        version_ref = None if route is None else route.get("selected_profile_version_ref")
+        profile_id = (
+            None if version_ref is None else router.get_profile(version_ref)["id"]
+        )
+        metadata = wire.get("metadata", {})
+        invocation_wire = metadata.get("intent_model_invocation")
+        try:
+            invocation = ModelInvocation.from_dict(invocation_wire)
+            failed_wire = dict(wire)
+            failed_wire["status"] = "failed"
+            failed_result = ResultEnvelope.from_dict(failed_wire)
+            from .provider_retry import returned_provider_failure_proof
+
+            canonical_proof = returned_provider_failure_proof(
+                invocation, failed_result
+            )
+        except Exception as exc:
+            raise HumanIntentInterpreterError(
+                "persisted intent provider retry proof is invalid"
+            ) from exc
+        if canonical_proof is None or canonical_proof != metadata.get(
+            "provider_retry_proof"
+        ):
+            raise HumanIntentInterpreterError(
+                "persisted intent provider retry proof is invalid"
+            )
+        if (
+            wire.get("work_order_ref") != work.id
+            or wire.get("status") != "retryable"
+            or route is None
+            or wire.get("metadata", {}).get("route_decision_ref") != route.get("id")
+            or state["retry_profile_version_ref"] is not None
+               and state["retry_profile_version_ref"] != version_ref
+            or state["retry_profile_version_ref"] is None
+               and profile_id not in state["excluded_profile_ids"]
+            or state["same_profile_retries"]
+               > self.config.provider_retry["max_same_profile_retries"]
+        ):
+            raise HumanIntentInterpreterError(
+                "persisted intent provider retry state does not match route history"
+            )
+        return dict(state)
+
+    def _paid_retry_result(
+        self,
+        *,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+        invocation: ModelInvocation,
+        result: ResultEnvelope,
+        state: Mapping[str, Any] | None,
+        attempt_number: int,
+        max_attempts: int,
+    ) -> ResultEnvelope:
+        from .provider_retry import returned_provider_failure_proof
+
+        proof = returned_provider_failure_proof(invocation, result)
+        if self.config.provider_retry is None or state is None or proof is None:
+            return result
+        used = int(state["same_profile_retries"])
+        excluded = list(state["excluded_profile_ids"])
+        if used < self.config.provider_retry["max_same_profile_retries"]:
+            retry_profile = profile["profile_version_ref"]
+            used += 1
+        else:
+            if profile["id"] not in excluded:
+                excluded.append(profile["id"])
+            retry_profile = None
+            used = 0
+        wire = result.to_dict()
+        wire["status"] = (
+            "failed" if attempt_number >= max_attempts else "retryable"
+        )
+        wire["metadata"] = dict(wire["metadata"]) | {
+            "provider_retry_proof": proof,
+            "provider_retry_state": {
+                "excluded_profile_ids": excluded,
+                "retry_profile_version_ref": retry_profile,
+                "same_profile_retries": used,
+            },
+        }
+        return ResultEnvelope.from_dict(wire)
+
+    @staticmethod
+    def _retryable_bound_result(
+        invocation: ModelInvocation,
+        result: ResultEnvelope,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+        *,
+        attempt_number: int,
+        max_attempts: int,
+    ) -> ResultEnvelope:
+        wire = OpenClawIntentInterpreter._bind_invocation(
+            invocation, result, route, profile
+        ).to_dict()
+        wire["status"] = (
+            "failed" if attempt_number >= max_attempts else "retryable"
+        )
+        return ResultEnvelope.from_dict(wire)
+
+    @staticmethod
+    def _typed_unknown_result(
+        evidence: Any,
+        *,
+        work: WorkOrder,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> ResultEnvelope:
+        if not isinstance(evidence, PostSendUnknownEvidence):
+            raise HumanIntentInterpreterError(
+                "adapter post-send unknown evidence is invalid"
+            )
+        invocation = evidence.invocation
+        result = evidence.result
+        if (
+            invocation.work_order_ref != work.id
+            or invocation.parent_ref != route["id"]
+            or result.work_order_ref != work.id
+            or result.invocation_ref != invocation.id
+            or result.status != "failed"
+            or (result.error or {}).get("code") != "POST_SEND_RESULT_UNKNOWN"
+            or result.metadata.get("route_decision_ref") != route["id"]
+        ):
+            raise HumanIntentInterpreterError(
+                "adapter post-send unknown evidence is invalid"
+            )
+        return OpenClawIntentInterpreter._bind_invocation(
+            invocation, result, route, profile
+        )
+
     def _execute_attempt(
         self,
+        scheduler: Scheduler,
         router: ModelRouter,
         work: WorkOrder,
         *,
         attempt_number: int,
+        max_attempts: int,
         prompt_tokens: int,
     ) -> ResultEnvelope:
-        """Run the pinned chain while permitting at most one dispatched call."""
+        """Run exactly one routed provider call for one Scheduler attempt."""
 
         from .model_fallback_chain import execute_chain, purpose_tiers
         from .model_router import policy_chain
 
-        policy = router.get_policy(self.config.routing_policy_ref)
         tier = purpose_tiers()[INTENT_MODEL_PURPOSE]
+        policy = router.get_policy(self.config.routing_policy_ref)
         chain = policy_chain(policy, tier=tier, purpose=INTENT_MODEL_PURPOSE)
         adapter = self._adapter(router)
-
-        def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
-            try:
-                invocation, result = self._execute_with_safe_retry(
-                    adapter, work, route, profile
-                )
-            except BrokerDefinitelyNotSent as exc:
-                return {
-                    "outcome": "failed",
-                    "failure_class": "transport_failure",
-                    "reason": str(exc),
-                }
-            except OpenClawModelAdapterError as exc:
-                # Dispatch may have happened. A second provider call could
-                # spend the same WorkOrder budget twice, so fail this work.
-                return {
-                    "outcome": "failed",
-                    "failure_class": "unclassified_failure",
-                    "reason": str(exc),
-                }
-            capacity = self._capacity_code(result)
-            if capacity is not None:
-                return {
-                    "outcome": "failed",
-                    "failure_class": "capacity_busy",
-                    "error_code": capacity,
-                    "reason": (result.error or {}).get(
-                        "message", "broker capacity unavailable"
-                    ),
-                }
-            # A returned provider envelope consumed the one-call budget even
-            # when it failed. Treat it as served so the chain cannot spend on
-            # another provider, and preserve the exact invocation formally.
-            return {
-                "outcome": "served",
-                "value": self._bind_invocation(invocation, result, route, profile),
-            }
-
+        retry_state = self._provider_retry_state(scheduler, router, work)
         route_args = {
             "purpose": INTENT_MODEL_PURPOSE,
             "capability": "extract",
@@ -1531,24 +1783,107 @@ class OpenClawIntentInterpreter:
             "required_context_tokens": prompt_tokens + self.config.max_output_tokens,
             "estimated_input_tokens": prompt_tokens,
             "estimated_output_tokens": self.config.max_output_tokens,
+            "excluded_profile_ids": (
+                () if retry_state is None else retry_state["excluded_profile_ids"]
+            ),
+            "required_profile_version_ref": (
+                None if retry_state is None
+                else retry_state["retry_profile_version_ref"]
+            ),
         }
         if chain is not None:
+            def call(
+                route: Mapping[str, Any], profile: Mapping[str, Any]
+            ) -> dict[str, Any]:
+                try:
+                    invocation, result = self._execute_with_safe_retry(
+                        adapter, work, route, profile
+                    )
+                except BrokerDefinitelyNotSent as exc:
+                    return {
+                        "outcome": "failed",
+                        "failure_class": "transport_failure",
+                        "reason": str(exc),
+                    }
+                except OpenClawModelAdapterError as exc:
+                    evidence = getattr(exc, "post_send_unknown_evidence", None)
+                    if evidence is None:
+                        return {
+                            "outcome": "served",
+                            "value": self._failure_result(
+                                work,
+                                code="MODEL_ADAPTER_INDETERMINATE",
+                                route_ref=route["id"],
+                                attempt_number=attempt_number,
+                            ),
+                        }
+                    return {
+                        "outcome": "served",
+                        "value": self._typed_unknown_result(
+                            evidence, work=work, route=route, profile=profile
+                        ),
+                    }
+                capacity = self._capacity_code(result)
+                if capacity is not None:
+                    return {
+                        "outcome": "failed",
+                        "failure_class": "capacity_busy",
+                        "defer_attempt": True,
+                        "value": self._retryable_bound_result(
+                            invocation, result, route, profile,
+                            attempt_number=attempt_number,
+                            max_attempts=max_attempts,
+                        ),
+                        "error_code": capacity,
+                        "reason": (result.error or {}).get(
+                            "message", "broker capacity unavailable"
+                        ),
+                    }
+                bound = self._bind_invocation(invocation, result, route, profile)
+                paid = self._paid_retry_result(
+                    route=route,
+                    profile=profile,
+                    invocation=invocation,
+                        result=bound,
+                        state=retry_state,
+                        attempt_number=attempt_number,
+                        max_attempts=max_attempts,
+                )
+                if paid.status == "retryable":
+                    return {
+                        "outcome": "failed",
+                        "failure_class": "provider_failure",
+                        "defer_attempt": True,
+                        "value": paid,
+                        "error_code": (paid.error or {}).get("code"),
+                    }
+                return {
+                    "outcome": "served",
+                    "value": paid,
+                }
+
             outcome = execute_chain(
                 router,
                 work,
                 tier=tier,
-                idempotency_prefix=(
-                    f"human-intent-route:{work.id}:{attempt_number}"
-                ),
+                idempotency_prefix=f"human-intent-route:{work.id}:{attempt_number}",
                 call=call,
                 **route_args,
             )
             if outcome["status"] == "served":
                 return outcome["value"]
+            if outcome.get("reason") in {"provider_retry", "capacity_busy"} and isinstance(
+                outcome.get("value"), ResultEnvelope
+            ):
+                return outcome["value"]
             route_ref = outcome.get("route_decision_ref")
             if route_ref is None and outcome.get("links"):
                 route_ref = outcome["links"][-1]["decision_id"]
             capacity = outcome.get("reason") == "capacity_busy"
+            definitely_not_sent = bool(outcome.get("failures")) and all(
+                item.get("failure_class") == "transport_failure"
+                for item in outcome["failures"]
+            )
             return self._failure_result(
                 work,
                 code=(
@@ -1559,6 +1894,7 @@ class OpenClawIntentInterpreter:
                 route_ref=route_ref,
                 attempt_number=attempt_number,
                 retryable=capacity,
+                definitely_not_sent=definitely_not_sent,
             )
 
         prior = router.list_decisions(work_order_id=work.id)
@@ -1585,19 +1921,36 @@ class OpenClawIntentInterpreter:
             return self._failure_result(
                 work, code="BROKER_DEFINITELY_NOT_SENT", route_ref=routed["id"],
                 attempt_number=attempt_number,
+                retryable=attempt_number < max_attempts,
+                definitely_not_sent=True,
             )
-        except OpenClawModelAdapterError:
+        except OpenClawModelAdapterError as exc:
+            evidence = getattr(exc, "post_send_unknown_evidence", None)
+            if evidence is not None:
+                return self._typed_unknown_result(
+                    evidence, work=work, route=routed, profile=profile
+                )
             return self._failure_result(
                 work, code="MODEL_ADAPTER_INDETERMINATE", route_ref=routed["id"],
                 attempt_number=attempt_number,
             )
         capacity = self._capacity_code(result)
         if capacity is not None:
-            return self._failure_result(
-                work, code=capacity, route_ref=routed["id"],
-                attempt_number=attempt_number, retryable=True,
+            return self._retryable_bound_result(
+                invocation, result, routed, profile,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
             )
-        return self._bind_invocation(invocation, result, routed, profile)
+        bound = self._bind_invocation(invocation, result, routed, profile)
+        return self._paid_retry_result(
+            route=routed,
+            profile=profile,
+            invocation=invocation,
+            result=bound,
+            state=retry_state,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+        )
 
     @staticmethod
     def _provenance(
@@ -1653,6 +2006,8 @@ class OpenClawIntentInterpreter:
     def interpret(
         self, context: Mapping[str, Any], utterance_version: Mapping[str, Any]
     ) -> InterpreterOutput:
+        with ModelRouter(self.config.model_router_db) as router:
+            model_execution = self._model_execution(router)
         work = build_intent_interpreter_work_order(
             context,
             utterance_version,
@@ -1661,7 +2016,9 @@ class OpenClawIntentInterpreter:
             max_cost_usd=self.config.max_cost_usd,
             max_seconds=self.config.timeout_seconds,
             transport_retry=self.config.transport_retry,
+            provider_retry=self.config.provider_retry,
             max_scheduler_attempts=self.config.max_scheduler_attempts,
+            model_execution=model_execution,
         )
         with self._scheduler() as scheduler:
             enqueued = scheduler.enqueue(work)
@@ -1669,8 +2026,7 @@ class OpenClawIntentInterpreter:
                 raise HumanIntentInterpreterError(
                     "intent WorkOrder identity is bound to different content"
                 )
-            formal = scheduler.formal_result(work.id)
-            if formal is None:
+            while (formal := scheduler.formal_result(work.id)) is None:
                 lease = scheduler.claim(WORKER_REF, work_order_id=work.id)
                 if lease is None:
                     raise HumanIntentInterpreterError(
@@ -1679,9 +2035,11 @@ class OpenClawIntentInterpreter:
                 with ModelRouter(self.config.model_router_db) as router:
                     prompt_tokens = count_dalton_search_tokens(work.question)
                     result = self._execute_attempt(
+                        scheduler,
                         router,
                         work,
                         attempt_number=lease["attempt"]["attempt_number"],
+                        max_attempts=lease["max_attempts"],
                         prompt_tokens=prompt_tokens,
                     )
                     completion = scheduler.complete(
@@ -1694,16 +2052,33 @@ class OpenClawIntentInterpreter:
                             f"human-intent-complete:{work.id}:"
                             f"{lease['attempt']['attempt_number']}"
                         ),
+                        retry_at=(
+                            datetime.now(timezone.utc) + timedelta(
+                                seconds=self.config.provider_retry[
+                                    "retry_backoff_seconds"
+                                ]
+                            )
+                            if self.config.provider_retry is not None
+                            and result.status == "retryable"
+                            and result.metadata.get("provider_retry_proof") is not None
+                            else None
+                        ),
                     )
                     if completion["status"] == "conflict":
                         raise HumanIntentInterpreterError(
                             "intent WorkOrder completion conflicted"
                         )
-                    if result.status == "retryable":
-                        raise HumanIntentInterpreterError(
-                            "intent model capacity is pending"
-                        )
-                formal = scheduler.formal_result(work.id)
+                    if (
+                        result.status == "retryable"
+                        and completion["work_state"] == "ready"
+                        and self.config.provider_retry is not None
+                        and result.metadata.get("provider_retry_proof") is not None
+                    ):
+                        backoff = self.config.provider_retry["retry_backoff_seconds"]
+                        if backoff:
+                            import time
+
+                            time.sleep(backoff)
             if formal is None or formal["terminal_state"] != "succeeded":
                 raise HumanIntentInterpreterError("intent model call did not succeed")
             result_wire = formal["result_envelope"]

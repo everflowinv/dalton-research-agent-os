@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from dalton_core.contracts import InvocationGranularity, ModelInvocation, ResultEnvelope
+from dalton_core.contracts import (
+    InvocationGranularity, ModelInvocation, ResultEnvelope, WorkOrder,
+)
 from dalton_core.human_intent import (
     INTERPRETER_CANDIDATE_CONTRACT_HASH,
     INTERPRETER_HASH,
@@ -588,7 +590,22 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
             HumanIntentValidationError, "max_scheduler_attempts"
         ):
             IntentComposerConfig.from_mapping({
-                **raw, "max_scheduler_attempts": 11
+                **raw, "max_scheduler_attempts": 0
+            })
+        with self.assertRaisesRegex(
+            HumanIntentValidationError, "unknown-result recovery"
+        ):
+            IntentComposerConfig.from_mapping({
+                **raw,
+                "provider_retry": {
+                    "max_same_profile_retries": 1,
+                    "retry_backoff_seconds": 0,
+                    "unknown_recovery": {
+                        "max_fresh_work_orders": 1,
+                        "retry_backoff_seconds": 0,
+                        "max_elapsed_seconds": 60,
+                    },
+                },
             })
         utterance = {
             "id": "human-utterance-version:transport-identity",
@@ -616,9 +633,22 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
         bounded = build_intent_interpreter_work_order(
             context(), utterance, max_scheduler_attempts=5, **common
         )
+        provider = build_intent_interpreter_work_order(
+            context(), utterance,
+            provider_retry={
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 0,
+            },
+            **common,
+        )
+        budget_changed = build_intent_interpreter_work_order(
+            context(), utterance, **(common | {"max_cost_usd": 2.0})
+        )
         self.assertNotIn("transport_retry", legacy.metadata)
         self.assertNotEqual(explicit.id, legacy.id)
         self.assertNotEqual(bounded.id, legacy.id)
+        self.assertNotEqual(provider.id, legacy.id)
+        self.assertNotEqual(budget_changed.id, legacy.id)
 
     def test_configured_timeout_and_transport_fit_the_immutable_scheduler_lease(self):
         config = IntentComposerConfig(
@@ -762,14 +792,12 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
         utterance = {"id": "human-utterance-version:real-capacity", "created_at": NOW,
                      "verbatim_text": "状态？", "content_hash": "9" * 64}
         interpreter = OpenClawIntentInterpreter(config)
-        with self.assertRaisesRegex(HumanIntentInterpreterError, "capacity is pending"):
-            interpreter.interpret(context(), utterance)
-        with Scheduler(config.scheduler_db) as scheduler:
-            work_id = scheduler.connection.execute(
-                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid DESC LIMIT 1"
-            ).fetchone()[0]
-            self.assertEqual(scheduler.status(work_id)["state"], "ready")
         output = interpreter.interpret(context(), utterance)
+        with Scheduler(config.scheduler_db) as scheduler:
+            self.assertEqual(
+                scheduler.status(output.provenance["work_order_ref"])["state"],
+                "succeeded",
+            )
         self.assertEqual(len(broker.requests), 2)
         self.assertNotEqual(broker.requests[0]["invocationId"], broker.requests[1]["invocationId"])
         with Scheduler(config.scheduler_db) as scheduler:
@@ -917,6 +945,20 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
                 invocation, result = FakeBrokerAdapter(candidate).execute(
                     work, route, selected
                 )
+                invocation = replace(
+                    invocation,
+                    id=f"invocation:intent-capacity-{calls}",
+                    parent_ref=route["id"],
+                )
+                result = replace(
+                    result,
+                    id=f"result:intent-capacity-{calls}",
+                    invocation_ref=invocation.id,
+                    metadata={
+                        **result.metadata,
+                        "route_decision_ref": route["id"],
+                    },
+                )
                 if calls == 1:
                     wire = result.to_dict()
                     wire.update({
@@ -945,8 +987,6 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
             "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
         ):
             interpreter = OpenClawIntentInterpreter(self.config)
-            with self.assertRaisesRegex(HumanIntentInterpreterError, "capacity is pending"):
-                interpreter.interpret(context(), utterance)
             output = interpreter.interpret(context(), utterance)
         self.assertEqual(calls, 2)
         with Scheduler(self.config.scheduler_db) as scheduler:
@@ -955,6 +995,120 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
         self.assertEqual(status["state"], "succeeded")
         self.assertEqual(status["attempt_number"], 2)
         self.assertTrue(any(row["state"] == "ready" for row in history))
+
+    def test_persistent_capacity_fails_formally_at_bound_without_extra_call(self):
+        candidate = {
+            "schema_version": "0.1", "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"), "rationale": "状态查询",
+        }
+        calls = 0
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                nonlocal calls
+                calls += 1
+                invocation, result = FakeBrokerAdapter(candidate).execute(
+                    work, route, selected
+                )
+                invocation = replace(
+                    invocation,
+                    id=f"invocation:intent-persistent-capacity-{calls}",
+                    parent_ref=route["id"],
+                )
+                return invocation, replace(
+                    result,
+                    id=f"result:intent-persistent-capacity-{calls}",
+                    invocation_ref=invocation.id,
+                    status="failed",
+                    outputs={},
+                    error={"code": "BUSY", "message": "broker full"},
+                    metadata={
+                        "route_decision_ref": route["id"],
+                        "profile_version_ref": selected["profile_version_ref"],
+                        "dispatch_proof": {
+                            "authority": "openclaw-model-adapter",
+                            "state": "definitely_not_sent",
+                            "version": "0.1",
+                        },
+                    },
+                )
+
+        config = replace(self.config, max_scheduler_attempts=2)
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            with self.assertRaisesRegex(
+                HumanIntentInterpreterError, "did not succeed"
+            ):
+                OpenClawIntentInterpreter(config).interpret(context(), {
+                    "id": "human-utterance-version:persistent-capacity",
+                    "created_at": NOW,
+                    "verbatim_text": "状态？",
+                    "content_hash": "0" * 64,
+                })
+        self.assertEqual(calls, 2)
+        with Scheduler(config.scheduler_db) as scheduler:
+            work_id = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()[0]
+            formal = scheduler.formal_result(work_id)
+        self.assertEqual(formal["terminal_state"], "failed")
+        self.assertEqual(formal["attempt_number"], 2)
+        self.assertEqual(formal["result_envelope"]["error"]["code"], "BUSY")
+        self.assertEqual(
+            formal["result_envelope"]["metadata"]["dispatch_proof"]["state"],
+            "definitely_not_sent",
+        )
+
+    def test_definitely_not_sent_exhaustion_fails_formally_at_bound(self):
+        calls = 0
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                nonlocal calls
+                calls += 1
+                raise BrokerDefinitelyNotSent("connect failed before sendall")
+
+        config = replace(
+            self.config,
+            transport_retry={
+                "max_definitely_not_sent_retries": 1,
+                "queue_wait_seconds": 0,
+                "retry_backoff_seconds": 0,
+            },
+            max_scheduler_attempts=2,
+        )
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            with self.assertRaisesRegex(
+                HumanIntentInterpreterError, "did not succeed"
+            ):
+                OpenClawIntentInterpreter(config).interpret(context(), {
+                    "id": "human-utterance-version:not-sent-exhausted",
+                    "created_at": NOW,
+                    "verbatim_text": "状态？",
+                    "content_hash": "a" * 64,
+                })
+        self.assertEqual(calls, 4)
+        with Scheduler(config.scheduler_db) as scheduler:
+            work_id = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()[0]
+            formal = scheduler.formal_result(work_id)
+        self.assertEqual(formal["terminal_state"], "failed")
+        self.assertEqual(formal["attempt_number"], 2)
+        self.assertEqual(
+            formal["result_envelope"]["error"]["code"],
+            "BROKER_DEFINITELY_NOT_SENT",
+        )
+        self.assertEqual(
+            formal["result_envelope"]["metadata"]["dispatch_proof"]["state"],
+            "definitely_not_sent",
+        )
 
     def test_provider_busy_code_without_undispatched_proof_is_terminal(self):
         candidate = {
@@ -994,6 +1148,292 @@ class OpenClawIntentInterpreterTests(unittest.TestCase):
                     "content_hash": "4" * 64,
                 })
         self.assertEqual(calls, 1)
+
+    def test_provider_retry_exhaustion_formally_fails_on_the_last_attempt(self):
+        candidate = {
+            "schema_version": "0.1", "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"), "rationale": "状态查询",
+        }
+        calls = 0
+
+        class Adapter:
+            def execute(inner, work, route, selected):
+                nonlocal calls
+                calls += 1
+                invocation, result = FakeBrokerAdapter(candidate).execute(
+                    work, route, selected
+                )
+                identity = content_hash({"route": route["id"], "call": calls})[:32]
+                invocation = replace(
+                    invocation,
+                    id="invocation:intent-provider-failed-" + identity,
+                    parent_ref=route["id"],
+                    usage={
+                        "raw_provider_telemetry": {
+                            "cost": {"available": False, "usd": None}
+                        },
+                        "measurement_status": "unavailable",
+                    },
+                )
+                return invocation, replace(
+                    result,
+                    id="result:intent-provider-failed-" + identity,
+                    invocation_ref=invocation.id,
+                    status="failed",
+                    outputs={},
+                    error={
+                        "code": "RATE_LIMITED",
+                        "message": "provider asked the caller to retry",
+                        "source": "openclaw-model-broker",
+                    },
+                    metadata={
+                        "route_decision_ref": route["id"],
+                        "profile_version_ref": selected["profile_version_ref"],
+                        "broker_response_hash": content_hash({"call": calls}),
+                        "broker_request_mode": "execute",
+                        "dispatch_proof": {
+                            "authority": "openclaw-model-adapter",
+                            "state": "provider_completed_failure",
+                            "version": "0.1",
+                        },
+                    },
+                )
+
+        config = replace(
+            self.config,
+            provider_retry={
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 0,
+            },
+        )
+        with patch(
+            "dalton_core.human_intent.OpenClawModelAdapter", return_value=Adapter()
+        ):
+            with self.assertRaisesRegex(
+                HumanIntentInterpreterError, "did not succeed"
+            ):
+                OpenClawIntentInterpreter(config).interpret(context(), {
+                    "id": "human-utterance-version:provider-exhausted",
+                    "created_at": NOW,
+                    "verbatim_text": "状态？",
+                    "content_hash": "1" * 64,
+                })
+        self.assertEqual(calls, 2)
+        with Scheduler(config.scheduler_db) as scheduler:
+            work_id = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()[0]
+            formal = scheduler.formal_result(work_id)
+            history = scheduler.attempt_history(work_id)
+            authority = scheduler.work_order_authority(work_id)["work_order"]
+        self.assertEqual(formal["terminal_state"], "failed")
+        self.assertEqual(formal["attempt_number"], 2)
+        self.assertEqual(
+            [(row["attempt_number"], row["state"]) for row in history
+             if row["state"] in {"retryable", "failed"}],
+            [(1, "retryable"), (2, "failed")],
+        )
+        with Scheduler(config.scheduler_db) as scheduler:
+            row = scheduler.connection.execute(
+                "SELECT result_envelope_id,result_envelope_json "
+                "FROM scheduler_result_envelopes "
+                "WHERE work_order_id=? AND outcome='retryable'",
+                (work_id,),
+            ).fetchone()
+            wire = json.loads(row["result_envelope_json"])
+            wire["metadata"]["provider_retry_proof"]["code"] = (
+                "PROVIDER_INTERNAL_ERROR"
+            )
+            scheduler.connection.execute(
+                "DROP TRIGGER scheduler_result_envelope_no_update"
+            )
+            scheduler.connection.execute(
+                "UPDATE scheduler_result_envelopes SET result_envelope_json=?,"
+                "result_envelope_hash=? WHERE result_envelope_id=?",
+                (json.dumps(wire, sort_keys=True, separators=(",", ":")),
+                 content_hash(wire), row["result_envelope_id"]),
+            )
+            with ModelRouter(config.model_router_db) as router:
+                with self.assertRaisesRegex(
+                    HumanIntentInterpreterError, "retry proof is invalid"
+                ):
+                    OpenClawIntentInterpreter(config)._provider_retry_state(
+                        scheduler, router, WorkOrder.from_dict(authority)
+                    )
+
+    def test_real_unix_returned_failures_retry_same_profile_then_fallback(self):
+        from tests.test_openclaw_model_adapter import (
+            AUTH_SECRET, FakeBroker, core_request, failure_response, seal,
+            success_response,
+        )
+        from dalton_core.openclaw_model_adapter import canonical_hash
+
+        first = model_profile()
+        second = model_profile()
+        second.update({
+            "profile_version_ref": "model-profile-version:intent-fallback:1",
+            "id": "profile:intent-fallback",
+            "model": "intent-fallback",
+            "family": "intent-fallback",
+        })
+        policy = model_policy()
+        policy.update({
+            "policy_version_ref": "model-routing-policy-version:intent:provider-retry",
+            "version": 2,
+            "prior_version_ref": "model-routing-policy-version:intent:1",
+            "purpose_overrides": {
+                "human_intent": {
+                    "mode": "explicit",
+                    "chain": [first["id"], second["id"]],
+                }
+            },
+        })
+        policy["filters"] = {
+            **policy["filters"],
+            "allowed_profile_ids": [first["id"], second["id"]],
+        }
+        with ModelRouter(self.config.model_router_db) as router:
+            router.register_profile(second)
+            router.register_policy(policy)
+            policy_hash = router.get_policy(policy["policy_version_ref"])["content_hash"]
+        candidate = {
+            "schema_version": "0.1", "intent_kind": "meta",
+            "disposition": "candidate",
+            "effect": {"kind": "meta_read", "query": "status"},
+            "clarification_question": None,
+            "evidence_spans": evidence("状态？"), "rationale": "状态查询",
+        }
+
+        def respond(request):
+            if len(broker.requests) <= 2:
+                response = failure_response(
+                    request,
+                    code="RATE_LIMITED",
+                    dispatch_proof={
+                        "authority": "openclaw-model-broker",
+                        "state": "provider_completed_failure",
+                        "version": "0.1",
+                    },
+                )
+            else:
+                response = success_response(
+                    request,
+                    text=json.dumps(
+                        candidate, ensure_ascii=False, separators=(",", ":")
+                    ),
+                )
+                response.update({
+                    "provider": "test",
+                    "model": "intent-fallback",
+                    "canonicalModel": "test/intent-fallback",
+                })
+            execution = core_request(request)
+            execution.pop("queueWaitMs", None)
+            response["requestHash"] = canonical_hash(execution)
+            response.pop("contentHash")
+            return seal(response)
+
+        broker = FakeBroker(self.config.staging_path.parent, respond, connections=3)
+        self.addCleanup(broker.close)
+        self.config.broker_auth_key.write_bytes(AUTH_SECRET)
+        config = replace(
+            self.config,
+            broker_socket=broker.path,
+            expected_agent_id="dalton-model-broker",
+            routing_policy_ref=policy["policy_version_ref"],
+            provider_retry={
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 0,
+            },
+            max_scheduler_attempts=4,
+        )
+        with self.assertRaisesRegex(
+            HumanIntentValidationError, "cannot exhaust"
+        ):
+            intent_scheduler_policy(replace(config, max_scheduler_attempts=3))
+        output = OpenClawIntentInterpreter(config).interpret(context(), {
+            "id": "human-utterance-version:provider-retry",
+            "created_at": NOW,
+            "verbatim_text": "状态？",
+            "content_hash": "3" * 64,
+        })
+        self.assertEqual(
+            [request["profileId"] for request in broker.requests],
+            [first["id"], first["id"], second["id"]],
+        )
+        self.assertEqual(len({request["invocationId"] for request in broker.requests}), 3)
+        with Scheduler(config.scheduler_db) as scheduler:
+            history = scheduler.attempt_history(output.provenance["work_order_ref"])
+            authority = scheduler.work_order_authority(
+                output.provenance["work_order_ref"]
+            )["work_order"]
+            retry_results = scheduler.connection.execute(
+                "SELECT result_envelope_json FROM scheduler_result_envelopes "
+                "WHERE work_order_id=? AND outcome='retryable' ORDER BY attempt_number",
+                (output.provenance["work_order_ref"],),
+            ).fetchall()
+        self.assertEqual(
+            [(row["attempt_number"], row["state"]) for row in history
+             if row["state"] in {"retryable", "succeeded"}],
+            [(1, "retryable"), (2, "retryable"), (3, "succeeded")],
+        )
+        self.assertEqual(authority["metadata"]["provider_retry"], config.provider_retry)
+        self.assertEqual(
+            authority["metadata"]["model_execution"]["routing_policy_hash"],
+            policy_hash,
+        )
+        for row in retry_results:
+            result = json.loads(row[0])
+            self.assertIn("intent_model_invocation", result["metadata"])
+            self.assertEqual(
+                result["metadata"]["provider_retry_proof"]["code"],
+                "RATE_LIMITED",
+            )
+
+    def test_real_unix_sent_then_drop_preserves_unknown_invocation_and_never_retries(self):
+        from tests.test_openclaw_model_adapter import AUTH_SECRET, FakeBroker
+
+        broker = FakeBroker(
+            self.config.staging_path.parent, lambda _request: None, connections=1
+        )
+        self.addCleanup(broker.close)
+        self.config.broker_auth_key.write_bytes(AUTH_SECRET)
+        config = replace(
+            self.config,
+            broker_socket=broker.path,
+            expected_agent_id="dalton-model-broker",
+            provider_retry={
+                "max_same_profile_retries": 2,
+                "retry_backoff_seconds": 0,
+            },
+        )
+        with self.assertRaisesRegex(
+            HumanIntentInterpreterError, "did not succeed"
+        ):
+            OpenClawIntentInterpreter(config).interpret(context(), {
+                "id": "human-utterance-version:sent-drop",
+                "created_at": NOW,
+                "verbatim_text": "状态？",
+                "content_hash": "2" * 64,
+            })
+        self.assertEqual(len(broker.requests), 1)
+        with Scheduler(config.scheduler_db) as scheduler:
+            work_id = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()[0]
+            formal = scheduler.formal_result(work_id)
+        result = formal["result_envelope"]
+        self.assertEqual(result["error"]["code"], "POST_SEND_RESULT_UNKNOWN")
+        invocation = result["metadata"]["intent_model_invocation"]
+        self.assertEqual(invocation["id"], result["invocation_ref"])
+        self.assertEqual(invocation["usage"]["measurement_status"], "unavailable")
+        self.assertEqual(
+            invocation["usage"]["raw_provider_telemetry"]["post_send_unknown"]["state"],
+            "post_send_result_unknown",
+        )
 
 
 class HumanIntentComposerTests(unittest.TestCase):

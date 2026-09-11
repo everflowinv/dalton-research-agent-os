@@ -624,6 +624,10 @@ class SetSelectionTests(StateDirectoryCase):
             "queue_wait_seconds": 12,
             "retry_backoff_seconds": 2,
         }
+        provider = {
+            "max_same_profile_retries": 2,
+            "retry_backoff_seconds": 3,
+        }
         service = {
             "model_router_db": str(self.root / "model-router.sqlite"),
             "control": {"config": {"intent_composer": {
@@ -631,6 +635,7 @@ class SetSelectionTests(StateDirectoryCase):
                 "routing_policy_ref": self.policies["cheap"],
                 "credential_slot_refs": ["credential-slot:openai:dalton"],
                 "transport_retry": transport,
+                "provider_retry": provider,
                 "timeout_seconds": 180,
             }}},
         }
@@ -647,6 +652,7 @@ class SetSelectionTests(StateDirectoryCase):
         intent = updated["control"]["config"]["intent_composer"]
         self.assertNotEqual(intent["routing_policy_ref"], self.policies["cheap"])
         self.assertEqual(intent["transport_retry"], transport)
+        self.assertEqual(intent["provider_retry"], provider)
         self.assertEqual(intent["timeout_seconds"], 180)
         selected_profile = next(
             item for item in self.router.latest_profiles() if item["id"] == chosen

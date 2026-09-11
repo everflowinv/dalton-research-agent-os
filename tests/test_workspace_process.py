@@ -195,6 +195,10 @@ class WorkspaceLaunchAgentTests(unittest.TestCase):
                     "queue_wait_seconds": 15,
                     "retry_backoff_seconds": 2,
                 },
+                "provider_retry": {
+                    "max_same_profile_retries": 2,
+                    "retry_backoff_seconds": 3,
+                },
             }
             service["control"]["config"]["intent_composer"] = intent
             workspace.config_path.write_text(json.dumps(service), encoding="utf-8")
