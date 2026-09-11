@@ -20,6 +20,8 @@ from dalton_core.contracts import WorkOrder
 from dalton_core.model_router import ModelRouter, canonical_hash as dalton_hash
 from dalton_core.openclaw_model_adapter import (
     BrokerFrameTooLarge,
+    BrokerDefinitelyNotSent,
+    BrokerRequestFrameTooLarge,
     BrokerProtocolError,
     BrokerTimeout,
     ModelAdmissionError,
@@ -965,13 +967,23 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             estimated_output_tokens=250,
             idempotency_key="route-key:model-completion-large",
         )["decision"]
-        with self.assertRaises(BrokerFrameTooLarge):
-            self.run_with(success_response, work=large_work, route=changed_route, frame_limit=1024)
-        with self.assertRaises(BrokerFrameTooLarge):
+        sent = []
+        with self.assertRaises(BrokerRequestFrameTooLarge) as request_failure:
+            self.run_with(
+                success_response, work=large_work, route=changed_route,
+                frame_limit=1024, before_send=lambda: sent.append(True),
+            )
+        self.assertIsInstance(request_failure.exception, BrokerDefinitelyNotSent)
+        self.assertEqual(sent, [])
+        self.assertFalse(hasattr(request_failure.exception, "post_send_unknown_evidence"))
+        with self.assertRaises(BrokerFrameTooLarge) as response_failure:
             self.run_with(
                 lambda request: success_response(request, text="x" * 5_000),
-                frame_limit=1024,
+                frame_limit=1024, before_send=lambda: sent.append(True),
             )
+        self.assertNotIsInstance(response_failure.exception, BrokerDefinitelyNotSent)
+        self.assertEqual(sent, [True])
+        self.assertTrue(hasattr(response_failure.exception, "post_send_unknown_evidence"))
 
     def test_timeout_is_hard_wall_clock_boundary(self) -> None:
         def slow(_request: dict[str, Any]):

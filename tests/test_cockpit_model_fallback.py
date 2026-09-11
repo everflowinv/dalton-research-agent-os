@@ -33,6 +33,7 @@ from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
 from dalton_core.openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
+    OpenClawModelAdapter,
     BrokerTimeout,
 )
 from dalton_core.research_planner_setup import credential_slots_for, ensure_planner_policy
@@ -220,6 +221,28 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(adapter.served,
                          ["profile:gpt-6-astra", "profile:claude-fable-5-1"])
         self.assertIn("claude", answer["text"])
+
+    def test_real_local_frame_refusal_settles_zero_before_connect(self) -> None:
+        model = self._model(None, policy_version_ref=self.pinned_policy)
+        model.adapter_factory = lambda router: OpenClawModelAdapter(
+            self.root / "must-not-connect.sock",
+            route_resolver=router.get_decision,
+            auth_client_id="client:dalton-core",
+            auth_key_provider=lambda: b"a" * 64,
+            expected_agent_id="chem",
+            max_frame_bytes=1024,
+            clock=lambda: NOW,
+        )
+        with patch("dalton_core.openclaw_model_adapter.socket.socket") as socket_factory:
+            with self.assertRaisesRegex(CockpitModelError, "request exceeds max_frame_bytes"):
+                model.call(purpose="plan", request_id="oversize-local-frame",
+                           prompt="q" * 3000, mission=self.mission)
+            socket_factory.assert_not_called()
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            settlements = ledger.connection.execute(
+                "SELECT actual_micros, usage_entry_ref FROM thesis_impact_day_settlements"
+            ).fetchall()
+        self.assertEqual([tuple(row) for row in settlements], [(0, None)])
 
     def test_single_pin_broker_busy_is_settled_as_not_sent(self) -> None:
         adapter = BusyThenAvailableAdapter({})

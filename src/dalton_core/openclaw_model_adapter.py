@@ -216,6 +216,10 @@ class BrokerFrameTooLarge(BrokerProtocolError):
     """A request or response exceeded the configured frame limit."""
 
 
+class BrokerRequestFrameTooLarge(BrokerFrameTooLarge, BrokerDefinitelyNotSent):
+    """Local encoded request limit refused before socket creation or dispatch."""
+
+
 class BrokerBudgetExceeded(OpenClawModelAdapterError):
     """Provider telemetry exceeds a WorkOrder or endpoint-profile limit."""
 
@@ -965,7 +969,7 @@ class OpenClawModelAdapter:
     ) -> Mapping[str, Any]:
         frame = canonical_json(request).encode("utf-8") + b"\n"
         if len(frame) > self._max_frame_bytes:
-            raise BrokerFrameTooLarge("broker request exceeds max_frame_bytes")
+            raise BrokerRequestFrameTooLarge("broker request exceeds max_frame_bytes")
         self._assert_safe_socket()
         deadline = self._monotonic() + timeout
         response = bytearray()
@@ -1666,6 +1670,7 @@ __all__ = [
     "BrokerDefinitelyNotSent",
     "BrokerTimeout",
     "BrokerFrameTooLarge",
+    "BrokerRequestFrameTooLarge",
     "BrokerBudgetExceeded",
     "PostSendUnknownEvidence",
     "BrokerIdempotencyConflict",
