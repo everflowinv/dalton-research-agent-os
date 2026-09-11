@@ -7,7 +7,7 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from dalton_core.contracts import ResultEnvelope, WorkOrder
+from dalton_core.contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.document_research import (
     CoreAcquiredDocumentSourceAdapter, DocumentResearchRegistry, FeedDocumentSourceAdapter,
@@ -21,6 +21,7 @@ from dalton_core.host_tool_runner import ACCESS_POLICY_REF, RETENTION_POLICY_REF
 from dalton_core.mission_document_research import (
     MissionDocumentResearchAuthority, MissionDocumentResearchError, PURPOSE,
 )
+from dalton_core.model_accounting import record_model_accounting
 from dalton_core.document_research_qualitative import (
     MissionDocumentDraftWorker, MissionDocumentVerifierWorker,
 )
@@ -86,18 +87,28 @@ class DefinitelyNotSentFirstWorkAdapter(CountingFakeAdapter):
         return FakeAdapter.execute(self, work, route, selected)
 
 
+class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
+    """Keep the shared fixture adapter's invocation faithful to the selected route."""
+
+    def execute(self, work, route, selected):
+        invocation, result = super().execute(work, route, selected)
+        wire = invocation.to_dict()
+        wire["capability"] = route["capability"]
+        return ModelInvocation.from_dict(wire), result
+
+
 class MissionDocumentResearchTests(unittest.TestCase):
     def _executor(self, fixture, authority, *, draft_adapter=None,
                   verifier_adapter=None, fault_injector=None):
         statement = "Managed services revenue is recognized over time."
-        draft_adapter = draft_adapter or CountingFakeAdapter({
+        draft_adapter = draft_adapter or RouteBoundCountingFakeAdapter({
             "schema_version": "0.1", "status": "answered", "answer": statement,
             "candidate": {"normalized_statement": statement,
                           "metric_or_aspect": "managed services revenue recognition",
                           "period": "current policy", "basis": "reported",
                           "cited_match_indexes": [0]}, "missing": [],
         })
-        verifier_adapter = verifier_adapter or CountingFakeAdapter({
+        verifier_adapter = verifier_adapter or RouteBoundCountingFakeAdapter({
             "schema_version": "0.1", "verdict": "pass",
             "verified_statement": statement, "findings": [],
         })
@@ -972,7 +983,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 0)
 
-    def test_self_consistent_model_completion_without_budget_cannot_advance(self):
+    def test_self_consistent_model_completion_with_unsettled_budget_cannot_advance(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
         executor, draft_adapter, verifier = self._executor(fixture, authority)
@@ -996,6 +1007,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             purpose=executor.draft_worker.purpose, tier="brain",
         )["decision"]
         profile = fixture.router.get_profile(route["selected_profile_version_ref"])
+        executor.draft_worker._before_model_call(work, route, profile, False)
         invocation, result = draft_adapter.execute(work, route, profile)
         fixture.store.register_invocation(invocation.to_dict())
         formal_envelope = executor.draft_worker._successful_result(
@@ -1006,7 +1018,57 @@ class MissionDocumentResearchTests(unittest.TestCase):
             idempotency_key="foreign:self-consistent-without-budget",
             result_envelope_hash=content_hash(formal_envelope.to_dict()))
         with self.assertRaisesRegex(
-            MissionDocumentResearchExecutorError, "model budget binding drifted"
+            MissionDocumentResearchExecutorError, "budget settlement is unavailable"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual(verifier.calls, 0)
+        self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 0)
+
+    def test_model_invocation_family_must_match_selected_route(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft_adapter, verifier = self._executor(fixture, authority)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        work_wire = executor._derive_work(admission, executor._blueprints(admission), 1)
+        work = WorkOrder.from_dict(work_wire)
+        claim = executor.scheduler.claim(
+            executor.draft_worker.worker_ref, work_order_id=work.id)
+        estimated_input = executor.draft_worker.token_counter(work.question)
+        route = fixture.router.route(
+            work, attempt_number=claim["attempt"]["attempt_number"],
+            capability="research",
+            policy_version_ref=fixture.draft_policy["policy_version_ref"],
+            credential_slot_refs=[fixture.draft_profile["credential_slot_ref"]],
+            required_modalities=["text"],
+            required_context_tokens=estimated_input + work.budget["max_output_tokens"],
+            estimated_input_tokens=estimated_input,
+            estimated_output_tokens=work.budget["max_output_tokens"],
+            idempotency_key="foreign:route-family-drift",
+            purpose=executor.draft_worker.purpose, tier="brain",
+        )["decision"]
+        profile = fixture.router.get_profile(route["selected_profile_version_ref"])
+        executor.draft_worker._before_model_call(work, route, profile, False)
+        invocation, result = draft_adapter.execute(work, route, profile)
+        invocation_wire = invocation.to_dict()
+        invocation_wire["model_family"] = "forged-unselected-family"
+        invocation = type(invocation).from_dict(invocation_wire)
+        fixture.store.register_invocation(invocation.to_dict())
+        accounting = record_model_accounting(
+            fixture.harness.observability, invocation, route, profile,
+            actor_ref=executor.draft_worker.worker_ref,
+            namespace=executor.draft_worker.namespace,
+        )
+        executor.draft_worker._after_accounting(work, route, accounting)
+        formal_envelope = executor.draft_worker._successful_result(
+            work, route, invocation, result, result.outputs["text"])
+        executor.scheduler.complete(
+            work.id, claim["attempt"]["attempt_number"], executor.draft_worker.worker_ref,
+            claim["lease_token"], formal_envelope,
+            idempotency_key="foreign:self-consistent-route-family-drift",
+            result_envelope_hash=content_hash(formal_envelope.to_dict()))
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "differs from selected route"
         ):
             executor.run_once(admission["id"])
         self.assertEqual(verifier.calls, 0)

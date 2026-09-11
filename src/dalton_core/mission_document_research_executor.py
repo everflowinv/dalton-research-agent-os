@@ -621,6 +621,20 @@ def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], work
             or invocation["model_family"] != proof["model_family"]
             or invocation["completed_at"] is None):
         raise MissionDocumentResearchExecutorError("model invocation binding drifted")
+    endpoint = route.get("selected_endpoint")
+    expected_capability = (
+        "research" if work["metadata"]["stage"] == "qualitative_model_draft"
+        else "verify"
+    )
+    if (not isinstance(endpoint, Mapping)
+            or invocation["provider"] != endpoint.get("provider")
+            or invocation["model"] != endpoint.get("model")
+            or invocation["model_family"] != endpoint.get("family")
+            or invocation["runtime_ref"] != endpoint.get("adapter_ref")
+            or invocation["capability"] != route.get("capability")
+            or invocation["capability"] != expected_capability):
+        raise MissionDocumentResearchExecutorError(
+            "model invocation differs from selected route")
     authority = getattr(worker, "mission_document_research_authority", None)
     budget_store = getattr(worker, "budget_store", None)
     if authority is None or budget_store is None:
@@ -641,6 +655,36 @@ def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], work
             or canonical_json(exact_budget["mission_binding"])
             != canonical_json(expected_binding)):
         raise MissionDocumentResearchExecutorError("model budget binding drifted")
+    settlement = exact_budget["settlement"]
+    if settlement is None or settlement.get("usage_entry_ref") is None:
+        raise MissionDocumentResearchExecutorError(
+            "model budget settlement is unavailable")
+    try:
+        usage = worker.observability.get_usage(settlement["usage_entry_ref"])
+        cost_row = worker.observability.connection.execute(
+            "SELECT cost_entry_id FROM observability_cost_entries "
+            "WHERE usage_entry_ref=? AND revision_number=1",
+            (settlement["usage_entry_ref"],),
+        ).fetchone()
+        cost = (None if cost_row is None else
+                worker.observability.get_cost(cost_row["cost_entry_id"]))
+    except Exception as exc:
+        raise MissionDocumentResearchExecutorError(
+            "model budget accounting authority is unavailable") from exc
+    if (usage.get("invocation_ref") != invocation["id"]
+            or usage.get("work_order_ref") != work["id"]
+            or usage.get("profile_ref") != invocation["profile_ref"]
+            or usage.get("provider") != invocation["provider"]
+            or usage.get("model") != invocation["model"]
+            or usage.get("model_family") != invocation["model_family"]
+            or usage.get("runtime_ref") != invocation["runtime_ref"]
+            or usage.get("capability") != invocation["capability"]
+            or not isinstance(cost, Mapping)
+            or cost.get("usage_entry_ref") != usage["id"]
+            or cost.get("cost_status") != "actual"
+            or cost.get("amount_micros") != settlement.get("actual_micros")):
+        raise MissionDocumentResearchExecutorError(
+            "model budget settlement accounting drifted")
     return proof
 
 
