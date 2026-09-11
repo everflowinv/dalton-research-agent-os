@@ -213,11 +213,8 @@ def _validate_admission(value: Any) -> dict[str, Any]:
 
     legacy = {"source", "content_hash", "inquiry_ref", "plan_ref"}
     current = legacy | {"mission_version_ref", "mission_version_hash"}
-    repair = current | {"repair_target_ref", "repair_target_hash"}
     if (not isinstance(value, Mapping)
-            or frozenset(value) not in {
-                frozenset(legacy), frozenset(current), frozenset(repair)
-            }):
+            or frozenset(value) not in {frozenset(legacy), frozenset(current)}):
         raise BoundedPlannerValidationError("admission has an invalid closed shape")
     obj = dict(value)
     source = _text(obj["source"], "admission.source")
@@ -236,17 +233,6 @@ def _validate_admission(value: Any) -> dict[str, Any]:
             ),
             "mission_version_hash": _sha256(
                 obj["mission_version_hash"], "admission.mission_version_hash"
-            ),
-        })
-    if "repair_target_ref" in obj:
-        target_ref = _text(obj["repair_target_ref"], "admission.repair_target_ref")
-        if not target_ref.startswith("dossier-repair-target:"):
-            raise BoundedPlannerValidationError(
-                "admission.repair_target_ref is not a dossier repair target")
-        result.update({
-            "repair_target_ref": target_ref,
-            "repair_target_hash": _sha256(
-                obj["repair_target_hash"], "admission.repair_target_hash"
             ),
         })
     return result

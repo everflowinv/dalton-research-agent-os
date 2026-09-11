@@ -1042,6 +1042,11 @@ def admit_inquiry(
 
     if not entry.get("admissible"):
         raise ResearchTaskError(f"inquiry is not admissible: {entry.get('reason')}")
+    if inquiry.get("repair_target_ref") is not None:
+        # There is no mission-authorized directed repair capability yet. Do
+        # not let a caller bypass plan_admissions by presenting a forged
+        # admissible entry to this lower-level mutation seam.
+        raise ResearchTaskError("dossier repair target has no admitted directed capability")
     digest = entry["inquiry_hash"]
     principal = mission["autonomy"]["automation_principal"]
     mandate_version_ref = mission["bindings"]["mandate_version"]["ref"]
@@ -1057,19 +1062,6 @@ def admit_inquiry(
         actor_ref=principal,
         idempotency_key=f"research-task:question:{digest[:32]}",
     )
-    admission = {
-        "source": INQUIRY_ADMISSION_SOURCE,
-        "content_hash": digest,
-        "inquiry_ref": inquiry_ref_for(digest),
-        "plan_ref": plan_ref,
-        "mission_version_ref": mission["id"],
-        "mission_version_hash": mission["content_hash"],
-    }
-    if inquiry.get("repair_target_ref") is not None:
-        admission.update({
-            "repair_target_ref": inquiry["repair_target_ref"],
-            "repair_target_hash": inquiry["repair_target_hash"],
-        })
     loop = authority.create_loop(
         task_loop_ref(digest),
         question_version_ref=recorded["question_version_ref"],
@@ -1077,7 +1069,14 @@ def admit_inquiry(
         required_coverage_items=[b["coverage_item_ref"] for b in entry["bindings"]],
         budget=entry["budget"],
         actor_ref=principal,
-        admission=admission,
+        admission={
+            "source": INQUIRY_ADMISSION_SOURCE,
+            "content_hash": digest,
+            "inquiry_ref": inquiry_ref_for(digest),
+            "plan_ref": plan_ref,
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+        },
     )
     return {
         "status": loop["status"],

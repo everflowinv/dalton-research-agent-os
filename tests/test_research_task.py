@@ -931,3 +931,17 @@ class InquiryDirectedDiscoveryTests(ResearchTaskFixture):
         self.assertEqual(entry["reason"], "repair_target_capability_gap")
         self.assertEqual(entry["repair_target_ref"], wire["repair_target_ref"])
         self.assertNotIn("bindings", entry)
+
+    def test_forged_admissible_entry_cannot_bypass_repair_capability_gap(self):
+        normal = inquiry(question="How does ACN reconcile adjusted margin guidance?")
+        plan = self.record_plan([normal])
+        forged = inquiry(
+            question=normal["question"],
+            repair_target_ref="dossier-repair-target:" + "a" * 32,
+            repair_target_hash="b" * 64,
+        )
+        entry = self.admissions(plan)[0]
+        with self.assertRaisesRegex(rt.ResearchTaskError,
+                                    "no admitted directed capability"):
+            self.admit(plan, entry, forged)
+        self.assertEqual(self.authority.admitted_loops("inquiry"), [])
