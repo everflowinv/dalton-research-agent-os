@@ -2,7 +2,17 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-11，03:29 UTC）
+## 当前检查点（2026-09-11，03:42 UTC）
+
+**R8a `9fa9e569d0a75f343f611a8bb31d869a173c0e5d` 已部署，实际代码与配置验收通过，连续运行和产物检查中。** 同版 6,873 tests / 1 skip、556 个 wheel 文件/3 JS、67 schemas / 40 entries / 0 escaped 副本演练通过。03:39:57–03:41:16 UTC 安装 exit 0，备份 `deploy-backup-20260911T033958Z`；实际 556 个运行文件、1,854 个保留源码文件逐字一致。12 份模型/预算/credential、mission v14、broker 以及历史 pending 保留通过。
+
+此版包含单次 Dossier 输入快照复用（真实旧/新输入完全一致，约 8.97 倍提速）和仅取消未开始的超时 writer 请求。03:42 起运行 45 次、至少 660 秒连续健康检查，正常队列的 Dossier0.3 与 reader 导出另行只读核验，尚不标为完成。前版 R7b 已在 670.174 秒/45 样本/三轮 planner 中完成稳定性验收，但其 Dossier writer 排队故障明确保留为产品 pending。
+
+部署空间不足时，只将两份较旧备份逐文件/元数据/无句柄校验后压缩，保留可恢复 tar/manifest/verification；此前最新 R7b 备份和本次新备份保持展开，没有放宽磁盘安全余量。
+
+**Next step：** 等待正常档案子任务产出，核验每个新单元的 producer/verifier/mission 证明与旧单元继承，检查队列恢复与跨调度周期健康；及时记录具体内容/来源 hold。高级投资能力、最终视觉、多 workspace 激活继续后排。
+
+## 前一检查点（2026-09-11，03:29 UTC）
 
 **R8 性能候选全量与副本演练通过，尚未部署；补上 writer 队列恢复后准备 R8a 统一验收。** R8 `86ad4dc` 全量 6,871 tests / 1 skip、wheel 556 文件/3 JS、67 schemas / 40 entries / 0 escaped 均通过。真实 Core 一致副本的 4 家公司 × 12 单元旧/新 canonical 输入逐字一致，148→4 次 Claim snapshot，118.56→13.22 秒，约 8.97 倍加速。
 

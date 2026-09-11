@@ -248,3 +248,14 @@ Independent review confirmed the WAL failures are not merely fixtures: the live 
 同一 PID 69511 / 03:18:30.604875Z 在 03:20:39–03:31:49 UTC 连续观察 45 次，670.174 秒全部通过，最大 heartbeat age 7.522 秒；覆盖三个 planner 启动（03:18、03:23、03:28）。运行 receipt SHA `07e96cd1bc3fde4fd0971d94ead3ed75f7392d94b2a45d69070a5eac15408e65`，完整 raw 样本摘要 SHA `b1f97c0e59007f6d87adf4bdfeae964a7958f18fcdbe0916fcd4d2579ff27b59`。已逐一校验原始样本 hash、结果及进程身份，并重算接受条件；manifest 状态为 deployed_verified，runtime_health_only 明确 true。
 
 Dossier 产品验收仍 pending：v4 实际只读检查无 0.3 记录，而正常 lane 因 writer 队列超时尚未产生新子进程结果。这个条件与基础 heartbeat 区分，不能从健康检查推导出研究链完成。排队请求恢复与实测约 9 倍的输入重建提速已统一冻结 R8a `9fa9e569d0a75f343f611a8bb31d869a173c0e5d`；wheel、67 schemas / 40 entries / 0 escaped 演练通过，完整测试进行中。
+
+
+## R8a 安装与逐字核对（2026-09-11 03:42 UTC）
+
+冻结 `9fa9e569d0a75f343f611a8bb31d869a173c0e5d` 全量 6,873 tests / 1 skip，完整 runner 565.124s（unittest 563.181s），log SHA `9e088033e86ddfd15ee6cf4001e3c2c4d1f0b6f9d9f4c39549fd62c0ebabd2bc`。Wheel 556 文件/3 JS，SHA `3c1572a3d7e641de2606ea78bea72fd60a652b9f339ee3d132da318d1d03766c`；副本演练 report SHA `e7a1d74638f42186b7d711dfbbf160d1984f857a71df9c536e27d49593be6ed3`，binding SHA `16aa6fd9773ca88ac2691637c985af5a033e7fd91b8273d479a491a3a764a97d`。
+
+实际安装 03:39:57.872–03:41:16.168 UTC exit 0；日志 SHA `9305bce347b0b3f17fbca85334bbe6e04d7fb1f37bdffd94516f59710f774e8b`。备份 `deploy-backup-20260911T033958Z`，retained source `.release-source.fTMG5g`；556 个运行文件和 1,854 个 tracked source 文件匹配，receipt SHA `c3ead0fc11e4ef58f5e2c9098b7031b5acc2cd1ad00f558011a937ce987e5d78`。12 份模型/预算/credential、mission、broker/pending 保留通过。五份部署/验证 helper 在 staging 前按固定审查 hash 核对，私有 packet 单独发布并纳入 manifest，实际调用再次核对绑定。
+
+状态仍是 installed_bytes_verified_runtime_pending，45 次连续观察与实际 Dossier0.3/reader 检查进行中。R8 `86ad4dc` 虽全量/演练通过但未部署，与队列修复统一形成本次候选，未混淆历史接受记录。
+
+磁盘预检先明确拒绝 2.36GB available / 3.85GB required。在保留全部回滚字节前提下归档旧备份：013344Z archive SHA `d2040fab03dbee466a4dc9bb14cbc7b0dc6f7e2e375a2ee5d7de30b6c26f812c`（989,371,816 source bytes→153,533,582 archive bytes）；021801Z archive SHA `b42a706fc2e1dd9318a3686ba41e81d06a953038c55c6e352e376190c0488668`（1,000,971,688→155,026,166）。每份 95 entries 的内容、路径、类型、权限、owner/group、mtime 与 symlink 均核对，fsync + 源重扫 + 无 open handles 后才移除重复展开副本，tar/manifest/verification mode600。重检 4.03GB available / 3.85GB required 通过，最近两次备份保持展开。
