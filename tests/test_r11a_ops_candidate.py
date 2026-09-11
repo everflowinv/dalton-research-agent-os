@@ -95,6 +95,7 @@ class R11aOpsCandidateTests(unittest.TestCase):
             installed_path = root / "installed.json"
             write_json(installed_path, {"status": "installed_bytes_verified_runtime_pending",
                                         "source_commit": final.COMMIT, "wheel_sha256": final.WHEEL_SHA256,
+                                        "candidate_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                                         "service_backup_keep_latest": 3, "model_config_count": 15})
             deployment = json.loads(deployment_path.read_text())
             deployment["installed_verification"] = installed_path.name

@@ -127,6 +127,7 @@ def finalize(manifest_path: Path, deployment_path: Path, summary_path: Path,
     verify_health_samples(summary_path, summary, deployment)
     need(installed.get("status") == "installed_bytes_verified_runtime_pending"
          and installed.get("source_commit") == COMMIT
+         and installed.get("candidate_manifest_sha256") == sha(manifest_path)
          and installed.get("wheel_sha256") == WHEEL_SHA256
          and installed.get("service_backup_keep_latest") == 3
          and isinstance(installed.get("model_config_count"), int)
