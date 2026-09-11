@@ -731,11 +731,11 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
         self.assertEqual(adapter.served, [work.id])
 
     def test_a_broker_that_never_served_hands_the_reservation_back(self) -> None:
-        from dalton_core.openclaw_model_adapter import BrokerConnectionError
+        from dalton_core.openclaw_model_adapter import BrokerDefinitelyNotSent
 
         class DeadBroker(FakeAdapter):
             def execute(self, work, route, selected):
-                raise BrokerConnectionError("the broker socket is not there")
+                raise BrokerDefinitelyNotSent("the broker socket is not there")
 
         work = self._work()
         result = self._budgeted(
@@ -745,7 +745,7 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
         self.assertEqual(len(settlements), 1)
         self.assertEqual(settlements[0]["actual_micros"], 0)
 
-    def test_a_dead_broker_still_reports_that_it_was_budgeted(self) -> None:
+    def test_unproved_adapter_failure_retains_budget_and_is_terminal(self) -> None:
         # The fix for the failure that mattered most: reporting the budget
         # only on success made a budgeted install with a dead broker report
         # the one word -- "unbudgeted" -- that means the call never reached
@@ -759,10 +759,11 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
         work = self._work()
         result = self._budgeted(
             DeadBroker(self.ACTION), budget_mission()).run_once(work)
-        self.assertEqual(result["status"], "retryable")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(result["budget"]["status"], "settled")
         self.assertEqual(result["budget"]["pool"], "adhoc")
-        self.assertEqual(result["budget"]["settled_micros"], 0)
+        self.assertEqual(result["budget"]["settled_micros"], 500_000)
+        self.assertEqual(result["budget"]["cost_status"], "reserved")
         self.assertNotEqual(result["budget"]["status"], "unbudgeted")
 
     def test_a_failure_this_worker_does_not_model_still_frees_the_pool(self) -> None:

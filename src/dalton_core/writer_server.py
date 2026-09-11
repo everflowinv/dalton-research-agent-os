@@ -1114,6 +1114,45 @@ def _require_owner_only(path: Path, label: str) -> None:
         raise WriterServerError(f"{label} must be owner-only")
 
 
+_PLANNER_LEGACY_CALL_BUDGET = {
+    "max_input_tokens": 16_000,
+    "max_output_tokens": 1_200,
+    "max_cost_usd": 5.0,
+    "timeout_seconds": 180,
+}
+
+
+def resolved_planner_call_budget(
+    config: Mapping[str, Any], requested: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Resolve the installed planner ceiling and tighten it for one Work."""
+
+    from .call_budget import CallBudgetError, resolve_call_budget
+
+    try:
+        installed = resolve_call_budget(
+            config, "plan", defaults=_PLANNER_LEGACY_CALL_BUDGET
+        )
+    except CallBudgetError as exc:
+        raise WriterServerError(
+            f"planner model call budget is invalid: {exc}"
+        ) from exc
+    supplied = dict(requested or {})
+    names = {
+        "max_input_tokens": "max_input_tokens",
+        "max_output_tokens": "max_output_tokens",
+        "max_cost_usd": "max_cost_usd",
+        "max_seconds": "timeout_seconds",
+    }
+    result = dict(installed)
+    for request_name, installed_name in names.items():
+        if supplied.get(request_name) is not None:
+            result[installed_name] = min(
+                installed[installed_name], supplied[request_name]
+            )
+    return result
+
+
 def planner_budget_config(state_dir: str | Path) -> dict[str, Any]:
     """The day-ledger wiring for the planner's model calls, if it is installed.
 
@@ -1178,6 +1217,12 @@ def planner_budget_config(state_dir: str | Path) -> dict[str, Any]:
             raise WriterServerError(
                 f"planner transport retry configuration is invalid: {exc}"
             ) from exc
+    for key in ("call_budget", "purpose_call_budgets"):
+        if key in installed:
+            result[key] = installed[key]
+    # Validate the effective plan-purpose view now, at startup, rather than
+    # discovering a malformed owner limit after a Work has been prepared.
+    resolved_planner_call_budget(result)
     return result
 
 
@@ -1962,13 +2007,19 @@ class WriterServer:
                 safe_retries = int(
                     transport.get("max_definitely_not_sent_retries", 0)
                 )
-                # The production adapter below has an explicit 120-second
-                # response timeout. Its queue and proved-pre-send retry policy
-                # extend the same Scheduler lease; neither consumes a paid
-                # provider attempt.
+                configured_call = resolved_planner_call_budget(
+                    self._planner_model_config
+                )
+                # The installed plan-purpose timeout, queue, and proved-
+                # pre-send retries extend the same Scheduler lease. None of
+                # those safe transport retries consumes a paid provider
+                # attempt.
                 self._planner_lease_seconds = (
                     (safe_retries + 1)
-                    * (120.0 + float(transport.get("queue_wait_seconds", 0)))
+                    * (
+                        float(configured_call["timeout_seconds"])
+                        + float(transport.get("queue_wait_seconds", 0))
+                    )
                     + safe_retries
                     * float(transport.get("retry_backoff_seconds", 0))
                     + 30.0
@@ -3528,7 +3579,19 @@ class WriterServer:
     def _op_llm_planner_prepare(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
         context_pack_ref = values.pop("context_pack_ref")
-        budget = {key: value for key, value in values.items() if value is not None}
+        requested = {key: value for key, value in values.items() if value is not None}
+        if self._planner_model_config is None:
+            budget = requested
+        else:
+            effective = resolved_planner_call_budget(
+                self._planner_model_config, requested
+            )
+            budget = {
+                "max_input_tokens": effective["max_input_tokens"],
+                "max_output_tokens": effective["max_output_tokens"],
+                "max_cost_usd": effective["max_cost_usd"],
+                "max_seconds": effective["timeout_seconds"],
+            }
         return self._llm_planner_coordinator().prepare(
             context_pack_ref,
             provider_retry=(
@@ -3642,7 +3705,14 @@ class WriterServer:
         declared_pool = values.pop("pool", None)
         if declared_pool is not None and declared_pool not in POOL_NAMES:
             raise WriterServerError("pool is not one of the mission's capacity pools")
-        budget = {key: value for key, value in values.items() if value is not None}
+        requested = {key: value for key, value in values.items() if value is not None}
+        effective = resolved_planner_call_budget(config, requested)
+        budget = {
+            "max_input_tokens": effective["max_input_tokens"],
+            "max_output_tokens": effective["max_output_tokens"],
+            "max_cost_usd": effective["max_cost_usd"],
+            "max_seconds": effective["timeout_seconds"],
+        }
         coordinator = self._llm_planner_coordinator()
         prepared = coordinator.prepare(
             context_pack_ref,
@@ -3678,7 +3748,7 @@ class WriterServer:
                     config["broker_auth_key"]
                 ).read_bytes().strip(),
                 expected_agent_id=config["expected_agent_id"],
-                timeout_seconds=120.0,
+                timeout_seconds=float(work_order["budget"]["max_seconds"]),
                 queue_wait_seconds=float(
                     (config.get("transport_retry") or {}).get(
                         "queue_wait_seconds", 0

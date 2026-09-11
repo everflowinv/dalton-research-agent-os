@@ -1010,7 +1010,7 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
         transport = {
             "max_definitely_not_sent_retries": 1,
-            "queue_wait_seconds": 600,
+            "queue_wait_seconds": 7200,
             "retry_backoff_seconds": 2,
         }
         config = {
@@ -1025,6 +1025,9 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
             "model_router_db": str(router_path),
             "provider_retry": retry,
             "transport_retry": transport,
+            "purpose_call_budgets": {
+                "plan": {"timeout_seconds": 600},
+            },
         }
         server = WriterServer(
             self.root / "core.sqlite", str(self.root / "planner-retry.sock"),
@@ -1061,10 +1064,16 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         self.assertEqual(
             authority["work_order"]["metadata"]["transport_retry"], transport
         )
-        self.assertEqual(server._planner_lease_seconds, 1472.0)
-        self.assertEqual(server._scheduler.max_lease_seconds, 1472.0)
         self.assertEqual(
-            adapter_factory.call_args.kwargs["queue_wait_seconds"], 600.0
+            authority["work_order"]["budget"]["max_seconds"], 600
+        )
+        self.assertEqual(server._planner_lease_seconds, 15632.0)
+        self.assertEqual(server._scheduler.max_lease_seconds, 15632.0)
+        self.assertEqual(
+            adapter_factory.call_args.kwargs["queue_wait_seconds"], 7200.0
+        )
+        self.assertEqual(
+            adapter_factory.call_args.kwargs["timeout_seconds"], 600.0
         )
 
     def _budget_binding(self) -> dict:

@@ -26,7 +26,6 @@ from .llm_research_planner import (
 from .model_accounting import record_model_accounting
 from .model_router import ModelRouter, RoutingPolicyNotFound
 from .openclaw_model_adapter import (
-    BrokerConnectionError,
     BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
@@ -879,11 +878,15 @@ class LLMResearchPlannerModelWorker:
                         admission, reserved, "reserved"
                     ),
                 }
-            # With no typed post-send evidence this remains the historical
-            # adapter-unavailable path. Definitely-not-sent retries were
-            # already exhausted by _execute_with_safe_retry above.
-            self._settle(admission, 0)
-            retryable = isinstance(exc, BrokerConnectionError)
+            # Absence of typed post-send evidence is not proof of absence of
+            # dispatch. Only the adapter's dedicated definitely-not-sent
+            # exception can release the reservation; every other adapter
+            # failure retains it in full.
+            definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent)
+            settled_micros = 0 if definitely_not_sent else reserved
+            settled_status = "not_sent" if definitely_not_sent else "reserved"
+            self._settle(admission, settled_micros)
+            retryable = definitely_not_sent
             result = self._control_result(
                 work,
                 attempt_number,
@@ -912,7 +915,9 @@ class LLMResearchPlannerModelWorker:
                 "route": route,
                 "completion": completion,
                 "error_type": type(exc).__name__,
-                "budget": self._budget_report(admission, 0, "failed"),
+                "budget": self._budget_report(
+                    admission, settled_micros, settled_status
+                ),
             }
         except BaseException:
             # C2b: an adapter failure this worker does not model -- a bug, an
