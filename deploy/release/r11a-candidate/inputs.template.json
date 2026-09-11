@@ -1,0 +1,47 @@
+{
+  "schema_version": "r11a-ops-stage-input-0.1",
+  "status": "incomplete",
+  "release_ref": "foundation-followup-r11a",
+  "source": {
+    "root": "/Users/everflow/Projects/dalton-foundation-followup-r11a-acceptance-worktree",
+    "commit": "424c22529d5317c4c5c9dc8ba88f37299cea3f49"
+  },
+  "artifacts": {
+    "wheel": {
+      "path": "/tmp/dalton-foundation-followup-r11a-wheel/dalton_core-0.1.0.dev0-py3-none-any.whl",
+      "sha256": "418bf77f7b5285f9e53e041bdcf9d36463e57a7fa0bd4ce368ded2ec1e50d046"
+    },
+    "wheel_verification": {
+      "path": "/tmp/dalton-foundation-followup-r11a-wheel-verification.json",
+      "sha256": null
+    },
+    "full_suite_log": {"path": "/tmp/dalton-foundation-followup-r11a-full-suite.log", "sha256": null},
+    "full_suite_receipt": {"path": "/tmp/dalton-foundation-followup-r11a-full-suite-receipt.json", "sha256": null},
+    "full_suite_runner": {"path": "/tmp/dalton-run-r11a-full-suite.py", "sha256": null},
+    "full_suite_native_result": {"path": "/tmp/dalton-foundation-followup-r11a-unittest-result.json", "sha256": null},
+    "rehearsal_binding": {"path": null, "sha256": null},
+    "rehearsal_report": {"path": null, "sha256": null},
+    "service_config_before": {"path": null, "sha256": null},
+    "service_config_after": {"path": null, "sha256": null},
+    "model_config_snapshot": {"path": null, "sha256": null},
+    "openclaw_config_snapshot": {"path": null, "sha256": "249124e3d372aaab5479a272f4901046fb04aec3339d3276711c2068edcb402e"},
+    "provider_bridge_install_receipt": {"path": null, "sha256": null},
+    "mission_authority_snapshot": {"path": null, "sha256": null},
+    "web_v6_activation_receipt": {"path": null, "sha256": null},
+    "provider_bridge_activation_receipt": {"path": null, "sha256": null},
+    "alpha_v3_activation_receipt": {"path": null, "sha256": null},
+    "latest_backup_manifest": {"path": null, "sha256": null},
+    "backup_retention_receipt": {"path": null, "sha256": null}
+  },
+  "runtime_configuration": {
+    "model_config_count": null,
+    "semantic_snapshot_sha256": null
+  },
+  "latest_backup": {"snapshot_id": null},
+  "boundaries": {
+    "live_mutation": false,
+    "manifest_publication": false,
+    "acceptance_transition": false,
+    "historical_archives_copied": false
+  }
+}

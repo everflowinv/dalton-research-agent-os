@@ -1,0 +1,100 @@
+{
+  "schema_version": "r11a-ops-stage-input-0.1",
+  "status": "complete_pending_staging",
+  "release_ref": "foundation-followup-r11a",
+  "source": {
+    "root": "/Users/everflow/Projects/dalton-foundation-followup-r11a-acceptance-worktree",
+    "commit": "424c22529d5317c4c5c9dc8ba88f37299cea3f49"
+  },
+  "artifacts": {
+    "wheel": {
+      "path": "/tmp/dalton-foundation-followup-r11a-wheel/dalton_core-0.1.0.dev0-py3-none-any.whl",
+      "sha256": "418bf77f7b5285f9e53e041bdcf9d36463e57a7fa0bd4ce368ded2ec1e50d046"
+    },
+    "wheel_verification": {
+      "path": "/tmp/dalton-foundation-followup-r11a-wheel-verification.json",
+      "sha256": "0fe138681701c7d48642cce082d9912a70477469b4e3d3fa99c1f75fafbc1c41"
+    },
+    "full_suite_log": {
+      "path": "/tmp/dalton-foundation-followup-r11a-full-suite.log",
+      "sha256": "990e2545d5da0806908f95a1feaebc069560dc1ff2f6d6df25c167be882df269"
+    },
+    "full_suite_receipt": {
+      "path": "/tmp/dalton-foundation-followup-r11a-full-suite-receipt.json",
+      "sha256": "6e69a4951a66c68a127e9a38c5389928aea538e3b67a54a826e1aa6663362bfa"
+    },
+    "full_suite_runner": {
+      "path": "/tmp/dalton-run-r11a-full-suite.py",
+      "sha256": "f9e28a85c7ac8639ca77cf567ef6373348d149571ddf352727647bbd3435c132"
+    },
+    "full_suite_native_result": {
+      "path": "/tmp/dalton-foundation-followup-r11a-unittest-result.json",
+      "sha256": "13baa84baf6289871a1421ad880ae2e051fb968cbf93aac60d036539b7cb6af2"
+    },
+    "rehearsal_binding": {
+      "path": "/private/tmp/dalton-foundation-followup-r11a-v2-rehearsal-release-binding.json",
+      "sha256": "e239a8f1d90f4651d81c06d9e43fb731d934fdc7c400b3fa38a67fafc786a4ee"
+    },
+    "rehearsal_report": {
+      "path": "/private/tmp/dalton-foundation-followup-r11a-v2-rehearsal-report.md",
+      "sha256": "c6175f858b24c36749a67642328e85a3228e470b708b3e386e4079803570e292"
+    },
+    "service_config_before": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/service-before.json",
+      "sha256": "e1b23596c4913230832c7713319b5d5163138dcfb06d7eecabf161d464695c56"
+    },
+    "service_config_after": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/service-after.json",
+      "sha256": "9a247ce52058b02a00b90b30806fa1b1e8d6105dd4429dc313de3ac01f58584b"
+    },
+    "model_config_snapshot": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/model-config-snapshot.json",
+      "sha256": "69068da3ff790f1186809121d5c3c0168201feaa7630ad63adbc382e413ec144"
+    },
+    "openclaw_config_snapshot": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/openclaw-config.json",
+      "sha256": "249124e3d372aaab5479a272f4901046fb04aec3339d3276711c2068edcb402e"
+    },
+    "provider_bridge_install_receipt": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/provider-failure-bridge-r10a-stopped-window/install-receipt/receipt.json",
+      "sha256": "ac41e1e2c0617ea2066432419951abd83de25cb720eea753aeef8781669da874"
+    },
+    "mission_authority_snapshot": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/mission-v14-signed-receipt.json",
+      "sha256": "3cb6280fa3ac37f600c5225aecc1115ab0dfe53644954da4f6a2e39d27e8b5cd"
+    },
+    "web_v6_activation_receipt": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/web-host-recovery-r10a-activation/activation-receipt.json",
+      "sha256": "3d130e2175cef5aee38e3038b7e23a89adc7469ea30a2f89c6ede34bb19d10f1"
+    },
+    "provider_bridge_activation_receipt": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/provider-failure-bridge-r10a-stopped-window/activation-receipt.json",
+      "sha256": "b1159447deaea10ef078479d94d62c578d82ac1c00f633c8f3fb3c114ab7fc06"
+    },
+    "alpha_v3_activation_receipt": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/alphaengine-selection-r10a-activation-v3/activation-receipt.json",
+      "sha256": "ed0d5b6d0c90f67e96d09f2ba3b3ae5cf54fb6814e8899b22c417c78191badb5"
+    },
+    "latest_backup_manifest": {
+      "path": "/Users/everflow/Library/Application Support/Dalton/state/dalton-core/backups/20260911T111631.495486Z/manifest.json",
+      "sha256": "c4d6598035dc8d65042d51a9d8ce6edbf8401ca0df579d2b516e12ddb6638180"
+    },
+    "backup_retention_receipt": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/state-backup-prune-r11a-predeploy-20260911.json",
+      "sha256": "5a88952e0e34a6afdc19177149c7def70240e280bf608b048a36c011274fbbaf"
+    }
+  },
+  "runtime_configuration": {
+    "model_config_count": 15,
+    "semantic_snapshot_sha256": "3d8ff14ab8f0f62a6223859af1cd3fb09868ca64c9f9e2e55fab282fd703505a"
+  },
+  "latest_backup": {
+    "snapshot_id": "20260911T111631.495486Z"
+  },
+  "boundaries": {
+    "live_mutation": false,
+    "manifest_publication": false,
+    "acceptance_transition": false,
+    "historical_archives_copied": false
+  }
+}
