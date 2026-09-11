@@ -517,6 +517,22 @@ def broker_catalog_hash(config: Mapping[str, Any]) -> str:
     )
 
 
+def catalog_source_hash(config: Mapping[str, Any]) -> str:
+    """Hash the public OpenClaw fields that can change Dalton's catalog.
+
+    The hourly lane also checks this digest on every controller tick.  This
+    makes an atomically replaced OpenClaw catalog visible without restarting
+    the resident Writer or waiting for the next wall-clock hour, while a
+    credential-only edit does not manufacture a new catalog observation.
+    Provider and broker parsers deliberately project no secrets.
+    """
+
+    return canonical_hash({
+        "provider_models": _provider_models(config),
+        "broker_profiles": _broker_profiles(config),
+    })
+
+
 def _retired_version(
     latest: Mapping[str, Any], *, checked_at: datetime, catalog_hash: str
 ) -> dict[str, Any]:
@@ -794,6 +810,7 @@ __all__ = [
     "UNPRICED_CEILING_INPUT_PER_MILLION_USD",
     "UNPRICED_CEILING_OUTPUT_PER_MILLION_USD",
     "broker_catalog_hash",
+    "catalog_source_hash",
     "catalog_sync_status",
     "load_openclaw_config",
     "openclaw_broker_profiles_from_config",

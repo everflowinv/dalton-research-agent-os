@@ -1071,6 +1071,58 @@ class CatalogLaneTests(unittest.TestCase):
         self.moment = NOW + timedelta(hours=1)
         self.assertEqual(lane.dispatch_once()["status"], "current")
 
+    def test_public_catalog_change_hot_reloads_before_the_next_hour(self) -> None:
+        lane = self.coordinator()
+        first = lane.dispatch_once()
+        self.assertEqual(first["status"], "changed")
+        profile_id = "profile:deepseek-v4-flash"
+        with ModelRouter(self.router_db) as router:
+            before = next(
+                profile for profile in router.latest_profiles()
+                if profile["id"] == profile_id
+            )
+            before_bytes = router.connection.execute(
+                "SELECT profile_json FROM model_endpoint_profile_versions "
+                "WHERE profile_version_ref=?", (before["profile_version_ref"],),
+            ).fetchone()[0]
+
+        changed = _allowing_config()
+        changed["models"]["providers"]["deepseek"]["models"].append({
+            "id": "deepseek-renamed", "contextWindow": 180_000,
+            "maxTokens": 12_000, "cost": {"input": 0.4, "output": 1.2},
+        })
+        broker = next(
+            profile for profile in changed["plugins"]["entries"]
+            ["dalton-openclaw-model-broker"]["config"]["profiles"]
+            if profile["id"] == profile_id
+        )
+        broker.update({"model": "deepseek/deepseek-renamed", "maxTokens": 10_000})
+        changed["plugins"]["entries"]["dalton-openclaw-model-broker"]["llm"][
+            "allowedModels"
+        ].append("deepseek/deepseek-renamed")
+        self.openclaw.write_text(json.dumps(changed), encoding="utf-8")
+
+        # The clock has not moved into a new hourly window.  The public source
+        # digest still makes this a reconciliation pass on the next tick.
+        second = lane.dispatch_once()
+        self.assertEqual(second["status"], "changed")
+        self.assertEqual(second["registered"], [])
+        with ModelRouter(self.router_db) as router:
+            after = next(
+                profile for profile in router.latest_profiles()
+                if profile["id"] == profile_id
+            )
+            self.assertEqual(
+                (after["provider"], after["model"]),
+                ("deepseek", "deepseek-renamed"),
+            )
+            self.assertEqual(after["prior_version_ref"], before["profile_version_ref"])
+            self.assertEqual(router.connection.execute(
+                "SELECT profile_json FROM model_endpoint_profile_versions "
+                "WHERE profile_version_ref=?", (before["profile_version_ref"],),
+            ).fetchone()[0], before_bytes)
+        self.assertEqual(lane.dispatch_once()["status"], "idle")
+
     def test_the_lane_never_writes_the_gateways_configuration(self) -> None:
         before = self.openclaw.read_bytes()
         self.coordinator().run()

@@ -9,6 +9,7 @@ from dalton_core.model_deployment import openclaw_broker_profiles
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import (
     OpenClawCatalogError,
+    catalog_source_hash,
     load_openclaw_config,
     openclaw_broker_profiles_from_config,
     reconcile_openclaw_model_catalog,
@@ -359,6 +360,21 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
             path.write_text('{"models":{},"models":{}}', encoding="utf-8")
             with self.assertRaisesRegex(OpenClawCatalogError, "duplicate JSON key"):
                 load_openclaw_config(path)
+
+    def test_public_source_hash_tracks_catalog_not_credentials(self):
+        config = _config()
+        baseline = catalog_source_hash(config)
+        credentials = copy.deepcopy(config)
+        next(iter(credentials["models"]["providers"].values()))["apiKey"] = (
+            "a-different-secret"
+        )
+        self.assertEqual(catalog_source_hash(credentials), baseline)
+
+        public = copy.deepcopy(config)
+        next(iter(public["models"]["providers"].values()))["models"][0]["cost"][
+            "input"
+        ] += 0.01
+        self.assertNotEqual(catalog_source_hash(public), baseline)
 
 
 if __name__ == "__main__":

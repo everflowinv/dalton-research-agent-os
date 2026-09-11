@@ -109,6 +109,7 @@ class ModelCatalogSyncCoordinator:
             clock = lambda: datetime.now(timezone.utc)  # noqa: E731
         self.clock = clock
         self._last_window: int | None = None
+        self._last_source_hash: str | None = None
 
     def close(self) -> None:
         """Nothing is held open between runs; the writer closes every lane."""
@@ -125,6 +126,7 @@ class ModelCatalogSyncCoordinator:
             record_retirement_notices,
         )
         from .openclaw_catalog_reconcile import (
+            catalog_source_hash,
             load_openclaw_config,
             sync_openclaw_model_catalog,
         )
@@ -140,6 +142,7 @@ class ModelCatalogSyncCoordinator:
             return {"status": "unavailable",
                     "reason": f"no model router database at {router_db}"}
         config = load_openclaw_config(openclaw_path)
+        source_hash = catalog_source_hash(config)
         checked_at = self.clock()
         with ModelRouter(str(router_db)) as router:
             sync = sync_openclaw_model_catalog(
@@ -175,6 +178,7 @@ class ModelCatalogSyncCoordinator:
             "status": "changed" if sync["changed"] else "current",
             "catalog_in_sync": sync["catalog_in_sync"],
             "broker_catalog_hash": sync["broker_catalog_hash"],
+            "catalog_source_hash": source_hash,
             "registered": _names(sync["added_profile_ids"]),
             "retired": _names(sync["retired_profile_ids_this_run"]),
             "revived": _names(sync["revived_profile_ids"]),
@@ -189,16 +193,35 @@ class ModelCatalogSyncCoordinator:
 
     def dispatch_once(self) -> dict[str, Any]:
         window = self.window()
-        if window == self._last_window:
-            return {"status": "idle",
-                    "reason": "the catalog has already been read this hour"}
         try:
+            # The hour remains the bounded reconciliation cadence, including
+            # availability renewal.  Between hourly passes, read only the
+            # public projection and run early when it changed.  In particular,
+            # a resident Writer now follows an OpenClaw model rename on its
+            # next controller tick instead of continuing to route the prior
+            # model until the next hour.
+            if window == self._last_window:
+                from .openclaw_catalog_reconcile import (
+                    catalog_source_hash,
+                    load_openclaw_config,
+                )
+
+                settings = load_lane_config(self.config_path)
+                source = Path(settings["openclaw_config_path"])
+                if not source.is_file():
+                    return {"status": "unavailable",
+                            "reason": f"no OpenClaw configuration at {source}"}
+                current_hash = catalog_source_hash(load_openclaw_config(source))
+                if current_hash == self._last_source_hash:
+                    return {"status": "idle",
+                            "reason": "the catalog has already been read this hour"}
             result = self.run()
         except Exception as exc:  # noqa: BLE001 - a bad host file never fails a tick
             return {"status": "failed",
                     "reason": f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]}
         if result["status"] != "unavailable":
             self._last_window = window
+            self._last_source_hash = result["catalog_source_hash"]
         return result
 
 
