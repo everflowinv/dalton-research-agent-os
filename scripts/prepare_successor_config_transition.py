@@ -23,7 +23,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from dalton_core.document_extraction import validate_model_config
+from dalton_core.annual_report_runtime import load_annual_report_model_config
 from dalton_core.document_research_inventory import validate_inventory_config
 
 
@@ -127,9 +127,9 @@ def build_transition(
              MODEL_REPLACEMENT: initial_after_path, DOCUMENT_CONFIG: document_activation_path}
     parsed: dict[str, dict[str, Any]] = {}
     for name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT):
-        value, _ = _read_json(paths[name], name)
+        _value, _ = _read_json(paths[name], name)
         try:
-            parsed[name] = validate_model_config(value)
+            parsed[name] = load_annual_report_model_config(paths[name], name)
         except Exception as exc:
             raise ConfigTransitionError(f"{name} is not a valid model config") from exc
 
@@ -214,10 +214,19 @@ def _resolve_artifact(packet_root: Path, row: Mapping[str, Any]) -> tuple[Path, 
     return path, data
 
 
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def apply_transition(
     *, packet_root: Path, state_dir: Path, manifest_path: Path,
     expected_manifest_sha256: str, receipt_path: Path,
     fault_hook: Callable[[str], None] | None = None,
+    _require_accepted: bool = True,
 ) -> dict[str, Any]:
     """Apply only manifest-owned bytes; caller owns the stopped window."""
 
@@ -234,18 +243,56 @@ def apply_transition(
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
-    _need(acceptance.get("state") == "accepted"
-          and acceptance.get("health_acceptance_required") is True
-          and all(HEX64.fullmatch(str(acceptance.get(name, ""))) is not None
-                  for name in ("full_suite_receipt_sha256", "wheel_sha256",
-                               "copied_state_rehearsal_binding_sha256")),
-          "accepted full-suite, wheel, rehearsal and health gates are required")
+    if _require_accepted:
+        _need(acceptance.get("state") == "accepted"
+              and acceptance.get("health_acceptance_required") is True
+              and all(HEX64.fullmatch(str(acceptance.get(name, ""))) is not None
+                      for name in ("full_suite_receipt_sha256", "wheel_sha256",
+                                   "copied_state_rehearsal_binding_sha256")),
+              "accepted full-suite, wheel, rehearsal and health gates are required")
+    else:
+        _need(acceptance.get("state") == "pending"
+              and acceptance.get("health_acceptance_required") is True,
+              "scratch rehearsal requires the inert pending transition")
+
+    rows = manifest.get("targets")
+    _need(isinstance(rows, list) and len(rows) == 4
+          and {row.get("name") for row in rows if isinstance(row, Mapping)}
+          == {*MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG},
+          "transition must contain each of the four targets exactly once")
+    expected_kinds = {name: "exclusive_add" for name in MODEL_ADDITIONS}
+    expected_kinds.update({MODEL_REPLACEMENT: "compare_and_replace",
+                           DOCUMENT_CONFIG: "exclusive_add"})
+
+    supporting = manifest.get("supporting_evidence")
+    _need(isinstance(supporting, Mapping)
+          and set(supporting) == {
+              "baseline_model_snapshot", "document_research_readonly_audit"},
+          "transition supporting evidence differs")
+    _, baseline_bytes = _resolve_artifact(
+        packet_root, supporting["baseline_model_snapshot"])
+    try:
+        baseline_models = json.loads(baseline_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigTransitionError("baseline model snapshot is invalid") from exc
+    actual_models = {
+        path.name: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(state_dir.glob("*-model-config.json"))
+        if path.is_file() and not path.is_symlink()
+    }
+    _need(actual_models == baseline_models
+          and len(actual_models) == manifest["model_inventory"]["before_count"]
+          and canonical_hash(actual_models)
+          == manifest["model_inventory"]["before_semantic_sha256"],
+          "full model configuration inventory differs from reviewed baseline")
 
     prepared = []
-    for row in manifest.get("targets", []):
+    for row in rows:
         _need(isinstance(row, Mapping) and row.get("name") in {
             *MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG},
             "transition target is outside the closed inventory")
+        _need(row.get("kind") == expected_kinds[row["name"]],
+              "transition target kind differs from its closed operation")
         target = state_dir / row["name"]
         _, after = _resolve_artifact(packet_root, row["after"])
         if row.get("kind") == "exclusive_add":
@@ -264,12 +311,47 @@ def apply_transition(
         prepared.append((row, target, before, after))
 
     changed = []
+
+    def rollback_changed() -> list[str]:
+        conflicts = []
+        for row, target, before, after, owned_identity in reversed(changed):
+            try:
+                current_identity = (target.stat().st_dev, target.stat().st_ino)
+                if (not target.is_file() or target.is_symlink()
+                        or current_identity != owned_identity
+                        or target.read_bytes() != after):
+                    conflicts.append(row["name"])
+                    continue
+                if before is None:
+                    target.unlink()
+                else:
+                    fd, temporary_name = tempfile.mkstemp(
+                        prefix=".successor-rollback-", dir=state_dir)
+                    temporary = Path(temporary_name)
+                    try:
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(before); stream.flush(); os.fsync(stream.fileno())
+                        os.chmod(temporary, stat.S_IMODE(target.stat().st_mode))
+                        os.replace(temporary, target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            except OSError:
+                conflicts.append(row["name"])
+        return conflicts
+
     try:
         for row, target, before, after in prepared:
             if row["kind"] == "exclusive_add":
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(after); stream.flush(); os.fsync(stream.fileno())
+                fd, temporary_name = tempfile.mkstemp(
+                    prefix=".successor-add-", dir=state_dir)
+                temporary = Path(temporary_name)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(after); stream.flush(); os.fsync(stream.fileno())
+                    os.chmod(temporary, 0o600)
+                    os.link(temporary, target)
+                finally:
+                    temporary.unlink(missing_ok=True)
             else:
                 mode = stat.S_IMODE(target.stat().st_mode)
                 fd, temporary_name = tempfile.mkstemp(prefix=".successor-config-", dir=state_dir)
@@ -283,35 +365,71 @@ def apply_transition(
                     os.replace(temporary, target)
                 finally:
                     temporary.unlink(missing_ok=True)
-            changed.append((row, target, before, after))
+            owned_identity = (target.stat().st_dev, target.stat().st_ino)
+            changed.append((row, target, before, after, owned_identity))
+            _fsync_directory(state_dir)
             if fault_hook is not None:
                 fault_hook(row["name"])
-    except Exception:
-        for row, target, before, after in reversed(changed):
-            _need(target.is_file() and not target.is_symlink() and target.read_bytes() == after,
-                  f"{row['name']} changed after installation; refusing rollback overwrite")
-            if before is None:
-                target.unlink()
-            else:
-                target.write_bytes(before)
+        final_models = {
+            path.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(state_dir.glob("*-model-config.json"))
+            if path.is_file() and not path.is_symlink()
+        }
+        _need(len(final_models) == manifest["model_inventory"]["after_count"]
+              and canonical_hash(final_models)
+              == manifest["model_inventory"]["after_semantic_sha256"],
+              "installed model configuration inventory differs")
+        receipt = {
+            "schema_version": RECEIPT_SCHEMA_VERSION,
+            "status": "configured_controller_start_pending",
+            "release_ref": manifest["release_ref"],
+            "source_commit": manifest["source_commit"],
+            "transition_manifest_sha256": expected_manifest_sha256,
+            "targets": [{"name": row["name"], "after_sha256": sha256_bytes(after)}
+                        for row, _target, _before, after in prepared],
+            "service_lifecycle_mutations": 0, "model_calls": 0,
+            "manifest_publication": False,
+        }
+        receipt["content_hash"] = canonical_hash(receipt)
+        data = (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode()
+        if fault_hook is not None:
+            fault_hook("before_receipt")
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+    except Exception as exc:
+        conflicts = rollback_changed()
+        if conflicts:
+            raise ConfigTransitionError(
+                "transition failed; restored other owned targets but refused "
+                "concurrent target changes: " + ",".join(sorted(conflicts))
+            ) from exc
         raise
-    receipt = {
-        "schema_version": RECEIPT_SCHEMA_VERSION,
-        "status": "configured_controller_start_pending",
-        "release_ref": manifest["release_ref"],
-        "source_commit": manifest["source_commit"],
-        "transition_manifest_sha256": expected_manifest_sha256,
-        "targets": [{"name": row["name"], "after_sha256": sha256_bytes(after)}
-                    for row, _target, _before, after in prepared],
-        "service_lifecycle_mutations": 0, "model_calls": 0,
-        "manifest_publication": False,
-    }
-    receipt["content_hash"] = canonical_hash(receipt)
-    data = (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode()
-    fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(data); stream.flush(); os.fsync(stream.fileno())
     return receipt
+
+
+def apply_transition_to_scratch(
+    *, packet_root: Path, scratch_root: Path, state_dir: Path,
+    manifest_path: Path, expected_manifest_sha256: str, receipt_path: Path,
+) -> dict[str, Any]:
+    """Apply a pending transition only under an explicit scratch root."""
+
+    scratch_root = scratch_root.resolve()
+    state_dir = state_dir.resolve()
+    receipt_path = receipt_path.resolve()
+    _need(scratch_root.is_dir() and not scratch_root.is_symlink(),
+          "scratch root is unavailable")
+    _need(state_dir.is_relative_to(scratch_root)
+          and receipt_path.is_relative_to(scratch_root),
+          "scratch transition output escapes scratch root")
+    receipt = apply_transition(
+        packet_root=packet_root, state_dir=state_dir,
+        manifest_path=manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+        receipt_path=receipt_path, _require_accepted=False,
+    )
+    return {**receipt, "status": "scratch_configuration_applied",
+            "live_mutation": False}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

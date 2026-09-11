@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from scripts.prepare_successor_config_transition import (
 
 def write(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
 
 
 def model(name: str) -> dict:
@@ -184,7 +186,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
         write(manifest_path, manifest)
         for name, value in self.baseline.items(): write(self.state / name, value)
         write(self.state / MODEL_REPLACEMENT, {"owner": "changed"})
-        with self.assertRaisesRegex(ConfigTransitionError, "reviewed precondition"):
+        with self.assertRaisesRegex(ConfigTransitionError, "reviewed baseline"):
             apply_transition(
                 packet_root=self.packet, state_dir=self.state,
                 manifest_path=manifest_path,
@@ -193,6 +195,67 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
             )
         self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())
         self.assertFalse((self.state / "document-research-config.json").exists())
+
+    def test_empty_or_duplicate_target_inventory_is_refused(self):
+        for mutate in (
+            lambda manifest: manifest.update(targets=[]),
+            lambda manifest: manifest.update(targets=[manifest["targets"][0]] * 4),
+        ):
+            with self.subTest(mutate=mutate):
+                manifest = self.accepted_manifest(); mutate(manifest)
+                manifest["content_hash"] = canonical_hash(
+                    {key: value for key, value in manifest.items()
+                     if key != "content_hash"})
+                manifest_path = self.packet / "transition.json"
+                write(manifest_path, manifest)
+                for name, value in self.baseline.items(): write(self.state / name, value)
+                with self.assertRaisesRegex(ConfigTransitionError, "four targets"):
+                    apply_transition(
+                        packet_root=self.packet, state_dir=self.state,
+                        manifest_path=manifest_path,
+                        expected_manifest_sha256=hashlib.sha256(
+                            manifest_path.read_bytes()).hexdigest(),
+                        receipt_path=self.packet / "receipt.json",
+                    )
+                manifest_path.unlink()
+                for path in self.state.iterdir(): path.unlink()
+
+    def test_receipt_failure_rolls_back_completed_configuration(self):
+        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        write(manifest_path, manifest)
+        for name, value in self.baseline.items(): write(self.state / name, value)
+        def fail(name: str) -> None:
+            if name == "before_receipt": raise OSError("receipt storage failed")
+        with self.assertRaisesRegex(OSError, "receipt storage failed"):
+            apply_transition(
+                packet_root=self.packet, state_dir=self.state,
+                manifest_path=manifest_path,
+                expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                receipt_path=self.packet / "receipt.json", fault_hook=fail,
+            )
+        self.assertEqual(json.loads((self.state / MODEL_REPLACEMENT).read_text()), self.initial)
+        self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())
+        self.assertFalse((self.state / "document-research-config.json").exists())
+
+    def test_rollback_continues_after_one_target_is_changed_externally(self):
+        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        write(manifest_path, manifest)
+        for name, value in self.baseline.items(): write(self.state / name, value)
+        def fail(name: str) -> None:
+            if name == "before_receipt":
+                (self.state / MODEL_ADDITIONS[0]).write_text("external\n")
+                raise RuntimeError("late failure")
+        with self.assertRaisesRegex(ConfigTransitionError, MODEL_ADDITIONS[0]):
+            apply_transition(
+                packet_root=self.packet, state_dir=self.state,
+                manifest_path=manifest_path,
+                expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                receipt_path=self.packet / "receipt.json", fault_hook=fail,
+            )
+        self.assertEqual((self.state / MODEL_ADDITIONS[0]).read_text(), "external\n")
+        self.assertFalse((self.state / MODEL_ADDITIONS[1]).exists())
+        self.assertFalse((self.state / "document-research-config.json").exists())
+        self.assertEqual(json.loads((self.state / MODEL_REPLACEMENT).read_text()), self.initial)
 
     def test_mid_transition_failure_rolls_back_only_owned_bytes(self):
         manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
