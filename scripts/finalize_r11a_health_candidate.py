@@ -109,17 +109,17 @@ def finalize(manifest_path: Path, deployment_path: Path, summary_path: Path,
     manifest_bytes = manifest_path.read_bytes()
     manifest = json_file(manifest_path); deployment = json_file(deployment_path)
     summary = json_file(summary_path); installed = json_file(installed_verification_path)
-    need(manifest.get("source_commit") == deployment.get("source_commit") == summary.get("source_commit") == COMMIT,
+    need(manifest.get("source", {}).get("commit") == deployment.get("source_commit") == summary.get("source_commit") == COMMIT,
          "release identity differs")
-    need(manifest.get("acceptance_state") == "passed"
-         and deployment.get("status") == "installer_finished" and deployment.get("exit_code") == 0
-         and deployment.get("approved_manifest_sha256") == sha(manifest_path),
+    need(manifest.get("status") == "staged_pending_owner_acceptance"
+         and deployment.get("status") == "installer_finished_runtime_health_pending" and deployment.get("exit_code") == 0
+         and deployment.get("candidate_manifest_sha256") == sha(manifest_path),
          "deployment proof differs")
     need(summary.get("accepted") is True and summary.get("all_healthy") is True
          and summary.get("same_controller") is True and summary.get("postdeployment_controller") is True
          and summary.get("observed_long_enough") is True
          and summary.get("sample_count") == 45
-         and summary.get("approved_manifest_sha256") == sha(manifest_path)
+         and summary.get("candidate_manifest_sha256") == sha(manifest_path)
          and summary.get("deployment_receipt_sha256") == sha(deployment_path),
          "sustained health proof differs")
     verify_health_samples(summary_path, summary, deployment)
@@ -137,7 +137,7 @@ def finalize(manifest_path: Path, deployment_path: Path, summary_path: Path,
         "status": "passed_pending_owner_publication",
         "source_commit": COMMIT,
         "verified_at": datetime.now(timezone.utc).isoformat(),
-        "approved_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "candidate_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "deployment_receipt_sha256": sha(deployment_path),
         "health_summary_sha256": sha(summary_path),
         "installed_verification_sha256": sha(installed_verification_path),

@@ -32,28 +32,28 @@
       "sha256": "13baa84baf6289871a1421ad880ae2e051fb968cbf93aac60d036539b7cb6af2"
     },
     "rehearsal_binding": {
-      "path": "/private/tmp/dalton-foundation-followup-r11a-v2-rehearsal-release-binding.json",
-      "sha256": "e239a8f1d90f4651d81c06d9e43fb731d934fdc7c400b3fa38a67fafc786a4ee"
+      "path": "/private/tmp/dalton-foundation-followup-r11a-v3-rehearsal-release-binding.json",
+      "sha256": "7345c0a2cdc826e5ddbeb4ed08a7c9afd21b11c43576f5e7da91dccbba6fb955"
     },
     "rehearsal_report": {
-      "path": "/private/tmp/dalton-foundation-followup-r11a-v2-rehearsal-report.md",
-      "sha256": "c6175f858b24c36749a67642328e85a3228e470b708b3e386e4079803570e292"
+      "path": "/private/tmp/dalton-foundation-followup-r11a-v3-rehearsal-report.md",
+      "sha256": "c4f73be8b65f0f46f5406891f7e6aee8b3d11e378db70750f797de2dd3f1d1fd"
     },
     "service_config_before": {
-      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/service-before.json",
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-current-web-config-inputs/service-before.json",
       "sha256": "e1b23596c4913230832c7713319b5d5163138dcfb06d7eecabf161d464695c56"
     },
     "service_config_after": {
-      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/service-after.json",
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-current-web-config-inputs/service-after.json",
       "sha256": "9a247ce52058b02a00b90b30806fa1b1e8d6105dd4429dc313de3ac01f58584b"
     },
     "model_config_snapshot": {
-      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/model-config-snapshot.json",
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-current-web-config-inputs/model-config-snapshot.json",
       "sha256": "69068da3ff790f1186809121d5c3c0168201feaa7630ad63adbc382e413ec144"
     },
     "openclaw_config_snapshot": {
-      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-final-config-inputs/openclaw-config.json",
-      "sha256": "249124e3d372aaab5479a272f4901046fb04aec3339d3276711c2068edcb402e"
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-current-web-config-inputs/openclaw-config.json",
+      "sha256": "f45fa4698e55e6404f2558b2aa5f558bd906fd68f1d2e8c0914c475bd5b6a9a6"
     },
     "provider_bridge_install_receipt": {
       "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/provider-failure-bridge-r10a-stopped-window/install-receipt/receipt.json",
@@ -82,6 +82,14 @@
     "backup_retention_receipt": {
       "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/state-backup-prune-r11a-predeploy-20260911.json",
       "sha256": "5a88952e0e34a6afdc19177149c7def70240e280bf608b048a36c011274fbbaf"
+    },
+    "provider_plugin_snapshot": {
+      "path": "/Users/everflow/Projects/dalton-r11-acceptance-tooling-worktree/deploy/release/r11a-candidate/provider-plugin-snapshot.review-candidate.json",
+      "sha256": "a2234d0c77123215b88e3ce61c30a8e1d67b7c7c8010fb1965d8e14c6ad44428"
+    },
+    "runtime_snapshot_receipt": {
+      "path": "/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-followup-r11a-current-web-config-inputs/snapshot-receipt.json",
+      "sha256": "3ef539e747eb5782cfcb55bca9bdfb10015eeb309ef5cf5a1dfcd04efcb245f5"
     }
   },
   "runtime_configuration": {

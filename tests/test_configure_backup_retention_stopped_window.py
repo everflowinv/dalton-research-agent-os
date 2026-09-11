@@ -99,6 +99,18 @@ class BackupRetentionStoppedWindowTests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), before)
         self.assertFalse(self.receipt.exists())
 
+    def test_concurrent_owner_change_wins_and_cas_refuses_to_replace_it(self) -> None:
+        def owner_changes_config(_raw):
+            changed = json.loads(json.dumps(self.raw))
+            changed["plugins"].append("new-owner-value")
+            self.config.write_text(json.dumps(changed, indent=2) + "\n")
+
+        with self.assertRaisesRegex(RetentionConfigError, "changed during"):
+            install(self.config, self._sha(), self.receipt, config_validator=owner_changes_config)
+        self.assertEqual(json.loads(self.config.read_text())["plugins"],
+                         ["existing", "new-owner-value"])
+        self.assertFalse(self.receipt.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

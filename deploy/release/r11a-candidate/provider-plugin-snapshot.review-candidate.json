@@ -1,0 +1,56 @@
+{
+  "schema_version": "r11a-provider-plugin-snapshot-0.1",
+  "root": "/Users/everflow/Projects/dalton-owner-activation-20260910/provider-failure-bridge-r10a-review/managed-plugins/openclaw-model-broker-7e3fb7bbd9095a3fd78af1b0e0d10bd7c6fb48e4",
+  "openclaw_config_sha256": "f45fa4698e55e6404f2558b2aa5f558bd906fd68f1d2e8c0914c475bd5b6a9a6",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "aff77331e582fc6623a4644ff1e048546ddd201a5bcbfaf38462af375bc2b7d8"
+    },
+    {
+      "path": "index.mjs",
+      "sha256": "3d7ea2564d2b7f7dddb64bf4af29f1fe5a36fd0ca24481c9bdd8536b25bfd19e"
+    },
+    {
+      "path": "openclaw.plugin.json",
+      "sha256": "3909eb8472a94bbaa6fd52c0b9b85d2b36cd24d4d50f2aa595de30a25f8531a5"
+    },
+    {
+      "path": "package.json",
+      "sha256": "626cf9058a253acb38c1224a113427c56122b60a266ea40a61ffa9c95bd0fada"
+    },
+    {
+      "path": "src/auth.mjs",
+      "sha256": "d29087c5b89a2e87bbba5f89ab77b40f7e43d97438d46631470bc862565317cf"
+    },
+    {
+      "path": "src/broker.mjs",
+      "sha256": "d2f9f709cf8de37b18ec4b95b74deda032f1d1b4ed876f6ba81a9c575bd1fffb"
+    },
+    {
+      "path": "src/journal.mjs",
+      "sha256": "c13fa61bbc2017a5a6033239cd343c74b455bd483fc649bad37ec358817fca4c"
+    },
+    {
+      "path": "src/plugin-definition.mjs",
+      "sha256": "7659c938bafb8f86ee7ccddf94c1d9fe1cd3c73d20ad3600663eda719c1b7fa2"
+    },
+    {
+      "path": "src/protocol.mjs",
+      "sha256": "deefbdad07be85c7efa755f8d8f6bf931f916612aa1568f387d88e155d1fe761"
+    },
+    {
+      "path": "src/server.mjs",
+      "sha256": "662913c4ea4086d46717bb17c402ace660ef17462c1b9bc7adc786c8ead1bd8c"
+    },
+    {
+      "path": "test/broker.test.mjs",
+      "sha256": "a81525d33a8d8656acc7b33dbf38b6a21cb22534847df4b61cf3f7735a42d3af"
+    },
+    {
+      "path": "test/server.test.mjs",
+      "sha256": "7c4894a995ebb71a19c75b7db197e5c7fca8b609dfb1511d3365e6a479701637"
+    }
+  ],
+  "tree_sha256": "4a08108412b007b3a28fec4dd71d13c5e29e2900ed621f8606cfebd458403763"
+}

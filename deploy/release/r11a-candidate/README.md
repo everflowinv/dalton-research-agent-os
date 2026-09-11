@@ -22,10 +22,12 @@ python3 scripts/stage_r11a_ops_candidate.py \
   --output /a/new/review-packet-directory
 ```
 
-The staged manifest remains `staged_pending_owner_acceptance`. A separate owner
-step must review it and create an `r11a-approved-deployment-0.1` manifest with a
-closed seven-command inventory. `run_r11a_deploy_candidate.py` validates that
-inventory and is inert unless `--execute` is supplied. Its required order is:
+The staged manifest remains `staged_pending_owner_acceptance`.
+`execute_r11a_stopped_window_candidate.py` performs a read-only preflight by
+default. Execution requires both `--execute` and the exact staged manifest hash.
+It records a full private log, creates a fresh rollback snapshot of runtime,
+configuration, plists and authority databases, and restores those bytes plus
+only the initially loaded services if any later step fails. Its order is:
 
 1. exact preflight;
 2. controlled service stop and child drain;
