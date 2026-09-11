@@ -473,7 +473,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
                 )
 
                 validate_mission_annual_work_authority(
-                    self.mission_annual_research_authority, work
+                    self.mission_annual_research_authority, self.scheduler, work
                 )
             except Exception as exc:
                 raise AnnualReportQualitativeError(
@@ -749,12 +749,12 @@ def build_annual_report_qualitative_candidate(
     return validate_candidate_claim(base)
 
 
-def stage_annual_report_candidate(
-    staging: Any, *, question_ref: str, question: str, proof: Mapping[str, Any],
+def build_annual_report_candidate_bundle(
+    *, question_ref: str, question: str, proof: Mapping[str, Any],
     draft_proof: Mapping[str, Any], verifier_proof: Mapping[str, Any],
     draft_work: WorkOrder | Mapping[str, Any],
     verifier_work: WorkOrder | Mapping[str, Any],
-    actor_ref: str, created_at: str, idempotency_key: str,
+    actor_ref: str, created_at: str,
     source_authority: Mapping[str, Any] | None = None,
     mission_admission: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -791,24 +791,50 @@ def stage_annual_report_candidate(
         subject_ref=proof["registration"]["company_ref"], candidate=candidate,
         actor_ref=actor_ref, created_at=created_at,
     )
-    staged = staging.stage(
-        material=material, source_verification=source_verification,
-        evidence=evidence, claim=claim, idempotency_key=idempotency_key,
-        verification_mode=REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
-        authority_resolver=authority,
-    )
     return {
-        "staging": staged, "material": material,
-        "source_verification": source_verification,
+        "material": material, "source_verification": source_verification,
         "evidence": evidence, "claim": claim,
     }
+
+
+def stage_annual_report_candidate(
+    staging: Any, *, question_ref: str, question: str, proof: Mapping[str, Any],
+    draft_proof: Mapping[str, Any], verifier_proof: Mapping[str, Any],
+    draft_work: WorkOrder | Mapping[str, Any],
+    verifier_work: WorkOrder | Mapping[str, Any],
+    actor_ref: str, created_at: str, idempotency_key: str,
+    source_authority: Mapping[str, Any] | None = None,
+    mission_admission: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    bundle = build_annual_report_candidate_bundle(
+        question_ref=question_ref, question=question, proof=proof,
+        draft_proof=draft_proof, verifier_proof=verifier_proof,
+        draft_work=draft_work, verifier_work=verifier_work,
+        actor_ref=actor_ref, created_at=created_at,
+        source_authority=source_authority, mission_admission=mission_admission,
+    )
+    staged = staging.stage(
+        material=bundle["material"],
+        source_verification=bundle["source_verification"],
+        evidence=bundle["evidence"], claim=bundle["claim"],
+        idempotency_key=idempotency_key,
+        verification_mode=REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
+        authority_resolver=AnnualReportCandidateAuthority(
+            question=question, proof=proof,
+            draft_proof=bundle["material"]["normalized_payload"]["draft_proof"],
+            verifier_proof=bundle["material"]["normalized_payload"]["verifier_proof"],
+            source_authority=source_authority, mission_admission=mission_admission,
+        ),
+    )
+    return {"staging": staged, **bundle}
 
 
 __all__ = [
     "DRAFT_OUTPUT_SCHEMA", "VERIFIER_OUTPUT_SCHEMA", "AnnualReportCandidateAuthority",
     "AnnualReportQualitativeError", "RegisteredAnnualReportDraftWorker",
     "RegisteredAnnualReportModelWorker", "RegisteredAnnualReportVerifierWorker",
-    "build_annual_report_qualitative_candidate", "draft_prompt", "parse_draft_text",
+    "build_annual_report_candidate_bundle", "build_annual_report_qualitative_candidate",
+    "draft_prompt", "parse_draft_text",
     "parse_verifier_text", "stage_annual_report_candidate", "validate_draft_output",
     "validate_model_proof", "validate_verifier_output", "verifier_prompt",
 ]

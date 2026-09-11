@@ -19,6 +19,7 @@ from .annual_report_qualitative import (
     AnnualReportQualitativeError,
     RegisteredAnnualReportDraftWorker,
     RegisteredAnnualReportVerifierWorker,
+    build_annual_report_candidate_bundle,
     stage_annual_report_candidate,
     validate_model_proof,
 )
@@ -66,11 +67,151 @@ def _ref(prefix: str, value: Any) -> str:
     return f"{prefix}:{content_hash(value)[:32]}"
 
 
+def _mission_annual_steps(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
+    specs = (_REGISTERED_ANNUAL_REPORT_STEP_SPEC, *_REGISTERED_ANNUAL_REPORT_DOWNSTREAM_STEP_SPECS)
+    run_id = _ref("mission-annual-research-run", {
+        "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+    })
+    result = []
+    for ordinal, spec in enumerate(specs, 1):
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "id": f"mission-annual-research-step:{run_id.rsplit(':', 1)[-1]}:{ordinal}",
+            "ordinal": ordinal, **dict(spec),
+            "max_attempts": (
+                1 if ordinal == 1
+                else sum(
+                    admission["request"]["model_execution"][stage]["max_attempts"]
+                    for stage in ("draft", "verifier")
+                ) if ordinal == 4
+                else admission["request"]["model_execution"][
+                    "draft" if ordinal == 2 else "verifier"
+                ]["max_attempts"]
+            ),
+        }
+        body["content_hash"] = content_hash(body)
+        result.append(body)
+    return result
+
+
+def _mission_annual_common_metadata(
+    admission: Mapping[str, Any], step: Mapping[str, Any],
+    work_ref: str, upstream_ref: str | None,
+) -> dict[str, Any]:
+    binding = {
+        "admission_ref": admission["id"],
+        "admission_hash": admission["content_hash"],
+        "work_order_ref": work_ref,
+        "stage": step["stage"], "step_ref": step["id"],
+        "upstream_work_order_ref": upstream_ref,
+    }
+    return {
+        "authority_kind": AUTHORITY_KIND,
+        "mission_annual_research_admission_ref": admission["id"],
+        "mission_annual_research_admission_hash": admission["content_hash"],
+        "mission_annual_work_binding_hash": content_hash(binding),
+        "mission_version_ref": admission["mission_version_ref"],
+        "mission_version_hash": admission["mission_version_hash"],
+        "repair_feedback_ref": admission["repair_feedback_ref"],
+        "repair_feedback_hash": admission["repair_feedback_hash"],
+        "repair_target_ref": admission["repair_target_ref"],
+        "repair_target_hash": admission["repair_target_hash"],
+        "source_content_hash": admission["request"]["source_content_hash"],
+        "step_ref": step["id"], "step_hash": step["content_hash"],
+        "stage": step["stage"], "operation": step["operation"],
+        "permission_scope": "registered_annual_report_read",
+        "upstream_work_order_ref": upstream_ref,
+    }
+
+
+def _mission_annual_blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
+    steps = _mission_annual_steps(admission)
+    suffix = _ref("x", admission["identity_hash"]).rsplit(":", 1)[-1]
+    works: list[dict[str, Any]] = []
+    for step in steps:
+        ordinal = step["ordinal"]
+        work_ref = f"work:mission-annual-research:{suffix}:{ordinal}"
+        prior_ref = works[-1]["id"] if works else None
+        model_key = "draft" if ordinal == 2 else "verifier" if ordinal == 3 else None
+        execution = None if model_key is None else admission["request"]["model_execution"][model_key]
+        if ordinal == 1:
+            question = (
+                "Search registered SEC annual report for CIK "
+                f"{admission['request']['issuer_cik']}, accession "
+                f"{admission['request']['accession']}, source SHA-256 "
+                f"{admission['request']['source_content_hash']}, terms "
+                f"{','.join(admission['request']['query_terms'])}"
+            )
+        else:
+            question = f"Mission annual research stage {ordinal}: {step['operation']}"
+        metadata = _mission_annual_common_metadata(admission, step, work_ref, prior_ref)
+        if execution is not None:
+            metadata.update({
+                "routing_policy_ref": execution["routing_policy_ref"],
+                "credential_slot_refs": list(execution["credential_slot_refs"]),
+                "budget_db": execution["budget_db"],
+                "budget_policy_ref": execution["budget_policy_ref"],
+                "provider_retry": execution["provider_retry"],
+                "transport_retry": execution["transport_retry"],
+            })
+            budget = {
+                "max_attempts": execution["max_attempts"],
+                "max_input_tokens": execution["max_input_tokens"],
+                "max_output_tokens": execution["max_output_tokens"],
+                "max_total_tokens": execution["max_input_tokens"] + execution["max_output_tokens"],
+                "max_cost_usd": execution["max_cost_usd"],
+                "max_seconds": execution["max_seconds"],
+                "max_elapsed_seconds": execution["max_elapsed_seconds"],
+                "step_max_attempts": step["max_attempts"],
+            }
+        else:
+            budget = {
+                **_REGISTERED_ANNUAL_REPORT_BUDGET,
+                "step_max_attempts": step["max_attempts"],
+            }
+        works.append(WorkOrder.from_dict({
+            "schema_version": SCHEMA_VERSION, "id": work_ref,
+            "created_at": admission["created_at"], "updated_at": admission["created_at"],
+            "question": question,
+            "requested_capabilities": list(step["requested_capabilities"]),
+            "runtime_profile_ref": step["runtime_profile_ref"],
+            "budget": budget,
+            "idempotency_key": f"mission-annual-research-work:{admission['id']}:{ordinal}",
+            "declared_side_effects": list(step["declared_side_effects"]),
+            "status": "ready",
+            "input_refs": [admission["id"], admission["repair_target_ref"], step["id"], *([prior_ref] if prior_ref else [])],
+            "metadata": metadata,
+        }).to_dict())
+    return works
+
+
+def _derive_mission_annual_work(
+    admission: Mapping[str, Any], scheduler: Scheduler,
+    blueprints: Sequence[Mapping[str, Any]], index: int,
+) -> dict[str, Any]:
+    if index == 0:
+        return dict(blueprints[0])
+    upstream = scheduler.work_order_authority(blueprints[index - 1]["id"])
+    formal = scheduler.formal_result(blueprints[index - 1]["id"])
+    if upstream is None or formal is None or formal["terminal_state"] != "succeeded":
+        raise MissionAnnualResearchExecutorError("child requires exact succeeded upstream")
+    context = {
+        "id": _ref("mission-annual-research-run", {
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+        }),
+        "execution_scope": {"parameters": admission["request"]},
+    }
+    return _resolve_qualitative_child_work_order(
+        context, blueprints[index], upstream["work_order"], formal,
+        question=admission["planner_inquiry"]["question"],
+    )
+
+
 def validate_mission_annual_work_authority(
-    authority: MissionAnnualResearchAuthority,
+    authority: MissionAnnualResearchAuthority, scheduler: Scheduler,
     work: WorkOrder | Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Re-resolve mission/source/target authority for a model WorkOrder."""
+    """Rebuild and compare the complete immutable WorkOrder from Core authority."""
 
     wire = work.to_dict() if isinstance(work, WorkOrder) else WorkOrder.from_dict(work).to_dict()
     metadata = wire["metadata"]
@@ -79,28 +220,22 @@ def validate_mission_annual_work_authority(
     admission = authority.resolve_for_execution(
         metadata.get("mission_annual_research_admission_ref")
     )
-    expected = {
-        "mission_annual_research_admission_hash": admission["content_hash"],
-        "mission_version_ref": admission["mission_version_ref"],
-        "mission_version_hash": admission["mission_version_hash"],
-        "repair_feedback_ref": admission["repair_feedback_ref"],
-        "repair_feedback_hash": admission["repair_feedback_hash"],
-        "repair_target_ref": admission["repair_target_ref"],
-        "repair_target_hash": admission["repair_target_hash"],
-        "source_content_hash": admission["request"]["source_content_hash"],
-    }
-    if any(metadata.get(key) != value for key, value in expected.items()):
-        raise MissionAnnualResearchExecutorError("WorkOrder mission authority binding drifted")
-    binding = {
-        "admission_ref": admission["id"],
-        "admission_hash": admission["content_hash"],
-        "work_order_ref": wire["id"],
-        "stage": metadata.get("stage"),
-        "step_ref": metadata.get("step_ref"),
-        "upstream_work_order_ref": metadata.get("upstream_work_order_ref"),
-    }
-    if metadata.get("mission_annual_work_binding_hash") != content_hash(binding):
-        raise MissionAnnualResearchExecutorError("WorkOrder authority identity drifted")
+    blueprints = _mission_annual_blueprints(admission)
+    indexes = [
+        index for index, blueprint in enumerate(blueprints)
+        if blueprint["id"] == wire["id"]
+    ]
+    if len(indexes) != 1 or indexes[0] not in (1, 2):
+        raise MissionAnnualResearchExecutorError("WorkOrder is not an admitted mission model stage")
+    expected = _derive_mission_annual_work(admission, scheduler, blueprints, indexes[0])
+    stored = scheduler.work_order_authority(wire["id"])
+    if (
+        canonical_json(wire) != canonical_json(expected)
+        or stored is None
+        or stored["work_order_hash"] != content_hash(expected)
+        or canonical_json(stored["work_order"]) != canonical_json(expected)
+    ):
+        raise MissionAnnualResearchExecutorError("WorkOrder drifted from exact mission derivation")
     return admission
 
 
@@ -167,128 +302,24 @@ class MissionAnnualResearchExecutor:
 
     @staticmethod
     def _steps(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
-        specs = (_REGISTERED_ANNUAL_REPORT_STEP_SPEC, *_REGISTERED_ANNUAL_REPORT_DOWNSTREAM_STEP_SPECS)
-        run_id = _ref("mission-annual-research-run", {
-            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
-        })
-        result = []
-        for ordinal, spec in enumerate(specs, 1):
-            body = {
-                "schema_version": SCHEMA_VERSION,
-                "id": f"mission-annual-research-step:{run_id.rsplit(':', 1)[-1]}:{ordinal}",
-                "ordinal": ordinal, **dict(spec),
-                "max_attempts": (
-                    1 if ordinal in (1, 4)
-                    else admission["request"]["model_execution"][
-                        "draft" if ordinal == 2 else "verifier"
-                    ]["max_attempts"]
-                ),
-            }
-            body["content_hash"] = content_hash(body)
-            result.append(body)
-        return result
+        return _mission_annual_steps(admission)
 
     @staticmethod
     def _common_metadata(
         admission: Mapping[str, Any], step: Mapping[str, Any],
         work_ref: str, upstream_ref: str | None,
     ) -> dict[str, Any]:
-        binding = {
-            "admission_ref": admission["id"],
-            "admission_hash": admission["content_hash"],
-            "work_order_ref": work_ref,
-            "stage": step["stage"], "step_ref": step["id"],
-            "upstream_work_order_ref": upstream_ref,
-        }
-        return {
-            "authority_kind": AUTHORITY_KIND,
-            "mission_annual_research_admission_ref": admission["id"],
-            "mission_annual_research_admission_hash": admission["content_hash"],
-            "mission_annual_work_binding_hash": content_hash(binding),
-            "mission_version_ref": admission["mission_version_ref"],
-            "mission_version_hash": admission["mission_version_hash"],
-            "repair_feedback_ref": admission["repair_feedback_ref"],
-            "repair_feedback_hash": admission["repair_feedback_hash"],
-            "repair_target_ref": admission["repair_target_ref"],
-            "repair_target_hash": admission["repair_target_hash"],
-            "source_content_hash": admission["request"]["source_content_hash"],
-            "step_ref": step["id"], "step_hash": step["content_hash"],
-            "stage": step["stage"], "operation": step["operation"],
-            "permission_scope": "registered_annual_report_read",
-            "upstream_work_order_ref": upstream_ref,
-        }
+        return _mission_annual_common_metadata(admission, step, work_ref, upstream_ref)
 
     def _blueprints(self, admission: Mapping[str, Any]) -> list[dict[str, Any]]:
-        steps = self._steps(admission)
-        suffix = _ref("x", admission["identity_hash"]).rsplit(":", 1)[-1]
-        works: list[dict[str, Any]] = []
-        for step in steps:
-            ordinal = step["ordinal"]
-            work_ref = f"work:mission-annual-research:{suffix}:{ordinal}"
-            prior_ref = works[-1]["id"] if works else None
-            model_key = "draft" if ordinal == 2 else "verifier" if ordinal == 3 else None
-            execution = None if model_key is None else admission["request"]["model_execution"][model_key]
-            if ordinal == 1:
-                question = (
-                    "Search registered SEC annual report for CIK "
-                    f"{admission['request']['issuer_cik']}, accession "
-                    f"{admission['request']['accession']}, source SHA-256 "
-                    f"{admission['request']['source_content_hash']}, terms "
-                    f"{','.join(admission['request']['query_terms'])}"
-                )
-            else:
-                question = f"Mission annual research stage {ordinal}: {step['operation']}"
-            metadata = self._common_metadata(admission, step, work_ref, prior_ref)
-            if execution is not None:
-                metadata.update({
-                    "routing_policy_ref": execution["routing_policy_ref"],
-                    "credential_slot_refs": list(execution["credential_slot_refs"]),
-                    "budget_db": execution["budget_db"],
-                    "budget_policy_ref": execution["budget_policy_ref"],
-                    "provider_retry": execution["provider_retry"],
-                    "transport_retry": execution["transport_retry"],
-                })
-                budget = {
-                    "max_attempts": execution["max_attempts"],
-                    "max_input_tokens": execution["max_input_tokens"],
-                    "max_output_tokens": execution["max_output_tokens"],
-                    "max_total_tokens": execution["max_input_tokens"] + execution["max_output_tokens"],
-                    "max_cost_usd": execution["max_cost_usd"],
-                    "max_seconds": execution["max_seconds"],
-                    "max_elapsed_seconds": execution["max_elapsed_seconds"],
-                    "step_max_attempts": step["max_attempts"],
-                }
-            else:
-                budget = {**_REGISTERED_ANNUAL_REPORT_BUDGET, "step_max_attempts": 1}
-            works.append(WorkOrder.from_dict({
-                "schema_version": SCHEMA_VERSION, "id": work_ref,
-                "created_at": admission["created_at"], "updated_at": admission["created_at"],
-                "question": question,
-                "requested_capabilities": list(step["requested_capabilities"]),
-                "runtime_profile_ref": step["runtime_profile_ref"],
-                "budget": budget,
-                "idempotency_key": f"mission-annual-research-work:{admission['id']}:{ordinal}",
-                "declared_side_effects": list(step["declared_side_effects"]),
-                "status": "ready",
-                "input_refs": [admission["id"], admission["repair_target_ref"], step["id"], *([prior_ref] if prior_ref else [])],
-                "metadata": metadata,
-            }).to_dict())
-        return works
+        return _mission_annual_blueprints(admission)
 
     def _derive_work(
         self, admission: Mapping[str, Any], blueprints: Sequence[Mapping[str, Any]],
         index: int,
     ) -> dict[str, Any]:
-        if index == 0:
-            return dict(blueprints[0])
-        upstream = self.scheduler.work_order_authority(blueprints[index - 1]["id"])
-        formal = self.scheduler.formal_result(blueprints[index - 1]["id"])
-        if upstream is None or formal is None or formal["terminal_state"] != "succeeded":
-            raise MissionAnnualResearchExecutorError("child requires exact succeeded upstream")
-        context = {"id": self._run_id(admission), "execution_scope": {"parameters": admission["request"]}}
-        return _resolve_qualitative_child_work_order(
-            context, blueprints[index], upstream["work_order"], formal,
-            question=admission["planner_inquiry"]["question"],
+        return _derive_mission_annual_work(
+            admission, self.scheduler, blueprints, index
         )
 
     @staticmethod
@@ -370,6 +401,9 @@ class MissionAnnualResearchExecutor:
         formal = self.scheduler.formal_result(upstream["id"])
         if formal is None or formal["terminal_state"] != "succeeded":
             raise MissionAnnualResearchExecutorError("staging requires succeeded verifier")
+        claim = self.scheduler.claim(self.actor_ref, work_order_id=work["id"])
+        if claim is None:
+            return {"status": "pending", "work_order_ref": work["id"]}
         try:
             verifier = validate_model_proof(
                 formal["result_envelope"]["outputs"],
@@ -381,7 +415,7 @@ class MissionAnnualResearchExecutor:
                 proof=work["metadata"]["retrieval_proof"],
                 draft_proof=work["metadata"]["draft_proof"],
                 verifier_proof=verifier, draft_work=works[1], verifier_work=upstream,
-                actor_ref=admission["actor_ref"], created_at=_wire_time(self.clock()),
+                actor_ref=admission["actor_ref"], created_at=work["created_at"],
                 idempotency_key=f"mission-annual-research-candidate:{admission['id']}",
                 source_authority=self.registry.candidate_source_authority(
                     admission["request"]
@@ -402,9 +436,7 @@ class MissionAnnualResearchExecutor:
             "candidate_claim_ref": staged["claim"]["id"],
             "candidate_claim_hash": staged["claim"]["content_hash"],
         }
-        claim = self.scheduler.claim(self.actor_ref, work_order_id=work["id"])
-        if claim is None:
-            return {"status": "pending", "work_order_ref": work["id"]}
+        self._validate_staged_records(admission, works, records)
         envelope = ResultEnvelope(
             schema_version=SCHEMA_VERSION,
             id=_ref("result-envelope:mission-annual-staging", records),
@@ -421,13 +453,94 @@ class MissionAnnualResearchExecutor:
         )
         if completed["status"] != "fresh":
             raise MissionAnnualResearchExecutorError("staging completion did not converge")
-        outcome = self._store_outcome(admission, records)
+        outcome = self._store_outcome(admission, works, records)
         return {
             "status": "complete", **records,
             "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"],
         }
 
-    def _store_outcome(self, admission: Mapping[str, Any], records: Mapping[str, Any]) -> dict[str, Any]:
+    def _validate_staged_records(
+        self, admission: Mapping[str, Any], works: Sequence[Mapping[str, Any]],
+        records: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        expected_keys = {
+            "authority_ref", "repair_target_ref", "repair_target_hash",
+            "research_status", "candidate_evidence_ref", "candidate_evidence_hash",
+            "candidate_claim_ref", "candidate_claim_hash",
+        }
+        if not isinstance(records, Mapping) or set(records) != expected_keys:
+            raise MissionAnnualResearchExecutorError("staging result has an open or invalid shape")
+        if (
+            records["authority_ref"] != admission["id"]
+            or records["repair_target_ref"] != admission["repair_target_ref"]
+            or records["repair_target_hash"] != admission["repair_target_hash"]
+            or records["research_status"] != "candidate_staged"
+        ):
+            raise MissionAnnualResearchExecutorError("staging result drifted from admission")
+        try:
+            bundle = self.staging.exact_candidate_bundle(
+                evidence_ref=records["candidate_evidence_ref"],
+                claim_ref=records["candidate_claim_ref"],
+                idempotency_key=f"mission-annual-research-candidate:{admission['id']}",
+            )
+            formal = self.scheduler.formal_result(works[2]["id"])
+            if formal is None or formal["terminal_state"] != "succeeded":
+                raise MissionAnnualResearchExecutorError("staged candidate lost verifier authority")
+            expected = build_annual_report_candidate_bundle(
+                question_ref=admission["repair_target_ref"],
+                question=admission["planner_inquiry"]["question"],
+                proof=works[3]["metadata"]["retrieval_proof"],
+                draft_proof=works[3]["metadata"]["draft_proof"],
+                verifier_proof=validate_model_proof(
+                    formal["result_envelope"]["outputs"],
+                    stage="independent_qualitative_verifier", work=works[2],
+                ),
+                draft_work=works[1], verifier_work=works[2],
+                actor_ref=admission["actor_ref"], created_at=works[3]["created_at"],
+                source_authority=self.registry.candidate_source_authority(
+                    admission["request"]
+                ),
+                mission_admission=admission,
+            )
+        except (AnnualReportQualitativeError, ResearchVerificationError) as exc:
+            raise MissionAnnualResearchExecutorError(str(exc)) from exc
+        for key in ("material", "source_verification", "evidence", "claim"):
+            if canonical_json(bundle[key]) != canonical_json(expected[key]):
+                raise MissionAnnualResearchExecutorError(
+                    f"staged candidate {key} drifted from exact annual authority"
+                )
+        if (
+            records["candidate_evidence_hash"] != bundle["evidence"]["content_hash"]
+            or records["candidate_claim_hash"] != bundle["claim"]["content_hash"]
+        ):
+            raise MissionAnnualResearchExecutorError("staging result hashes drifted")
+        return dict(records)
+
+    def _stage_formal_owned_by_executor(
+        self, work: Mapping[str, Any], formal: Mapping[str, Any],
+    ) -> None:
+        row = self.connection.execute(
+            "SELECT l.owner_ref,e.result_envelope_id,e.result_envelope_hash "
+            "FROM scheduler_attempt_events e "
+            "JOIN scheduler_leases l ON l.lease_revision_id=e.lease_revision_id "
+            "WHERE e.work_order_id=? AND e.attempt_number=? AND e.state='succeeded' "
+            "ORDER BY e.event_seq DESC LIMIT 1",
+            (work["id"], formal["attempt_number"]),
+        ).fetchone()
+        if (
+            row is None or row["owner_ref"] != self.actor_ref
+            or row["result_envelope_id"] != formal["result_envelope_id"]
+            or row["result_envelope_hash"] != formal["result_envelope_hash"]
+        ):
+            raise MissionAnnualResearchExecutorError(
+                "staging formal result was not completed by the mission executor"
+            )
+
+    def _store_outcome(
+        self, admission: Mapping[str, Any], works: Sequence[Mapping[str, Any]],
+        records: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        records = self._validate_staged_records(admission, works, records)
         start_ref = _ref("mission-annual-research-start", self._run_id(admission))
         outcome_id = _ref("mission-annual-research-outcome", {"start_ref": start_ref, **dict(records)})
         body = {
@@ -473,7 +586,9 @@ class MissionAnnualResearchExecutor:
                 if index == 0:
                     return self._complete_retrieval(admission, work)
                 if index in (1, 2):
-                    validate_mission_annual_work_authority(self.authority, work)
+                    validate_mission_annual_work_authority(
+                        self.authority, self.scheduler, work
+                    )
                     worker = self.draft_worker if index == 1 else self.verifier_worker
                     try:
                         result = worker.run_once(work)
@@ -488,11 +603,16 @@ class MissionAnnualResearchExecutor:
                 if canonical_json(proof) != canonical_json(self.registry.search(admission["request"])):
                     raise MissionAnnualResearchExecutorError("stored retrieval proof drifted")
             elif index in (1, 2):
-                validate_mission_annual_work_authority(self.authority, work)
+                validate_mission_annual_work_authority(
+                    self.authority, self.scheduler, work
+                )
                 validate_model_proof(formal["result_envelope"]["outputs"], stage=work["metadata"]["stage"], work=work)
             else:
                 records = formal["result_envelope"]["outputs"]
-                outcome = self._store_outcome(admission, records)
+                self._stage_formal_owned_by_executor(work, formal)
+                outcome = self._store_outcome(admission, [
+                    self._derive_work(admission, blueprints, i) for i in range(4)
+                ], records)
                 return {"status": "complete", **records, "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"]}
         raise MissionAnnualResearchExecutorError("annual research run has invalid shape")
 

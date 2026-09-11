@@ -6,13 +6,14 @@ import json
 import os
 import sqlite3
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.annual_report_runtime import (
     DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME,
 )
 from dalton_core.company_dossier_launcher import run_digest
+from dalton_core.contracts import ResultEnvelope
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.dossier_repair_feedback import read_dossier_repair_feedback
 from dalton_core.mission_annual_research import (
@@ -20,7 +21,7 @@ from dalton_core.mission_annual_research import (
     WORKFLOW_CONTRACT_REF,
 )
 from dalton_core.mission_annual_research_executor import (
-    MissionAnnualResearchExecutor,
+    MissionAnnualResearchExecutor, MissionAnnualResearchExecutorError,
 )
 from dalton_core.model_router import ModelRouter
 from dalton_core.annual_report_qualitative import (
@@ -30,7 +31,7 @@ from dalton_core.annual_report_qualitative import (
 from dalton_core.registered_annual_report import OPERATION, RegisteredAnnualReportError
 from dalton_core.sec_company_facts_lane import LanePreconditionError
 from dalton_core.sec_company_facts_lane import read_active_annual_budget_mission
-from dalton_core.store import canonical_json
+from dalton_core.store import canonical_json, content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_research_plan_annual_report import (
@@ -484,6 +485,111 @@ class MissionAnnualResearchTests(unittest.TestCase):
         work["metadata"]["repair_target_hash"] = "0" * 64
         with self.assertRaisesRegex(AnnualReportQualitativeError, "authority is invalid"):
             executor.draft_worker._work(work)
+
+    def test_model_worker_rejects_substituted_question_and_request_binding_before_send(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, draft, _verifier = self._executor(fixture)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        work["question"] = "Use another mission and source instead"
+        work["metadata"]["question"] = "Use another mission and source instead"
+        work["metadata"]["prompt_hash"] = content_hash(work["question"])
+        work["metadata"]["model_request_binding_hash"] = "0" * 64
+        with self.assertRaisesRegex(AnnualReportQualitativeError, "authority is invalid"):
+            executor.draft_worker._work(work)
+        self.assertEqual(draft.calls, 0)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT count(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], 0)
+
+    def test_foreign_stage_completion_cannot_forge_resolved_outcome(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, _draft, _verifier = self._executor(fixture)
+        for _ in range(7):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 3)
+        scheduler = fixture.harness.scheduler()
+        claim = scheduler.claim("worker:foreign", work_order_id=work["id"])
+        self.assertIsNotNone(claim)
+        forged = {
+            "authority_ref": admission["id"],
+            "repair_target_ref": admission["repair_target_ref"],
+            "repair_target_hash": admission["repair_target_hash"],
+            "research_status": "dossier_resolved",
+            "candidate_evidence_ref": "evidence:forged",
+            "candidate_evidence_hash": "1" * 64,
+            "candidate_claim_ref": "claim:forged",
+            "candidate_claim_hash": "2" * 64,
+        }
+        envelope = ResultEnvelope(
+            schema_version="0.1", id="result-envelope:foreign-stage",
+            created_at=NOW.isoformat(), work_order_ref=work["id"],
+            invocation_ref="execution:foreign", status="succeeded", outputs=forged,
+            actual_side_effects=(), usage_refs=(), artifact_refs=(), error=None,
+            metadata={"authority_ref": admission["id"]},
+        ).to_dict()
+        scheduler.complete(
+            work["id"], claim["attempt"]["attempt_number"], "worker:foreign",
+            claim["lease_token"], envelope,
+            idempotency_key="foreign-stage-completion",
+            result_envelope_hash=content_hash(envelope),
+        )
+        with self.assertRaisesRegex(
+            MissionAnnualResearchExecutorError, "not completed by the mission executor"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual(fixture.harness.staging.counts(), {
+            "candidate_source_materials": 0, "candidate_verifications": 0,
+            "candidate_numeric_specs": 0, "candidate_evidence_versions": 0,
+            "candidate_claim_versions": 0, "candidate_stage_requests": 0,
+            "candidate_figures": 0,
+        })
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_annual_research_outcomes"
+        ).fetchone()[0], 0)
+
+    def test_stage_claim_precedes_side_effect_and_restart_converges_after_crash(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, _draft, _verifier = self._executor(fixture)
+        for _ in range(7):
+            executor.run_once(admission["id"])
+        work = executor._derive_work(admission, executor._blueprints(admission), 3)
+        foreign = executor.scheduler.claim("worker:foreign", work_order_id=work["id"])
+        self.assertIsNotNone(foreign)
+        self.assertEqual(executor.run_once(admission["id"])["status"], "pending")
+        self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 0)
+
+    def test_stage_restart_reuses_exact_candidate_after_post_stage_crash(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, _draft, _verifier = self._executor(fixture)
+        for _ in range(7):
+            executor.run_once(admission["id"])
+
+        original_complete = executor.scheduler.complete
+        crashed = {"done": False}
+
+        def crash_after_staging(*args, **kwargs):
+            if not crashed["done"]:
+                crashed["done"] = True
+                raise RuntimeError("injected crash after candidate staging")
+            return original_complete(*args, **kwargs)
+
+        executor.scheduler.complete = crash_after_staging
+        with self.assertRaisesRegex(RuntimeError, "injected crash"):
+            executor.run_once(admission["id"])
+        self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 1)
+        executor.scheduler.complete = original_complete
+        fixture.harness.clock.value += timedelta(hours=1)
+        completed = executor.run_once(admission["id"])
+        self.assertEqual(completed["status"], "complete")
+        self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 1)
+        replay = executor.run_once(admission["id"])
+        self.assertEqual(replay["outcome_ref"], completed["outcome_ref"])
 
 
 if __name__ == "__main__":

@@ -1499,6 +1499,119 @@ class CandidateStagingStore:
     def close(self) -> None:
         self.connection.close()
 
+    def exact_candidate_bundle(
+        self, *, evidence_ref: str, claim_ref: str, idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Read and verify one complete immutable staging authority bundle."""
+
+        def read_row(table: str, id_column: str, identifier: str) -> dict[str, Any]:
+            row = self.connection.execute(
+                f"SELECT * FROM {table} WHERE {id_column}=?", (identifier,)
+            ).fetchone()
+            if row is None:
+                raise ResearchVerificationConflict(
+                    f"candidate staging {table} authority is missing"
+                )
+            try:
+                wire = json.loads(row["record_json"])
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ResearchVerificationConflict(
+                    f"candidate staging {table} authority is invalid"
+                ) from exc
+            if (
+                wire.get("id") != identifier
+                or canonical_json(wire) != row["record_json"]
+                or wire.get("content_hash") != row["content_hash"]
+                or content_hash({k: v for k, v in wire.items() if k != "content_hash"})
+                != row["content_hash"]
+                or wire.get("created_at") != row["created_at"]
+            ):
+                raise ResearchVerificationConflict(
+                    f"candidate staging {table} authority drifted"
+                )
+            if table == "candidate_evidence_versions" and (
+                row["candidate_evidence_ref"] != wire["candidate_evidence_ref"]
+                or row["version_number"] != wire["version"]
+                or row["prior_version_id"] != wire["prior_version_ref"]
+            ):
+                raise ResearchVerificationConflict(
+                    "candidate staging evidence columns drifted"
+                )
+            if table == "candidate_claim_versions" and (
+                row["candidate_claim_ref"] != wire["candidate_claim_ref"]
+                or row["version_number"] != wire["version"]
+                or row["prior_version_id"] != wire["prior_version_ref"]
+                or row["evidence_version_id"]
+                != wire["candidate_evidence_refs"][0]["ref"]
+            ):
+                raise ResearchVerificationConflict(
+                    "candidate staging claim columns drifted"
+                )
+            return wire
+
+        evidence = validate_candidate_evidence(read_row(
+            "candidate_evidence_versions", "version_id", evidence_ref
+        ))
+        claim = validate_candidate_claim(read_row(
+            "candidate_claim_versions", "version_id", claim_ref
+        ))
+        expected_evidence = [{"ref": evidence["id"], "hash": evidence["content_hash"]}]
+        if claim["candidate_evidence_refs"] != expected_evidence:
+            raise ResearchVerificationConflict("staged claim binds another evidence version")
+        if (
+            claim["source_verification_ref"] != evidence["source_verification_ref"]
+            or claim["source_verification_hash"] != evidence["source_verification_hash"]
+        ):
+            raise ResearchVerificationConflict("staged evidence and claim bind different verification")
+        verification = validate_verification_bundle(read_row(
+            "candidate_verifications", "verification_id",
+            evidence["source_verification_ref"],
+        ))
+        if verification["content_hash"] != evidence["source_verification_hash"]:
+            raise ResearchVerificationConflict("staged source verification hash drifted")
+        material = validate_source_verification_material(read_row(
+            "candidate_source_materials", "material_id", verification["subject_ref"]
+        ))
+        if verification["subject_hash"] != material["content_hash"]:
+            raise ResearchVerificationConflict("staged verification binds another material")
+
+        request = self.connection.execute(
+            "SELECT * FROM candidate_stage_requests WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if request is None:
+            raise ResearchVerificationConflict("candidate staging request authority is missing")
+        try:
+            result = json.loads(request["result_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ResearchVerificationConflict("candidate staging request is invalid") from exc
+        expected_result = {
+            "write_status": "fresh",
+            "candidate_evidence_ref": evidence["id"],
+            "candidate_evidence_hash": evidence["content_hash"],
+            "candidate_claim_ref": claim["id"],
+            "candidate_claim_hash": claim["content_hash"],
+            "source_verification_ref": verification["id"],
+            "numeric_verification_ref": None,
+        }
+        request_identity = {
+            "material_hash": material["content_hash"], "numeric_spec_hash": None,
+            "source_verification_hash": verification["content_hash"],
+            "numeric_verification_hash": None,
+            "evidence_hash": evidence["content_hash"],
+            "claim_hash": claim["content_hash"],
+        }
+        if (
+            canonical_json(result) != canonical_json(expected_result)
+            or request["request_hash"] != content_hash(request_identity)
+            or request["created_at"] != claim["created_at"]
+        ):
+            raise ResearchVerificationConflict("candidate staging request drifted")
+        return {
+            "material": material, "source_verification": verification,
+            "evidence": evidence, "claim": claim, "request": result,
+        }
+
     @staticmethod
     def _require_clean_pass(bundle: Mapping[str, Any], kind: str) -> dict[str, Any]:
         wire = validate_verification_bundle(bundle)
