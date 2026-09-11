@@ -259,3 +259,12 @@ Dossier 产品验收仍 pending：v4 实际只读检查无 0.3 记录，而正�
 状态仍是 installed_bytes_verified_runtime_pending，45 次连续观察与实际 Dossier0.3/reader 检查进行中。R8 `86ad4dc` 虽全量/演练通过但未部署，与队列修复统一形成本次候选，未混淆历史接受记录。
 
 磁盘预检先明确拒绝 2.36GB available / 3.85GB required。在保留全部回滚字节前提下归档旧备份：013344Z archive SHA `d2040fab03dbee466a4dc9bb14cbc7b0dc6f7e2e375a2ee5d7de30b6c26f812c`（989,371,816 source bytes→153,533,582 archive bytes）；021801Z archive SHA `b42a706fc2e1dd9318a3686ba41e81d06a953038c55c6e352e376190c0488668`（1,000,971,688→155,026,166）。每份 95 entries 的内容、路径、类型、权限、owner/group、mtime 与 symlink 均核对，fsync + 源重扫 + 无 open handles 后才移除重复展开副本，tar/manifest/verification mode600。重检 4.03GB available / 3.85GB required 通过，最近两次备份保持展开。
+
+
+## R8a 连续运行验收完成；R9 基础修复（2026-09-11 03:58 UTC）
+
+R8a 同一 controller PID 73209 / 03:40:40.013898Z 连续 45 次健康检查通过，观察 669.381 秒。摘要 SHA `42e3ce30ee31aba2a8fb5718821f087807f71d3902757c46d0157ebde00665ae`；核对全部原始样本后，运行验收 receipt SHA `c98c6a1ba471ad46bf495d5b87b12e61b4d65c2ba7c5a8a656692de5d689332d`，manifest 标记 deployed_verified，runtime_health_only=true。
+
+产品结果单独记录：正常 Dossier 调度恢复为明确的内容 hold，没有据此宣称完整研究已完成。实际 v4 只读验收仍 pending_no_v03_records，receipt SHA `b88224ba9dbb35ea38139a96692b274d5e7bf9e4e1c1a7172420ee38ed80d59c`。实际已安装 HTML reader 对 ACN schema0.2 / partial 3/12 / stale 的内容与权限、不可用单元展示核对通过，receipt SHA `8a9f02a4072efc4ae7f7e5ac86cc90f7643eca65b5aa237107415927fdfb4560`；这不是 schema0.3 产品通过证明。
+
+下一版已合入 variant prompt 与既有严格输出检查器的契约对齐 `1f5a1df`；保留旧 v0.2 精确 producer proof 验证，新输入使用 v0.3 契约。独立 177 tests 与集成 196 tests 通过，尚未部署。下一步冻结同版完整测试、wheel、当前状态副本演练，然后部署并重新核对真实 Dossier。用户反馈的 Cockpit 历史阶段通过与当前资料缺口展示混淆正在独立调查/修复，不改写历史裁决。8793 服务端及 Tailscale HTTPS 页面/API 核对均 HTTP200，用户确认更换客户端后恢复，因此停止网络排查。
