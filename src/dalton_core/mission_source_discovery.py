@@ -569,6 +569,12 @@ def build_discovery_parameters(
             "date_to": as_of.isoformat(),
             "limit": SEC_INDEX_LIMIT,
         })
+    if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
+        return validate_web_search_spec({
+            "query": spec["query_template"].replace("{terms}", company["search_terms"]),
+            "date_after": window_start,
+            "date_before": as_of.isoformat(),
+        })
     if plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
         if (not isinstance(variant_index,int) or isinstance(variant_index,bool)
                 or not 0 <= variant_index < len(spec["query_variants"])):
@@ -588,12 +594,6 @@ def build_discovery_parameters(
         query = spec["query_template"].replace("{terms}", company["search_terms"])
         filters={"document_type": spec["document_type"],"date_from":window_start,
                  "date_to":as_of.isoformat()}
-    if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
-        return validate_web_search_spec({
-            "query": query,
-            "date_after": window_start,
-            "date_before": as_of.isoformat(),
-        })
     return validate_search_spec({
         "query": query,
         "filters": filters,
