@@ -89,10 +89,11 @@ DISCOVERY_PLAN_SCHEMA_VERSION_V3 = "0.3"
 # would fill in.
 DISCOVERY_PLAN_SCHEMA_VERSION_V4 = "0.4"
 DISCOVERY_PLAN_SCHEMA_VERSION_V5 = "0.5"
+DISCOVERY_PLAN_SCHEMA_VERSION_V6 = "0.6"
 DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
     DISCOVERY_PLAN_SCHEMA_VERSION, DISCOVERY_PLAN_SCHEMA_VERSION_V2,
     DISCOVERY_PLAN_SCHEMA_VERSION_V3, DISCOVERY_PLAN_SCHEMA_VERSION_V4,
-    DISCOVERY_PLAN_SCHEMA_VERSION_V5,
+    DISCOVERY_PLAN_SCHEMA_VERSION_V5, DISCOVERY_PLAN_SCHEMA_VERSION_V6,
 )
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
@@ -167,6 +168,7 @@ _PLAN_FIELDS_V2 = _PLAN_FIELDS | frozenset({"budget"})
 _PLAN_FIELDS_V3 = _PLAN_FIELDS_V2 | frozenset({"acquisition"})
 _PLAN_FIELDS_V4 = _PLAN_FIELDS_V2
 _PLAN_FIELDS_V5 = _PLAN_FIELDS_V3
+_PLAN_FIELDS_V6 = _PLAN_FIELDS_V2
 _BUDGET_FIELDS = frozenset({"max_calls_24h"})
 _ACQUISITION_FIELDS = frozenset({"preferred_hosts", "skip_hosts"})
 _ACQUISITION_FIELDS_V5 = _ACQUISITION_FIELDS | {"failure_cooldown"}
@@ -215,10 +217,13 @@ def _plan_acquisition(value: Any, *, cooldown: bool = False) -> dict[str, Any]:
         }
     return result
 _COMPANY_FIELDS = frozenset({"search_terms"})
+_COMPANY_FIELDS_V6 = frozenset({"name", "ticker", "aliases"})
 _SPEC_FIELDS = frozenset({
     "spec_ref", "document_type", "query_template", "lookback_days",
     "rediscovery_interval_days", "retry_interval_days",
 })
+_SPEC_FIELDS_V6 = frozenset({"spec_ref", "document_type", "query_variants",
+                             "lookback_days", "rediscovery_interval_days", "retry_interval_days"})
 # Web search has no library document type: one ranked page per query.
 _WEB_SPEC_FIELDS = _SPEC_FIELDS - frozenset({"document_type"})
 # The SEC index is asked for a form, not a phrase.
@@ -289,6 +294,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         DISCOVERY_PLAN_SCHEMA_VERSION_V3: _PLAN_FIELDS_V3,
         DISCOVERY_PLAN_SCHEMA_VERSION_V4: _PLAN_FIELDS_V4,
         DISCOVERY_PLAN_SCHEMA_VERSION_V5: _PLAN_FIELDS_V5,
+        DISCOVERY_PLAN_SCHEMA_VERSION_V6: _PLAN_FIELDS_V6,
     }[schema_version]
     if set(value) != fields:
         raise DiscoveryPlanError("discovery plan has an invalid closed shape")
@@ -307,6 +313,8 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         raise DiscoveryPlanError(
             f"discovery plan source_ref must be one of {sorted(DISCOVERY_SOURCES)}"
         )
+    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6 and source_ref != ALPHAENGINE_SOURCE_REF:
+        raise DiscoveryPlanError("discovery plan 0.6 is only for source:alphaengine")
     budget: dict[str, int] | None = None
     if schema_version != DISCOVERY_PLAN_SCHEMA_VERSION:
         raw_budget = wire["budget"]
@@ -329,7 +337,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     if source_ref == SEC_SOURCE_REF:
         spec_fields = _SEC_SPEC_FIELDS
     elif source_ref == ALPHAENGINE_SOURCE_REF:
-        spec_fields = _SPEC_FIELDS
+        spec_fields = _SPEC_FIELDS_V6 if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6 else _SPEC_FIELDS
     else:
         spec_fields = _WEB_SPEC_FIELDS
     companies = wire["companies"]
@@ -337,7 +345,8 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         raise DiscoveryPlanError("discovery plan companies must be a non-empty object")
     cleaned_companies: dict[str, dict[str, str]] = {}
     company_fields = (
-        _SEC_COMPANY_FIELDS if source_ref == SEC_SOURCE_REF else _COMPANY_FIELDS
+        (_SEC_COMPANY_FIELDS if source_ref == SEC_SOURCE_REF else
+         _COMPANY_FIELDS_V6 if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6 else _COMPANY_FIELDS)
     )
     for company_ref in sorted(companies):
         entry = companies[company_ref]
@@ -353,9 +362,20 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
                 )
             cleaned_companies[_plan_text(company_ref, "company_ref")] = {"cik": cik}
             continue
-        cleaned_companies[_plan_text(company_ref, "company_ref")] = {
-            "search_terms": _plan_text(entry["search_terms"], "search_terms", maximum=120),
-        }
+        if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+            aliases=entry["aliases"]
+            if (not isinstance(aliases,list) or len(aliases)>10
+                    or any(not isinstance(alias,str) or not alias.strip() or len(alias)>80 for alias in aliases)
+                    or len(set(aliases)) != len(aliases)):
+                raise DiscoveryPlanError("company aliases must be unique non-empty text")
+            cleaned_companies[_plan_text(company_ref,"company_ref")]={
+                "name":_plan_text(entry["name"],"name",maximum=120),
+                "ticker":_plan_text(entry["ticker"],"ticker",maximum=20),
+                "aliases":[alias.strip() for alias in aliases]}
+        else:
+            cleaned_companies[_plan_text(company_ref, "company_ref")] = {
+                "search_terms": _plan_text(entry["search_terms"], "search_terms", maximum=120),
+            }
     specs = wire["specs"]
     if not isinstance(specs, list) or not specs:
         raise DiscoveryPlanError("discovery plan specs must be a non-empty array")
@@ -373,6 +393,29 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         if "form" in spec_fields:
             form = _plan_text(raw["form"], "form", maximum=16)
             cleaned = {"spec_ref": spec_ref, "form": form}
+        elif schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+            variants=raw["query_variants"]
+            if not isinstance(variants,list) or not 1 <= len(variants) <= 12:
+                raise DiscoveryPlanError("query_variants must contain 1..12 entries")
+            cleaned_variants=[]
+            for variant in variants:
+                if not isinstance(variant,Mapping) or set(variant)!={"query_template","filters"}:
+                    raise DiscoveryPlanError("query variant has an invalid closed shape")
+                template=_plan_text(variant["query_template"],"query_template")
+                allowed={"{name}","{ticker}","{aliases}","{quarter}"}
+                tokens=set(re.findall(r"\{[^{}]+\}",template))
+                if not tokens or not tokens <= allowed:
+                    raise DiscoveryPlanError("query variant placeholders are invalid")
+                filters=variant["filters"]
+                if (not isinstance(filters,Mapping) or set(filters)-{"company","geography","industry"}
+                        or any(not isinstance(v,str) or not v for v in filters.values())):
+                    raise DiscoveryPlanError("query variant filters are invalid")
+                if any(set(re.findall(r"\{[^{}]+\}", value))-allowed for value in filters.values()):
+                    raise DiscoveryPlanError("query variant filter placeholders are invalid")
+                cleaned_variants.append({"query_template":template,"filters":dict(filters)})
+            if len({canonical_json(v) for v in cleaned_variants}) != len(cleaned_variants):
+                raise DiscoveryPlanError("query variants must be unique")
+            cleaned={"spec_ref":spec_ref,"query_variants":cleaned_variants}
         else:
             template = _plan_text(raw["query_template"], "query_template")
             if "{terms}" not in template or template.count("{") != 1 or template.count("}") != 1:
@@ -437,10 +480,17 @@ def build_discovery_plan(
         "created_at": created_at,
         "mission_ref": mission_ref,
         "source_ref": source_ref,
-        "companies": {ref: {"search_terms": terms} for ref, terms in companies.items()},
+        "companies": ({ref: dict(terms) for ref,terms in companies.items()}
+                      if companies and all(isinstance(terms,Mapping) for terms in companies.values())
+                      else {ref: {"search_terms": terms} for ref, terms in companies.items()}),
         "specs": [dict(spec) for spec in specs],
     }
-    if source_ref != ALPHAENGINE_SOURCE_REF or max_calls_24h is not None:
+    if companies and all(isinstance(terms,Mapping) for terms in companies.values()):
+        if source_ref != ALPHAENGINE_SOURCE_REF or max_calls_24h is None:
+            raise DiscoveryPlanError("a 0.6 AlphaEngine plan requires max_calls_24h")
+        base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V6
+        base["budget"] = {"max_calls_24h": max_calls_24h}
+    elif source_ref != ALPHAENGINE_SOURCE_REF or max_calls_24h is not None:
         if max_calls_24h is None:
             raise DiscoveryPlanError("a 0.2 discovery plan requires max_calls_24h")
         base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V2
@@ -474,7 +524,8 @@ def plan_spec(plan: Mapping[str, Any], spec_ref: str) -> dict[str, Any]:
 
 def build_discovery_parameters(
     plan: Mapping[str, Any], *, spec_ref: str, company_ref: str, as_of: date,
-    cursor: str | None = None,
+    cursor: str | None = None, variant_index: int = 0,
+    missing_periods: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Deterministic search parameters for one plan spec and company.
 
@@ -502,7 +553,25 @@ def build_discovery_parameters(
             "date_to": as_of.isoformat(),
             "limit": SEC_INDEX_LIMIT,
         })
-    query = spec["query_template"].replace("{terms}", company["search_terms"])
+    if plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+        if (not isinstance(variant_index,int) or isinstance(variant_index,bool)
+                or not 0 <= variant_index < len(spec["query_variants"])):
+            raise DiscoveryPlanError("query variant index is invalid")
+        if not all(isinstance(period,str) and period for period in missing_periods):
+            raise DiscoveryPlanError("missing periods are invalid")
+        variant=spec["query_variants"][variant_index]
+        quarter=missing_periods[0] if missing_periods else "latest quarter"
+        query=variant["query_template"].format(name=company["name"],ticker=company["ticker"],
+            aliases=" ".join(company["aliases"]),quarter=quarter)
+        substitutions={"name":company["name"],"ticker":company["ticker"],
+                       "aliases":" ".join(company["aliases"]),"quarter":quarter}
+        configured={key:value.format(**substitutions) for key,value in variant["filters"].items()}
+        filters={"document_type":spec["document_type"],"date_from":window_start,
+                 "date_to":as_of.isoformat(),**configured}
+    else:
+        query = spec["query_template"].replace("{terms}", company["search_terms"])
+        filters={"document_type": spec["document_type"],"date_from":window_start,
+                 "date_to":as_of.isoformat()}
     if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
         return validate_web_search_spec({
             "query": query,
@@ -511,11 +580,7 @@ def build_discovery_parameters(
         })
     return validate_search_spec({
         "query": query,
-        "filters": {
-            "document_type": spec["document_type"],
-            "date_from": window_start,
-            "date_to": as_of.isoformat(),
-        },
+        "filters": filters,
         "cursor": cursor,
     })
 
@@ -668,6 +733,8 @@ class _SearchLauncherBase:
         as_of: str,
         ticket_dir: Path,
         cursor: str | None = None,
+        variant_index: int | None = None,
+        missing_periods: Sequence[str] = (),
     ) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
@@ -687,6 +754,10 @@ class _SearchLauncherBase:
             command += ["--spool-dir", str(self.spool_dir)]
         if cursor is not None:
             command += ["--cursor", cursor]
+        if variant_index is not None:
+            command += ["--variant-index", str(variant_index)]
+        for period in missing_periods:
+            command += ["--missing-period", period]
         command += self._extra_command_args()
         command += list(self.mode_args)
         return command
@@ -698,6 +769,8 @@ class _SearchLauncherBase:
         spec_ref: str,
         as_of: date | None = None,
         cursor: str | None = None,
+        variant_index: int | None = None,
+        missing_periods: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Spawn one discovery child bound to an exact mission authorization."""
 
@@ -743,6 +816,7 @@ class _SearchLauncherBase:
                 canonical_json({
                     "authorization": dict(authorization), "spec_ref": spec_ref,
                     "as_of": as_of_date.isoformat(), "started_at": started_at,
+                    "variant_index": variant_index, "missing_periods": list(missing_periods),
                     "governance_hash": governance.content_hash,
                     "plan_hash": plan["content_hash"],
                 }).encode("utf-8")
@@ -755,6 +829,7 @@ class _SearchLauncherBase:
                 mission_version_ref=authorization["mission_version_ref"],
                 mission_version_hash=authorization["mission_version_hash"],
                 as_of=as_of_date.isoformat(), ticket_dir=ticket_dir, cursor=cursor,
+                variant_index=variant_index, missing_periods=missing_periods,
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1386,7 +1461,7 @@ class MissionSourceDiscoveryCoordinator:
         return int(held["have"]) < floor
 
     def _continuation_page(self, mission_version_ref: str, company_ref: str,
-                           spec_ref: str) -> dict[str, Any] | None:
+                           spec_ref: str, *, missing_periods: Sequence[str] = ()) -> dict[str, Any] | None:
         """Return an exact prior search binding with its next opaque cursor."""
         if self.source_ref != ALPHAENGINE_SOURCE_REF:
             return None
@@ -1413,7 +1488,31 @@ class MissionSourceDiscoveryCoordinator:
             or content_hash(hashed) != stored_hash
         ):
             return None
-        return _next_page_binding(discoveries[0], envelope, self.plan)
+        continuation=_next_page_binding(discoveries[0], envelope, self.plan)
+        if self.plan['schema_version'] != DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+            return continuation
+        prior=discoveries[0]['parameters']; as_of=date.fromisoformat(prior['filters']['date_to'])
+        spec=plan_spec(self.plan,spec_ref); variant_index=None
+        for index in range(len(spec['query_variants'])):
+            compiled=build_discovery_parameters(self.plan,spec_ref=spec_ref,company_ref=company_ref,
+                as_of=as_of,variant_index=index,missing_periods=missing_periods,cursor=prior.get('cursor'))
+            if compiled == prior:
+                variant_index=index; break
+        if variant_index is None:
+            return None
+        if self.selection_launcher is None:
+            return None
+        current=self.selection_launcher.currently_consumed(
+            mission_ref=mission_version_ref,missing_periods_by_company={company_ref:list(missing_periods)})
+        if discoveries[0]['id'] not in current:
+            return None
+        if continuation is not None:
+            return {**continuation,'variant_index':variant_index}
+        # A page without a cursor advances only after candidate selection has
+        # consumed that exact discovery under current inputs.
+        if variant_index+1 >= len(spec['query_variants']):
+            return None
+        return {'cursor':None,'as_of':as_of.isoformat(),'variant_index':variant_index+1}
 
     def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
                          spec_ref: str) -> str | None:
@@ -1610,8 +1709,15 @@ class MissionSourceDiscoveryCoordinator:
                 budget = self._budget(authorization["max_alphaengine_calls_24h"])
                 if budget["remaining"] < 1:
                     return {"status": "budget_exhausted", "budget": budget, "skipped": skipped}
+                missing_periods=()
+                if self.plan['schema_version'] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+                    from .mission_stage import evaluate_mission
+                    company_stage=next(row for row in evaluate_mission(self.store.connection,mission)
+                                       if row['company_ref']==company_ref)
+                    calls=next(row for row in company_stage['items'] if row['item_ref']=='earnings_calls')
+                    missing_periods=tuple(calls.get('missing_periods') or ())
                 continuation = self._continuation_page(
-                    mission["id"], company_ref, spec["spec_ref"])
+                    mission["id"], company_ref, spec["spec_ref"],missing_periods=missing_periods)
                 request_date = (
                     date.fromisoformat(continuation["as_of"])
                     if continuation else self.clock().date()
@@ -1620,11 +1726,16 @@ class MissionSourceDiscoveryCoordinator:
                     self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
                     as_of=request_date,
                     cursor=None if continuation is None else continuation["cursor"],
+                    variant_index=0 if continuation is None else continuation.get('variant_index',0),
+                    missing_periods=missing_periods,
                 )
                 try:
                     # Only AlphaEngine continuation adds a cursor. Initial
                     # pages and other search launchers keep their contract.
                     page_options = {"cursor": parameters["cursor"]} if parameters.get("cursor") else {}
+                    if self.plan['schema_version'] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+                        page_options.update(variant_index=0 if continuation is None else continuation.get('variant_index',0),
+                                            missing_periods=missing_periods)
                     ticket = self.search_launcher.start(
                         authorization=authorization, spec_ref=spec["spec_ref"],
                         as_of=request_date,
@@ -1759,12 +1870,15 @@ class MissionSourceDiscoveryCoordinator:
                     if self._spool is None: self._spool=RawSpool(str(self.spool_dir),max_total_bytes=1_000_000_000)
                     view=candidate_view(self._spool.read_object(envelope["raw_response_hash"]),envelope)
                     member=next(x for x in mission["universe"] if x["company_ref"]==document["company_ref"])
-                    terms=self.plan["companies"][document["company_ref"]]["search_terms"]
+                    company_plan=self.plan["companies"][document["company_ref"]]
+                    terms=company_plan.get("name",company_plan.get("search_terms"))
                     from .mission_stage import evaluate_mission
                     stage=next(x for x in evaluate_mission(self.store.connection,mission) if x["company_ref"]==document["company_ref"])
                     item=next(x for x in stage["items"] if x["item_ref"]=="earnings_calls")
                     ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
-                        mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,"ticker":member["ticker"],"aliases":[member["ticker"]]},missing_periods=list(item.get("missing_periods") or ()))
+                        mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,
+                        "ticker":member["ticker"],"aliases":list(company_plan.get("aliases") or [member["ticker"]])},
+                        missing_periods=list(item.get("missing_periods") or ()))
                 except Exception as exc:
                     return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
                 if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":

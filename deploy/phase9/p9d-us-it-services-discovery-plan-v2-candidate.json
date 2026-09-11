@@ -1,0 +1,88 @@
+{
+  "budget": {
+    "max_calls_24h": 30
+  },
+  "companies": {
+    "company:sec-cik:0000051143": {
+      "aliases": [
+        "IBM"
+      ],
+      "name": "International Business Machines",
+      "ticker": "IBM"
+    },
+    "company:sec-cik:0001058290": {
+      "aliases": [
+        "Cognizant"
+      ],
+      "name": "Cognizant Technology Solutions",
+      "ticker": "CTSH"
+    },
+    "company:sec-cik:0001352010": {
+      "aliases": [
+        "EPAM"
+      ],
+      "name": "EPAM Systems",
+      "ticker": "EPAM"
+    },
+    "company:sec-cik:0001467373": {
+      "aliases": [
+        "Accenture"
+      ],
+      "name": "Accenture plc",
+      "ticker": "ACN"
+    },
+    "company:sec-cik:001688568": {
+      "aliases": [
+        "DXC"
+      ],
+      "name": "DXC Technology",
+      "ticker": "DXC"
+    }
+  },
+  "content_hash": "409bd86a14b7889b87cd49c113220a488ed89e857b5fb82d9ca9b443b5faf398",
+  "created_at": "2026-09-11T00:00:00.000000+00:00",
+  "id": "discovery-plan:us-it-services:alphaengine:2-candidate",
+  "mission_ref": "coverage-mission:us-it-services",
+  "schema_version": "0.6",
+  "source_ref": "source:alphaengine",
+  "specs": [
+    {
+      "document_type": "meeting_minutes",
+      "lookback_days": 400,
+      "query_variants": [
+        {
+          "filters": {},
+          "query_template": "{name} {quarter} earnings call transcript"
+        },
+        {
+          "filters": {},
+          "query_template": "{ticker} {quarter} results webcast transcript"
+        },
+        {
+          "filters": {},
+          "query_template": "{name} quarterly earnings conference call"
+        }
+      ],
+      "rediscovery_interval_days": 7,
+      "retry_interval_days": 1,
+      "spec_ref": "earnings-call-transcripts"
+    },
+    {
+      "document_type": "sell_side_report",
+      "lookback_days": 180,
+      "query_variants": [
+        {
+          "filters": {},
+          "query_template": "{name} equity research report"
+        },
+        {
+          "filters": {},
+          "query_template": "{ticker} analyst report"
+        }
+      ],
+      "rediscovery_interval_days": 7,
+      "retry_interval_days": 1,
+      "spec_ref": "sell-side-reports"
+    }
+  ]
+}

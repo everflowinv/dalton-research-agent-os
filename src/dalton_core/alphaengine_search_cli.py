@@ -87,6 +87,8 @@ def run_discovery(
     transport: str,
     summary_dir: Path,
     cursor: str | None = None,
+    variant_index: int = 0,
+    missing_periods: tuple[str, ...] = (),
     catalog_db: Path | None = None,
     spool_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -160,6 +162,7 @@ def run_discovery(
         parameters = build_discovery_parameters(
             plan, spec_ref=spec_ref, company_ref=company_ref, as_of=as_of,
             cursor=cursor,
+            variant_index=variant_index, missing_periods=missing_periods,
         )
         summary["parameters"] = parameters
         summary["query_hash"] = search_spec_hash(parameters)
@@ -241,6 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mission-version-hash", required=True)
     parser.add_argument("--as-of", help="YYYY-MM-DD; defaults to today (UTC)")
     parser.add_argument("--cursor", help="opaque continuation cursor from the prior search page")
+    parser.add_argument("--variant-index", type=int, default=0)
+    parser.add_argument("--missing-period", action="append", default=[])
     parser.add_argument("--fake-search-file", type=Path)
     parser.add_argument("--mcp-endpoint", default=DEFAULT_MCP_ENDPOINT)
     parser.add_argument("--allow-network", action="store_true")
@@ -304,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         transport=transport,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         cursor=args.cursor,
+        variant_index=args.variant_index, missing_periods=tuple(args.missing_period),
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
     )

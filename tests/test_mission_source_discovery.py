@@ -566,6 +566,28 @@ class CoordinatorTests(unittest.TestCase):
         ref = params.pop("mission_ref")
         return self.missions.create_mission(ref, **params)
 
+    def test_v06_query_variants_bind_company_quarter_filters_and_cursor(self):
+        plan=build_discovery_plan(plan_id='discovery-plan:variants:test',created_at=NOW.isoformat(timespec='microseconds'),
+            mission_ref='coverage-mission:us-it-services',source_ref='source:alphaengine',max_calls_24h=12,
+            companies={ACN:{'name':'Accenture plc','ticker':'ACN','aliases':['Accenture']}},specs=[{
+                'spec_ref':'earnings-call-transcripts','document_type':'meeting_minutes',
+                'query_variants':[
+                    {'query_template':'{name} {quarter} earnings call transcript','filters':{'company':'Accenture'}},
+                    {'query_template':'{ticker} {quarter} results webcast','filters':{'geography':'US'}}],
+                'lookback_days':400,'rediscovery_interval_days':7,'retry_interval_days':1}])
+        first=build_discovery_parameters(plan,spec_ref='earnings-call-transcripts',company_ref=ACN,
+            as_of=date(2026,9,11),variant_index=0,missing_periods=['2026-Q2'])
+        second=build_discovery_parameters(plan,spec_ref='earnings-call-transcripts',company_ref=ACN,
+            as_of=date(2026,9,11),variant_index=1,missing_periods=['2026-Q2'],cursor='next-page')
+        self.assertEqual(first['query'],'Accenture plc 2026-Q2 earnings call transcript')
+        self.assertEqual(first['filters']['company'],'Accenture')
+        self.assertEqual(second['query'],'ACN 2026-Q2 results webcast')
+        self.assertEqual(second['cursor'],'next-page')
+        self.assertNotEqual(search_spec_hash(first),search_spec_hash(second))
+        legacy=plan_for_tests(); before=canonical_json(legacy)
+        validate_discovery_plan(legacy)
+        self.assertEqual(canonical_json(legacy),before)
+
     def mission_v2(self, v1, *, cap: int = 30):
         params = mission_params(self.state)
         params["autonomy"]["may_write"] = list(params["autonomy"]["may_write"]) + ["source_discovery"]
