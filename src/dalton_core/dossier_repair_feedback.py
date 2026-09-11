@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -34,18 +34,29 @@ def _read_object(path: Path) -> dict[str, Any] | None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
-        info = os.fstat(descriptor)
+        before = os.fstat(descriptor)
         if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077 != 0
-            or info.st_size > MAX_FILE_BYTES
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_mode & 0o077 != 0
+            or before.st_size > MAX_FILE_BYTES
         ):
             return None
-        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as handle:
-            descriptor = -1
-            value = json.load(handle)
-    except (OSError, UnicodeError, ValueError):
+        payload = os.read(descriptor, MAX_FILE_BYTES + 1)
+        after = os.fstat(descriptor)
+        path_info = path.lstat()
+        stable = lambda item: (
+            item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns
+        )
+        if (
+            len(payload) > MAX_FILE_BYTES
+            or len(payload) != after.st_size
+            or stable(before) != stable(after)
+            or stable(after) != stable(path_info)
+        ):
+            return None
+        value = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError):
         return None
     finally:
         if "descriptor" in locals() and descriptor >= 0:
@@ -58,10 +69,25 @@ def _terminal_time(ticket: Mapping[str, Any]) -> str | None:
     if not isinstance(value, str):
         return None
     try:
-        datetime.fromisoformat(value)
+        moment = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return value
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        return None
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _owner_directory(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and info.st_uid == os.getuid()
+        and info.st_mode & 0o077 == 0
+    )
 
 
 def _targets(value: Any) -> list[dict[str, str]]:
@@ -133,12 +159,15 @@ def read_dossier_repair_feedback(state_dir: str | Path) -> dict[str, dict[str, A
     add or clear feedback.
     """
 
-    root = Path(state_dir).expanduser().resolve() / "company-dossier-runs"
-    if not root.is_dir():
+    state = Path(state_dir).expanduser()
+    if not state.is_absolute():
+        state = state.absolute()
+    root = state / "company-dossier-runs"
+    if not _owner_directory(state) or not _owner_directory(root):
         return {}
     latest: dict[str, dict[str, Any]] = {}
     for directory in sorted(root.iterdir(), key=lambda item: item.name):
-        if not directory.is_dir() or directory.is_symlink():
+        if not _owner_directory(directory):
             continue
         outcome = _outcome(directory)
         if outcome is None:

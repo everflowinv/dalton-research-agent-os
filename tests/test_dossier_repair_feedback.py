@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.dossier_repair_feedback import (
     dossier_repair_feedback_signature,
@@ -103,6 +104,62 @@ class DossierRepairFeedbackTests(unittest.TestCase):
         external.write_text("{}", encoding="utf-8")
         os.chmod(external, 0o600)
         (target / "summary.json").symlink_to(external)
+        self.assertEqual(read_dossier_repair_feedback(self.state), {})
+
+    def test_symlinked_state_root_is_rejected_before_resolution(self) -> None:
+        self._write("real", completed_at="2026-09-11T12:00:00+00:00",
+                    targets=[{"unit": "kpi_dictionary"}])
+        link = self.state.parent / "linked-state"
+        link.symlink_to(self.state, target_is_directory=True)
+        self.addCleanup(link.unlink)
+        self.assertEqual(read_dossier_repair_feedback(link), {})
+
+    def test_file_that_grows_during_its_bounded_read_is_rejected(self) -> None:
+        directory = self._write(
+            "growing", completed_at="2026-09-11T12:00:00+00:00",
+            targets=[{"unit": "kpi_dictionary"}],
+        )
+        original_read = os.read
+        reads = 0
+
+        def grow_after_read(descriptor: int, size: int) -> bytes:
+            nonlocal reads
+            reads += 1
+            payload = original_read(descriptor, size)
+            if reads == 2:
+                with (directory / "summary.json").open("ab") as handle:
+                    handle.write(b" ")
+            return payload
+
+        with patch("dalton_core.dossier_repair_feedback.os.read",
+                   side_effect=grow_after_read):
+            self.assertEqual(read_dossier_repair_feedback(self.state), {})
+
+    def test_naive_time_is_rejected_and_offsets_are_compared_in_utc(self) -> None:
+        self._write("naive", completed_at="2026-09-11T23:00:00",
+                    targets=[{"detail": "naive"}])
+        first = self._write("offset-first",
+                            completed_at="2026-09-11T14:00:00+02:00",
+                            targets=[{"detail": "12:00 UTC"}])
+        later = self._write("offset-later",
+                            completed_at="2026-09-11T12:30:00+00:00",
+                            targets=[{"detail": "12:30 UTC"}])
+        feedback = read_dossier_repair_feedback(self.state)[COMPANY]
+        self.assertNotEqual(first.name, later.name)
+        self.assertEqual(feedback["source_ticket_ref"],
+                         f"company-dossier-run:{later.name}")
+        self.assertEqual(feedback["repair_targets"][0]["detail"], "12:30 UTC")
+
+    def test_ticket_signature_must_still_derive_its_directory_identity(self) -> None:
+        directory = self._write(
+            "identity", completed_at="2026-09-11T12:00:00+00:00",
+            targets=[{"unit": "kpi_dictionary"}],
+        )
+        path = directory / "ticket.json"
+        ticket = json.loads(path.read_text(encoding="utf-8"))
+        ticket["signature"] = "ledger:tampered"
+        path.write_text(json.dumps(ticket), encoding="utf-8")
+        os.chmod(path, 0o600)
         self.assertEqual(read_dossier_repair_feedback(self.state), {})
 
 

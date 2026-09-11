@@ -73,6 +73,7 @@ class PlannerChildTests(unittest.TestCase):
         suffix = run_digest(company_ref, signature)
         directory = self.state / "company-dossier-runs" / suffix
         directory.mkdir(mode=0o700, parents=True)
+        directory.parent.chmod(0o700)
         for name, value in {
             "ticket.json": {
                 "id": f"company-dossier-run:{suffix}",
