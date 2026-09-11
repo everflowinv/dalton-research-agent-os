@@ -3701,10 +3701,11 @@ class WriterServer:
         ):
             if coordinator is None:
                 continue
-            try:
-                plans.append(coordinator.load_plan())
-            except Exception:  # noqa: BLE001 - a missing plan only narrows the checklist
-                continue
+            # The coordinator owns the validated plan used for dispatch.
+            # load_plan() belongs to its launcher, not the coordinator;
+            # swallowing that AttributeError classified every installed spec
+            # as unplanned and hid real source gaps from dependent lanes.
+            plans.append(coordinator.plan)
         return MissionStageDriver(
             self.coverage_mission, planned_specs=planned_spec_refs(plans)
         )

@@ -79,6 +79,36 @@ class P9dWriterHarness(P9aWriterHarness):
 
 
 class P9dWriterOpsTests(unittest.TestCase):
+    def test_stage_checklist_uses_the_installed_coordinator_plan(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        h = P9dWriterHarness(Path(root.name))
+        self.addCleanup(h.close)
+        state = h.bootstrap()
+        params = h.mission_params(state)
+        for source in params["source_plan"]:
+            if source["source_ref"] == "source:alphaengine":
+                source["status"] = "connected"
+        h.governance.call("create_coverage_mission", params)
+
+        # Exercise the actual writer RPC and actual installed coordinator,
+        # without launching a search or reading model/provider fixtures.
+        view = h.core.call("mission_stage_checklist", {})
+        company = next(row for row in view["missions"][0]["companies"]
+                       if row["company_ref"] == ACN)
+        calls = next(row for row in company["items"]
+                     if row["item_ref"] == "earnings_calls")
+        self.assertEqual(calls["status"], "missing")
+        self.assertIn("earnings_calls", company["gaps"])
+        annual = next(row for row in company["items"]
+                      if row["item_ref"] == "annual_report")
+        self.assertNotEqual(annual["status"], "missing")
+        tick = h.core.call("dispatch_mission_stage", {})
+        needs = tick["missions"][0]["discovery_needs"]
+        self.assertTrue(any(row["company_ref"] == ACN and
+                            row["spec_ref"] == "earnings-call-transcripts"
+                            for row in needs))
+
     def test_discovery_ops_are_gated_recorded_and_readable(self) -> None:
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
