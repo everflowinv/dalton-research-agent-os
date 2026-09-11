@@ -16,6 +16,7 @@ from dalton_core.store import canonical_json, content_hash
 from tests.test_company_dossier import body, drafted
 from tests.test_claim_index_entries import LedgerFixture
 from tests.test_company_dossier_draft import STRUCTURE, material, reply, one_sentence
+from tests.test_dossier_lane import bootstrap_method_authorities, mission_params
 
 
 class DossierUnitProvenanceTests(unittest.TestCase):
@@ -65,17 +66,12 @@ class DossierUnitProvenanceTests(unittest.TestCase):
 
     def _install_mission(self, fixture):
         authority=CoverageMissionAuthority(fixture.store)
-        record={"id":"mission:v14"}
-        record["content_hash"]=content_hash(record)
-        with authority._transaction() as cur:
-            cur.execute("INSERT INTO coverage_mission_versions "
-                "(mission_version_id,mission_ref,version_number,prior_version_id,industry_ref,"
-                "playbook_version_ref,constitution_version_ref,mandate_version_ref,record_json,"
-                "content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("mission:v14","mission:test",1,None,"industry:test","playbook:test",
-                 "constitution-version:us-it-services:1","mandate:test",canonical_json(record),
-                 record["content_hash"],"actor:test","2026-09-10T00:00:00+00:00"))
-        self.producer_input["mission"]["hash"]=record["content_hash"]
+        state=bootstrap_method_authorities(fixture.store);self.method_state=state
+        params=mission_params(state)
+        if "dossier" not in params["autonomy"]["may_write"]:
+            params["autonomy"]["may_write"].append("dossier")
+        record=authority.create_mission(params.pop("mission_ref"),**params)
+        self.producer_input["mission"]={"ref":record["id"],"hash":record["content_hash"]}
         self.provenance[self.unit]["input_fingerprint"]=content_hash(self.producer_input)
         scheduler=sqlite3.connect(self.scheduler_path)
         router=sqlite3.connect(self.router_path)
@@ -83,7 +79,9 @@ class DossierUnitProvenanceTests(unittest.TestCase):
             work_ref=f"work:{name}"
             row=scheduler.execute("SELECT work_order_json FROM scheduler_work_orders "
                                   "WHERE work_order_id=?",(work_ref,)).fetchone()
-            work=json.loads(row[0]);work["metadata"]["mission_version_hash"]=record["content_hash"]
+            work=json.loads(row[0]);work["metadata"].update({
+                "mission_version_ref":record["id"],
+                "mission_version_hash":record["content_hash"]})
             work_hash=content_hash(work)
             scheduler.execute("UPDATE scheduler_work_orders SET work_order_json=?,work_order_hash=? "
                               "WHERE work_order_id=?",(canonical_json(work),work_hash,work_ref))
@@ -91,6 +89,17 @@ class DossierUnitProvenanceTests(unittest.TestCase):
                            "WHERE work_order_id=?",(work_hash,work_ref))
         scheduler.commit();scheduler.close();router.commit();router.close()
         return record
+
+    def _next_mission(self, fixture, prior):
+        params=mission_params(self.method_state)
+        params.update({"version_id":"mission-version:test:2",
+                       "prior_version_ref":prior["id"],
+                       "idempotency_key":"mission-test-v2",
+                       "objective":params["objective"]+" revised"})
+        if "dossier" not in params["autonomy"]["may_write"]:
+            params["autonomy"]["may_write"].append("dossier")
+        return CoverageMissionAuthority(fixture.store).create_mission(
+            params.pop("mission_ref"),**params)
 
     def _call(self, scheduler, router, name, producer_routes):
         work_ref=f"work:{name}"; route_ref=f"route-decision:{name}"; result_ref=f"result-envelope:{name}"; invocation_ref=f"invocation:{name}"
@@ -146,10 +155,10 @@ class DossierUnitProvenanceTests(unittest.TestCase):
 
     def test_nested_parse_input_and_governance_are_closed(self):
         fixture=LedgerFixture();self.addCleanup(fixture.close)
-        self._install_mission(fixture)
+        mission=self._install_mission(fixture)
         authority=CompanyDossierAuthority(fixture.store)
         candidate=body(drafted_sections={self.unit:self.block},company_ref="company:acn")
-        candidate["bindings"]["mission_version_ref"]="mission:v14"
+        candidate["bindings"]["mission_version_ref"]=mission["id"]
         candidate["input_fingerprints"]={unit:None for unit in UNITS}
         candidate["unit_provenance"]={unit:None for unit in UNITS}
         item=json.loads(json.dumps(self.provenance[self.unit]))
@@ -175,17 +184,17 @@ class DossierUnitProvenanceTests(unittest.TestCase):
             wrong_unit["business_model"]["producer_input"])
         with self.assertRaisesRegex(ValueError,"producer input binding drifted"):
             validate_formal_unit_provenance(
-                wrong_unit, mission_ref="mission:v14", current_prior_ref=None,
+                wrong_unit, mission_ref=mission["id"], current_prior_ref=None,
                 company_ref="company:acn", scheduler_db=self.scheduler_path,
                 router_db=self.router_path)
 
     def test_verified_publish_round_trips_closed_v3_and_plain_publish_refuses(self):
         fixture=LedgerFixture();self.addCleanup(fixture.close)
-        self._install_mission(fixture)
+        mission=self._install_mission(fixture)
         authority=CompanyDossierAuthority(fixture.store)
         candidate=body(drafted_sections={self.unit: self.block})
         candidate["company_ref"]="company:acn"
-        candidate["bindings"]["mission_version_ref"]="mission:v14"
+        candidate["bindings"]["mission_version_ref"]=mission["id"]
         candidate["input_fingerprints"]={unit:None for unit in UNITS}
         candidate["input_fingerprints"][self.unit]=content_hash(self.producer_input)
         candidate["unit_provenance"]={unit:None for unit in UNITS}
@@ -198,13 +207,13 @@ class DossierUnitProvenanceTests(unittest.TestCase):
 
     def test_recomputed_record_hash_cannot_publish_a_body_the_producer_did_not_make(self):
         fixture=LedgerFixture();self.addCleanup(fixture.close)
-        self._install_mission(fixture)
+        mission=self._install_mission(fixture)
         authority=CompanyDossierAuthority(fixture.store)
         altered=json.loads(json.dumps(self.block))
         altered["slots"][0]["sentences"][0]["text"]="A different supported-looking sentence"
         candidate=body(drafted_sections={self.unit:altered})
         candidate["company_ref"]="company:acn"
-        candidate["bindings"]["mission_version_ref"]="mission:v14"
+        candidate["bindings"]["mission_version_ref"]=mission["id"]
         candidate["input_fingerprints"]={unit:None for unit in UNITS}
         candidate["input_fingerprints"][self.unit]=content_hash(self.producer_input)
         candidate["unit_provenance"]={unit:None for unit in UNITS}
@@ -215,14 +224,14 @@ class DossierUnitProvenanceTests(unittest.TestCase):
 
     def test_legacy_drafted_unit_stays_null_when_one_new_unit_gains_proof(self):
         fixture=LedgerFixture();self.addCleanup(fixture.close)
-        self._install_mission(fixture)
+        mission=self._install_mission(fixture)
         authority=CompanyDossierAuthority(fixture.store)
         legacy_block=drafted("business_model","claim-version:legacy")
         prior=authority.publish(body(drafted_sections={"business_model":legacy_block},
                                      company_ref="company:acn"))
         candidate=body(drafted_sections={"business_model":legacy_block,self.unit:self.block},
                        company_ref="company:acn",prior_ref=prior["id"])
-        candidate["bindings"]["mission_version_ref"]="mission:v14"
+        candidate["bindings"]["mission_version_ref"]=mission["id"]
         candidate["input_fingerprints"]={unit:None for unit in UNITS}
         candidate["input_fingerprints"][self.unit]=content_hash(self.producer_input)
         candidate["unit_provenance"]={unit:None for unit in UNITS}
@@ -233,6 +242,31 @@ class DossierUnitProvenanceTests(unittest.TestCase):
                                              router_db=self.router_path)
         self.assertIsNone(published["unit_provenance"]["business_model"])
         self.assertEqual(published["sections"][0],legacy_block)
+
+    def test_old_mission_proof_is_carried_exactly_into_a_new_mission_version(self):
+        fixture=LedgerFixture();self.addCleanup(fixture.close)
+        mission=self._install_mission(fixture)
+        authority=CompanyDossierAuthority(fixture.store)
+        first=body(drafted_sections={self.unit:self.block},company_ref="company:acn")
+        first["bindings"]["mission_version_ref"]=mission["id"]
+        first["input_fingerprints"]={unit:None for unit in UNITS}
+        first["input_fingerprints"][self.unit]=content_hash(self.producer_input)
+        first["unit_provenance"]={unit:None for unit in UNITS}
+        first["unit_provenance"][self.unit]=self.provenance[self.unit]
+        published=authority.publish_verified(first,scheduler_db=self.scheduler_path,
+                                             router_db=self.router_path)
+        second_mission=self._next_mission(fixture,mission)
+        second=body(drafted_sections={self.unit:self.block},company_ref="company:acn",
+                    prior_ref=published["id"])
+        second["bindings"]["mission_version_ref"]=second_mission["id"]
+        second["input_fingerprints"]=published["input_fingerprints"]
+        second["unit_provenance"]=published["unit_provenance"]
+        carried=authority.publish_verified(second,scheduler_db=self.scheduler_path,
+                                           router_db=self.router_path)
+        self.assertEqual(carried["unit_provenance"][self.unit],
+                         published["unit_provenance"][self.unit])
+        self.assertEqual(carried["unit_provenance"][self.unit]["producer_input"]
+                         ["mission"]["ref"],mission["id"])
 
 
 if __name__ == "__main__": unittest.main()

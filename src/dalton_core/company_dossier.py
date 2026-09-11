@@ -1431,19 +1431,14 @@ class CompanyDossierAuthority:
             return self.publish(body)
         from .company_dossier_cli import validate_formal_unit_provenance
         mission_ref = ((body.get("bindings") or {}).get("mission_version_ref"))
-        mission_row = self.connection.execute(
-            "SELECT record_json,content_hash FROM coverage_mission_versions "
-            "WHERE mission_version_id=?", (mission_ref,),
-        ).fetchone()
-        if mission_row is None:
+        from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+        try:
+            mission_reader = object.__new__(CoverageMissionAuthority)
+            mission_reader.connection = self.connection
+            mission_record = mission_reader.mission(mission_ref)
+        except CoverageMissionError as exc:
             raise CompanyDossierValidationError(
-                "the dossier mission binding does not resolve")
-        mission_record = json.loads(mission_row["record_json"])
-        if (mission_record.get("id") != mission_ref
-                or content_hash({key: value for key, value in mission_record.items()
-                         if key != "content_hash"}) != mission_row["content_hash"]
-                or mission_record.get("content_hash") != mission_row["content_hash"]):
-            raise CompanyDossierValidationError("the dossier mission authority drifted")
+                "the dossier mission binding does not resolve exactly") from exc
         prior_ref = body.get(SOURCE_VERSION_KEY)
         prior = None if prior_ref is None else self.dossier(prior_ref)
 
@@ -1486,7 +1481,7 @@ class CompanyDossierAuthority:
             company_ref=body.get("company_ref"), current_units=changed_units,
             current_blocks=changed_blocks,
             current_bindings=body.get("bindings"),
-            current_mission_hash=mission_row["content_hash"],
+            current_mission_hash=mission_record["content_hash"],
             scheduler_db=scheduler_db, router_db=router_db,
         )
         return self.publish(body, _provenance_verified=True)
