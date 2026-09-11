@@ -255,6 +255,10 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
         self.assertEqual(finished["summary"]["status"], "complete")
         self.assertEqual(coordinator.dispatch_once()["status"], "idle")
         self.assertEqual(len(broker.requests), 2)
+        self.assertEqual(
+            [decision["capability"] for decision in fixture.router.list_decisions()][-2:],
+            ["research", "verify"],
+        )
         with sqlite3.connect(fixture.state / "budget.sqlite") as budget:
             rows = budget.execute(
                 "SELECT a.work_order_ref,s.actual_micros FROM "

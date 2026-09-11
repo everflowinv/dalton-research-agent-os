@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .annual_report_qualitative import (
     AnnualReportQualitativeError, VERIFIER_PROVIDER_SCHEMA_HASH,
-    validate_model_proof,
+    qualitative_router_capability, validate_model_proof,
 )
 from .contracts import ResultEnvelope, WorkOrder
 from .document_research import DocumentResearchError, DocumentResearchRegistry
@@ -160,6 +160,11 @@ def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
         prior = works[-1]["id"] if works else None
         model_key = "draft" if ordinal == 2 else "verifier" if ordinal == 3 else None
         execution = None if model_key is None else admission["model_execution"][model_key]
+        requested_capabilities = list(step["requested_capabilities"])
+        if model_key is not None:
+            requested_capabilities.append(
+                qualitative_router_capability(requested_capabilities[0])
+            )
         metadata = {
             "authority_kind": AUTHORITY_KIND,
             "mission_document_research_admission_ref": admission["id"],
@@ -214,7 +219,7 @@ def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
         works.append(WorkOrder.from_dict({
             "schema_version": SCHEMA_VERSION, "id": ref,
             "created_at": admission["created_at"], "updated_at": admission["created_at"],
-            "question": question, "requested_capabilities": step["requested_capabilities"],
+            "question": question, "requested_capabilities": requested_capabilities,
             "runtime_profile_ref": step["runtime_profile_ref"], "budget": budget,
             "idempotency_key": f"mission-document-research-work:{admission['id']}:{ordinal}",
             "declared_side_effects": step["declared_side_effects"], "status": "ready",
