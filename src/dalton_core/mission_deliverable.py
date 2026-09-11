@@ -127,7 +127,17 @@ _MONTH_DATE_RE = re.compile(
     r"Dec(?:ember)?)\s+(?:0?[1-9]|[12]\d|3[01]),?\s+(?:19|20)\d{2}(?!\d)",
     re.IGNORECASE,
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.2"
+_MONTH_DAY_RE = re.compile(
+    r"(?<![A-Za-z])(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\s+(0?[1-9]|[12]\d|3[01])(?!\d)",
+    re.IGNORECASE,
+)
+_BARE_MONTH_DAY_RE = re.compile(
+    _MONTH_DAY_RE.pattern + r"(?!\s*,?\s*(?:19|20)\d{2})",
+    re.IGNORECASE,
+)
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.3"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -138,7 +148,8 @@ def number_source_contract_fingerprint() -> str:
     return content_hash({
         "version": NUMBER_SOURCE_CONTRACT_VERSION,
         "number_source_fields": ["text", "period"],
-        "bound_period_equivalence": "iso-date-to-english-month-date",
+        "bound_period_equivalence": (
+            "iso-date-to-english-month-date-or-exact-cited-month-day"),
     })
 
 
@@ -234,6 +245,26 @@ def _bound_period_dates(numbers: Sequence[Mapping[str, Any]]) -> set[str]:
     return dates
 
 
+def _month_day(value: str) -> tuple[str, int] | None:
+    match = _MONTH_DAY_RE.search(value)
+    if match is None:
+        return None
+    try:
+        parsed = datetime.strptime(match.group(1)[:3], "%b")
+    except ValueError:
+        return None
+    return (parsed.strftime("%m"), int(match.group(2)))
+
+
+def _bound_period_month_days(
+    numbers: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, int]]:
+    return {
+        found for item in numbers
+        if (found := _month_day(str(item.get("period") or ""))) is not None
+    }
+
+
 def _remove_bound_month_dates(
     body: str, numbers: Sequence[Mapping[str, Any]],
 ) -> str:
@@ -244,13 +275,19 @@ def _remove_bound_month_dates(
     blanket rule that dates are never figures.
     """
 
-    bound = _bound_period_dates(numbers)
-    if not bound:
-        return body
-    return _MONTH_DATE_RE.sub(
+    bound_dates = _bound_period_dates(numbers)
+    checked = _MONTH_DATE_RE.sub(
         lambda match: (" " * len(match.group(0)))
-        if _normalise_date(match.group(0)) in bound else match.group(0),
+        if _normalise_date(match.group(0)) in bound_dates else match.group(0),
         body,
+    )
+    bound_month_days = _bound_period_month_days(numbers)
+    if not bound_month_days:
+        return checked
+    return _BARE_MONTH_DAY_RE.sub(
+        lambda match: (" " * len(match.group(0)))
+        if _month_day(match.group(0)) in bound_month_days else match.group(0),
+        checked,
     )
 
 

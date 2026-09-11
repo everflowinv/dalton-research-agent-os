@@ -109,6 +109,7 @@ def _verifier_contract_pairs(draft_digest, blocks, company, *, current):
 # reports is recorded and read; these two are the blueprint's stop-loss for
 # this layer, so they are a gate rather than a score.
 HARD_CHECKS: tuple[str, ...] = ("numbers_without_refs", "new_version_cites_new_refs")
+MAX_REPAIR_TARGETS = 20
 MAX_STATEMENT_PERIODS = 8
 # The sections a filed figure belongs beside. The rest of the file is about
 # judgement, and a number offered to a section that cannot use it is prompt
@@ -1379,6 +1380,7 @@ def run_dossier(
         "failure_reason": None,
         "formal_authority_writes": 0,
         "failed_model_traces": [],
+        "repair_targets": [],
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
@@ -1605,7 +1607,14 @@ def run_dossier(
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
             attempted_outcomes.append(str(outcome.get("status") or ""))
             if outcome["status"] != "drafted":
-                summary["refused"].append({"unit": unit, "reason": outcome["reason"]})
+                if outcome["status"] == "insufficient_evidence":
+                    summary["repair_targets"].extend(
+                        (outcome.get("repair_targets") or [])[
+                            :MAX_REPAIR_TARGETS - len(summary["repair_targets"])
+                        ])
+                else:
+                    summary["refused"].append(
+                        {"unit": unit, "reason": outcome["reason"]})
                 continue
             blocks[unit] = outcome["block"]
             input_fingerprints[unit] = dossier_input_fingerprint(frozen_input)
@@ -1622,7 +1631,15 @@ def run_dossier(
         if not blocks:
             model_refusals = [item for item in summary["refused"]
                               if item.get("reason") != "run cost bound reached"]
-            if model_refusals:
+            if (attempted_outcomes and all(
+                    status == "insufficient_evidence"
+                    for status in attempted_outcomes)):
+                summary.update({
+                    "status": "succeeded", "dossier_status": "insufficient_evidence",
+                    "failure_reason": ("the supplied canonical material supports no "
+                                       "requested dossier slot"),
+                })
+            elif model_refusals:
                 reasons = [str(item.get("reason") or "draft contract refused")
                            for item in model_refusals[:3]]
                 summary.update({
@@ -1783,10 +1800,15 @@ def run_dossier(
             record["unit_provenance"] = unit_provenance
         gate = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate["summary"]
+        summary["repair_targets"].extend(
+            gate["repair_targets"][:MAX_REPAIR_TARGETS - len(summary["repair_targets"])])
         if gate["failed"]:
+            target = gate["repair_targets"][0] if gate["repair_targets"] else None
+            detail = "" if target is None else "; first target: " + json.dumps(
+                target, ensure_ascii=False, sort_keys=True)
             summary.update({"status": "succeeded", "dossier_status": "rubric_refused",
                             "failure_reason": "hard checks failed: "
-                                              + ", ".join(gate["failed"])})
+                                              + ", ".join(gate["failed"]) + detail})
             return summary
         findings = output_rubric_findings(record, constitution=constitution,
                                           policy=policy, prior=prior)
@@ -1947,15 +1969,28 @@ def rubric_gate(
     if "new_version_cites_new_refs" in failed and new_refs(record, prior):
         failed = [name for name in failed if name != "new_version_cites_new_refs"]
         overridden.append("new_version_cites_new_refs")
+    checks = {
+        item["check"]: {
+            "status": item["status"], "count": item["count"],
+            "detail": item.get("detail") or "",
+            "findings": [dict(row) for row in item.get("findings") or []],
+        }
+        for item in result["checks"]
+    }
+    repair_targets = [
+        {"check": check, **dict(finding)}
+        for check in failed
+        for finding in checks[check]["findings"]
+    ][:MAX_REPAIR_TARGETS]
     return {
         "failed": failed,
+        "repair_targets": repair_targets,
         "summary": {
             "passed": result["passed"],
             "failed_checks": result["failed_checks"],
             "hard_failed": failed,
             "overridden_checks": overridden,
-            "checks": {item["check"]: {"status": item["status"], "count": item["count"]}
-                       for item in result["checks"]},
+            "checks": checks,
         },
     }
 

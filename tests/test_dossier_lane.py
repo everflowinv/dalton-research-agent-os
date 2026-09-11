@@ -514,6 +514,62 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(summary["formal_authority_writes"], 0)
         self.assertIn("all attempted dossier units", summary["failure_reason"])
 
+    def test_all_unknown_drafts_become_an_actionable_evidence_hold(self):
+        class AllUnknownModel(FakeModel):
+            def call(self, **kwargs):
+                prompt = kwargs["prompt"]
+                self.prompts.append(prompt)
+                self.assert_not_verifier(prompt)
+                slots = re.findall(r"^  (\S+)\t", prompt, flags=re.MULTILINE)
+                payload = {
+                    "slots": [
+                        {"slot_id": slot, "unknown": f"缺少 {slot} 的直接证据"}
+                        for slot in slots
+                    ],
+                    "gaps": ["需要新的公司披露"],
+                }
+                if "Part: industry_classification" in prompt:
+                    payload["classification"] = "insufficient_evidence"
+                return self._envelope(json.dumps(payload, ensure_ascii=False))
+
+            def assert_not_verifier(self, prompt):
+                if prompt.startswith("You are an independent verifier"):
+                    raise AssertionError("an empty draft must not spend a verifier call")
+
+        summary = self.harness.run(model_factory=AllUnknownModel, max_units=2)
+        self.assertEqual(
+            (summary["status"], summary["dossier_status"]),
+            ("succeeded", "insufficient_evidence"),
+        )
+        self.assertEqual(summary["refused"], [])
+        self.assertEqual(summary["formal_authority_writes"], 0)
+        self.assertTrue(summary["repair_targets"])
+        self.assertEqual(summary["repair_targets"][0]["code"], "unsupported_slot")
+
+    def test_an_unknown_unit_does_not_block_supported_units(self):
+        class CatalystUnknownModel(FakeModel):
+            def call(self, **kwargs):
+                prompt = kwargs["prompt"]
+                if "Part: catalyst_calendar" not in prompt:
+                    return super().call(**kwargs)
+                self.prompts.append(prompt)
+                return self._envelope(json.dumps({
+                    "slots": [{"slot_id": "catalyst_calendar",
+                               "unknown": "材料没有给出未来事件日期"}],
+                    "gaps": ["需要业绩发布或投资者日日期"],
+                }, ensure_ascii=False))
+
+        self.harness.tag(
+            "d-catalyst", "catalyst_calendar",
+            statement="AI产品采用是后续观察项，但当前没有发布日期。")
+        summary = self.harness.run(
+            model_factory=CatalystUnknownModel, max_units=12)
+        self.assertEqual(summary["dossier_status"], "partial_published")
+        self.assertNotIn("catalyst_calendar", summary["units_drafted"])
+        self.assertEqual(summary["repair_targets"][0]["unit"],
+                         "catalyst_calendar")
+        self.assertEqual(len(self.authority.versions(ACN)), 1)
+
     def test_one_refused_unit_does_not_hide_a_published_partial_success(self):
         class FirstRefusedModel(FakeModel):
             def call(self, **kwargs):
@@ -533,6 +589,11 @@ class PublishTests(unittest.TestCase):
             model_factory=lambda: FakeModel(extra_number="45.6 亿美元"))
         self.assertEqual(summary["dossier_status"], "rubric_refused")
         self.assertIn("numbers_without_refs", summary["rubric"]["hard_failed"])
+        check = summary["rubric"]["checks"]["numbers_without_refs"]
+        self.assertTrue(check["findings"])
+        self.assertEqual(summary["repair_targets"][0]["check"],
+                         "numbers_without_refs")
+        self.assertIn("first target", summary["failure_reason"])
         self.assertEqual(self.authority.versions(ACN), [])
 
     def test_the_run_writes_a_summary_a_parent_can_read(self):
@@ -1046,6 +1107,40 @@ class CoordinatorTests(unittest.TestCase):
         second = coordinator.dispatch_once()
         self.assertEqual(second["settled"]["dossier_status"], "nothing_new")
         self.assertEqual(len(launcher.started), 1)
+
+    def test_settlement_preserves_bounded_repair_targets(self):
+        launcher = self.Launcher(summary={
+            "dossier_status": "rubric_refused",
+            "failure_reason": "hard checks failed",
+            "repair_targets": [
+                {"check": "numbers_without_refs", "section": "history",
+                 "figure": "31", "ignored": "not part of the projection"},
+            ],
+        })
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher)
+        coordinator.dispatch_once()
+        settled = coordinator.dispatch_once()["settled"]
+        self.assertEqual(settled["repair_targets"], [{
+            "check": "numbers_without_refs", "section": "history",
+            "figure": "31",
+        }])
+
+    def test_insufficient_evidence_is_quiet_for_an_unchanged_signature(self):
+        launcher = self.Launcher(summary={
+            "dossier_status": "insufficient_evidence",
+            "failure_reason": "no supported slot",
+            "repair_targets": [{"unit": "catalyst_calendar",
+                                "code": "missing_evidence",
+                                "detail": "需要未来事件日期"}],
+        })
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        settled = coordinator.dispatch_once()
+        self.assertEqual(settled["settled"]["repair_targets"][0]["unit"],
+                         "catalyst_calendar")
+        self.assertEqual(coordinator.dispatch_once()["status"], "idle")
 
     def test_it_stays_quiet_until_the_ledger_moves(self):
         launcher = self.Launcher()

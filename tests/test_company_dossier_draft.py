@@ -27,6 +27,7 @@ from dalton_core.company_dossier_draft import (
     DRAFT_PURPOSE,
     SECTION_SENTENCE_CAP,
     SLOT_SENTENCE_CAP,
+    DossierDraftInsufficientEvidence,
     DossierDraftRefused,
     build_unit_prompt,
     build_verifier_prompt,
@@ -213,6 +214,22 @@ class ReplyContractTests(unittest.TestCase):
         self.assertEqual(section["slots"][1]["unknown"],
                          "没有关于 AI 预算池的一手材料")
 
+    def test_an_all_unknown_reply_is_valid_but_is_not_a_draft(self):
+        with self.assertRaises(DossierDraftInsufficientEvidence) as caught:
+            self.parse(reply([
+                {"slot_id": "causal_chain:0", "unknown": "缺少订单转化证据"},
+                {"slot_id": "causal_chain:1", "unknown": "缺少AI预算披露"},
+            ], gaps=["需要下一次业绩披露"]))
+        self.assertEqual(caught.exception.slots[0]["slot_id"], "causal_chain:0")
+        self.assertEqual(caught.exception.gaps, ["需要下一次业绩披露"])
+
+    def test_a_malformed_all_unknown_reply_is_still_refused(self):
+        with self.assertRaises(DossierDraftRefused):
+            self.parse(reply([
+                {"slot_id": "causal_chain:0", "unknown": "x"},
+                {"slot_id": "causal_chain:1", "unknown": "x"},
+            ], gaps=["x"] * (MAX_GAPS + 1)))
+
     def test_a_tag_that_was_never_shown_refuses_the_whole_reply(self):
         with self.assertRaises(DossierDraftRefused) as caught:
             self.parse(reply([one_sentence("causal_chain:0", ["C9"]),
@@ -327,6 +344,21 @@ class DraftCallTests(unittest.TestCase):
                              material=material(), company=COMPANY, mission=MISSION)
         self.assertEqual(outcome["status"], "refused")
         self.assertNotIn("block", outcome)
+
+    def test_an_all_unknown_reply_reports_the_missing_evidence(self):
+        model = FakeModel(reply([
+            {"slot_id": "causal_chain:0", "unknown": "缺少订单转化证据"},
+            {"slot_id": "causal_chain:1", "unknown": "缺少AI预算披露"},
+        ], gaps=["需要下一次业绩披露"]))
+        outcome = draft_unit(
+            model, unit="demand_drivers", structure=STRUCTURE,
+            material=material(), company=COMPANY, mission=MISSION)
+        self.assertEqual(outcome["status"], "insufficient_evidence")
+        self.assertNotIn("block", outcome)
+        self.assertEqual(
+            [row["code"] for row in outcome["repair_targets"]],
+            ["unsupported_slot", "unsupported_slot", "missing_evidence"],
+        )
 
     def test_the_previous_version_is_shown_so_the_new_one_can_advance(self):
         model = FakeModel(reply([one_sentence("causal_chain:0"),

@@ -90,7 +90,7 @@ MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # prompt SHA already binds every WorkOrder; the exported fingerprint also lets
 # the lane retire a terminal refusal after a reviewed contract repair without
 # pretending that the underlying company evidence changed.
-DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.4"
+DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.5"
 VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.3"
 LEGACY_VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.2"
 VARIANT_CONCLUSION_RULE_VERSION = "variant-no-investment-conclusion:1"
@@ -175,6 +175,17 @@ class DossierDraftError(RuntimeError):
 
 class DossierDraftRefused(DossierDraftError):
     """The reply deviated from the contract and was refused whole."""
+
+
+class DossierDraftInsufficientEvidence(DossierDraftError):
+    """A conforming reply said that every requested slot lacks support."""
+
+    def __init__(self, unit: str, slots: Sequence[Mapping[str, Any]],
+                 gaps: Sequence[str]) -> None:
+        self.unit = unit
+        self.slots = [dict(row) for row in slots]
+        self.gaps = list(gaps)
+        super().__init__(f"{unit}: the supplied material supports no requested slot")
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +508,47 @@ def parse_unit_output(
             f"{sorted(expected)}")
     slots, sources = _resolve_tags(value["slots"], material, unit=unit)
     gaps = list(value.get("gaps") or [])
+    if slots and all(set(slot) == {"slot_id", "unknown"} for slot in slots):
+        # This is the answer the prompt explicitly asks for when the material
+        # does not answer the question. Validate its exact closed shape before
+        # distinguishing it from a contract violation. It is not a draft and
+        # therefore never reaches the citation gate.
+        from .company_dossier import _gaps, _slot
+
+        ids = [slot["slot_id"] for slot in structure]
+        if len(slots) != len(ids):
+            raise DossierDraftRefused(
+                f"{unit}: the reply fills {len(slots)} slots; every slot must be "
+                "answered or explicitly unknown")
+        try:
+            if unit == CLASSIFICATION_UNIT:
+                checked = validate_classification({
+                    "classification": value["classification"],
+                    "slots": slots, "sources": [], "gaps": value.get("gaps"),
+                })
+                checked_slots, checked_gaps = checked["slots"], checked["gaps"]
+            elif unit == VARIANT_UNIT:
+                checked = validate_variant_view({
+                    "status": "drafted", "reason": None,
+                    "market_view_available": bool(market_view_available),
+                    "market_view_reason": (
+                        None if market_view_available else
+                        "no consensus, rating, sales note or crowd narrative "
+                        "material was found for this company"),
+                    "structure": ids, "slots": slots, "sources": [],
+                    "gaps": value.get("gaps"),
+                })
+                checked_slots, checked_gaps = checked["slots"], checked["gaps"]
+            else:
+                checked_slots = [
+                    _slot(slot, f"{unit}.slots[{index}]", expected_id=ids[index],
+                          allowed_refs=set())
+                    for index, slot in enumerate(slots)
+                ]
+                checked_gaps = _gaps(value.get("gaps"), f"{unit}.gaps")
+        except CompanyDossierValidationError as exc:
+            raise DossierDraftRefused(f"{unit}: {exc}") from exc
+        raise DossierDraftInsufficientEvidence(unit, checked_slots, checked_gaps)
     if unit == VARIANT_UNIT:
         grades = {row["ref"]: row.get("importance") for row in material}
         for slot in slots:
@@ -597,6 +649,18 @@ def draft_unit(
             market_view_available=market_view_available, profile=profile,
             classification=classification,
         )
+    except DossierDraftInsufficientEvidence as exc:
+        findings = [
+            {"unit": unit, "code": "unsupported_slot",
+             "slot_id": slot["slot_id"], "detail": slot["unknown"]}
+            for slot in exc.slots
+        ] + [
+            {"unit": unit, "code": "missing_evidence", "detail": gap}
+            for gap in exc.gaps
+        ]
+        return {"status": "insufficient_evidence", "unit": unit,
+                "reason": str(exc), "repair_targets": findings,
+                "model": provenance}
     except DossierDraftRefused as exc:
         return {"status": "refused", "unit": unit, "reason": str(exc),
                 "model": provenance}
@@ -863,6 +927,7 @@ __all__ = [
     "VERIFIER_FINDING_CODES",
     "VERIFIER_VERDICTS",
     "DossierDraftError",
+    "DossierDraftInsufficientEvidence",
     "DossierDraftRefused",
     "TEMPLATE_UNITS",
     "build_unit_prompt",

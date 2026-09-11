@@ -136,6 +136,37 @@ class NumberDisciplineTests(unittest.TestCase):
             ["30"],
         )
 
+    def test_a_cited_month_day_period_sources_only_that_date(self) -> None:
+        """Reduced from DXC's refused live history-of-price-drivers draft."""
+
+        source = {"text": "RBC lowered its price target.", "period": "as of Jul 31"}
+        self.assertEqual(
+            unsourced_numbers("RBC截至Jul 31已下调目标价。", [source]), [])
+        self.assertEqual(
+            unsourced_numbers("RBC截至Jul 31已下调目标价。", []), ["31"])
+        self.assertEqual(
+            unsourced_numbers(
+                "RBC截至Jul 31已下调目标价。",
+                [{**source, "period": "as of Aug 31"}],
+            ),
+            ["31"],
+        )
+        # A partial authority period cannot prove a year the body added.
+        self.assertEqual(
+            unsourced_numbers("RBC截至Jul 31, 2026已下调目标价。", [source]),
+            ["31,"],
+        )
+        self.assertEqual(
+            unsourced_numbers(
+                "RBC截至Jul 31, 2026已下调目标价。",
+                [{**source, "period": "Jul 31, 2025"}],
+            ),
+            ["31,"],
+        )
+        # Nor does a date period excuse a same-valued operating quantity.
+        self.assertEqual(
+            unsourced_numbers("RBC覆盖31个客户。", [source]), ["31"])
+
 
 class AuthorityTests(DeliverableHarness):
     def test_an_unsourced_figure_fails_the_publish(self) -> None:

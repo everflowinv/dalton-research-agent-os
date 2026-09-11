@@ -35,11 +35,12 @@ from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
 
 MAX_FAILURE_DETAIL_CHARS = 500
+MAX_REPAIR_TARGETS = 20
 LAUNCHER_KWARG = "company_dossier_launcher"
 # Statuses that mean "this run looked and found nothing to do". After one of
 # these, an unchanged signature is a reason to stay quiet.
 QUIET_STATUSES = frozenset({"nothing_new", "no_screened_company", "no_mission",
-                            "no_claim_index"})
+                            "no_claim_index", "insufficient_evidence"})
 CONTENT_TERMINAL_STATUSES = frozenset({
     "verification_failed", "rubric_refused", "constitution_refused",
     "not_independent", "no_new_evidence",
@@ -193,6 +194,20 @@ class MissionDossierLaneCoordinator:
         reason = summary.get("failure_reason")
         if reason:
             settled["failure_reason"] = str(reason)[:MAX_FAILURE_DETAIL_CHARS]
+        targets = []
+        for item in (summary.get("repair_targets") or [])[:MAX_REPAIR_TARGETS]:
+            if not isinstance(item, Mapping):
+                continue
+            target = {}
+            for key in ("unit", "code", "slot_id", "check", "section", "figure",
+                        "detail"):
+                value = item.get(key)
+                if isinstance(value, (str, int, float, bool)):
+                    target[key] = str(value)[:MAX_FAILURE_DETAIL_CHARS]
+            if target:
+                targets.append(target)
+        if targets:
+            settled["repair_targets"] = targets
         return settled
 
     def _settle_open(self) -> dict[str, Any] | None:
