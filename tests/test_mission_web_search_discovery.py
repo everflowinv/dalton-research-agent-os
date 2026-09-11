@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -378,6 +379,72 @@ class FakeWebSearchLauncher:
         return dict(self.tickets[ticket_ref])
 
 
+class FailedAfterSuccessfulWebSearchLauncher:
+    """Persist a real successful search, then reproduce a local ledger failure."""
+
+    def __init__(self, harness: WebSearchHarness, plan: dict) -> None:
+        self.h = harness
+        self.plan = plan
+        self.tickets: dict[str, dict] = {}
+        self.starts: list[dict] = []
+
+    def running(self) -> bool:
+        return False
+
+    def start(self, *, authorization, spec_ref, as_of=None):
+        self.starts.append({"authorization": dict(authorization), "spec_ref": spec_ref})
+        ticket_id = f"web-search-discovery:{len(self.starts):024x}"
+        params = build_discovery_parameters(
+            self.plan, spec_ref=spec_ref, company_ref=authorization["company_ref"], as_of=as_of,
+        )
+        receipt = self.h.search.search(self.h.search.build_request(params))
+        governance = self.h.search.governance
+        common = {
+            "id": ticket_id, "company_ref": authorization["company_ref"],
+            "spec_ref": spec_ref, "requested_by": authorization["requested_by"],
+            "actor_ref": authorization["actor_ref"],
+            "mission_version_ref": authorization["mission_version_ref"],
+            "mission_version_hash": authorization["mission_version_hash"],
+            "as_of": as_of.isoformat(), "governance_ref": governance.id,
+            "governance_hash": governance.content_hash, "plan_ref": self.plan["id"],
+            "plan_hash": self.plan["content_hash"],
+        }
+        summary = {
+            "schema_version": "0.1", "created_at": self.h.clock().isoformat(),
+            "source_ref": WEB_SEARCH_SOURCE_REF, "transport": "rehearsal",
+            "expected_provider": "gemini", "provider_selection_policy": "test",
+            "governance_ref": governance.id, "governance_hash": governance.content_hash,
+            "governance_status": governance.status, "plan_ref": self.plan["id"],
+            "plan_hash": self.plan["content_hash"], "company_ref": authorization["company_ref"],
+            "spec_ref": spec_ref, "requested_by": authorization["requested_by"],
+            "as_of": as_of.isoformat(), "status": "failed",
+            "failure_reason": "unexpected local registration failure",
+            "authorization": dict(authorization), "parameters": params,
+            "query_hash": web_search_spec_hash(params),
+            "search": {key: receipt[key] for key in (
+                "request_hash", "connector_profile_ref", "connector_invocation_ref",
+                "connector_invocation_hash", "runner_response_ref", "outcome", "replayed",
+                "source_envelope_ref", "source_envelope_hash", "raw_artifact_version_ref",
+                "document_refs", "next_cursor", "source_status",
+            )},
+            "discovery_ref": None, "discovery_hash": None, "discovery_status": None,
+            "document_count": 0, "new_document_count": 0,
+            "in_authority_document_count": 0, "discovered_urls": [],
+            "provider_calls": receipt["provider_calls"], "production_activated": False,
+            "formal_authority_writes": 0,
+        }
+        self.tickets[ticket_id] = {
+            **common, "schema_version": "0.1", "transport": "rehearsal",
+            "started_at": self.h.clock().isoformat(), "pid": 999999,
+            "status": "failed", "exit_code": 1,
+            "completed_at": self.h.clock().isoformat(), "summary": summary,
+        }
+        return {"id": ticket_id, "status": "running"}
+
+    def status(self, ticket_ref):
+        return json.loads(json.dumps(self.tickets[ticket_ref]))
+
+
 class WebCoordinatorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -508,6 +575,130 @@ class WebCoordinatorTests(unittest.TestCase):
         self.assertEqual((tick["discovery"]["status"], tick["discovery"]["company_ref"]), ("launched", CTSH))
         self.assertTrue(any("rediscovered" in item["reason"] for item in tick["discovery"]["skipped"]))
         self.assertEqual(len(self.h.handle.calls), 2)
+
+    def test_successful_partial_search_recovers_local_record_without_another_call(self) -> None:
+        # Thirteen ranked results normalize to the admitted top ten and a
+        # partial SourceEnvelope.  The provider work succeeds; only the local
+        # mission discovery write is absent.
+        root = Path(self.temp.name) / "partial-recovery"
+        root.mkdir()
+        citations = [{"url": f"https://example.com/source/{index}"} for index in range(13)]
+        harness = WebSearchHarness(root, FakeWebSearchHandle(citations), clock=self.clock)
+        self.addCleanup(harness.close)
+        state = bootstrap_method_authorities(harness.core)
+        missions = CoverageMissionAuthority(harness.core)
+        plan = web_plan_for_tests(max_calls_24h=1)
+        launcher = FailedAfterSuccessfulWebSearchLauncher(harness, plan)
+        coordinator = MissionSourceDiscoveryCoordinator(
+            store=harness.core, missions=missions, plan=plan,
+            search_launcher=launcher, acquisition_launcher=None, clock=self.clock,
+            spool_dir=root / "spool",
+        )
+        params = mission_with_web_status(
+            state, status="connected", grant=True, version=1, prior=None,
+        )
+        mission_ref = params.pop("mission_ref")
+        mission = missions.create_mission(mission_ref, **params)
+
+        first = coordinator.dispatch_once()
+        self.assertEqual("launched", first["discovery"]["status"])
+        self.assertEqual(1, len(harness.handle.calls))
+        self.assertEqual([], missions.source_discoveries(mission["id"]))
+
+        second = coordinator.dispatch_once()
+        self.assertEqual("failed", second["settled_dispatches"][0]["status"])
+        self.assertEqual("recovered", second["recovered_dispatches"][0]["status"])
+        self.assertEqual(0, second["recovered_dispatches"][0]["provider_calls"])
+        self.assertEqual(1, len(harness.handle.calls))
+        discoveries = missions.source_discoveries(mission["id"])
+        self.assertEqual(1, len(discoveries))
+        self.assertEqual(10, len(discoveries[0]["document_refs"]))
+        documents = missions.discovered_documents(mission["id"])
+        self.assertEqual(10, len(documents))
+        self.assertTrue(all(row["status"] == "discovered" for row in documents))
+        self.assertTrue(all(row["host"] == "example.com" for row in documents))
+
+        # The failed history stays failed and the same envelope is not
+        # published or queued a second time on later ticks.
+        with mock.patch.object(
+            missions, "record_source_discovery",
+            side_effect=AssertionError("an existing envelope must be skipped"),
+        ):
+            third = coordinator.dispatch_once()
+        self.assertEqual("already_recovered", third["recovered_dispatches"][0]["status"])
+        self.assertEqual(1, len(missions.source_discoveries(mission["id"])))
+        self.assertEqual(10, len(missions.discovered_documents(mission["id"])))
+        self.assertEqual(1, len(harness.handle.calls))
+        dispatch = missions.discovery_dispatches(mission["id"], limit=1)[0]
+        self.assertEqual("failed", dispatch["status"])
+
+    def test_local_recovery_rejects_tamper_pending_and_stale_mission(self) -> None:
+        root = Path(self.temp.name) / "refused-recovery"
+        root.mkdir()
+        harness = WebSearchHarness(root, FakeWebSearchHandle(CITATIONS), clock=self.clock)
+        self.addCleanup(harness.close)
+        state = bootstrap_method_authorities(harness.core)
+        missions = CoverageMissionAuthority(harness.core)
+        plan = web_plan_for_tests(max_calls_24h=1)
+        launcher = FailedAfterSuccessfulWebSearchLauncher(harness, plan)
+        coordinator = MissionSourceDiscoveryCoordinator(
+            store=harness.core, missions=missions, plan=plan,
+            search_launcher=launcher, acquisition_launcher=None, clock=self.clock,
+            spool_dir=root / "spool",
+        )
+        params = mission_with_web_status(
+            state, status="connected", grant=True, version=1, prior=None,
+        )
+        mission_ref = params.pop("mission_ref")
+        mission = missions.create_mission(mission_ref, **params)
+        coordinator.dispatch_once()
+        coordinator.settle_dispatches()
+        ticket = next(iter(launcher.tickets.values()))
+
+        ticket["summary"]["parameters"]["query"] = "foreign query"
+        refused = coordinator.recover_local_web_discoveries()
+        self.assertEqual("refused", refused[0]["status"])
+        self.assertIn("query binding drifted", refused[0]["reason"])
+        self.assertEqual([], missions.source_discoveries(mission["id"]))
+
+        ticket["summary"]["parameters"] = build_discovery_parameters(
+            plan, spec_ref="management-changes", company_ref=ACN, as_of=self.clock().date(),
+        )
+        ticket["status"] = "running"
+        refused = coordinator.recover_local_web_discoveries()
+        self.assertEqual("refused", refused[0]["status"])
+        self.assertIn("exact failed child ticket", refused[0]["reason"])
+        self.assertEqual(1, len(harness.handle.calls))
+
+        ticket["status"] = "failed"
+        ticket["summary"]["search"]["outcome"] = "failed"
+        refused = coordinator.recover_local_web_discoveries()
+        self.assertEqual("refused", refused[0]["status"])
+        self.assertIn("does not prove a successful search", refused[0]["reason"])
+        self.assertEqual([], missions.source_discoveries(mission["id"]))
+        ticket["summary"]["search"]["outcome"] = "succeeded"
+        envelope_ref = ticket["summary"]["search"]["source_envelope_ref"]
+        envelope = json.loads(harness.core.connection.execute(
+            "SELECT record_json FROM connector_source_envelopes WHERE source_envelope_id=?",
+            (envelope_ref,),
+        ).fetchone()[0])
+        raw_hash = envelope["raw_response_hash"]
+        raw_path = root / "spool" / "connector-spool" / "objects" / raw_hash[:2] / raw_hash
+        raw_path.write_bytes(b"tampered")
+        refused = coordinator.recover_local_web_discoveries()
+        self.assertEqual("refused", refused[0]["status"])
+        self.assertIn("raw response hash drifted", refused[0]["reason"])
+        self.assertEqual([], missions.source_discoveries(mission["id"]))
+        next_params = mission_with_web_status(
+            state, status="connected", grant=True, version=2, prior=mission,
+        )
+        next_params.pop("mission_ref")
+        missions.create_mission(mission_ref, **next_params)
+        # Failed proof from the superseded mission is not even selected by the
+        # active-version scan, so it cannot be relabelled into the new mission.
+        self.assertEqual([], coordinator.recover_local_web_discoveries())
+        self.assertEqual([], missions.source_discoveries(mission["id"]))
+        self.assertEqual(1, len(harness.handle.calls))
 
     def test_alphaengine_coordinator_ignores_web_dispatches_and_documents(self) -> None:
         v1 = self.publish(status="not_connected", grant=False)
