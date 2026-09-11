@@ -428,6 +428,34 @@ class DocumentResearchTests(unittest.TestCase):
                 document_ref="claim:anything",
                 purpose="qualitative_research",
             )
+
+    def test_registration_rejects_empty_or_inconsistent_original_before_inventory(self):
+        from types import SimpleNamespace
+
+        adapter, _, _ = self._source(
+            source_ref=SALES_NOTES_SOURCE_REF, document_ref="sales-note:empty-regression",
+            text="A complete original note.", ticket_ref="feed-run:empty-regression",
+            doc_kind="broker_note")
+        valid, original = adapter.materialize(
+            document_ref="sales-note:empty-regression", acquisition_ticket_ref="feed-run:empty-regression")
+        for replacement in ("", "  \n", "Different original note."):
+            with self.subTest(replacement=replacement):
+                broken = SimpleNamespace(source_ref=SALES_NOTES_SOURCE_REF,
+                    materialize=mock.Mock(return_value=(valid, replacement)))
+                acquired = SimpleNamespace(materialize_record=mock.Mock(return_value=(valid, replacement)))
+                registry = DocumentResearchRegistry(
+                    adapters={SALES_NOTES_SOURCE_REF: broken}, policy=self.policy,
+                    acquired_document_adapter=acquired)
+                result = registry.inspect(source_ref=SALES_NOTES_SOURCE_REF,
+                    document_ref="sales-note:empty-regression", purpose="qualitative_research")
+                self.assertFalse(result["available"])
+                self.assertEqual(result["reason"], "source_not_readable")
+                self.assertIsNone(result["registration"])
+                core_result = registry.inspect_acquired_document(
+                    record_id="record:empty-regression", purpose="qualitative_research")
+                self.assertFalse(core_result["available"])
+                self.assertIsNone(core_result["registration"])
+        self.assertEqual(len(original), valid["normalized_text"]["characters"])
         unavailable = registry.inspect(
             source_ref="source:claims",
             document_ref="claim:anything",

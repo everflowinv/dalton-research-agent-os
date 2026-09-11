@@ -1156,6 +1156,20 @@ def _normalize_terms(
     return terms
 
 
+def _validated_materialization(registration: Mapping[str, Any], text: str) -> dict[str, Any]:
+    """Apply the same complete-text contract at registration and later reads."""
+    if not isinstance(text, str) or not text.strip():
+        raise DocumentResearchError("source has no readable original text")
+    wire = validate_registration(registration)
+    normalized = wire["normalized_text"]
+    encoded = text.encode("utf-8")
+    if (normalized["characters"] != len(text)
+            or normalized["size_bytes"] != len(encoded)
+            or normalized["text_sha256"] != hashlib.sha256(encoded).hexdigest()):
+        raise DocumentResearchConflict("registered text identity differs from the materialized original")
+    return wire
+
+
 class DocumentResearchRegistry:
     """A configured set of source adapters and one reusable access policy."""
 
@@ -1205,12 +1219,12 @@ class DocumentResearchRegistry:
             adapter = self.adapters[source_ref]
         except KeyError as exc:
             raise DocumentResearchError("source has no document research adapter") from exc
-        registration, _ = adapter.materialize(
+        registration, text = adapter.materialize(
             document_ref=document_ref,
             acquisition_ticket_ref=acquisition_ticket_ref,
         )
         self._authorize(purpose, registration)
-        return registration
+        return _validated_materialization(registration, text)
 
     def inspect(
         self, *, source_ref: str, document_ref: str, purpose: str,
@@ -1258,11 +1272,11 @@ class DocumentResearchRegistry:
             raise DocumentResearchError(
                 "Core acquired-document adapter is not configured"
             )
-        registration, _ = self.acquired_document_adapter.materialize_record(
+        registration, text = self.acquired_document_adapter.materialize_record(
             record_id=record_id
         )
         self._authorize(purpose, registration)
-        return registration
+        return _validated_materialization(registration, text)
 
     def inspect_acquired_document(
         self, *, record_id: str, purpose: str
@@ -1308,6 +1322,7 @@ class DocumentResearchRegistry:
                 record_id=expected["source_authority"]["ref"],
                 acquisition_ticket_ref=expected["acquisition_ticket_ref"],
             )
+            actual = _validated_materialization(actual, text)
             if actual != expected:
                 raise DocumentResearchConflict("registered document authority changed")
             self._authorize(purpose, actual)
@@ -1320,6 +1335,7 @@ class DocumentResearchRegistry:
             document_ref=expected["document_ref"],
             acquisition_ticket_ref=expected["acquisition_ticket_ref"],
         )
+        actual = _validated_materialization(actual, text)
         if actual != expected:
             raise DocumentResearchConflict("registered document authority changed")
         self._authorize(purpose, actual)
