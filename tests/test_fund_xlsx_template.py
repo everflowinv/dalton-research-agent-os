@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+import json
+import unittest
+from unittest import mock
+
+from dalton_core.fund_xlsx_template import (
+    FundXlsxTemplateError,
+    apply_fund_xlsx_template,
+    build_fund_xlsx_template_plan,
+    load_fund_xlsx_template_style,
+)
+
+
+class FundXlsxTemplateTests(unittest.TestCase):
+    def plan(self):
+        return build_fund_xlsx_template_plan(
+            sheet_names={
+                "valuation": "Valuation - DXC",
+                "financials": "Financials - DXC",
+                "driver": "Driver - DXC",
+            },
+            annual_periods=["FY2025A", "FY2026E"],
+            quarterly_periods=["Q1 FY2026A", "Q2 FY2026E", "Q3 FY2026E"],
+            hidden_periods=["FY2025A"],
+            unit_labels={"financials": "(USD MM)", "driver": "(USD MM)"},
+            row_styles={
+                "financials": [
+                    {"row": 2, "style": "section", "level": 0},
+                    {"row": 3, "style": "label", "level": 1},
+                    {"row": 4, "style": "subtotal", "level": 0},
+                ],
+                "driver": [
+                    {"row": 2, "style": "major_section", "level": 0},
+                    {"row": 3, "style": "growth_label", "level": 2},
+                ],
+                "valuation": [
+                    {"row": 2, "style": "valuation_section", "level": 0},
+                ],
+            },
+            cell_styles={
+                "financials": [
+                    {"range": "E3:F3", "style": "cross_sheet_formula",
+                     "number_kind": "amount"},
+                    {"range": "H3:J3", "style": "local_formula",
+                     "number_kind": "amount_one_decimal"},
+                ],
+                "driver": [
+                    {"range": "F3:F3", "style": "hardcoded_input",
+                     "number_kind": "percentage"},
+                    {"range": "H3:J3", "style": "assumption_input",
+                     "number_kind": "percentage"},
+                ],
+                "valuation": [
+                    {"range": "B3:B3", "style": "hardcoded_input",
+                     "number_kind": "per_share"},
+                ],
+            },
+        )
+
+    def test_source_style_contract_is_exact_and_contains_no_company_financial_rows(self):
+        style = load_fund_xlsx_template_style()
+        self.assertEqual(style["source_proof"]["workbook_sha256"],
+                         "545709e06eb0c1452cf74224d92e8ecb70bef4764f316e74595b2f41f87567b0")
+        self.assertEqual(style["sheet_order"], ["valuation", "financials", "driver"])
+        self.assertEqual(style["model_grid"]["hierarchy_gutter_columns"], [1, 2, 3])
+        self.assertEqual(style["model_grid"]["label_column"], 4)
+        wire = json.dumps(style)
+        for source_value in ("Online stores", "Retail & Subscription", "2798509", "AMZN"):
+            self.assertNotIn(source_value, wire)
+
+    def test_resource_tamper_is_rejected_before_json_is_trusted(self):
+        with mock.patch("dalton_core.fund_xlsx_template._resource_bytes",
+                        return_value=b'{}\n'):
+            with self.assertRaisesRegex(FundXlsxTemplateError, "bytes differ"):
+                load_fund_xlsx_template_style()
+
+    def test_dynamic_apply_plan_preserves_values_formulas_and_applies_source_geometry(self):
+        from openpyxl import Workbook
+
+        book = Workbook()
+        sources = book.active
+        sources.title = "Sources"
+        driver = book.create_sheet("Driver - DXC")
+        financials = book.create_sheet("Financials - DXC")
+        valuation = book.create_sheet("Valuation - DXC")
+
+        financials["D2"] = "Income statement"
+        financials["D3"] = "Subscription revenue"
+        financials["D4"] = "Revenue"
+        financials["E3"] = "='Driver - DXC'!E3"
+        financials["F3"] = "='Driver - DXC'!F3"
+        financials["H3"] = "=E3+1"
+        financials["I3"] = "=F3+1"
+        financials["J3"] = "=I3+1"
+        driver["D2"] = "Operating drivers"
+        driver["D3"] = "Subscription growth"
+        driver["F3"] = 0.08
+        driver["H3"] = 0.09
+        driver["I3"] = 0.10
+        driver["J3"] = 0.11
+        valuation["A2"] = "Valuation"
+        valuation["A3"] = "Target price"
+        valuation["B3"] = 98.25
+        originals = {
+            "financials": tuple(financials.cell(3, column).value for column in range(4, 11)),
+            "driver": tuple(driver.cell(3, column).value for column in range(4, 11)),
+            "valuation": (valuation["A3"].value, valuation["B3"].value),
+        }
+
+        apply_fund_xlsx_template(book, self.plan())
+
+        self.assertEqual(book.sheetnames,
+                         ["Valuation - DXC", "Financials - DXC", "Driver - DXC", "Sources"])
+        self.assertEqual(tuple(financials.cell(3, column).value for column in range(4, 11)),
+                         originals["financials"])
+        self.assertEqual(tuple(driver.cell(3, column).value for column in range(4, 11)),
+                         originals["driver"])
+        self.assertEqual((valuation["A3"].value, valuation["B3"].value),
+                         originals["valuation"])
+
+        self.assertEqual([financials.cell(1, column).value for column in (5, 6, 7, 8, 9, 10)],
+                         ["FY2025A", "FY2026E", None,
+                          "Q1 FY2026A", "Q2 FY2026E", "Q3 FY2026E"])
+        self.assertEqual(financials.freeze_panes, "E2")
+        self.assertFalse(financials.sheet_view.showGridLines)
+        self.assertEqual(financials.sheet_format.defaultRowHeight, 11.25)
+        self.assertEqual(financials.column_dimensions["A"].width, 1.875)
+        self.assertEqual(financials.column_dimensions["B"].width, 2.125)
+        self.assertEqual(financials.column_dimensions["C"].width, 2.125)
+        self.assertEqual(financials.column_dimensions["D"].width, 25.125)
+        self.assertEqual(financials.column_dimensions["G"].width, 1.375)
+        self.assertTrue(financials.column_dimensions["E"].hidden)
+        self.assertEqual(financials.row_dimensions[3].outlineLevel, 1)
+        self.assertEqual(driver.row_dimensions[3].outlineLevel, 2)
+        self.assertEqual(financials["D3"].value, "Subscription revenue")
+        self.assertTrue(all(financials.cell(3, column).value is None for column in range(1, 4)))
+
+        self.assertEqual(financials["A1"].fill.fgColor.rgb, "FF3366FF")
+        self.assertEqual(financials["E1"].font.color.rgb, "FFFFFFFF")
+        self.assertEqual(financials["E3"].font.color.rgb, "FF008000")
+        self.assertEqual(financials["H3"].font.color.rgb, "FF000000")
+        self.assertEqual(driver["F3"].font.color.rgb, "FF0000FF")
+        self.assertEqual(driver["H3"].fill.fgColor.rgb, "FFFFFFC8")
+        self.assertEqual(driver["H3"].border.top.style, "hair")
+        self.assertEqual(driver["H3"].number_format, "0.0%")
+        self.assertEqual(financials["E3"].number_format,
+                         "_(#,##0_);\\(#,##0\\);_(?\\-?_);@")
+        self.assertEqual(valuation.column_dimensions["A"].width, 14.625)
+        self.assertEqual(valuation["A2"].fill.fgColor.rgb, "FF99CCFF")
+        self.assertEqual(valuation["B3"].font.color.rgb, "FF0000FF")
+
+    def test_plan_refuses_ambiguous_or_out_of_contract_mappings(self):
+        arguments = {
+            "sheet_names": {"valuation": "Valuation", "financials": "Financials",
+                            "driver": "Driver"},
+            "annual_periods": ["FY2025A"],
+            "quarterly_periods": ["Q1 FY2026E"],
+            "unit_labels": {"financials": "(USD MM)", "driver": "(USD MM)"},
+        }
+        with self.assertRaisesRegex(FundXlsxTemplateError, "hidden periods"):
+            build_fund_xlsx_template_plan(**arguments, hidden_periods=["FY1900A"])
+        with self.assertRaisesRegex(FundXlsxTemplateError, "unsupported"):
+            build_fund_xlsx_template_plan(
+                **arguments,
+                row_styles={"financials": [
+                    {"row": 2, "style": "copy_amzn_revenue_rows", "level": 0}
+                ]},
+            )
+        with self.assertRaisesRegex(FundXlsxTemplateError, "closed shape"):
+            build_fund_xlsx_template_plan(
+                **arguments,
+                cell_styles={"financials": [
+                    {"range": "E2", "style": "hardcoded_input",
+                     "number_kind": "amount", "value": 123}
+                ]},
+            )
+
+        from openpyxl import Workbook
+        book = Workbook()
+        book.active.title = "Valuation - DXC"
+        book.create_sheet("Financials - DXC")
+        book.create_sheet("Driver - DXC")
+        tampered = self.plan()
+        tampered["columns"]["label_column"] = 3
+        with self.assertRaisesRegex(FundXlsxTemplateError, "plan hash"):
+            apply_fund_xlsx_template(book, tampered)
+
+
+if __name__ == "__main__":
+    unittest.main()

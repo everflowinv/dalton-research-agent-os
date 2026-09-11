@@ -121,6 +121,7 @@ dalton_core = [
   "annual-report-verifier-provider-output-v0.1.schema.json",
   "call_budget_defaults.json",
   "run_budget_defaults.json",
+  "fund_xlsx_template_style.json",
   "dashboard.html",
   "cockpit_control.html",
   "cockpit_control_legacy.html",

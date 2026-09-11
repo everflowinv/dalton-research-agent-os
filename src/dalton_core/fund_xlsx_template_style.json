@@ -1,0 +1,159 @@
+{
+  "schema_version": "fund-xlsx-template-style-0.1",
+  "template_ref": "fund-xlsx-template-style:amzn-source:0.1",
+  "source_proof": {
+    "workbook_sha256": "545709e06eb0c1452cf74224d92e8ecb70bef4764f316e74595b2f41f87567b0",
+    "exact_source_style_sha256": "02ca90bbd4c1a33e77131e2295d7e696bdfbff79293d3a4f69d3438c7f955c8e",
+    "theme_xml_sha256": "75005de4e181b6b5ae78b4c8c834ddd5f0a60dd5d5963aa58447dc944ba4eff6"
+  },
+  "sheet_order": [
+    "valuation",
+    "financials",
+    "driver"
+  ],
+  "model_grid": {
+    "period_row": 1,
+    "first_annual_column": 5,
+    "hierarchy_gutter_columns": [
+      1,
+      2,
+      3
+    ],
+    "label_column": 4,
+    "period_column_width": 7.125,
+    "period_separator_width": 1.375,
+    "default_row_height": 11.25,
+    "freeze_cell": "E2",
+    "show_grid_lines": false,
+    "font": {
+      "name": "Arial",
+      "size": 8
+    },
+    "column_widths": {
+      "gutter_1": 1.875,
+      "gutter_2": 2.125,
+      "gutter_3": 2.125,
+      "financials_label": 25.125,
+      "driver_label": 22.375
+    }
+  },
+  "valuation_grid": {
+    "default_row_height": 11.25,
+    "show_grid_lines": false,
+    "font": {
+      "name": "Arial",
+      "size": 8
+    },
+    "column_widths": {
+      "A": 14.625,
+      "B": 14.375,
+      "C": 9.125,
+      "D": 14.625,
+      "E": 14.375
+    }
+  },
+  "styles": {
+    "period_header": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": true,
+        "color": "FFFFFFFF"
+      },
+      "fill": "FF3366FF",
+      "horizontal": "right"
+    },
+    "major_section": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": true,
+        "color": "FFFFFFFF"
+      },
+      "fill": "FF993300"
+    },
+    "section": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": true,
+        "color": "FF000000"
+      },
+      "fill": "FF99CCFF"
+    },
+    "label": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": false,
+        "color": "FF000000"
+      }
+    },
+    "subtotal": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": true,
+        "color": "FF000000"
+      }
+    },
+    "growth_label": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "italic": true,
+        "color": "FF000000"
+      }
+    },
+    "hardcoded_input": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "color": "FF0000FF"
+      }
+    },
+    "cross_sheet_formula": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "color": "FF008000"
+      }
+    },
+    "local_formula": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "color": "FF000000"
+      }
+    },
+    "assumption_input": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "color": "FF0000FF"
+      },
+      "fill": "FFFFFFC8",
+      "border": {
+        "style": "hair",
+        "color": "FF000000"
+      }
+    },
+    "valuation_section": {
+      "font": {
+        "name": "Arial",
+        "size": 8,
+        "bold": true,
+        "color": "FF000000"
+      },
+      "fill": "FF99CCFF"
+    }
+  },
+  "number_formats": {
+    "amount": "_(#,##0_);\\(#,##0\\);_(?\\-?_);@",
+    "amount_one_decimal": "_(#,##0.0_);\\(#,##0.0\\);_(?\\-?_);@",
+    "percentage": "0.0%",
+    "multiple": "#,##0.0\\x",
+    "date_month": "mmm-yy",
+    "per_share": "_(#,##0.00_);\\(#,##0.00\\);_(?\\-?_);@"
+  }
+}
