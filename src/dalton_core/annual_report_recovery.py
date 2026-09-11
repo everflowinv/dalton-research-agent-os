@@ -170,7 +170,7 @@ class AnnualReportUnknownRecovery:
         base: Mapping[str, Any], *, identity: Mapping[str, Any], link_ref: str,
         kind: str, policy: Mapping[str, Any], window_started_at: str,
     ) -> dict[str, Any]:
-        work_ref = "work:annual-recovery:" + content_hash(identity)[:32]
+        work_ref = "work:annual-recovery-" + content_hash(identity)[:32]
         metadata = dict(base["metadata"])
         metadata["unknown_recovery_derivation"] = {
             "schema_version": "0.1",
@@ -329,27 +329,56 @@ class AnnualReportUnknownRecovery:
             returned_failure = returned_provider_failure_proof(
                 invocation_object, ResultEnvelope.from_dict(envelope)
             )
-            unknown_classification = {
-                "authority": "openclaw-model-adapter",
-                "classification": "provider_completed_failure_unknown_metering",
-                "returned_failure": returned_failure,
-                "version": "0.1",
-            }
-            if (
-                returned_failure is None
-                or envelope.get("status") != "failed"
-                or not isinstance(error, Mapping)
-                or error.get("source") != "openclaw-model-broker"
-                or not isinstance(envelope_metadata, Mapping)
-                or envelope_metadata.get("broker_request_mode") != "execute"
-                or envelope_metadata.get("dispatch_proof") != {
+            provider_completed = (
+                returned_failure is not None
+                and isinstance(error, Mapping)
+                and error.get("source") == "openclaw-model-broker"
+                and isinstance(envelope_metadata, Mapping)
+                and envelope_metadata.get("broker_request_mode") == "execute"
+                and envelope_metadata.get("dispatch_proof") == {
                     "authority": "openclaw-model-adapter",
                     "state": "provider_completed_failure", "version": "0.1",
                 }
-                or not isinstance(envelope_metadata.get("broker_response_hash"), str)
-                or len(envelope_metadata["broker_response_hash"]) != 64
-                or any(character not in "0123456789abcdef"
-                       for character in envelope_metadata["broker_response_hash"])
+                and isinstance(envelope_metadata.get("broker_response_hash"), str)
+                and len(envelope_metadata["broker_response_hash"]) == 64
+                and all(character in "0123456789abcdef"
+                        for character in envelope_metadata["broker_response_hash"])
+            )
+            post_send = (
+                envelope_metadata.get("post_send_unknown")
+                if isinstance(envelope_metadata, Mapping) else None
+            )
+            post_send_unknown = (
+                isinstance(error, Mapping)
+                and error.get("code") == "POST_SEND_RESULT_UNKNOWN"
+                and error.get("source") == "openclaw-model-adapter"
+                and isinstance(envelope_metadata, Mapping)
+                and envelope_metadata.get("broker_request_mode") == "execute"
+                and envelope_metadata.get("dispatch_proof") == {
+                    "authority": "openclaw-model-adapter",
+                    "state": "post_send_result_unknown", "version": "0.1",
+                }
+                and isinstance(post_send, Mapping)
+                and set(post_send) == {
+                    "authority", "state", "request_frame_hash",
+                    "transport_error_type", "version",
+                }
+                and post_send.get("authority") == "openclaw-model-adapter"
+                and post_send.get("state") == "post_send_result_unknown"
+                and post_send.get("version") == "0.1"
+                and post_send.get("transport_error_type") in {
+                    "BrokerConnectionError", "BrokerFrameTooLarge",
+                    "BrokerProtocolError", "BrokerTimeout",
+                }
+                and isinstance(post_send.get("request_frame_hash"), str)
+                and len(post_send["request_frame_hash"]) == 64
+                and all(character in "0123456789abcdef"
+                        for character in post_send["request_frame_hash"])
+                and isinstance(telemetry, Mapping)
+                and telemetry.get("post_send_unknown") == post_send
+            )
+            if (
+                envelope.get("status") != "failed"
                 or not isinstance(usage, Mapping)
                 or usage.get("measurement_status") != "unavailable"
                 or any(usage.get(key) is not None for key in (
@@ -358,11 +387,23 @@ class AnnualReportUnknownRecovery:
                 ))
                 or not isinstance(cost, Mapping)
                 or cost.get("available") is not False
+                or cost.get("usd") is not None
+                or not (provider_completed or post_send_unknown)
             ):
                 raise AnnualReportRecoveryError(
                     "unknown_result_ineligible",
                     "failed Work lacks a proved post-send unknown-metering classification",
                 )
+            unknown_classification = {
+                "authority": "openclaw-model-adapter",
+                "classification": (
+                    "post_send_result_unknown"
+                    if post_send_unknown
+                    else "provider_completed_failure_unknown_metering"
+                ),
+                "proof": dict(post_send) if post_send_unknown else returned_failure,
+                "version": "0.1",
+            }
         except ResearchPlanCoordinatorConflict as exc:
             raise AnnualReportRecoveryError(
                 "recovery_authority_drift", str(exc)
@@ -439,10 +480,40 @@ class AnnualReportUnknownRecovery:
         if (
             not isinstance(mission, Mapping)
             or resolved_ref != mission_ref
-            or mission_binding.get("mission_version_ref") != mission_ref
         ):
             raise AnnualReportRecoveryError(
                 "recovery_mission_invalid", "mission authority does not bind the failed Work"
+            )
+        try:
+            from .budget_pools import mission_pool_scope
+            expected_binding = {
+                "mission_ref": mission["mission_ref"],
+                "mission_version_ref": mission_ref,
+                "mission_version_hash": mission["content_hash"],
+                "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
+                "max_daily_cost_micros": int(
+                    Decimal(str(mission["budget"]["max_daily_cost_usd"]))
+                    * 1_000_000
+                ),
+                "outer_budget": dict(mission["outer_budget"]),
+                **mission_pool_scope(
+                    mission,
+                    purpose=getattr(
+                        worker,
+                        "purpose",
+                        ("registered_annual_report_verifier"
+                         if index == 2 else "registered_annual_report_draft"),
+                    ),
+                ),
+            }
+        except Exception as exc:
+            raise AnnualReportRecoveryError(
+                "recovery_mission_invalid", "mission budget authority is incomplete"
+            ) from exc
+        if canonical_json(mission_binding) != canonical_json(expected_binding):
+            raise AnnualReportRecoveryError(
+                "recovery_mission_invalid",
+                "historical admission does not bind the active mission budget authority",
             )
         return {
             "formal": formal,
@@ -943,6 +1014,8 @@ def read_effective_annual_recovery_work_orders(
                 stores[path] = ThesisImpactBudgetStore(path, read_only=True)
             workers[index] = SimpleNamespace(
                 budget_store=stores[path], mission_resolver=mission_resolver,
+                purpose=("registered_annual_report_verifier" if index == 2
+                         else "registered_annual_report_draft"),
             )
         reader = AnnualReportUnknownRecovery(
             plan=SimpleNamespace(connection=connection), scheduler=None,

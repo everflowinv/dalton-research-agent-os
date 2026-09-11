@@ -566,6 +566,7 @@ class SecLaneLauncher:
             from .annual_report_recovery import (
                 read_effective_annual_recovery_work_orders,
             )
+            from .sec_company_facts_lane import read_active_annual_budget_mission
 
             uri = f"file:{self.state_dir / 'core.sqlite'}?mode=ro"
             connection = sqlite3.connect(uri, uri=True)
@@ -603,7 +604,11 @@ class SecLaneLauncher:
                 effective, _recovery_links = read_effective_annual_recovery_work_orders(
                     connection=connection, plan_wire=plan, start_wire=start,
                     clock=self.clock,
-                    mission_resolver=lambda ref, _company: {"id": ref},
+                    mission_resolver=lambda ref, company: (
+                        read_active_annual_budget_mission(
+                            connection, ref, company, now=self.clock()
+                        )
+                    ),
                 )
                 for work in effective:
                     formal = cursor.execute(

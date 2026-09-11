@@ -978,8 +978,17 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             time.sleep(0.2)
             return None
 
-        with self.assertRaises(BrokerTimeout):
+        with self.assertRaises(BrokerTimeout) as caught:
             self.run_with(slow, timeout=0.05)
+        evidence = caught.exception.post_send_unknown_evidence
+        self.assertEqual(
+            evidence.result.error["code"], "POST_SEND_RESULT_UNKNOWN"
+        )
+        self.assertEqual(
+            evidence.result.metadata["post_send_unknown"]["transport_error_type"],
+            "BrokerTimeout",
+        )
+        self.assertEqual(evidence.invocation.work_order_ref, self.work.id)
 
     def test_before_send_runs_after_connect_and_can_prevent_all_request_bytes(self) -> None:
         called: list[str] = []

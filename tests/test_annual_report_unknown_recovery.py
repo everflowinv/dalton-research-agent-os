@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,22 +17,29 @@ from dalton_core.contracts import ModelInvocation, ResultEnvelope
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_model_adapter import BrokerConnectionError
+from dalton_core.openclaw_model_adapter import OpenClawModelAdapter
 from dalton_core.research_plan import _plan_work_orders
 from dalton_core.research_plan import ResearchPlanValidationError
 from dalton_core.research_plan_executor import (
     ResearchPlanExecutor, ResearchPlanExecutorConflict,
 )
 from dalton_core.sec_lane_launcher import SecLaneLauncher
+from dalton_core.sec_company_facts_lane import read_active_annual_budget_mission
 from dalton_core.store import canonical_json, content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.test_research_plan_annual_report import (
     AnnualSourceHarness,
+    COMPANY,
     MISSION,
     seed_core_registration,
 )
+from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests import test_research_plan_annual_report as annual_support
 from tests.test_research_plan_executor import PlanExecutorHarness
 from tests.test_transcript_polish_model_worker import FakeAdapter
+from tests.test_openclaw_model_adapter import (
+    AUTH_CLIENT_ID, AUTH_SECRET, FakeBroker, seal, success_response,
+)
 
 
 class UnknownThenSuccessAdapter(FakeAdapter):
@@ -98,9 +105,56 @@ class RecoveryFixture:
         max_attempts: int = 1,
         unknown_calls: int = 1,
         same_profile_retries: int = 0,
+        production_mission: bool = False,
     ) -> None:
         self.harness = PlanExecutorHarness(suffix="annual-unknown-recovery")
         case.addCleanup(self.harness.close)
+        if production_mission:
+            self.harness.clock.value = datetime(
+                2026, 9, 11, 12, 0, tzinfo=timezone.utc
+            )
+            outer = {
+                "max_daily_paid_calls": 20,
+                "max_daily_cost_usd": 20.0,
+                "max_alphaengine_calls_24h": 30,
+            }
+            active = self.harness.core.active_policy_version()
+            self.harness.core.create_policy(
+                {**active.policy, "research_budget": outer},
+                policy_version_id="governance-policy-version:recovery:2",
+                version_number=2, prior_version_ref=active.id,
+                actor_ref="human:test-owner",
+                change_reason="authorize bounded annual recovery",
+                activate=True,
+            )
+            method = bootstrap_method_authorities(
+                self.harness.core,
+                mandate_ref="mandate:annual-recovery-test",
+                mandate_constraints={"research_budget": outer},
+            )
+            params = mission_params(method)
+            params.update({
+                "mission_ref": "coverage-mission:annual-test",
+                "version_id": MISSION,
+                "idempotency_key": "coverage-mission:annual-recovery:1",
+                "universe": [{
+                    "company_ref": COMPANY, "ticker": "TEST",
+                    "coverage_tier": "A", "bootstrap_priority": "P0",
+                }],
+                "budget": {
+                    "max_daily_paid_calls": 10,
+                    "max_daily_cost_usd": 10.0,
+                    "max_alphaengine_calls_24h": 0,
+                },
+            })
+            params["autonomy"] = {
+                **params["autonomy"], "automation_principal": "automation:test",
+            }
+            for key in ("playbook_ref", "constitution_ref", "mandate_ref"):
+                params.pop(key, None)
+            CoverageMissionAuthority(self.harness.core).create_mission(
+                params.pop("mission_ref"), **params
+            )
         self.source = AnnualSourceHarness(self.harness.planner)
         case.addCleanup(self.source.close)
         self.harness.planner.plans.annual_report_registry = self.source.registry
@@ -120,6 +174,13 @@ class RecoveryFixture:
             stage="recovery-verifier", capability=verifier_capability,
             slot="credential-slot:model:recovery-verifier",
         )
+        if production_mission:
+            for profile_wire in (self.draft_profile, self.verifier_profile):
+                profile_wire["availability"] = {
+                    "state": "available",
+                    "checked_at": "2026-09-01T00:00:00+00:00",
+                    "valid_until": "2027-09-11T00:00:00+00:00",
+                }
         self.draft_policy = helper._model_policy(
             stage="recovery-draft", profile_ids=[self.draft_profile["id"]],
             capability=draft_capability, tier="brain",
@@ -191,6 +252,7 @@ class RecoveryFixture:
                 "cited_match_indexes": [0, 1],
             },
         }
+        self.draft_output = draft_output
         verifier_output = {
             "schema_version": "0.1", "verdict": "pass",
             "verified_statement": statement, "findings": [],
@@ -215,9 +277,15 @@ class RecoveryFixture:
                 "max_daily_cost_micros": 20_000_000,
             },
         }
-        resolver = lambda ref, _company: (
-            copy.deepcopy(mission) if ref == MISSION else None
-        )
+        if production_mission:
+            resolver = lambda ref, company: read_active_annual_budget_mission(
+                self.harness.core.connection, ref, company,
+                now=self.harness.clock(),
+            )
+        else:
+            resolver = lambda ref, _company: (
+                copy.deepcopy(mission) if ref == MISSION else None
+            )
         common_worker = {
             "scheduler": self.harness.scheduler(), "router": self.router,
             "store": self.harness.core,
@@ -387,6 +455,88 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
             (fixture.plan_ref,),
         ).fetchone()[0], 3)
 
+    def test_real_unix_sent_then_drop_persists_unknown_and_recovers_fresh(self):
+        fixture = RecoveryFixture(self, recovery=self.POLICY)
+        state = Path(fixture.harness.planner.temp.name)
+
+        def adapter_for(broker):
+            return OpenClawModelAdapter(
+                broker.path,
+                route_resolver=fixture.router.get_decision,
+                auth_client_id=AUTH_CLIENT_ID,
+                auth_key_provider=lambda: AUTH_SECRET,
+                timeout_seconds=1,
+                expected_agent_id="dalton-model-broker",
+                clock=fixture.harness.clock,
+            )
+
+        dropped = FakeBroker(state, lambda _request: None)
+        self.addCleanup(dropped.close)
+        fixture.draft_worker.adapter = adapter_for(dropped)
+        admitted = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(admitted["status"], "admitted")
+        failed = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(len(dropped.requests), 1)
+        original_work = _plan_work_orders(
+            fixture.harness.planner.plans.plan_version(fixture.plan_ref)
+        )[1]
+        formal = fixture.harness.scheduler().formal_result(original_work["id"])
+        self.assertEqual(
+            formal["result_envelope"]["error"]["code"],
+            "POST_SEND_RESULT_UNKNOWN",
+        )
+        self.assertTrue(formal["result_envelope"]["invocation_ref"].startswith(
+            "invocation:"
+        ))
+        original_budget = fixture.budget.admission(
+            work_order_ref=original_work["id"], attempt_number=1,
+            phase="assessment",
+        )
+        self.assertIsNone(original_budget["settlement"])
+
+        recovery = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(recovery["status"], "admitted")
+        recovery_work_ref = recovery["admitted_work_order_ref"]
+
+        def recovered_response(request):
+            response = success_response(
+                request, text=canonical_json(fixture.draft_output)
+            )
+            response.pop("contentHash")
+            response.update({
+                "provider": fixture.draft_profile["provider"],
+                "model": fixture.draft_profile["model"],
+                "canonicalModel": (
+                    f"{fixture.draft_profile['provider']}/"
+                    f"{fixture.draft_profile['model']}"
+                ),
+            })
+            return seal(response)
+
+        recovered_broker = FakeBroker(state, recovered_response)
+        self.addCleanup(recovered_broker.close)
+        fixture.draft_worker.adapter = adapter_for(recovered_broker)
+        verifier_admitted = fixture.executor.run_once(
+            plan_version_ref=fixture.plan_ref
+        )
+        self.assertEqual(verifier_admitted["status"], "admitted")
+        self.assertNotEqual(recovery_work_ref, original_work["id"])
+        self.assertEqual(len(recovered_broker.requests), 1)
+        recovered_budget = fixture.budget.admission(
+            work_order_ref=recovery_work_ref, attempt_number=1,
+            phase="assessment",
+        )
+        self.assertIsNotNone(recovered_budget["settlement"])
+        self.assertEqual(
+            recovered_budget["settlement"]["actual_micros"], 10_000
+        )
+        staged = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(staged["status"], "admitted")
+        complete = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(complete["status"], "complete")
+        self.assertEqual(fixture.harness.staging_counts()["candidate_claim_versions"], 1)
+
     def test_missing_budget_authority_refuses_recovery(self):
         fixture = RecoveryFixture(self, recovery=self.POLICY)
         _, failed = fixture.run_to_unknown()
@@ -439,6 +589,18 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
             RuntimeError("mission inactive")
         )
         blocked = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(blocked["reason"], "recovery_mission_invalid")
+        self.assertEqual(len(fixture.draft_adapter.calls), 1)
+
+    def test_same_mission_ref_with_wrong_hash_refuses_recovery(self):
+        fixture = RecoveryFixture(self, recovery=self.POLICY)
+        fixture.run_to_unknown()
+        original = fixture.draft_worker.mission_resolver(MISSION, "wanhua")
+        fixture.draft_worker.mission_resolver = lambda _ref, _company: {
+            **original, "content_hash": "f" * 64,
+        }
+        blocked = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["reason"], "recovery_mission_invalid")
         self.assertEqual(len(fixture.draft_adapter.calls), 1)
 
@@ -543,6 +705,7 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
             max_attempts=2,
             unknown_calls=2,
             same_profile_retries=1,
+            production_mission=True,
         )
         _, retryable_original = fixture.run_to_unknown()
         self.assertEqual(retryable_original["status"], "retryable")
@@ -579,24 +742,6 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
             scheduler.formal_result(original_work["id"])["terminal_state"],
             "failed",
         )
-        mission_authority = CoverageMissionAuthority(fixture.harness.core)
-        mission_row = fixture.harness.core.connection.execute(
-            "SELECT mission_ref,mission_version_id,version_number,content_hash,created_at "
-            "FROM coverage_mission_versions WHERE mission_version_id=?", (MISSION,),
-        ).fetchone()
-        with mission_authority._transaction() as cursor:
-            cursor.execute(
-                "INSERT OR IGNORE INTO coverage_mission_pointer("
-                "mission_ref,mission_version_id,version_number,content_hash,updated_at) "
-                "VALUES(?,?,?,?,?)",
-                tuple(mission_row),
-            )
-            pointer = cursor.execute(
-                "SELECT mission_ref,mission_version_id,version_number,content_hash,updated_at "
-                "FROM coverage_mission_pointer WHERE mission_ref=?", (mission_row["mission_ref"],),
-            ).fetchone()
-            self.assertEqual(tuple(pointer), tuple(mission_row))
-
         launcher_view = SimpleNamespace(
             state_dir=Path(fixture.harness.planner.temp.name),
             clock=fixture.harness.clock,
@@ -621,6 +766,28 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         blocked = exhausted.executor.run_once(plan_version_ref=exhausted.plan_ref)
         self.assertEqual(blocked["reason"], "unknown_recovery_exhausted")
+
+        disabled = RecoveryFixture(self, recovery={
+            **self.POLICY, "max_fresh_work_orders": 0,
+        })
+        disabled.run_to_unknown()
+        before_admissions = disabled.budget.connection.execute(
+            "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0]
+        blocked = disabled.executor.run_once(plan_version_ref=disabled.plan_ref)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "unknown_recovery_exhausted")
+        self.assertEqual(len(disabled.draft_adapter.calls), 1)
+        self.assertEqual(disabled.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM research_plan_recovery_links"
+        ).fetchone()[0], 0)
+        self.assertEqual(disabled.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM scheduler_work_orders "
+            "WHERE work_order_json LIKE '%unknown_recovery_derivation%'"
+        ).fetchone()[0], 0)
+        self.assertEqual(disabled.budget.connection.execute(
+            "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], before_admissions)
 
         deadline = RecoveryFixture(self, recovery={
             **self.POLICY, "max_elapsed_seconds": 1,

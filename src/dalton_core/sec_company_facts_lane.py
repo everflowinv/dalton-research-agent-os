@@ -407,6 +407,40 @@ def _annual_budget_mission(
     }
 
 
+def read_active_annual_budget_mission(
+    connection: sqlite3.Connection,
+    mission_version_ref: str,
+    company_ref: str,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Revalidate annual mission authority over an existing read-only connection."""
+
+    from .contracts import GovernancePolicyVersion
+
+    class _ReadOnlyCore:
+        def __init__(self, database: sqlite3.Connection) -> None:
+            self.connection = database
+
+        def active_policy_version(self) -> GovernancePolicyVersion:
+            row = self.connection.execute(
+                "SELECT v.version_json FROM governance_policy_pointer p "
+                "JOIN governance_policy_versions v "
+                "ON v.policy_version_id=p.policy_version_id "
+                "WHERE p.pointer_id=1"
+            ).fetchone()
+            if row is None:
+                raise LanePreconditionError("active governance policy is unavailable")
+            return GovernancePolicyVersion.from_dict(json.loads(row[0]))
+
+    missions = object.__new__(CoverageMissionAuthority)
+    missions.store = _ReadOnlyCore(connection)
+    missions.connection = connection
+    return _annual_budget_mission(
+        missions, mission_version_ref, company_ref, now=now
+    )
+
+
 class SecCompanyFactsLane:
     """Assemble the full research-plan stack on an existing Core state directory."""
 
@@ -1359,4 +1393,5 @@ __all__ = [
     "SecCompanyFactsLane",
     "US_IT_SERVICES_ISSUERS",
     "check_core_governance_rules",
+    "read_active_annual_budget_mission",
 ]

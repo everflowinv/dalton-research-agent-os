@@ -25,6 +25,7 @@ import stat
 import time
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from importlib import resources
@@ -214,6 +215,14 @@ class BrokerFrameTooLarge(BrokerProtocolError):
 
 class BrokerBudgetExceeded(OpenClawModelAdapterError):
     """Provider telemetry exceeds a WorkOrder or endpoint-profile limit."""
+
+
+@dataclass(frozen=True, slots=True)
+class PostSendUnknownEvidence:
+    """Uncommitted contracts proving dispatch with no trustworthy result."""
+
+    invocation: ModelInvocation
+    result: ResultEnvelope
 
 
 class BrokerIdempotencyConflict(BrokerProtocolError):
@@ -1189,6 +1198,100 @@ class OpenClawModelAdapter:
             before_send=before_send,
         )
 
+    def _post_send_unknown_contracts(
+        self, *, work: WorkOrder, route: Mapping[str, Any],
+        profile: Mapping[str, Any], invocation_id: str, started_at: str,
+        request: Mapping[str, Any], error: Exception,
+    ) -> tuple[ModelInvocation, ResultEnvelope]:
+        """Return immutable evidence when dispatch occurred but no result is trusted."""
+
+        completed_at = _timestamp(self._clock())
+        request_hash = canonical_hash(request)
+        error_type = type(error).__name__
+        proof = {
+            "authority": "openclaw-model-adapter",
+            "state": "post_send_result_unknown",
+            "request_frame_hash": request_hash,
+            "transport_error_type": error_type,
+            "version": "0.1",
+        }
+        usage_ref = f"usage:{invocation_id}"
+        usage = {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+            "total_tokens": None,
+            "raw_provider_telemetry": {
+                "cost": {"available": False, "usd": None},
+                "post_send_unknown": proof,
+            },
+            "metering_source": "unavailable_post_send",
+            "measurement_status": "unavailable",
+            "authority_status": "uncommitted",
+        }
+        invocation = ModelInvocation(
+            schema_version=work.schema_version,
+            id=invocation_id,
+            created_at=completed_at,
+            work_order_ref=work.id,
+            profile_ref=profile["profile_version_ref"],
+            granularity=(
+                InvocationGranularity.VERIFICATION
+                if route["constraints"]["producer_family"] is not None
+                else InvocationGranularity.TASK
+            ),
+            capability=route["capability"],
+            provider=profile["provider"],
+            model=profile["model"],
+            model_family=profile["family"],
+            input_refs=work.input_refs,
+            output_refs=(),
+            started_at=started_at,
+            completed_at=completed_at,
+            usage=usage,
+            side_effects=(),
+            runtime_ref=profile["adapter_ref"],
+            actor_ref=BROKER_ACTOR_REF,
+            parent_ref=route["id"],
+            environment_hash=_dalton_hash({
+                "adapter_ref": profile["adapter_ref"],
+                "broker_protocol": PROTOCOL_VERSION,
+                "transport": "unix-jsonl",
+            }),
+        )
+        result = ResultEnvelope(
+            schema_version=work.schema_version,
+            id="result:" + hashlib.sha256(
+                invocation_id.encode("utf-8")
+            ).hexdigest()[:32],
+            created_at=completed_at,
+            work_order_ref=work.id,
+            invocation_ref=invocation_id,
+            status="failed",
+            outputs={},
+            actual_side_effects=(),
+            usage_refs=(usage_ref,),
+            artifact_refs=(),
+            error={
+                "code": "POST_SEND_RESULT_UNKNOWN",
+                "message": "broker result unavailable after request dispatch",
+                "source": "openclaw-model-adapter",
+            },
+            metadata={
+                "route_decision_ref": route["id"],
+                "profile_version_ref": profile["profile_version_ref"],
+                "broker_request_mode": "execute",
+                "dispatch_proof": {
+                    "authority": "openclaw-model-adapter",
+                    "state": "post_send_result_unknown",
+                    "version": "0.1",
+                },
+                "post_send_unknown": proof,
+            },
+        )
+        return invocation, result
+
     def replay(
         self,
         work_order: WorkOrder | Mapping[str, Any],
@@ -1392,7 +1495,7 @@ class OpenClawModelAdapter:
                     reservation["reservation_ref"], actual_cost_micros=actual,
                     outcome="broker_succeeded" if response["ok"] else "broker_failed",
                 )
-        except Exception:
+        except Exception as exc:
             if capacity is not None and reservation is not None:
                 try:
                     if dispatched:
@@ -1405,6 +1508,20 @@ class OpenClawModelAdapter:
                             reservation["reservation_ref"], reason="definitely_not_sent")
                 except SharedCapacityError:
                     pass
+            if (
+                dispatched
+                and not replay_only
+                and isinstance(exc, (BrokerConnectionError, BrokerProtocolError))
+            ):
+                invocation, result = self._post_send_unknown_contracts(
+                    work=work, route=route, profile=profile,
+                    invocation_id=invocation_id, started_at=started_at,
+                    request=request, error=exc,
+                )
+                evidence = PostSendUnknownEvidence(
+                    invocation=invocation, result=result
+                )
+                setattr(exc, "post_send_unknown_evidence", evidence)
             raise
         finally:
             if capacity is not None:
@@ -1547,6 +1664,7 @@ __all__ = [
     "BrokerTimeout",
     "BrokerFrameTooLarge",
     "BrokerBudgetExceeded",
+    "PostSendUnknownEvidence",
     "BrokerIdempotencyConflict",
     "PROVIDER_CONTROL_MODE_REQUIRED",
     "PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC",

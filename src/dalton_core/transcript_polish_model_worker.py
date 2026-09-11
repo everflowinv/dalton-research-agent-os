@@ -15,6 +15,7 @@ from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
+    PostSendUnknownEvidence,
 )
 from .research_context import count_dalton_search_tokens
 from .scheduler import LeaseExpired, Scheduler
@@ -476,6 +477,11 @@ class RoutedTranscriptPolishModelWorker:
             "error_type": type(exc).__name__,
         }
 
+    @staticmethod
+    def _post_send_unknown_evidence(exc):
+        evidence = getattr(exc, "post_send_unknown_evidence", None)
+        return evidence if isinstance(evidence, PostSendUnknownEvidence) else None
+
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -591,7 +597,10 @@ class RoutedTranscriptPolishModelWorker:
                 try:
                     invocation, adapter_result = self._execute_model(work, route, profile)
                 except OpenClawModelAdapterError as exc:
-                    return self._complete_adapter_failure(work, lease, route, exc)
+                    evidence = self._post_send_unknown_evidence(exc)
+                    if evidence is None:
+                        return self._complete_adapter_failure(work, lease, route, exc)
+                    invocation, adapter_result = evidence.invocation, evidence.result
             elif not has_chain:
                 routed = self.router.route(
                     work,
@@ -622,7 +631,10 @@ class RoutedTranscriptPolishModelWorker:
                         work, route, profile
                     )
                 except OpenClawModelAdapterError as exc:
-                    return self._complete_adapter_failure(work, lease, route, exc)
+                    evidence = self._post_send_unknown_evidence(exc)
+                    if evidence is None:
+                        return self._complete_adapter_failure(work, lease, route, exc)
+                    invocation, adapter_result = evidence.invocation, evidence.result
             else:
                 # Imported here because the chain registry imports CockpitModel,
                 # whose extraction validator subclasses this worker.
@@ -641,7 +653,13 @@ class RoutedTranscriptPolishModelWorker:
                             "outcome": "failed",
                             "failure_class": classify_model_failure(exc),
                         }
-                    except OpenClawModelAdapterError:
+                    except OpenClawModelAdapterError as exc:
+                        evidence = self._post_send_unknown_evidence(exc)
+                        if evidence is not None:
+                            return {
+                                "outcome": "served",
+                                "value": (evidence.invocation, evidence.result),
+                            }
                         return {
                             "outcome": "failed",
                             "failure_class": "unclassified_failure",
