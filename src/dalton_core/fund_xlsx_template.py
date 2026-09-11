@@ -324,6 +324,10 @@ def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
             _apply_style(cell, style["styles"][header_style], Font=Font,
                          PatternFill=PatternFill, Border=Border, Side=Side,
                          Alignment=Alignment)
+        # The source workbook lets the unit label occupy the A:C hierarchy
+        # gutter.  Make that span explicit so the D-column A/E legend cannot
+        # clip a currency label when the sheet is fit to one printed page.
+        sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
         for row in plan["row_styles"].get(role, []):
             sheet.row_dimensions[row["row"]].outlineLevel = row["level"]
             for cell in next(sheet.iter_rows(min_row=row["row"], max_row=row["row"],

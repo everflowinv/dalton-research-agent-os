@@ -120,6 +120,8 @@ class FundXlsxTemplateTests(unittest.TestCase):
         driver["J3"] = 0.09
         driver["K3"] = 0.10
         driver["L3"] = 0.11
+        driver["D1"] = "A/E mixed; * partial"
+        financials["D1"] = "A/E mixed; * partial"
         valuation["A2"] = "Valuation"
         valuation["A3"] = "Target price"
         valuation["B3"] = 98.25
@@ -166,6 +168,12 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertEqual(self.plan()["row_styles"]["driver"][1]["label_column"], 3)
 
         self.assertEqual(financials["A1"].fill.fgColor.rgb, "FF3366FF")
+        self.assertIn("A1:C1", {str(value) for value in financials.merged_cells.ranges})
+        self.assertIn("A1:C1", {str(value) for value in driver.merged_cells.ranges})
+        self.assertEqual(financials["A1"].value, "(USD MM)")
+        self.assertEqual(driver["A1"].value, "(USD MM)")
+        self.assertEqual(financials["D1"].value, "A/E mixed; * partial")
+        self.assertEqual(driver["D1"].value, "A/E mixed; * partial")
         self.assertIsNone(financials["A1"].alignment.horizontal)
         self.assertEqual(financials["E1"].alignment.horizontal, "right")
         self.assertEqual(financials["E1"].font.color.rgb, "FFFFFFFF")
