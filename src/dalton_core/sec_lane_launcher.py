@@ -34,6 +34,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -97,10 +98,16 @@ def _secure_dir(path: Path) -> Path:
 
 
 def _write_owner_only(path: Path, value: Mapping[str, Any]) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(canonical_json(value) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(canonical_json(value) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _iso_date(value: Any, name: str) -> str:
@@ -757,6 +764,13 @@ class SecLaneLauncher:
             if (record.get("operation") != "registered_annual_report"
                     or record.get("status") not in {"running", "orphaned"}):
                 continue
+            if self._pid_matches(record):
+                # The child may publish its summary before it exits. A
+                # recovered supervisor must retain the slot until the exact
+                # process has stopped, just like the supervisor owning Popen.
+                self._reserved_ticket = (record["id"], int(record["pid"]))
+                self._last_ticket_id = record["id"]
+                return
             summary_path = path.with_name("summary.json")
             if summary_path.is_file():
                 try:
@@ -767,10 +781,6 @@ class SecLaneLauncher:
                 record["status"] = "succeeded" if summary.get("ok") is True else "failed"
                 _write_owner_only(path, record)
                 continue
-            if self._pid_matches(record):
-                self._reserved_ticket = (record["id"], int(record["pid"]))
-                self._last_ticket_id = record["id"]
-                return
             resumable, expired = self._annual_resume_authorized(record.get("id", ""), record)
             if not resumable or (expired and record.get("deadline_resume_attempted")):
                 # An inactive old plan must not hide a later valid orphan.

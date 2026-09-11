@@ -83,7 +83,7 @@ def _stub_child(
         lines.extend([
             'with open(os.path.join(summary_dir, "summary.json"), "w") as handle:',
             '    json.dump({"schema_version": "0.1", "status": "stub", '
-            '"argv_count": len(argv)}, handle)',
+            f'"ok": {exit_code == 0!r}, "argv_count": len(argv)}}, handle)',
             'os.chmod(os.path.join(summary_dir, "summary.json"), 0o600)',
         ])
     lines.append(f"sys.exit({exit_code})")
@@ -289,6 +289,17 @@ class SecLaneLauncherTests(unittest.TestCase):
             while time.monotonic() < limit and second._reserved_ticket is None:
                 time.sleep(0.05)
             self.assertEqual(second._reserved_ticket, (ticket["id"], ticket["pid"]))
+            # A summary is a child output, not evidence that its process has
+            # exited. A second supervisor must still hold the shared slot.
+            path = second._ticket_path(ticket["id"])
+            path.with_name("summary.json").write_text(
+                json.dumps({"ok": True}), encoding="utf-8",
+            )
+            before = path.read_bytes()
+            with second._lock:
+                second._supervise_once_locked()
+            self.assertEqual(second._reserved_ticket, (ticket["id"], ticket["pid"]))
+            self.assertEqual(path.read_bytes(), before)
             with self.assertRaises(LaneLaunchConflict):
                 second.start(
                     issuers=["ACN"], filed_from="2026-06-01",
