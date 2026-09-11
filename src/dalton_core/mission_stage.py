@@ -318,6 +318,21 @@ def _document_counts(
     except (sqlite3.OperationalError, ValueError, TypeError, json.JSONDecodeError):
         completed_reviews = set()
 
+    # A dismissed review may still represent acquired issuer material, but the
+    # document-ref prefix alone does not prove issuer attribution.  Only the
+    # statement authority's exact company/accession/form binding does.
+    authoritative_annuals: set[tuple[str, str]] = set()
+    try:
+        authoritative_annuals = {
+            (filing["company_ref"], f"sec:filing:{filing['accession']}")
+            for filing in connection.execute(
+                "SELECT company_ref,accession FROM coverage_mission_statement_filings "
+                "WHERE form='10-K'"
+            ).fetchall()
+        }
+    except sqlite3.OperationalError:
+        pass
+
     # A source can return the same external document for several companies or
     # specs.  Those are separate attribution claims.  Deduplicating on the
     # external id alone made an equal-rank row belong to whichever company
@@ -336,7 +351,7 @@ def _document_counts(
         issuer_authoritative_annual = (
             entry["spec_ref"] == "annual-report-10k"
             and entry["source_ref"] == "source:sec-edgar"
-            and document_ref.startswith("sec:filing:")
+            and (entry["company_ref"], document_ref) in authoritative_annuals
         )
         completed = latest_reviews.get((entry["company_ref"], document_ref), (None, None))[1] in completed_reviews
         if dismissed and not issuer_authoritative_annual and not completed:
