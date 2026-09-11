@@ -232,3 +232,12 @@ Independent review confirmed the WAL failures are not merely fixtures: the live 
 - 私有健康观察器经独立审查修正：绑定成功部署及 installed-bytes receipts，拒绝旧 controller 和观察期重启；45 次健康、同一非空进程身份、启动时间落在部署窗口、至少 660 秒才能 accepted。4 项故障回归通过，尚未运行 live observer。
 
 重新阅读 analyst onboarding / vision 后，旧蓝图的“无”不再作为当前缺口：市场 authority、Excel/HTML、Debate/Event/Reflection/预算池已有实现。接下来的明确基础工程是单次 Dossier 重建共享一致输入投影，消除逐单元重复构建；独立工作区推进，不混入本次冻结。真实来源许可、错误 issuer Claim 退役、阶段裁决及 thesis-impact 人类绑定继续按既有 packet 等待裁决。高级投资能力、最终视觉与多 workspace 激活继续后排。
+
+
+## R7b 安装完成，运行观察中（2026-09-11 03:22 UTC）
+
+全量 6,867 tests / 1 skip，573.795 秒；log SHA `1ecf570e7ebde1c498f5465857f7895507def729e1e9b9c06a6672ba88f6f903`。经过同版 wheel / 副本演练与 inert preflight 后，03:17:46–03:20:11 UTC 实际部署 exit 0，备份 `deploy-backup-20260911T031747Z`，保留源码 `.release-source.iWhfWI`。安装日志 SHA `1142364c6043f84a886d775fc7ba322eb8ecc6dd961ab3a753fcfd4c551ceda2`。
+
+实际 556 运行文件 / 1,850 tracked source 文件匹配，逐字 receipt SHA `150ca947818d115668c9de345a0d3060461dff1e5fed94b196d4634921022477`。模型、预算、credential、mission、broker 和 pending 保留通过。私有 release stager 绑定两份部署前 baseline hashes，postdeploy config receipt 绑定精确 accepted manifest / execution receipt；installed 状态与 wheel hash 也严格检查。3 项私有流程/拒绝测试通过。
+
+运行状态暂为 installed_bytes_verified_runtime_pending。新 controller PID 69511 / 03:18:30.604875Z；03:20:39 起完整 45 样本观察，不能用早期通过样本替代最终结果。启动时超过一分钟仍 starting，保留原始进程采样；最终在配置的安装等待期限内通过，不抬高日常健康门槛。另一会话四份 DeepSeek diff SHA 仍为 `43832e8e6d32cec9bf48b59044d200df0d57a99d30598859c23d4c1360207932`。
