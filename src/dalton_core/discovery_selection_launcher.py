@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from .child_tickets import adopt_finished_child
+from .lane_child_launcher import process_matches
 from .store import canonical_json, content_hash
 
 PREFIX="discovery-selection"; _RE=re.compile(r"discovery-selection:[0-9a-f]{24}\Z")
@@ -19,10 +20,10 @@ class DiscoverySelectionLauncher:
         self.scheduler=Path(scheduler_db).resolve(); self.python=python_executable or sys.executable
         self.root=self.state/'discovery-selections'; self.root.mkdir(parents=True,exist_ok=True); os.chmod(self.root,0o700)
         self._lock=threading.Lock(); self._current=None
-        retry = json.loads(self.config.read_text()).get("discovery_selection_retry", {})
-        if not isinstance(retry, Mapping) or set(retry) - {"max_recovery_epochs", "cooldown_seconds"}:
-            raise ValueError("invalid discovery selection retry policy")
-        self.max_recovery_epochs = retry.get("max_recovery_epochs", 1)
+        # Reuse the installed, closed capacity recovery policy.  It already
+        # versions the model WorkOrder and is preserved by tier setup.
+        retry = json.loads(self.config.read_text()).get("capacity_retry", {})
+        self.max_recovery_epochs = retry.get("max_recovery_epochs", 0)
         self.cooldown_seconds = retry.get("cooldown_seconds", 300)
         if (not isinstance(self.max_recovery_epochs, int) or isinstance(self.max_recovery_epochs, bool)
                 or not 0 <= self.max_recovery_epochs <= 10):
@@ -66,19 +67,28 @@ class DiscoverySelectionLauncher:
         directory.mkdir(mode=0o700,parents=True,exist_ok=True); os.chmod(directory,0o700)
         with self._lock:
             if self._current and self._current[1].poll() is None: return {"status":"busy"}
+            for ticket_path in self.root.glob('*/ticket.json'):
+                try:
+                    persisted = json.loads(ticket_path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if (persisted.get('status') == 'running'
+                        and process_matches(persisted.get('pid'), persisted.get('command'))):
+                    return {"status":"busy"}
             _write(directory/'input.json',{"view":dict(view),"mission_ref":mission_ref,
                 "company":dict(company),"missing_periods":missing_periods,
                 "identity_hash":content_hash(attempt_identity), "recovery_epoch":epoch})
             log=os.open(directory/'run.log',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
-            try: proc=subprocess.Popen([self.python,'-m','dalton_core.discovery_selection_cli',
+            command=[self.python,'-m','dalton_core.discovery_selection_cli',
                 '--state-dir',str(self.state),'--model-config',str(self.config),'--scheduler-db',str(self.scheduler),
-                '--input',str(directory/'input.json'),'--summary-dir',str(directory)],stdin=subprocess.DEVNULL,
+                '--input',str(directory/'input.json'),'--summary-dir',str(directory)]
+            try: proc=subprocess.Popen(command,stdin=subprocess.DEVNULL,
                 stdout=log,stderr=subprocess.STDOUT,cwd=self.state)
             finally: os.close(log)
             row={"schema_version":"0.1","id":tid,"discovery_ref":discovery_ref,
                  "identity_hash":content_hash(attempt_identity), "base_identity_hash":content_hash(identity),
                  "recovery_epoch":epoch,"started_at":_now(),"pid":proc.pid,"status":"running",
-                 "exit_code":None,"completed_at":None}
+                 "command":command,"exit_code":None,"completed_at":None}
             _write(directory/'ticket.json',row); self._current=(tid,proc); return row
     def status(self,ref:str):
         if not _RE.fullmatch(ref): raise ValueError('invalid discovery selection ticket')
@@ -89,7 +99,7 @@ class DiscoverySelectionLauncher:
                 code=proc.poll() if proc else None
                 if proc and code is not None:
                     row.update(status='succeeded' if code==0 else 'failed',exit_code=code,completed_at=_now()); _write(path,row)
-                elif not proc and not self._alive(row['pid']):
+                elif not proc and not process_matches(row.get('pid'), row.get('command')):
                     if not adopt_finished_child(row,path.with_name('summary.json'),now=_now()): row.update(status='orphaned',completed_at=_now())
                     _write(path,row)
         summary=path.with_name('summary.json')
@@ -106,13 +116,11 @@ class DiscoverySelectionLauncher:
                          if key not in {'content_hash', 'work_order_ref', 'replayed', 'config_hash', 'recovery_epoch'}
                      }))
             if parsed.get('status') == 'succeeded' and not valid:
-                row = {**row, 'status': 'failed', 'failure_reason': 'selection summary authority drifted'}
+                row = {**row, 'status': 'failed', 'exit_code': 1,
+                       'completed_at': row.get('completed_at') or _now(),
+                       'failure_reason': 'selection summary authority drifted'}
+                _write(path, row)
                 parsed = None
         return {**row,"summary":parsed}
-    @staticmethod
-    def _alive(pid):
-        try: os.kill(pid,0); return True
-        except (ProcessLookupError,TypeError): return False
-        except PermissionError: return True
     def _now_datetime(self):
         return datetime.now(timezone.utc)

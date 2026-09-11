@@ -28,7 +28,7 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
                 "source_record_refs": ["alphaengine-doc:other", "alphaengine-doc:ibm-q2"]}
         return raw, {**base, "content_hash": content_hash(base)}
 
-    def test_archived_ibm_shape_projects_bounded_metadata_and_selects_only_ibm(self):
+    def test_synthetic_ibm_shaped_results_project_bounded_metadata(self):
         raw, envelope = self.fixture()
         view = candidate_view(raw, envelope)
         self.assertEqual([x["document_ref"] for x in view["candidates"]],

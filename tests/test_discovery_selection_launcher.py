@@ -38,8 +38,9 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
     def test_failed_selection_has_bounded_cooldown_and_new_identity(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); config=root/'model.json'
-            config.write_text(json.dumps({"discovery_selection_retry": {
-                "max_recovery_epochs": 1, "cooldown_seconds": 60}}))
+            config.write_text(json.dumps({"capacity_retry": {
+                "max_recovery_epochs": 1, "cooldown_seconds": 60,
+                "scheduler_max_attempts": 1}}))
             first=Process(); second=Process()
             launcher=DiscoverySelectionLauncher(state_dir=root,model_config_path=config,
                                                   scheduler_db=root/'scheduler.sqlite')
@@ -79,5 +80,28 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
                 "identity_hash":ticket['identity_hash'],"selection":{"selected":[]}}))
             process.code=0
             self.assertEqual(launcher.status(ticket['id'])['status'],'failed')
+            persisted=json.loads((directory/'ticket.json').read_text())
+            self.assertEqual(persisted['status'],'failed')
+            self.assertIsNotNone(persisted['completed_at'])
+
+    def test_restart_refuses_second_child_while_exact_recorded_process_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); config=root/'model.json'; config.write_text('{}')
+            process=Process(); first=DiscoverySelectionLauncher(
+                state_dir=root,model_config_path=config,scheduler_db=root/'scheduler.sqlite')
+            base={"schema_version":"0.1","contract_ref":"x","source_envelope_ref":"e",
+                  "source_envelope_hash":"a"*64,"candidates":[]}
+            view={**base,"content_hash":content_hash(base)}
+            with patch('dalton_core.discovery_selection_launcher.subprocess.Popen',return_value=process):
+                first.start(discovery_ref='discovery:one',view=view,mission_ref='mission:v1',
+                    company={"company_ref":"c","name":"IBM","ticker":"IBM","aliases":[]},missing_periods=[])
+            restarted=DiscoverySelectionLauncher(state_dir=root,model_config_path=config,
+                                                  scheduler_db=root/'scheduler.sqlite')
+            with patch('dalton_core.discovery_selection_launcher.process_matches',return_value=True), \
+                 patch('dalton_core.discovery_selection_launcher.subprocess.Popen') as popen:
+                result=restarted.start(discovery_ref='discovery:two',view=view,mission_ref='mission:v1',
+                    company={"company_ref":"c","name":"IBM","ticker":"IBM","aliases":[]},missing_periods=[])
+            self.assertEqual(result['status'],'busy')
+            popen.assert_not_called()
 
 if __name__=='__main__': unittest.main()
