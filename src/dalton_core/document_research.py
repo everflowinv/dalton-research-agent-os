@@ -649,7 +649,10 @@ class PublicWebDocumentSourceAdapter:
 class CoreAcquiredDocumentSourceAdapter:
     """Bind one mission/company row to a source adapter's exact acquisition."""
 
-    def __init__(self, *, core: Any, adapters: Mapping[str, Any]) -> None:
+    def __init__(
+        self, *, core: Any, adapters: Mapping[str, Any],
+        source_aliases: Mapping[str, str] | None = None,
+    ) -> None:
         connection = getattr(core, "connection", None)
         if connection is None or not callable(getattr(connection, "execute", None)):
             raise TypeError("core must expose a database connection")
@@ -658,11 +661,22 @@ class CoreAcquiredDocumentSourceAdapter:
         configured = dict(adapters)
         if any(key != adapter.source_ref for key, adapter in configured.items()):
             raise TypeError("Core adapter map keys must equal adapter source_ref")
+        aliases = {} if source_aliases is None else dict(source_aliases)
+        if any(
+            not isinstance(key, str) or not key
+            or not isinstance(item, str) or item not in configured
+            for key, item in aliases.items()
+        ):
+            raise TypeError("Core source aliases must name configured source adapters")
         self.core = core
         self.adapters = configured
+        self.source_aliases = aliases
 
     @staticmethod
-    def _authority(row: Mapping[str, Any]) -> dict[str, Any]:
+    def _authority(
+        row: Mapping[str, Any], *, resolved_source_ref: str | None = None,
+        discovery: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         body = {
             "schema_version": "coverage-mission-acquired-document-binding-0.1",
             "record_id": row["record_id"],
@@ -673,6 +687,26 @@ class CoreAcquiredDocumentSourceAdapter:
             "ticket_ref": row["ticket_ref"],
             "status": row["status"],
         }
+        # Keep the existing 0.1 identity byte-for-byte for sources whose Core
+        # and acquisition authorities use the same source_ref.  An alias is a
+        # new authority shape: it must also freeze the exact discovery row and
+        # the physical SourceEnvelope which justified that translation.
+        if resolved_source_ref is not None:
+            if discovery is None:
+                raise TypeError("aliased Core authority requires discovery")
+            body.update({
+                "schema_version": (
+                    "coverage-mission-acquired-document-binding-0.2"
+                ),
+                "resolved_source_ref": resolved_source_ref,
+                "discovery_ref": row.get("discovery_ref"),
+                "discovery_source_envelope_ref": discovery.get(
+                    "source_envelope_ref"
+                ),
+                "discovery_source_envelope_hash": discovery.get(
+                    "source_envelope_hash"
+                ),
+            })
         return _record(body)
 
     def materialize_record(
@@ -700,8 +734,11 @@ class CoreAcquiredDocumentSourceAdapter:
             raise DocumentResearchConflict(
                 "Core row is not a readable acquired document"
             )
+        adapter_source_ref = self.source_aliases.get(
+            row["source_ref"], row["source_ref"]
+        )
         try:
-            adapter = self.adapters[row["source_ref"]]
+            adapter = self.adapters[adapter_source_ref]
         except KeyError as exc:
             raise DocumentResearchConflict(
                 "Core acquired-document source has no configured adapter"
@@ -721,7 +758,7 @@ class CoreAcquiredDocumentSourceAdapter:
             acquisition_ticket_ref=resolved_ticket,
         )
         if (
-            registration.get("source_ref") != row["source_ref"]
+            registration.get("source_ref") != adapter_source_ref
             or registration.get("document_ref") != row["document_ref"]
             or not isinstance(registration.get("acquisition_ticket_ref"), str)
             or not registration["acquisition_ticket_ref"]
@@ -731,7 +768,36 @@ class CoreAcquiredDocumentSourceAdapter:
             raise DocumentResearchConflict(
                 "Core acquired row and source acquisition authority disagree"
             )
-        authority = self._authority(row)
+        discovery = None
+        if adapter_source_ref != row["source_ref"]:
+            discovery_rows = self.core.connection.execute(
+                "SELECT * FROM coverage_mission_source_discoveries WHERE record_id=?",
+                (row.get("discovery_ref"),),
+            ).fetchall()
+            if len(discovery_rows) != 1:
+                raise DocumentResearchConflict(
+                    "Core source alias has no exact discovery authority"
+                )
+            discovery = dict(discovery_rows[0])
+            source_authority = registration.get("source_authority", {})
+            if (
+                discovery.get("mission_version_ref") != row["mission_version_ref"]
+                or discovery.get("company_ref") != row["company_ref"]
+                or discovery.get("source_ref") != row["source_ref"]
+                or discovery.get("source_envelope_ref") != source_authority.get("ref")
+                or discovery.get("source_envelope_hash") != source_authority.get("hash")
+            ):
+                raise DocumentResearchConflict(
+                    "Core source alias and discovery envelope authority disagree"
+                )
+        authority = self._authority(
+            row,
+            resolved_source_ref=(
+                adapter_source_ref
+                if adapter_source_ref != row["source_ref"] else None
+            ),
+            discovery=discovery,
+        )
         body = {
             key: item for key, item in registration.items()
             if key not in {"id", "content_hash"}
@@ -771,7 +837,10 @@ class CoreAcquiredFetchedDocumentSourceAdapter(
             )
             for source_ref in SUPPORTED_FETCH_DISCOVERY_SOURCE_REFS
         }
-        super().__init__(core=core, adapters=adapters)
+        super().__init__(
+            core=core, adapters=adapters,
+            source_aliases={"source:web-search": "source:public-web"},
+        )
 
 
 def validate_registration(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1394,7 +1463,7 @@ def build_document_research_registry(
             )
     core_adapters = dict(adapters)
     if public_web_launcher is not None:
-        for source_ref in SUPPORTED_FETCH_DISCOVERY_SOURCE_REFS:
+        for source_ref in {"source:public-web", "source:sec-edgar"}:
             if source_ref in core_adapters:
                 continue
             core_adapters[source_ref] = PublicWebDocumentSourceAdapter(
@@ -1411,8 +1480,14 @@ def build_document_research_registry(
     acquired_document_adapter = None
     connection = getattr(core, "connection", None)
     if connection is not None and callable(getattr(connection, "execute", None)):
+        from .source_capability_map import SOURCE_PLAN_ALIASES
+
         acquired_document_adapter = CoreAcquiredDocumentSourceAdapter(
             core=core, adapters=core_adapters,
+            source_aliases={
+                key: item for key, item in SOURCE_PLAN_ALIASES.items()
+                if item in core_adapters
+            },
         )
     return DocumentResearchRegistry(
         adapters=adapters, policy=policy,

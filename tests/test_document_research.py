@@ -131,14 +131,22 @@ class FakeLauncher:
 
 
 class FakeCoreRows:
-    def __init__(self, *rows: dict):
+    def __init__(self, *rows: dict, discoveries: tuple[dict, ...] = ()):
         self.rows = {row["record_id"]: dict(row) for row in rows}
+        self.discoveries = {
+            row["record_id"]: dict(row) for row in discoveries
+        }
         self.connection = self
 
     def execute(self, query: str, params: tuple):
-        if "coverage_mission_discovered_documents" not in query or len(params) != 1:
+        if len(params) != 1:
             raise AssertionError("unexpected Core acquired-document query")
-        row = self.rows.get(params[0])
+        if "coverage_mission_discovered_documents" in query:
+            row = self.rows.get(params[0])
+        elif "coverage_mission_source_discoveries" in query:
+            row = self.discoveries.get(params[0])
+        else:
+            raise AssertionError("unexpected Core acquired-document query")
 
         class Result:
             def fetchall(self):
@@ -832,6 +840,54 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
         })
         self.assertEqual(len(proof["matches"]), 1)
         self.assertIn("effective immediately", proof["matches"][0]["excerpt"])
+        acquired_ref = "mission-discovered-document:web-alias-fixture"
+        mission_ref = "coverage-mission-version:web-alias-fixture"
+        company_ref = "company:web-alias-fixture"
+        discovery_ref = "mission-source-discovery:web-alias-fixture"
+        acquired_core = FakeCoreRows(
+            {
+                "record_id": acquired_ref,
+                "mission_version_ref": mission_ref,
+                "company_ref": company_ref,
+                "source_ref": "source:web-search",
+                "document_ref": URL_A,
+                "discovery_ref": discovery_ref,
+                "ticket_ref": ticket,
+                "status": "acquired",
+            },
+            discoveries=({
+                "record_id": discovery_ref,
+                "mission_version_ref": mission_ref,
+                "company_ref": company_ref,
+                "source_ref": "source:web-search",
+                "source_envelope_ref": discovery["id"],
+                "source_envelope_hash": discovery["content_hash"],
+            },),
+        )
+        acquired_registry = DocumentResearchRegistry(
+            adapters={"source:public-web": adapter},
+            policy=policy,
+            acquired_document_adapter=CoreAcquiredDocumentSourceAdapter(
+                core=acquired_core,
+                adapters={"source:public-web": adapter},
+                source_aliases={"source:web-search": "source:public-web"},
+            ),
+        )
+        acquired_registration = acquired_registry.register_acquired_document(
+            record_id=acquired_ref, purpose="qualitative_research"
+        )
+        self.assertEqual(acquired_registration["source_ref"], "source:web-search")
+        self.assertEqual(
+            acquired_registration["source_authority"]["company_ref"], company_ref
+        )
+        acquired_proof = acquired_registry.search({
+            **proof["request"],
+            "registration": acquired_registration,
+        })
+        self.assertEqual(len(acquired_proof["matches"]), 1)
+        acquired_core.discoveries[discovery_ref]["source_envelope_hash"] = "0" * 64
+        with self.assertRaisesRegex(DocumentResearchConflict, "alias.*discovery"):
+            acquired_registry.verify_search_proof(acquired_proof)
 
     def test_public_web_adapter_rejects_a_truncated_rendering(self):
         temp = tempfile.TemporaryDirectory()

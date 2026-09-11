@@ -2,8 +2,9 @@
 
 Date: 2026-09-11  
 Audited source commit: `073879a60d40f7e5e6557b72b56327cb0fcb5d11`  
-Scope: source and schema review plus an inert, read-only contract; no live reads,
-model calls, Claim writes, promotion, planner execution, or deployment.
+Scope: source and schema review plus an inert, read-only contract and a later
+read-only authority audit of acquired rows; no live writes, model calls, Claim
+writes, promotion, planner execution, or deployment.
 
 ## Finding
 
@@ -118,7 +119,21 @@ policy outside that configured grant is refused.
    ticket. Thus an acquired SEC 8-K stays `source:sec-edgar` because Core says
    so; the public-web profile proves only how the body was fetched and cannot
    relabel an arbitrary URL as SEC. Ordinary web registrations retain the
-   source from their actual discovery envelope. The production factory consumes injected, already-open
+   source from their actual discovery envelope. The planned web-search path is
+   an explicit exception already declared by `SOURCE_PLAN_ALIASES`: its Core
+   discovery/acquired rows retain logical `source:web-search`, while the actual
+   connector SourceEnvelope is `source:public-web`. DocumentResearch accepts
+   that translation only through the Core-acquired path, when the exact source
+   discovery row has the same mission, company and logical source and binds the
+   exact SourceEnvelope ref/hash returned by the physical adapter. The alias
+   binding has its own 0.2 authority identity including the discovery ref,
+   resolved source and envelope ref/hash; changing any one makes replay fail.
+   Direct caller-selected source aliases remain insufficient. A read-only
+   audit found this exact planned relationship in all eight readable active
+   `source:web-search` manifests; the ninth active ticket had no completed
+   manifest and remains unavailable.
+
+   The production factory consumes injected, already-open
    Core/spool/receipt/launcher authorities and verifies every launcher belongs
    to one state directory; it does not open or migrate authority on a read
    path. Dedicated AlphaEngine, public-web, and feed manifest readers reopen
