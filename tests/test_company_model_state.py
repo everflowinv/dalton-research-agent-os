@@ -13,6 +13,7 @@ import unittest
 from dalton_core.company_model_state import (
     DEFAULT_NUMERIC_CONTEXT_POLICY,
     MAX_CONCEPTS_PER_STATEMENT,
+    CompanyModelPromptBudgetError,
     CompanyModelStateError,
     _numeric_line_authority,
     build_company_model_state,
@@ -101,6 +102,8 @@ class CompanyModelStateTests(unittest.TestCase):
         numeric = state["numeric_context"]
         self.assertEqual(numeric["policy"], DEFAULT_NUMERIC_CONTEXT_POLICY)
         self.assertEqual(numeric["included_cells"], 3)
+        self.assertLessEqual(numeric["prompt_bytes"], numeric["prompt_byte_limit"])
+        self.assertEqual(numeric["prompt_bytes"], len(build_prompt(state).encode("utf-8")))
         revenue = next(
             item for item in numeric["cells"]
             if item["concept"] == "us-gaap:Revenues"
@@ -234,6 +237,36 @@ class CompanyModelStateTests(unittest.TestCase):
         self.assertEqual(bounded["included_cells"], 0)
         self.assertEqual(bounded["omitted_by_total_limit"], 2)
 
+    def test_prompt_budget_omits_a_whole_ambiguity_group(self):
+        concept = "us-gaap:OtherNonoperatingIncomeExpense"
+        self.ingest("0001467373-26-000031", [
+            _line(concept, value="15.00"),
+            _line(concept, value="16.00"),
+        ])
+        complete = build_company_model_state(self.missions, ACN)
+        base = complete["numeric_context"]["base_prompt_bytes"]
+        bounded = build_company_model_state(
+            self.missions, ACN, prompt_byte_limit=base,
+        )
+        context = bounded["numeric_context"]
+        held = [cell for cell in context["cells"] if cell["concept"] == concept]
+        self.assertEqual(held, [])
+        self.assertEqual(context["omitted_by_prompt_limit"], 2)
+        self.assertEqual(context["prompt_bytes"], len(build_prompt(bounded).encode("utf-8")))
+        self.assertLessEqual(context["prompt_bytes"], context["prompt_byte_limit"])
+
+    def test_an_overbudget_base_prompt_reports_the_exact_boundary(self):
+        self.ingest("0001467373-26-000031", [_line("us-gaap:Revenues")])
+        with self.assertRaises(CompanyModelPromptBudgetError) as raised:
+            build_company_model_state(self.missions, ACN, prompt_byte_limit=1_000)
+        report = raised.exception.report
+        self.assertEqual(report["prompt_byte_limit"], 1_000)
+        self.assertGreater(report["base_prompt_bytes"], 1_000)
+        self.assertEqual(
+            report["over_by_bytes"],
+            report["base_prompt_bytes"] - report["prompt_byte_limit"],
+        )
+
     def test_bounds_are_explicit_and_policy_changes_the_state_identity(self):
         self.ingest("0001467373-26-000031", [
             _line("us-gaap:Revenues", value="100"),
@@ -250,6 +283,10 @@ class CompanyModelStateTests(unittest.TestCase):
         self.assertEqual(context["omitted_by_total_limit"], 1)
         self.assertTrue(context["truncated"])
         self.assertNotEqual(default["state_hash"], bounded["state_hash"])
+        other_prompt_budget = build_company_model_state(
+            self.missions, ACN, prompt_byte_limit=119_999,
+        )
+        self.assertNotEqual(default["state_hash"], other_prompt_budget["state_hash"])
         with self.assertRaisesRegex(ValueError, "positive integer"):
             validate_numeric_context_policy({"max_periods_per_series": 0,
                                              "max_total_cells": 1})

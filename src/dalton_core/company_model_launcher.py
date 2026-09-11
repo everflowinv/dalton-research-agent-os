@@ -64,6 +64,19 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
         return model_spec_numeric_context_config(self._validated_model_config())
 
+    def state_projection_config(self) -> dict[str, Any]:
+        """One validated config read for the exact state the parent selects."""
+
+        from .company_model_state import (
+            model_spec_numeric_context_config, model_spec_prompt_byte_limit,
+        )
+
+        config = self._validated_model_config()
+        return {
+            "numeric_context_policy": model_spec_numeric_context_config(config),
+            "prompt_byte_limit": model_spec_prompt_byte_limit(config),
+        }
+
     def _validated_model_config(self) -> dict[str, Any] | None:
         from .document_extraction import validate_model_config
 

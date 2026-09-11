@@ -51,9 +51,12 @@ from .company_financial_statement_structure import FinancialStatementStructureEr
 from .company_model_inputs import ModelInputError
 from .model_forecast_driver import ForecastModelError
 from .company_model_state import (
+    DEFAULT_MODEL_SPEC_CALL_BUDGET,
+    CompanyModelPromptBudgetError,
     CompanyModelStateError,
     build_company_model_state,
     model_spec_numeric_context_config,
+    model_spec_prompt_byte_limit,
 )
 from .driver_template import REGISTRY_HASH as TEMPLATE_REGISTRY_HASH, template_for
 from .coverage_mission import CoverageMissionAuthority
@@ -63,8 +66,8 @@ from .store import DaltonStore, canonical_json, content_hash
 SUMMARY_SCHEMA_VERSION = "0.1"
 # The state is a few hundred concept rows; the answer is a page of structured
 # judgement. Both bounds are generous against that.
-MAX_INPUT_TOKENS = 120_000
-MAX_OUTPUT_TOKENS = 6_000
+MAX_INPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_input_tokens"])
+MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # P13am: the reservation, not the price. The router estimates a call at its
 # permitted output and at prompt *bytes* rather than tokens, so it reserves
 # roughly four times what the call costs -- IBM's ran for $0.24 against an
@@ -72,8 +75,8 @@ MAX_OUTPUT_TOKENS = 6_000
 # was refused before it was made. With the day cap at $100 the old $0.60 bought
 # nothing but that refusal, so this is sized to admit a large company's
 # structure rather than to look frugal.
-MAX_COST_USD = 2.50
-TIMEOUT_SECONDS = 300
+MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
+TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
 REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.1"
 REPAIR_CONTRACT = {
     "ref": REPAIR_CONTRACT_REF,
@@ -422,6 +425,7 @@ def choose_company(
     *, company_ref: str | None = None,
     classifications: Mapping[str, str] | None = None,
     numeric_context_policy: Mapping[str, Any] | None = None,
+    prompt_byte_limit: int = MAX_INPUT_TOKENS,
     exclude_company_refs: frozenset[str] = frozenset(),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The company to decide about, and the disclosure to decide from.
@@ -467,7 +471,10 @@ def choose_company(
                 # specification written under the old frame.
                 industry_classification=(classifications or {}).get(held),
                 numeric_context_policy=numeric_context_policy,
+                prompt_byte_limit=prompt_byte_limit,
             )
+        except CompanyModelPromptBudgetError:
+            raise
         except CompanyModelStateError:
             if company_ref is not None:
                 raise
@@ -505,6 +512,8 @@ def run_model_spec(
         "numeric_context_policy": None,
         "numeric_context_cells": 0,
         "numeric_context_omitted_cells": 0,
+        "prompt_byte_limit": None,
+        "prompt_bytes": None,
         "spec_status": None,
         "revenue_drivers": 0,
         "expense_lines": 0,
@@ -541,12 +550,21 @@ def run_model_spec(
             else json.loads(config_path.read_text(encoding="utf-8"))
         )
         numeric_policy = model_spec_numeric_context_config(raw_model_config)
+        prompt_byte_limit = model_spec_prompt_byte_limit(raw_model_config)
         try:
             chosen, state = choose_company(
                 missions, mission, company_ref=company_ref,
                 classifications=filed_classifications(store),
                 numeric_context_policy=numeric_policy,
+                prompt_byte_limit=prompt_byte_limit,
             )
+        except CompanyModelPromptBudgetError as exc:
+            summary.update({
+                "status": "succeeded", "spec_status": "refused",
+                "failure_reason": f"{type(exc).__name__}: {exc}",
+                "prompt_budget_report": exc.report,
+            })
+            return summary
         except CompanyModelStateError as exc:
             summary.update({"status": "idle", "spec_status": "no_statements",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
@@ -569,7 +587,10 @@ def run_model_spec(
         summary["numeric_context_omitted_cells"] = (
             numeric_context["omitted_by_series_limit"]
             + numeric_context["omitted_by_total_limit"]
+            + numeric_context["omitted_by_prompt_limit"]
         )
+        summary["prompt_byte_limit"] = numeric_context["prompt_byte_limit"]
+        summary["prompt_bytes"] = numeric_context["prompt_bytes"]
         summary["concepts"] = len(state["concepts"])
         template = template_for(state.get("industry_classification"))
         summary["driver_template"] = {
@@ -596,7 +617,7 @@ def run_model_spec(
             summary.update({
                 "status": "succeeded", "spec_status": "gated",
                 "failure_reason": None if dry_run else "no model configured",
-                "prompt_bytes": len(build_prompt(state).encode("utf-8")),
+                "prompt_bytes": numeric_context["prompt_bytes"],
             })
             return summary
 

@@ -28,11 +28,36 @@ DEFAULT_NUMERIC_CONTEXT_POLICY = {
     "max_periods_per_series": 8,
     "max_total_cells": 300,
 }
-NUMERIC_CONTEXT_SCHEMA_VERSION = "company-model-numeric-context-0.1"
+DEFAULT_MODEL_SPEC_CALL_BUDGET = {
+    "max_input_tokens": 120_000,
+    "max_output_tokens": 6_000,
+    "max_cost_usd": 2.50,
+    "timeout_seconds": 300,
+}
+DEFAULT_MODEL_SPEC_PROMPT_BYTES = int(
+    DEFAULT_MODEL_SPEC_CALL_BUDGET["max_input_tokens"]
+)
+NUMERIC_CONTEXT_SCHEMA_VERSION = "company-model-numeric-context-0.2"
 
 
 class CompanyModelStateError(RuntimeError):
     """The company has nothing to model against."""
+
+
+class CompanyModelPromptBudgetError(CompanyModelStateError):
+    """The fixed prompt cannot fit even after all numeric rows are omitted."""
+
+    def __init__(self, *, base_prompt_bytes: int, prompt_byte_limit: int) -> None:
+        self.report = {
+            "base_prompt_bytes": base_prompt_bytes,
+            "prompt_byte_limit": prompt_byte_limit,
+            "over_by_bytes": base_prompt_bytes - prompt_byte_limit,
+        }
+        super().__init__(
+            "model specification base prompt exceeds its configured input bound: "
+            f"base_prompt_bytes={base_prompt_bytes}, "
+            f"prompt_byte_limit={prompt_byte_limit}"
+        )
 
 
 def validate_numeric_context_policy(value: Any = None) -> dict[str, int]:
@@ -57,6 +82,19 @@ def model_spec_numeric_context_config(
     return validate_numeric_context_policy(
         None if model_config is None else model_config.get("model_spec_numeric_context")
     )
+
+
+def model_spec_prompt_byte_limit(
+    model_config: Mapping[str, Any] | None,
+) -> int:
+    """Resolve the byte limit enforced by the actual ``model_spec`` Work."""
+
+    from .call_budget import resolve_call_budget
+
+    return int(resolve_call_budget(
+        {} if model_config is None else model_config,
+        "model_spec", defaults=DEFAULT_MODEL_SPEC_CALL_BUDGET,
+    )["max_input_tokens"])
 
 
 def _line(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -102,7 +140,7 @@ def _numeric_line_authority(row: Mapping[str, Any]) -> dict[str, Any]:
 def _numeric_context(
     filings: list[Mapping[str, Any]], lines_by_ingest: Mapping[str, list[Mapping[str, Any]]],
     *, structure_series: set[tuple[str, str]], policy: Mapping[str, int],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[list[dict[str, Any]]]]:
     for filing in filings:
         digest = filing.get("content_hash")
         if (
@@ -220,7 +258,8 @@ def _numeric_context(
         series.append(groups[: int(policy["max_periods_per_series"])])
 
     statement_rank = {"income": 0, "cash": 1, "balance": 2}
-    selected: list[dict[str, Any]] = []
+    selected_groups: list[list[dict[str, Any]]] = []
+    selected_count = 0
     for depth in range(int(policy["max_periods_per_series"])):
         at_depth = [groups[depth] for groups in series if len(groups) > depth]
         at_depth.sort(key=lambda group: (
@@ -232,9 +271,10 @@ def _numeric_context(
         for group in at_depth:
             # Never show one side of a same-source conflict. If the complete
             # ambiguity group does not fit, omit that period as a whole.
-            if len(selected) + len(group) <= int(policy["max_total_cells"]):
-                selected.extend(group)
-        if len(selected) >= int(policy["max_total_cells"]):
+            if selected_count + len(group) <= int(policy["max_total_cells"]):
+                selected_groups.append(group)
+                selected_count += len(group)
+        if selected_count >= int(policy["max_total_cells"]):
             break
     after_series_limit = sum(
         len(group) for groups in series for group in groups
@@ -245,19 +285,142 @@ def _numeric_context(
         "filing_authorities": filing_authorities,
         "available_cells": available_cells,
         "after_series_limit_cells": after_series_limit,
-        "included_cells": len(selected),
+        "after_total_limit_cells": selected_count,
+        "included_cells": selected_count,
         "omitted_by_series_limit": available_cells - after_series_limit,
-        "omitted_by_total_limit": after_series_limit - len(selected),
-        "truncated": len(selected) < available_cells,
-        "cells": selected,
+        "omitted_by_total_limit": after_series_limit - selected_count,
+        "omitted_by_prompt_limit": 0,
+        "truncated": selected_count < available_cells,
+        "cells": [cell for group in selected_groups for cell in group],
     }
-    return {**body, "content_hash": content_hash(body)}
+    return ({**body, "content_hash": content_hash(body)}, selected_groups)
+
+
+def _context_with_prompt_proof(
+    base: Mapping[str, Any], selected: list[dict[str, Any]], *,
+    prompt_byte_limit: int, base_prompt_bytes: int,
+    fixed_prompt_bytes: int, selected_cell_bytes: int,
+    hash_content: bool = False,
+) -> tuple[dict[str, Any], int]:
+    """Return a context whose recorded prompt size equals its rendered size."""
+
+    from .company_model_spec import _numeric_period_table_header
+
+    context_body = {
+        key: value for key, value in base.items() if key != "content_hash"
+    }
+    context_body.update({
+        "prompt_byte_limit": prompt_byte_limit,
+        "base_prompt_bytes": base_prompt_bytes,
+        "prompt_bytes": 0,
+        "included_cells": len(selected),
+        "omitted_by_prompt_limit": int(base["after_total_limit_cells"]) - len(selected),
+        "truncated": len(selected) < int(base["available_cells"]),
+        "cells": list(selected),
+    })
+    # The decimal prompt size is itself rendered in the prompt. It converges
+    # after at most a digit-width change; the hash is fixed-width.
+    for _ in range(8):
+        context = {
+            **context_body,
+            "content_hash": (
+                content_hash(context_body) if hash_content else "0" * 64
+            ),
+        }
+        size = (
+            fixed_prompt_bytes
+            + len(_numeric_period_table_header(context).encode("utf-8"))
+            + selected_cell_bytes
+        )
+        if size == context_body["prompt_bytes"]:
+            return context, size
+        context_body["prompt_bytes"] = size
+    raise CompanyModelStateError("model specification prompt size did not stabilize")
+
+
+def _fit_prompt_budget(
+    state_body: Mapping[str, Any], context: Mapping[str, Any],
+    groups: list[list[dict[str, Any]]], *, prompt_byte_limit: int,
+) -> dict[str, Any]:
+    """Select complete numeric evidence groups under the whole prompt bound."""
+
+    if (isinstance(prompt_byte_limit, bool) or not isinstance(prompt_byte_limit, int)
+            or prompt_byte_limit <= 0):
+        raise ValueError("model_spec max_input_tokens must be a positive integer")
+
+    from .company_model_spec import (
+        _numeric_period_cell_line, _numeric_period_table, build_prompt,
+    )
+
+    unavailable = _numeric_period_table({"numeric_context": None})
+    fixed_prompt_bytes = (
+        len(build_prompt({**state_body, "numeric_context": None}).encode("utf-8"))
+        - len(unavailable.encode("utf-8"))
+    )
+
+    # First measure the complete non-cell prompt. This includes all instructions,
+    # schemas, statement structure, filing authorities, and truthful omission
+    # metadata. If that cannot fit, dropping evidence would not make the call legal.
+    base_size = 0
+    for _ in range(8):
+        base_context, measured = _context_with_prompt_proof(
+            context, [], prompt_byte_limit=prompt_byte_limit,
+            base_prompt_bytes=base_size, fixed_prompt_bytes=fixed_prompt_bytes,
+            selected_cell_bytes=0,
+        )
+        if measured == base_size:
+            break
+        base_size = measured
+    else:
+        raise CompanyModelStateError(
+            "model specification base prompt size did not stabilize"
+        )
+    if base_size > prompt_byte_limit:
+        raise CompanyModelPromptBudgetError(
+            base_prompt_bytes=base_size, prompt_byte_limit=prompt_byte_limit,
+        )
+
+    selected: list[dict[str, Any]] = []
+    selected_cell_bytes = 0
+    final_context = base_context
+    for group in groups:
+        group_bytes = sum(
+            1 + len(_numeric_period_cell_line(cell).encode("utf-8"))
+            for cell in group
+        )
+        candidate, size = _context_with_prompt_proof(
+            context, [*selected, *group], prompt_byte_limit=prompt_byte_limit,
+            base_prompt_bytes=base_size, fixed_prompt_bytes=fixed_prompt_bytes,
+            selected_cell_bytes=selected_cell_bytes + group_bytes,
+        )
+        if size <= prompt_byte_limit:
+            selected.extend(group)
+            selected_cell_bytes += group_bytes
+            final_context = candidate
+    # Rebuild once because groups skipped after the last accepted group change
+    # only the omitted count, which the candidate already derives from selection.
+    final_context, final_size = _context_with_prompt_proof(
+        context, selected, prompt_byte_limit=prompt_byte_limit,
+        base_prompt_bytes=base_size, fixed_prompt_bytes=fixed_prompt_bytes,
+        selected_cell_bytes=selected_cell_bytes, hash_content=True,
+    )
+    rendered_size = len(build_prompt(
+        {**state_body, "numeric_context": final_context}
+    ).encode("utf-8"))
+    if rendered_size != final_size:
+        raise CompanyModelStateError(
+            "model specification prompt byte accounting differs from rendering"
+        )
+    if final_size > prompt_byte_limit:  # defensive invariant
+        raise CompanyModelStateError("bounded model specification prompt exceeds its input bound")
+    return final_context
 
 
 def build_company_model_state(
     missions: Any, company_ref: str, *, ticker: str | None = None,
     industry_classification: str | None = None,
     numeric_context_policy: Mapping[str, Any] | None = None,
+    prompt_byte_limit: int = DEFAULT_MODEL_SPEC_PROMPT_BYTES,
 ) -> dict[str, Any]:
     """Project one company's filed statements down to the structure of them.
 
@@ -309,6 +472,14 @@ def build_company_model_state(
     if not concepts:
         raise CompanyModelStateError("this company's filings carry no statement lines")
 
+    numeric_context, numeric_groups = _numeric_context(
+        filings, lines_by_ingest,
+        structure_series={
+            (statement, line["concept"])
+            for statement, lines in statements.items() for line in lines
+        },
+        policy=policy,
+    )
     body = {
         "company_ref": company_ref,
         "ticker": ticker,
@@ -321,14 +492,7 @@ def build_company_model_state(
         ],
         "statements": {name: statements[name] for name in sorted(statements)},
         "concepts": concepts,
-        "numeric_context": _numeric_context(
-            filings, lines_by_ingest,
-            structure_series={
-                (statement, line["concept"])
-                for statement, lines in statements.items() for line in lines
-            },
-            policy=policy,
-        ),
+        "numeric_context": numeric_context,
     }
     if industry_classification:
         body["industry_classification"] = str(industry_classification)
@@ -351,6 +515,10 @@ def build_company_model_state(
         proxies = [json.loads(row["record_json"]) for row in rows]
         if proxies:
             body["market_proxies"] = proxies
+    body["numeric_context"] = _fit_prompt_budget(
+        body, numeric_context, numeric_groups,
+        prompt_byte_limit=prompt_byte_limit,
+    )
     return {**body, "state_hash": content_hash(body)}
 
 
@@ -358,9 +526,13 @@ __all__ = [
     "MAX_CONCEPTS_PER_STATEMENT",
     "MAX_FILINGS",
     "DEFAULT_NUMERIC_CONTEXT_POLICY",
+    "DEFAULT_MODEL_SPEC_CALL_BUDGET",
+    "DEFAULT_MODEL_SPEC_PROMPT_BYTES",
     "NUMERIC_CONTEXT_SCHEMA_VERSION",
     "CompanyModelStateError",
+    "CompanyModelPromptBudgetError",
     "build_company_model_state",
     "model_spec_numeric_context_config",
+    "model_spec_prompt_byte_limit",
     "validate_numeric_context_policy",
 ]

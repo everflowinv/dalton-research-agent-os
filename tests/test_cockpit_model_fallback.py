@@ -421,6 +421,22 @@ class CockpitChainTests(unittest.TestCase):
                     **config, "structured_output_repair": invalid,
                 })
 
+    def test_model_spec_numeric_context_policy_is_install_preserved(self) -> None:
+        from dalton_core.budget_config_install import preserved_budget_overrides
+
+        policy = {"max_periods_per_series": 5, "max_total_cells": 123}
+        config = {
+            **self._model(
+                ChainAdapter({}), policy_version_ref=self.pinned_policy
+            ).config,
+            "model_spec_numeric_context": policy,
+        }
+        path = self.root / "numeric-context-model-config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        self.assertEqual(
+            preserved_budget_overrides(path)["model_spec_numeric_context"], policy,
+        )
+
     def test_model_spec_repair_is_a_second_budgeted_scheduler_work(self) -> None:
         from dalton_core.company_model_cli import (
             _validated_spec_with_repair, model_spec_request_id,

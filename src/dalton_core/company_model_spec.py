@@ -66,7 +66,7 @@ from .company_financial_statement_structure import (
 
 SCHEMA_VERSION = "0.4"
 LEGACY_SCHEMA_VERSION = "0.3"
-TASK_REF = "task:company-model-spec:0.7"
+TASK_REF = "task:company-model-spec:0.8"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -312,8 +312,8 @@ TASK_HASH = content_hash({
     "cost_driver_template_registry": {
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
-    "authority_projection": "company-model-state-with-numeric-periods:0.1",
-    "prompt_contract": "company-model-spec-prompt:0.8",
+    "authority_projection": "company-model-state-with-numeric-periods:0.2",
+    "prompt_contract": "company-model-spec-prompt:0.9",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -356,19 +356,33 @@ def _statement_table(state: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _numeric_period_table(state: Mapping[str, Any]) -> str:
-    context = state.get("numeric_context")
-    if not isinstance(context, Mapping):
-        return "NUMERIC CONTEXT UNAVAILABLE"
+_NUMERIC_PERIOD_FIELDS = (
+    "statement", "concept", "dimension_axis", "dimension_member",
+    "period_start", "period_end", "period_shape", "duration_days", "value",
+    "unit", "balance", "accession", "filing_form", "line_content_hash",
+    "status", "ambiguity_ref",
+)
+
+
+def _numeric_period_cell_line(cell: Mapping[str, Any]) -> str:
+    return "\t".join(
+        json.dumps(cell.get(field), ensure_ascii=False, separators=(",", ":"))
+        for field in _NUMERIC_PERIOD_FIELDS
+    )
+
+
+def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
     metadata = {
         key: context.get(key) for key in (
             "schema_version", "policy", "available_cells",
-            "after_series_limit_cells", "included_cells",
-            "omitted_by_series_limit", "omitted_by_total_limit", "truncated",
+            "after_series_limit_cells", "after_total_limit_cells", "included_cells",
+            "omitted_by_series_limit", "omitted_by_total_limit",
+            "omitted_by_prompt_limit", "prompt_byte_limit",
+            "base_prompt_bytes", "prompt_bytes", "truncated",
             "content_hash",
         )
     }
-    lines = [
+    return "\n".join([
         "CONTEXT=" + json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         "FILINGS=" + json.dumps(
             context.get("filing_authorities") or [],
@@ -378,18 +392,16 @@ def _numeric_period_table(state: Mapping[str, Any]) -> str:
         "period_start\tperiod_end\tperiod_shape\tduration_days\tvalue\tunit\t"
         "balance\taccession\tfiling_form\tline_content_hash\tstatus\t"
         "ambiguity_ref",
-    ]
-    fields = (
-        "statement", "concept", "dimension_axis", "dimension_member",
-        "period_start", "period_end", "period_shape", "duration_days", "value",
-        "unit", "balance", "accession", "filing_form", "line_content_hash",
-        "status", "ambiguity_ref",
-    )
+    ])
+
+
+def _numeric_period_table(state: Mapping[str, Any]) -> str:
+    context = state.get("numeric_context")
+    if not isinstance(context, Mapping):
+        return "NUMERIC CONTEXT UNAVAILABLE"
+    lines = [_numeric_period_table_header(context)]
     for cell in context.get("cells") or []:
-        lines.append("\t".join(
-            json.dumps(cell.get(field), ensure_ascii=False, separators=(",", ":"))
-            for field in fields
-        ))
+        lines.append(_numeric_period_cell_line(cell))
     return "\n".join(lines)
 
 

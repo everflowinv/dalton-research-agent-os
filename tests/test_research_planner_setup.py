@@ -278,7 +278,7 @@ class PlannerBudgetConfigTests(unittest.TestCase):
             self.assertEqual(installed["provider_retry"], found["provider_retry"])
             self.assertEqual(installed["transport_retry"], found["transport_retry"])
 
-    def test_setup_preserves_an_existing_owner_provider_retry_policy(self) -> None:
+    def test_setup_preserves_existing_owner_execution_policies(self) -> None:
         from tests.test_document_extraction_setup import _service
 
         with tempfile.TemporaryDirectory() as directory:
@@ -302,6 +302,10 @@ class PlannerBudgetConfigTests(unittest.TestCase):
                 "retry_backoff_seconds": 19,
             }
             configured["structured_output_repair"] = {"max_attempts": 37}
+            configured["model_spec_numeric_context"] = {
+                "max_periods_per_series": 5,
+                "max_total_cells": 123,
+            }
             target.write_text(json.dumps(configured), encoding="utf-8")
 
             install(config_path, tier="cheap", now=NOW)
@@ -316,6 +320,10 @@ class PlannerBudgetConfigTests(unittest.TestCase):
             self.assertEqual(
                 preserved["structured_output_repair"],
                 configured["structured_output_repair"],
+            )
+            self.assertEqual(
+                preserved["model_spec_numeric_context"],
+                configured["model_spec_numeric_context"],
             )
 
     def test_no_configuration_at_all_is_todays_behaviour(self) -> None:

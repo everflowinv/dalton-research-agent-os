@@ -30,12 +30,17 @@ class FakeLauncher:
         self.numeric_policy = {
             "max_periods_per_series": 8, "max_total_cells": 300,
         }
+        self.prompt_byte_limit = 120_000
 
     def repair_policy_hash(self):
         return content_hash(self.repair_config)
 
     def numeric_context_policy(self):
         return dict(self.numeric_policy)
+
+    def state_projection_config(self):
+        return {"numeric_context_policy": dict(self.numeric_policy),
+                "prompt_byte_limit": self.prompt_byte_limit}
 
     def start(self, *, company_ref, state_hash, task_hash=None,
               repair_policy_hash=None):
@@ -151,6 +156,18 @@ class ModelSpecLaneTests(unittest.TestCase):
             mission=lambda: self.mission,
         ).dispatch_once()
 
+        self.assertEqual(first["status"], "launched")
+        self.assertEqual(other["status"], "launched")
+        self.assertNotEqual(first["state_hash"], other["state_hash"])
+
+    def test_prompt_budget_is_part_of_the_parent_selected_state(self):
+        first = self.lane.dispatch_once()
+        other_launcher = FakeLauncher()
+        other_launcher.prompt_byte_limit = 119_999
+        other = MissionModelSpecLaneCoordinator(
+            missions=self.missions, launcher=other_launcher,
+            mission=lambda: self.mission,
+        ).dispatch_once()
         self.assertEqual(first["status"], "launched")
         self.assertEqual(other["status"], "launched")
         self.assertNotEqual(first["state_hash"], other["state_hash"])

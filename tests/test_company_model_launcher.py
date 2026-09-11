@@ -110,6 +110,32 @@ class CompanyModelSpecLauncherTests(unittest.TestCase):
             "max_periods_per_series": 5, "max_total_cells": 120,
         })
 
+    def test_the_launcher_reads_state_bounds_from_one_validated_model_config(self):
+        config = self.state / "model-budget.json"
+        config.write_text(json.dumps({
+            "routing_policy_ref": "routing-policy:test:1",
+            "credential_slot_refs": ["credential-slot:test"],
+            "model_router_db": str(self.state / "router.sqlite"),
+            "broker_socket": str(self.state / "broker.sock"),
+            "broker_auth_key": str(self.state / "broker.key"),
+            "broker_client_id": "client:dalton-core",
+            "expected_agent_id": "dalton-model-broker",
+            "budget_db": str(self.state / "budget.sqlite"),
+            "budget_policy_ref": "budget-policy:test:1",
+            "purpose_call_budgets": {
+                "model_spec": {"max_input_tokens": 77_777},
+            },
+        }), encoding="utf-8")
+        self.assertEqual(
+            self.launcher(model_config_path=config).state_projection_config(),
+            {
+                "numeric_context_policy": {
+                    "max_periods_per_series": 8, "max_total_cells": 300,
+                },
+                "prompt_byte_limit": 77_777,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

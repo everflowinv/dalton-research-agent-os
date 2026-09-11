@@ -36,11 +36,19 @@ The closed optional model-config block is:
 ```
 
 Those documented values are also the compatible defaults when the key is
-absent.  Both bounds must be positive integers; owner-selected larger values
-are not silently clamped.  The projection reports available, post-series-cap,
-included, and omitted counts.  Selection gives each income series its newest
-period before older periods, then cash and balance series, rather than allowing
-one long series to consume the context.
+absent. Both bounds must be positive integers; owner-selected larger values
+are not silently clamped. They are ceilings on evidence selection, while the
+effective `model_spec.max_input_tokens` call budget is the ceiling on the
+complete UTF-8 prompt. The latter comes from the same validated model config
+and packaged fallback used by `CockpitModel`; it is not a second independent
+limit. The projection reports available, post-series-cap, post-total-cap,
+included, and omitted-by-each-bound counts, plus the no-cell base prompt and
+final rendered prompt byte counts. Selection gives each income series its
+newest period before older periods, then cash and balance series, rather than
+allowing one long series to consume the context.
+
+Plain model-role reinstall preserves this block after validating its closed
+shape, just as it preserves the owner call, run, retry and repair policies.
 
 For a restated period, the newest `filed` date wins.  Different values for the
 same series and period in that same newest filing remain together with one
@@ -53,16 +61,26 @@ The policy, selected cells, omissions, line hashes, and filing authorities are
 inside `numeric_context.content_hash` and the company `state_hash`.  The parent
 lane reads the exact same validated config as the child.  A policy or filed
 value change therefore produces a new state and ticket, while the child still
-checks the expected state before any model call.  The model-spec task and
-prompt contracts advance to `task:company-model-spec:0.7` and
-`company-model-spec-prompt:0.8`; structured repair remains bound to that task
+checks the expected state before any model call. The model-spec task and
+prompt contracts advance to `task:company-model-spec:0.8` and
+`company-model-spec-prompt:0.9`; structured repair remains bound to that task
 and cannot replay an answer from the vocabulary-only prompt.
 
 The prompt renders a compact period table with exact values, dates, dimensions,
 accessions, forms, line-authority hashes, ambiguity state, and a separate
-filing-authority catalog.  A synthetic ceiling case with 150 structural lines
-and the full 300 numeric cells rendered to 88,195 bytes, below the existing
-120,000-byte model input allowance.
+filing-authority catalog. The selector measures the complete rendered prompt,
+including its fixed instructions, output schema, statement structure, filing
+catalog and omission metadata. It admits only complete period groups that fit.
+A same-filing conflict is therefore either visible in full or omitted in full.
+If the fixed no-cell prompt itself exceeds the configured budget, the state
+builder returns a typed report with the base bytes, limit and overage instead
+of silently skipping the company.
+
+The five-company copied-state audit that exposed the original line-count bug
+now produces prompts of 119,886 (IBM), 114,079 (CTSH), 119,922 (EPAM), 119,917
+(ACN), and 119,946 (DXC) bytes under the installed 120,000-byte effective
+limit. Before this correction four of those five prompts were
+125,157–139,529 bytes and would have been refused before a model invocation.
 
 ## Verification boundary
 

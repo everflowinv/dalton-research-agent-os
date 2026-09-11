@@ -11,7 +11,7 @@ from .call_budget import validate_budget_overrides, validate_run_budget_override
 
 BUDGET_KEYS = ("call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
                "capacity_retry", "transport_retry", "provider_retry", "reading_limits",
-               "structured_output_repair")
+               "structured_output_repair", "model_spec_numeric_context")
 
 
 class BudgetConfigInstallError(ValueError):
@@ -53,6 +53,9 @@ def preserved_budget_overrides(path: str | Path) -> dict[str, Any]:
         kept["structured_output_repair"] = dict(
             validated["structured_output_repair"]
         )
+    if "model_spec_numeric_context" in wire:
+        from .company_model_state import model_spec_numeric_context_config
+        kept["model_spec_numeric_context"] = model_spec_numeric_context_config(wire)
     for key in ("call_budget", "run_budget"):
         if key in wire:
             validator = validate_budget_overrides if key == "call_budget" else validate_run_budget_overrides

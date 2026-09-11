@@ -333,14 +333,38 @@ class ChooseCompanyTests(unittest.TestCase):
         )
         self.assertEqual(summary["spec_status"], "gated")
 
+    def test_an_overbudget_fixed_prompt_is_reported_without_being_skipped(self):
+        config = self.state_dir / "too-small-model.json"
+        config.write_text(json.dumps({
+            "purpose_call_budgets": {
+                "model_spec": {"max_input_tokens": 1_000},
+            },
+        }), encoding="utf-8")
+        summary = run_model_spec(
+            state_dir=self.state_dir, model_config_path=config,
+            summary_dir=self.state_dir / "too-small-summary",
+            scheduler_db=None, dry_run=True,
+        )
+        self.assertEqual(summary["spec_status"], "refused")
+        self.assertEqual(summary["prompt_budget_report"]["prompt_byte_limit"], 1_000)
+        self.assertGreater(
+            summary["prompt_budget_report"]["base_prompt_bytes"], 1_000,
+        )
+        self.assertEqual(self.missions.company_model_specs(ACN), [])
+
     def test_dry_run_rebuilds_the_state_with_the_configured_numeric_bounds(self):
         policy = {"max_periods_per_series": 1, "max_total_cells": 2}
+        prompt_byte_limit = 90_000
         config = self.state_dir / "numeric-context-model.json"
         config.write_text(json.dumps({
             "model_spec_numeric_context": policy,
+            "purpose_call_budgets": {
+                "model_spec": {"max_input_tokens": prompt_byte_limit},
+            },
         }), encoding="utf-8")
         expected = build_company_model_state(
             self.missions, ACN, ticker="ACN", numeric_context_policy=policy,
+            prompt_byte_limit=prompt_byte_limit,
         )
 
         summary = run_model_spec(
@@ -354,6 +378,8 @@ class ChooseCompanyTests(unittest.TestCase):
         self.assertEqual(summary["spec_status"], "gated")
         self.assertEqual(summary["state_hash"], expected["state_hash"])
         self.assertEqual(summary["numeric_context_policy"], policy)
+        self.assertEqual(summary["prompt_byte_limit"], prompt_byte_limit)
+        self.assertLessEqual(summary["prompt_bytes"], prompt_byte_limit)
         self.assertEqual(
             summary["numeric_context_hash"],
             expected["numeric_context"]["content_hash"],

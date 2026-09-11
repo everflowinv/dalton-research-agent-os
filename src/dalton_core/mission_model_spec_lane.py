@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from .company_model_cli import choose_company, filed_classifications
+from .company_model_state import DEFAULT_MODEL_SPEC_PROMPT_BYTES
 from .company_model_spec import TASK_HASH
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
@@ -140,10 +141,16 @@ class MissionModelSpecLaneCoordinator:
         held_companies: dict[str, Any] = {}
         try:
             repair_policy_hash = self.launcher.repair_policy_hash()
-            numeric_context_policy = (
-                self.launcher.numeric_context_policy()
-                if hasattr(self.launcher, "numeric_context_policy") else None
-            )
+            if hasattr(self.launcher, "state_projection_config"):
+                state_projection = self.launcher.state_projection_config()
+                numeric_context_policy = state_projection["numeric_context_policy"]
+                prompt_byte_limit = state_projection["prompt_byte_limit"]
+            else:
+                numeric_context_policy = (
+                    self.launcher.numeric_context_policy()
+                    if hasattr(self.launcher, "numeric_context_policy") else None
+                )
+                prompt_byte_limit = DEFAULT_MODEL_SPEC_PROMPT_BYTES
         except Exception as exc:  # noqa: BLE001 - malformed config cannot launch
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -160,6 +167,7 @@ class MissionModelSpecLaneCoordinator:
                     self.missions, mission,
                     classifications=classifications,
                     numeric_context_policy=numeric_context_policy,
+                    prompt_byte_limit=prompt_byte_limit,
                     exclude_company_refs=frozenset(excluded))
             except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
                 return {"status": "unavailable", "settled": settled,
