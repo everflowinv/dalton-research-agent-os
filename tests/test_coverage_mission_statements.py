@@ -242,6 +242,33 @@ class StatementIngestTests(unittest.TestCase):
                         governance_ref="g", governance_hash=GOVERNANCE_HASH)
         self.assertEqual(self.authority.statement_filings(ACN), [])
 
+    def test_observation_form_must_match_dispatch_without_partial_batch(self):
+        dispatch = self.launched()
+        observation = _observation()
+        first = dict(observation["filings"][0])
+        first["accession"] = "0001467373-26-000041"
+        second = dict(observation["filings"][0])
+        second["accession"] = "0001467373-25-000099"
+        second["form"] = "10-K"
+        observation["filings"] = [first, second]
+        with self.assertRaisesRegex(
+                CoverageMissionValidationError, "form differs from its dispatch"):
+            self.authority.record_statement_observation(
+                dispatch_id=dispatch["dispatch_id"], observation=observation,
+                governance_ref="g", governance_hash=GOVERNANCE_HASH)
+        self.assertEqual(self.authority.statement_filings(ACN), [])
+
+    def test_legacy_same_form_observation_remains_idempotent(self):
+        dispatch = self.launched()
+        first = self.authority.record_statement_observation(
+            dispatch_id=dispatch["dispatch_id"], observation=_observation(),
+            governance_ref="g", governance_hash=GOVERNANCE_HASH)
+        second = self.authority.record_statement_observation(
+            dispatch_id=dispatch["dispatch_id"], observation=_observation(),
+            governance_ref="g", governance_hash=GOVERNANCE_HASH)
+        self.assertEqual(first["filings"][0]["status_marker"], "fresh")
+        self.assertEqual(second["filings"][0]["status_marker"], "duplicate")
+
     def test_a_runaway_parse_is_refused_rather_than_stored(self):
         dispatch = self.launched()
         with self.assertRaises(CoverageMissionValidationError):

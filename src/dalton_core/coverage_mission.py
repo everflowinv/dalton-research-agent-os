@@ -3755,7 +3755,7 @@ class CoverageMissionAuthority:
         governance_ref = _text(governance_ref, "governance_ref")
         governance_hash = _sha256(governance_hash, "governance_hash")
         now = _now()
-        recorded: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
         for filing in filings:
             if not isinstance(filing, Mapping):
                 raise CoverageMissionValidationError("statement filing must be an object")
@@ -3763,6 +3763,10 @@ class CoverageMissionAuthority:
             if _ACCESSION_RE.fullmatch(accession) is None:
                 raise CoverageMissionValidationError("statement accession is invalid")
             form = _vocabulary(filing.get("form"), ("10-Q", "10-K"), "form")
+            if form != row["form"]:
+                raise CoverageMissionValidationError(
+                    "statement filing form differs from its dispatch"
+                )
             lines = filing.get("lines")
             if not isinstance(lines, list):
                 raise CoverageMissionValidationError("statement filing carries no lines")
@@ -3770,13 +3774,25 @@ class CoverageMissionAuthority:
                 raise CoverageMissionValidationError(
                     f"statement filing exceeds {MAX_STATEMENT_LINES} lines"
                 )
-            held = self.connection.execute(
-                "SELECT * FROM coverage_mission_statement_filings "
-                "WHERE company_ref=? AND accession=?", (company_ref, accession),
-            ).fetchone()
-            if held is not None:
-                recorded.append({**dict(held), "status_marker": "duplicate"})
-                continue
+            normalized_lines = []
+            for ordinal, line in enumerate(lines):
+                normalized_lines.append((
+                    ordinal,
+                    _vocabulary(line.get("statement"),
+                                ("income", "balance", "cash"), "statement"),
+                    _text(line.get("concept"), "concept"),
+                    _text(line.get("label"), "label"),
+                    _non_negative_int(line.get("level"), "level"),
+                    line.get("parent_concept"),
+                    1 if line.get("is_breakdown") else 0,
+                    line.get("dimension_axis"), line.get("dimension_member"),
+                    _optional_non_negative_int(line.get("dimension_count"),
+                                               "dimension_count"),
+                    line.get("period_start"),
+                    _text(line.get("period_end"), "period_end"),
+                    None if line.get("value") is None else str(line["value"]),
+                    _text(line.get("unit"), "unit"), line.get("balance"),
+                ))
             identity = {
                 "company_ref": company_ref, "cik": cik, "accession": accession,
                 "form": form, "line_count": len(lines),
@@ -3791,7 +3807,26 @@ class CoverageMissionAuthority:
                 "statement_lines_hash": content_hash(lines),
             }
             line_hash = content_hash(body)
-            with self._transaction() as cur:
+            prepared.append({"accession": accession, "ingest_id": ingest_id,
+                             "body": body, "line_hash": line_hash,
+                             "lines": normalized_lines})
+
+        # Validate the complete child result before opening the transaction,
+        # then insert the batch atomically. A malformed later filing must not
+        # leave an earlier filing behind under this dispatch.
+        recorded: list[dict[str, Any]] = []
+        with self._transaction() as cur:
+            for item in prepared:
+                held = cur.execute(
+                    "SELECT * FROM coverage_mission_statement_filings "
+                    "WHERE company_ref=? AND accession=?",
+                    (company_ref, item["accession"]),
+                ).fetchone()
+                if held is not None:
+                    recorded.append({**dict(held), "status_marker": "duplicate"})
+                    continue
+                body = item["body"]
+                ingest_id = item["ingest_id"]
                 cur.execute(
                     "INSERT INTO coverage_mission_statement_filings"
                     "(ingest_id,dispatch_id,company_ref,cik,entity_name,accession,form,filed,"
@@ -3799,12 +3834,17 @@ class CoverageMissionAuthority:
                     "governance_hash,recorded_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         ingest_id, row["dispatch_id"], company_ref, cik, entity_name,
-                        accession, form, body["filed"], body["report_date"], len(lines),
+                        item["accession"], body["form"], body["filed"],
+                        body["report_date"], body["line_count"],
                         canonical_json(source_refs), governance_ref, governance_hash,
-                        now, line_hash,
+                        now, item["line_hash"],
                     ),
                 )
-                for ordinal, line in enumerate(lines):
+                for normalized in item["lines"]:
+                    (ordinal, statement, concept, label, level, parent_concept,
+                     is_breakdown, dimension_axis, dimension_member,
+                     dimension_count, period_start, period_end, value, unit,
+                     balance) = normalized
                     cur.execute(
                         "INSERT INTO coverage_mission_statement_lines"
                         "(line_id,ingest_id,statement,ordinal,concept,label,level,parent_concept,"
@@ -3812,27 +3852,17 @@ class CoverageMissionAuthority:
                         "value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             f"{ingest_id}#{ordinal}", ingest_id,
-                            _vocabulary(line.get("statement"),
-                                        ("income", "balance", "cash"), "statement"),
-                            ordinal,
-                            _text(line.get("concept"), "concept"),
-                            _text(line.get("label"), "label"),
-                            _non_negative_int(line.get("level"), "level"),
-                            line.get("parent_concept"),
-                            1 if line.get("is_breakdown") else 0,
-                            line.get("dimension_axis"), line.get("dimension_member"),
-                            _optional_non_negative_int(line.get("dimension_count"), "dimension_count"),
-                            line.get("period_start"),
-                            _text(line.get("period_end"), "period_end"),
-                            None if line.get("value") is None else str(line["value"]),
-                            _text(line.get("unit"), "unit"),
-                            line.get("balance"),
+                            statement, ordinal, concept, label, level,
+                            parent_concept, is_breakdown, dimension_axis,
+                            dimension_member, dimension_count, period_start,
+                            period_end, value, unit, balance,
                         ),
                     )
-            recorded.append({
-                **body, "ingest_id": ingest_id, "dispatch_id": row["dispatch_id"],
-                "recorded_at": now, "content_hash": line_hash, "status_marker": "fresh",
-            })
+                recorded.append({
+                    **body, "ingest_id": ingest_id,
+                    "dispatch_id": row["dispatch_id"], "recorded_at": now,
+                    "content_hash": item["line_hash"], "status_marker": "fresh",
+                })
         return {
             "dispatch_id": row["dispatch_id"], "company_ref": company_ref,
             "filings": recorded,
