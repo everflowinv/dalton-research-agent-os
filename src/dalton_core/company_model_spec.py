@@ -262,7 +262,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "cost_driver_template_metadata:0.1",
-    "prompt_contract": "company-model-spec-prompt:0.3",
+    "prompt_contract": "company-model-spec-prompt:0.4",
 })
 
 
@@ -359,10 +359,15 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "a name to look right. A line with no filed counterpart uses null.\n"
         "* Every entry needs a reason specific to this company and grounded in the provided "
         "statement, classification, or labelled proxy evidence. State when the driver is an "
-        "analytical inference and what would falsify it. Restating the label or a general "
-        "industry truth is not a reason. Choose the current base case for each model decision; "
-        "state the alternative trigger, model-line impact, falsifier and next observable driver "
-        "instead of listing unranked possibilities.\n"
+        "analytical inference. Restating the label or a general industry truth is not a reason. "
+        "Choose the model structure you currently judge appropriate. In assessment, explain "
+        "the key driver uncertainty and what observation would require a different structure.\n"
+        "* Keep each because field, including horizon.because, within "
+        f"{_BECAUSE['maxLength']} characters: give the specific reason for that line or horizon. "
+        "Use assessment for the overall modelling judgement, within "
+        f"{OUTPUT_SCHEMA['properties']['assessment']['maxLength']} characters. The output is "
+        "a modelling specification; investment scenarios and tracking tasks have their own "
+        "downstream consumers. Do not squeeze a full scenario discussion into every because.\n"
         "* Return JSON matching OUTPUT_SCHEMA and nothing else.\n\n"
         f"{template}\n\n"
         f"{cost_prompt_block(state.get('industry_classification'), state.get('concepts') or ())}\n\n"
