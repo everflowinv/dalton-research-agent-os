@@ -39,6 +39,11 @@ ARTIFACT_NAMES = frozenset({
     "mission_authority_snapshot", "provider_plugin_snapshot",
     "web_v6_activation_receipt", "alpha_v3_activation_receipt",
 })
+MANIFEST_FIELDS = frozenset({
+    "schema_version", "release_ref", "status", "acceptance_state",
+    "deployment_state", "source", "artifacts", "acceptance", "runtime",
+    "health_acceptance", "boundaries", "content_hash",
+})
 
 
 class SuccessorExecuteError(RuntimeError):
@@ -107,14 +112,18 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          "successor candidate packet is unavailable")
     manifest = load_json(manifest_path)
     unsigned = dict(manifest); asserted = unsigned.pop("content_hash", None)
-    need(manifest.get("schema_version") == SCHEMA_VERSION
+    need(set(manifest) == MANIFEST_FIELDS
+         and manifest.get("schema_version") == SCHEMA_VERSION
+         and isinstance(manifest.get("release_ref"), str)
+         and bool(manifest["release_ref"].strip())
          and manifest.get("status") == "accepted_for_stopped_window"
          and manifest.get("acceptance_state") == "accepted"
          and manifest.get("deployment_state") == "not_started"
          and asserted == canonical_hash(unsigned),
          "successor candidate manifest differs")
     source = manifest.get("source", {})
-    need(isinstance(source.get("root"), str)
+    need(isinstance(source, Mapping) and set(source) == {"root", "commit"}
+         and isinstance(source.get("root"), str)
          and Path(source["root"]).is_absolute()
          and HEX40.fullmatch(str(source.get("commit", ""))) is not None,
          "successor frozen source is unresolved")
@@ -132,6 +141,8 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
         need(path.is_file() and not path.is_symlink() and sha(path) == row["sha256"],
              f"successor artifact changed: {name}")
         paths[name] = path
+    need(len(set(paths.values())) == len(paths),
+         "successor artifact files must be distinct")
     acceptance = manifest.get("acceptance", {})
     need(acceptance == {
         "state": "accepted",
@@ -204,6 +215,9 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          and ((health["sample_count"] - 1) * health["interval_seconds"]
               >= health["minimum_duration_seconds"]),
          "successor health acceptance window is invalid")
+    need(manifest.get("boundaries") == {
+        "manifest_publication": False, "model_calls": False,
+    }, "successor execution boundaries differ")
     return manifest, paths
 
 
