@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dalton_core.document_research import build_document_research_policy
 from scripts.prepare_successor_config_transition import (
-    ConfigTransitionError, MODEL_ADDITIONS, MODEL_REPLACEMENT,
+    ConfigTransitionError, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
     apply_transition, build_transition, canonical_hash,
 )
 
@@ -86,6 +86,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
             "initial_after": self.packet / "initial.after.json",
             "activation": self.packet / "document-research.activation.json",
             "audit": self.packet / "document-research.audit.json",
+            "lane": self.packet / LANE_CONFIG,
         }
         for key, value in (
             ("baseline", self.baseline), ("draft", model("draft")),
@@ -94,6 +95,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
                                "structured_output_repair": {"max_attempts": 1}}),
             ("activation", document_config("document-research-policy:production:1")),
             ("audit", document_config("document-research-policy:readonly-audit")),
+            ("lane", {"schema_version": "0.1", "enabled": True}),
         ):
             write(self.paths[key], value)
 
@@ -106,20 +108,16 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
             initial_after_path=self.paths["initial_after"],
             document_activation_path=self.paths["activation"],
             document_audit_path=self.paths["audit"],
+            lane_activation_path=self.paths["lane"],
         )
 
-    def accepted_manifest(self):
-        manifest = self.build()
-        manifest["acceptance"] = {
-            **manifest["acceptance"], "state": "accepted",
+    def acceptance_evidence(self):
+        return {
+            "state": "accepted", "health_acceptance_required": True,
             "full_suite_receipt_sha256": "1" * 64,
             "wheel_sha256": "2" * 64,
             "copied_state_rehearsal_binding_sha256": "3" * 64,
         }
-        manifest["content_hash"] = canonical_hash(
-            {key: value for key, value in manifest.items() if key != "content_hash"}
-        )
-        return manifest
 
     def test_prepares_dynamic_exact_delta_and_preserves_other_model_bytes(self):
         result = self.build()
@@ -162,7 +160,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
         self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())
 
     def test_apply_uses_exact_preconditions_and_writes_no_other_state(self):
-        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        manifest = self.build(); manifest_path = self.packet / "transition.json"
         write(manifest_path, manifest)
         for name, value in self.baseline.items(): write(self.state / name, value)
         unrelated = self.state / "owner.json"; unrelated.write_text("owner\n")
@@ -171,7 +169,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
             packet_root=self.packet, state_dir=self.state,
             manifest_path=manifest_path,
             expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-            receipt_path=receipt_path,
+            receipt_path=receipt_path, accepted_evidence=self.acceptance_evidence(),
         )
         self.assertEqual(receipt["status"], "configured_controller_start_pending")
         self.assertEqual(unrelated.read_text(), "owner\n")
@@ -179,10 +177,11 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
                          json.loads(self.paths["initial_after"].read_text()))
         self.assertTrue((self.state / MODEL_ADDITIONS[0]).is_file())
         self.assertTrue((self.state / "document-research-config.json").is_file())
+        self.assertTrue((self.state / LANE_CONFIG).is_file())
         self.assertFalse(receipt["manifest_publication"])
 
     def test_precondition_drift_stops_before_any_mutation(self):
-        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        manifest = self.build(); manifest_path = self.packet / "transition.json"
         write(manifest_path, manifest)
         for name, value in self.baseline.items(): write(self.state / name, value)
         write(self.state / MODEL_REPLACEMENT, {"owner": "changed"})
@@ -192,6 +191,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
                 manifest_path=manifest_path,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 receipt_path=self.packet / "receipt.json",
+                accepted_evidence=self.acceptance_evidence(),
             )
         self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())
         self.assertFalse((self.state / "document-research-config.json").exists())
@@ -202,26 +202,27 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
             lambda manifest: manifest.update(targets=[manifest["targets"][0]] * 4),
         ):
             with self.subTest(mutate=mutate):
-                manifest = self.accepted_manifest(); mutate(manifest)
+                manifest = self.build(); mutate(manifest)
                 manifest["content_hash"] = canonical_hash(
                     {key: value for key, value in manifest.items()
                      if key != "content_hash"})
                 manifest_path = self.packet / "transition.json"
                 write(manifest_path, manifest)
                 for name, value in self.baseline.items(): write(self.state / name, value)
-                with self.assertRaisesRegex(ConfigTransitionError, "four targets"):
+                with self.assertRaisesRegex(ConfigTransitionError, "five targets"):
                     apply_transition(
                         packet_root=self.packet, state_dir=self.state,
                         manifest_path=manifest_path,
                         expected_manifest_sha256=hashlib.sha256(
                             manifest_path.read_bytes()).hexdigest(),
                         receipt_path=self.packet / "receipt.json",
+                        accepted_evidence=self.acceptance_evidence(),
                     )
                 manifest_path.unlink()
                 for path in self.state.iterdir(): path.unlink()
 
     def test_receipt_failure_rolls_back_completed_configuration(self):
-        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        manifest = self.build(); manifest_path = self.packet / "transition.json"
         write(manifest_path, manifest)
         for name, value in self.baseline.items(): write(self.state / name, value)
         def fail(name: str) -> None:
@@ -232,13 +233,15 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
                 manifest_path=manifest_path,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 receipt_path=self.packet / "receipt.json", fault_hook=fail,
+                accepted_evidence=self.acceptance_evidence(),
             )
         self.assertEqual(json.loads((self.state / MODEL_REPLACEMENT).read_text()), self.initial)
         self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())
         self.assertFalse((self.state / "document-research-config.json").exists())
+        self.assertFalse((self.state / LANE_CONFIG).exists())
 
     def test_rollback_continues_after_one_target_is_changed_externally(self):
-        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        manifest = self.build(); manifest_path = self.packet / "transition.json"
         write(manifest_path, manifest)
         for name, value in self.baseline.items(): write(self.state / name, value)
         def fail(name: str) -> None:
@@ -251,14 +254,16 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
                 manifest_path=manifest_path,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 receipt_path=self.packet / "receipt.json", fault_hook=fail,
+                accepted_evidence=self.acceptance_evidence(),
             )
         self.assertEqual((self.state / MODEL_ADDITIONS[0]).read_text(), "external\n")
         self.assertFalse((self.state / MODEL_ADDITIONS[1]).exists())
         self.assertFalse((self.state / "document-research-config.json").exists())
+        self.assertFalse((self.state / LANE_CONFIG).exists())
         self.assertEqual(json.loads((self.state / MODEL_REPLACEMENT).read_text()), self.initial)
 
     def test_mid_transition_failure_rolls_back_only_owned_bytes(self):
-        manifest = self.accepted_manifest(); manifest_path = self.packet / "transition.json"
+        manifest = self.build(); manifest_path = self.packet / "transition.json"
         write(manifest_path, manifest)
         for name, value in self.baseline.items(): write(self.state / name, value)
         unrelated = self.state / "owner.json"; unrelated.write_text("before\n")
@@ -272,6 +277,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
                 manifest_path=manifest_path,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 receipt_path=self.packet / "receipt.json", fault_hook=fail,
+                accepted_evidence=self.acceptance_evidence(),
             )
         self.assertEqual(json.loads((self.state / MODEL_REPLACEMENT).read_text()), self.initial)
         self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())

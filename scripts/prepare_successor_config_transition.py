@@ -37,6 +37,7 @@ MODEL_ADDITIONS = (
 )
 MODEL_REPLACEMENT = "initial-screen-model-config.json"
 DOCUMENT_CONFIG = "document-research-config.json"
+LANE_CONFIG = "mission-document-research-lane.json"
 
 
 class ConfigTransitionError(RuntimeError):
@@ -107,6 +108,7 @@ def build_transition(
     baseline_models_path: Path, draft_path: Path, verifier_path: Path,
     initial_before_path: Path, initial_after_path: Path,
     document_activation_path: Path, document_audit_path: Path,
+    lane_activation_path: Path,
 ) -> dict[str, Any]:
     """Return one inert exact transition; no target files are changed."""
 
@@ -124,7 +126,8 @@ def build_transition(
     _need(MODEL_REPLACEMENT in baseline, "initial-screen baseline is unavailable")
 
     paths = {MODEL_ADDITIONS[0]: draft_path, MODEL_ADDITIONS[1]: verifier_path,
-             MODEL_REPLACEMENT: initial_after_path, DOCUMENT_CONFIG: document_activation_path}
+             MODEL_REPLACEMENT: initial_after_path, DOCUMENT_CONFIG: document_activation_path,
+             LANE_CONFIG: lane_activation_path}
     parsed: dict[str, dict[str, Any]] = {}
     for name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT):
         _value, _ = _read_json(paths[name], name)
@@ -155,6 +158,9 @@ def build_transition(
         raise ConfigTransitionError("document research audit evidence is invalid") from exc
     _need(audit_config["policy"]["policy_ref"] == "document-research-policy:readonly-audit",
           "audit evidence does not carry the read-only audit policy")
+    lane_config, _ = _read_json(lane_activation_path, "mission document lane activation")
+    _need(lane_config == {"schema_version": "0.1", "enabled": True},
+          "mission document lane activation has an invalid closed shape")
 
     final_models = json.loads(json.dumps(baseline))
     for name in MODEL_ADDITIONS:
@@ -171,6 +177,9 @@ def build_transition(
     targets.append({"name": DOCUMENT_CONFIG, "kind": "exclusive_add",
                     "before_sha256": None,
                     "after": _artifact(document_activation_path, packet_root)})
+    targets.append({"name": LANE_CONFIG, "kind": "exclusive_add",
+                    "before_sha256": None,
+                    "after": _artifact(lane_activation_path, packet_root)})
     body = {
         "schema_version": SCHEMA_VERSION, "status": "prepared_inert",
         "release_ref": release_ref, "source_commit": source_commit,
@@ -214,6 +223,48 @@ def _resolve_artifact(packet_root: Path, row: Mapping[str, Any]) -> tuple[Path, 
     return path, data
 
 
+def expected_transition_state(
+    *, packet_root: Path, manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Rebuild the exact post-transition model and document config snapshots."""
+
+    supporting = manifest.get("supporting_evidence", {})
+    _need(isinstance(supporting, Mapping)
+          and "baseline_model_snapshot" in supporting,
+          "baseline model snapshot authority is absent")
+    _, baseline_bytes = _resolve_artifact(
+        packet_root, supporting["baseline_model_snapshot"])
+    try:
+        models = json.loads(baseline_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigTransitionError("baseline model snapshot is invalid") from exc
+    _need(isinstance(models, dict), "baseline model snapshot is invalid")
+    document = None
+    lane = None
+    for row in manifest.get("targets", []):
+        if not isinstance(row, Mapping) or "after" not in row:
+            raise ConfigTransitionError("transition target is invalid")
+        _, data = _resolve_artifact(packet_root, row["after"])
+        try:
+            value = json.loads(data.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigTransitionError("transition target is invalid JSON") from exc
+        if row.get("name", "").endswith("-model-config.json"):
+            models[row["name"]] = value
+        elif row.get("name") == DOCUMENT_CONFIG:
+            document = value
+        elif row.get("name") == LANE_CONFIG:
+            lane = value
+    _need(isinstance(document, dict), "document research target is absent")
+    _need(lane == {"schema_version": "0.1", "enabled": True},
+          "mission document lane target is absent or invalid")
+    _need(len(models) == manifest["model_inventory"]["after_count"]
+          and canonical_hash(models)
+          == manifest["model_inventory"]["after_semantic_sha256"],
+          "transition final model inventory authority differs")
+    return models, document, lane
+
+
 def _fsync_directory(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -227,6 +278,7 @@ def apply_transition(
     expected_manifest_sha256: str, receipt_path: Path,
     fault_hook: Callable[[str], None] | None = None,
     _require_accepted: bool = True,
+    accepted_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply only manifest-owned bytes; caller owns the stopped window."""
 
@@ -244,9 +296,11 @@ def apply_transition(
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
     if _require_accepted:
-        _need(acceptance.get("state") == "accepted"
-              and acceptance.get("health_acceptance_required") is True
-              and all(HEX64.fullmatch(str(acceptance.get(name, ""))) is not None
+        _need(acceptance.get("state") == "pending"
+              and accepted_evidence is not None
+              and accepted_evidence.get("state") == "accepted"
+              and accepted_evidence.get("health_acceptance_required") is True
+              and all(HEX64.fullmatch(str(accepted_evidence.get(name, ""))) is not None
                       for name in ("full_suite_receipt_sha256", "wheel_sha256",
                                    "copied_state_rehearsal_binding_sha256")),
               "accepted full-suite, wheel, rehearsal and health gates are required")
@@ -256,13 +310,14 @@ def apply_transition(
               "scratch rehearsal requires the inert pending transition")
 
     rows = manifest.get("targets")
-    _need(isinstance(rows, list) and len(rows) == 4
+    _need(isinstance(rows, list) and len(rows) == 5
           and {row.get("name") for row in rows if isinstance(row, Mapping)}
-          == {*MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG},
-          "transition must contain each of the four targets exactly once")
+          == {*MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG, LANE_CONFIG},
+          "transition must contain each of the five targets exactly once")
     expected_kinds = {name: "exclusive_add" for name in MODEL_ADDITIONS}
     expected_kinds.update({MODEL_REPLACEMENT: "compare_and_replace",
-                           DOCUMENT_CONFIG: "exclusive_add"})
+                           DOCUMENT_CONFIG: "exclusive_add",
+                           LANE_CONFIG: "exclusive_add"})
 
     supporting = manifest.get("supporting_evidence")
     _need(isinstance(supporting, Mapping)
@@ -289,7 +344,7 @@ def apply_transition(
     prepared = []
     for row in rows:
         _need(isinstance(row, Mapping) and row.get("name") in {
-            *MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG},
+            *MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG, LANE_CONFIG},
             "transition target is outside the closed inventory")
         _need(row.get("kind") == expected_kinds[row["name"]],
               "transition target kind differs from its closed operation")
@@ -385,6 +440,10 @@ def apply_transition(
             "release_ref": manifest["release_ref"],
             "source_commit": manifest["source_commit"],
             "transition_manifest_sha256": expected_manifest_sha256,
+            "acceptance_evidence_hash": (
+                None if accepted_evidence is None
+                else canonical_hash(dict(accepted_evidence))
+            ),
             "targets": [{"name": row["name"], "after_sha256": sha256_bytes(after)}
                         for row, _target, _before, after in prepared],
             "service_lifecycle_mutations": 0, "model_calls": 0,
@@ -436,36 +495,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--write-template", type=Path)
-    modes.add_argument("--apply-manifest", type=Path)
-    parser.add_argument("--packet-root", type=Path)
-    parser.add_argument("--state-dir", type=Path)
-    parser.add_argument("--expected-manifest-sha256")
-    parser.add_argument("--receipt", type=Path)
     args = parser.parse_args(argv)
     if args.write_template is not None:
-        _need(all(value is None for value in (
-            args.packet_root, args.state_dir, args.expected_manifest_sha256,
-            args.receipt,
-        )), "apply arguments cannot accompany template generation")
         _need(not args.write_template.exists(), "template output already exists")
         args.write_template.write_text(json.dumps(incomplete_template(), indent=2) + "\n")
         print(json.dumps({"status": "incomplete_template_written",
                           "path": str(args.write_template)}))
         return 0
-    _need(all(value is not None for value in (
-        args.packet_root, args.state_dir, args.expected_manifest_sha256,
-        args.receipt,
-    )), "apply requires packet root, state dir, manifest SHA-256 and receipt")
-    receipt = apply_transition(
-        packet_root=args.packet_root.expanduser().resolve(),
-        state_dir=args.state_dir.expanduser().resolve(),
-        manifest_path=args.apply_manifest.expanduser().resolve(),
-        expected_manifest_sha256=args.expected_manifest_sha256,
-        receipt_path=args.receipt.expanduser().resolve(),
+    raise ConfigTransitionError(
+        "live apply is callable only by the reviewed stopped-window orchestrator"
     )
-    print(json.dumps({"status": receipt["status"],
-                      "content_hash": receipt["content_hash"]}))
-    return 0
 
 
 if __name__ == "__main__":
