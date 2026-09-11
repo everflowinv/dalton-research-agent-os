@@ -28,3 +28,13 @@ This register preserves the ongoing foundation/Dossier/deployment work and the o
 | Deploy and sustained health | R8a health45/45 passed; next freeze not yet accepted | Full Python/JS tests, wheel bytes, copied-state rehearsal, config preservation, deployed bytes and sustained runtime/product evidence |
 
 The owner explicitly asked to finish these tasks along with prior ongoing work, audit unreasonable hardcoded limits, retain progress/next steps, commit/push, and deploy autonomously. Model and budget choices must remain cockpit/config driven. Human research signatures remain human. Advanced investment-methodology work, final visual redesign, reference-file import/export polish, and multi-workspace activation remain sequenced after foundations; these are not removed from the broader backlog.
+
+## Integration checkpoint — 05:12 UTC
+
+The first R9 freeze is `050a044c18570431bdd7bbf782cd44ff5ef94596`. Its full suite is diagnostic and still running; failures mean it is not accepted. Wheel/source equality passed for 561 runtime files (400 Python, 68 SQL, 90 JSON, 3 HTML) and three JavaScript syntax checks. Root subsequently fixed preservation of explicit reading limits across installation (`10340e8`); this requires a new freeze and fresh acceptance, not reuse of the old suite result.
+
+Transport scope remains explicit: extraction and Cockpit support the reviewed queue/retry contract; other direct production adapter entry points need their own configuration, identity and lease review. Agenda/Human Intent/Thesis Impact/Planner gaps predate R9; different immutable Scheduler policies can coexist in one database. A Sol agent is implementing the Agenda slice first.
+
+The annual directed probe currently proves retrieval into a governed backlog question only. A new independent Sol task is implementing the versioned qualitative ResearchPlan contract and registered-filing retrieval node; model drafting, independent verification and candidate staging must follow through real formal authority.
+
+Conviction v2 candidate code remains under review and is not activated or accepted. Initial review found incorrect omission of earnings-expectation revisions from return sources, incomplete prompt/schema and verifier identities, and insufficient formal governance/provenance/ongoing-tracking admission. These are engineering work to complete before presenting any signature request. The owner explicitly requested methodology to strengthen decisions rather than a universal prompt checklist.
