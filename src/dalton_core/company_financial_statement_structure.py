@@ -1087,12 +1087,31 @@ def aggregate_fiscal_year(
 def annual_diluted_eps(
     *, diluted_eps_numerator_cells: Sequence[Mapping[str, Any]],
     diluted_weighted_share_cells: Sequence[Mapping[str, Any]], fiscal_year: str,
+    diluted_eps_cells: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Annual disclosed diluted-EPS numerator divided by annual diluted shares."""
 
-    income = aggregate_fiscal_year(
+    quarterly_income = aggregate_fiscal_year(
         diluted_eps_numerator_cells, semantic="sum_quarters", fiscal_year=fiscal_year,
     )
+    direct_income = aggregate_fiscal_year(
+        diluted_eps_numerator_cells, semantic="direct_annual", fiscal_year=fiscal_year,
+    )
+    if direct_income["status"] == "computed":
+        if (
+            quarterly_income["status"] == "computed"
+            and (
+                quarterly_income["unit"] != direct_income["unit"]
+                or _decimal(quarterly_income["value"], "quarterly annual numerator")
+                != _decimal(direct_income["value"], "direct annual numerator")
+            )
+        ):
+            return {"status": "unavailable", "value": None,
+                    "reason": ("direct annual diluted-EPS numerator disagrees with "
+                               "the four disclosed quarters")}
+        income = direct_income
+    else:
+        income = quarterly_income
     shares = aggregate_fiscal_year(
         diluted_weighted_share_cells, semantic="direct_annual", fiscal_year=fiscal_year,
     )
@@ -1123,10 +1142,31 @@ def annual_diluted_eps(
     if denominator <= 0:
         return {"status": "unavailable", "value": None,
                 "reason": "annual diluted weighted shares are not positive"}
+    calculated = _decimal(income["value"], "annual diluted-EPS numerator") / denominator
+    filed_eps = aggregate_fiscal_year(
+        diluted_eps_cells, semantic="direct_annual", fiscal_year=fiscal_year,
+    )
+    if filed_eps["status"] == "computed":
+        eps_period = filed_eps["source_periods"][0]
+        if (
+            filed_eps["unit"] != f"{income['unit']}_per_share"
+            or eps_period["calendar"] != share_calendar
+            or eps_period["period_start"] != income_start
+            or eps_period["period_end"] != income_end
+        ):
+            return {"status": "unavailable", "value": None,
+                    "reason": "filed annual diluted EPS uses a different definition or window"}
+        disclosed = _decimal(filed_eps["value"], "filed annual diluted EPS")
+        quantum = Decimal(1).scaleb(disclosed.as_tuple().exponent)
+        if calculated.quantize(quantum) != disclosed:
+            return {"status": "unavailable", "value": None,
+                    "reason": "computed annual diluted EPS does not tie to the filed value"}
     return {"status": "computed",
-            "value": str(_decimal(income["value"], "annual parent income") / denominator),
+            "value": str(calculated),
             "unit": f"{income['unit']}_per_share",
-            "source_periods": income["source_periods"] + shares["source_periods"]}
+            "source_periods": (income["source_periods"] + shares["source_periods"]
+                               + (filed_eps["source_periods"]
+                                  if filed_eps["status"] == "computed" else []))}
 
 
 def forecast_structure_binding(

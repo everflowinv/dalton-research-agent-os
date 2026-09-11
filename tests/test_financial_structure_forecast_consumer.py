@@ -75,8 +75,8 @@ def forecastable_proposal(inputs):
 
 
 class FinancialStructureForecastConsumerTests(unittest.TestCase):
-    def authority(self):
-        inputs = financial_inputs()
+    def authority(self, inputs=None):
+        inputs = financial_inputs() if inputs is None else inputs
         candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
             candidate, company_spec(), inputs)
@@ -421,6 +421,71 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertIn(",,", _number_format("usd"))
         self.assertEqual(_display_unit("usd"), "USD millions")
         self.assertEqual(_display_unit("eur_per_share"), "EUR per share")
+
+    def test_v03_workbook_uses_exact_direct_annual_eps_authority(self):
+        from openpyxl import load_workbook
+
+        inputs = financial_inputs()
+        inputs["schema_version"] = "0.3"
+        annual = {
+            "period_start": "2025-01-01", "period_end": "2025-12-31",
+            "period_kind": "cumulative", "source_accessions": [ACCESSION],
+            "source_forms": ["10-K"],
+        }
+        facts = {
+            "eps_numerator": {**annual, "value": "670", "unit": "usd"},
+            "shares": {**annual, "value": "100", "unit": "shares"},
+            "eps": {**annual, "value": "6.70", "unit": "usd_per_share"},
+        }
+        for line in inputs["filed_lines"]:
+            quarter_facts = [
+                {"period_start": cell["period_start"], "period_end": end,
+                 "period_kind": "quarter", "value": cell["value"],
+                 "unit": cell["unit"], "source_accessions": [ACCESSION],
+                 "source_forms": ["10-Q"]}
+                for end, cell in line["cells"].items()
+            ]
+            line["duration_facts"] = quarter_facts + (
+                [facts[line["concept"]]] if line["concept"] in facts else []
+            )
+            line["ambiguous_periods"] = []
+        inputs, structure = self.authority(inputs)
+        candidate = forecastable_proposal(inputs)
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            record = ForecastModelAuthority(store).publish(body)
+            path = Path(temporary) / "annual-eps.xlsx"
+            calendar = {
+                "calendar_ref": "calendar:test", "source_hash": "c" * 64,
+                "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+            }
+            calendar["content_hash"] = content_hash(calendar)
+            export_fund_workbook(
+                path, model=record, spec=company_spec(), inputs=inputs,
+                calendar_binding=calendar)
+            book = load_workbook(path, data_only=False)
+        financials = book["Financials"]
+        rows = {result["role"]: 5 + index
+                for index, result in enumerate(record["results"])}
+        self.assertEqual(financials.cell(rows["diluted_eps_numerator"], 2).value, 670)
+        self.assertEqual(
+            financials.cell(rows["diluted_weighted_average_shares"], 2).value, 100)
+        self.assertEqual(
+            financials.cell(rows["diluted_eps"], 2).value,
+            f"='Financials'!B{rows['diluted_eps_numerator']}/"
+            f"'Financials'!B{rows['diluted_weighted_average_shares']}",
+        )
+        self.assertIn(
+            "historical-structured-annual-diluted-eps",
+            [book["Formula Map"].cell(row, 2).value
+             for row in range(5, book["Formula Map"].max_row + 1)],
+        )
 
 
 if __name__ == "__main__":

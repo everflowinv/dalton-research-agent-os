@@ -503,6 +503,45 @@ class FinancialStatementStructureTests(unittest.TestCase):
             fiscal_year="FY2025",
         )["status"], "unavailable")
 
+    def test_annual_eps_accepts_a_tied_direct_numerator_and_refuses_drift(self):
+        common = {
+            "fiscal_year": "FY2025", "period_kind": "annual",
+            "period_start": "2025-01-01", "period_end": "2025-12-31",
+            "calendar": "company:fiscal",
+        }
+        numerator = [{**common, "value": "460", "unit": "hkd",
+                      "definition_ref": "diluted-eps-numerator"}]
+        shares = [{**common, "value": "92", "unit": "shares",
+                   "definition_ref": "diluted-weighted-average-shares"}]
+        eps = [{**common, "value": "5.00", "unit": "hkd_per_share",
+                "definition_ref": "diluted-eps"}]
+        result = annual_diluted_eps(
+            diluted_eps_numerator_cells=numerator,
+            diluted_weighted_share_cells=shares,
+            diluted_eps_cells=eps,
+            fiscal_year="FY2025",
+        )
+        self.assertEqual((result["status"], result["value"]), ("computed", "5"))
+        eps[0]["value"] = "4.99"
+        self.assertEqual(annual_diluted_eps(
+            diluted_eps_numerator_cells=numerator,
+            diluted_weighted_share_cells=shares,
+            diluted_eps_cells=eps,
+            fiscal_year="FY2025",
+        )["status"], "unavailable")
+
+        quarters = [
+            {**common, "period_kind": "quarter", "period_start": start,
+             "period_end": end, "value": value, "unit": "hkd",
+             "definition_ref": "diluted-eps-numerator"}
+            for (start, end), value in zip(QUARTERS, (100, 110, 120, 131))
+        ]
+        self.assertIn("disagrees", annual_diluted_eps(
+            diluted_eps_numerator_cells=[*quarters, *numerator],
+            diluted_weighted_share_cells=shares,
+            fiscal_year="FY2025",
+        )["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
