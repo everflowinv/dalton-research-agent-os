@@ -58,8 +58,9 @@ SECTION_GUIDANCE: tuple[str, ...] = (
 #: the Claims the new version has to be written from.
 MAX_PRIOR_SECTION_CHARS = 1200
 VALUATION_GAP = (
-    "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority "
-    "尚未接入，写任何倍数或目标价都会是无来源的数字。"
+    "估值一节按 Playbook 的数字纪律留空：本次 Initial Screen 冻结输入没有同时提供可引用的"
+    "价格、股本、汇率、利率、市场预期与估值结果。系统其他流程可能已持有其中部分 authority，"
+    "但本调用看不到的内容不能当作证据；应由估值投影接入后再写倍数或目标价。"
 )
 GATE_QUESTION_CHECKS = ("source_base", "number_provenance", "key_driver", "street_and_risk")
 #: What one gate item can say about itself. ``passed`` / ``failed`` are the
@@ -446,14 +447,23 @@ def build_section_prompt(
         "  brackets, not in a source list. List them in the JSON arrays instead;",
         "  that is what carries provenance to the reader. A sentence whose subject",
         "  is a tag becomes a sentence with no subject once the tag is removed, so",
-        "  name the source in words: 管理层、该季报、卖方研报.",
+        "  name the source in words using the kind shown by the tagged row (for example 管理层、公告、",
+        "  已申报报表、卖方共识、内部预测). Do not call an internal forecast or vendor",
+        "  consensus a company actual, and do not call the house view buy-side consensus.",
         "- You may write a figure ONLY by citing the N tag that carries it, and the figure must appear",
         f"  in that N tag's text VERBATIM.  Do not convert units or scales (no 亿/万 rewriting, no",
         f"  rounding, no percentage recomputation): copy the digits exactly as the N tag prints them.",
         f"  If you need a number you do not have, write {GAP_MARKER}.",
         "- Do not number your paragraphs or write ordered lists; write prose.",
         "- Do not invent company names, products, dates or numbers.  Do not repeat the section title.",
-        "- If the material cannot support this section, say so in one sentence and list what is missing.",
+        "- Evidence-backed analysis is allowed: distinguish source fact from 判断/推断, cite",
+        "  the premises, and state uncertainty. Do not merely concatenate quotations.",
+        "- If the material cannot support this section, say so in one sentence and list",
+        "  the exact missing document, metric, period, comparison, or existing research action.",
+        "- Where the section asks for a judgement, choose the evidence-weighted current case",
+        "  rather than ending with A也可能、B也可能. State the alternative trigger, its operating/",
+        "  earnings/valuation impact when the supplied evidence supports it, the falsifier, and",
+        "  the next observable item that would move the judgement. This is analysis, not a trade call.",
         "",
         "Return raw JSON only, no markdown fence:",
         '{"body": "<the section text>", "claims": ["C3","C7"], "numbers": ["N1"],',

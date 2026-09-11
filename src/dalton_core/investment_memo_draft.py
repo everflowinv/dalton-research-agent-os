@@ -12,6 +12,8 @@ from .store import content_hash
 
 DRAFT_PURPOSE = register_purpose("investment_memo")
 VERIFIER_PURPOSE = register_purpose("investment_memo_verifier")
+MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.2"
+MEMO_VERIFIER_PROMPT_CONTRACT_VERSION = "investment-memo-verifier-prompt:0.2"
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 6_000
 MAX_COST_USD = 1.0
@@ -54,8 +56,16 @@ def build_group_prompt(*, group: str, section_titles: Sequence[str], questions: 
     return "\n".join([
         "Draft only the requested Investment Memo sections and Playbook key questions.",
         "Use only the complete frozen evidence rows below. Never use model memory.",
-        "Every factual sentence and every number must cite an allowed ref. If evidence is",
-        "missing, leave body/answer empty, set unknown true for a question, and state the gap.",
+        "Every factual sentence and every number must cite an allowed ref. Evidence-backed",
+        "inference is allowed only when its cited rows contain the premises; label the inference",
+        "and uncertainty. Do not call vendor/sell-side consensus buy-side consensus, and do not",
+        "invent holding-period return arithmetic absent a frozen return-bridge authority.",
+        "For each judgement choose the current preferred case; give the alternative trigger,",
+        "operating/earnings/valuation impact where supported, falsifier, and next tracking item.",
+        "Do not evade the decision with unranked A/B possibilities. This does not authorize a",
+        "recommendation or return calculation that the frozen inputs and human gate do not support.",
+        "If evidence is missing, leave body/answer empty, set unknown true for a question,",
+        "and name the exact document, metric, period, comparison, or research action needed.",
         f"Company: {_json(company)}", f"Group: {group}",
         f"Allowed refs: {_json(allowed_refs)}", "Evidence rows:", _json(list(material)),
         "Return raw JSON only with exactly this shape and the exact requested titles/questions:",
@@ -129,7 +139,7 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
                 company: Mapping[str, Any], mission: Mapping[str, Any]) -> dict[str, Any]:
     prompt = build_group_prompt(group=group, section_titles=section_titles, questions=questions,
                                 material=material, company=company)
-    request_id = "memo-" + content_hash({"group": group, "prompt": prompt})[:24]
+    request_id = "memo-" + content_hash({"contract": MEMO_PROMPT_CONTRACT_VERSION, "group": group, "prompt": prompt})[:24]
     call: Mapping[str, Any] = {}
     try:
         call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
@@ -158,7 +168,11 @@ def build_verifier_prompt(*, sections: Sequence[Mapping[str, Any]], questions: S
                 "finding_codes": ["one or more closed codes"]}
     return "\n".join([
         "Independently verify this complete Investment Memo against every cited frozen row.",
-        "Do not rewrite it. Reject unsupported prose/numbers, missing sections, unknown key",
+        "Do not rewrite it. Permit an explicitly labelled analytical inference only when its",
+        "cited evidence contains the premises and the uncertainty is stated. Reject unsupported",
+        "prose/numbers, claims of buy-side consensus without that authority, invented return",
+        "arithmetic, or an answered judgement that evades the requested current case with",
+        "unranked alternatives. Reject missing sections, unknown key",
         "questions, absent variant-vs-consensus, incomplete Anti-thesis, or incomplete risk/reward.",
         "A pass has finding_codes=[]. Return raw JSON only:", _json(contract),
         "Complete memo sections:", _json(list(sections)), "All 12 key questions:", _json(list(questions)),
@@ -174,7 +188,7 @@ def verify_memo(model: Any, *, sections: Sequence[Mapping[str, Any]], questions:
     call: Mapping[str, Any] = {}
     try:
         call = independent_model_call(model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=VERIFIER_PURPOSE, request_id="memo-verify-" + material_hash[:24], prompt=prompt, mission=mission)
+            purpose=VERIFIER_PURPOSE, request_id="memo-verify-" + material_hash[:24] + "-" + content_hash(MEMO_VERIFIER_PROMPT_CONTRACT_VERSION)[:8], prompt=prompt, mission=mission)
         value = unwrap_json_object(call["text"])
     except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
         return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",

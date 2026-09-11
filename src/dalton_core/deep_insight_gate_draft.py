@@ -69,6 +69,7 @@ from .store import content_hash
 # this module is what makes the drafter reachable.
 DRAFT_PURPOSE = register_purpose("deep_insight_gate")
 VERIFIER_PURPOSE = register_purpose("deep_insight_gate_verifier")
+VERIFIER_PROMPT_CONTRACT_VERSION = "deep-insight-gate-verifier-prompt:0.2"
 
 # The gate drafts on the deliverable-drafting configuration, which is already in
 # the registry: same route, same broker, same day ledger as the dossier it reads
@@ -368,21 +369,26 @@ def build_group_prompt(
         "  in brackets, not in a source list. The tags travel in refs; a sentence",
         "  whose subject is a tag becomes a sentence with no subject once the tag",
         "  is gone.",
-        "- Every sentence must cite at least one tag. A sentence you cannot cite is",
-        "  a sentence you may not write.",
+        "- Every sentence must cite at least one tag. A judgement is allowed only when",
+        "  its cited rows contain the premises; label it as 判断/推断, state uncertainty,",
+        "  and do not turn it into an investment recommendation.",
         "- Copy any figure verbatim from the tag that carries it. Do not convert",
         "  units or scales, do not round, do not recompute a percentage.",
         f"- At most {SENTENCES_PER_ANSWER} sentences per question.",
         "- If the material does not answer a question, return it as",
         '  {"question_ref": "<id>", "status": "unknown", "missing": "<what is not',
         '  known>", "evidence_that_would_answer": "<the cheapest observation or',
-        '  document that would settle it, and where it would come from>", "gaps": []}.',
+        '  document that would settle it, its company/metric/period, and the existing source or research action that could obtain it>", "gaps": []}.',
         "  An honest unknown is worth more than a plausible paragraph. Most of these",
         "  questions are expected to be unknown on a thin file, and saying so is the",
         "  answer the reader needs.",
         "- An answered question carries a confidence of "
         + "/".join(CONFIDENCE_LEVELS) + ", and it grades the evidence, not the prose.",
         "- Do not repeat the previous answer. Say what the new evidence changes.",
+        "- An answered judgement must choose the evidence-weighted current case. State the",
+        "  alternative trigger, operating/earnings/valuation impact where supported, falsifier,",
+        "  and next observable tracking item. Do not use uncertainty to avoid choosing; use",
+        "  confidence to show how strongly the evidence supports the choice.",
         "",
     ]
     if "q1" in refs:
@@ -618,7 +624,8 @@ def build_verifier_prompt(
         "You are an independent verifier. Another model answered the Deep Insight",
         "Gate's questions from a fixed table of evidence. You do not rewrite the",
         "answers, improve them or grade them. You answer one question: does every",
-        "answer stay inside the rows it cites?",
+        "answer remain supported: facts by cited rows, and explicit judgements by reasonable",
+        "qualified inference from cited premises?",
         "",
         f"Company: {company.get('ticker') or ''} ({company.get('company_ref')})",
         "",
@@ -702,7 +709,7 @@ def verify(
     try:
         call = independent_model_call(
             model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
+            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}-{content_hash(VERIFIER_PROMPT_CONTRACT_VERSION)[:8]}",
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}

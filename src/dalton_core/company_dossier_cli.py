@@ -70,7 +70,9 @@ from .company_dossier_draft import (
     TIMEOUT_SECONDS,
     build_unit_prompt,
     legacy_unit_prompt_v02,
+    legacy_unit_prompt_v03,
     build_verifier_prompt,
+    legacy_verifier_prompt_v02,
     draft_hash,
     draft_unit,
     independence,
@@ -81,6 +83,7 @@ from .company_dossier_draft import (
     verify,
     validate_verifier_output,
     verifier_prompt_contract_fingerprint,
+    legacy_verifier_prompt_contract_fingerprint,
 )
 from .coverage_mission import CoverageMissionAuthority, fold_stage_status
 from .guidance_profile import build_profile, render_profile_table
@@ -897,9 +900,11 @@ def validate_formal_unit_provenance(
                     raise ValueError(f"unit_provenance.{unit}.{role} authority binding drifted")
                 resolved[role] = {"work": work, "route": claimed["route_decision_ref"]}
                 if role == "verifier":
-                    expected_request = (f"verify-{item['verified_draft_hash'][:24]}-"
-                                        f"{verifier_prompt_contract_fingerprint()[:16]}")
-                    if claimed["request_id"] != expected_request:
+                    expected_requests = {
+                        f"verify-{item['verified_draft_hash'][:24]}-{verifier_prompt_contract_fingerprint()[:16]}",
+                        f"verify-{item['verified_draft_hash'][:24]}-{legacy_verifier_prompt_contract_fingerprint()[:16]}",
+                    }
+                    if claimed["request_id"] not in expected_requests:
                         raise ValueError(f"unit_provenance.{unit}.verifier draft binding drifted")
                     try:
                         parsed = validate_verifier_output(json.loads(
@@ -909,9 +914,11 @@ def validate_formal_unit_provenance(
                     if parsed != {"verdict": "pass", "findings": []}:
                         raise ValueError(f"unit_provenance.{unit}.verifier did not pass")
                     if is_current and current_blocks:
-                        expected_prompt = build_verifier_prompt(
-                            current_blocks, company=producer_input["company"])
-                        if work.get("question") != expected_prompt:
+                        expected_prompts = {
+                            build_verifier_prompt(current_blocks, company=producer_input["company"]),
+                            legacy_verifier_prompt_v02(current_blocks, company=producer_input["company"]),
+                        }
+                        if work.get("question") not in expected_prompts:
                             raise ValueError(
                                 f"unit_provenance.{unit}.verifier prompt binding drifted")
                 else:
@@ -923,7 +930,8 @@ def validate_formal_unit_provenance(
                         profile_table=producer_input["parse_input"]["profile_table"],
                         market_view_available=producer_input["parse_input"]["market_view_available"],
                         classification=producer_input["parse_input"]["classification"])
-                    expected_prompts = [build_unit_prompt(**prompt_args)]
+                    expected_prompts = [build_unit_prompt(**prompt_args),
+                                        legacy_unit_prompt_v03(**prompt_args)]
                     if unit == VARIANT_UNIT:
                         expected_prompts.append(legacy_unit_prompt_v02(**prompt_args))
                     expected_request = content_hash({

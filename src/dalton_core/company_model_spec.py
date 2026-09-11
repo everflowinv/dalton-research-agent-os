@@ -262,6 +262,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "cost_driver_template_metadata:0.1",
+    "prompt_contract": "company-model-spec-prompt:0.3",
 })
 
 
@@ -319,8 +320,10 @@ def build_prompt(state: Mapping[str, Any]) -> str:
                             state.get("concepts") or ())
     return (
         "You decide how one company should be modelled.\n\n"
-        "Below is what this system holds about it: the company, the statements "
-        "it has filed, and every line in those statements with the structure "
+        "Below is the bounded input this call actually has: company identity, filed "
+        "statement structure, the selected industry driver templates, and any explicitly "
+        "labelled market proxies. It cannot browse, retrieve missing filings, or inspect "
+        "documents outside these blocks. Every line in the statements carries the structure "
         "the company itself disclosed -- which line rolls into which, and "
         "which lines are segment breakdowns.\n\n"
         "STATEMENTS is one line per row, tab separated:\n"
@@ -354,9 +357,12 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "* ``basis_concept`` must be a concept that appears in the statements "
         "below, copied exactly, or null. Do not invent one, and do not adapt "
         "a name to look right. A line with no filed counterpart uses null.\n"
-        "* Every entry needs a reason specific to this company. Restating the "
-        "label is not a reason, and neither is a general truth about the "
-        "industry.\n"
+        "* Every entry needs a reason specific to this company and grounded in the provided "
+        "statement, classification, or labelled proxy evidence. State when the driver is an "
+        "analytical inference and what would falsify it. Restating the label or a general "
+        "industry truth is not a reason. Choose the current base case for each model decision; "
+        "state the alternative trigger, model-line impact, falsifier and next observable driver "
+        "instead of listing unranked possibilities.\n"
         "* Return JSON matching OUTPUT_SCHEMA and nothing else.\n\n"
         f"{template}\n\n"
         f"{cost_prompt_block(state.get('industry_classification'), state.get('concepts') or ())}\n\n"

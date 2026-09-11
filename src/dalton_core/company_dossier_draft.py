@@ -90,8 +90,9 @@ MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # prompt SHA already binds every WorkOrder; the exported fingerprint also lets
 # the lane retire a terminal refusal after a reviewed contract repair without
 # pretending that the underlying company evidence changed.
-DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.3"
-VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.2"
+DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.4"
+VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.3"
+LEGACY_VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.2"
 VARIANT_CONCLUSION_RULE_VERSION = "variant-no-investment-conclusion:1"
 
 
@@ -114,6 +115,16 @@ def verifier_prompt_contract_fingerprint() -> str:
 
     return content_hash({
         "version": VERIFIER_PROMPT_CONTRACT_VERSION,
+        "source_fields": ["kind", "period", "text"],
+        "max_row_chars": MAX_ROW_CHARS,
+        "finding_codes": list(VERIFIER_FINDING_CODES),
+    })
+
+def legacy_verifier_prompt_contract_fingerprint() -> str:
+    """Identity of the evidence projection shown to the verifier."""
+
+    return content_hash({
+        "version": LEGACY_VERIFIER_PROMPT_CONTRACT_VERSION,
         "source_fields": ["kind", "period", "text"],
         "max_row_chars": MAX_ROW_CHARS,
         "finding_codes": list(VERIFIER_FINDING_CODES),
@@ -266,6 +277,7 @@ def build_unit_prompt(
     market_view_available: bool = True,
     classification: Any = None,
     _variant_conclusion_rule: bool = True,
+    _analytical_contract: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -299,8 +311,9 @@ def build_unit_prompt(
         "- NEVER write a C or N tag inside a sentence's text: not as a word, not in",
         "  brackets, not in a source list. The tags travel in refs; a sentence whose",
         "  subject is a tag becomes a sentence with no subject once the tag is gone.",
-        "- Every sentence must cite at least one tag. A sentence you cannot cite is a",
-        "  sentence you may not write.",
+        "- Every sentence must cite at least one tag. Analytical inference is allowed only when",
+        "  its cited rows contain the premises: label it as 判断/推断 and state the",
+        "  uncertainty. A sentence with no cited premise is a sentence you may not write.",
         "- Copy any figure verbatim from the tag that carries it. Do not convert units",
         "  or scales, do not round, do not recompute a percentage.",
         f"- At most {SLOT_SENTENCE_CAP} sentences in a slot and {SECTION_SENTENCE_CAP} in this part.",
@@ -316,6 +329,14 @@ def build_unit_prompt(
         "- Do not repeat the previous version. Say what the new evidence changes.",
         "",
     ]
+    if _analytical_contract:
+        lines += [
+            "- When a slot asks for a view, driver, competitive position, catalyst, or risk,",
+            "  choose the current evidence-weighted case. State the alternative trigger, expected",
+            "  operating/earnings/valuation impact only where supported, its falsifier, and the next",
+            "  observable tracking item. Do not hide behind A也可能、B也可能; qualify confidence.",
+            "",
+        ]
     if unit == VARIANT_UNIT and _variant_conclusion_rule:
         forbidden = ", ".join(_CONCLUSION_PATTERNS)
         lines += [
@@ -373,7 +394,13 @@ def build_unit_prompt(
 def legacy_unit_prompt_v02(**kwargs: Any) -> str:
     """Rebuild an immutable v0.2 producer question for formal replay only."""
 
-    return build_unit_prompt(**kwargs, _variant_conclusion_rule=False)
+    return build_unit_prompt(**kwargs, _variant_conclusion_rule=False, _analytical_contract=False)
+
+
+def legacy_unit_prompt_v03(**kwargs: Any) -> str:
+    """Rebuild an immutable v0.3 producer question for formal replay only."""
+
+    return build_unit_prompt(**kwargs, _analytical_contract=False)
 
 
 # ---------------------------------------------------------------------------
@@ -584,13 +611,19 @@ def draft_hash(blocks: Mapping[str, Any]) -> str:
     return content_hash({key: blocks[key] for key in sorted(blocks)})
 
 
-def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, Any]) -> str:
+def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, Any],
+                          _analytical_contract: bool = True) -> str:
     """The verifier reads the draft and the rows it cites, and answers once."""
 
     lines = [
         "You are an independent verifier. Another model drafted parts of a company file",
         "from a fixed table of evidence. You do not rewrite it, improve it or grade it.",
-        "You answer one question: does every sentence stay inside the rows it cites?",
+        *(
+            ["You answer one question: is every factual statement supported, and is every",
+             "analytical inference a reasonable, explicitly qualified conclusion from its cited premises?"]
+            if _analytical_contract else
+            ["You answer one question: does every sentence stay inside the rows it cites?"]
+        ),
         "",
         f"Company: {company.get('ticker') or ''} ({company.get('company_ref')})",
         "",
@@ -627,6 +660,10 @@ def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, An
                         )
         lines.append("")
     return "\n".join(lines)
+
+
+def legacy_verifier_prompt_v02(blocks: Mapping[str, Any], *, company: Mapping[str, Any]) -> str:
+    return build_verifier_prompt(blocks, company=company, _analytical_contract=False)
 
 
 def validate_verifier_output(value: Any) -> dict[str, Any]:

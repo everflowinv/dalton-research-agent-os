@@ -86,6 +86,7 @@ from .store import content_hash
 DRAFT_PURPOSE = "industry_framework"
 register_purpose_tier(DRAFT_PURPOSE, TIER_BRAIN)
 VERIFIER_PURPOSE = "industry_framework_verifier"
+VERIFIER_PROMPT_CONTRACT_VERSION = "industry-framework-verifier-prompt:0.2"
 register_purpose_tier(VERIFIER_PURPOSE, TIER_VERIFIER)
 
 # The framework drafts on the deliverable-drafting configuration, which is
@@ -255,8 +256,9 @@ def build_unit_prompt(
         "  in brackets, not in a source list. The tags travel in refs; a sentence",
         "  whose subject is a tag becomes a sentence with no subject once the tag",
         "  is gone.",
-        "- Every sentence must cite at least one tag. A sentence you cannot cite is",
-        "  a sentence you may not write.",
+        "- Every sentence must cite at least one tag. Cross-company or causal inference is",
+        "  allowed only when the cited rows/table cells contain its premises; label the",
+        "  inference and its uncertainty. With no cited premise, do not write it.",
         "- Copy any figure verbatim from the tag that carries it. Do not convert",
         "  units or scales, do not round, do not recompute a percentage, do not",
         "  average two cells into a third number.",
@@ -269,8 +271,13 @@ def build_unit_prompt(
         "- If the material does not answer a slot, return that slot as",
         '  {"slot_id": "<id>", "unknown": "<what is missing to answer it>"} instead',
         "  of writing something plausible. An honest unknown is worth more than a",
-        "  guess, and it is what the gap list is built from.",
+        "  guess, and it is what the gap list is built from. Make each gap operational:",
+        "  name the company/metric/period/document or observation that would answer it.",
         "- Do not repeat the previous version. Say what the new evidence changes.",
+        "- For drivers and competitive dynamics, choose the current evidence-weighted stance",
+        "  rather than listing two possibilities. Give the alternative trigger, expected operating",
+        "  and earnings impact (and valuation only if supplied), a falsifier, and the next",
+        "  observable item that would move the stance. Preserve long-term business-model/moat work.",
         "",
     ]
     if unit == "characteristics":
@@ -492,7 +499,8 @@ def build_verifier_prompt(
         "You are an independent verifier. Another model drafted parts of an industry",
         "framework from a fixed table of evidence and a computed comparison table.",
         "You do not rewrite it, improve it or grade it. You answer one question:",
-        "does every sentence stay inside the rows it cites?",
+        "is every factual sentence supported, and is every comparison or causal inference",
+        "a reasonable, explicitly qualified conclusion from its cited rows/table cells?",
         "",
         f"Industry: {industry.get('industry_ref')}",
         "",
@@ -541,7 +549,7 @@ def verify(
     try:
         call = independent_model_call(
             model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
+            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}-{content_hash(VERIFIER_PROMPT_CONTRACT_VERSION)[:8]}",
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
