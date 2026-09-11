@@ -1,0 +1,46 @@
+{
+  "schema_version": "dalton-release-acceptance-candidate-input-0.1",
+  "release_ref": "R11",
+  "status": "candidate_inputs_incomplete",
+  "acceptance_state": "pending",
+  "deployment_state": "not_started",
+  "packet_root": null,
+  "source": {
+    "root": "/Users/everflow/Projects/dalton-foundation-followup-r11-acceptance-worktree",
+    "commit": "62f35597b2ca3c57d02bc06e688a2484829c1309"
+  },
+  "artifacts": {
+    "wheel": {"path": null, "sha256": null},
+    "wheel_verification": {"path": null, "sha256": null},
+    "full_suite_log": {"path": null, "sha256": null},
+    "full_suite_receipt": {"path": null, "sha256": null},
+    "rehearsal_binding": {"path": null, "sha256": null},
+    "rehearsal_report": {"path": null, "sha256": null},
+    "release_helper_manifest": {"path": null, "sha256": null},
+    "deployment_candidate": {"path": null, "sha256": null},
+    "backup_retention_config_helper": {"path": null, "sha256": null},
+    "service_config_before_snapshot": {"path": null, "sha256": null},
+    "service_config_after_candidate": {"path": null, "sha256": null},
+    "final_activated_model_config_snapshot": {"path": null, "sha256": null},
+    "openclaw_config_snapshot": {"path": null, "sha256": null},
+    "plugin_tree_manifest": {"path": null, "sha256": null},
+    "mission_authority_snapshot": {"path": null, "sha256": null},
+    "provider_bridge_activation_receipt": {"path": null, "sha256": null},
+    "web_activation_receipt": {"path": null, "sha256": null},
+    "backup_retention_receipt": {"path": null, "sha256": null},
+    "latest_backup_manifest": {"path": null, "sha256": null}
+  },
+  "runtime_configuration": {
+    "model_config_count": null,
+    "semantic_snapshot_sha256": null
+  },
+  "latest_backup": {
+    "snapshot_id": null
+  },
+  "boundaries": {
+    "live_mutation": false,
+    "manifest_publication": false,
+    "acceptance_transition": false,
+    "historical_archives_copied": false
+  }
+}
