@@ -28,12 +28,13 @@ from dalton_core.company_model_cli import (
     _validated_spec_with_repair, choose_company, filed_classifications,
     model_spec_request_id, run_model_spec, structured_output_repair_config,
 )
+from dalton_core.company_model_forecast_cli import run_model_forecast
 from dalton_core.company_model_spec import TASK_HASH, spec_from_response
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.company_model_state import build_company_model_state
-from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
 from dalton_core.store import DaltonStore
-from dalton_core.store import content_hash
+from dalton_core.store import canonical_json, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_company_dossier import body as dossier_body, classification
 
@@ -216,6 +217,55 @@ class ChooseCompanyTests(unittest.TestCase):
         self.assertEqual(company_ref, ACN)
         self.assertEqual(reopened["state_hash"], state["state_hash"])
 
+    def test_a_legacy_spec_remains_byte_readable_when_the_new_contract_reopens(self):
+        _, state = choose_company(self.missions, self.mission)
+        current = spec_from_response(state, _spec_body(), decided_by="automation:x")
+        legacy = {
+            key: value for key, value in current.items()
+            if key not in {"financial_statement_structure", "cash_flow_companion",
+                           "content_hash"}
+        }
+        legacy.update({"schema_version": "0.2", "task_hash": "d" * 64})
+        legacy["content_hash"] = content_hash(legacy)
+        self.missions.record_company_model_spec(
+            legacy, mission_version_ref=self.mission["id"])
+        before = canonical_json(
+            self.missions.company_model_spec_for_state(
+                ACN, state["state_hash"], task_hash=legacy["task_hash"],
+            )
+        )
+
+        company_ref, reopened = choose_company(self.missions, self.mission)
+
+        self.assertEqual(company_ref, ACN)
+        self.assertEqual(reopened["state_hash"], state["state_hash"])
+        self.assertEqual(
+            canonical_json(self.missions.company_model_specs(ACN)[0]), before,
+        )
+
+    def test_validated_persistence_refuses_a_different_candidate_at_the_same_id(self):
+        _, state = choose_company(self.missions, self.mission)
+        first = spec_from_response(state, _spec_body(), decided_by="automation:x")
+        original = self.missions.record_company_model_spec(
+            first, mission_version_ref=self.mission["id"])
+        changed_body = copy.deepcopy(_spec_body())
+        changed_body["assessment"] = "A different but schema-valid assessment."
+        changed = spec_from_response(
+            state, changed_body, decided_by="automation:x",
+        )
+
+        with self.assertRaisesRegex(
+            CoverageMissionConflict, "differs from stored authority",
+        ):
+            self.missions.record_validated_company_model_spec(
+                changed, mission_version_ref=self.mission["id"],
+                work_order_ref="work:different-candidate",
+            )
+
+        replayed = self.missions.company_model_specs(ACN)
+        self.assertEqual(len(replayed), 1)
+        self.assertEqual(replayed[0]["content_hash"], original["content_hash"])
+
     def test_scheduler_identity_changes_with_the_spec_contract(self):
         state_hash = "a" * 64
         self.assertEqual(model_spec_request_id(state_hash, "b" * 64),
@@ -373,11 +423,68 @@ class ChooseCompanyTests(unittest.TestCase):
                 expected_repair_policy_hash=content_hash({"max_attempts": 1}),
             )
         self.assertEqual(summary["spec_status"], "fresh")
+        self.assertEqual(summary["pre_persistence_validation"], "ready")
+        self.assertEqual(len(summary["financial_input_hash"]), 64)
+        self.assertTrue(summary["financial_structure_ref"].startswith(
+            "financial-statement-structure:"))
+        self.assertEqual(len(summary["financial_structure_hash"]), 64)
         self.assertEqual(summary["cost_micros"], 24)
         self.assertEqual(summary["repair_attempts"][0]["work_order_ref"],
                          "work:repair")
         stored = self.missions.company_model_specs(ACN)[-1]
         self.assertEqual(stored["work_order_ref"], "work:repair")
+        forecast = run_model_forecast(
+            state_dir=self.state_dir,
+            summary_dir=self.state_dir / "forecast-summary",
+        )
+        self.assertEqual(forecast["status"], "succeeded")
+        self.assertEqual(forecast["forecast_status"], "published")
+        self.assertEqual(forecast["spec_ref"], stored["spec_id"])
+
+    def test_schema_valid_false_historical_tie_is_refused_before_persistence(self):
+        _, state = choose_company(self.missions, self.mission)
+        body = copy.deepcopy(_spec_body())
+        # Structurally legal and accepted by the presentation-only validator,
+        # but 100 + 20 cannot tie to the filed net-income value of 80.
+        body["financial_statement_structure"]["formulas"][0]["terms"][1][
+            "coefficient"
+        ] = "1"
+        call = {
+            "text": json.dumps(body), "work_order_ref": "work:false-tie",
+            "work_order_hash": "1" * 64,
+            "result_envelope_ref": "result:false-tie",
+            "result_envelope_hash": "2" * 64,
+            "invocation_ref": "invocation:false-tie",
+            "route_decision_ref": "route:false-tie", "cost_micros": 11,
+            "replayed": False,
+        }
+        model_calls = []
+
+        class Model:
+            def __init__(inner, config, **kwargs):
+                inner.config = config
+
+            def call(inner, **kwargs):
+                model_calls.append(kwargs)
+                return call
+
+        config = self.state_dir / "false-tie-model.json"
+        config.write_text("{}", encoding="utf-8")
+        with patch("dalton_core.company_model_cli.CockpitModel", Model):
+            summary = run_model_spec(
+                state_dir=self.state_dir, model_config_path=config,
+                summary_dir=self.state_dir / "false-tie-summary",
+                scheduler_db=self.state_dir / "scheduler.sqlite",
+                company_ref=ACN, expected_state_hash=state["state_hash"],
+                expected_task_hash=TASK_HASH,
+                expected_repair_policy_hash=content_hash({"max_attempts": 0}),
+            )
+        self.assertEqual(summary["spec_status"], "refused")
+        self.assertEqual(summary["pre_persistence_validation"], "refused")
+        self.assertIn("does not tie to filed history", summary["failure_reason"])
+        self.assertEqual(len(model_calls), 1)
+        self.assertEqual(self.missions.company_model_specs(ACN), [])
+        self.assertEqual(choose_company(self.missions, self.mission)[0], ACN)
 
 
 class StructuredOutputRepairTests(unittest.TestCase):

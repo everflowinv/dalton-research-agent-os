@@ -794,6 +794,21 @@ def _ref(prefix: str, identity: Mapping[str, Any]) -> str:
     return f"{prefix}:{content_hash(identity)[:32]}"
 
 
+def company_model_spec_id(company_ref: str, state_hash: str, task_hash: str) -> str:
+    """The persisted identity of one company-spec decision.
+
+    Model-spec production uses this before insertion so its real financial
+    replay is bound to the exact authority row it would create.  Keeping the
+    calculation here prevents a preflight identity from drifting from storage.
+    """
+
+    return _ref("company-model-spec", {
+        "company_ref": _text(company_ref, "company_ref"),
+        "state_hash": _text(state_hash, "state_hash"),
+        "task_hash": _sha256(task_hash, "task_hash"),
+    })
+
+
 _HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 
 
@@ -3830,6 +3845,70 @@ class CoverageMissionAuthority:
 
     # -- company model specifications (P13al) --------------------------------
 
+    def validate_company_model_spec_financials(
+        self, spec: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Materialize one candidate against its immutable filed authority.
+
+        This is the shared pre-persistence boundary for production callers.
+        Imports stay local because the financial-input modules consume this
+        authority's public readers.
+        """
+
+        from .company_financial_statement_structure import (
+            financial_input_authority,
+            materialize_financial_statement_structure,
+        )
+        from .company_model_inputs import build_model_inputs
+        from .model_forecast_driver import build_cash_flow_companion
+
+        candidate = {
+            **dict(spec),
+            "spec_id": company_model_spec_id(
+                str(spec.get("company_ref") or ""),
+                str(spec.get("state_hash") or ""),
+                str(spec.get("task_hash") or ""),
+            ),
+        }
+        inputs = build_model_inputs(self, candidate)
+        structure, replay = materialize_financial_statement_structure(
+            candidate, inputs,
+        )
+        if candidate.get("schema_version") == "0.4":
+            build_cash_flow_companion(candidate, inputs, structure)
+        return {
+            "spec_id": candidate["spec_id"],
+            "financial_inputs": inputs,
+            "financial_input_hash": financial_input_authority(inputs)["content_hash"],
+            "financial_structure": structure,
+            "financial_replay": replay,
+        }
+
+    def record_validated_company_model_spec(
+        self, spec: Mapping[str, Any], *, mission_version_ref: str,
+        model_profile_ref: str | None = None, work_order_ref: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Replay real values and then persist that exact candidate.
+
+        The older record method remains the byte-compatible storage API for
+        historical schema rows. Production schema 0.4 creation uses this
+        method and cannot attach a mutable "validated" marker in its place.
+        """
+
+        proof = self.validate_company_model_spec_financials(spec)
+        stored = self.record_company_model_spec(
+            spec, mission_version_ref=mission_version_ref,
+            model_profile_ref=model_profile_ref, work_order_ref=work_order_ref,
+        )
+        if (
+            stored.get("spec_id") != proof["spec_id"]
+            or stored.get("content_hash") != spec.get("content_hash")
+        ):
+            raise CoverageMissionConflict(
+                "validated company model candidate differs from stored authority"
+            )
+        return stored, proof
+
     def record_company_model_spec(
         self, spec: Mapping[str, Any], *, mission_version_ref: str,
         model_profile_ref: str | None = None, work_order_ref: str | None = None,
@@ -3876,10 +3955,7 @@ class CoverageMissionAuthority:
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
         task_hash = _sha256(spec["task_hash"], "task_hash")
         spec_content_hash = _sha256(spec["content_hash"], "content_hash")
-        spec_id = _ref("company-model-spec", {
-            "company_ref": company_ref, "state_hash": state_hash,
-            "task_hash": task_hash,
-        })
+        spec_id = company_model_spec_id(company_ref, state_hash, task_hash)
         metadata = {
             **({"schema_version": spec["schema_version"]}
                if spec.get("schema_version") else {}),
@@ -5134,6 +5210,7 @@ __all__ = [
     "STAGE_STATUSES",
     "fold_stage_status",
     "sec_run_failure_reason",
+    "company_model_spec_id",
     "CoverageMissionAuthority",
     "CoverageMissionConflict",
     "CoverageMissionError",

@@ -47,6 +47,9 @@ from .company_model_spec import (
     spec_from_response,
     spec_template_gaps,
 )
+from .company_financial_statement_structure import FinancialStatementStructureError
+from .company_model_inputs import ModelInputError
+from .model_forecast_driver import ForecastModelError
 from .company_model_state import CompanyModelStateError, build_company_model_state
 from .driver_template import REGISTRY_HASH as TEMPLATE_REGISTRY_HASH, template_for
 from .coverage_mission import CoverageMissionAuthority
@@ -501,6 +504,10 @@ def run_model_spec(
         "failure_reason": None,
         "repair_attempts": [],
         "repair_policy_hash": None,
+        "pre_persistence_validation": None,
+        "financial_input_hash": None,
+        "financial_structure_ref": None,
+        "financial_structure_hash": None,
         "formal_authority_writes": 0,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
@@ -631,10 +638,32 @@ def run_model_spec(
             )
         if summary.get("spec_status") == "refused":
             return summary
-        stored = missions.record_company_model_spec(
-            spec, mission_version_ref=mission["id"],
-            work_order_ref=accepted_call.get("work_order_ref"),
+        try:
+            stored, financial_validation = (
+                missions.record_validated_company_model_spec(
+                    spec, mission_version_ref=mission["id"],
+                    work_order_ref=accepted_call.get("work_order_ref"),
+                )
+            )
+        except (ModelInputError, FinancialStatementStructureError,
+                ForecastModelError) as exc:
+            # Semantic failures are whole refusals. They are not eligible for
+            # the format/text-length repair above and must not poison the
+            # current-spec identity.
+            summary.update({
+                "status": "succeeded", "spec_status": "refused",
+                "failure_reason": f"{type(exc).__name__}: {exc}",
+                "pre_persistence_validation": "refused",
+            })
+            return summary
+        financial_structure = financial_validation["financial_structure"]
+        financial_replay = financial_validation["financial_replay"]
+        summary["pre_persistence_validation"] = (
+            "ready" if financial_replay["ready_for_forecast"] else "unavailable"
         )
+        summary["financial_input_hash"] = financial_validation["financial_input_hash"]
+        summary["financial_structure_ref"] = financial_structure["structure_ref"]
+        summary["financial_structure_hash"] = financial_structure["content_hash"]
         # Reported beside the specification, not enforced over it: a template
         # slot the model did not model is a question for the reader, and a
         # refusal here would make a table about a *kind* of company the
