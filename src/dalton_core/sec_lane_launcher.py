@@ -572,7 +572,11 @@ class SecLaneLauncher:
                             seconds=maximum
                         )
                         return True, self.clock() >= deadline
-                    return False, False
+                    # Retrieval and staging are bounded by their single
+                    # Scheduler attempt/lease rather than a model elapsed
+                    # budget. A replacement child must still wait out or
+                    # recover that exact in-flight Work.
+                    return True, False
                 return True, False
             finally:
                 connection.close()
