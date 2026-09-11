@@ -31,8 +31,10 @@ from dalton_core.document_research_inventory import validate_inventory_config
 
 SCHEMA_VERSION = "successor-config-transition-0.1"
 PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.2"
+EXTERNAL_CAS_SCHEMA_VERSION = "successor-config-transition-0.3"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
 PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
+EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.3"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -44,6 +46,12 @@ DOCUMENT_CONFIG = "document-research-config.json"
 LANE_CONFIG = "mission-document-research-lane.json"
 PRESERVED_TARGETS = (*MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG, LANE_CONFIG)
 PLANNER_BUDGET_PATH = ("bounded_planner", "config", "planner_call_budget")
+OPENCLAW_FRAME_PATH = (
+    "plugins", "entries", "dalton-openclaw-model-broker", "config",
+    "maxFrameBytes",
+)
+OPENCLAW_DEFAULT_MAX_FRAME_BYTES = 262_144
+OPENCLAW_TARGET_MAX_FRAME_BYTES = 1_048_576
 
 
 class ConfigTransitionError(RuntimeError):
@@ -271,6 +279,66 @@ def _service_after(before: Mapping[str, Any], delta: Mapping[str, Any]) -> dict[
     return after
 
 
+def _leaf_state(value: Mapping[str, Any], path: Sequence[str]) -> dict[str, Any]:
+    current: Any = value
+    for key in path[:-1]:
+        _need(isinstance(current, Mapping) and key in current,
+              "OpenClaw broker config path is absent")
+        current = current[key]
+    _need(isinstance(current, Mapping), "OpenClaw broker config parent is invalid")
+    key = path[-1]
+    if key not in current:
+        return {"state": "absent",
+                "effective_default": OPENCLAW_DEFAULT_MAX_FRAME_BYTES}
+    leaf = current[key]
+    _need(isinstance(leaf, int) and not isinstance(leaf, bool),
+          "OpenClaw maxFrameBytes baseline is not an integer")
+    return {"state": "present", "value": leaf}
+
+
+def _set_leaf(value: Mapping[str, Any], path: Sequence[str], leaf: int) -> dict[str, Any]:
+    result = json.loads(json.dumps(value))
+    current: Any = result
+    for key in path[:-1]:
+        _need(isinstance(current, dict) and key in current,
+              "OpenClaw broker config path is absent")
+        current = current[key]
+    _need(isinstance(current, dict), "OpenClaw broker config parent is invalid")
+    current[path[-1]] = leaf
+    return result
+
+
+def _validated_openclaw_frame_transition(
+    *, before_path: Path, after_path: Path, packet_root: Path,
+) -> dict[str, Any]:
+    packet_root = packet_root.resolve()
+    before, before_bytes = _read_json(before_path, "OpenClaw config before")
+    after, after_bytes = _read_json(after_path, "OpenClaw config after")
+    before_state = _leaf_state(before, OPENCLAW_FRAME_PATH)
+    _need(before_state in (
+        {"state": "absent", "effective_default": OPENCLAW_DEFAULT_MAX_FRAME_BYTES},
+        {"state": "present", "value": OPENCLAW_DEFAULT_MAX_FRAME_BYTES},
+    ), "OpenClaw maxFrameBytes baseline differs from reviewed default")
+    _need(after == _set_leaf(before, OPENCLAW_FRAME_PATH,
+                             OPENCLAW_TARGET_MAX_FRAME_BYTES),
+          "OpenClaw candidate changes more than maxFrameBytes")
+    _need(_leaf_state(after, OPENCLAW_FRAME_PATH)
+          == {"state": "present", "value": OPENCLAW_TARGET_MAX_FRAME_BYTES},
+          "OpenClaw candidate maxFrameBytes differs")
+    return {
+        "name": "openclaw_model_broker_max_frame",
+        "kind": "compare_and_patch", "mutation_count": 1,
+        "target": "~/.openclaw/openclaw.json",
+        "json_path": list(OPENCLAW_FRAME_PATH),
+        "before_presence": before_state,
+        "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
+        "before": _artifact(before_path, packet_root),
+        "after": _artifact(after_path, packet_root),
+        "before_sha256": sha256_bytes(before_bytes),
+        "after_sha256": sha256_bytes(after_bytes),
+    }
+
+
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
@@ -281,9 +349,15 @@ def build_preserve_existing_transition(
     model_config_paths: Mapping[str, Path],
     preserved_config_paths: Mapping[str, Path],
     preserved_state_authority_paths: Mapping[str, Path],
-    service_config_before_path: Path, service_delta_path: Path,
+    service_config_before_path: Path, service_delta_path: Path | None = None,
+    openclaw_config_before_path: Path | None = None,
+    openclaw_config_after_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Build a 0.2 transition that preserves configuration and applies one service delta."""
+    """Build a 0.2 service delta or a 0.3 external broker-frame CAS.
+
+    The 0.3 form preserves the service and every reviewed Dalton configuration
+    byte.  It changes only the fixed OpenClaw broker ``maxFrameBytes`` leaf.
+    """
 
     packet_root = packet_root.resolve()
     _need(packet_root.is_dir() and not packet_root.is_symlink(),
@@ -366,16 +440,56 @@ def build_preserve_existing_transition(
 
     service_before, service_before_bytes = _read_json(
         service_config_before_path, "service config before")
-    delta_value, _ = _read_json(service_delta_path, "planner service budget delta")
-    delta = _validated_service_delta(delta_value)
-    _need(delta["expected_before_sha256"] == sha256_bytes(service_before_bytes),
-          "planner service budget delta does not bind the service baseline")
-    service_after = _service_after(service_before, delta)
-    _need(sha256_bytes(_json_bytes(service_after)) == delta["expected_after_sha256"],
-          "planner service budget expected-after hash differs")
+    external_cas = service_delta_path is None
+    if external_cas:
+        _need(openclaw_config_before_path is not None
+              and openclaw_config_after_path is not None,
+              "0.3 requires exact OpenClaw before and after artifacts")
+        openclaw_transition = _validated_openclaw_frame_transition(
+            before_path=openclaw_config_before_path,
+            after_path=openclaw_config_after_path,
+            packet_root=packet_root,
+        )
+        schema_version = EXTERNAL_CAS_SCHEMA_VERSION
+        service_transition = {
+            "kind": "preserve_exact", "mutation_count": 0,
+            "before": _artifact(service_config_before_path, packet_root),
+            "after_sha256": sha256_bytes(service_before_bytes),
+        }
+        boundaries = {
+            "configuration_mutations": 0, "service_config_mutations": 0,
+            "external_config_mutations": 1,
+            "live_mutation": False, "manifest_publication": False,
+            "service_lifecycle": False, "model_calls": False,
+        }
+    else:
+        _need(openclaw_config_before_path is None
+              and openclaw_config_after_path is None,
+              "0.2 cannot carry an external config transition")
+        delta_value, _ = _read_json(
+            service_delta_path, "planner service budget delta")
+        delta = _validated_service_delta(delta_value)
+        _need(delta["expected_before_sha256"] == sha256_bytes(service_before_bytes),
+              "planner service budget delta does not bind the service baseline")
+        service_after = _service_after(service_before, delta)
+        _need(sha256_bytes(_json_bytes(service_after)) == delta["expected_after_sha256"],
+              "planner service budget expected-after hash differs")
+        schema_version = PRESERVE_SCHEMA_VERSION
+        service_transition = {
+            "kind": "compare_and_patch", "mutation_count": 1,
+            "before": _artifact(service_config_before_path, packet_root),
+            "delta": _artifact(service_delta_path, packet_root),
+            "after_sha256": delta["expected_after_sha256"],
+        }
+        openclaw_transition = None
+        boundaries = {
+            "configuration_mutations": 0, "service_config_mutations": 1,
+            "live_mutation": False, "manifest_publication": False,
+            "service_lifecycle": False, "model_calls": False,
+        }
 
     body = {
-        "schema_version": PRESERVE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "transition_kind": "preserve_existing",
         "status": "prepared_inert",
         "release_ref": release_ref,
@@ -394,13 +508,7 @@ def build_preserve_existing_transition(
         },
         "targets": targets,
         "preserved_state_authorities": preserved_state_authorities,
-        "service_transition": {
-            "kind": "compare_and_patch",
-            "mutation_count": 1,
-            "before": _artifact(service_config_before_path, packet_root),
-            "delta": _artifact(service_delta_path, packet_root),
-            "after_sha256": delta["expected_after_sha256"],
-        },
+        "service_transition": service_transition,
         "supporting_evidence": {
             "baseline_model_snapshot": _artifact(baseline_models_path, packet_root),
             "model_config_files": model_artifacts,
@@ -412,12 +520,10 @@ def build_preserve_existing_transition(
             "connector_governance", "owner_metadata", "credentials",
             "signatures", "disabled_thesis_impact", "backup_keep_latest_3",
         ],
-        "boundaries": {
-            "configuration_mutations": 0, "service_config_mutations": 1,
-            "live_mutation": False, "manifest_publication": False,
-            "service_lifecycle": False, "model_calls": False,
-        },
+        "boundaries": boundaries,
     }
+    if openclaw_transition is not None:
+        body["external_config_transitions"] = [openclaw_transition]
     body["content_hash"] = canonical_hash(body)
     return body
 
@@ -451,13 +557,15 @@ def expected_transition_state(
         raise ConfigTransitionError("baseline model snapshot is invalid") from exc
     _need(isinstance(models, dict), "baseline model snapshot is invalid")
     version = manifest.get("schema_version")
-    _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION},
+    _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION,
+                      EXTERNAL_CAS_SCHEMA_VERSION},
           "transition schema version is unsupported")
     document = None
     lane = None
     for row in manifest.get("targets", []):
         artifact = (row.get("before") if isinstance(row, Mapping)
-                    and version == PRESERVE_SCHEMA_VERSION else row.get("after")
+                    and version in {PRESERVE_SCHEMA_VERSION,
+                                    EXTERNAL_CAS_SCHEMA_VERSION} else row.get("after")
                     if isinstance(row, Mapping) else None)
         if not isinstance(row, Mapping) or not isinstance(artifact, Mapping):
             raise ConfigTransitionError("transition target is invalid")
@@ -488,12 +596,29 @@ def expected_transition_state(
 def expected_service_transition_state(
     *, packet_root: Path, manifest: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return the exact semantic service before/after state for a 0.2 manifest."""
+    """Return the exact semantic service before/after state for 0.2 or 0.3."""
 
-    _need(manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION
+    version = manifest.get("schema_version")
+    _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION}
           and manifest.get("transition_kind") == "preserve_existing",
-          "service transition requires preserve-existing schema 0.2")
+          "service transition requires preserve-existing schema 0.2 or 0.3")
     row = manifest.get("service_transition")
+    if version == EXTERNAL_CAS_SCHEMA_VERSION:
+        _need(isinstance(row, Mapping)
+              and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
+              and row.get("kind") == "preserve_exact"
+              and row.get("mutation_count") == 0,
+              "preserved service transition shape differs")
+        _, before_bytes = _resolve_artifact(packet_root, row["before"])
+        try:
+            before = json.loads(before_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigTransitionError(
+                "preserved service transition artifact is invalid JSON") from exc
+        _need(isinstance(before, dict)
+              and row["after_sha256"] == sha256_bytes(before_bytes),
+              "preserved service transition hash differs")
+        return before, json.loads(json.dumps(before))
     _need(isinstance(row, Mapping)
           and set(row) == {"kind", "mutation_count", "before", "delta", "after_sha256"}
           and row.get("kind") == "compare_and_patch"
@@ -515,6 +640,42 @@ def expected_service_transition_state(
           and sha256_bytes(_json_bytes(after)) == row["after_sha256"],
           "service transition hashes differ")
     return before, after
+
+
+def expected_openclaw_frame_transition_state(
+    *, packet_root: Path, manifest: Mapping[str, Any],
+) -> tuple[bytes, bytes, dict[str, Any]]:
+    """Return exact OpenClaw before/after bytes and the closed 0.3 row."""
+
+    _need(manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION,
+          "OpenClaw frame transition requires schema 0.3")
+    rows = manifest.get("external_config_transitions")
+    _need(isinstance(rows, list) and len(rows) == 1
+          and isinstance(rows[0], Mapping),
+          "external config transition inventory differs")
+    row = dict(rows[0])
+    expected_keys = {
+        "name", "kind", "mutation_count", "target", "json_path",
+        "before_presence", "after_value", "before", "after",
+        "before_sha256", "after_sha256",
+    }
+    _need(set(row) == expected_keys
+          and row.get("name") == "openclaw_model_broker_max_frame"
+          and row.get("kind") == "compare_and_patch"
+          and row.get("mutation_count") == 1
+          and row.get("target") == "~/.openclaw/openclaw.json"
+          and row.get("json_path") == list(OPENCLAW_FRAME_PATH)
+          and row.get("after_value") == OPENCLAW_TARGET_MAX_FRAME_BYTES,
+          "OpenClaw frame transition shape differs")
+    before_path, before_bytes = _resolve_artifact(packet_root, row["before"])
+    after_path, after_bytes = _resolve_artifact(packet_root, row["after"])
+    validated = _validated_openclaw_frame_transition(
+        before_path=before_path, after_path=after_path, packet_root=packet_root)
+    _need(row == validated
+          and row["before_sha256"] == sha256_bytes(before_bytes)
+          and row["after_sha256"] == sha256_bytes(after_bytes),
+          "OpenClaw frame transition authority differs")
+    return before_bytes, after_bytes, row
 
 
 def verify_preserved_state_authorities(
