@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.bootstrap import apply_packaged_schemas
 from dalton_core.document_research import build_document_research_policy
 from dalton_core.document_research_inventory import load_document_inventory_authority
 from dalton_core.document_research_strategy import STRATEGY_VERSION
@@ -25,6 +26,7 @@ from dalton_core.mission_document_research_admission import (
 )
 from dalton_core.mission_document_research_launcher import MissionDocumentResearchLauncher
 from dalton_core.mission_document_research_lane import MissionDocumentResearchCoordinator
+from dalton_core.mission_document_research_runtime import MissionDocumentResearchRuntime
 from dalton_core.research_question_backlog import ResearchQuestionBacklog
 from dalton_core.research_verification import CandidateStagingStore
 from dalton_core.store import canonical_json, content_hash
@@ -35,10 +37,11 @@ from tests.test_openclaw_model_adapter import (
 
 
 class MissionDocumentResearchProductionTests(unittest.TestCase):
-    def _public_fixture(self):
+    def _public_fixture(self, *, auto_commit=False):
         fixture = MissionAnnualFixture(
             self, company_in_mandate=True,
             additional_connected_source="source:public-web",
+            auto_commit=auto_commit,
         )
         public_record = "mission-discovered-document:public-runtime-test"
         coverage = CoverageMissionAuthority(fixture.store)
@@ -346,6 +349,149 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             "fresh_work_recovery_disabled",
         )
         self.assertEqual(broker.requests, [])
+
+    def test_crash_after_staged_outcome_reenters_only_for_canonical_promotion(self):
+        fixture = self._public_fixture(auto_commit=True)
+        statement = (
+            "The company serves varied customers and depends on outsourcing partners."
+        )
+        replies = iter((
+            (fixture.draft_profile, canonical_json({
+                "schema_version": "0.1", "status": "answered", "answer": statement,
+                "candidate": {
+                    "normalized_statement": statement,
+                    "metric_or_aspect": "customer and operating dependencies",
+                    "period": "FY2025 annual report", "basis": "reported",
+                    "cited_match_indexes": [0],
+                }, "missing": [],
+            })),
+            (fixture.verifier_profile, canonical_json({
+                "schema_version": "0.1", "verdict": "pass",
+                "verified_statement": statement, "findings": [],
+            })),
+        ))
+
+        def respond(request):
+            semantic = dict(request)
+            semantic.pop("queueWaitMs", None)
+            profile, text = next(replies)
+            response = success_response(semantic, text=text)
+            response.pop("contentHash")
+            response["provider"] = profile["provider"]
+            response["model"] = profile["model"]
+            response["canonicalModel"] = f"{profile['provider']}/{profile['model']}"
+            return seal(response)
+
+        broker = FakeBroker(fixture.state, respond, connections=2)
+        self.addCleanup(broker.close)
+        document_config = self._install_runtime_authorities(fixture, broker)
+        admission = self._admit(fixture, document_config)
+        applied = apply_packaged_schemas(fixture.state)
+        self.assertGreater(applied["schemas_applied"], 0)
+        staging_path = fixture.state / "mission-document-promotion-crash.sqlite"
+        CandidateStagingStore(staging_path).close()
+        runtime_kwargs = {
+            "state_dir": fixture.state,
+            "staging_path": staging_path,
+            "planner_scheduler_db": fixture.state / "core.sqlite",
+            "planner_model_config_path": (
+                fixture.state / "registered-annual-report-draft-model-config.json"
+            ),
+            "document_config_path": document_config,
+            "admission_ref": admission["id"],
+            "expected_admission_hash": admission["content_hash"],
+        }
+        with MissionDocumentResearchRuntime(**runtime_kwargs) as runtime:
+            def crash(seam):
+                if seam == "after_candidate_outcome":
+                    raise RuntimeError("test crash after candidate outcome")
+
+            runtime.executor.fault_injector = crash
+            with self.assertRaisesRegex(RuntimeError, "after candidate outcome"):
+                for _ in range(runtime.transition_budget(runtime.admission)):
+                    outcome = runtime.executor.run_once(admission["id"])
+                    if outcome.get("status") in {"retryable", "pending", "waiting"}:
+                        self.assertTrue(runtime.wait_until_claimable(
+                            outcome["work_order_ref"]
+                        ))
+
+        core = fixture.store.connection
+        self.assertEqual(core.execute(
+            "SELECT COUNT(*) FROM mission_document_research_outcomes"
+        ).fetchone()[0], 1)
+        self.assertEqual(core.execute(
+            "SELECT COUNT(*) FROM mission_document_research_promotions"
+        ).fetchone()[0], 0)
+        model_calls = len(broker.requests)
+        with sqlite3.connect(fixture.state / "budget.sqlite") as budget:
+            budget_admissions = budget.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_admissions WHERE "
+                "work_order_ref LIKE 'work:mission-document-%'"
+            ).fetchone()[0]
+
+        launcher = MissionDocumentResearchLauncher(
+            state_dir=fixture.state, staging_path=staging_path,
+            planner_scheduler_db=fixture.state / "core.sqlite",
+            planner_model_config_path=(
+                fixture.state / "registered-annual-report-draft-model-config.json"
+            ),
+            document_config_path=document_config, python_executable=sys.executable,
+        )
+        self.addCleanup(launcher.close)
+        original_command = launcher._command
+        launcher._command = lambda **_kwargs: [
+            sys.executable, "-c", "raise SystemExit(1)"
+        ]
+        prior = launcher.start(
+            admission_ref=admission["id"], admission_hash=admission["content_hash"]
+        )
+        self.assertEqual(launcher.wait(timeout=60), 1)
+        summary_body = {
+            "schema_version": "0.1",
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "status": "incomplete", "outcomes": [],
+            "error": "simulated process loss after durable outcome",
+        }
+        launcher._ticket_path(prior["id"]).with_name("summary.json").write_text(
+            canonical_json({
+                **summary_body, "content_hash": content_hash(summary_body),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        launcher._command = original_command
+        coordinator = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=launcher,
+        )
+        pointer = {
+            "ticket_ref": prior["id"], "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        coordinator.latest_path.write_text(
+            canonical_json({**pointer, "content_hash": content_hash(pointer)}) + "\n",
+            encoding="utf-8",
+        )
+        python_path = os.pathsep.join((
+            str(Path(__file__).parents[1] / "src"), str(Path(__file__).parents[1]),
+        ))
+        with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
+            resumed = coordinator.dispatch_once()
+            self.assertEqual(resumed["status"], "resumed", resumed)
+            self.assertEqual(launcher.wait(timeout=60), 0)
+        self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        self.assertEqual(len(broker.requests), model_calls)
+        with sqlite3.connect(fixture.state / "budget.sqlite") as budget:
+            self.assertEqual(budget.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_admissions WHERE "
+                "work_order_ref LIKE 'work:mission-document-%'"
+            ).fetchone()[0], budget_admissions)
+        promotion = json.loads(core.execute(
+            "SELECT record_json FROM mission_document_research_promotions "
+            "WHERE admission_ref=?", (admission["id"],)
+        ).fetchone()[0])
+        self.assertEqual(promotion["research_status"], "canonical_claim_promoted")
+        self.assertIsNotNone(fixture.store.get_claim(promotion["claim_version_ref"]))
 
     def test_real_busy_wait_reenters_with_fresh_work_and_finishes(self):
         fixture = self._public_fixture()

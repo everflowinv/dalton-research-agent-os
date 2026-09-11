@@ -178,14 +178,35 @@ class MissionDocumentResearchCoordinator:
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='mission_document_research_outcomes'"
             ).fetchone() is not None
+            from .research_auto_commit import policy_lists_document_rule
+
+            promotion_required = policy_lists_document_rule(
+                self.store.active_policy()
+            )
+            has_promotions = self.store.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='mission_document_research_promotions'"
+            ).fetchone() is not None
+            if promotion_required and has_outcomes and not has_promotions:
+                raise MissionDocumentResearchLaneError(
+                    "document research promotion authority is unavailable"
+                )
+            joins = where = ""
+            if has_outcomes:
+                joins = (
+                    "LEFT JOIN mission_document_research_outcomes o "
+                    "ON o.admission_ref=a.admission_id "
+                )
+                where = "WHERE o.outcome_id IS NULL "
+                if promotion_required:
+                    joins += (
+                        "LEFT JOIN mission_document_research_promotions p "
+                        "ON p.admission_ref=a.admission_id "
+                    )
+                    where = "WHERE o.outcome_id IS NULL OR p.promotion_id IS NULL "
             query = (
                 "SELECT a.* FROM mission_document_research_admissions a "
-                + (
-                    "LEFT JOIN mission_document_research_outcomes o "
-                    "ON o.admission_ref=a.admission_id WHERE o.outcome_id IS NULL "
-                    if has_outcomes else ""
-                )
-                + "ORDER BY a.created_at,a.admission_id"
+                + joins + where + "ORDER BY a.created_at,a.admission_id"
             )
             rows = self.store.connection.execute(query).fetchall()
         except sqlite3.OperationalError as exc:
@@ -669,7 +690,7 @@ class MissionDocumentResearchCoordinator:
                         )
                         settled["recovery"] = {
                             "action": "recovery_required",
-                            "reason": "controlled_reentry_unavailable",
+                            "reason": "controlled_reentry_unavailable:" + str(exc),
                         }
                         recovery = settled["recovery"]
                     else:

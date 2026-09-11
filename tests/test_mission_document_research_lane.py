@@ -24,6 +24,7 @@ from dalton_core.store import canonical_json, content_hash
 
 class _Store:
     def __init__(self) -> None:
+        self.auto_commit = False
         self.connection = sqlite3.connect(":memory:")
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(
@@ -45,6 +46,20 @@ class _Store:
             """
         )
 
+    def active_policy(self) -> dict:
+        return {
+            "policy": {
+                "research_candidate_auto_commit": {
+                    "enabled": self.auto_commit,
+                    "rules": (
+                        ["research-auto-commit:mission-document-qualitative:v1"]
+                        if self.auto_commit else []
+                    ),
+                    "max_records": 10,
+                }
+            }
+        }
+
     def add(self, ordinal: int) -> dict:
         body = {
             "schema_version": "0.1",
@@ -64,6 +79,14 @@ class _Store:
         self.connection.execute(
             "INSERT INTO mission_document_research_starts VALUES(?,?)",
             ("start:" + content_hash(admission_ref)[:24], admission_ref),
+        )
+        self.connection.commit()
+
+    def completed(self, admission_ref: str) -> None:
+        self.connection.execute(
+            "INSERT INTO mission_document_research_outcomes VALUES(?,?)",
+            ("mission-document-research-outcome:" + content_hash(admission_ref)[:24],
+             admission_ref),
         )
         self.connection.commit()
 
@@ -211,6 +234,31 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
             holds["holds"][first["id"]]["reason"],
             "started_without_owned_live_ticket",
         )
+
+    def test_staged_outcome_is_pending_only_when_policy_requires_promotion(self) -> None:
+        admission = self.store.add(1)
+        self.store.completed(admission["id"])
+        self.assertEqual(self.lane._admissions(), [])
+
+        self.store.auto_commit = True
+        with self.assertRaisesRegex(
+            MissionDocumentResearchLaneError, "promotion authority is unavailable"
+        ):
+            self.lane._admissions()
+        self.store.connection.execute(
+            "CREATE TABLE mission_document_research_promotions("
+            "promotion_id TEXT PRIMARY KEY,admission_ref TEXT NOT NULL UNIQUE)"
+        )
+        self.assertEqual(
+            [item["id"] for item in self.lane._admissions()], [admission["id"]]
+        )
+        self.store.connection.execute(
+            "INSERT INTO mission_document_research_promotions VALUES(?,?)",
+            ("mission-document-research-promotion:" + content_hash(admission["id"])[:24],
+             admission["id"]),
+        )
+        self.store.connection.commit()
+        self.assertEqual(self.lane._admissions(), [])
 
     def test_tampered_latest_and_hold_authority_fail_closed(self) -> None:
         admission = self.store.add(1)
