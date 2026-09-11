@@ -395,7 +395,7 @@ def run_extraction(
                         # "cannot be read at all". The second kind never
                         # completes, so it never resolves, so it holds the
                         # queue open forever without anyone being told.
-                        if _permanently_unreadable(reason):
+                        if _permanently_unreadable(reason, offset=offset):
                             unreadable = {
                                 "review_id": review["review_id"], "company_ref": review["company_ref"],
                                 "source_ref": review["source_ref"], "document_ref": review["document_ref"],
@@ -578,29 +578,34 @@ def run_extraction(
 
 
 # The refusals that will still refuse tomorrow.  Every one of them is about
-# the bytes themselves -- an encrypted PDF stays encrypted, a page that is not
-# UTF-8 will not become UTF-8, an acquisition whose ticket is gone is not
-# coming back -- so retrying is not patience, it is a loop.  Anything else is
-# assumed transient and keeps its retry.
+# the bytes themselves -- an encrypted PDF stays encrypted and a page that is
+# not UTF-8 will not become UTF-8 -- so retrying is not patience, it is a loop.
+# Ticket lookup failures are deliberately absent: a producer may publish a
+# completed ticket later.  Anything else is assumed transient and keeps its
+# retry.
 _PERMANENT_UNREADABLE = (
     "is not valid UTF-8",
     "is encrypted and is not rendered",
     "requires a password and is not rendered",
     "gzip content is incomplete or invalid",
-    "no completed acquisition ticket",
-    "no completed fetch ticket",
-    # S5: a rendering that came back empty.  Offset zero is the only offset a
-    # first read uses, and it is refused when the text has no characters at
-    # all, so this is "the document rendered to nothing", not "the caller
-    # asked for a silly window".
-    "source offset must be a valid bounded window",
 )
 
 
-def _permanently_unreadable(reason: str) -> bool:
+def _permanently_unreadable(reason: str, *, offset: int | None = None) -> bool:
     """Whether this refusal is about the bytes rather than about the moment."""
 
-    return any(marker in reason for marker in _PERMANENT_UNREADABLE)
+    if any(marker in reason for marker in _PERMANENT_UNREADABLE):
+        return True
+    # ``view`` rejects this one sentence for three different conditions.  At
+    # the initial offset, zero is already an aligned non-negative integer, so
+    # the only possible condition is ``offset >= len(rendered_text)``: the
+    # exact rendering is empty.  At later offsets the same sentence may mean a
+    # caller/window mismatch and is recoverable rather than evidence that the
+    # original is unreadable.
+    return (
+        offset == 0
+        and "source offset must be a valid bounded window" in reason
+    )
 
 
 def _record_provenance(host: ExtractionHost) -> dict[str, Any]:

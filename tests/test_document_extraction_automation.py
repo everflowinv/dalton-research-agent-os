@@ -154,7 +154,7 @@ class AutomationDraftingTests(unittest.TestCase):
         self.assertEqual(refused["summary"]["drafted"], [])
         self.assertIn("CoverageMissionConflict", refused["summary"]["skipped"][0]["reason"])
 
-    def test_durably_unreadable_original_is_parked_without_a_read_or_claim(self) -> None:
+    def test_empty_offset_zero_rendering_is_parked_without_a_read_or_claim(self) -> None:
         mission = self._grant_automation()
         review = next(r for r in self.h.missions.document_reviews(mission["id"])
                       if r["state"] == "awaiting_human_extraction")
@@ -214,6 +214,49 @@ class AutomationDraftingTests(unittest.TestCase):
         )
         self.assertEqual((again["reviews_scanned"], again["reviews_complete"],
                           again["admitted"], again["status"]), (0, 0, [], "succeeded"))
+
+    def test_missing_ticket_stays_open_and_a_future_read_progresses(self) -> None:
+        mission = self._grant_automation()
+        review = next(r for r in self.h.missions.document_reviews(mission["id"])
+                      if r["state"] == "awaiting_human_extraction")
+        fixture = self.root / "unused-missing-ticket.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        with patch.object(
+            DocumentExtractionService,
+            "view",
+            side_effect=RuntimeError(
+                "no completed acquisition ticket for this document"
+            ),
+        ):
+            failed = run_extraction(
+                state_dir=self.root, model_config_path=self._model_config(),
+                summary_dir=self.root / "missing-ticket-summary",
+                spool_dir=self.root / "spool", scheduler_db=self.root / "scheduler.sqlite",
+                requested_by=None, max_windows=2, max_numeric_windows=0,
+                max_discovery_windows=0, connector_governance=None,
+                web_fetch_governance=None, hermetic_fixture=fixture,
+            )
+        self.assertEqual(failed["stop_reason"], "all_document_views_failed")
+        self.assertEqual(failed["unreadable_reviews"], [])
+        self.assertEqual(
+            self.h.missions.document_review(review["review_id"])["state"],
+            "awaiting_human_extraction",
+        )
+
+        # Once the already-bound producer ticket is readable, the same open
+        # review proceeds normally rather than having been irreversibly
+        # dismissed by the earlier lookup race.
+        recovered = run_extraction(
+            state_dir=self.root, model_config_path=self._model_config(),
+            summary_dir=self.root / "future-ticket-summary",
+            spool_dir=self.root / "spool", scheduler_db=self.root / "scheduler.sqlite",
+            requested_by=None, max_windows=2, max_numeric_windows=0,
+            max_discovery_windows=0, connector_governance=None,
+            web_fetch_governance=None, hermetic_fixture=fixture,
+        )
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertEqual(recovered["reviews_complete"], 1)
+        self.assertTrue(recovered["drafted"])
 
 
 class AutomationAdmissionTests(AutomationDraftingTests):
@@ -430,10 +473,15 @@ class OutputContractTests(unittest.TestCase):
 
         for reason in (
             "PublicWebSourceError: fetched page is not valid UTF-8; it is not rendered",
-            "ResearchVerificationError: source offset must be a valid bounded window",
-            "FetchLaunchRejected: no completed acquisition ticket for this document",
         ):
             self.assertTrue(_permanently_unreadable(reason), reason)
+        offset_reason = "ResearchVerificationError: source offset must be a valid bounded window"
+        self.assertTrue(_permanently_unreadable(offset_reason, offset=0))
+        self.assertFalse(_permanently_unreadable(offset_reason, offset=12000))
+        self.assertFalse(_permanently_unreadable(
+            "FetchLaunchRejected: no completed acquisition ticket for this document",
+            offset=0,
+        ))
         # A failed fetch directory may be repaired or superseded.  It is held
         # by the coordinator, then retried; it is never silently dismissed.
         self.assertFalse(_permanently_unreadable(
