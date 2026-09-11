@@ -2,7 +2,17 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-11，02:46 UTC）
+## 当前检查点（2026-09-11，02:59 UTC）
+
+**R7 / R7a 全量各有 8 failures、5 errors，均未部署；live 仍是 R6，稳定性修复等待完整验收。** R7 6,864 项、R7a 6,865 项，均 1 skip；失败主要是 WAL 最后一个临时 owner 关闭后缺少 sidecars，ModelSelection/Cockpit 严格只读消费者被拒绝。独立代码与运行审查确认生产 writer 也只有逐请求 ModelRouter，故这是实际生命周期缺口，不能只调整测试夹具。正在让 writer 在 store executor 线程持续持有明确配置的全部现存 router，脱离 planner/scheduler 开关，并覆盖启动失败和关闭清理。
+
+其余两项失败是旧测试仍要求 rubric 未通过的 Dossier 返回 `published`；已改为 `partial_published`，明确断言 rubric 未过，保留原 input freshness 与内容顺序/旧版本 hash 检查，26 项通过。R7a wheel 与 67 schemas / 40 entries / 0 escaped 演练已通过，但它们不能覆盖失败的完整测试，接受标记不变。
+
+只读 Dossier 验收器 v4 已通过 12 项私有测试，包含真实 0.2 legacy partial → 0.3 新单元、正文相同的新 proof、临时 WAL owner 生命周期，以及冷 WAL 源不得创建 sidecars。当前基线无 0.3，明确 pending。另检测到非 Dalton 的 OpenClaw heartbeat target 配置增加，记录新完整配置 hash 为保留基线；模型路由和 broker 并发仍保持，另一会话 main 的四份 DeepSeek diff 完全未变。
+
+**Next step：** 完成 writer 生命周期独立复核、合并并重跑这 13 项及关联测试，再冻结 R7b 全量/wheel/演练；全部通过才部署。高阶投资方法、最终视觉和其余扩展继续后排。
+
+## 前一检查点（2026-09-11，02:46 UTC）
 
 **R7 副本演练明确失败，未部署；演练边界修复后重新冻结 R7a。** 原冻结 `0f88f9c` 的 wheel 556 个运行文件/完整文件集及 3 处 JS 通过；真实状态副本的额外 verifier 检查在 writable catalog sync 结束后打开严格只读 WAL 库，因 SQLite 已移除空 sidecars 而正确拒绝。失败报告和绑定完整保留，不记作通过。真实 installer 的 catalog sync 使用 owned writable connection，不受这个额外检查缺口影响。
 
