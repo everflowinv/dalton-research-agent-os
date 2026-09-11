@@ -6,9 +6,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from .store import canonical_json, content_hash
+from .alphaengine_core_search import SEARCH_MAX_RECORDS
 
 CONTRACT_REF = "discovery-candidate-selection-contract:0.1"
-_TEXT_FIELDS = ("title", "snippet", "date", "document_type", "company")
+_TEXT_FIELDS = ("title", "publish_time", "rank_date", "document_code", "type_id")
+_LIST_FIELDS = ("companies", "industries", "markets", "sources")
 
 
 class CandidateSelectionError(ValueError):
@@ -18,6 +20,10 @@ class CandidateSelectionError(ValueError):
 def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str, Any]:
     """Project only bounded search metadata from exact raw JSON-RPC bytes."""
     import hashlib
+    envelope_wire = dict(envelope)
+    claimed_envelope_hash = envelope_wire.pop("content_hash", None)
+    if claimed_envelope_hash != content_hash(envelope_wire):
+        raise CandidateSelectionError("candidate source envelope hash drifted")
     if hashlib.sha256(raw_response).hexdigest() != envelope.get("raw_response_hash"):
         raise CandidateSelectionError("candidate raw response hash drifted")
     try:
@@ -29,7 +35,7 @@ def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str
         results = payload["results"]
     except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateSelectionError("candidate raw response is invalid") from exc
-    if not isinstance(results, list) or len(results) > 20:
+    if not isinstance(results, list) or len(results) > SEARCH_MAX_RECORDS:
         raise CandidateSelectionError("candidate results are invalid")
     expected = list(envelope.get("source_record_refs") or ())
     candidates = []
@@ -43,15 +49,23 @@ def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str
         for field in _TEXT_FIELDS:
             value = raw.get(field)
             if value is not None:
-                if not isinstance(value, str) or len(value) > (800 if field == "snippet" else 240):
+                if not isinstance(value, str):
                     raise CandidateSelectionError(f"candidate {field} is invalid")
-                item[field] = value
-        tags = raw.get("tags")
-        if tags is not None:
-            if (not isinstance(tags, list) or len(tags) > 20
-                    or not all(isinstance(x, str) and len(x) <= 80 for x in tags)):
-                raise CandidateSelectionError("candidate tags are invalid")
-            item["tags"] = tags
+                item[field] = value[:240]
+        snippet = raw.get("snippet")
+        if snippet is not None:
+            if not isinstance(snippet, str):
+                raise CandidateSelectionError("candidate snippet is invalid")
+            item["snippet"] = snippet[:800]
+            item["snippet_truncated"] = len(snippet) > 800
+            item["snippet_hash"] = hashlib.sha256(snippet.encode()).hexdigest()
+        for field in _LIST_FIELDS:
+            values = raw.get(field)
+            if values is not None:
+                if (not isinstance(values, list) or len(values) > 20
+                        or not all(isinstance(x, str) for x in values)):
+                    raise CandidateSelectionError(f"candidate {field} is invalid")
+                item[field] = [x[:120] for x in values]
         candidates.append(item)
     if len(candidates) != len(expected):
         raise CandidateSelectionError("candidate count differs from source authority")
@@ -61,12 +75,19 @@ def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str
     return {**base, "content_hash": content_hash(base)}
 
 
-def selection_prompt(view: Mapping[str, Any], *, company_ref: str,
+def selection_prompt(view: Mapping[str, Any], *, company: Mapping[str, Any],
                      missing_periods: list[str]) -> str:
+    if (not isinstance(company, Mapping)
+            or not all(isinstance(company.get(key), str) and company[key]
+                       for key in ("company_ref", "name", "ticker"))
+            or set(company) != {"company_ref", "name", "ticker", "aliases"}
+            or not isinstance(company["aliases"], list)
+            or not all(isinstance(x, str) and x for x in company["aliases"])):
+        raise CandidateSelectionError("company selection identity is invalid")
     return ("Select only documents likely to be quarterly earnings-call transcripts for the "
             "specified company and missing periods. Tags are hints, not authority. Do not select "
             "another issuer. Return strict JSON {selected:[{document_ref,reason}]}.\nINPUT="
-            + canonical_json({"company_ref": company_ref, "missing_periods": missing_periods,
+            + canonical_json({"company": dict(company), "missing_periods": missing_periods,
                               "candidate_view": dict(view)}))
 
 

@@ -12,28 +12,29 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
     def fixture(self):
         results = [
             {"doc_id": "other", "title": "International Foods quarterly call",
-             "snippet": "Results for another issuer", "date": "2026-07-20",
-             "document_type": "meeting_minutes", "company": "International Foods",
-             "tags": ["quarterly"]},
+             "snippet": "Results for another issuer", "publish_time": "2026-07-20 00:00:00",
+             "document_code": "summary", "companies": ["International Foods"]},
             {"doc_id": "ibm-q2", "title": "IBM Q2 2026 Earnings Call Transcript",
              "snippet": "International Business Machines management discussion",
-             "date": "2026-07-23", "document_type": "meeting_minutes",
-             "company": "International Business Machines", "tags": ["IBM", "earnings"]},
+             "publish_time": "2026-07-23 00:00:00", "document_code": "summary",
+             "companies": ["International Business Machines"]},
         ]
         payload = {"results": results, "cursor": None, "has_more": False, "total": 2}
         raw = canonical_json({"jsonrpc": "2.0", "id": "archived", "result": {
             "content": [{"type": "text", "text": canonical_json(payload)}]}}).encode()
-        base = {"id": "source-envelope:ibm", "content_hash": "a" * 64,
+        base = {"id": "source-envelope:ibm",
                 "raw_response_hash": hashlib.sha256(raw).hexdigest(),
                 "source_record_refs": ["alphaengine-doc:other", "alphaengine-doc:ibm-q2"]}
-        return raw, base
+        return raw, {**base, "content_hash": content_hash(base)}
 
     def test_archived_ibm_shape_projects_bounded_metadata_and_selects_only_ibm(self):
         raw, envelope = self.fixture()
         view = candidate_view(raw, envelope)
         self.assertEqual([x["document_ref"] for x in view["candidates"]],
                          ["alphaengine-doc:other", "alphaengine-doc:ibm-q2"])
-        prompt = selection_prompt(view, company_ref="company:sec-cik:0000051143",
+        prompt = selection_prompt(view, company={"company_ref": "company:sec-cik:0000051143",
+                                  "name": "International Business Machines", "ticker": "IBM",
+                                  "aliases": ["IBM"]},
                                   missing_periods=["2026-Q2"])
         self.assertIn("Tags are hints, not authority", prompt)
         selected = validate_selection(json.dumps({"selected": [{
@@ -61,6 +62,8 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
         rpc["result"]["content"][0]["text"] = canonical_json(payload)
         raw = canonical_json(rpc).encode()
         envelope["raw_response_hash"] = hashlib.sha256(raw).hexdigest()
+        envelope["content_hash"] = content_hash({k: v for k, v in envelope.items()
+                                                  if k != "content_hash"})
         view = candidate_view(raw, envelope)
         self.assertNotIn("private_provider_field", canonical_json(view))
 
