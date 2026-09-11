@@ -31,7 +31,7 @@ from .mission_annual_research_executor import MissionAnnualResearchExecutor
 from .model_router import ModelRouter
 from .observability import ObservabilityStore
 from .public_web_fetch_launcher import PublicWebFetchLauncher
-from .raw_spool import RawSpool
+from .raw_spool import RawSpoolReader
 from .registered_annual_report import RegisteredAnnualReportRegistry
 from .research_verification import CandidateStagingStore
 from .scheduler import Scheduler
@@ -103,10 +103,7 @@ class MissionAnnualResearchRuntime:
                 **scheduler_policy((draft_execution, verifier_execution)),
             )
             scheduler.clock = self.clock
-            spool = RawSpool(
-                str(Path(spool_dir).expanduser().resolve()),
-                max_total_bytes=1_000_000_000,
-            )
+            spool = RawSpoolReader(str(Path(spool_dir).expanduser().resolve()))
             registry = RegisteredAnnualReportRegistry(
                 core=self.store,
                 spool=spool,
