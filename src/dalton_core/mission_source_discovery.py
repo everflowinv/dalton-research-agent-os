@@ -1519,13 +1519,7 @@ class MissionSourceDiscoveryCoordinator:
     def _reserved_calls(self) -> int:
         """Children launched but not yet settled may not have recorded their call yet."""
 
-        open_dispatches = len(self.missions.open_discovery_dispatches(
-            limit=100, source_ref=self.source_ref,
-        ))
-        open_documents = len(self.missions.launched_discovered_documents(
-            limit=100, source_ref=self.source_ref,
-        ))
-        return open_dispatches + open_documents
+        return self.missions.count_pending_source_calls(self.source_ref)
 
     def _budget(self, mission_cap: int) -> dict[str, int]:
         """Remaining trailing-24h calls for this plan's source.

@@ -581,6 +581,29 @@ class CoordinatorTests(unittest.TestCase):
         ref = params.pop("mission_ref")
         return self.missions.create_mission(ref, **params)
 
+    def test_source_budget_counts_pending_calls_beyond_listing_limit(self):
+        mission = self.mission_v2(self.create_mission(), cap=500)
+        self.coordinator.owner_call_cap = 500
+        authorization = self.missions.authorize_source_discovery(
+            company_ref=ACN, source_ref="source:alphaengine", requested_by=AUTOMATION,
+        )
+        dispatches = [self.missions.record_discovery_dispatch(
+            authorization=authorization, discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"], spec_ref="earnings-call-transcripts",
+            query_hash=f"{index:064x}", ticket_ref=f"alphaengine-discovery:{index:024x}",
+        ) for index in range(105)]
+        # A bounded listing remains useful for settlement/UI; it cannot serve
+        # as a budget counter when concurrency and budgets are configurable.
+        self.assertEqual(len(self.missions.open_discovery_dispatches(limit=100)), 100)
+        budget = self.coordinator._budget(mission["budget"]["max_alphaengine_calls_24h"])
+        self.assertEqual(budget["reserved"], 105)
+        self.assertEqual(budget["remaining"], 395)
+        self.assertEqual(self.missions.count_pending_source_calls("source:web-search"), 0)
+        self.missions.settle_discovery_dispatch(
+            dispatches[0]["dispatch_id"], status="failed", reason="child completed without a call",
+        )
+        self.assertEqual(self.coordinator._reserved_calls(), 104)
+
     def test_no_mission_then_v1_skip_then_v2_full_cycle(self) -> None:
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["status"], "no_active_mission")

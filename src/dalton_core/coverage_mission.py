@@ -1720,6 +1720,23 @@ class CoverageMissionAuthority:
             "updated_at": row["updated_at"],
         }
 
+    def count_pending_source_calls(self, source_ref: str) -> int:
+        """Count every unsettled source call, independently of UI page limits.
+
+        Include superseded missions: their already-launched children can still
+        consume the same source's rolling budget. One SQL statement observes
+        dispatches and acquisitions in the same SQLite snapshot.
+        """
+        source_ref = _text(source_ref, "source_ref")
+        row = self.connection.execute(
+            "SELECT (SELECT COUNT(*) FROM coverage_mission_discovery_dispatches "
+            "WHERE status='launched' AND source_ref=?) + "
+            "(SELECT COUNT(*) FROM coverage_mission_discovered_documents "
+            "WHERE status='acquisition_launched' AND source_ref=?)",
+            (source_ref, source_ref),
+        ).fetchone()
+        return int(row[0])
+
     def open_discovery_dispatches(
         self, *, limit: int = 20, source_ref: str | None = None
     ) -> list[dict[str, Any]]:
