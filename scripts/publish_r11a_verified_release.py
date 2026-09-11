@@ -28,7 +28,8 @@ def load_module(path: Path):
     return module
 
 
-def publish(packet: Path, owner: Path, expected_manifest: str) -> dict:
+def publish(packet: Path, owner: Path, expected_manifest: str,
+            host_transition: Path | None = None, expected_transition: str | None = None) -> dict:
     manifest_path = packet / "release-manifest.candidate.json"
     if sha(manifest_path) != expected_manifest:
         raise ValueError("reviewed manifest changed")
@@ -58,6 +59,32 @@ fi
     execute = load_module(packet / "execute_r11a_stopped_window_candidate.py")
     final = load_module(packet / "finalize_r11a_health_candidate.py")
     manifest, artifacts = execute.packet_preflight(packet)
+    effective_artifacts = dict(artifacts)
+    transition = None
+    if host_transition is not None:
+        if not expected_transition or sha(host_transition) != expected_transition:
+            raise ValueError("reviewed host transition hash differs")
+        transition = json.loads(host_transition.read_text())
+        if transition.get("schema_version") != "r11a-host-skill-transition-0.1":
+            raise ValueError("unsupported host transition review")
+        before = artifacts["openclaw_config_snapshot"]
+        for field in ("config_file", "plugin_snapshot_file"):
+            if Path(transition[field]).name != transition[field]:
+                raise ValueError("host transition path is not packet-relative")
+        after = host_transition.parent / transition["config_file"]
+        plugin = host_transition.parent / transition["plugin_snapshot_file"]
+        if sha(before) != transition["before_sha256"] or sha(after) != transition["after_sha256"] \
+                or sha(plugin) != transition["plugin_snapshot_sha256"]:
+            raise ValueError("host transition bytes differ")
+        a, b = json.loads(before.read_text()), json.loads(after.read_text())
+        if {k: v for k, v in a.items() if k != "skills"} != {k: v for k, v in b.items() if k != "skills"}:
+            raise ValueError("host transition changes non-skill configuration")
+        old_plugin = json.loads(artifacts["provider_plugin_snapshot"].read_text())
+        new_plugin = json.loads(plugin.read_text())
+        if {k: v for k, v in old_plugin.items() if k != "openclaw_config_sha256"} != \
+                {k: v for k, v in new_plugin.items() if k != "openclaw_config_sha256"}:
+            raise ValueError("host transition changes provider plugin authority")
+        effective_artifacts.update(openclaw_config_snapshot=after, provider_plugin_snapshot=plugin)
     deployment_path = packet / "r11a-deploy-receipt.json"
     deployment = json.loads(deployment_path.read_text())
     rollback = Path(deployment["fresh_rollback_snapshot"]["path"])
@@ -75,7 +102,7 @@ fi
             orchestrator = execute.Orchestrator(packet, log)
             orchestrator.rollback_root = rollback
             orchestrator.initially_loaded = initial["loaded"]
-            live = orchestrator.verify_installed(artifacts)
+            live = orchestrator.verify_installed(effective_artifacts)
         if sha(manifest_path) != expected_manifest or sha(legacy) != legacy_hash:
             raise ValueError("release authority changed during publication checks")
         if old_launcher.read_bytes() != launcher_before:
@@ -101,6 +128,8 @@ fi
             "historical_launcher_before_sha256": launcher_hash,
             "historical_launcher_after_sha256": hashlib.sha256(launcher_after).hexdigest(),
             "publisher_sha256": sha(Path(__file__)),
+            "post_install_host_transition": transition,
+            "post_install_host_transition_sha256": expected_transition,
         }
         # Publish complete bytes atomically, without replacing a concurrent pointer.
         pointer_draft = check / "current-release.json"
@@ -131,6 +160,9 @@ if __name__ == "__main__":
     parser.add_argument("--packet", type=Path, required=True)
     parser.add_argument("--owner-packet", type=Path, required=True)
     parser.add_argument("--expected-manifest-sha256", required=True)
+    parser.add_argument("--host-transition-review", type=Path)
+    parser.add_argument("--expected-host-transition-sha256")
     args = parser.parse_args()
-    result = publish(args.packet.resolve(), args.owner_packet.resolve(), args.expected_manifest_sha256)
+    result = publish(args.packet.resolve(), args.owner_packet.resolve(), args.expected_manifest_sha256,
+                     args.host_transition_review, args.expected_host_transition_sha256)
     print(json.dumps({"status": result["status"], "source_commit": result["source_commit"]}))
