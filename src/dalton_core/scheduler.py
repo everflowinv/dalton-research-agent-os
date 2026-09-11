@@ -545,11 +545,18 @@ class Scheduler:
         return {"expired": expired, "next": next_event}
 
     def _expire_due(self, cur: sqlite3.Cursor, now_dt: datetime, now: str) -> list[dict[str, Any]]:
+        # Start with the small set of leased events and use the existing
+        # (work_order_id, event_seq) index to rule out historical leases.  The
+        # former GROUP BY materialized the latest event for every WorkOrder
+        # while holding BEGIN IMMEDIATE, serializing otherwise independent
+        # child completions as the authority grew.
         current_leased = cur.execute(
             "SELECT e.* FROM scheduler_attempt_events e "
-            "JOIN (SELECT work_order_id, MAX(event_seq) AS max_seq "
-            "      FROM scheduler_attempt_events GROUP BY work_order_id) current "
-            "ON current.max_seq=e.event_seq WHERE e.state='leased' "
+            "WHERE e.state='leased' AND NOT EXISTS ("
+            "  SELECT 1 FROM scheduler_attempt_events newer "
+            "  WHERE newer.work_order_id=e.work_order_id "
+            "  AND newer.event_seq>e.event_seq"
+            ") "
             "ORDER BY e.event_seq"
         ).fetchall()
         expired: list[dict[str, Any]] = []

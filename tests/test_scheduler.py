@@ -455,6 +455,21 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(limited.status("work-1")["state"], "failed")
         self.assertIsNone(limited.formal_result("work-1"))
 
+    def test_sweep_ignores_historical_leases_and_expires_only_current_ones(self):
+        first = self.enqueue_claim("work-1")
+        self.scheduler.complete(
+            "work-1", 1, "worker:a", first["lease_token"], result("done"),
+            idempotency_key="complete:work-1",
+        )
+        second = self.enqueue_claim("work-2")
+        self.clock.advance(11)
+
+        swept = self.scheduler.sweep_expired()
+
+        self.assertEqual(len(swept), 1)
+        self.assertEqual(self.scheduler.status("work-1")["state"], "succeeded")
+        self.assertEqual(self.scheduler.status("work-2")["attempt_number"], 2)
+
     def test_authority_rows_reject_direct_insert_update_and_delete(self):
         self.scheduler.enqueue(work_order())
         with self.assertRaises(sqlite3.DatabaseError):
