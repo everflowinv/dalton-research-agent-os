@@ -417,20 +417,12 @@ def build_launcher(args: Any) -> Any | None:
         # producer.  This does not turn on ad-hoc probes: the child carries a
         # closed directed-only mode and skips every ordinary inquiry.
         from .mission_document_research_lane import (
+            directed_admission_configuration,
             lane_configuration as document_lane_configuration,
         )
-
-        document_lane_configuration(document_lane_path)
-        from .call_budget import default_run_budget
-        from .research_task import validate_task_budget
-
-        configuration = {
-            "max_admissions_per_tick": default_run_budget(
-                "research_task"
-            )["max_admissions_per_tick"],
-            "retired_templates": (),
-            "task_budget": validate_task_budget({}),
-        }
+        configuration = directed_admission_configuration(
+            document_lane_configuration(document_lane_path)
+        )
     else:
         configuration = lane_configuration(research_task_path)
     return ResearchTaskLauncher(

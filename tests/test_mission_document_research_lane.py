@@ -412,6 +412,16 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
             argv_fragment(context), ["--mission-document-research-lane", str(config)]
         )
 
+        configured = {
+            "schema_version": "0.2", "enabled": True,
+            "directed_admission": {
+                "max_admissions_per_tick": 4,
+                "task_budget": {"max_rounds": 8, "max_seconds": 1200},
+            },
+        }
+        config.write_text(canonical_json(configured) + "\n")
+        self.assertEqual(lane_configuration(config), configured)
+
 
 if __name__ == "__main__":
     unittest.main()

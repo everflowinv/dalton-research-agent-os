@@ -843,11 +843,57 @@ def lane_configuration(path: Path) -> dict[str, Any]:
         raise MissionDocumentResearchLaneError(
             "mission document research lane config cannot be read"
         ) from exc
-    if value != {"schema_version": "0.1", "enabled": True}:
+    if value == {"schema_version": "0.1", "enabled": True}:
+        return dict(value)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "enabled", "directed_admission"}
+        or value.get("schema_version") != "0.2"
+        or value.get("enabled") is not True
+        or not isinstance(value.get("directed_admission"), dict)
+        or set(value["directed_admission"]) - {
+            "max_admissions_per_tick", "task_budget",
+        }
+    ):
         raise MissionDocumentResearchLaneError(
             "mission document research lane config has an invalid closed shape"
         )
+    from .call_budget import default_run_budget
+    from .research_task import ResearchTaskError, validate_task_budget
+
+    controls = value["directed_admission"]
+    requested = controls.get(
+        "max_admissions_per_tick",
+        default_run_budget("research_task")["max_admissions_per_tick"],
+    )
+    if isinstance(requested, bool) or not isinstance(requested, int) or requested < 1:
+        raise MissionDocumentResearchLaneError(
+            "directed_admission.max_admissions_per_tick must be a positive integer"
+        )
+    try:
+        validate_task_budget(controls.get("task_budget", {}))
+    except ResearchTaskError as exc:
+        raise MissionDocumentResearchLaneError(
+            "directed_admission.task_budget is invalid"
+        ) from exc
     return dict(value)
+
+
+def directed_admission_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve the document lane's producer bounds without enabling ad-hoc work."""
+
+    from .call_budget import default_run_budget
+    from .research_task import validate_task_budget
+
+    controls = value.get("directed_admission", {})
+    return {
+        "max_admissions_per_tick": controls.get(
+            "max_admissions_per_tick",
+            default_run_budget("research_task")["max_admissions_per_tick"],
+        ),
+        "retired_templates": (),
+        "task_budget": validate_task_budget(controls.get("task_budget", {})),
+    }
 
 
 def build_launcher(args: Any) -> Any | None:
