@@ -42,7 +42,7 @@ ACN = "company:sec-cik:0001467373"
 
 def _spec_body():
     return {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: billable heads times realised rate.",
         "revenue_drivers": [{
@@ -52,7 +52,7 @@ def _spec_body():
         }],
         "expense_lines": [{
             "ref": "delivery", "label": "Cost of services",
-            "basis_concept": "us-gaap:Revenues",
+            "basis_concept": None,
             "behaviour": "variable_with_headcount", "driver_ref": "heads",
             "because": "Delivery payroll follows the billable base.",
         }],
@@ -67,6 +67,17 @@ def _spec_body():
         "operating_metrics": [],
         "horizon": {"historical_quarters": 12, "forecast_quarters": 8,
                     "because": "Three years spans the cycle."},
+        "financial_statement_structure": {
+            "schema_version": "0.1",
+            "lines": [{
+                "ref": "revenue", "role": "revenue", "label": "Revenue",
+                "kind": "filed", "concept": "us-gaap:Revenues",
+                "statement": "income", "unit": "usd",
+                "period_kind": "duration", "annual_semantics": "sum_quarters",
+                "forecast_method": "quarterly_growth", "forecast_base_ref": None,
+            }],
+            "formulas": [],
+        },
     }
 
 
@@ -131,7 +142,9 @@ class ChooseCompanyTests(unittest.TestCase):
     def test_a_new_spec_contract_reopens_the_same_filed_state(self):
         _, state = choose_company(self.missions, self.mission)
         old = spec_from_response(state, _spec_body(), decided_by="automation:x")
-        old = {**old, "task_hash": "d" * 64, "content_hash": "e" * 64}
+        old = {**old, "task_hash": "d" * 64}
+        old.pop("content_hash")
+        old["content_hash"] = content_hash(old)
         self.missions.record_company_model_spec(
             old, mission_version_ref=self.mission["id"])
         company_ref, reopened = choose_company(self.missions, self.mission)
@@ -320,10 +333,12 @@ class StructuredOutputRepairTests(unittest.TestCase):
         return {
             "company_ref": ACN,
             "state_hash": "a" * 64,
+            "filings": [{"accession": "0001467373-26-000031"}],
             "concepts": ["us-gaap:Revenues"],
             "statements": {"income": [{
                 "concept": "us-gaap:Revenues", "level": 0,
                 "parent_concept": None, "is_breakdown": False,
+                "dimension_axis": None, "unit": "USD", "period_kind": "duration",
             }]},
         }
 

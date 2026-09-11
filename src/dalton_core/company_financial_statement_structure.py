@@ -109,7 +109,7 @@ STRUCTURE_PROPOSAL_SCHEMA = _schema_object(
         "schema_version": {"const": SCHEMA_VERSION},
         "lines": {"type": "array", "minItems": 1,
                   "maxItems": MAX_STRUCTURE_LINES, "items": _STRUCTURE_LINE_SCHEMA},
-        "formulas": {"type": "array", "minItems": 1,
+        "formulas": {"type": "array", "minItems": 0,
                      "maxItems": MAX_STRUCTURE_FORMULAS,
                      "items": {"oneOf": [_SUM_FORMULA_SCHEMA,
                                           _DIVIDE_FORMULA_SCHEMA]}},
@@ -583,6 +583,117 @@ def _validate_formula_evidence(
             )
 
 
+def _validate_forecast_bases(lines: Sequence[Mapping[str, Any]]) -> None:
+    by_ref = {line["ref"]: line for line in lines}
+    for line in lines:
+        if line["forecast_method"] != "share_of_line":
+            continue
+        base = by_ref.get(line["forecast_base_ref"])
+        if base is None or base["ref"] == line["ref"]:
+            raise FinancialStatementStructureError(
+                "share_of_line forecast base must name another structure line"
+            )
+        if (
+            base["unit"] != line["unit"]
+            or base["period_kind"] != line["period_kind"]
+        ):
+            raise FinancialStatementStructureError(
+                "share_of_line forecast base must use the same unit and period kind"
+            )
+
+
+def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    filings = state.get("filings")
+    if not isinstance(filings, list) or not filings:
+        raise FinancialStatementStructureError("company presentation has no filing authority")
+    accessions = {
+        _text(item.get("accession"), "company presentation accession")
+        for item in filings if isinstance(item, Mapping)
+    }
+    if len(accessions) != len(filings):
+        raise FinancialStatementStructureError("company presentation filing authority is ambiguous")
+    rows = (state.get("statements") or {}).get("income") or []
+    filed: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        if (
+            not isinstance(raw, Mapping) or raw.get("is_breakdown")
+            or raw.get("dimension_axis")
+        ):
+            continue
+        concept = _text(raw.get("concept"), "company presentation concept")
+        unit = _text(raw.get("unit"), "company presentation unit").casefold()
+        period_kind = _text(
+            raw.get("period_kind") or (
+                "duration" if raw.get("period_start") else "instant"
+            ),
+            "company presentation period_kind",
+        )
+        candidate = {
+            "status": "filed", "statement": "income",
+            "period_basis": period_kind,
+            "cells": {accession: {
+                "unit": unit, "value": "1", "period_start": "2000-01-01",
+                "source_accessions": sorted(accessions),
+            } for accession in sorted(accessions)},
+        }
+        previous = filed.get(concept)
+        if previous is not None and previous != candidate:
+            raise FinancialStatementStructureError(
+                f"company presentation concept {concept} is ambiguous"
+            )
+        filed[concept] = candidate
+    if not filed:
+        raise FinancialStatementStructureError(
+            "company presentation has no consolidated income lines"
+        )
+    return filed, accessions
+
+
+def validate_structure_proposal(
+    proposal: Mapping[str, Any], state: Mapping[str, Any], *,
+    revenue_anchor_concept: str, expense_lines: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Validate the formula definition inside a model-spec response."""
+
+    body = _closed(proposal, {"schema_version", "lines", "formulas"},
+                   "financial statement structure proposal")
+    if body["schema_version"] != SCHEMA_VERSION:
+        raise FinancialStatementStructureError("unsupported structure proposal version")
+    raw_lines = body["lines"]
+    raw_formulas = body["formulas"]
+    if (
+        not isinstance(raw_lines, list) or not 1 <= len(raw_lines) <= MAX_STRUCTURE_LINES
+        or not isinstance(raw_formulas, list)
+        or not 0 <= len(raw_formulas) <= MAX_STRUCTURE_FORMULAS
+    ):
+        raise FinancialStatementStructureError("structure proposal exceeds its bounded shape")
+    filed, accessions = _presentation_filed(state)
+    lines = [
+        _normalize_line(raw, index, filed, validate_values=False)
+        for index, raw in enumerate(raw_lines)
+    ]
+    by_ref = {line["ref"]: line for line in lines}
+    if len(by_ref) != len(lines):
+        raise FinancialStatementStructureError("structure line ref is duplicated")
+    _validate_spec_alignment({
+        "revenue_anchor_concept": revenue_anchor_concept,
+        "expense_lines": list(expense_lines),
+    }, lines)
+    _validate_forecast_bases(lines)
+    formulas = [
+        _normalize_formula(raw, index, by_ref, filed, accessions)
+        for index, raw in enumerate(raw_formulas)
+    ]
+    outputs = [formula["output_ref"] for formula in formulas]
+    derived = sorted(ref for ref, line in by_ref.items() if line["kind"] == "derived")
+    if sorted(outputs) != derived or len(outputs) != len(set(outputs)):
+        raise FinancialStatementStructureError(
+            "every derived line must have exactly one formula"
+        )
+    _validate_formula_evidence(formulas, by_ref, filed, set())
+    return {"schema_version": SCHEMA_VERSION, "lines": lines, "formulas": formulas}
+
+
 def replay_historical_structure(
     structure: Mapping[str, Any], financial_inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -659,11 +770,63 @@ def replay_historical_structure(
             progressed = True
         if not progressed:
             raise FinancialStatementStructureError("formula graph contains a cycle")
+    forecast_reports: list[dict[str, Any]] = []
+    for ref, line in sorted(lines.items()):
+        method = line["forecast_method"]
+        if method == "formula":
+            report = next(item for item in reports if item["output_ref"] == ref)
+            forecast_reports.append({
+                "line_ref": ref, "method": method, "base_ref": None,
+                "status": report["status"], "observations": [],
+                "reason": report["reason"],
+            })
+            continue
+        if method == "unavailable":
+            forecast_reports.append({
+                "line_ref": ref, "method": method, "base_ref": None,
+                "status": "unavailable", "observations": [],
+                "reason": "the company spec selected no forecast basis for this filed line",
+            })
+            continue
+        cells = values[ref]
+        observations: list[dict[str, Any]] = []
+        if method == "quarterly_growth":
+            ordered = sorted(cells.items(), key=lambda item: item[0][1])
+            for (prior_period, prior), (current_period, current) in zip(
+                ordered, ordered[1:]
+            ):
+                gap = _quarter_gap(prior_period[1], current_period[1])
+                if 80 <= gap <= 100 and prior != 0:
+                    observations.append({
+                        "period_start": prior_period[1],
+                        "period_end": current_period[1],
+                        "value": str((current - prior) / prior),
+                    })
+        else:
+            base_ref = line["forecast_base_ref"]
+            base_cells = values[base_ref]
+            for period in sorted(set(cells) & set(base_cells), key=lambda item: item[1]):
+                if base_cells[period] != 0:
+                    observations.append({
+                        "period_start": period[0], "period_end": period[1],
+                        "value": str(cells[period] / base_cells[period]),
+                    })
+        observations = observations[-4:]
+        forecast_reports.append({
+            "line_ref": ref, "method": method,
+            "base_ref": line["forecast_base_ref"],
+            "status": "validated" if observations else "unavailable",
+            "observations": observations,
+            "reason": None if observations else (
+                "historical inputs contain no complete nonzero forecast-measure pair"
+            ),
+        })
     return {
         "schema_version": "financial-statement-structure-replay-0.1",
         "structure_hash": structure["content_hash"],
         "formulas": sorted(reports, key=lambda item: item["output_ref"]),
-        "ready_for_forecast": bool(reports) and all(
+        "forecast_methods": forecast_reports,
+        "ready_for_forecast": all(
             report["status"] == "validated" for report in reports
         ),
     }
@@ -711,21 +874,7 @@ def validate_financial_statement_structure(
     if len(by_ref) != len(lines):
         raise FinancialStatementStructureError("structure line ref is duplicated")
     _validate_spec_alignment(company_spec, lines)
-    for line in lines:
-        if line["forecast_method"] != "share_of_line":
-            continue
-        base = by_ref.get(line["forecast_base_ref"])
-        if base is None or base["ref"] == line["ref"]:
-            raise FinancialStatementStructureError(
-                "share_of_line forecast base must name another structure line"
-            )
-        if (
-            base["unit"] != line["unit"]
-            or base["period_kind"] != line["period_kind"]
-        ):
-            raise FinancialStatementStructureError(
-                "share_of_line forecast base must use the same unit and period kind"
-            )
+    _validate_forecast_bases(lines)
     notes = _normalized_note_evidence(note_evidence, note_evidence_resolver)
     note_refs = {item["ref"] for item in notes}
     allowed_evidence = _statement_refs(financial_inputs) | note_refs
@@ -759,6 +908,44 @@ def validate_financial_statement_structure(
     normalized["content_hash"] = content_hash(normalized)
     replay = replay_historical_structure(normalized, financial_inputs)
     return normalized, replay
+
+
+def materialize_financial_statement_structure(
+    company_spec: Mapping[str, Any], financial_inputs: Mapping[str, Any], *,
+    note_evidence: Sequence[Mapping[str, Any]] = (),
+    note_evidence_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind a persisted spec definition to the current filed financial inputs."""
+
+    definition = company_spec.get("financial_statement_structure")
+    if not isinstance(definition, Mapping):
+        raise FinancialStatementStructureError(
+            "company spec has no financial statement structure definition"
+        )
+    authority = financial_input_authority(financial_inputs)
+    identity = {
+        "schema_version": SCHEMA_VERSION,
+        "spec_ref": company_spec.get("spec_id"),
+        "spec_hash": company_spec.get("content_hash"),
+        "definition_hash": content_hash(definition),
+        "financial_input_hash": authority["content_hash"],
+    }
+    proposal = {
+        "schema_version": SCHEMA_VERSION,
+        "structure_ref": "financial-statement-structure:" + content_hash(identity)[:32],
+        "company_ref": company_spec.get("company_ref"),
+        "spec_ref": company_spec.get("spec_id"),
+        "spec_hash": company_spec.get("content_hash"),
+        "financial_input_hash": authority["content_hash"],
+        "lines": definition.get("lines"),
+        "formulas": definition.get("formulas"),
+        "created_by": company_spec.get("decided_by"),
+    }
+    return validate_financial_statement_structure(
+        proposal, company_spec, financial_inputs,
+        note_evidence=note_evidence,
+        note_evidence_resolver=note_evidence_resolver,
+    )
 
 
 def _quarter_gap(left: str, right: str) -> int:
@@ -913,9 +1100,11 @@ def forecast_structure_binding(
 
 
 __all__ = [
-    "ANNUAL_SEMANTICS", "FinancialStatementStructureError", "LINE_KINDS",
-    "ROLES", "SCHEMA_VERSION", "STRUCTURE_AUTHORITY_REF",
+    "ANNUAL_SEMANTICS", "FORECAST_METHODS", "FinancialStatementStructureError",
+    "LINE_KINDS", "MAX_STRUCTURE_FORMULAS", "MAX_STRUCTURE_LINES", "ROLES",
+    "SCHEMA_VERSION", "STRUCTURE_AUTHORITY_REF", "STRUCTURE_PROPOSAL_SCHEMA",
     "aggregate_fiscal_year", "annual_diluted_eps", "financial_input_authority",
-    "forecast_structure_binding", "replay_historical_structure",
-    "validate_financial_statement_structure",
+    "forecast_structure_binding", "materialize_financial_statement_structure",
+    "replay_historical_structure", "validate_financial_statement_structure",
+    "validate_structure_proposal",
 ]

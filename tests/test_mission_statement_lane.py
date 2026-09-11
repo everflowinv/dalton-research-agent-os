@@ -38,7 +38,7 @@ def _model_spec(*, historical_quarters):
     """The smallest specification the frame accepts, with a chosen horizon."""
 
     return {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: heads times realised rate.",
         "revenue_drivers": [{
@@ -48,7 +48,7 @@ def _model_spec(*, historical_quarters):
         }],
         "expense_lines": [{
             "ref": "delivery", "label": "Cost of services",
-            "basis_concept": "us-gaap:Revenues",
+            "basis_concept": None,
             "behaviour": "variable_with_headcount", "driver_ref": "heads",
             "because": "Delivery payroll follows the billable base.",
         }],
@@ -64,6 +64,17 @@ def _model_spec(*, historical_quarters):
         "horizon": {
             "historical_quarters": historical_quarters, "forecast_quarters": 8,
             "because": "What this company's cycle needs.",
+        },
+        "financial_statement_structure": {
+            "schema_version": "0.1",
+            "lines": [{
+                "ref": "revenue", "role": "revenue", "label": "Revenue",
+                "kind": "filed", "concept": "us-gaap:Revenues",
+                "statement": "income", "unit": "usd", "period_kind": "duration",
+                "annual_semantics": "sum_quarters",
+                "forecast_method": "quarterly_growth", "forecast_base_ref": None,
+            }],
+            "formulas": [],
         },
     }
 
@@ -332,6 +343,7 @@ class StatementLaneTests(unittest.TestCase):
         self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
         spec = spec_from_response(
             {"company_ref": ACN, "state_hash": "a" * 64,
+             "filings": [{"accession": ACCESSION}],
              "concepts": ["us-gaap:Revenues"],
              "statements": {"income": _observation()["filings"][0]["lines"]}},
             _model_spec(historical_quarters=20), decided_by="automation:x")
@@ -345,6 +357,7 @@ class StatementLaneTests(unittest.TestCase):
     def test_a_specification_asking_for_less_never_goes_below_the_floor(self):
         spec = spec_from_response(
             {"company_ref": ACN, "state_hash": "a" * 64,
+             "filings": [{"accession": ACCESSION}],
              "concepts": ["us-gaap:Revenues"],
              "statements": {"income": _observation()["filings"][0]["lines"]}},
             _model_spec(historical_quarters=1), decided_by="automation:x")

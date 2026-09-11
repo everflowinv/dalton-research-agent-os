@@ -9,7 +9,9 @@ from dalton_core.company_financial_statement_structure import (
     annual_diluted_eps,
     financial_input_authority,
     forecast_structure_binding,
+    materialize_financial_statement_structure,
     validate_financial_statement_structure,
+    validate_structure_proposal,
 )
 
 
@@ -74,6 +76,22 @@ def company_spec():
         "expense_lines": [
             {"basis_concept": "cost"}, {"basis_concept": "opex"},
         ],
+    }
+
+
+def presentation_state(inputs=None):
+    inputs = financial_inputs() if inputs is None else inputs
+    return {
+        "company_ref": "company:test",
+        "filings": [{"accession": ACCESSION, "form": "10-Q",
+                     "report_date": "2025-12-31"}],
+        "statements": {"income": [
+            {"concept": line["concept"], "label": line["label"],
+             "level": 0, "parent_concept": None, "is_breakdown": False,
+             "dimension_axis": None, "unit": next(iter(line["cells"].values()))["unit"],
+             "period_kind": line["period_basis"]}
+            for line in inputs["filed_lines"]
+        ]},
     }
 
 
@@ -159,6 +177,14 @@ class FinancialStatementStructureTests(unittest.TestCase):
         )
         self.assertTrue(all(len(row["tested_periods"]) == 4
                             for row in replay["formulas"]))
+        methods = {row["line_ref"]: row for row in replay["forecast_methods"]}
+        self.assertEqual((methods["revenue"]["status"],
+                          len(methods["revenue"]["observations"])),
+                         ("validated", 3))
+        self.assertEqual((methods["cost"]["base_ref"],
+                          len(methods["cost"]["observations"])),
+                         ("revenue", 4))
+        self.assertEqual(methods["interest-income"]["status"], "unavailable")
 
     def test_unrelated_state_hash_does_not_change_financial_authority(self):
         first = financial_inputs()
@@ -258,6 +284,47 @@ class FinancialStatementStructureTests(unittest.TestCase):
         wrong_anchor["revenue_anchor_concept"] = "interest_income"
         with self.assertRaisesRegex(FinancialStatementStructureError, "exact filed anchor"):
             validate_financial_statement_structure(proposal(inputs), wrong_anchor, inputs)
+
+    def test_spec_proposal_materializes_against_each_current_financial_input(self):
+        inputs = financial_inputs()
+        candidate = proposal(inputs)
+        definition = validate_structure_proposal(
+            {key: candidate[key] for key in ("schema_version", "lines", "formulas")},
+            presentation_state(inputs),
+            revenue_anchor_concept="revenue",
+            expense_lines=company_spec()["expense_lines"],
+        )
+        spec = {**company_spec(), "financial_statement_structure": definition,
+                "decided_by": "automation:test"}
+        structure, replay = materialize_financial_statement_structure(spec, inputs)
+        self.assertTrue(replay["ready_for_forecast"])
+        self.assertEqual(structure["financial_input_hash"],
+                         financial_input_authority(inputs)["content_hash"])
+        first_binding = forecast_structure_binding(structure, replay, inputs)
+
+        moved = copy.deepcopy(inputs)
+        next(line for line in moved["filed_lines"]
+             if line["concept"] == "revenue")["cells"]["2025-12-31"]["value"] = "1400"
+        for concept, value in {
+            "operating": "360", "pretax": "350", "net": "295", "parent": "290",
+        }.items():
+            next(line for line in moved["filed_lines"]
+                 if line["concept"] == concept)["cells"]["2025-12-31"]["value"] = value
+        current, current_replay = materialize_financial_statement_structure(spec, moved)
+        current_binding = forecast_structure_binding(current, current_replay, moved)
+        self.assertNotEqual(first_binding["financial_input_hash"],
+                            current_binding["financial_input_hash"])
+        self.assertNotEqual(first_binding["structure_hash"],
+                            current_binding["structure_hash"])
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "authority is invalid"):
+            forecast_structure_binding(structure, replay, moved)
+
+        untied = copy.deepcopy(moved)
+        next(line for line in untied["filed_lines"]
+             if line["concept"] == "operating")["cells"]["2025-12-31"]["value"] = "361"
+        with self.assertRaisesRegex(FinancialStatementStructureError, "does not tie"):
+            materialize_financial_statement_structure(spec, untied)
 
     def test_note_evidence_must_replay_from_authority(self):
         inputs = financial_inputs()

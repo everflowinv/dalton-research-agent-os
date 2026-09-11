@@ -12,6 +12,11 @@ from __future__ import annotations
 
 import unittest
 
+from dalton_core.company_financial_statement_structure import (
+    financial_input_authority,
+    forecast_structure_binding,
+    materialize_financial_statement_structure,
+)
 from dalton_core.company_model_inputs import (
     AMBIGUOUS,
     ESTIMATED,
@@ -22,6 +27,7 @@ from dalton_core.company_model_inputs import (
     ModelInputError,
     build_model_inputs,
 )
+from dalton_core.store import content_hash
 
 ACN = "company:sec-cik:0001467373"
 
@@ -101,6 +107,45 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(line["cells"]["2026-05-31"]["source_accessions"],
                          ["0001467373-26-000032"])
         self.assertFalse(line["is_split"])
+
+    def test_built_inputs_materialize_the_persisted_statement_definition(self):
+        spec = {
+            **_spec(),
+            "revenue_anchor_concept": "us-gaap:Revenues",
+            "decided_by": "automation:test",
+            "financial_statement_structure": {
+                "schema_version": "0.1",
+                "lines": [
+                    {
+                        "ref": "revenue", "role": "revenue", "label": "Revenue",
+                        "kind": "filed", "concept": "us-gaap:Revenues",
+                        "statement": "income", "unit": "usd",
+                        "period_kind": "duration", "annual_semantics": "sum_quarters",
+                        "forecast_method": "quarterly_growth", "forecast_base_ref": None,
+                    },
+                    {
+                        "ref": "delivery", "role": "cost_of_revenue",
+                        "label": "Cost of services", "kind": "filed",
+                        "concept": "us-gaap:CostOfGoodsAndServicesSold",
+                        "statement": "income", "unit": "usd",
+                        "period_kind": "duration", "annual_semantics": "sum_quarters",
+                        "forecast_method": "share_of_line",
+                        "forecast_base_ref": "revenue",
+                    },
+                ],
+                "formulas": [],
+            },
+        }
+        spec["content_hash"] = content_hash(spec)
+        table = build_model_inputs(self.ledger(), spec)
+        structure, replay = materialize_financial_statement_structure(spec, table)
+        binding = forecast_structure_binding(structure, replay, table)
+        self.assertEqual(binding["financial_input_hash"],
+                         financial_input_authority(table)["content_hash"])
+        self.assertEqual(
+            {item["line_ref"]: item["status"] for item in replay["forecast_methods"]},
+            {"delivery": "validated", "revenue": "validated"},
+        )
 
     def test_cash_input_refuses_ambiguous_frozen_operating_cash_concepts(self):
         periods = (("2025-01-01", "2025-03-31"),

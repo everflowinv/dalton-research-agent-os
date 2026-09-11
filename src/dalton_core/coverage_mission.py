@@ -3794,6 +3794,19 @@ class CoverageMissionAuthority:
             if spec.get(field) in (None, ""):
                 raise CoverageMissionValidationError(
                     f"company model spec is missing {field}")
+        if spec.get("schema_version") == "0.3" and not isinstance(
+            spec.get("financial_statement_structure"), Mapping
+        ):
+            raise CoverageMissionValidationError(
+                "company model spec 0.3 is missing financial_statement_structure"
+            )
+        if spec.get("schema_version") == "0.3":
+            body = dict(spec)
+            claimed_hash = body.pop("content_hash", None)
+            if content_hash(body) != claimed_hash:
+                raise CoverageMissionValidationError(
+                    "company model spec 0.3 content_hash does not match its body"
+                )
         company_ref = _text(spec["company_ref"], "company_ref")
         state_hash = _text(spec["state_hash"], "state_hash")
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
@@ -3803,6 +3816,14 @@ class CoverageMissionAuthority:
             "company_ref": company_ref, "state_hash": state_hash,
             "task_hash": task_hash,
         })
+        metadata = {
+            **({"schema_version": spec["schema_version"]}
+               if spec.get("schema_version") else {}),
+            **({"financial_statement_structure": spec["financial_statement_structure"]}
+               if spec.get("financial_statement_structure") else {}),
+            **({"cost_driver_template": spec["cost_driver_template"]}
+               if "cost_driver_template" in spec else {}),
+        }
         now = _now()
         with self._transaction() as cur:
             cur.execute(
@@ -3822,8 +3843,7 @@ class CoverageMissionAuthority:
                     canonical_json(spec["forecast_statements"]),
                     canonical_json(spec["operating_metrics"]),
                     canonical_json(spec["horizon"]),
-                    (canonical_json({"cost_driver_template": spec["cost_driver_template"]})
-                     if "cost_driver_template" in spec else None),
+                    canonical_json(metadata) if metadata else None,
                     task_hash,
                     model_profile_ref, work_order_ref,
                     _text(spec["decided_by"], "decided_by"), now,
@@ -3850,7 +3870,9 @@ class CoverageMissionAuthority:
         metadata_json = wire.pop("metadata_json", None)
         if metadata_json is not None:
             metadata = json.loads(metadata_json)
-            if not isinstance(metadata, dict) or set(metadata) - {"cost_driver_template"}:
+            if not isinstance(metadata, dict) or set(metadata) - {
+                "schema_version", "cost_driver_template", "financial_statement_structure",
+            }:
                 raise CoverageMissionConflict("company model spec metadata is invalid")
             wire.update(metadata)
         return wire

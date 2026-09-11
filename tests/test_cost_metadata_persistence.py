@@ -7,7 +7,7 @@ import unittest
 from dalton_core.company_model_inputs import ModelInputError, build_model_inputs
 from dalton_core.company_model_spec import spec_from_response
 from dalton_core.coverage_mission import CoverageMissionAuthority
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 from tests.test_company_model_inputs import FakeMissions, _line
 from tests.test_company_model_spec import DECIDED_BY, STATE, _spec
 
@@ -35,8 +35,13 @@ class CostMetadataPersistenceTests(unittest.TestCase):
         store = DaltonStore(":memory:")
         self.addCleanup(store.close)
         authority = CoverageMissionAuthority(store)
+        legacy = self._decided(cost_bound=False)
+        legacy.pop("schema_version")
+        legacy.pop("financial_statement_structure")
+        legacy.pop("content_hash")
+        legacy["content_hash"] = content_hash(legacy)
         original = authority.record_company_model_spec(
-            self._decided(cost_bound=False), mission_version_ref=MISSION)
+            legacy, mission_version_ref=MISSION)
         original.pop("status")
 
         # Reproduce the immediately preceding table contract. The migration is
@@ -61,8 +66,11 @@ class CostMetadataPersistenceTests(unittest.TestCase):
         # shape; the consumer validates whether the referenced registry is the
         # installed one. Persist a historically valid/stale reference through
         # that public API rather than disabling append-only triggers.
+        stale_decided = {**decided, "cost_driver_template": stale}
+        stale_decided.pop("content_hash")
+        stale_decided["content_hash"] = content_hash(stale_decided)
         held = authority.record_company_model_spec(
-            {**decided, "cost_driver_template": stale}, mission_version_ref=MISSION)
+            stale_decided, mission_version_ref=MISSION)
 
         replayed = authority.latest_company_model_spec(held["company_ref"])
         with self.assertRaisesRegex(ModelInputError, "stale cost template metadata"):

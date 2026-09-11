@@ -35,6 +35,8 @@ STATE = {
     "ticker": "ACN",
     "entity_name": "Accenture plc",
     "state_hash": "a" * 64,
+    "filings": [{"accession": "0001467373-26-000031", "form": "10-Q",
+                 "report_date": "2026-06-30"}],
     "concepts": [
         "us-gaap:Revenues",
         "us-gaap:CostOfRevenue",
@@ -45,25 +47,69 @@ STATE = {
     "statements": {
         "income": [
             {"concept": "us-gaap:Revenues", "label": "Revenues", "level": 0,
-             "parent_concept": None, "is_breakdown": False, "dimension_axis": None},
+             "parent_concept": None, "is_breakdown": False, "dimension_axis": None,
+             "unit": "USD", "period_kind": "duration"},
             {"concept": "us-gaap:CostOfRevenue", "label": "Cost of services",
              "level": 1, "parent_concept": "us-gaap:Revenues",
-             "is_breakdown": False, "dimension_axis": None},
+             "is_breakdown": False, "dimension_axis": None,
+             "unit": "USD", "period_kind": "duration"},
+            {"concept": "us-gaap:SellingGeneralAndAdministrativeExpense",
+             "label": "Sales, general and administrative", "level": 1,
+             "parent_concept": "us-gaap:Revenues", "is_breakdown": False,
+             "dimension_axis": None, "unit": "USD", "period_kind": "duration"},
+            {"concept": "us-gaap:OperatingIncomeLoss", "label": "Operating income",
+             "level": 0, "parent_concept": None, "is_breakdown": False,
+             "dimension_axis": None, "unit": "USD", "period_kind": "duration"},
             {"concept": "us-gaap:Revenues", "label": "Americas", "level": 1,
              "parent_concept": None, "is_breakdown": True,
-             "dimension_axis": "srt:StatementGeographicalAxis"},
+             "dimension_axis": "srt:StatementGeographicalAxis",
+             "unit": "USD", "period_kind": "duration"},
         ],
         "balance": [
             {"concept": "us-gaap:Assets", "label": "Total assets", "level": 0,
-             "parent_concept": None, "is_breakdown": False, "dimension_axis": None},
+             "parent_concept": None, "is_breakdown": False, "dimension_axis": None,
+             "unit": "USD", "period_kind": "instant"},
         ],
     },
 }
 
 
+def _statement_structure():
+    accession = "0001467373-26-000031"
+    def line(ref, role, concept, method, base=None, *, kind="filed"):
+        return {
+            "ref": ref, "role": role, "label": ref, "kind": kind,
+            "concept": concept, "statement": "income", "unit": "usd",
+            "period_kind": "duration", "annual_semantics": "sum_quarters",
+            "forecast_method": method, "forecast_base_ref": base,
+        }
+    return {
+        "schema_version": "0.1",
+        "lines": [
+            line("revenue", "revenue", "us-gaap:Revenues", "quarterly_growth"),
+            line("cost", "cost_of_revenue", "us-gaap:CostOfRevenue",
+                 "share_of_line", "revenue"),
+            line("sga", "operating_expense",
+                 "us-gaap:SellingGeneralAndAdministrativeExpense",
+                 "share_of_line", "revenue"),
+            line("operating", "operating_income", None, "formula", kind="derived"),
+        ],
+        "formulas": [{
+            "output_ref": "operating", "operator": "sum",
+            "terms": [
+                {"line_ref": "revenue", "coefficient": "1"},
+                {"line_ref": "cost", "coefficient": "-1"},
+                {"line_ref": "sga", "coefficient": "-1"},
+            ],
+            "tie_out_concept": "us-gaap:OperatingIncomeLoss",
+            "evidence_refs": [accession],
+        }],
+    }
+
+
 def _spec(**overrides):
     body = {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": (
             "Accenture is a people business: revenue is billable heads times "
@@ -117,6 +163,7 @@ def _spec(**overrides):
             "historical_quarters": 12, "forecast_quarters": 8,
             "because": "Three years spans the last demand cycle.",
         },
+        "financial_statement_structure": _statement_structure(),
     }
     body.update(overrides)
     return body
@@ -301,7 +348,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         import json
 
         fenced = "```json\n" + json.dumps(_spec()) + "\n```"
-        self.assertEqual(parse_response(fenced)["schema_version"], "0.2")
+        self.assertEqual(parse_response(fenced)["schema_version"], "0.3")
 
     def test_the_wrong_schema_version_is_refused(self):
         with self.assertRaises(CompanyModelSpecError):
@@ -389,6 +436,9 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
             [item["statement"] for item in held["forecast_statements"]],
             ["income", "balance", "cash"])
         self.assertEqual(held["model_profile_ref"], "profile:model-spec")
+        self.assertEqual(held["schema_version"], "0.3")
+        self.assertEqual(
+            held["financial_statement_structure"], _statement_structure())
 
     def test_deciding_twice_about_an_unchanged_disclosure_is_one_decision(self):
         first = self.record()
@@ -405,8 +455,12 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
         self.assertEqual(len(self.missions.company_model_specs(ACN)), 2)
 
     def test_a_new_task_contract_gets_a_new_spec_for_the_same_state(self):
+        from dalton_core.store import content_hash
+
         old = spec_from_response(STATE, _spec(), decided_by=DECIDED_BY)
-        old = {**old, "task_hash": "b" * 64, "content_hash": "c" * 64}
+        old = {**old, "task_hash": "b" * 64}
+        old.pop("content_hash")
+        old["content_hash"] = content_hash(old)
         self.record(old)
         current = self.record()
         self.assertEqual(current["status"], "fresh")
@@ -421,6 +475,14 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
                 broken = {**verified, field: None}
                 with self.assertRaises(CoverageMissionValidationError):
                     self.record(broken)
+
+    def test_structure_cannot_be_changed_after_spec_validation(self):
+        from dalton_core.coverage_mission import CoverageMissionValidationError
+
+        verified = spec_from_response(STATE, _spec(), decided_by=DECIDED_BY)
+        verified["financial_statement_structure"]["lines"][0]["label"] = "Changed"
+        with self.assertRaisesRegex(CoverageMissionValidationError, "content_hash"):
+            self.record(verified)
 
     def test_specifications_cannot_be_rewritten(self):
         import sqlite3

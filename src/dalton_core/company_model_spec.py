@@ -57,9 +57,13 @@ from .driver_template import (
     template_for,
 )
 from .store import content_hash
+from .company_financial_statement_structure import (
+    FinancialStatementStructureError, STRUCTURE_PROPOSAL_SCHEMA,
+    validate_structure_proposal,
+)
 
-SCHEMA_VERSION = "0.2"
-TASK_REF = "task:company-model-spec:0.4"
+SCHEMA_VERSION = "0.3"
+TASK_REF = "task:company-model-spec:0.5"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -125,16 +129,17 @@ _BASIS = {
 
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "CompanyModelSpecV0.2",
+    "title": "CompanyModelSpecV0.3",
     "type": "object",
     "additionalProperties": False,
     "required": [
         "schema_version", "assessment", "revenue_anchor_concept",
         "revenue_drivers", "expense_lines",
         "forecast_statements", "operating_metrics", "horizon",
+        "financial_statement_structure",
     ],
     "properties": {
-        "schema_version": {"const": "0.2"},
+        "schema_version": {"const": "0.3"},
         "revenue_anchor_concept": {
             "type": "string", "minLength": 1, "maxLength": 160,
             "description": (
@@ -244,6 +249,7 @@ OUTPUT_SCHEMA = {
             },
             ("historical_quarters", "forecast_quarters", "because"),
         ),
+        "financial_statement_structure": STRUCTURE_PROPOSAL_SCHEMA,
     },
 }
 
@@ -262,7 +268,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "cost_driver_template_metadata:0.1",
-    "prompt_contract": "company-model-spec-prompt:0.5",
+    "prompt_contract": "company-model-spec-prompt:0.6",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -299,7 +305,8 @@ def _statement_table(state: Mapping[str, Any]) -> str:
             axis = row.get("dimension_axis") or ""
             lines.append(
                 f"{mark}{row.get('level', 0)}\t{row.get('concept')}\t"
-                f"{row.get('label')}\t{parent}\t{axis}"
+                f"{row.get('label')}\t{parent}\t{axis}\t"
+                f"{row.get('unit')}\t{row.get('period_kind')}"
             )
     return "\n".join(lines)
 
@@ -332,7 +339,8 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "the company itself disclosed -- which line rolls into which, and "
         "which lines are segment breakdowns.\n\n"
         "STATEMENTS is one line per row, tab separated:\n"
-        "  <mark><level>\\t<concept>\\t<label>\\t<parent concept>\\t<dimension axis>\n"
+        "  <mark><level>\\t<concept>\\t<label>\\t<parent concept>\\t"
+        "<dimension axis>\\t<unit>\\t<period kind>\n"
         "where the mark is '-' for a reported line and '*' for a segment or "
         "geographic breakdown, and the last two fields may be empty.\n\n"
         "Return a model specification. The frame is fixed; the judgement is "
@@ -358,7 +366,20 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "headcount. Say whether the company discloses each one -- an "
         "undisclosed metric has to be estimated, and that changes how it is "
         "used.\n\n"
+        "Then return financial_statement_structure: the exact duration income "
+        "lines and arithmetic this company disclosed. Use consolidated filed "
+        "concepts only; derived sums must follow this presentation and tie to "
+        "a filed subtotal. For each filed leaf choose quarterly_growth, "
+        "share_of_line with an exact base ref, or unavailable. Derived lines "
+        "use formula. Missing non-operating, tax, attribution, preferred-dividend, "
+        "participating-security, convertible or share evidence stays unavailable; "
+        "never treat it as zero. Diluted EPS divides the company's disclosed "
+        "diluted_eps_numerator by diluted_weighted_average_shares. Parent net "
+        "income is not automatically that numerator.\n\n"
         "Rules:\n"
+        "* Formula evidence_refs must copy exact filing accession values listed "
+        "in COMPANY.filings. Do not invent a note or document ref; note evidence "
+        "is unavailable in this call.\n"
         "* ``basis_concept`` must be a concept that appears in the statements "
         "below, copied exactly, or null. Do not invent one, and do not adapt "
         "a name to look right. A line with no filed counterpart uses null.\n"
@@ -471,7 +492,7 @@ def spec_from_response(
 
     body = parse_response(response)
     if body.get("schema_version") != SCHEMA_VERSION:
-        raise CompanyModelSpecError("model specification schema_version is not 0.2")
+        raise CompanyModelSpecError("model specification schema_version is not 0.3")
     company_ref = state.get("company_ref")
     if not isinstance(company_ref, str) or not company_ref:
         raise CompanyModelSpecError("company state carries no company_ref")
@@ -657,6 +678,16 @@ def spec_from_response(
         raise CompanyModelSpecError(
             "decided_by must use the human: or automation: namespace")
 
+    try:
+        statement_structure = validate_structure_proposal(
+            body.get("financial_statement_structure"), state,
+            revenue_anchor_concept=revenue_anchor, expense_lines=expenses,
+        )
+    except FinancialStatementStructureError as exc:
+        raise CompanyModelSpecError(
+            f"financial_statement_structure is invalid: {exc}"
+        ) from exc
+
     spec = {
         "schema_version": SCHEMA_VERSION,
         "company_ref": company_ref,
@@ -669,6 +700,7 @@ def spec_from_response(
         "forecast_statements": [statements[name] for name in STATEMENTS],
         "operating_metrics": metrics,
         "horizon": horizon,
+        "financial_statement_structure": statement_structure,
         "decided_by": decided_by,
         "task_hash": TASK_HASH,
     }

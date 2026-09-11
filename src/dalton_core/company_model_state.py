@@ -39,6 +39,8 @@ def _line(row: Mapping[str, Any]) -> dict[str, Any]:
         "parent_concept": row["parent_concept"],
         "is_breakdown": bool(row["is_breakdown"]),
         "dimension_axis": row["dimension_axis"],
+        "unit": str(row["unit"]),
+        "period_kind": "duration" if row["period_start"] else "instant",
     }
 
 
