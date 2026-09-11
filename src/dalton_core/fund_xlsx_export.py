@@ -20,7 +20,13 @@ from .fund_xlsx_template import (
     apply_fund_xlsx_template,
     build_fund_xlsx_template_plan,
 )
-from .model_forecast_driver import ForecastModelAuthority, validate_forecast_model
+from .model_forecast_driver import (
+    STRUCTURED_CASH_SCHEMA_VERSION,
+    ForecastModelAuthority,
+    is_structured_schema,
+    structure_result_refs,
+    validate_forecast_model,
+)
 from .store import DaltonStore, canonical_json, content_hash
 from .valuation_snapshot import ValuationSnapshotAuthority
 
@@ -181,6 +187,12 @@ _FINANCIAL_LINE_LABELS = {
     "result:free_cash_flow": "Free cash flow",
 }
 
+_CASH_FLOW_RESULT_REFS = (
+    "result:operating_cash_flow",
+    "result:capital_expenditure",
+    "result:free_cash_flow",
+)
+
 _READER_LABELS = {
     "CostOfGoodsAndServicesSold": "Cost of goods and services sold",
     "IncomeTaxExpenseBenefit": "Income tax expense",
@@ -208,6 +220,36 @@ def _financial_line_label(result: Mapping[str, Any]) -> str:
         if concept in _READER_LABELS:
             return _READER_LABELS[concept]
     return _reader_label(result.get("label"))
+
+
+def _financial_result_layout(
+    model: Mapping[str, Any],
+) -> tuple[dict[str, int], int | None]:
+    """Place an explicitly declared 0.4 cash companion below income results."""
+
+    if model.get("schema_version") != STRUCTURED_CASH_SCHEMA_VERSION:
+        return {
+            str(item["ref"]): 3 + index
+            for index, item in enumerate(model["results"])
+        }, None
+    cash_refs = set(_CASH_FLOW_RESULT_REFS)
+    income_results = [
+        item for item in model["results"] if item["ref"] not in cash_refs
+    ]
+    cash_results = {str(item["ref"]): item for item in model["results"]
+                    if item["ref"] in cash_refs}
+    if set(cash_results) != cash_refs:
+        raise FundWorkbookExportError(
+            "cash-flow companion model lacks its exact result rows")
+    rows = {
+        str(item["ref"]): 3 + index
+        for index, item in enumerate(income_results)
+    }
+    # Match the source workbook: one blank row, then a light-blue section row.
+    section_row = 4 + len(income_results)
+    for index, result_ref in enumerate(_CASH_FLOW_RESULT_REFS):
+        rows[result_ref] = section_row + 1 + index
+    return rows, section_row
 
 
 def _is_operating_expense_share_formula(
@@ -451,7 +493,7 @@ def export_fund_workbook(
         raise FundWorkbookExportError("forecast model currency must be an ISO code")
     calendar_binding = _calendar_binding(calendar_binding)
     annual_groups = _fiscal_groups(periods, calendar_binding, set(history))
-    if model.get("schema_version") == "0.3" and calendar_binding is not None:
+    if is_structured_schema(model.get("schema_version")) and calendar_binding is not None:
         from .company_model_annual_projection import (
             AnnualProjectionError, build_annual_projection,
             validate_annual_projection,
@@ -498,24 +540,49 @@ def export_fund_workbook(
     period_columns = {
         period: quarter_start + index for index, period in enumerate(periods)
     }
-    result_rows = {item["ref"]: 3 + i for i, item in enumerate(model["results"])}
+    result_rows, cash_flow_section_row = _financial_result_layout(model)
     cagr_column = template_plan["columns"]["annual_support"][0]["column"]
     formula_map: list[dict[str, Any]] = []
     statement_structure = (
         model.get("financial_statement_structure") or {}
-        if model.get("schema_version") == "0.3" else {}
+        if is_structured_schema(model.get("schema_version")) else {}
+    )
+    cash_flow_companion = (
+        model.get("cash_flow_companion") or {}
+        if model.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION else {}
     )
     driver_roles = {
         str(line["ref"]): str(line.get("role") or "")
         for line in statement_structure.get("lines") or []
     }
-    structured_result_refs: dict[str, str] = {}
-    structured_lines_by_ref = {
-        str(line["ref"]): line for line in statement_structure.get("lines") or []
-    }
+    driver_roles.update({
+        str(line["ref"]): str(line.get("role") or "")
+        for line in cash_flow_companion.get("lines") or []
+    })
+    ratio_result_refs: dict[str, tuple[str, str]] = {}
     if statement_structure:
-        from .model_forecast_driver import _structure_result_refs
-        structured_result_refs = _structure_result_refs(statement_structure)
+        result_refs = structure_result_refs(statement_structure)
+        for line in statement_structure.get("lines") or []:
+            base_ref = line.get("forecast_base_ref")
+            if (line.get("forecast_method") == "share_of_line"
+                    and base_ref in result_refs):
+                result_ref = result_refs.get(str(line["ref"]))
+                if result_ref is not None:
+                    driver_ref = next((
+                        str(item["ref"]) for item in model["drivers"]
+                        if item.get("structure_line_ref") == line["ref"]
+                    ), None)
+                    if driver_ref is not None:
+                        ratio_result_refs[driver_ref] = (
+                            result_ref, result_refs[str(base_ref)],
+                        )
+    for line in cash_flow_companion.get("lines") or []:
+        if (line.get("status") == "filed"
+                and line.get("forecast_method") == "share_of_line"
+                and line.get("concept")):
+            ratio_result_refs[f"concept:{line['concept']}"] = (
+                str(line["result_ref"]), str(line["forecast_base_result_ref"]),
+            )
 
     ticker_label = (mission_binding or {}).get("ticker")
     entity_label = (mission_binding or {}).get("entity_name")
@@ -627,20 +694,15 @@ def export_fund_workbook(
                     assumption.get("kind") == "actual"
                     and measure == "share_of_line"
                 ):
-                    driver_record = next(
-                        (item for item in model["drivers"]
-                         if item["ref"] == driver_ref), None,
+                    ratio_refs = ratio_result_refs.get(driver_ref)
+                    numerator_row = (
+                        None if ratio_refs is None
+                        else result_rows.get(ratio_refs[0])
                     )
-                    line_ref = (
-                        None if driver_record is None
-                        else driver_record.get("structure_line_ref")
+                    denominator_row = (
+                        None if ratio_refs is None
+                        else result_rows.get(ratio_refs[1])
                     )
-                    line = structured_lines_by_ref.get(str(line_ref))
-                    base_ref = None if line is None else line.get("forecast_base_ref")
-                    numerator_ref = structured_result_refs.get(str(line_ref))
-                    denominator_ref = structured_result_refs.get(str(base_ref))
-                    numerator_row = result_rows.get(str(numerator_ref))
-                    denominator_row = result_rows.get(str(denominator_ref))
                     if numerator_row is not None and denominator_row is not None:
                         actual_share_formula = (
                             f"='Financials'!{_col(ci)}{numerator_row}/"
@@ -675,12 +737,16 @@ def export_fund_workbook(
         row += 1
 
     financials.cell(2, 1, "Income statement")
+    if cash_flow_section_row is not None:
+        financials.cell(cash_flow_section_row, 1, "Cash flow statement")
+        template_row_styles["financials"].append({
+            "row": cash_flow_section_row, "style": "section", "level": 0,
+        })
     structured_lines: dict[str, Mapping[str, Any]] = {}
     structured_formulas: dict[str, Mapping[str, Any]] = {}
-    if model.get("schema_version") == "0.3":
-        from .model_forecast_driver import _structure_result_refs
+    if is_structured_schema(model.get("schema_version")):
         structure = statement_structure
-        refs_by_line = _structure_result_refs(structure)
+        refs_by_line = structure_result_refs(structure)
         structured_lines = {
             refs_by_line[str(line["ref"])]: line for line in structure.get("lines") or []
         }
@@ -719,7 +785,15 @@ def export_fund_workbook(
         gaps.append("annual columns unavailable: no bound fiscal calendar")
     for result in model["results"]:
         rr = result_rows[result["ref"]]
-        level, row_style = _financial_row_presentation(result)
+        if result["ref"] in _CASH_FLOW_RESULT_REFS and cash_flow_section_row is not None:
+            level = 1
+            row_style = (
+                "subtotal" if result["ref"] in {
+                    "result:operating_cash_flow", "result:free_cash_flow",
+                } else "label"
+            )
+        else:
+            level, row_style = _financial_row_presentation(result)
         financials.cell(
             rr,
             level + 1,
@@ -792,16 +866,31 @@ def export_fund_workbook(
                 elif result["ref"] == "result:net_income":
                     components = [result_cells.get(("result:operating_income", period)),
                                   result_cells.get(("result:income_tax_expense", period))]
+                elif (result["ref"] == "result:free_cash_flow"
+                      and cash_flow_section_row is not None):
+                    components = [
+                        result_cells.get(("result:operating_cash_flow", period)),
+                        result_cells.get(("result:capital_expenditure", period)),
+                    ]
                 if structured_formula is None and components and all(components):
                     formula = f"={components[0]}-SUM({','.join(components[1:])})"
                     model_cell_ref = "historical-derived"
-                    component_refs = (
-                        ["result:revenue", "result:cost_of_revenue"]
-                        if result["ref"] == "result:gross_profit"
-                        else ["result:gross_profit", *expense_refs]
-                        if result["ref"] == "result:operating_income"
-                        else ["result:operating_income", "result:income_tax_expense"]
-                    )
+                    if result["ref"] == "result:gross_profit":
+                        component_refs = [
+                            "result:revenue", "result:cost_of_revenue",
+                        ]
+                    elif result["ref"] == "result:operating_income":
+                        component_refs = ["result:gross_profit", *expense_refs]
+                    elif result["ref"] == "result:net_income":
+                        component_refs = [
+                            "result:operating_income",
+                            "result:income_tax_expense",
+                        ]
+                    else:
+                        component_refs = [
+                            "result:operating_cash_flow",
+                            "result:capital_expenditure",
+                        ]
                     if all((ref, period) in result_flow_periods
                            for ref in component_refs):
                         result_flow_periods.add((result["ref"], period))
@@ -841,17 +930,24 @@ def export_fund_workbook(
             )
             structured_line = structured_lines.get(result["ref"])
             structured_role = (
-                None if structured_line is None else structured_line.get("role")
+                result.get("role") if structured_line is None
+                else structured_line.get("role")
+            )
+            annual_semantics = (
+                structured_line.get("annual_semantics")
+                if structured_line is not None else
+                "sum_quarters" if result["ref"] in _CASH_FLOW_RESULT_REFS
+                and cash_flow_section_row is not None else None
             )
             annual_eps = annual_eps_results.get(label)
             projection_outcome = (
                 annual_line_outcomes.get(label, {}).get(result["ref"])
-                if structured_line is not None else None
+                if annual_semantics is not None else None
             )
-            if structured_line is not None:
+            if annual_semantics is not None:
                 if projection_outcome is None:
                     raise FundWorkbookExportError(
-                        f"annual projection lacks structured result {result['ref']}")
+                        f"annual projection lacks result {result['ref']}")
                 if structured_role == "diluted_eps":
                     # Written after numerator/share result rows exist.
                     continue
@@ -881,7 +977,7 @@ def export_fund_workbook(
                     ) + f")/{sum(weights)}"
                     model_formula = "day_weighted_quarters"
                     cell_style = "local_formula"
-                elif structured_line.get("annual_semantics") == "sum_quarters":
+                elif annual_semantics == "sum_quarters":
                     if len(coordinates) != 4 or not all(coordinates):
                         gaps.append(
                             f"{result['ref']} {label}: annual projection source "
@@ -891,7 +987,7 @@ def export_fund_workbook(
                     target.value = f"=SUM({','.join(coordinates)})"
                     model_formula = "projection_sum_quarters"
                     cell_style = "local_formula"
-                elif structured_line.get("annual_semantics") == "direct_annual":
+                elif annual_semantics == "direct_annual":
                     if len(source_periods) != 1:
                         raise FundWorkbookExportError(
                             "computed direct annual projection lacks one source period")
