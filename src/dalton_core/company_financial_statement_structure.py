@@ -18,10 +18,12 @@ from .store import content_hash
 
 
 LEGACY_SCHEMA_VERSION = "0.1"
-SCHEMA_VERSION = "0.2"
-STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.2"
+ANNUAL_SCHEMA_VERSION = "0.2"
+SCHEMA_VERSION = "0.3"
+STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.3"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
+    ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
     SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
 }
 
@@ -60,6 +62,15 @@ _DIVIDE_FIELDS = {
 }
 _TERM_FIELDS = {"line_ref", "coefficient"}
 _NOTE_FIELDS = {"ref", "content_hash", "source_content_hash"}
+_TYPED_NOTE_FIELDS = {
+    "schema_version", "ref", "content_hash", "target_ref", "company_ref",
+    "statement_ingest_ref", "statement_filing_hash", "accession", "form",
+    "applicability_kind", "periods",
+}
+_NOTE_PERIOD_FIELDS = {"period_start", "period_end"}
+_FINANCIAL_NOTE_AUTHORITY_VERSION = "financial-note-evidence-binding-0.1"
+_DILUTED_EPS_NUMERATOR_TARGET = "financial_note:diluted_eps_numerator:0.1"
+_ANNUAL_STRUCTURE_VERSIONS = {ANNUAL_SCHEMA_VERSION, SCHEMA_VERSION}
 
 
 def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
@@ -262,29 +273,87 @@ def _is_currency_unit(value: str) -> bool:
     return re.fullmatch(r"[a-z]{3}", value) is not None
 
 
-def _statement_refs(inputs: Mapping[str, Any]) -> set[str]:
+def _statement_refs(inputs: Mapping[str, Any], *, include_duration: bool = False) -> set[str]:
     return {
         str(ref)
         for line in inputs.get("filed_lines") or []
         if isinstance(line, Mapping)
-        for cell in (line.get("cells") or {}).values()
+        for cell in (
+            list((line.get("cells") or {}).values())
+            + (list(line.get("duration_facts") or []) if include_duration else [])
+        )
         if isinstance(cell, Mapping)
         for ref in (cell.get("source_accessions") or [])
         if isinstance(ref, str) and ref
     }
 
 
-def _note_refs(note_evidence: Sequence[Mapping[str, Any]]) -> set[str]:
+def _digest(value: Any, name: str) -> str:
+    digest = _text(value, name)
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise FinancialStatementStructureError(f"{name} must be a lowercase SHA-256")
+    return digest
+
+
+def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
+               schema_version: str) -> set[str]:
     refs: set[str] = set()
     for index, raw in enumerate(note_evidence):
-        wire = _closed(raw, _NOTE_FIELDS, f"note_evidence[{index}]")
+        fields = _TYPED_NOTE_FIELDS if schema_version == SCHEMA_VERSION else _NOTE_FIELDS
+        wire = _closed(raw, fields, f"note_evidence[{index}]")
         ref = _text(wire["ref"], f"note_evidence[{index}].ref")
-        for field in ("content_hash", "source_content_hash"):
-            digest = _text(wire[field], f"note_evidence[{index}].{field}")
-            if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        _digest(wire["content_hash"], f"note_evidence[{index}].content_hash")
+        if schema_version == SCHEMA_VERSION:
+            if wire["schema_version"] != _FINANCIAL_NOTE_AUTHORITY_VERSION:
+                raise FinancialStatementStructureError("note evidence schema_version is invalid")
+            if wire["target_ref"] != _DILUTED_EPS_NUMERATOR_TARGET:
                 raise FinancialStatementStructureError(
-                    f"note_evidence[{index}].{field} must be a lowercase SHA-256"
+                    "note evidence target is not the diluted EPS numerator target"
                 )
+            for field in ("company_ref", "statement_ingest_ref", "accession", "form"):
+                _text(wire[field], f"note_evidence[{index}].{field}")
+            _digest(wire["statement_filing_hash"],
+                    f"note_evidence[{index}].statement_filing_hash")
+            if wire["applicability_kind"] not in {"annual", "quarter"}:
+                raise FinancialStatementStructureError(
+                    "note evidence applicability_kind is invalid"
+                )
+            periods = wire["periods"]
+            if not isinstance(periods, list) or not periods:
+                raise FinancialStatementStructureError(
+                    "note evidence periods must be a non-empty list"
+                )
+            normalized_periods: list[tuple[str, str]] = []
+            for number, raw_period in enumerate(periods):
+                period = _closed(
+                    raw_period, _NOTE_PERIOD_FIELDS,
+                    f"note_evidence[{index}].periods[{number}]",
+                )
+                start = _text(period["period_start"], "note evidence period_start")
+                end = _text(period["period_end"], "note evidence period_end")
+                try:
+                    days = (date.fromisoformat(end) - date.fromisoformat(start)).days
+                except ValueError as exc:
+                    raise FinancialStatementStructureError(
+                        "note evidence period must use ISO dates"
+                    ) from exc
+                correct_kind = (
+                    NINE_MONTH_MAX_DAYS < days <= ANNUAL_MAX_DAYS
+                    if wire["applicability_kind"] == "annual"
+                    else 80 <= days <= 100
+                )
+                if not correct_kind:
+                    raise FinancialStatementStructureError(
+                        "note evidence period differs from its applicability kind"
+                    )
+                normalized_periods.append((start, end))
+            if normalized_periods != sorted(set(normalized_periods)):
+                raise FinancialStatementStructureError(
+                    "note evidence periods must be unique and sorted"
+                )
+        else:
+            _digest(wire["source_content_hash"],
+                    f"note_evidence[{index}].source_content_hash")
         if ref in refs:
             raise FinancialStatementStructureError("note evidence ref is duplicated")
         refs.add(ref)
@@ -294,10 +363,11 @@ def _note_refs(note_evidence: Sequence[Mapping[str, Any]]) -> set[str]:
 def _normalized_note_evidence(
     note_evidence: Sequence[Mapping[str, Any]],
     resolver: Callable[[str], Mapping[str, Any] | None] | None,
+    *, schema_version: str,
 ) -> list[dict[str, Any]]:
     # _note_refs performs the closed/hash validation. Keep the complete proof
     # in the normalized authority so a note ref cannot later resolve to new bytes.
-    refs = _note_refs(note_evidence)
+    refs = _note_refs(note_evidence, schema_version=schema_version)
     if refs and resolver is None:
         raise FinancialStatementStructureError(
             "note evidence requires an authoritative resolver"
@@ -374,7 +444,7 @@ def _normalize_line(
         ),
         "forecast_base_ref": wire["forecast_base_ref"],
     }
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in _ANNUAL_STRUCTURE_VERSIONS:
         line["annual_forecast_method"] = wire["annual_forecast_method"]
     for field, allowed in (
         ("role", ROLES), ("kind", LINE_KINDS), ("statement", STATEMENTS),
@@ -457,7 +527,7 @@ def _normalize_line(
             raise FinancialStatementStructureError(
                 "diluted weighted-average shares must be positive"
             )
-        if schema_version == SCHEMA_VERSION:
+        if schema_version in _ANNUAL_STRUCTURE_VERSIONS:
             annual_method = _text(
                 line["annual_forecast_method"],
                 f"lines[{index}].annual_forecast_method",
@@ -474,7 +544,7 @@ def _normalize_line(
                 raise FinancialStatementStructureError(
                     "day-weighted annual shares require an explicit quarterly forecast method"
                 )
-    elif schema_version == SCHEMA_VERSION and line["annual_forecast_method"] is not None:
+    elif schema_version in _ANNUAL_STRUCTURE_VERSIONS and line["annual_forecast_method"] is not None:
         raise FinancialStatementStructureError(
             "only diluted weighted-average shares may carry annual_forecast_method"
         )
@@ -506,7 +576,8 @@ def _normalize_line(
 
 def _normalize_formula(
     raw: Any, index: int, lines: Mapping[str, Mapping[str, Any]],
-    filed: Mapping[str, Mapping[str, Any]], allowed_evidence: set[str],
+    filed: Mapping[str, Mapping[str, Any]], allowed_evidence: set[str], *,
+    schema_version: str, note_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise FinancialStatementStructureError(f"formulas[{index}] must be an object")
@@ -537,7 +608,13 @@ def _normalize_formula(
             raise FinancialStatementStructureError("formula tie-out unit differs")
         if target.get("period_basis") != lines[output]["period_kind"]:
             raise FinancialStatementStructureError("formula tie-out period kind differs")
-    else:
+    elif not (
+        schema_version == SCHEMA_VERSION
+        and operator == "sum"
+        and lines[output]["role"] == "diluted_eps_numerator"
+        and note_evidence
+        and any(ref in note_evidence for ref in refs)
+    ):
         raise FinancialStatementStructureError(
             "every derived formula must tie to an exact filed concept"
         )
@@ -582,6 +659,17 @@ def _normalize_formula(
             raise FinancialStatementStructureError(
                 "sum formula roles do not match its company statement output"
             )
+        if tie is None:
+            cited_notes = [ref for ref in refs if ref in (note_evidence or {})]
+            if not cited_notes:
+                raise FinancialStatementStructureError(
+                    "untied diluted EPS numerator needs exact typed note evidence"
+                )
+            if any(lines[term["line_ref"]]["kind"] != "filed" for term in normalized):
+                raise FinancialStatementStructureError(
+                    "note-backed diluted EPS numerator terms must be exact filed lines"
+                )
+            result["note_evidence_refs"] = sorted(cited_notes)
         result["terms"] = normalized
     elif operator == "divide":
         numerator = _text(wire["numerator_ref"], "formula numerator_ref")
@@ -627,9 +715,157 @@ def _period_cells(line: Mapping[str, Any]) -> dict[tuple[str | None, str], Decim
     }
 
 
+def _filed_period_facts(
+    line: Mapping[str, Any], *, period_start: str, period_end: str,
+    accession: str, form: str,
+) -> list[dict[str, Any]]:
+    facts = [
+        dict(item) for item in (line.get("duration_facts") or [])
+        if isinstance(item, Mapping)
+        and item.get("period_start") == period_start
+        and item.get("period_end") == period_end
+    ]
+    if not facts:
+        cell = (line.get("cells") or {}).get(period_end)
+        if isinstance(cell, Mapping) and cell.get("period_start") == period_start:
+            facts = [{**dict(cell), "period_end": period_end}]
+    return [
+        item for item in facts
+        if accession in (item.get("source_accessions") or [])
+        and form in (item.get("source_forms") or [])
+    ]
+
+
+def _note_backed_eps_replay(
+    structure: Mapping[str, Any], filed: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate exact note-scoped numerator periods through filed diluted EPS."""
+
+    if structure.get("schema_version") != SCHEMA_VERSION:
+        return []
+    lines = {line["ref"]: line for line in structure["lines"]}
+    formulas = list(structure["formulas"])
+    notes = {item["ref"]: item for item in structure.get("note_evidence") or []}
+    reports: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for formula in formulas:
+        if formula.get("tie_out_concept") is not None:
+            continue
+        output = formula["output_ref"]
+        if lines[output]["role"] != "diluted_eps_numerator":
+            raise FinancialStatementStructureError(
+                "only diluted EPS numerator may use note-backed replay"
+            )
+        divides = [
+            item for item in formulas
+            if item["operator"] == "divide" and item["numerator_ref"] == output
+        ]
+        if len(divides) != 1 or divides[0].get("tie_out_concept") is None:
+            raise FinancialStatementStructureError(
+                "note-backed numerator needs one filed diluted EPS divide tie"
+            )
+        divide = divides[0]
+        denominator = lines[divide["denominator_ref"]]
+        if denominator["kind"] != "filed":
+            raise FinancialStatementStructureError(
+                "note-backed diluted EPS denominator must be an exact filed line"
+            )
+        eps_line = filed[divide["tie_out_concept"]]
+        formula_reports: list[dict[str, Any]] = []
+        for evidence_ref in formula.get("note_evidence_refs") or []:
+            evidence = notes[evidence_ref]
+            accession = evidence["accession"]
+            form = evidence["form"]
+            for period in evidence["periods"]:
+                start = period["period_start"]
+                end = period["period_end"]
+                identity = (output, start, end)
+                if identity in seen:
+                    raise FinancialStatementStructureError(
+                        "note-backed numerator period authority is ambiguous"
+                    )
+                seen.add(identity)
+                sources: list[dict[str, Any]] = []
+                calculated = Decimal(0)
+                missing = False
+                for term in formula["terms"]:
+                    term_line = lines[term["line_ref"]]
+                    matches = _filed_period_facts(
+                        filed[term_line["concept"]], period_start=start,
+                        period_end=end, accession=accession, form=form,
+                    )
+                    if len(matches) != 1:
+                        missing = True
+                        break
+                    fact = matches[0]
+                    if str(fact.get("unit") or "").casefold() != lines[output]["unit"]:
+                        raise FinancialStatementStructureError(
+                            "note-backed numerator term unit differs"
+                        )
+                    calculated += _decimal(term["coefficient"], "coefficient") * _decimal(
+                        fact.get("value"), "note-backed numerator term"
+                    )
+                    sources.append(fact)
+                shares = _filed_period_facts(
+                    filed[denominator["concept"]], period_start=start,
+                    period_end=end, accession=accession, form=form,
+                )
+                eps = _filed_period_facts(
+                    eps_line, period_start=start, period_end=end,
+                    accession=accession, form=form,
+                )
+                if missing or len(shares) != 1 or len(eps) != 1:
+                    formula_reports.append({
+                        "period_start": start, "period_end": end,
+                        "applicability_kind": evidence["applicability_kind"],
+                        "evidence_ref": evidence_ref, "status": "unavailable",
+                        "value": None,
+                        "reason": "the exact statement period lacks one numerator term, shares, or EPS tie",
+                    })
+                    continue
+                share_value = _decimal(shares[0].get("value"), "diluted shares")
+                if (
+                    str(shares[0].get("unit") or "").casefold() != "shares"
+                    or share_value <= 0
+                ):
+                    raise FinancialStatementStructureError(
+                        "note-backed diluted EPS shares must be positive shares"
+                    )
+                filed_eps = _decimal(eps[0].get("value"), "filed diluted EPS")
+                if str(eps[0].get("unit") or "").casefold() != lines[divide["output_ref"]]["unit"]:
+                    raise FinancialStatementStructureError(
+                        "note-backed filed diluted EPS unit differs"
+                    )
+                quotient = calculated / share_value
+                quantum = Decimal(1).scaleb(filed_eps.as_tuple().exponent)
+                if quotient.quantize(quantum) != filed_eps:
+                    raise FinancialStatementStructureError(
+                        "note-backed diluted EPS numerator does not tie through filed EPS"
+                    )
+                formula_reports.append({
+                    "period_start": start, "period_end": end,
+                    "applicability_kind": evidence["applicability_kind"],
+                    "evidence_ref": evidence_ref, "status": "validated",
+                    "value": str(calculated), "unit": lines[output]["unit"],
+                    "filed_diluted_eps": str(filed_eps),
+                    "source_accessions": [accession], "reason": None,
+                })
+        reports.append({
+            "output_ref": output,
+            "status": (
+                "validated" if formula_reports
+                and all(item["status"] == "validated" for item in formula_reports)
+                else "unavailable"
+            ),
+            "periods": formula_reports,
+        })
+    return reports
+
+
 def _validate_formula_evidence(
     formulas: Sequence[Mapping[str, Any]], lines: Mapping[str, Mapping[str, Any]],
-    filed: Mapping[str, Mapping[str, Any]], note_refs: set[str],
+    filed: Mapping[str, Mapping[str, Any]], note_refs: set[str], *,
+    include_duration: bool = False,
 ) -> None:
     by_output = {formula["output_ref"]: formula for formula in formulas}
     visiting: set[str] = set()
@@ -644,7 +880,11 @@ def _validate_formula_evidence(
         if line["kind"] == "filed":
             result = {
                 str(source_ref)
-                for cell in (filed[line["concept"]].get("cells") or {}).values()
+                for cell in (
+                    list((filed[line["concept"]].get("cells") or {}).values())
+                    + (list(filed[line["concept"]].get("duration_facts") or [])
+                       if include_duration else [])
+                )
                 if isinstance(cell, Mapping)
                 for source_ref in (cell.get("source_accessions") or [])
             }
@@ -676,6 +916,40 @@ def _validate_formula_evidence(
         if not set(formula["evidence_refs"]).issubset(allowed):
             raise FinancialStatementStructureError(
                 f"formula {formula['output_ref']} cites evidence outside its operands"
+            )
+
+
+def _validate_typed_note_use(
+    formulas: Sequence[Mapping[str, Any]], lines: Mapping[str, Mapping[str, Any]],
+    notes: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if not notes:
+        return
+    for evidence_ref in notes:
+        uses = [formula for formula in formulas
+                if evidence_ref in formula["evidence_refs"]]
+        if len(uses) != 1:
+            raise FinancialStatementStructureError(
+                "typed financial note evidence must be cited by exactly one formula"
+            )
+        numerator = uses[0]
+        if (
+            numerator["operator"] != "sum"
+            or numerator.get("tie_out_concept") is not None
+            or lines[numerator["output_ref"]]["role"] != "diluted_eps_numerator"
+        ):
+            raise FinancialStatementStructureError(
+                "typed financial note evidence is reserved for an untied diluted EPS numerator"
+            )
+        divides = [
+            formula for formula in formulas
+            if formula["operator"] == "divide"
+            and formula["numerator_ref"] == numerator["output_ref"]
+            and formula.get("tie_out_concept") is not None
+        ]
+        if len(divides) != 1:
+            raise FinancialStatementStructureError(
+                "note-backed numerator must feed one filed diluted EPS tie"
             )
 
 
@@ -748,6 +1022,8 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
 def validate_structure_proposal(
     proposal: Mapping[str, Any], state: Mapping[str, Any], *,
     revenue_anchor_concept: str, expense_lines: Sequence[Mapping[str, Any]],
+    note_evidence: Sequence[Mapping[str, Any]] = (),
+    note_evidence_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """Validate the formula definition inside a model-spec response."""
 
@@ -779,8 +1055,21 @@ def validate_structure_proposal(
         "expense_lines": list(expense_lines),
     }, lines)
     _validate_forecast_bases(lines)
+    notes = _normalized_note_evidence(
+        note_evidence, note_evidence_resolver, schema_version=schema_version,
+    )
+    if schema_version == SCHEMA_VERSION and any(
+        item["company_ref"] != state.get("company_ref") for item in notes
+    ):
+        raise FinancialStatementStructureError(
+            "note evidence company differs from company presentation"
+        )
+    note_by_ref = {item["ref"]: item for item in notes}
     formulas = [
-        _normalize_formula(raw, index, by_ref, filed, accessions)
+        _normalize_formula(
+            raw, index, by_ref, filed, accessions | set(note_by_ref),
+            schema_version=schema_version, note_evidence=note_by_ref,
+        )
         for index, raw in enumerate(raw_formulas)
     ]
     outputs = [formula["output_ref"] for formula in formulas]
@@ -796,7 +1085,8 @@ def validate_structure_proposal(
         raise FinancialStatementStructureError(
             "structure needs a formula-derived filed final earnings result"
         )
-    _validate_formula_evidence(formulas, by_ref, filed, set())
+    _validate_formula_evidence(formulas, by_ref, filed, set(note_by_ref))
+    _validate_typed_note_use(formulas, by_ref, note_by_ref)
     return {"schema_version": schema_version, "lines": lines, "formulas": formulas}
 
 
@@ -810,6 +1100,10 @@ def replay_historical_structure(
     values: dict[str, dict[tuple[str | None, str], Decimal]] = {
         ref: _period_cells(filed[line["concept"]])
         for ref, line in lines.items() if line["kind"] == "filed"
+    }
+    note_formula_reports = _note_backed_eps_replay(structure, filed)
+    note_reports_by_output = {
+        item["output_ref"]: item for item in note_formula_reports
     }
     reports: list[dict[str, Any]] = []
     pending = {formula["output_ref"]: formula for formula in structure["formulas"]}
@@ -844,6 +1138,14 @@ def replay_historical_structure(
             tie = formula["tie_out_concept"]
             tied = {} if tie is None else _period_cells(filed[tie])
             tested = sorted(set(calculated) & set(tied), key=lambda item: item[1])
+            note_report = note_reports_by_output.get(output)
+            note_quarters = {
+                (item["period_start"], item["period_end"])
+                for item in ((note_report or {}).get("periods") or [])
+                if item["applicability_kind"] == "quarter"
+                and item["status"] == "validated"
+            }
+            note_validated = bool(calculated) and set(calculated) == note_quarters
             def matches(period: tuple[str | None, str]) -> bool:
                 if formula["operator"] != "divide":
                     return calculated[period] == tied[period]
@@ -863,12 +1165,12 @@ def replay_historical_structure(
                 )
             reports.append({
                 "output_ref": output,
-                "status": "validated" if tested else "unavailable",
+                "status": "validated" if tested or note_validated else "unavailable",
                 "tested_periods": [
                     {"period_start": period[0], "period_end": period[1]}
-                    for period in tested
+                    for period in (tested or sorted(note_quarters, key=lambda item: item[1]))
                 ],
-                "reason": None if tested else (
+                "reason": None if tested or note_validated else (
                     "no complete historical period has every formula term and filed tie-out"
                 ),
             })
@@ -887,7 +1189,7 @@ def replay_historical_structure(
                 "status": report["status"], "observations": [],
                 "reason": report["reason"],
             })
-            if structure.get("schema_version") == SCHEMA_VERSION:
+            if structure.get("schema_version") in _ANNUAL_STRUCTURE_VERSIONS:
                 forecast_reports[-1]["annual_method"] = line.get(
                     "annual_forecast_method"
                 )
@@ -898,7 +1200,7 @@ def replay_historical_structure(
                 "status": "unavailable", "observations": [],
                 "reason": "the company spec selected no forecast basis for this filed line",
             })
-            if structure.get("schema_version") == SCHEMA_VERSION:
+            if structure.get("schema_version") in _ANNUAL_STRUCTURE_VERSIONS:
                 forecast_reports[-1]["annual_method"] = line.get(
                     "annual_forecast_method"
                 )
@@ -936,12 +1238,12 @@ def replay_historical_structure(
                 "historical inputs contain no complete nonzero forecast-measure pair"
             ),
         })
-        if structure.get("schema_version") == SCHEMA_VERSION:
+        if structure.get("schema_version") in _ANNUAL_STRUCTURE_VERSIONS:
             forecast_reports[-1]["annual_method"] = line.get(
                 "annual_forecast_method"
             )
         if (
-            structure.get("schema_version") == SCHEMA_VERSION
+            structure.get("schema_version") in _ANNUAL_STRUCTURE_VERSIONS
             and line["role"] == "diluted_weighted_average_shares"
         ):
             annual_method = str(line["annual_forecast_method"])
@@ -958,10 +1260,12 @@ def replay_historical_structure(
             })
             if annual_method == "day_weighted_quarters":
                 annual_ready = annual_report["status"] == "validated"
-    return {
+    result = {
         "schema_version": (
-            "financial-statement-structure-replay-0.2"
+            "financial-statement-structure-replay-0.3"
             if structure.get("schema_version") == SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.2"
+            if structure.get("schema_version") == ANNUAL_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.1"
         ),
         "structure_hash": structure["content_hash"],
@@ -971,6 +1275,9 @@ def replay_historical_structure(
             report["status"] == "validated" for report in reports
         ),
     }
+    if structure.get("schema_version") == SCHEMA_VERSION:
+        result["note_formula_periods"] = note_formula_reports
+    return result
 
 
 def validate_financial_statement_structure(
@@ -1020,16 +1327,30 @@ def validate_financial_statement_structure(
         raise FinancialStatementStructureError("structure line ref is duplicated")
     _validate_spec_alignment(company_spec, lines)
     _validate_forecast_bases(lines)
-    notes = _normalized_note_evidence(note_evidence, note_evidence_resolver)
+    notes = _normalized_note_evidence(
+        note_evidence, note_evidence_resolver, schema_version=schema_version,
+    )
+    if schema_version == SCHEMA_VERSION and any(
+        item["company_ref"] != body["company_ref"] for item in notes
+    ):
+        raise FinancialStatementStructureError(
+            "note evidence company differs from financial statement structure"
+        )
     note_refs = {item["ref"] for item in notes}
-    allowed_evidence = _statement_refs(financial_inputs) | note_refs
+    note_by_ref = {item["ref"]: item for item in notes}
+    allowed_evidence = _statement_refs(
+        financial_inputs, include_duration=schema_version == SCHEMA_VERSION,
+    ) | note_refs
     raw_formulas = body["formulas"]
     if not isinstance(raw_formulas, list) or not raw_formulas:
         raise FinancialStatementStructureError(
             "structure needs at least one formula and a tied final earnings result"
         )
     formulas = [
-        _normalize_formula(raw, index, by_ref, filed, allowed_evidence)
+        _normalize_formula(
+            raw, index, by_ref, filed, allowed_evidence,
+            schema_version=schema_version, note_evidence=note_by_ref,
+        )
         for index, raw in enumerate(raw_formulas)
     ]
     outputs = [formula["output_ref"] for formula in formulas]
@@ -1045,7 +1366,12 @@ def validate_financial_statement_structure(
         raise FinancialStatementStructureError(
             "structure needs a formula-derived filed final earnings result"
         )
-    _validate_formula_evidence(formulas, by_ref, filed, note_refs)
+    _validate_formula_evidence(
+        formulas, by_ref, filed, note_refs,
+        include_duration=schema_version == SCHEMA_VERSION,
+    )
+    if schema_version == SCHEMA_VERSION:
+        _validate_typed_note_use(formulas, by_ref, note_by_ref)
     normalized = {
         "schema_version": schema_version,
         "authority_ref": _STRUCTURE_AUTHORITY_REFS[schema_version],
@@ -1418,8 +1744,10 @@ def forecast_structure_binding(
         raise FinancialStatementStructureError("statement structure is not ready for forecast")
     projection = {
         "schema_version": (
-            "forecast-statement-structure-binding-0.2"
+            "forecast-statement-structure-binding-0.3"
             if structure.get("schema_version") == SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.2"
+            if structure.get("schema_version") == ANNUAL_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.1"
         ),
         "authority_ref": structure.get("authority_ref"),

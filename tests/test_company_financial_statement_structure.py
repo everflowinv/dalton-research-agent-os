@@ -5,6 +5,7 @@ from decimal import Decimal
 import unittest
 
 from dalton_core.company_financial_statement_structure import (
+    ANNUAL_SCHEMA_VERSION,
     LEGACY_SCHEMA_VERSION,
     SCHEMA_VERSION,
     FinancialStatementStructureError,
@@ -118,6 +119,84 @@ def derived(ref, role, *, unit="usd", annual="sum_quarters"):
     }
 
 
+def typed_note(*, kind="annual", periods=None):
+    return {
+        "schema_version": "financial-note-evidence-binding-0.1",
+        "ref": "financial-note-evidence:acn-eps",
+        "content_hash": "c" * 64,
+        "target_ref": "financial_note:diluted_eps_numerator:0.1",
+        "company_ref": "company:test",
+        "statement_ingest_ref": "statement-ingest:test",
+        "statement_filing_hash": "d" * 64,
+        "accession": ACCESSION,
+        "form": "10-K",
+        "applicability_kind": kind,
+        "periods": periods or [{
+            "period_start": "2024-01-01", "period_end": "2024-12-31",
+        }],
+    }
+
+
+def note_backed_eps_inputs_and_proposal():
+    inputs = financial_inputs()
+    annual = ("2024-01-01", "2024-12-31")
+    values = {
+        "parent": ("7678433000", "usd"),
+        "canada-nci": ("7240000", "usd"),
+        "other-nci": ("146727000", "usd"),
+        "shares": ("632435108", "shares"),
+        "eps": ("12.15", "usd_per_share"),
+    }
+    inputs["filed_lines"].extend([
+        input_line("canada-nci", (), unit="usd"),
+        input_line("other-nci", (), unit="usd"),
+    ])
+    for concept, (value, unit) in values.items():
+        line = next(item for item in inputs["filed_lines"] if item["concept"] == concept)
+        annual_fact = {
+            "period_start": annual[0], "period_end": annual[1],
+            "period_kind": "cumulative", "value": value, "unit": unit,
+            "source_accessions": [ACCESSION], "source_forms": ["10-K"],
+        }
+        line["duration_facts"] = [annual_fact]
+        line["cells"][annual[1]] = {
+            key: item for key, item in annual_fact.items()
+            if key not in {"period_end", "period_kind", "source_forms"}
+        }
+    candidate = proposal(inputs)
+    candidate["schema_version"] = SCHEMA_VERSION
+    for line in candidate["lines"]:
+        line["annual_forecast_method"] = (
+            "unavailable" if line["role"] == "diluted_weighted_average_shares" else None
+        )
+    parent = next(line for line in candidate["lines"] if line["ref"] == "parent")
+    parent.update({
+        "kind": "filed", "concept": "parent", "forecast_method": "unavailable",
+    })
+    candidate["formulas"] = [
+        formula for formula in candidate["formulas"]
+        if formula["output_ref"] != "parent"
+    ]
+    numerator = next(line for line in candidate["lines"] if line["ref"] == "eps-numerator")
+    numerator.update({"kind": "derived", "concept": None, "forecast_method": "formula"})
+    candidate["lines"].extend([
+        {**filed("canada-nci", "dilutive_securities_adjustment", "canada-nci"),
+         "annual_forecast_method": None},
+        {**filed("other-nci", "dilutive_securities_adjustment", "other-nci"),
+         "annual_forecast_method": None},
+    ])
+    candidate["formulas"].insert(-1, {
+        "output_ref": "eps-numerator", "operator": "sum",
+        "terms": [
+            {"line_ref": "parent", "coefficient": "1"},
+            {"line_ref": "canada-nci", "coefficient": "1"},
+        ],
+        "tie_out_concept": None,
+        "evidence_refs": [ACCESSION, "financial-note-evidence:acn-eps"],
+    })
+    return inputs, candidate
+
+
 def sum_formula(output, terms, tie):
     return {
         "output_ref": output, "operator": "sum",
@@ -169,6 +248,107 @@ def proposal(inputs=None):
 
 
 class FinancialStatementStructureTests(unittest.TestCase):
+    def test_note_backed_annual_eps_numerator_ties_indirectly_without_quarter_readiness(self):
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        note = typed_note()
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs, note_evidence=[note],
+            note_evidence_resolver=lambda ref: note if ref == note["ref"] else None,
+        )
+        self.assertEqual(structure["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(structure["authority_ref"],
+                         "company-financial-statement-structure:0.3")
+        annual = replay["note_formula_periods"][0]
+        self.assertEqual(annual["status"], "validated")
+        self.assertEqual(annual["periods"][0]["value"], "7685673000")
+        self.assertEqual(annual["periods"][0]["filed_diluted_eps"], "12.15")
+        self.assertFalse(replay["ready_for_forecast"])
+        numerator = next(item for item in replay["formulas"]
+                         if item["output_ref"] == "eps-numerator")
+        self.assertEqual(numerator["status"], "unavailable")
+
+    def test_note_backed_numerator_refuses_other_nci_sign_and_missing_period(self):
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        note = typed_note()
+        numerator = next(item for item in candidate["formulas"]
+                         if item["output_ref"] == "eps-numerator")
+        numerator["terms"][1]["line_ref"] = "other-nci"
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "does not tie through filed EPS"):
+            validate_financial_statement_structure(
+                candidate, company_spec(), inputs, note_evidence=[note],
+                note_evidence_resolver=lambda _ref: note,
+            )
+        numerator["terms"][1].update({"line_ref": "canada-nci", "coefficient": "-1"})
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "does not tie through filed EPS"):
+            validate_financial_statement_structure(
+                candidate, company_spec(), inputs, note_evidence=[note],
+                note_evidence_resolver=lambda _ref: note,
+            )
+
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        adjustment = next(item for item in inputs["filed_lines"]
+                          if item["concept"] == "canada-nci")
+        prior = {
+            "period_start": "2023-01-01", "period_end": "2023-12-31",
+            "period_kind": "cumulative", "value": "7000000", "unit": "usd",
+            "source_accessions": [ACCESSION], "source_forms": ["10-K"],
+        }
+        adjustment["duration_facts"] = [prior]
+        adjustment["cells"] = {"2023-12-31": {
+            key: value for key, value in prior.items()
+            if key not in {"period_end", "period_kind", "source_forms"}
+        }}
+        candidate["financial_input_hash"] = financial_input_authority(inputs)["content_hash"]
+        # The missing amount is honest unavailability, never an implicit zero.
+        _structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs, note_evidence=[note],
+            note_evidence_resolver=lambda _ref: note,
+        )
+        self.assertEqual(replay["note_formula_periods"][0]["status"], "unavailable")
+
+    def test_typed_note_binding_refuses_foreign_company_period_and_resolver_drift(self):
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        note = typed_note()
+        for changed, error in (
+            ({**note, "company_ref": "company:foreign"}, "company differs"),
+            ({**note, "applicability_kind": "quarter"}, "applicability kind"),
+        ):
+            with self.assertRaisesRegex(FinancialStatementStructureError, error):
+                validate_financial_statement_structure(
+                    candidate, company_spec(), inputs, note_evidence=[changed],
+                    note_evidence_resolver=lambda _ref, item=changed: item,
+                )
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "authority differs"):
+            validate_financial_statement_structure(
+                candidate, company_spec(), inputs, note_evidence=[note],
+                note_evidence_resolver=lambda _ref: {**note, "content_hash": "e" * 64},
+            )
+
+    def test_structure_0_2_replays_with_its_exact_prior_shape(self):
+        inputs = financial_inputs()
+        candidate = proposal(inputs)
+        candidate["schema_version"] = ANNUAL_SCHEMA_VERSION
+        for line in candidate["lines"]:
+            line["annual_forecast_method"] = (
+                "unavailable" if line["role"] == "diluted_weighted_average_shares" else None
+            )
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs,
+        )
+        self.assertEqual(structure["authority_ref"],
+                         "company-financial-statement-structure:0.2")
+        self.assertEqual(replay["schema_version"],
+                         "financial-statement-structure-replay-0.2")
+        self.assertNotIn("note_formula_periods", replay)
+        self.assertEqual(structure["content_hash"],
+                         "a4c044f8da824a0eb4439fc1bd64c14870e8cb45d254a344e3fcd027df83aa03")
+        from dalton_core.store import content_hash
+        self.assertEqual(content_hash(replay),
+                         "29f9fa2947b59f00f4c597557292da3bddc009f57f4d3c65c83bb7ce094a00b2")
+
     def test_versioned_annual_share_method_needs_a_historical_direct_tie(self):
         inputs = financial_inputs()
         inputs["schema_version"] = "0.3"
