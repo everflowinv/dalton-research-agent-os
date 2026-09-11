@@ -1008,6 +1008,11 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
             router.register_profile(alternate)
             router.register_policy(retry_policy())
         retry = {"max_same_profile_retries": 1, "retry_backoff_seconds": 0}
+        transport = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 600,
+            "retry_backoff_seconds": 2,
+        }
         config = {
             **self.UNBUDGETED,
             "routing_policy_ref": (
@@ -1019,6 +1024,7 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
             ],
             "model_router_db": str(router_path),
             "provider_retry": retry,
+            "transport_retry": transport,
         }
         server = WriterServer(
             self.root / "core.sqlite", str(self.root / "planner-retry.sock"),
@@ -1033,7 +1039,7 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         with patch(
             "dalton_core.openclaw_model_adapter.OpenClawModelAdapter",
             return_value=adapter,
-        ):
+        ) as adapter_factory:
             result = server._store_executor.submit(
                 server._op_llm_planner_execute,
                 {"context_pack_ref": context_ref, "max_cost_usd": 0.5},
@@ -1051,6 +1057,14 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         self.assertEqual(status["max_attempts"], 4)
         self.assertEqual(
             authority["work_order"]["metadata"]["provider_retry"], retry
+        )
+        self.assertEqual(
+            authority["work_order"]["metadata"]["transport_retry"], transport
+        )
+        self.assertEqual(server._planner_lease_seconds, 1472.0)
+        self.assertEqual(server._scheduler.max_lease_seconds, 1472.0)
+        self.assertEqual(
+            adapter_factory.call_args.kwargs["queue_wait_seconds"], 600.0
         )
 
     def _budget_binding(self) -> dict:

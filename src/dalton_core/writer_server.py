@@ -1167,6 +1167,17 @@ def planner_budget_config(state_dir: str | Path) -> dict[str, Any]:
             raise WriterServerError(
                 "planner provider retry does not support unknown-result recovery"
             )
+    if "transport_retry" in installed:
+        from .document_extraction import validate_transport_retry
+
+        try:
+            result["transport_retry"] = validate_transport_retry(
+                installed["transport_retry"]
+            )
+        except Exception as exc:
+            raise WriterServerError(
+                f"planner transport retry configuration is invalid: {exc}"
+            ) from exc
     return result
 
 
@@ -1494,6 +1505,7 @@ class WriterServer:
         self._bounded_planner: BoundedPlannerAuthority | None = None
         self._llm_planner_coordinator_instance: LLMResearchPlannerCoordinator | None = None
         self._planner_model_config: dict[str, Any] | None = planner_model_config
+        self._planner_lease_seconds: float | None = None
         # C2b: held open for the writer's lifetime rather than per op. See
         # _planner_budget_ledger -- a WAL ledger nobody holds has no sidecars,
         # and the P14e lane reads it between ops, not during one.
@@ -1918,7 +1930,11 @@ class WriterServer:
                 None if self._planner_model_config is None
                 else self._planner_model_config.get("provider_retry")
             )
-            if planner_retry is not None:
+            planner_transport = (
+                None if self._planner_model_config is None
+                else self._planner_model_config.get("transport_retry")
+            )
+            if planner_retry is not None or planner_transport is not None:
                 from .model_router import ModelRouter
                 from .llm_research_planner_worker import (
                     planner_provider_attempt_bound,
@@ -1927,26 +1943,57 @@ class WriterServer:
                 with ModelRouter(
                     self._planner_model_config["model_router_db"]
                 ) as planner_router:
-                    planner_attempts, planner_policy_hash = (
-                        planner_provider_attempt_bound(
+                    planner_policy = planner_router.get_policy(
+                        self._planner_model_config["routing_policy_ref"]
+                    )
+                    planner_policy_hash = planner_policy["content_hash"]
+                    planner_attempts = 1
+                    if planner_retry is not None:
+                        planner_attempts, planner_policy_hash = planner_provider_attempt_bound(
                             planner_router,
                             self._planner_model_config["routing_policy_ref"],
                             planner_retry,
                         )
-                    )
                 scheduler_kwargs["max_attempts"] = max(
                     int(scheduler_kwargs.get("max_attempts", 3)),
                     planner_attempts,
                 )
+                transport = planner_transport or {}
+                safe_retries = int(
+                    transport.get("max_definitely_not_sent_retries", 0)
+                )
+                # The production adapter below has an explicit 120-second
+                # response timeout. Its queue and proved-pre-send retry policy
+                # extend the same Scheduler lease; neither consumes a paid
+                # provider attempt.
+                self._planner_lease_seconds = (
+                    (safe_retries + 1)
+                    * (120.0 + float(transport.get("queue_wait_seconds", 0)))
+                    + safe_retries
+                    * float(transport.get("retry_backoff_seconds", 0))
+                    + 30.0
+                )
+                scheduler_kwargs["max_lease_seconds"] = max(
+                    float(scheduler_kwargs.get("max_lease_seconds", 60.0)),
+                    self._planner_lease_seconds,
+                )
+                scheduler_kwargs["max_total_lease_seconds"] = max(
+                    float(
+                        scheduler_kwargs.get("max_total_lease_seconds", 300.0)
+                    ),
+                    self._planner_lease_seconds * 2,
+                )
                 scheduler_kwargs["policy_version_id"] = (
-                    "scheduler-policy-model-provider-retry-"
+                    "scheduler-policy-model-retry-"
                     + content_hash({
                         "base": scheduler_kwargs.get(
                             "policy_version_id", "scheduler-policy-0.1"
                         ),
                         "planner_routing_policy_hash": planner_policy_hash,
                         "planner_provider_retry": planner_retry,
+                        "planner_transport_retry": planner_transport,
                         "max_attempts": scheduler_kwargs["max_attempts"],
+                        "planner_lease_seconds": self._planner_lease_seconds,
                     })[:24]
                     + "-0.1"
                 )
@@ -3488,6 +3535,10 @@ class WriterServer:
                 None if self._planner_model_config is None
                 else self._planner_model_config.get("provider_retry")
             ),
+            transport_retry=(
+                None if self._planner_model_config is None
+                else self._planner_model_config.get("transport_retry")
+            ),
             **budget,
         )
 
@@ -3596,6 +3647,7 @@ class WriterServer:
         prepared = coordinator.prepare(
             context_pack_ref,
             provider_retry=config.get("provider_retry"),
+            transport_retry=config.get("transport_retry"),
             **budget,
         )
         if prepared.get("status") != "model_work_ready":
@@ -3627,6 +3679,11 @@ class WriterServer:
                 ).read_bytes().strip(),
                 expected_agent_id=config["expected_agent_id"],
                 timeout_seconds=120.0,
+                queue_wait_seconds=float(
+                    (config.get("transport_retry") or {}).get(
+                        "queue_wait_seconds", 0
+                    )
+                ),
             )
             worker = LLMResearchPlannerModelWorker(
                 scheduler=self._scheduler,
@@ -3641,6 +3698,8 @@ class WriterServer:
                     None if ledger is None else config["budget_policy_ref"]),
                 mission_binding=binding,
                 provider_retry=config.get("provider_retry"),
+                transport_retry=config.get("transport_retry"),
+                lease_seconds=self._planner_lease_seconds,
             )
             run = worker.run_once(work_order)
         # C2b: the default when the worker said nothing is read off the ledger

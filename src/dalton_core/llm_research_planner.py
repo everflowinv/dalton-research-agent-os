@@ -425,6 +425,7 @@ def build_planner_work_order(
     max_cost_usd: float = 5.0,
     max_seconds: int = 180,
     provider_retry: Mapping[str, Any] | None = None,
+    transport_retry: Mapping[str, Any] | None = None,
 ) -> WorkOrder:
     """Create the exact Scheduler contract for one model planning call."""
 
@@ -454,6 +455,15 @@ def build_planner_work_order(
             raise LLMResearchPlannerValidationError(
                 "planner provider retry does not support unknown-result recovery"
             )
+    if transport_retry is not None:
+        from .document_extraction import validate_transport_retry
+
+        try:
+            transport_retry = validate_transport_retry(transport_retry)
+        except Exception as exc:
+            raise LLMResearchPlannerValidationError(
+                f"invalid planner transport retry policy: {exc}"
+            ) from exc
     visible = planner_visible_context(context)
     identity = {
         "planner_ref": LLM_RESEARCH_PLANNER_REF,
@@ -464,6 +474,8 @@ def build_planner_work_order(
     }
     if provider_retry is not None:
         identity["provider_retry_hash"] = content_hash(provider_retry)
+    if transport_retry is not None:
+        identity["transport_retry_hash"] = content_hash(transport_retry)
     digest = content_hash(identity)[:32]
     created_at = _text(context.get("created_at"), "planner context created_at")
     return WorkOrder(
@@ -496,6 +508,10 @@ def build_planner_work_order(
             **(
                 {} if provider_retry is None
                 else {"provider_retry": dict(provider_retry)}
+            ),
+            **(
+                {} if transport_retry is None
+                else {"transport_retry": dict(transport_retry)}
             ),
         },
     )
@@ -616,6 +632,7 @@ class LLMResearchPlannerCoordinator:
         context_pack_ref: str,
         *,
         provider_retry: Mapping[str, Any] | None = None,
+        transport_retry: Mapping[str, Any] | None = None,
         **work_budget: Any,
     ) -> dict[str, Any]:
         disposition = planner_disposition(self.authority, context_pack_ref)
@@ -627,6 +644,7 @@ class LLMResearchPlannerCoordinator:
         work = build_planner_work_order(
             disposition["context"],
             provider_retry=provider_retry,
+            transport_retry=transport_retry,
             **work_budget,
         )
         enqueued = self.scheduler.enqueue(work)

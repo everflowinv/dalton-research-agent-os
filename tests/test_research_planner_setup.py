@@ -262,6 +262,11 @@ class PlannerBudgetConfigTests(unittest.TestCase):
                     "max_same_profile_retries": 1,
                     "retry_backoff_seconds": 2,
                 },
+                "transport_retry": {
+                    "max_definitely_not_sent_retries": 1,
+                    "queue_wait_seconds": 600,
+                    "retry_backoff_seconds": 2,
+                },
             })
             # The very same two keys the installed configuration carries: one
             # file, one repoint, and no way for them to disagree.
@@ -271,6 +276,7 @@ class PlannerBudgetConfigTests(unittest.TestCase):
             self.assertEqual(
                 installed["budget_policy_ref"], found["budget_policy_ref"])
             self.assertEqual(installed["provider_retry"], found["provider_retry"])
+            self.assertEqual(installed["transport_retry"], found["transport_retry"])
 
     def test_setup_preserves_an_existing_owner_provider_retry_policy(self) -> None:
         from tests.test_document_extraction_setup import _service
@@ -290,6 +296,11 @@ class PlannerBudgetConfigTests(unittest.TestCase):
                 "max_same_profile_retries": 4,
                 "retry_backoff_seconds": 17,
             }
+            configured["transport_retry"] = {
+                "max_definitely_not_sent_retries": 3,
+                "queue_wait_seconds": 901,
+                "retry_backoff_seconds": 19,
+            }
             target.write_text(json.dumps(configured), encoding="utf-8")
 
             install(config_path, tier="cheap", now=NOW)
@@ -297,6 +308,9 @@ class PlannerBudgetConfigTests(unittest.TestCase):
             preserved = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(
                 preserved["provider_retry"], configured["provider_retry"]
+            )
+            self.assertEqual(
+                preserved["transport_retry"], configured["transport_retry"]
             )
 
     def test_no_configuration_at_all_is_todays_behaviour(self) -> None:

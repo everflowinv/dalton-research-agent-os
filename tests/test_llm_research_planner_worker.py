@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from dalton_core.contracts import (
     InvocationGranularity,
@@ -377,7 +378,7 @@ class LLMResearchPlannerWorkerTests(unittest.TestCase):
             clock=lambda: NOW,
         )
         with self.assertRaisesRegex(
-            LLMResearchPlannerWorkerRejected, "provider retry policy differs"
+            LLMResearchPlannerWorkerRejected, "retry policy differs"
         ):
             worker.run_once(work)
 
@@ -446,7 +447,8 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
                 mission, pool="adhoc", lane="llm_planner_execute"),
         }
 
-    def _budgeted(self, adapter: FakeAdapter, mission: dict
+    def _budgeted(self, adapter: FakeAdapter, mission: dict, *,
+                  provider_retry=None, transport_retry=None,
                   ) -> LLMResearchPlannerModelWorker:
         return LLMResearchPlannerModelWorker(
             scheduler=self.scheduler,
@@ -459,6 +461,8 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
             budget=self.ledger,
             budget_policy_ref=BUDGET_POLICY,
             mission_binding=self._binding(mission),
+            provider_retry=provider_retry,
+            transport_retry=transport_retry,
             clock=lambda: NOW,
         )
 
@@ -550,6 +554,140 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
         self.assertEqual(rows[0][2], rows[0][1])
         self.assertEqual(rows[1][2], rows[1][1])
         self.assertEqual(rows[2][2], 1_000)
+
+    def test_nonretryable_provider_failure_with_actual_cost_is_charged(self) -> None:
+        class NonretryableFailure(FakeAdapter):
+            def execute(inner, work, route, selected):
+                invocation, result = super().execute(work, route, selected)
+                return invocation, replace(
+                    result,
+                    status="failed",
+                    outputs={},
+                    error={
+                        "code": "INVALID_HOST_RESULT",
+                        "message": "host rejected the result",
+                        "source": "openclaw-model-broker",
+                    },
+                )
+
+        work = self._work()
+        result = self._budgeted(
+            NonretryableFailure(self.ACTION), budget_mission()
+        ).run_once(work)
+        self.assertEqual(result["status"], "failed")
+        settlement = self._rows("thesis_impact_day_settlements")[0]
+        self.assertEqual(settlement["actual_micros"], 1_000)
+
+    def test_unproved_busy_without_metering_retains_full_reservation(self) -> None:
+        class UnprovedBusy(FakeAdapter):
+            def execute(inner, work, route, selected):
+                invocation, result = super().execute(work, route, selected)
+                return replace(invocation, usage={}), replace(
+                    result,
+                    status="failed",
+                    outputs={},
+                    error={"code": "BUSY", "message": "provider said busy"},
+                )
+
+        work = self._work()
+        result = self._budgeted(
+            UnprovedBusy(self.ACTION), budget_mission()
+        ).run_once(work)
+        self.assertEqual(result["status"], "failed")
+        admission = self._rows("thesis_impact_day_admissions")[0]
+        settlement = self._rows("thesis_impact_day_settlements")[0]
+        self.assertEqual(
+            settlement["actual_micros"], admission["reserved_micros"]
+        )
+
+    def test_proved_not_sent_transport_retry_stays_in_one_attempt(self) -> None:
+        from dalton_core.openclaw_model_adapter import BrokerDefinitelyNotSent
+
+        class NotSentOnce(FakeAdapter):
+            def __init__(inner, candidate):
+                super().__init__(candidate)
+                inner.calls = 0
+
+            def execute(inner, work, route, selected):
+                inner.calls += 1
+                if inner.calls == 1:
+                    raise BrokerDefinitelyNotSent("connect failed before send")
+                return super().execute(work, route, selected)
+
+        transport = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 0,
+            "retry_backoff_seconds": 0,
+        }
+        work = build_planner_work_order(
+            context(), max_cost_usd=0.5, transport_retry=transport
+        )
+        self.assertEqual(self.scheduler.enqueue(work)["status"], "fresh")
+        adapter = NotSentOnce(self.ACTION)
+        result = self._budgeted(
+            adapter, budget_mission(), transport_retry=transport
+        ).run_once(work)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(adapter.calls, 2)
+        self.assertEqual(
+            {item["attempt_number"] for item in self.router.list_decisions(
+                work_order_id=work.id
+            )},
+            {1},
+        )
+        self.assertEqual(len(self._rows("thesis_impact_day_admissions")), 1)
+
+    def test_post_send_unknown_is_persisted_charged_and_not_retried(self) -> None:
+        from dalton_core.openclaw_model_adapter import BrokerConnectionError
+
+        class PostSendUnknown(FakeAdapter):
+            def execute(inner, work, route, selected):
+                invocation, succeeded = super().execute(work, route, selected)
+                invocation = replace(invocation, usage={})
+                failed = replace(
+                    succeeded,
+                    status="failed",
+                    outputs={},
+                    error={
+                        "code": "POST_SEND_RESULT_UNKNOWN",
+                        "message": "broker result unavailable after dispatch",
+                        "source": "openclaw-model-adapter",
+                    },
+                    metadata={
+                        "route_decision_ref": route["id"],
+                        "profile_version_ref": selected["profile_version_ref"],
+                        "broker_request_mode": "execute",
+                        "dispatch_proof": {
+                            "authority": "openclaw-model-adapter",
+                            "state": "post_send_result_unknown",
+                            "version": "0.1",
+                        },
+                    },
+                )
+                error = BrokerConnectionError("connection dropped after send")
+                error.post_send_unknown_evidence = SimpleNamespace(
+                    invocation=invocation, result=failed
+                )
+                raise error
+
+        work = self._work()
+        result = self._budgeted(
+            PostSendUnknown(self.ACTION), budget_mission()
+        ).run_once(work)
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["post_send_result_unknown"])
+        self.assertEqual(result["result"]["error"]["code"],
+                         "POST_SEND_RESULT_UNKNOWN")
+        self.assertIsNotNone(self.store.connection.execute(
+            "SELECT 1 FROM model_invocations WHERE invocation_id=?",
+            (result["invocation"]["id"],),
+        ).fetchone())
+        admission = self._rows("thesis_impact_day_admissions")[0]
+        settlement = self._rows("thesis_impact_day_settlements")[0]
+        self.assertEqual(
+            settlement["actual_micros"], admission["reserved_micros"]
+        )
+        self.assertEqual(self.scheduler.status(work.id)["state"], "failed")
 
     def test_a_spent_pool_is_returned_before_the_work_order_is_leased(self) -> None:
         work = self._work()

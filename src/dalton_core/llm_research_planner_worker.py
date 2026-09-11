@@ -27,6 +27,7 @@ from .model_accounting import record_model_accounting
 from .model_router import ModelRouter, RoutingPolicyNotFound
 from .openclaw_model_adapter import (
     BrokerConnectionError,
+    BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
 )
@@ -113,6 +114,7 @@ class LLMResearchPlannerModelWorker:
         budget_policy_ref: str | None = None,
         mission_binding: Mapping[str, Any] | None = None,
         provider_retry: Mapping[str, Any] | None = None,
+        transport_retry: Mapping[str, Any] | None = None,
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -173,6 +175,17 @@ class LLMResearchPlannerModelWorker:
                 raise ValueError(
                     "planner provider retry does not support unknown-result recovery"
                 )
+        if transport_retry is None:
+            self.transport_retry = None
+        else:
+            from .document_extraction import validate_transport_retry
+
+            try:
+                self.transport_retry = validate_transport_retry(transport_retry)
+            except Exception as exc:
+                raise ValueError(
+                    f"invalid planner transport retry policy: {exc}"
+                ) from exc
         self.token_counter = token_counter
         self.lease_seconds = lease_seconds
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -206,10 +219,36 @@ class LLMResearchPlannerModelWorker:
             )
 
     def _validate_retry_binding(self, work: WorkOrder) -> None:
-        if work.metadata.get("provider_retry") != self.provider_retry:
+        if (
+            work.metadata.get("provider_retry") != self.provider_retry
+            or work.metadata.get("transport_retry") != self.transport_retry
+        ):
             raise LLMResearchPlannerWorkerRejected(
-                "planner WorkOrder provider retry policy differs from the worker"
+                "planner WorkOrder retry policy differs from the worker"
             )
+
+    def _execute_with_safe_retry(
+        self,
+        work: WorkOrder,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> tuple[ModelInvocation, ResultEnvelope]:
+        """Repeat only when the adapter proves no request was dispatched."""
+
+        policy = self.transport_retry or {}
+        maximum = int(policy.get("max_definitely_not_sent_retries", 0))
+        for retry_number in range(maximum + 1):
+            try:
+                return self.adapter.execute(work, route, profile)
+            except BrokerDefinitelyNotSent:
+                if retry_number >= maximum:
+                    raise
+                backoff = int(policy.get("retry_backoff_seconds", 0))
+                if backoff:
+                    import time
+
+                    time.sleep(backoff)
+        raise AssertionError("planner safe transport retry loop did not return")
 
     @staticmethod
     def _bounded_failure_status(lease: Mapping[str, Any]) -> str:
@@ -775,10 +814,74 @@ class LLMResearchPlannerModelWorker:
             if route_replayed:
                 invocation, adapter_result = self.adapter.replay(work, route, profile)
             else:
-                invocation, adapter_result = self.adapter.execute(work, route, profile)
+                invocation, adapter_result = self._execute_with_safe_retry(
+                    work, route, profile
+                )
         except OpenClawModelAdapterError as exc:
-            # Nothing was served, so nothing is charged: settling zero hands
-            # the whole reservation back to the pool in the same day.
+            evidence = getattr(exc, "post_send_unknown_evidence", None)
+            if evidence is not None:
+                # Dispatch happened and metering is unknown. Preserve the full
+                # reservation before validating or persisting the evidence;
+                # retry eligibility is deliberately absent for this Work.
+                self._settle(admission, reserved)
+                invocation = getattr(evidence, "invocation", None)
+                result = getattr(evidence, "result", None)
+                if (
+                    not isinstance(invocation, ModelInvocation)
+                    or not isinstance(result, ResultEnvelope)
+                    or invocation.work_order_ref != work.id
+                    or invocation.parent_ref != route["id"]
+                    or result.work_order_ref != work.id
+                    or result.invocation_ref != invocation.id
+                    or result.status != "failed"
+                    or (result.error or {}).get("code")
+                       != "POST_SEND_RESULT_UNKNOWN"
+                    or result.metadata.get("route_decision_ref") != route["id"]
+                ):
+                    raise LLMResearchPlannerWorkerConflict(
+                        "adapter post-send unknown evidence is invalid"
+                    ) from exc
+                saved = self._saved_invocation(invocation.id)
+                if saved is None:
+                    self.store.register_invocation(invocation.to_dict())
+                else:
+                    invocation = self._reuse_invocation(saved, invocation)
+                accounting = record_model_accounting(
+                    self.observability,
+                    invocation,
+                    route,
+                    profile,
+                    actor_ref=WORKER_REF,
+                    namespace="llm-research-planner",
+                )
+                completion = self.scheduler.complete(
+                    work.id,
+                    attempt_number,
+                    WORKER_REF,
+                    lease["lease_token"],
+                    result,
+                    idempotency_key=(
+                        f"llm-planner-complete:{work.id}:{attempt_number}"
+                    ),
+                )
+                return {
+                    "status": "failed",
+                    "work_order_ref": work.id,
+                    "route": route,
+                    "profile": profile,
+                    "invocation": invocation.to_dict(),
+                    "result": result.to_dict(),
+                    "accounting": accounting,
+                    "completion": completion,
+                    "post_send_result_unknown": True,
+                    "replayed": False,
+                    "budget": self._budget_report(
+                        admission, reserved, "reserved"
+                    ),
+                }
+            # With no typed post-send evidence this remains the historical
+            # adapter-unavailable path. Definitely-not-sent retries were
+            # already exhausted by _execute_with_safe_retry above.
             self._settle(admission, 0)
             retryable = isinstance(exc, BrokerConnectionError)
             result = self._control_result(
@@ -835,16 +938,28 @@ class LLMResearchPlannerModelWorker:
 
             cost_micros, cost_status = call_cost_micros(
                 invocation, route, profile, reserved)
-        elif provider_failure_proof is not None:
+        else:
             from .cockpit_model import call_cost_micros
 
             cost_micros, cost_status = call_cost_micros(
                 invocation, route, profile, reserved
             )
-            if cost_status != "actual":
+            error_code = str((adapter_result.error or {}).get("code", "")).upper()
+            local_not_sent = (
+                error_code in {
+                    "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                    "QUEUE_TIMEOUT", "BROKER_CLOSED",
+                }
+                and adapter_result.metadata.get("dispatch_proof") == {
+                    "authority": "openclaw-model-adapter",
+                    "state": "definitely_not_sent",
+                    "version": "0.1",
+                }
+            )
+            if local_not_sent:
+                cost_micros, cost_status = 0, "not_sent"
+            elif cost_status != "actual":
                 cost_micros, cost_status = reserved, "reserved"
-        else:
-            cost_micros, cost_status = 0, "failed"
         self._settle(admission, cost_micros)
         if (
             route_replayed

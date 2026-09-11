@@ -38,6 +38,11 @@ from .store import canonical_json, content_hash
 
 POLICY_ID = "model-routing-policy:dalton-openclaw-planner-decisions"
 CONFIG_FILE_NAME = "research-planner-model-config.json"
+DEFAULT_PLANNER_TRANSPORT_RETRY = {
+    "max_definitely_not_sent_retries": 1,
+    "queue_wait_seconds": 600,
+    "retry_backoff_seconds": 2,
+}
 # The lane registers its own configuration file rather than being listed in a
 # script it cannot reach -- the whole point of the registry (P14-0). A repeat
 # is a no-op, so the seed list and this agree instead of competing.
@@ -244,6 +249,7 @@ def install(
         "budget_db": str(Path(thesis["budget_db"]).resolve()),
         "budget_policy_ref": thesis["budget_policy_version_id"],
         "provider_retry": dict(DEFAULT_RETURNED_PROVIDER_RETRY),
+        "transport_retry": dict(DEFAULT_PLANNER_TRANSPORT_RETRY),
         **budget_overrides,
     })
     changed = (not target.exists()
@@ -297,6 +303,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 __all__ = [
     "CONFIG_FILE_NAME",
+    "DEFAULT_PLANNER_TRANSPORT_RETRY",
     "POLICY_ID",
     "PlannerSetupError",
     "credential_slots_for",
