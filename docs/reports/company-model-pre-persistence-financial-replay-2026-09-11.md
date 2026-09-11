@@ -49,3 +49,7 @@ mutating the historical row.
   new boundary.
 
 No live state, model call, or deployment was performed.
+
+## Independent integration review
+
+Root accepted author `f6f7d023cb1708bad6d9e981a245ec9b6e5f57a5` after reviewing the shared candidate identity, real-value materialization before persistence, whole semantic refusal and same-ID conflict behavior. Independent CLI/forecast/spec/structured-income/cash tests passed 121 cases in 11.631 seconds. The false-history test was then strengthened to enable one configured format-repair attempt; it still made exactly one model call, refused before current-spec persistence, and passed independently. Integration commits are `86f5a596` and `ae5521b0`. The existing storage method remains compatible for historical/manual callers; the automatic production path uses the validated authority method. R15a is not yet frozen or deployed; the separate old-model input reconstruction regression remains under review.
