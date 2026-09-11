@@ -23,6 +23,14 @@
     "investment_memo": {
       "max_cost_usd": 5.0,
       "max_units": 4
+    },
+    "registered_annual_report_draft": {
+      "max_units": 6,
+      "max_seconds": 7200
+    },
+    "registered_annual_report_verifier": {
+      "max_units": 6,
+      "max_seconds": 7200
     }
   },
   "schema_version": "0.1"
