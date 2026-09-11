@@ -60,6 +60,7 @@ def open_mission_document_admission_authority(
     mission: Mapping[str, Any],
     planner_scheduler_db: str | Path,
     planner_model_config_path: str | Path,
+    document_config_path: str | Path | None = None,
     draft_model_config_path: str | Path | None = None,
     verifier_model_config_path: str | Path | None = None,
     clock: Any = None,
@@ -69,6 +70,7 @@ def open_mission_document_admission_authority(
     state = Path(state_dir).expanduser().resolve()
     inventory = load_document_inventory_authority(
         core=store, mission=mission, state_dir=state,
+        config_path=document_config_path,
     )
     registry = inventory.get("registry")
     if registry is None:

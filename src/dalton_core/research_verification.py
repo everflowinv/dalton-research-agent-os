@@ -1740,7 +1740,12 @@ class CandidateStagingStore:
         qualitative = claim_wire["claim_kind"] == "qualitative"
         # ADR-0005 / P9d-17c: a fetched public-web page cited through the
         # same correction authority is cited evidence too.
-        transcript_evidence = evidence_wire["source_type"] in (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web")
+        transcript_evidence = (
+            verification_mode != MISSION_DOCUMENT_AUTHORITY_MODE
+            and evidence_wire["source_type"] in (
+                TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web"
+            )
+        )
         annual_report_evidence = (
             verification_mode == REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE
             and evidence_wire["source_type"] == "official_filing"

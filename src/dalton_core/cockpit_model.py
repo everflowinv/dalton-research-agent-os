@@ -98,6 +98,9 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "thesis_reflection_verifier": (
         "event-judgement-verifier-provider-output-0.1",
         "event-judgement-verifier-provider-output-v0.1.schema.json"),
+    "mission_directed_document_verifier": (
+        "annual-report-verifier-provider-output-0.1",
+        "annual-report-verifier-provider-output-v0.1.schema.json"),
     "debate_map_verifier": (
         "debate-map-verifier-provider-output-0.1",
         "debate-map-verifier-provider-output-v0.1.schema.json"),

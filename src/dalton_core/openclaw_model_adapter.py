@@ -66,7 +66,10 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "0.1",
         "annual-report-verifier-provider-output-v0.1.schema.json",
         "annual_report_verifier_provider_output_v0_1",
-        frozenset({"registered_annual_report_verifier"}),
+        frozenset({
+            "registered_annual_report_verifier",
+            "mission_directed_document_verifier",
+        }),
     ),
     "dossier-verifier-provider-output-0.1": (
         "0.1",
