@@ -113,7 +113,9 @@ def finalize(manifest_path: Path, deployment_path: Path, summary_path: Path,
          "release identity differs")
     need(manifest.get("status") == "staged_pending_owner_acceptance"
          and deployment.get("status") == "installer_finished_runtime_health_pending" and deployment.get("exit_code") == 0
-         and deployment.get("candidate_manifest_sha256") == sha(manifest_path),
+         and deployment.get("candidate_manifest_sha256") == sha(manifest_path)
+         and deployment.get("installed_verification") == installed_verification_path.name
+         and deployment.get("installed_verification_sha256") == sha(installed_verification_path),
          "deployment proof differs")
     need(summary.get("accepted") is True and summary.get("all_healthy") is True
          and summary.get("same_controller") is True and summary.get("postdeployment_controller") is True

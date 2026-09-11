@@ -96,6 +96,13 @@ class R11aOpsCandidateTests(unittest.TestCase):
             write_json(installed_path, {"status": "installed_bytes_verified_runtime_pending",
                                         "source_commit": final.COMMIT, "wheel_sha256": final.WHEEL_SHA256,
                                         "service_backup_keep_latest": 3, "model_config_count": 15})
+            deployment = json.loads(deployment_path.read_text())
+            deployment["installed_verification"] = installed_path.name
+            deployment["installed_verification_sha256"] = hashlib.sha256(installed_path.read_bytes()).hexdigest()
+            write_json(deployment_path, deployment)
+            summary = json.loads(summary_path.read_text())
+            summary["deployment_receipt_sha256"] = hashlib.sha256(deployment_path.read_bytes()).hexdigest()
+            write_json(summary_path, summary)
             before = manifest_path.read_bytes(); output = root / "candidate.json"
             receipt = final.finalize(manifest_path, deployment_path, summary_path,
                                      installed_path, wheel, installed_root, output)
@@ -147,8 +154,16 @@ class R11aOpsCandidateTests(unittest.TestCase):
             worker = Fake(); worker.stopped = worker.mutations_started = True
             artifacts = root / "artifacts"; artifacts.mkdir()
             write_json(artifacts / "service-after.json", {"version": "new"})
+            write_json(artifacts / "service-before.json", {"version": "old"})
             worker.rollback_root = rollback; worker.snapshot_id = snapshot; worker.initially_loaded = [writer]
-            worker.source = root; worker.artifacts = {"service_config_after": artifacts / "service-after.json"}
+            worker.source = root; worker.artifacts = {
+                "service_config_before": artifacts / "service-before.json",
+                "service_config_after": artifacts / "service-after.json",
+            }
+            initial = json.loads((rollback / "initial-state.json").read_text())
+            initial["protected_state_sha256"] = execute.protected_state_hash(state_files)
+            initial["plist_sha256"] = {writer: execute.sha(rollback / f"plists/{writer}.plist")}
+            write_json(rollback / "initial-state.json", initial)
             # The physical rollback test bypasses only process drain commands.
             worker.command = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", "")
             write_json(execute.STATE / "owned.json", {"version": "concurrent-owner"})
@@ -158,16 +173,31 @@ class R11aOpsCandidateTests(unittest.TestCase):
             self.assertEqual({"version": "concurrent-owner"},
                              json.loads((execute.STATE / "owned.json").read_text()))
             write_json(execute.STATE / "owned.json", {"version": "old"})
+            (execute.LAUNCH_AGENTS / f"{writer}.plist").write_bytes(b"concurrent-plist")
+            with self.assertRaisesRegex(execute.ExecuteError, "LaunchAgent changed outside"):
+                worker.rollback()
+            (execute.STATE / "concurrent-owner.sqlite").write_bytes(b"owner-database")
+            (execute.LAUNCH_AGENTS / f"{writer}.plist").write_bytes(b"old-plist")
             result = worker.rollback()
             self.assertEqual("rolled_back_healthy", result["status"])
             self.assertTrue(worker.restarted)
             self.assertTrue((execute.VENV / "old.txt").is_file())
             self.assertEqual({"version": "old"}, json.loads(execute.SERVICE_CONFIG.read_text()))
             self.assertEqual(b"old-database", (execute.STATE / "authority.sqlite").read_bytes())
+            self.assertEqual(b"owner-database", (execute.STATE / "concurrent-owner.sqlite").read_bytes())
+            self.assertEqual(["concurrent-owner.sqlite"], result["preserved_unknown_databases"])
             self.assertTrue((execute.STATE / "discovery-plans/old.json").is_file())
             self.assertEqual(b"old-plist", (execute.LAUNCH_AGENTS / f"{writer}.plist").read_bytes())
             self.assertFalse((execute.LAUNCH_AGENTS / f"{execute.LABELS[-1]}.plist").exists())
 
+    def test_rollback_preserves_installer_managed_state_and_unknown_database(self) -> None:
+        execute = load("execute_r11a_stopped_window_candidate")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_json(root / "owner.json", {"owner": True})
+            before = execute.protected_state_hash(root)
+            write_json(root / "model-catalog-sync.json", {"status": "installed", "checked_at": "later"})
+            self.assertEqual(before, execute.protected_state_hash(root))
 
 if __name__ == "__main__":
     unittest.main()
