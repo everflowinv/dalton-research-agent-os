@@ -356,6 +356,29 @@ def _duration_quarter_cell(cell: Mapping[str, Any], period_end: str) -> bool:
         return False
 
 
+def _inclusive_duration_days(cell: Mapping[str, Any]) -> int:
+    try:
+        return (
+            date.fromisoformat(str(cell.get("period_end")))
+            - date.fromisoformat(str(cell.get("period_start")))
+        ).days + 1
+    except ValueError:
+        return 0
+
+
+def _annual_line_definition_ref(
+    structure: Mapping[str, Any], line: Mapping[str, Any], concept: Any,
+) -> str:
+    definition = {
+        "structure_ref": structure.get("structure_ref"),
+        "structure_hash": structure.get("content_hash"),
+        "line_ref": line.get("ref"), "role": line.get("role"),
+        "concept": concept, "unit": line.get("unit"),
+        "annual_semantics": line.get("annual_semantics"),
+    }
+    return f"statement-line-definition:{content_hash(definition)}"
+
+
 def _annual_structure_facts(
     inputs: Mapping[str, Any], structure: Mapping[str, Any],
     line: Mapping[str, Any], group: Sequence[str], label: str,
@@ -374,14 +397,7 @@ def _annual_structure_facts(
     )
     if not isinstance(source, Mapping) or len(group) != 4:
         return []
-    definition = {
-        "structure_ref": structure.get("structure_ref"),
-        "structure_hash": structure.get("content_hash"),
-        "line_ref": line.get("ref"), "role": line.get("role"),
-        "concept": concept, "unit": line.get("unit"),
-        "annual_semantics": line.get("annual_semantics"),
-    }
-    definition_ref = f"statement-line-definition:{content_hash(definition)}"
+    definition_ref = _annual_line_definition_ref(structure, line, concept)
     fiscal_year = f"{calendar_binding['calendar_ref']}:{label}"
     calendar = calendar_binding["content_hash"]
     selected: list[dict[str, Any]] = []
@@ -469,6 +485,85 @@ def _structured_annual_eps(
             "direct_shares": aggregate_fiscal_year(
                 share_cells, semantic="direct_annual", fiscal_year=fiscal_year),
         }
+    return results
+
+
+def _structured_annual_share_forecasts(
+    model: Mapping[str, Any], annual_groups: Sequence[tuple[str, list[str]]],
+    calendar_binding: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Execute the structure's separately authorized annual share method."""
+
+    if calendar_binding is None:
+        return {}
+    from .company_financial_statement_structure import day_weighted_annual_shares
+
+    structure = model.get("financial_statement_structure") or {}
+    share_line = next(
+        (item for item in (structure.get("lines") or [])
+         if item.get("role") == "diluted_weighted_average_shares"), None,
+    )
+    if (
+        not isinstance(share_line, Mapping)
+        or share_line.get("annual_forecast_method") != "day_weighted_quarters"
+    ):
+        return {}
+    replay = model.get("financial_statement_structure_replay") or {}
+    share_replay = next(
+        (item for item in (replay.get("forecast_methods") or [])
+         if item.get("line_ref") == share_line.get("ref")), None,
+    )
+    if not isinstance(share_replay, Mapping) or share_replay.get("annual_status") != "validated":
+        return {}
+    share_result = next(
+        (item for item in (model.get("results") or [])
+         if item.get("role") == "diluted_weighted_average_shares"), None,
+    )
+    share_driver = next(
+        (item for item in (model.get("drivers") or [])
+         if item.get("structure_line_ref") == share_line.get("ref")), None,
+    )
+    if not isinstance(share_result, Mapping) or not isinstance(share_driver, Mapping):
+        return {}
+    by_end: dict[str, dict[str, Any]] = {
+        str(item.get("period_end")): {
+            "period_start": item.get("period_start"),
+            "period_end": item.get("period_end"), "value": item.get("value"),
+            "unit": share_line.get("unit"),
+        }
+        for item in (share_driver.get("history") or [])
+        if item.get("period_start") and item.get("period_end")
+    }
+    for cell in share_result.get("cells") or []:
+        period = cell.get("period")
+        if (
+            cell.get("status") == "computed" and isinstance(period, Mapping)
+            and period.get("kind") == "quarter"
+        ):
+            by_end[str(period.get("end"))] = {
+                "period_start": period.get("start"), "period_end": period.get("end"),
+                "value": cell.get("value"), "unit": share_line.get("unit"),
+            }
+    calendar = calendar_binding["content_hash"]
+    definition_ref = _annual_line_definition_ref(
+        structure, share_line, share_line.get("concept"),
+    )
+    results: dict[str, dict[str, Any]] = {}
+    for label, group in annual_groups:
+        if label.endswith("A") or label.endswith("(partial)") or len(group) != 4:
+            continue
+        cells = []
+        for end in group:
+            cell = by_end.get(end)
+            if cell is None:
+                continue
+            cells.append({
+                **cell, "calendar": calendar, "definition_ref": definition_ref,
+            })
+        results[label] = day_weighted_annual_shares(
+            cells, required_calendar=calendar,
+            required_definition_ref=definition_ref,
+        )
     return results
 
 
@@ -596,6 +691,9 @@ def export_fund_workbook(
     annual_eps_results = _structured_annual_eps(
         inputs, model.get("financial_statement_structure") or {},
         annual_groups, calendar_binding,
+    ) if model.get("schema_version") == "0.3" else {}
+    annual_share_forecasts = _structured_annual_share_forecasts(
+        model, annual_groups, calendar_binding,
     ) if model.get("schema_version") == "0.3" else {}
     result_cells: dict[tuple[str, str], str] = {}
     result_flow_periods: set[tuple[str, str]] = set()
@@ -760,6 +858,36 @@ def export_fund_workbook(
                         "model_label": result["label"],
                     })
                     continue
+            annual_share = annual_share_forecasts.get(label)
+            if (
+                structured_role == "diluted_weighted_average_shares"
+                and annual_share is not None
+                and annual_share.get("status") == "computed"
+            ):
+                source_periods = annual_share["source_periods"]
+                coordinates = [
+                    result_cells.get((result["ref"], str(cell["period_end"])))
+                    for cell in source_periods
+                ]
+                if len(coordinates) == 4 and all(coordinates):
+                    weights = [_inclusive_duration_days(cell) for cell in source_periods]
+                    target.value = "=(" + "+".join(
+                        f"{coordinate}*{weight}"
+                        for coordinate, weight in zip(coordinates, weights)
+                    ) + f")/{sum(weights)}"
+                    target.font = Font(name="Arial", color="000000")
+                    target.number_format = _number_format(result["unit"])
+                    result_cells[(result["ref"], label)] = (
+                        f"'Financials'!{target.coordinate}"
+                    )
+                    formula_map.append({
+                        "cell": f"Financials!{target.coordinate}",
+                        "model_cell_ref": "structured-day-weighted-quarter-shares",
+                        "formula": target.value,
+                        "model_formula": "day_weighted_quarters",
+                        "model_label": result["label"],
+                    })
+                    continue
             annual_semantic_ok = (
                 structured_line.get("annual_semantics") == "sum_quarters"
                 if structured_line is not None else result["unit"] != "ratio"
@@ -798,7 +926,8 @@ def export_fund_workbook(
                     reason = f"{len(quarter_cols)}/{len(group)} supported quarters"
                 gaps.append(f"{result['ref']} {label}: annual unavailable; {reason}")
 
-    if annual_eps_results:
+    annual_eps_outcomes = {**annual_eps_results, **annual_share_forecasts}
+    if annual_eps_outcomes:
         eps_result = next(
             (item for item in model["results"] if item.get("role") == "diluted_eps"),
             None,
@@ -813,7 +942,7 @@ def export_fund_workbook(
         )
         if eps_result is not None and numerator_result is not None and share_result is not None:
             eps_row = result_rows[eps_result["ref"]]
-            for label, outcome in annual_eps_results.items():
+            for label, outcome in annual_eps_outcomes.items():
                 if outcome.get("status") != "computed":
                     gaps.append(
                         f"{eps_result['ref']} {label}: annual unavailable; "

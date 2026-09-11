@@ -5,9 +5,12 @@ from decimal import Decimal
 import unittest
 
 from dalton_core.company_financial_statement_structure import (
+    LEGACY_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     FinancialStatementStructureError,
     aggregate_fiscal_year,
     annual_diluted_eps,
+    day_weighted_annual_shares,
     financial_input_authority,
     forecast_structure_binding,
     materialize_financial_statement_structure,
@@ -166,6 +169,80 @@ def proposal(inputs=None):
 
 
 class FinancialStatementStructureTests(unittest.TestCase):
+    def test_versioned_annual_share_method_needs_a_historical_direct_tie(self):
+        inputs = financial_inputs()
+        inputs["schema_version"] = "0.3"
+        shares = next(line for line in inputs["filed_lines"]
+                      if line["concept"] == "shares")
+        shares["duration_facts"] = [
+            {"period_start": cell["period_start"], "period_end": end,
+             "period_kind": "quarter", "value": cell["value"],
+             "unit": "shares", "source_accessions": [ACCESSION],
+             "source_forms": ["10-Q"]}
+            for end, cell in shares["cells"].items()
+        ] + [{
+            "period_start": "2025-01-01", "period_end": "2025-12-31",
+            "period_kind": "cumulative", "value": "100", "unit": "shares",
+            "source_accessions": [ACCESSION], "source_forms": ["10-K"],
+        }]
+        for line in inputs["filed_lines"]:
+            line.setdefault("duration_facts", [])
+            line.setdefault("ambiguous_periods", [])
+        candidate = proposal(inputs)
+        candidate["schema_version"] = SCHEMA_VERSION
+        for line in candidate["lines"]:
+            line["annual_forecast_method"] = None
+            if line["role"] == "diluted_weighted_average_shares":
+                line["forecast_method"] = "quarterly_growth"
+                line["annual_forecast_method"] = "day_weighted_quarters"
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        self.assertEqual(structure["schema_version"], SCHEMA_VERSION)
+        share_replay = next(item for item in replay["forecast_methods"]
+                            if item["line_ref"] == "shares")
+        self.assertEqual((share_replay["annual_method"], share_replay["annual_status"]),
+                         ("day_weighted_quarters", "validated"))
+        self.assertTrue(replay["ready_for_forecast"])
+
+        drifted = copy.deepcopy(inputs)
+        drifted_shares = next(line for line in drifted["filed_lines"]
+                              if line["concept"] == "shares")
+        drifted_shares["duration_facts"][-1]["value"] = "99"
+        candidate = proposal(drifted)
+        candidate["schema_version"] = SCHEMA_VERSION
+        for line in candidate["lines"]:
+            line["annual_forecast_method"] = None
+            if line["role"] == "diluted_weighted_average_shares":
+                line["forecast_method"] = "quarterly_growth"
+                line["annual_forecast_method"] = "day_weighted_quarters"
+        _structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), drifted)
+        self.assertFalse(replay["ready_for_forecast"])
+
+    def test_legacy_structure_bytes_do_not_gain_annual_method(self):
+        structure, _replay = validate_financial_statement_structure(
+            proposal(), company_spec(), financial_inputs())
+        self.assertEqual(structure["schema_version"], LEGACY_SCHEMA_VERSION)
+        self.assertEqual(
+            structure["authority_ref"],
+            "company-financial-statement-structure:0.1",
+        )
+        self.assertTrue(all("annual_forecast_method" not in line
+                            for line in structure["lines"]))
+
+    def test_day_weighted_shares_use_exact_quarter_days(self):
+        quarters = [
+            {"period_start": start, "period_end": end, "value": str(value),
+             "unit": "shares"}
+            for (start, end), value in zip(QUARTERS, (100, 100, 200, 200))
+        ]
+        result = day_weighted_annual_shares(quarters)
+        expected = (
+            Decimal(100 * 90 + 100 * 91 + 200 * 92 + 200 * 92)
+            / Decimal(365)
+        )
+        self.assertEqual(Decimal(result["value"]), expected)
+
     def test_company_specific_nonoperating_tax_attribution_and_eps_bridge_ties(self):
         inputs = financial_inputs()
         structure, replay = validate_financial_statement_structure(

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from dalton_core.company_financial_statement_structure import (
+    SCHEMA_VERSION as STRUCTURE_SCHEMA_VERSION,
     forecast_structure_binding,
     materialize_financial_statement_structure,
     replay_historical_structure,
@@ -71,6 +72,45 @@ def forecastable_proposal(inputs):
         "terms": [{"line_ref": "parent", "coefficient": "1"}],
         "tie_out_concept": "eps_numerator", "evidence_refs": [ACCESSION],
     })
+    return candidate
+
+
+def annual_authority_inputs():
+    inputs = financial_inputs()
+    inputs["schema_version"] = "0.3"
+    annual = {
+        "period_start": "2025-01-01", "period_end": "2025-12-31",
+        "period_kind": "cumulative", "source_accessions": [ACCESSION],
+        "source_forms": ["10-K"],
+    }
+    facts = {
+        "eps_numerator": {**annual, "value": "670", "unit": "usd"},
+        "shares": {**annual, "value": "100", "unit": "shares"},
+        "eps": {**annual, "value": "6.70", "unit": "usd_per_share"},
+    }
+    for line in inputs["filed_lines"]:
+        quarter_facts = [
+            {"period_start": cell["period_start"], "period_end": end,
+             "period_kind": "quarter", "value": cell["value"],
+             "unit": cell["unit"], "source_accessions": [ACCESSION],
+             "source_forms": ["10-Q"]}
+            for end, cell in line["cells"].items()
+        ]
+        line["duration_facts"] = quarter_facts + (
+            [facts[line["concept"]]] if line["concept"] in facts else []
+        )
+        line["ambiguous_periods"] = []
+    return inputs
+
+
+def annual_forecastable_proposal(inputs):
+    candidate = forecastable_proposal(inputs)
+    candidate["schema_version"] = STRUCTURE_SCHEMA_VERSION
+    for line in candidate["lines"]:
+        line["annual_forecast_method"] = None
+        if line["role"] == "diluted_weighted_average_shares":
+            line["forecast_method"] = "quarterly_growth"
+            line["annual_forecast_method"] = "day_weighted_quarters"
     return candidate
 
 
@@ -425,30 +465,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
     def test_v03_workbook_uses_exact_direct_annual_eps_authority(self):
         from openpyxl import load_workbook
 
-        inputs = financial_inputs()
-        inputs["schema_version"] = "0.3"
-        annual = {
-            "period_start": "2025-01-01", "period_end": "2025-12-31",
-            "period_kind": "cumulative", "source_accessions": [ACCESSION],
-            "source_forms": ["10-K"],
-        }
-        facts = {
-            "eps_numerator": {**annual, "value": "670", "unit": "usd"},
-            "shares": {**annual, "value": "100", "unit": "shares"},
-            "eps": {**annual, "value": "6.70", "unit": "usd_per_share"},
-        }
-        for line in inputs["filed_lines"]:
-            quarter_facts = [
-                {"period_start": cell["period_start"], "period_end": end,
-                 "period_kind": "quarter", "value": cell["value"],
-                 "unit": cell["unit"], "source_accessions": [ACCESSION],
-                 "source_forms": ["10-Q"]}
-                for end, cell in line["cells"].items()
-            ]
-            line["duration_facts"] = quarter_facts + (
-                [facts[line["concept"]]] if line["concept"] in facts else []
-            )
-            line["ambiguous_periods"] = []
+        inputs = annual_authority_inputs()
         inputs, structure = self.authority(inputs)
         candidate = forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
@@ -486,6 +503,76 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             [book["Formula Map"].cell(row, 2).value
              for row in range(5, book["Formula Map"].max_row + 1)],
         )
+
+    def test_v03_workbook_forecasts_annual_shares_only_with_bound_method(self):
+        from openpyxl import load_workbook
+
+        inputs = annual_authority_inputs()
+        candidate = annual_forecastable_proposal(inputs)
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        self.assertTrue(replay["ready_for_forecast"])
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay, binding=binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            record = ForecastModelAuthority(store).publish(body)
+            path = Path(temporary) / "forecast-annual-eps.xlsx"
+            calendar = {
+                "calendar_ref": "calendar:test", "source_hash": "c" * 64,
+                "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+            }
+            calendar["content_hash"] = content_hash(calendar)
+            export_fund_workbook(
+                path, model=record, spec=company_spec(), inputs=inputs,
+                calendar_binding=calendar)
+            book = load_workbook(path, data_only=False)
+        financials = book["Financials"]
+        rows = {result["role"]: 5 + index
+                for index, result in enumerate(record["results"])}
+        share_formula = financials.cell(
+            rows["diluted_weighted_average_shares"], 3).value
+        self.assertIsInstance(share_formula, str)
+        self.assertIn("*90", share_formula)
+        self.assertIn("*92", share_formula)
+        self.assertEqual(
+            financials.cell(rows["diluted_eps"], 3).value,
+            f"='Financials'!C{rows['diluted_eps_numerator']}/"
+            f"'Financials'!C{rows['diluted_weighted_average_shares']}",
+        )
+
+        no_authority_candidate = annual_forecastable_proposal(inputs)
+        next(
+            line for line in no_authority_candidate["lines"]
+            if line["role"] == "diluted_weighted_average_shares"
+        )["annual_forecast_method"] = "unavailable"
+        no_authority_structure, no_authority_replay = (
+            validate_financial_statement_structure(
+                no_authority_candidate, company_spec(), inputs)
+        )
+        no_authority_binding = forecast_structure_binding(
+            no_authority_structure, no_authority_replay, inputs)
+        no_authority_body = build_structured_forecast_model(
+            company_spec(), inputs, structure=no_authority_structure,
+            replay=no_authority_replay, binding=no_authority_binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            no_authority_record = ForecastModelAuthority(store).publish(no_authority_body)
+            path = Path(temporary) / "unavailable.xlsx"
+            export_fund_workbook(
+                path, model=no_authority_record, spec=company_spec(), inputs=inputs,
+                calendar_binding=calendar)
+            unavailable = load_workbook(path, data_only=False)["Financials"]
+        unavailable_rows = {
+            result["role"]: 5 + index
+            for index, result in enumerate(no_authority_record["results"])
+        }
+        self.assertIsNone(unavailable.cell(
+            unavailable_rows["diluted_weighted_average_shares"], 3).value)
+        self.assertIsNone(unavailable.cell(unavailable_rows["diluted_eps"], 3).value)
 
 
 if __name__ == "__main__":

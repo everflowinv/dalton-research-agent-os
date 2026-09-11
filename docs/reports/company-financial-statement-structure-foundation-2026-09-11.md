@@ -88,20 +88,32 @@ does not contain note text or an explicit diluted-EPS numerator authority for
 any of the five companies, so a new structure must leave diluted EPS
 unavailable unless a later held note/formula source supplies that authority.
 
-The forecast integration must consume
+The forecast integration consumes
 `forecast_structure_binding(structure, replay, financial_inputs)`. That call
 revalidates the structure bytes, financial input authority, and historical
-replay and emits an immutable binding. The integration then needs a new
-`formula_ref`/`formula_hash` and result construction driven by the bound graph.
-Until that change is made, the installed forecast path continues to use the
-legacy fixed formula and must be described that way. No note-document authority
-is currently loaded by `company_model_inputs`; callers must supply a real held
-note resolver or omit note evidence.
+replay and emits an immutable binding. Forecast model 0.3 stores that binding,
+the complete company graph, its replay, assumptions and result cells. Revision,
+sensitivity and export recompute the same graph. Historical structures without
+this extension remain readable on the legacy fixed formula path. No
+note-document authority is currently loaded by `company_model_inputs`; callers
+must supply a real held note resolver or omit note evidence.
 
-The representative ACN test request is 15,588 prompt characters plus a 9,201
-character provider schema. Its complete 0.3 response is 3,505 characters,
-inside the existing 120,000 input / 6,000 output-token model-spec limits. No
-budget or timeout was increased for this contract.
+Structure 0.2 adds a separate `annual_forecast_method` on diluted weighted-
+average shares. `quarterly_growth` does not authorize an annual average. The
+only executable method, `day_weighted_quarters`, first has to reproduce a
+direct annual filed share value from four positive contiguous filed quarter
+averages at the precision the company reported. Export then applies the same
+inclusive-day weighting to four quarters bound to the current fiscal calendar
+and structure-line definition. Without this explicit method and historical
+tie, forecast annual shares and annual EPS stay unavailable. Structure 0.1
+bytes and replay identity do not gain the new field.
+
+The current structure-0.2 test request is 17,012 prompt characters and its
+provider schema is 9,520 characters. The earlier complete representative
+response was 3,505 characters; the additional annual method is one closed
+nullable field per line. These remain inside the existing 120,000 input /
+6,000 output-token model-spec limits. No budget or timeout was increased for
+this contract.
 
 This first structure contract covers duration income-statement arithmetic. It
 does not yet claim company-specific balance-sheet, cash-flow, or operating-driver

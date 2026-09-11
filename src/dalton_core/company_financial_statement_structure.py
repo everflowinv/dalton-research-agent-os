@@ -17,8 +17,13 @@ from .company_model_series import ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS
 from .store import content_hash
 
 
-SCHEMA_VERSION = "0.1"
-STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.1"
+LEGACY_SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
+STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.2"
+_STRUCTURE_AUTHORITY_REFS = {
+    LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
+    SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
+}
 
 STATEMENTS = ("income", "balance", "cash")
 PERIOD_KINDS = ("duration", "instant")
@@ -40,12 +45,14 @@ ROLES = (
 )
 FORMULA_OPERATORS = ("sum", "divide")
 FORECAST_METHODS = ("quarterly_growth", "share_of_line", "formula", "unavailable")
+ANNUAL_FORECAST_METHODS = ("day_weighted_quarters", "unavailable")
 MAX_STRUCTURE_LINES = 48
 MAX_STRUCTURE_FORMULAS = 32
-_LINE_FIELDS = {
+_LEGACY_LINE_FIELDS = {
     "ref", "role", "label", "kind", "concept", "statement", "unit",
     "period_kind", "annual_semantics", "forecast_method", "forecast_base_ref",
 }
+_LINE_FIELDS = _LEGACY_LINE_FIELDS | {"annual_forecast_method"}
 _SUM_FIELDS = {"output_ref", "operator", "terms", "tie_out_concept", "evidence_refs"}
 _DIVIDE_FIELDS = {
     "output_ref", "operator", "numerator_ref", "denominator_ref",
@@ -86,6 +93,15 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
         "annual_semantics": {"enum": list(ANNUAL_SEMANTICS)},
         "forecast_method": {"enum": list(FORECAST_METHODS)},
         "forecast_base_ref": {"type": ["string", "null"], "maxLength": 80},
+        "annual_forecast_method": {
+            "type": ["string", "null"],
+            "enum": [*ANNUAL_FORECAST_METHODS, None],
+            "description": (
+                "Only diluted weighted-average shares may select "
+                "day_weighted_quarters. It authorizes annual forecast aggregation "
+                "only after an exact historical direct-annual tie."
+            ),
+        },
     },
     tuple(sorted(_LINE_FIELDS)),
 )
@@ -337,9 +353,10 @@ def _validate_spec_alignment(
 
 def _normalize_line(
     raw: Any, index: int, filed: Mapping[str, Mapping[str, Any]], *,
-    validate_values: bool = True,
+    validate_values: bool = True, schema_version: str = SCHEMA_VERSION,
 ) -> dict[str, Any]:
-    wire = _closed(raw, _LINE_FIELDS, f"lines[{index}]")
+    fields = _LEGACY_LINE_FIELDS if schema_version == LEGACY_SCHEMA_VERSION else _LINE_FIELDS
+    wire = _closed(raw, fields, f"lines[{index}]")
     line = {
         "ref": _text(wire["ref"], f"lines[{index}].ref"),
         "role": _text(wire["role"], f"lines[{index}].role"),
@@ -357,6 +374,8 @@ def _normalize_line(
         ),
         "forecast_base_ref": wire["forecast_base_ref"],
     }
+    if schema_version == SCHEMA_VERSION:
+        line["annual_forecast_method"] = wire["annual_forecast_method"]
     for field, allowed in (
         ("role", ROLES), ("kind", LINE_KINDS), ("statement", STATEMENTS),
         ("period_kind", PERIOD_KINDS), ("annual_semantics", ANNUAL_SEMANTICS),
@@ -421,6 +440,8 @@ def _normalize_line(
         )
     if line["role"] == "diluted_weighted_average_shares":
         if (
+            line["kind"] != "filed"
+            or
             line["annual_semantics"] != "direct_annual"
             or line["unit"] != "shares"
             or line["period_kind"] != "duration"
@@ -436,6 +457,27 @@ def _normalize_line(
             raise FinancialStatementStructureError(
                 "diluted weighted-average shares must be positive"
             )
+        if schema_version == SCHEMA_VERSION:
+            annual_method = _text(
+                line["annual_forecast_method"],
+                f"lines[{index}].annual_forecast_method",
+            )
+            if annual_method not in ANNUAL_FORECAST_METHODS:
+                raise FinancialStatementStructureError(
+                    f"lines[{index}].annual_forecast_method is invalid"
+                )
+            line["annual_forecast_method"] = annual_method
+            if (
+                annual_method == "day_weighted_quarters"
+                and line["forecast_method"] not in {"quarterly_growth", "share_of_line"}
+            ):
+                raise FinancialStatementStructureError(
+                    "day-weighted annual shares require an explicit quarterly forecast method"
+                )
+    elif schema_version == SCHEMA_VERSION and line["annual_forecast_method"] is not None:
+        raise FinancialStatementStructureError(
+            "only diluted weighted-average shares may carry annual_forecast_method"
+        )
     if line["role"] == "diluted_eps" and line["annual_semantics"] not in {
         "direct_annual", "annual_ratio",
     }:
@@ -711,7 +753,8 @@ def validate_structure_proposal(
 
     body = _closed(proposal, {"schema_version", "lines", "formulas"},
                    "financial statement structure proposal")
-    if body["schema_version"] != SCHEMA_VERSION:
+    schema_version = body["schema_version"]
+    if schema_version not in _STRUCTURE_AUTHORITY_REFS:
         raise FinancialStatementStructureError("unsupported structure proposal version")
     raw_lines = body["lines"]
     raw_formulas = body["formulas"]
@@ -723,7 +766,9 @@ def validate_structure_proposal(
         raise FinancialStatementStructureError("structure proposal exceeds its bounded shape")
     filed, accessions = _presentation_filed(state)
     lines = [
-        _normalize_line(raw, index, filed, validate_values=False)
+        _normalize_line(
+            raw, index, filed, validate_values=False, schema_version=schema_version,
+        )
         for index, raw in enumerate(raw_lines)
     ]
     by_ref = {line["ref"]: line for line in lines}
@@ -752,7 +797,7 @@ def validate_structure_proposal(
             "structure needs a formula-derived filed final earnings result"
         )
     _validate_formula_evidence(formulas, by_ref, filed, set())
-    return {"schema_version": SCHEMA_VERSION, "lines": lines, "formulas": formulas}
+    return {"schema_version": schema_version, "lines": lines, "formulas": formulas}
 
 
 def replay_historical_structure(
@@ -832,6 +877,7 @@ def replay_historical_structure(
         if not progressed:
             raise FinancialStatementStructureError("formula graph contains a cycle")
     forecast_reports: list[dict[str, Any]] = []
+    annual_ready = True
     for ref, line in sorted(lines.items()):
         method = line["forecast_method"]
         if method == "formula":
@@ -841,6 +887,10 @@ def replay_historical_structure(
                 "status": report["status"], "observations": [],
                 "reason": report["reason"],
             })
+            if structure.get("schema_version") == SCHEMA_VERSION:
+                forecast_reports[-1]["annual_method"] = line.get(
+                    "annual_forecast_method"
+                )
             continue
         if method == "unavailable":
             forecast_reports.append({
@@ -848,6 +898,10 @@ def replay_historical_structure(
                 "status": "unavailable", "observations": [],
                 "reason": "the company spec selected no forecast basis for this filed line",
             })
+            if structure.get("schema_version") == SCHEMA_VERSION:
+                forecast_reports[-1]["annual_method"] = line.get(
+                    "annual_forecast_method"
+                )
             continue
         cells = values[ref]
         observations: list[dict[str, Any]] = []
@@ -882,12 +936,38 @@ def replay_historical_structure(
                 "historical inputs contain no complete nonzero forecast-measure pair"
             ),
         })
+        if structure.get("schema_version") == SCHEMA_VERSION:
+            forecast_reports[-1]["annual_method"] = line.get(
+                "annual_forecast_method"
+            )
+        if (
+            structure.get("schema_version") == SCHEMA_VERSION
+            and line["role"] == "diluted_weighted_average_shares"
+        ):
+            annual_method = str(line["annual_forecast_method"])
+            annual_report = (
+                _historical_annual_share_replay(filed[line["concept"]])
+                if annual_method == "day_weighted_quarters"
+                else {"status": "unavailable", "observations": [],
+                      "reason": "annual diluted-share forecast is explicitly unavailable"}
+            )
+            forecast_reports[-1].update({
+                "annual_status": annual_report["status"],
+                "annual_observations": annual_report["observations"],
+                "annual_reason": annual_report["reason"],
+            })
+            if annual_method == "day_weighted_quarters":
+                annual_ready = annual_report["status"] == "validated"
     return {
-        "schema_version": "financial-statement-structure-replay-0.1",
+        "schema_version": (
+            "financial-statement-structure-replay-0.2"
+            if structure.get("schema_version") == SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.1"
+        ),
         "structure_hash": structure["content_hash"],
         "formulas": sorted(reports, key=lambda item: item["output_ref"]),
         "forecast_methods": forecast_reports,
-        "ready_for_forecast": all(
+        "ready_for_forecast": annual_ready and all(
             report["status"] == "validated" for report in reports
         ),
     }
@@ -908,7 +988,8 @@ def validate_financial_statement_structure(
     body = _closed(proposal, fields, "financial statement structure")
     authority = financial_input_authority(financial_inputs)
     spec_authority = _spec_authority(company_spec)
-    if body["schema_version"] != SCHEMA_VERSION:
+    schema_version = body["schema_version"]
+    if schema_version not in _STRUCTURE_AUTHORITY_REFS:
         raise FinancialStatementStructureError("unsupported structure schema_version")
     if body["company_ref"] != authority["company_ref"]:
         raise FinancialStatementStructureError("structure company differs from financial inputs")
@@ -930,7 +1011,10 @@ def validate_financial_statement_structure(
     raw_lines = body["lines"]
     if not isinstance(raw_lines, list) or not raw_lines:
         raise FinancialStatementStructureError("structure needs at least one line")
-    lines = [_normalize_line(raw, index, filed) for index, raw in enumerate(raw_lines)]
+    lines = [
+        _normalize_line(raw, index, filed, schema_version=schema_version)
+        for index, raw in enumerate(raw_lines)
+    ]
     by_ref = {line["ref"]: line for line in lines}
     if len(by_ref) != len(lines):
         raise FinancialStatementStructureError("structure line ref is duplicated")
@@ -963,8 +1047,8 @@ def validate_financial_statement_structure(
         )
     _validate_formula_evidence(formulas, by_ref, filed, note_refs)
     normalized = {
-        "schema_version": SCHEMA_VERSION,
-        "authority_ref": STRUCTURE_AUTHORITY_REF,
+        "schema_version": schema_version,
+        "authority_ref": _STRUCTURE_AUTHORITY_REFS[schema_version],
         "structure_ref": body["structure_ref"],
         "company_ref": body["company_ref"],
         "spec_ref": body["spec_ref"],
@@ -993,15 +1077,20 @@ def materialize_financial_statement_structure(
             "company spec has no financial statement structure definition"
         )
     authority = financial_input_authority(financial_inputs)
+    schema_version = definition.get("schema_version")
+    if schema_version not in _STRUCTURE_AUTHORITY_REFS:
+        raise FinancialStatementStructureError(
+            "company spec has an unsupported statement structure definition"
+        )
     identity = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "spec_ref": company_spec.get("spec_id"),
         "spec_hash": company_spec.get("content_hash"),
         "definition_hash": content_hash(definition),
         "financial_input_hash": authority["content_hash"],
     }
     proposal = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "structure_ref": "financial-statement-structure:" + content_hash(identity)[:32],
         "company_ref": company_spec.get("company_ref"),
         "spec_ref": company_spec.get("spec_id"),
@@ -1020,6 +1109,124 @@ def materialize_financial_statement_structure(
 
 def _quarter_gap(left: str, right: str) -> int:
     return (date.fromisoformat(right) - date.fromisoformat(left)).days
+
+
+def _inclusive_days(cell: Mapping[str, Any]) -> int:
+    try:
+        return (
+            date.fromisoformat(str(cell.get("period_end")))
+            - date.fromisoformat(str(cell.get("period_start")))
+        ).days + 1
+    except ValueError:
+        return 0
+
+
+def day_weighted_annual_shares(
+    quarter_cells: Sequence[Mapping[str, Any]],
+    *, direct_annual_cell: Mapping[str, Any] | None = None,
+    required_calendar: str | None = None,
+    required_definition_ref: str | None = None,
+) -> dict[str, Any]:
+    """Weight four positive quarter share averages by their exact day spans.
+
+    A direct annual filed cell is optional for forecast calculation and
+    required by the structure replay that authorizes this method historically.
+    """
+
+    quarters = sorted((dict(cell) for cell in quarter_cells),
+                      key=lambda cell: str(cell.get("period_end")))
+    units = {str(cell.get("unit") or "").casefold() for cell in quarters}
+    days = [_inclusive_days(cell) for cell in quarters]
+    contiguous = all(
+        _quarter_gap(str(left.get("period_end")), str(right.get("period_start"))) == 1
+        for left, right in zip(quarters, quarters[1:])
+    )
+    values = [_decimal(cell.get("value"), "quarter diluted shares") for cell in quarters]
+    authority_bound = all(
+        cell.get("calendar") == required_calendar
+        and cell.get("definition_ref") == required_definition_ref
+        for cell in quarters
+    ) if required_calendar is not None or required_definition_ref is not None else True
+    if (
+        len(quarters) != 4 or units != {"shares"}
+        or any(not 80 <= count <= 100 for count in days)
+        or not contiguous or any(value <= 0 for value in values)
+        or not authority_bound
+    ):
+        return {"status": "unavailable", "value": None,
+                "reason": ("annual diluted shares need four contiguous positive "
+                           "quarter averages with exact day spans")}
+    calculated = sum(
+        (value * Decimal(count) for value, count in zip(values, days)), Decimal(0)
+    ) / Decimal(sum(days))
+    if direct_annual_cell is not None:
+        direct = dict(direct_annual_cell)
+        if (
+            str(direct.get("unit") or "").casefold() != "shares"
+            or _inclusive_days(direct) <= NINE_MONTH_MAX_DAYS
+            or _inclusive_days(direct) > ANNUAL_MAX_DAYS
+            or direct.get("period_start") != quarters[0].get("period_start")
+            or direct.get("period_end") != quarters[-1].get("period_end")
+            or (required_calendar is not None
+                and direct.get("calendar") != required_calendar)
+            or (required_definition_ref is not None
+                and direct.get("definition_ref") != required_definition_ref)
+        ):
+            return {"status": "unavailable", "value": None,
+                    "reason": "direct annual diluted shares use a different fiscal window"}
+        disclosed = _decimal(direct.get("value"), "direct annual diluted shares")
+        if disclosed <= 0:
+            return {"status": "unavailable", "value": None,
+                    "reason": "direct annual diluted shares are not positive"}
+        quantum = Decimal(1).scaleb(disclosed.as_tuple().exponent)
+        if calculated.quantize(quantum) != disclosed:
+            return {"status": "unavailable", "value": None,
+                    "reason": "day-weighted quarters do not tie to direct annual diluted shares"}
+    return {
+        "status": "computed", "value": str(calculated), "unit": "shares",
+        "source_periods": quarters + ([dict(direct_annual_cell)]
+                                      if direct_annual_cell is not None else []),
+    }
+
+
+def _historical_annual_share_replay(line: Mapping[str, Any]) -> dict[str, Any]:
+    facts = [dict(item) for item in (line.get("duration_facts") or [])
+             if isinstance(item, Mapping)]
+    annual = [item for item in facts
+              if NINE_MONTH_MAX_DAYS < _inclusive_days(item) <= ANNUAL_MAX_DAYS]
+    annual_ends = {
+        str(item.get("period_end")) for item in annual
+        if sum(str(other.get("period_end")) == str(item.get("period_end"))
+               for other in annual) == 1
+    }
+    observations: list[dict[str, Any]] = []
+    for direct in annual:
+        if str(direct.get("period_end")) not in annual_ends:
+            continue
+        quarters = [
+            item for item in facts
+            if item.get("period_kind") == "quarter"
+            and str(direct.get("period_start")) <= str(item.get("period_start"))
+            and str(item.get("period_end")) <= str(direct.get("period_end"))
+        ]
+        tie = day_weighted_annual_shares(quarters, direct_annual_cell=direct)
+        if tie["status"] == "computed":
+            observations.append({
+                "period_start": direct.get("period_start"),
+                "period_end": direct.get("period_end"),
+                "value": tie["value"],
+                "source_accessions": sorted({
+                    str(ref) for item in tie["source_periods"]
+                    for ref in (item.get("source_accessions") or [])
+                }),
+            })
+    return {
+        "status": "validated" if observations else "unavailable",
+        "observations": observations,
+        "reason": None if observations else (
+            "no four-quarter day-weighted share history ties to a direct annual filing"
+        ),
+    }
 
 
 def aggregate_fiscal_year(
@@ -1192,8 +1399,10 @@ def forecast_structure_binding(
     held = dict(structure)
     held_hash = held.pop("content_hash", None)
     if (
-        structure.get("schema_version") != SCHEMA_VERSION
-        or structure.get("authority_ref") != STRUCTURE_AUTHORITY_REF
+        structure.get("schema_version") not in _STRUCTURE_AUTHORITY_REFS
+        or structure.get("authority_ref") != _STRUCTURE_AUTHORITY_REFS.get(
+            structure.get("schema_version")
+        )
         or not isinstance(held_hash, str)
         or content_hash(held) != held_hash
         or financial_input_authority(financial_inputs)["content_hash"]
@@ -1208,7 +1417,11 @@ def forecast_structure_binding(
     if replay.get("ready_for_forecast") is not True:
         raise FinancialStatementStructureError("statement structure is not ready for forecast")
     projection = {
-        "schema_version": "forecast-statement-structure-binding-0.1",
+        "schema_version": (
+            "forecast-statement-structure-binding-0.2"
+            if structure.get("schema_version") == SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.1"
+        ),
         "authority_ref": structure.get("authority_ref"),
         "structure_ref": structure.get("structure_ref"),
         "structure_hash": structure.get("content_hash"),
@@ -1224,10 +1437,12 @@ def forecast_structure_binding(
 
 
 __all__ = [
-    "ANNUAL_SEMANTICS", "FORECAST_METHODS", "FinancialStatementStructureError",
+    "ANNUAL_FORECAST_METHODS", "ANNUAL_SEMANTICS", "FORECAST_METHODS",
+    "FinancialStatementStructureError", "LEGACY_SCHEMA_VERSION",
     "LINE_KINDS", "MAX_STRUCTURE_FORMULAS", "MAX_STRUCTURE_LINES", "ROLES",
     "SCHEMA_VERSION", "STRUCTURE_AUTHORITY_REF", "STRUCTURE_PROPOSAL_SCHEMA",
-    "aggregate_fiscal_year", "annual_diluted_eps", "financial_input_authority",
+    "aggregate_fiscal_year", "annual_diluted_eps", "day_weighted_annual_shares",
+    "financial_input_authority",
     "forecast_structure_binding", "materialize_financial_statement_structure",
     "replay_historical_structure", "validate_financial_statement_structure",
     "validate_structure_proposal",
