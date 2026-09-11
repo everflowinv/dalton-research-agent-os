@@ -34,20 +34,9 @@ class ControlledFailureRedriveTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         self.openclaw_root = root / "openclaw"
-        installed = Path(
-            "/Users/everflow/.openclaw/tools/node/lib/node_modules/openclaw")
-        if not installed.exists():
-            self.skipTest("reviewed OpenClaw fixture source is unavailable")
-        for relative in (
-            "package.json", "dist/simple-completion-execution-3EZC6KFA.mjs",
-            "dist/runtime-llm.runtime-DdpXXHBe.mjs",
-            "node_modules/@openclaw/ai/dist/google-shared-BedY23XS.mjs",
-        ):
-            target = self.openclaw_root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(installed / relative, target)
-        from integrations.openclaw_host_patches.patch_controlled_completion_transport import apply as apply_host_patch
-        apply_host_patch(self.openclaw_root, check=False)
+        fixture = (Path(__file__).parent / "fixtures" /
+                   "openclaw-controlled-repair-2026.9.3")
+        shutil.copytree(fixture, self.openclaw_root)
         self.scheduler_db = root / "scheduler.sqlite"
         self.budget_db = root / "budget.sqlite"
         self.scheduler = Scheduler(self.scheduler_db, clock=lambda: NOW)
