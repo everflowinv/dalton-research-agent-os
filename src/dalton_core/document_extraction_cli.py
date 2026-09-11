@@ -396,11 +396,36 @@ def run_extraction(
                         # completes, so it never resolves, so it holds the
                         # queue open forever without anyone being told.
                         if _permanently_unreadable(reason):
-                            summary["unreadable_reviews"].append({
+                            unreadable = {
                                 "review_id": review["review_id"], "company_ref": review["company_ref"],
                                 "source_ref": review["source_ref"], "document_ref": review["document_ref"],
                                 "spec_ref": specs.get(review["document_ref"]), "reason": reason,
-                            })
+                                "read_complete": False, "claim_produced": False,
+                            }
+                            try:
+                                parked = host.coverage_mission.resolve_document_review(
+                                    review["review_id"], resolution="dismissed", actor_ref=actor,
+                                    rationale=(
+                                        "Document original is durably unreadable; no read-completion "
+                                        f"receipt or Claim was produced. {reason}"
+                                    ),
+                                    expected_review_hash=review_hash,
+                                )
+                                unreadable["park_status"] = parked["status"]
+                                unreadable["review_state"] = parked["state"]
+                                summary["resolved_reviews"].append({
+                                    "review_id": review["review_id"],
+                                    "status": "dismissed_unreadable",
+                                    "read_complete": False,
+                                    "claim_produced": False,
+                                    "reason": reason,
+                                })
+                            except Exception as park_exc:  # noqa: BLE001 - keep the failed view visible
+                                unreadable["park_status"] = "unresolved"
+                                unreadable["park_reason"] = (
+                                    f"{type(park_exc).__name__}: {park_exc}"
+                                )
+                            summary["unreadable_reviews"].append(unreadable)
                         complete = False
                         break
                     context = view["context"]

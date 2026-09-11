@@ -13,6 +13,7 @@ from pathlib import Path
 
 from dalton_core.document_extraction import DocumentExtractionService
 from dalton_core.document_extraction_cli import run_extraction
+from dalton_core.research_verification import ResearchVerificationError
 from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
 from dalton_core.store import content_hash
 from dalton_core.transcript_correction import TranscriptCorrectionConflict, TranscriptCorrectionValidationError
@@ -152,6 +153,67 @@ class AutomationDraftingTests(unittest.TestCase):
         self.assertEqual(refused["summary"]["status"], "failed")
         self.assertEqual(refused["summary"]["drafted"], [])
         self.assertIn("CoverageMissionConflict", refused["summary"]["skipped"][0]["reason"])
+
+    def test_durably_unreadable_original_is_parked_without_a_read_or_claim(self) -> None:
+        mission = self._grant_automation()
+        review = next(r for r in self.h.missions.document_reviews(mission["id"])
+                      if r["state"] == "awaiting_human_extraction")
+        fixture = self.root / "unused.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        with patch.object(
+            DocumentExtractionService,
+            "view",
+            side_effect=ResearchVerificationError(
+                "source offset must be a valid bounded window"
+            ),
+        ):
+            summary = run_extraction(
+                state_dir=self.root, model_config_path=self._model_config(),
+                summary_dir=self.root / "unreadable-summary",
+                spool_dir=self.root / "spool", scheduler_db=self.root / "scheduler.sqlite",
+                requested_by=None, max_windows=2, max_numeric_windows=0,
+                max_discovery_windows=0, connector_governance=None,
+                web_fetch_governance=None, hermetic_fixture=fixture,
+            )
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["reviews_complete"], 0)
+        self.assertEqual(summary["drafted"], [])
+        self.assertEqual(summary["admitted"], [])
+        self.assertEqual(summary["unreadable_reviews"], [{
+            "review_id": review["review_id"],
+            "company_ref": review["company_ref"],
+            "source_ref": review["source_ref"],
+            "document_ref": review["document_ref"],
+            "spec_ref": "earnings-call-transcripts",
+            "reason": "ResearchVerificationError: source offset must be a valid bounded window",
+            "read_complete": False,
+            "claim_produced": False,
+            "park_status": "fresh",
+            "review_state": "dismissed",
+        }])
+        self.assertEqual(summary["resolved_reviews"], [{
+            "review_id": review["review_id"],
+            "status": "dismissed_unreadable",
+            "read_complete": False,
+            "claim_produced": False,
+            "reason": "ResearchVerificationError: source offset must be a valid bounded window",
+        }])
+        parked = self.h.missions.document_review(review["review_id"])
+        self.assertEqual(parked["state"], "dismissed")
+        self.assertIn("no read-completion receipt or Claim was produced", parked["rationale"])
+
+        # A normal subsequent run has no outstanding review to revisit.  The
+        # dismissal is a visible lack of evidence, never a completed read.
+        again = run_extraction(
+            state_dir=self.root, model_config_path=self._model_config(),
+            summary_dir=self.root / "unreadable-again",
+            spool_dir=self.root / "spool", scheduler_db=self.root / "scheduler.sqlite",
+            requested_by=None, max_windows=2, max_numeric_windows=0,
+            max_discovery_windows=0, connector_governance=None,
+            web_fetch_governance=None, hermetic_fixture=fixture,
+        )
+        self.assertEqual((again["reviews_scanned"], again["reviews_complete"],
+                          again["admitted"], again["status"]), (0, 0, [], "succeeded"))
 
 
 class AutomationAdmissionTests(AutomationDraftingTests):
@@ -362,6 +424,21 @@ class AutomationAdmissionTests(AutomationDraftingTests):
 
 class OutputContractTests(unittest.TestCase):
     """Live: most rejected windows were fenced JSON or statements naming a period."""
+
+    def test_only_durable_source_failures_are_parked(self) -> None:
+        from dalton_core.document_extraction_cli import _permanently_unreadable
+
+        for reason in (
+            "PublicWebSourceError: fetched page is not valid UTF-8; it is not rendered",
+            "ResearchVerificationError: source offset must be a valid bounded window",
+            "FetchLaunchRejected: no completed acquisition ticket for this document",
+        ):
+            self.assertTrue(_permanently_unreadable(reason), reason)
+        # A failed fetch directory may be repaired or superseded.  It is held
+        # by the coordinator, then retried; it is never silently dismissed.
+        self.assertFalse(_permanently_unreadable(
+            "FetchLaunchRejected: completed fetch files are unavailable"
+        ))
 
     def test_fence_is_stripped_periods_pass_and_values_are_refused(self) -> None:
         from dalton_core.document_extraction import parse_suggestions, statement_asserts_a_value, unwrap_model_json
