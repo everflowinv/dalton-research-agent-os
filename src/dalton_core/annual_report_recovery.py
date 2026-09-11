@@ -7,8 +7,10 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
+from types import SimpleNamespace
 
-from .contracts import ExecutionInvocation, ModelInvocation, WorkOrder
+from .contracts import ExecutionInvocation, ModelInvocation, ResultEnvelope, WorkOrder
+from .provider_retry import returned_provider_failure_proof
 from .research_plan import (
     _formal_result_from_cursor,
     _plan_work_orders,
@@ -83,12 +85,14 @@ class AnnualReportUnknownRecovery:
         verifier_worker: Any,
         clock: Callable[[], datetime],
         actor_ref: str,
+        fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         self.plan = plan
         self.scheduler = scheduler
         self.workers = {1: draft_worker, 2: verifier_worker}
         self.clock = clock
         self.actor_ref = actor_ref
+        self.fault_injector = fault_injector
 
     def _rows(self, plan_ref: str) -> list[Any]:
         return self.plan.connection.execute(
@@ -141,6 +145,25 @@ class AnnualReportUnknownRecovery:
         resolved["input_refs"] = list(dict.fromkeys(resolved["input_refs"]))
         resolved["metadata"]["upstream_work_order_ref"] = upstream["id"]
         return resolved
+
+    @staticmethod
+    def _identity(
+        *, plan_wire: Mapping[str, Any], version: int, index: int, kind: str,
+        failed: Mapping[str, Any] | None, upstream: Mapping[str, Any],
+        policy: Mapping[str, Any], recovery_number: int,
+        prior: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "plan_version_ref": plan_wire["id"], "version": version,
+            "ordinal": index + 1, "kind": kind,
+            "failed_work_order_ref": None if failed is None else failed["id"],
+            "failed_work_order_hash": None if failed is None else content_hash(failed),
+            "upstream_work_order_ref": upstream["id"],
+            "upstream_work_order_hash": content_hash(upstream),
+            "approved_plan_policy_hash": content_hash(policy),
+            "recovery_number": recovery_number,
+            "prior_recovery_link_ref": None if prior is None else prior["id"],
+        }
 
     @staticmethod
     def _derive_work(
@@ -295,6 +318,51 @@ class AnnualReportUnknownRecovery:
                 raise AnnualReportRecoveryError(
                     "recovery_authority_drift", "failed model invocation drifted"
                 )
+            usage = invocation.get("usage")
+            telemetry = (
+                usage.get("raw_provider_telemetry")
+                if isinstance(usage, Mapping) else None
+            )
+            cost = telemetry.get("cost") if isinstance(telemetry, Mapping) else None
+            envelope_metadata = envelope.get("metadata")
+            error = envelope.get("error")
+            returned_failure = returned_provider_failure_proof(
+                invocation_object, ResultEnvelope.from_dict(envelope)
+            )
+            unknown_classification = {
+                "authority": "openclaw-model-adapter",
+                "classification": "provider_completed_failure_unknown_metering",
+                "returned_failure": returned_failure,
+                "version": "0.1",
+            }
+            if (
+                returned_failure is None
+                or envelope.get("status") != "failed"
+                or not isinstance(error, Mapping)
+                or error.get("source") != "openclaw-model-broker"
+                or not isinstance(envelope_metadata, Mapping)
+                or envelope_metadata.get("broker_request_mode") != "execute"
+                or envelope_metadata.get("dispatch_proof") != {
+                    "authority": "openclaw-model-adapter",
+                    "state": "provider_completed_failure", "version": "0.1",
+                }
+                or not isinstance(envelope_metadata.get("broker_response_hash"), str)
+                or len(envelope_metadata["broker_response_hash"]) != 64
+                or any(character not in "0123456789abcdef"
+                       for character in envelope_metadata["broker_response_hash"])
+                or not isinstance(usage, Mapping)
+                or usage.get("measurement_status") != "unavailable"
+                or any(usage.get(key) is not None for key in (
+                    "input_tokens", "output_tokens", "total_tokens",
+                    "cache_read_tokens", "cache_write_tokens",
+                ))
+                or not isinstance(cost, Mapping)
+                or cost.get("available") is not False
+            ):
+                raise AnnualReportRecoveryError(
+                    "unknown_result_ineligible",
+                    "failed Work lacks a proved post-send unknown-metering classification",
+                )
         except ResearchPlanCoordinatorConflict as exc:
             raise AnnualReportRecoveryError(
                 "recovery_authority_drift", str(exc)
@@ -306,6 +374,16 @@ class AnnualReportUnknownRecovery:
             raise AnnualReportRecoveryError(
                 "unknown_result_unproven",
                 "historical failed Work has no exact budget admission authority",
+            )
+        overrun = budget_store.connection.execute(
+            "SELECT 1 FROM thesis_impact_alerts WHERE kind='work_order_failed' "
+            "AND work_order_ref=? AND json_extract(detail_json,'$.reason')="
+            "'model_reservation_overrun' LIMIT 1", (work["id"],),
+        ).fetchone()
+        if overrun is not None:
+            raise AnnualReportRecoveryError(
+                "unknown_result_ineligible",
+                "reservation overrun is frozen for owner reconciliation",
             )
         try:
             budget = budget_store.admission(
@@ -374,6 +452,7 @@ class AnnualReportUnknownRecovery:
             "budget_admission_ref": admission["admission_id"],
             "budget_admission_hash": admission["content_hash"],
             "mission_binding_hash": content_hash(mission_binding),
+            "unknown_classification": unknown_classification,
             "policy": policy,
         }
 
@@ -482,12 +561,15 @@ class AnnualReportUnknownRecovery:
         links: list[dict[str, Any]] = []
         prior = None
         root_policy: Mapping[str, Any] | None = None
+        active_root: Mapping[str, Any] | None = None
+        roots_by_ordinal: dict[int, list[dict[str, Any]]] = {}
         for version, row in enumerate(self._rows(plan_wire["id"]), start=1):
             wire = self._read_link(
                 row, plan_wire=plan_wire, start_wire=start_wire,
                 expected_version=version, prior=prior,
             )
             index = wire["ordinal"] - 1
+            failed_work: Mapping[str, Any] | None = None
             if wire["kind"] == "unknown_recovery":
                 if index not in (1, 2) or effective[index]["id"] != wire["failed_work_order_ref"]:
                     raise AnnualReportRecoveryError(
@@ -502,12 +584,21 @@ class AnnualReportUnknownRecovery:
                     raise AnnualReportRecoveryError(
                         "recovery_authority_drift", "recovery policy drifted from the plan"
                     )
+                stage_roots = roots_by_ordinal.setdefault(wire["ordinal"], [])
+                expected_number = len(stage_roots) + 1
+                maximum = policy["unknown_recovery"]["max_fresh_work_orders"]
+                if expected_number > maximum:
+                    raise AnnualReportRecoveryError(
+                        "recovery_authority_drift",
+                        "recovery link exceeds the approved fresh-Work bound",
+                    )
                 proof = self._unknown_proof(
                     work=effective[index], index=index, policy=policy
                 )
                 for key in (
                     "invocation_ref", "invocation_hash", "budget_admission_ref",
                     "budget_admission_hash", "mission_binding_hash",
+                    "unknown_classification",
                 ):
                     if wire.get(key) != proof[key]:
                         raise AnnualReportRecoveryError(
@@ -530,19 +621,84 @@ class AnnualReportUnknownRecovery:
                         "recovery_authority_drift",
                         "recovery failed-result/policy proof drifted",
                     )
+                expected_window = (
+                    proof["formal"]["created_at"]
+                    if not stage_roots
+                    else stage_roots[0]["recovery_window_started_at"]
+                )
+                if wire.get("recovery_window_started_at") != expected_window:
+                    raise AnnualReportRecoveryError(
+                        "recovery_authority_drift", "recovery window start drifted"
+                    )
+                created = _time(wire["created_at"], "recovery link creation")
+                failed_at = _time(proof["formal"]["created_at"], "failed formal time")
+                recovery_policy = policy["unknown_recovery"]
+                if (
+                    created < failed_at + timedelta(
+                        seconds=recovery_policy["retry_backoff_seconds"]
+                    )
+                    or created >= _time(expected_window, "recovery window start")
+                    + timedelta(seconds=recovery_policy["max_elapsed_seconds"])
+                ):
+                    raise AnnualReportRecoveryError(
+                        "recovery_authority_drift",
+                        "recovery link was created outside its approved time window",
+                    )
+                failed_work = effective[index]
                 effective = effective[:index]
                 root_policy = policy
             else:
-                if root_policy is None or index != len(effective):
+                if root_policy is None or active_root is None or index != len(effective):
                     raise AnnualReportRecoveryError(
                         "recovery_authority_drift", "recovery suffix is out of order"
+                    )
+                expected_number = active_root["recovery_number"]
+                expected_window = active_root["recovery_window_started_at"]
+                recovery_policy = root_policy["unknown_recovery"]
+                if (
+                    wire.get("recovery_window_started_at") != expected_window
+                    or _time(wire["created_at"], "recovery suffix creation")
+                    >= _time(expected_window, "recovery window start")
+                    + timedelta(seconds=recovery_policy["max_elapsed_seconds"])
+                ):
+                    raise AnnualReportRecoveryError(
+                        "recovery_authority_drift",
+                        "recovery suffix was created outside its approved window",
                     )
             if effective[index - 1]["id"] != wire["upstream_work_order_ref"]:
                 raise AnnualReportRecoveryError(
                     "recovery_authority_drift", "recovery predecessor drifted"
                 )
             base = self._resolved_base(plan_wire, blueprints, effective, index)
-            identity = wire["derivation_identity"]
+            identity = self._identity(
+                plan_wire=plan_wire, version=version, index=index,
+                kind=wire["kind"], failed=failed_work,
+                upstream=effective[index - 1], policy=root_policy,
+                recovery_number=expected_number, prior=prior,
+            )
+            expected_link_ref = (
+                "research-plan-recovery-link:" + content_hash(identity)[:32]
+            )
+            repeated = {
+                "id": expected_link_ref,
+                "ordinal": index + 1,
+                "kind": wire["kind"],
+                "failed_work_order_ref": identity["failed_work_order_ref"],
+                "failed_work_order_hash": identity["failed_work_order_hash"],
+                "upstream_work_order_ref": identity["upstream_work_order_ref"],
+                "upstream_work_order_hash": identity["upstream_work_order_hash"],
+                "approved_plan_policy_hash": identity["approved_plan_policy_hash"],
+                "recovery_number": expected_number,
+            }
+            if (
+                canonical_json(wire.get("derivation_identity"))
+                != canonical_json(identity)
+                or any(wire.get(key) != value for key, value in repeated.items())
+            ):
+                raise AnnualReportRecoveryError(
+                    "recovery_authority_drift",
+                    "recovery derivation identity was not recomputed exactly",
+                )
             expected = self._derive_work(
                 base, identity=identity, link_ref=wire["id"], kind=wire["kind"],
                 policy=root_policy, window_started_at=wire["recovery_window_started_at"],
@@ -555,6 +711,9 @@ class AnnualReportUnknownRecovery:
             _reverify_scheduler_work_order(cursor, expected["id"], expected)
             effective.append(expected)
             links.append(wire)
+            if wire["kind"] == "unknown_recovery":
+                roots_by_ordinal[wire["ordinal"]].append(wire)
+                active_root = wire
             prior = wire
         return effective, links
 
@@ -576,7 +735,10 @@ class AnnualReportUnknownRecovery:
             proof = self._unknown_proof(work=failed, index=index, policy=policy)
         except AnnualReportRecoveryError as exc:
             return {"status": "blocked", "reason": exc.reason, "detail": str(exc)}
-        roots = [item for item in links if item["kind"] == "unknown_recovery"]
+        roots = [
+            item for item in links
+            if item["kind"] == "unknown_recovery" and item["ordinal"] == index + 1
+        ]
         if len(roots) >= recovery["max_fresh_work_orders"]:
             return {"status": "blocked", "reason": "unknown_recovery_exhausted"}
         started_at = (
@@ -619,6 +781,14 @@ class AnnualReportUnknownRecovery:
             )
         root = roots[-1]
         policy = effective[root["ordinal"] - 1]["metadata"]["provider_retry"]
+        deadline = _time(
+            root["recovery_window_started_at"], "recovery window start"
+        ) + timedelta(seconds=policy["unknown_recovery"]["max_elapsed_seconds"])
+        if self.clock().astimezone(timezone.utc) >= deadline:
+            return {
+                "status": "blocked",
+                "reason": "unknown_recovery_deadline_exceeded",
+            }
         return self._append(
             plan_wire=plan_wire, start_wire=start_wire, effective=effective,
             links=links, index=index, kind="recovery_suffix", failed=None,
@@ -639,17 +809,11 @@ class AnnualReportUnknownRecovery:
         base = self._resolved_base(plan_wire, blueprints, effective, index)
         version = len(links) + 1
         prior = None if not links else links[-1]
-        identity = {
-            "plan_version_ref": plan_wire["id"], "version": version,
-            "ordinal": index + 1, "kind": kind,
-            "failed_work_order_ref": None if failed is None else failed["id"],
-            "failed_work_order_hash": None if failed is None else content_hash(failed),
-            "upstream_work_order_ref": upstream["id"],
-            "upstream_work_order_hash": content_hash(upstream),
-            "approved_plan_policy_hash": content_hash(policy),
-            "recovery_number": recovery_number,
-            "prior_recovery_link_ref": None if prior is None else prior["id"],
-        }
+        identity = self._identity(
+            plan_wire=plan_wire, version=version, index=index, kind=kind,
+            failed=failed, upstream=upstream, policy=policy,
+            recovery_number=recovery_number, prior=prior,
+        )
         link_ref = "research-plan-recovery-link:" + content_hash(identity)[:32]
         work = self._derive_work(
             base, identity=identity, link_ref=link_ref, kind=kind,
@@ -660,6 +824,8 @@ class AnnualReportUnknownRecovery:
             raise AnnualReportRecoveryError(
                 "recovery_authority_drift", "recovery Work enqueue conflicted"
             )
+        if self.fault_injector is not None:
+            self.fault_injector("after_recovery_enqueue")
         created_at = _utc(self.clock())
         wire = {
             "schema_version": "0.1", "id": link_ref,
@@ -689,6 +855,9 @@ class AnnualReportUnknownRecovery:
             "budget_admission_ref": None if proof is None else proof["budget_admission_ref"],
             "budget_admission_hash": None if proof is None else proof["budget_admission_hash"],
             "mission_binding_hash": None if proof is None else proof["mission_binding_hash"],
+            "unknown_classification": (
+                None if proof is None else dict(proof["unknown_classification"])
+            ),
             "approved_plan_policy": dict(policy),
             "approved_plan_policy_hash": content_hash(policy),
             "recovery_number": recovery_number,
@@ -740,4 +909,53 @@ class AnnualReportUnknownRecovery:
         }
 
 
-__all__ = ["AnnualReportRecoveryError", "AnnualReportUnknownRecovery"]
+def read_effective_annual_recovery_work_orders(
+    *, connection: Any, plan_wire: Mapping[str, Any],
+    start_wire: Mapping[str, Any], clock: Callable[[], datetime],
+    mission_resolver: Callable[[str, str], Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read the effective annual suffix without opening any write authority.
+
+    The process supervisor uses this only to decide whether the same approved
+    plan is resumable.  With no recovery links it preserves the original plan
+    reader exactly.  Once links exist, both model stages open their frozen
+    budget databases in SQLite read-only mode and re-run the same link,
+    invocation, admission and mission proof used by the executor.
+    """
+
+    rows = connection.execute(
+        "SELECT 1 FROM research_plan_recovery_links WHERE plan_version_ref=? LIMIT 1",
+        (plan_wire["id"],),
+    ).fetchone()
+    if rows is None:
+        from .research_plan import _resolved_plan_work_orders
+
+        return _resolved_plan_work_orders(plan_wire, connection.cursor()), []
+    blueprints = _plan_work_orders(plan_wire)
+    from .thesis_impact_budget import ThesisImpactBudgetStore
+
+    stores: dict[str, ThesisImpactBudgetStore] = {}
+    try:
+        workers: dict[int, Any] = {}
+        for index in (1, 2):
+            path = blueprints[index]["metadata"]["budget_db"]
+            if path not in stores:
+                stores[path] = ThesisImpactBudgetStore(path, read_only=True)
+            workers[index] = SimpleNamespace(
+                budget_store=stores[path], mission_resolver=mission_resolver,
+            )
+        reader = AnnualReportUnknownRecovery(
+            plan=SimpleNamespace(connection=connection), scheduler=None,
+            draft_worker=workers[1], verifier_worker=workers[2],
+            clock=clock, actor_ref="supervisor:annual-read-only",
+        )
+        return reader.effective_work_orders(plan_wire, start_wire)
+    finally:
+        for store in stores.values():
+            store.close()
+
+
+__all__ = [
+    "AnnualReportRecoveryError", "AnnualReportUnknownRecovery",
+    "read_effective_annual_recovery_work_orders",
+]

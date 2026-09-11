@@ -5,17 +5,24 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from dalton_core.annual_report_qualitative import (
     RegisteredAnnualReportDraftWorker,
     RegisteredAnnualReportVerifierWorker,
 )
 from dalton_core.contracts import ModelInvocation, ResultEnvelope
+from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_model_adapter import BrokerConnectionError
 from dalton_core.research_plan import _plan_work_orders
 from dalton_core.research_plan import ResearchPlanValidationError
-from dalton_core.research_plan_executor import ResearchPlanExecutor
+from dalton_core.research_plan_executor import (
+    ResearchPlanExecutor, ResearchPlanExecutorConflict,
+)
+from dalton_core.sec_lane_launcher import SecLaneLauncher
 from dalton_core.store import canonical_json, content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.test_research_plan_annual_report import (
@@ -31,14 +38,19 @@ from tests.test_transcript_polish_model_worker import FakeAdapter
 class UnknownThenSuccessAdapter(FakeAdapter):
     """One returned result with unavailable cost, then an actual success."""
 
-    def __init__(self, candidate_wire: dict) -> None:
+    def __init__(
+        self, candidate_wire: dict, *, first_error_code: str = "PROVIDER_INTERNAL_ERROR",
+        unknown_calls: int = 1,
+    ) -> None:
         super().__init__(candidate_wire)
         self.calls: list[str] = []
+        self.first_error_code = first_error_code
+        self.unknown_calls = unknown_calls
 
     def execute(self, work, route, selected):
         self.calls.append(work.id)
         invocation, succeeded = super().execute(work, route, selected)
-        if len(self.calls) != 1:
+        if len(self.calls) > self.unknown_calls:
             return invocation, succeeded
         wire = invocation.to_dict()
         wire["usage"] = {
@@ -47,6 +59,8 @@ class UnknownThenSuccessAdapter(FakeAdapter):
             "raw_provider_telemetry": {
                 "cost": {"available": False, "usd": None}
             },
+            "measurement_status": "unavailable",
+            "authority_status": "uncommitted",
         }
         invocation = ModelInvocation.from_dict(wire)
         failed = ResultEnvelope(
@@ -55,16 +69,35 @@ class UnknownThenSuccessAdapter(FakeAdapter):
             invocation_ref=invocation.id, status="failed", outputs={},
             actual_side_effects=(), usage_refs=succeeded.usage_refs,
             artifact_refs=(),
-            error={"code": "UNCLASSIFIED_PROVIDER_FAILURE", "message": "unknown"},
-            metadata=dict(succeeded.metadata),
+            error={"code": self.first_error_code, "message": "unknown",
+                   "source": "openclaw-model-broker"},
+            metadata=dict(succeeded.metadata) | {
+                "broker_response_hash": content_hash({"work": work.id}),
+                "broker_request_mode": "execute",
+                "dispatch_proof": {
+                    "authority": "openclaw-model-adapter",
+                    "state": "provider_completed_failure", "version": "0.1",
+                },
+            },
         )
         return invocation, failed
+
+
+class PostSendExceptionAdapter:
+    def execute(self, _work, _route, _selected):
+        raise BrokerConnectionError("fixture disconnected after dispatch")
+
+    def replay(self, _work, _route, _selected):
+        raise AssertionError("terminal unknown Work must not replay")
 
 
 class RecoveryFixture:
     def __init__(
         self, case: unittest.TestCase, *, recovery: dict,
         day_cap_micros: int = 20_000_000,
+        max_attempts: int = 1,
+        unknown_calls: int = 1,
+        same_profile_retries: int = 0,
     ) -> None:
         self.harness = PlanExecutorHarness(suffix="annual-unknown-recovery")
         case.addCleanup(self.harness.close)
@@ -111,7 +144,8 @@ class RecoveryFixture:
             day_cap_micros=day_cap_micros,
         )
         provider_retry = {
-            "max_same_profile_retries": 0, "retry_backoff_seconds": 0,
+            "max_same_profile_retries": same_profile_retries,
+            "retry_backoff_seconds": 0,
             "unknown_recovery": recovery,
         }
         common = {
@@ -119,7 +153,7 @@ class RecoveryFixture:
             "budget_policy_ref": self.budget_policy_ref,
             "max_input_tokens": 32_000, "max_output_tokens": 4_000,
             "max_cost_usd": 1.0, "max_seconds": 120,
-            "max_elapsed_seconds": 3600, "max_attempts": 1,
+            "max_elapsed_seconds": 3600, "max_attempts": max_attempts,
             "transport_retry": None,
         }
         record = records[0]
@@ -161,7 +195,9 @@ class RecoveryFixture:
             "schema_version": "0.1", "verdict": "pass",
             "verified_statement": statement, "findings": [],
         }
-        self.draft_adapter = UnknownThenSuccessAdapter(draft_output)
+        self.draft_adapter = UnknownThenSuccessAdapter(
+            draft_output, unknown_calls=unknown_calls
+        )
         mission = {
             "id": MISSION, "mission_version_ref": MISSION,
             "mission_ref": "coverage-mission:annual-test",
@@ -208,7 +244,7 @@ class RecoveryFixture:
     def plan_ref(self):
         return self.created["plan_version_ref"]
 
-    def new_executor(self):
+    def new_executor(self, *, fault_injector=None):
         h = self.harness
         return ResearchPlanExecutor(
             plan=h.planner.plans, scheduler=h.scheduler(),
@@ -221,7 +257,7 @@ class RecoveryFixture:
             annual_report_registry=self.source.registry,
             annual_report_draft_worker=self.draft_worker,
             annual_report_verifier_worker=self.verifier_worker,
-            actor_ref=h.actor_ref,
+            actor_ref=h.actor_ref, fault_injector=fault_injector,
         )
 
     def run_to_unknown(self):
@@ -363,6 +399,39 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
             "SELECT COUNT(*) FROM research_plan_recovery_links"
         ).fetchone()[0], 0)
 
+    def test_open_reservation_alone_is_not_unknown_result_proof(self):
+        fixture = RecoveryFixture(self, recovery=self.POLICY)
+        fixture.draft_worker.adapter = PostSendExceptionAdapter()
+        admitted, failed = fixture.run_to_unknown()
+        self.assertEqual(admitted["status"], "admitted")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], 1)
+
+        self.assertEqual(fixture.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations WHERE work_order_ref LIKE 'work:plan-%'"
+        ).fetchone()[0], 0)
+        blocked = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "unknown_result_unproven")
+
+    def test_unapproved_completed_failure_does_not_gain_recovery_authority(self):
+        fixture = RecoveryFixture(self, recovery=self.POLICY)
+        fixture.draft_worker.adapter = UnknownThenSuccessAdapter(
+            {}, first_error_code="UNCLASSIFIED_PROVIDER_FAILURE"
+        )
+        fixture.run_to_unknown()
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations"
+        ).fetchone()[0], 1)
+        blocked = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "unknown_result_ineligible")
+
     def test_expired_mission_refuses_recovery_without_model_read(self):
         fixture = RecoveryFixture(self, recovery=self.POLICY)
         fixture.run_to_unknown()
@@ -387,6 +456,152 @@ class AnnualReportUnknownRecoveryTests(unittest.TestCase):
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT COUNT(*) FROM thesis_impact_day_admissions"
         ).fetchone()[0], 1)
+
+    def test_crash_after_recovery_enqueue_reuses_same_work_without_charge(self):
+        fixture = RecoveryFixture(self, recovery=self.POLICY)
+        fixture.run_to_unknown()
+        faulted = False
+
+        def fault(seam):
+            nonlocal faulted
+            if seam == "after_recovery_enqueue" and not faulted:
+                faulted = True
+                raise RuntimeError("crash after recovery enqueue")
+
+        crashing = fixture.new_executor(fault_injector=fault)
+        with self.assertRaisesRegex(RuntimeError, "after recovery enqueue"):
+            crashing.run_once(plan_version_ref=fixture.plan_ref)
+        orphan = fixture.harness.core.connection.execute(
+            "SELECT work_order_id FROM scheduler_work_orders "
+            "WHERE work_order_json LIKE '%unknown_recovery_derivation%'"
+        ).fetchall()
+        self.assertEqual(len(orphan), 1)
+        self.assertEqual(fixture.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM research_plan_recovery_links"
+        ).fetchone()[0], 0)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], 1)
+
+        resumed = fixture.new_executor()
+        linked = resumed.run_once(plan_version_ref=fixture.plan_ref)
+        self.assertEqual(linked["status"], "admitted")
+        self.assertEqual(linked["admitted_work_order_ref"], orphan[0][0])
+        self.assertEqual(fixture.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM scheduler_work_orders "
+            "WHERE work_order_json LIKE '%unknown_recovery_derivation%'"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.budget.connection.execute(
+            "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+        ).fetchone()[0], 1)
+
+    def test_recovery_link_recomputes_ordinal_number_and_identity(self):
+        mutations = {
+            "ordinal": lambda wire: wire["derivation_identity"].__setitem__(
+                "ordinal", 3
+            ),
+            "number": lambda wire: (
+                wire.__setitem__("recovery_number", 2),
+                wire["derivation_identity"].__setitem__("recovery_number", 2),
+            ),
+            "identity": lambda wire: (
+                wire.__setitem__("upstream_work_order_hash", "f" * 64),
+                wire["derivation_identity"].__setitem__(
+                    "upstream_work_order_hash", "f" * 64
+                ),
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                fixture = RecoveryFixture(self, recovery=self.POLICY)
+                fixture.run_to_unknown()
+                fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+                row = fixture.harness.core.connection.execute(
+                    "SELECT recovery_link_id,record_json FROM research_plan_recovery_links"
+                ).fetchone()
+                wire = json.loads(row["record_json"])
+                mutate(wire)
+                wire["content_hash"] = content_hash({
+                    key: value for key, value in wire.items()
+                    if key != "content_hash"
+                })
+                fixture.harness.core.connection.execute(
+                    "DROP TRIGGER research_plan_recovery_links_no_update"
+                )
+                fixture.harness.core.connection.execute(
+                    "UPDATE research_plan_recovery_links SET record_json=?,content_hash=? "
+                    "WHERE recovery_link_id=?",
+                    (canonical_json(wire), wire["content_hash"], row["recovery_link_id"]),
+                )
+                with self.assertRaises(ResearchPlanExecutorConflict):
+                    fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+
+    def test_launcher_resumes_recovery_work_during_scheduler_backoff(self):
+        fixture = RecoveryFixture(
+            self,
+            recovery={**self.POLICY, "max_fresh_work_orders": 1},
+            max_attempts=2,
+            unknown_calls=2,
+            same_profile_retries=1,
+        )
+        _, retryable_original = fixture.run_to_unknown()
+        self.assertEqual(retryable_original["status"], "retryable")
+        terminal_original = fixture.executor.run_once(
+            plan_version_ref=fixture.plan_ref
+        )
+        self.assertEqual(terminal_original["status"], "failed")
+        admitted = fixture.executor.run_once(plan_version_ref=fixture.plan_ref)
+        recovery_work_ref = admitted["admitted_work_order_ref"]
+        scheduler = fixture.harness.scheduler()
+        claim = scheduler.claim("worker:killed", work_order_id=recovery_work_ref)
+        retry_at = fixture.harness.clock.value + timedelta(seconds=30)
+        retryable = ResultEnvelope(
+            schema_version="0.1",
+            id="result:recovery-process-killed",
+            created_at=fixture.harness.clock.value.isoformat(timespec="microseconds"),
+            work_order_ref=recovery_work_ref,
+            invocation_ref="invocation:recovery-process-killed",
+            status="retryable",
+            outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(),
+            error={"code": "PROCESS_KILLED", "message": "fixture", "source": "test"},
+        )
+        completed = scheduler.complete(
+            recovery_work_ref, claim["lease"]["attempt_number"], "worker:killed",
+            claim["lease_token"], retryable,
+            idempotency_key="complete:recovery-process-killed",
+            retry_at=retry_at,
+        )
+        self.assertEqual(completed["work_state"], "ready")
+        original_work = _plan_work_orders(
+            fixture.harness.planner.plans.plan_version(fixture.plan_ref)
+        )[1]
+        self.assertEqual(
+            scheduler.formal_result(original_work["id"])["terminal_state"],
+            "failed",
+        )
+        mission_authority = CoverageMissionAuthority(fixture.harness.core)
+        mission_row = fixture.harness.core.connection.execute(
+            "SELECT mission_ref,mission_version_id,version_number,content_hash,created_at "
+            "FROM coverage_mission_versions WHERE mission_version_id=?", (MISSION,),
+        ).fetchone()
+        with mission_authority._transaction() as cursor:
+            cursor.execute(
+                "INSERT INTO coverage_mission_pointer("
+                "mission_ref,mission_version_id,version_number,content_hash,updated_at) "
+                "VALUES(?,?,?,?,?)",
+                tuple(mission_row),
+            )
+
+        launcher_view = SimpleNamespace(
+            state_dir=Path(fixture.harness.planner.temp.name),
+            clock=fixture.harness.clock,
+        )
+        resumable, deadline_expired = SecLaneLauncher._annual_resume_state(
+            launcher_view, {"plan_version_ref": fixture.plan_ref}
+        )
+        self.assertTrue(resumable)
+        self.assertFalse(deadline_expired)
+        self.assertEqual(scheduler.status(recovery_work_ref)["state"], "ready")
 
     def test_max_fresh_work_orders_and_deadline_stop(self):
         exhausted = RecoveryFixture(self, recovery={

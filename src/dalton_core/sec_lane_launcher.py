@@ -560,8 +560,11 @@ class SecLaneLauncher:
 
         try:
             from .research_plan import (
-                _resolved_plan_work_orders, plan_start_ref_for,
+                plan_start_ref_for,
                 read_exact_research_plan_start, read_exact_research_plan_version,
+            )
+            from .annual_report_recovery import (
+                read_effective_annual_recovery_work_orders,
             )
 
             uri = f"file:{self.state_dir / 'core.sqlite'}?mode=ro"
@@ -572,7 +575,7 @@ class SecLaneLauncher:
                 plan = read_exact_research_plan_version(
                     cursor, record["plan_version_ref"]
                 )
-                read_exact_research_plan_start(
+                start = read_exact_research_plan_start(
                     cursor, plan_start_ref_for(plan["id"])
                 )
                 if (plan["schema_version"] != "0.2"
@@ -597,7 +600,12 @@ class SecLaneLauncher:
                     # Revoked (no pointer) and superseded mission versions never
                     # gain new execution merely because an old child died.
                     return False, False
-                for work in _resolved_plan_work_orders(plan, cursor):
+                effective, _recovery_links = read_effective_annual_recovery_work_orders(
+                    connection=connection, plan_wire=plan, start_wire=start,
+                    clock=self.clock,
+                    mission_resolver=lambda ref, _company: {"id": ref},
+                )
+                for work in effective:
                     formal = cursor.execute(
                         "SELECT terminal_state FROM scheduler_formal_results "
                         "WHERE work_order_id=?", (work["id"],)

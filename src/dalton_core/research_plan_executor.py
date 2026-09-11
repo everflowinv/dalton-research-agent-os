@@ -637,6 +637,7 @@ class ResearchPlanExecutor:
                 draft_worker=annual_report_draft_worker,
                 verifier_worker=annual_report_verifier_worker,
                 clock=self.clock, actor_ref=self.actor_ref,
+                fault_injector=fault_injector,
             )
         self.capability_policy_ref = _text(
             capability_policy_ref, "capability_policy_ref"
