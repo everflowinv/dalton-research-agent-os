@@ -36,6 +36,21 @@ function integer(value, field, { min, max, fallback }) {
   return resolved;
 }
 
+function selectedProviderFromResponse(response) {
+  if (typeof response?.provider === "string" && PROVIDER_ID.test(response.provider)) {
+    return response.provider;
+  }
+  try {
+    const text = response?.result?.content?.[0]?.text;
+    const payload = typeof text === "string" ? JSON.parse(text) : undefined;
+    return typeof payload?.provider === "string" && PROVIDER_ID.test(payload.provider)
+      ? payload.provider
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Host-owned web search bridge for an external Dalton runtime.
  *
@@ -77,7 +92,9 @@ export class WebSearchBroker {
       throw new ProtocolError("INVALID_CONFIG", "socketName is invalid");
     }
     this.runtime = runtime;
-    this.hostConfig = hostConfig ?? runtime.config ?? undefined;
+    this.hostConfig = hostConfig ?? (
+      typeof runtime.config?.current === "function" ? undefined : runtime.config
+    );
     this.config = Object.freeze({
       clientId,
       profileId,
@@ -122,67 +139,116 @@ export class WebSearchBroker {
     // search identity: it may read a durable result but never create a claim
     // or reach the host on a miss.
     const { replayOnly = false, ...executionRequest } = request;
-    const requestHash = contentHash(executionRequest);
+    let providerContext;
+    try {
+      providerContext = this.#providerContext();
+    } catch (error) {
+      const message = error instanceof ProtocolError
+        ? error.message
+        : "host web search provider configuration is unavailable";
+      return this.#failure(
+        request, contentHash(executionRequest), "fresh",
+        "PROVIDER_CONTRACT_DRIFT", message,
+      );
+    }
+    const { provider } = providerContext;
+    // New clients send expectedProvider, so it is naturally part of their
+    // signed identity. For legacy clients the broker adds the selected host
+    // provider to its journal identity, preventing cross-provider replay.
+    const identityRequest = request.expectedProvider === undefined
+      ? { ...executionRequest, expectedProvider: provider }
+      : executionRequest;
+    const requestHash = contentHash(identityRequest);
+    const legacyRequestHash = request.expectedProvider === undefined
+      ? contentHash(executionRequest)
+      : undefined;
     if (request.profileId !== this.config.profileId) {
-      return this.#failure(request, requestHash, "fresh", "UNKNOWN_PROFILE", "profileId is not the configured search profile");
+      return this.#failure(request, requestHash, "fresh", "UNKNOWN_PROFILE", "profileId is not the configured search profile", provider);
     }
     if (request.timeoutMs > this.config.maxTimeoutMs) {
-      return this.#failure(request, requestHash, "fresh", "PROFILE_LIMIT_EXCEEDED", "timeoutMs exceeds the configured maximum");
+      return this.#failure(request, requestHash, "fresh", "PROFILE_LIMIT_EXCEEDED", "timeoutMs exceeds the configured maximum", provider);
+    }
+    if (request.expectedProvider !== undefined && request.expectedProvider !== provider) {
+      return this.#failure(request, requestHash, "fresh", "PROVIDER_CONTRACT_DRIFT", "request provider guard differs from the active host provider", provider);
     }
     const live = this.inFlight.get(request.callRef);
     if (live) {
-      if (live.requestHash !== requestHash) {
-        return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "callRef was already used for another request");
+      if (live.requestHash !== requestHash || live.provider !== provider) {
+        return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "callRef was already used for another request", provider);
       }
       return this.#duplicate(await live.promise);
     }
     const persisted = this.journal.get(request.callRef);
     if (persisted) {
-      if (persisted.requestHash !== requestHash) {
-        return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "callRef was already used for another request");
+      const historicalMatch = legacyRequestHash !== undefined
+        && persisted.requestHash === legacyRequestHash
+        && persisted.state === "completed"
+        && selectedProviderFromResponse(persisted.response) === provider;
+      if (persisted.requestHash !== requestHash && !historicalMatch) {
+        return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "callRef was already used for another request", provider);
       }
       if (persisted.state === "completed") return this.#duplicate(persisted.response);
-      return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "a prior host search may have run; automatic replay is blocked");
+      return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "a prior host search may have run; automatic replay is blocked", provider);
     }
     if (replayOnly) {
-      return this.#failure(request, requestHash, "fresh", "IDEMPOTENCY_MISS", "no durable search exists; replay-only request did not call the host");
+      return this.#failure(request, requestHash, "fresh", "IDEMPOTENCY_MISS", "no durable search exists; replay-only request did not call the host", provider);
     }
     if (this.active + this.reserved >= this.config.maxConcurrent) {
-      return this.#failure(request, requestHash, "fresh", "BUSY", "broker concurrency limit reached");
+      return this.#failure(request, requestHash, "fresh", "BUSY", "broker concurrency limit reached", provider);
     }
     this.reserved += 1;
     let claim;
     try {
       claim = await this.journal.claim(request.callRef, requestHash);
     } catch {
-      return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "idempotency journal is unavailable");
+      return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "idempotency journal is unavailable", provider);
     } finally {
       this.reserved -= 1;
     }
     if (claim.status === "conflict") {
-      return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "callRef was already used for another request");
+      return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "callRef was already used for another request", provider);
     }
     if (claim.status === "completed") return this.#duplicate(claim.record.response);
     if (claim.status === "pending") {
-      return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "a prior host search may have run; automatic replay is blocked");
+      return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "a prior host search may have run; automatic replay is blocked", provider);
     }
-    const promise = this.#searchAndPersist(request, requestHash);
-    this.inFlight.set(request.callRef, { requestHash, promise });
+    const promise = this.#searchAndPersist(request, requestHash, providerContext);
+    this.inFlight.set(request.callRef, { requestHash, provider, promise });
     promise.finally(() => this.inFlight.delete(request.callRef)).catch(() => {});
     return promise;
   }
 
-  async #searchAndPersist(request, requestHash) {
-    const response = await this.#search(request, requestHash);
+  #providerContext() {
+    const current = this.runtime.config?.current;
+    const hostConfig = typeof current === "function" ? current() : this.hostConfig;
+    if (!hostConfig || typeof hostConfig !== "object" || Array.isArray(hostConfig)) {
+      throw new ProtocolError("INVALID_CONFIG", "host runtime configuration is unavailable");
+    }
+    const configured = hostConfig.tools?.web?.search?.provider;
+    const provider = configured === undefined ? this.config.expectedProvider : configured;
+    if (typeof provider !== "string" || !PROVIDER_ID.test(provider)) {
+      throw new ProtocolError("INVALID_CONFIG", "host web search provider is invalid");
+    }
+    if (typeof this.runtime.webSearch.listProviders === "function") {
+      const available = this.runtime.webSearch.listProviders({ config: hostConfig });
+      if (!Array.isArray(available) || !available.some((item) => item?.id === provider)) {
+        throw new ProtocolError("INVALID_CONFIG", "host web search provider is unsupported");
+      }
+    }
+    return Object.freeze({ hostConfig, provider });
+  }
+
+  async #searchAndPersist(request, requestHash, providerContext) {
+    const response = await this.#search(request, requestHash, providerContext);
     try {
       await this.journal.complete(request.callRef, requestHash, response);
       return response;
     } catch {
-      return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "search result could not be committed to the idempotency journal");
+      return this.#failure(request, requestHash, "fresh", "JOURNAL_UNAVAILABLE", "search result could not be committed to the idempotency journal", providerContext.provider);
     }
   }
 
-  async #search(request, requestHash) {
+  async #search(request, requestHash, providerContext) {
     this.active += 1;
     try {
       const args = {
@@ -192,7 +258,12 @@ export class WebSearchBroker {
       };
       let payload;
       try {
-        payload = await this.runtime.webSearch.search({ config: this.hostConfig, args });
+        payload = await this.runtime.webSearch.search({
+          config: providerContext.hostConfig,
+          preferInputConfig: true,
+          providerId: providerContext.provider,
+          args,
+        });
       } catch (error) {
         const message = typeof error?.message === "string" ? error.message : "host web search failed";
         // Normalize punctuation so "GEMINI_API_KEY" and "api key" classify alike.
@@ -207,13 +278,14 @@ export class WebSearchBroker {
           // The host message can quote provider text; keep it bounded and
           // never include the query or any result content.
           message.slice(0, 300),
+          providerContext.provider,
         );
       }
       if (!envelopeShape(payload)) {
-        return this.#failure(request, requestHash, "fresh", "PROVIDER_CONTRACT_DRIFT", "host web search did not return a { provider, result } object");
+        return this.#failure(request, requestHash, "fresh", "PROVIDER_CONTRACT_DRIFT", "host web search did not return a { provider, result } object", providerContext.provider);
       }
       const inner = payload.result;
-      if (payload.provider !== this.config.expectedProvider || inner.provider !== this.config.expectedProvider) {
+      if (payload.provider !== providerContext.provider || inner.provider !== providerContext.provider) {
         // A silent provider swap would change the payload contract Dalton
         // pinned; refuse instead of handing over a different shape.
         return this.#failure(
@@ -222,6 +294,7 @@ export class WebSearchBroker {
           "fresh",
           "PROVIDER_CONTRACT_DRIFT",
           "host web search used a provider other than the configured one",
+          providerContext.provider,
         );
       }
       const envelope = toolResultEnvelope(inner);
@@ -233,12 +306,13 @@ export class WebSearchBroker {
         idempotencyStatus: "fresh",
         callRef: request.callRef,
         requestHash,
+        provider: providerContext.provider,
         providerRequestId: `provider-request:web-search-broker:${requestHash.slice(0, 32)}`,
         result: envelope,
       };
       const sealed = sealResponse(body);
       if (Buffer.byteLength(JSON.stringify(sealed), "utf8") > this.config.maxResponseBytes) {
-        return this.#failure(request, requestHash, "fresh", "RESPONSE_TOO_LARGE", "host web search result exceeds the configured response limit");
+        return this.#failure(request, requestHash, "fresh", "RESPONSE_TOO_LARGE", "host web search result exceeds the configured response limit", providerContext.provider);
       }
       return sealed;
     } finally {
@@ -251,7 +325,7 @@ export class WebSearchBroker {
     return sealResponse({ ...body, idempotencyStatus: "duplicate" });
   }
 
-  #failure(request, requestHash, idempotencyStatus, code, message) {
+  #failure(request, requestHash, idempotencyStatus, code, message, provider) {
     return sealResponse({
       schemaVersion: PROTOCOL_VERSION,
       brokerVersion: BROKER_VERSION,
@@ -260,6 +334,7 @@ export class WebSearchBroker {
       idempotencyStatus,
       callRef: request.callRef,
       requestHash,
+      ...(provider ? { provider } : {}),
       error: { code, message },
     });
   }

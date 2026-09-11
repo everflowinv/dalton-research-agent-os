@@ -12,7 +12,7 @@ const REQUIRED_REQUEST_KEYS = new Set([
   "count",
   "timeoutMs",
 ]);
-const OPTIONAL_REQUEST_KEYS = new Set(["dateAfter", "dateBefore", "replayOnly"]);
+const OPTIONAL_REQUEST_KEYS = new Set(["dateAfter", "dateBefore", "replayOnly", "expectedProvider"]);
 const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -185,6 +185,9 @@ export function validateRequest(input, { maxFrameBytes, maxQueryChars, maxCount 
     query: requiredString(input.query, "query", undefined, maxQueryChars),
     count,
     timeoutMs: positiveInteger(input.timeoutMs, "timeoutMs"),
+    ...(input.expectedProvider !== undefined
+      ? { expectedProvider: requiredString(input.expectedProvider, "expectedProvider", /^[a-z][a-z0-9-]{0,63}$/, 64) }
+      : {}),
     ...(hasAfter
       ? {
         dateAfter: requiredString(input.dateAfter, "dateAfter", DATE),

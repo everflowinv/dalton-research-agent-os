@@ -23,13 +23,14 @@ running a first real search are separate, owner-gated deployment steps.
 - Apart from that envelope a request contains only protocol version, the
   caller's `callRef`, the broker profile, the exact `query`, a bounded
   `count`, an optional explicit `dateAfter`/`dateBefore` window, `timeoutMs`,
-  and the optional boolean `replayOnly`. **A client cannot send or select an
-  API key, provider, model, endpoint, base URL or header.**
+  optional boolean `replayOnly`, and optional `expectedProvider` guard. The
+  guard can refuse a stale client snapshot; it cannot select a provider. **A
+  client cannot send an API key, model, endpoint, base URL or header.**
 - Provider selection and credentials stay in the host. The broker calls the
-  shared `api.runtime.webSearch.search` helper with the host's own config and
-  refuses the result if the provider the host used differs from the
-  configured `expectedProvider`, because a silent provider swap would change
-  the payload contract the Dalton adapter pinned.
+  shared `api.runtime.webSearch.search` helper with the host's current runtime
+  config snapshot and the provider selected by `tools.web.search.provider` in
+  that same snapshot. It refuses a stale request guard before that call and
+  verifies both provider fields returned by the host.
 - The provider payload is returned verbatim inside a tool-result envelope
   (`result.content[0].text`), which is the shape Dalton's frozen public-web
   adapter and URL-authority rebuild already parse. The broker never rewrites,
@@ -50,6 +51,11 @@ different one. A request left `pending` by a crash is reported as
 `IDEMPOTENCY_INDETERMINATE`; the broker never silently searches again. An
 authenticated `replayOnly` request can read a completed record but can never
 create a claim or reach the host, and a miss returns `IDEMPOTENCY_MISS`.
+The selected provider is included in new journal identities and response
+receipts. A host provider switch therefore cannot replay a completed result
+from the prior provider. Existing journal bytes remain valid and unchanged;
+legacy completed records replay only when their payload proves the same
+currently selected provider.
 
 The bounded journal is `<socketName>.journal.json`, mode `0600`, written
 through a same-directory temporary file plus fsync and atomic rename. It
@@ -59,8 +65,12 @@ audit log. It refuses to persist records carrying credential-shaped fields.
 
 ## Configuration
 
-Required: `clientId` (`client:<name>`) and `expectedProvider` (for example
-`gemini`). Optional: `profileId`, `socketName`, `maxQueryChars`, `maxCount`,
+Required: `clientId` (`client:<name>`) and legacy `expectedProvider` (for
+example `gemini`). When the host runtime has an explicit
+`tools.web.search.provider`, that current selection takes precedence over the
+legacy field. If the host selection is absent, `expectedProvider` remains the
+compatibility fallback. An explicit invalid or unsupported host provider is
+refused rather than silently replaced. Optional: `profileId`, `socketName`, `maxQueryChars`, `maxCount`,
 `maxFrameBytes`, `maxResponseBytes`, `maxConcurrent`, `idleTimeoutMs`,
 `maxTimeoutMs`, `authMaxSkewMs` and the journal bounds. The host must have a
 web search provider configured and enabled; this plugin adds no provider and

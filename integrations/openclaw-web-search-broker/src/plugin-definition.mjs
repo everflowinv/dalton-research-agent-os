@@ -17,7 +17,7 @@ export function createPluginDefinition() {
           // Never log the query, the results or the provider credential.
           ctx.logger.info("Dalton web search broker started", {
             socketName: broker.config.socketName,
-            expectedProvider: broker.config.expectedProvider,
+            legacyExpectedProvider: broker.config.expectedProvider,
             maxCount: broker.config.maxCount,
           });
         },

@@ -111,6 +111,7 @@ test("closed request shape, limits and unknown profiles are refused before the h
     ["unsupported schema", request({ schemaVersion: "9.9", callRef: "credential-use:web-search:c6" })],
     ["callRef outside the credential-use namespace", request({ callRef: "invocation:not-a-credential-use" })],
     ["query above the char cap", request({ query: "x".repeat(401), callRef: "credential-use:web-search:c8" })],
+    ["invalid provider guard", request({ expectedProvider: "Gemini!", callRef: "credential-use:web-search:c9" })],
   ];
   for (const [label, value] of cases) {
     await assertRefused(broker, value, label);
@@ -193,7 +194,7 @@ test("replayOnly reads a durable result but never reaches the host on a miss", a
 test("a pending journal claim blocks automatic replay", async () => {
   const journal = new MemoryIdempotencyJournal({});
   const runtime = fakeRuntime(() => geminiPayload());
-  const broker = new WebSearchBroker(runtime, CONFIG, { journal });
+  const broker = new WebSearchBroker(runtime, CONFIG, { journal, hostConfig: { host: true } });
   await journal.claim("credential-use:web-search:1", "0".repeat(64));
   const response = await broker.handle(request());
   assert.equal(response.ok, false);
@@ -205,4 +206,109 @@ test("a runtime without webSearch.search is refused at construction", () => {
   assert.throws(() => new WebSearchBroker({ version: "1" }, CONFIG), /webSearch\.search/);
   assert.throws(() => new WebSearchBroker(fakeRuntime(() => geminiPayload()), { ...CONFIG, clientId: "nope" }), /clientId/);
   assert.throws(() => new WebSearchBroker(fakeRuntime(() => geminiPayload()), { ...CONFIG, expectedProvider: "" }), /expectedProvider/);
+});
+
+test("one broker follows Gemini to Antigravity to Gemini from exact runtime snapshots", async () => {
+  let currentConfig = { tools: { web: { search: { enabled: true, provider: "gemini" } } } };
+  const calls = [];
+  const runtime = {
+    version: "2026.9.3",
+    config: { current: () => currentConfig },
+    webSearch: {
+      listProviders: () => [{ id: "gemini" }, { id: "antigravity" }],
+      async search(input) {
+        assert.equal(input.config, currentConfig, "search must use the resolved runtime snapshot");
+        assert.equal(input.providerId, input.config.tools.web.search.provider);
+        assert.equal(input.preferInputConfig, true);
+        calls.push(input);
+        const provider = input.providerId;
+        return {
+          provider,
+          result: {
+            ...geminiPayload(input.args.query),
+            provider,
+            externalContent: { untrusted: true, source: "web_search", provider, wrapped: true },
+          },
+        };
+      },
+    },
+  };
+  const journal = new MemoryIdempotencyJournal({});
+  // The plugin's legacy expectation is deliberately stale. The host's
+  // current tools.web.search.provider is authoritative.
+  const broker = new WebSearchBroker(runtime, { ...CONFIG, expectedProvider: "antigravity" }, { journal });
+
+  const gemini = await broker.handle(request({
+    callRef: "credential-use:web-search:switch-1", expectedProvider: "gemini",
+  }));
+  assert.equal(gemini.ok, true);
+  assert.equal(gemini.provider, "gemini");
+  assert.equal(gemini.requestHash, contentHash(request({
+    callRef: "credential-use:web-search:switch-1", expectedProvider: "gemini",
+  })));
+  const historicalReceipt = JSON.stringify(journal.get("credential-use:web-search:switch-1"));
+
+  currentConfig = { tools: { web: { search: { enabled: true, provider: "antigravity" } } } };
+  const stale = await broker.handle(request({
+    callRef: "credential-use:web-search:stale", expectedProvider: "gemini",
+  }));
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error.code, "PROVIDER_CONTRACT_DRIFT");
+  assert.equal(stale.provider, "antigravity");
+  assert.equal(calls.length, 1, "a stale client guard must fail before host search");
+
+  const antigravity = await broker.handle(request({
+    callRef: "credential-use:web-search:switch-2", expectedProvider: "antigravity",
+  }));
+  assert.equal(antigravity.ok, true);
+  assert.equal(antigravity.provider, "antigravity");
+
+  currentConfig = { tools: { web: { search: { enabled: true, provider: "gemini" } } } };
+  const geminiAgain = await broker.handle(request({
+    callRef: "credential-use:web-search:switch-3", expectedProvider: "gemini",
+  }));
+  assert.equal(geminiAgain.ok, true);
+  assert.equal(geminiAgain.provider, "gemini");
+  assert.deepEqual(calls.map((call) => call.providerId), ["gemini", "antigravity", "gemini"]);
+  assert.equal(
+    JSON.stringify(journal.get("credential-use:web-search:switch-1")),
+    historicalReceipt,
+    "provider switches must not rewrite an earlier completed journal receipt",
+  );
+});
+
+test("legacy requests bind the selected provider and unsupported host selection fails closed", async () => {
+  let currentConfig = { tools: { web: { search: { provider: "gemini" } } } };
+  let searches = 0;
+  const runtime = {
+    version: "2026.9.3",
+    config: { current: () => currentConfig },
+    webSearch: {
+      listProviders: () => [{ id: "gemini" }, { id: "antigravity" }],
+      async search(input) {
+        searches += 1;
+        const provider = input.providerId;
+        return { provider, result: { ...geminiPayload(), provider } };
+      },
+    },
+  };
+  const broker = new WebSearchBroker(runtime, CONFIG, { journal: new MemoryIdempotencyJournal({}) });
+  const legacy = request({ callRef: "credential-use:web-search:legacy" });
+  const first = await broker.handle(legacy);
+  assert.equal(first.ok, true);
+  assert.equal(
+    first.requestHash,
+    contentHash({ ...legacy, expectedProvider: "gemini" }),
+    "the broker must add host selection to a legacy journal identity",
+  );
+  currentConfig = { tools: { web: { search: { provider: "antigravity" } } } };
+  const conflict = await broker.handle(legacy);
+  assert.equal(conflict.error.code, "IDEMPOTENCY_CONFLICT");
+  assert.equal(searches, 1);
+
+  currentConfig = { tools: { web: { search: { provider: "unknown-provider" } } } };
+  const unsupported = await broker.handle(request({ callRef: "credential-use:web-search:unsupported" }));
+  assert.equal(unsupported.error.code, "PROVIDER_CONTRACT_DRIFT");
+  assert.match(unsupported.error.message, /unsupported/);
+  assert.equal(searches, 1);
 });
