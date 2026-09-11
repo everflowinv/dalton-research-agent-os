@@ -63,6 +63,20 @@ class MissionHarness(unittest.TestCase):
 
 
 class CoverageMissionTests(MissionHarness):
+    def test_fresh_schema_places_retryability_only_on_discovered_documents(self) -> None:
+        document_columns = {
+            row[1] for row in self.store.connection.execute(
+                "PRAGMA table_info(coverage_mission_discovered_documents)"
+            )
+        }
+        dispatch_columns = {
+            row[1] for row in self.store.connection.execute(
+                "PRAGMA table_info(coverage_mission_sec_dispatches)"
+            )
+        }
+        self.assertIn("failure_retryable", document_columns)
+        self.assertNotIn("failure_retryable", dispatch_columns)
+
     def test_signed_mission_can_publish_explicit_daily_pool_caps(self) -> None:
         from dalton_core.budget_pools import pool_caps
         from dalton_core.event_judgement import pool as event_pool
