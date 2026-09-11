@@ -591,6 +591,186 @@ def role_drivers(drivers: Sequence[Mapping[str, Any]], role: str) -> list[Mappin
             if item.get("role") == role and item.get("status") in FORECASTABLE_STATUSES]
 
 
+def build_structure_drivers(
+    table: Mapping[str, Any], structure: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Build forecast leaves from the exact company statement structure.
+
+    The legacy driver builder starts from the specification's revenue and
+    expense rows.  A company statement DAG also contains filed non-operating,
+    tax, attribution and per-share inputs.  Those leaves must come from the
+    structure's explicit concept and forecast method; a role never silently
+    chooses a method or a base.
+    """
+
+    filed = {str(item.get("concept")): item for item in (table.get("filed_lines") or [])}
+    drivers: list[dict[str, Any]] = []
+    concepts: set[str] = set()
+    for line in structure.get("lines") or []:
+        if line.get("kind") != "filed":
+            continue
+        concept = str(line.get("concept") or "")
+        source = filed.get(concept)
+        if not concept or source is None or source.get("status") != FILED:
+            raise ForecastModelUnavailable(
+                f"statement line {line.get('ref')} has no exact filed concept")
+        if concept in concepts:
+            raise ForecastModelUnavailable(
+                f"filed concept {concept} appears in more than one statement line")
+        concepts.add(concept)
+        cells = _cells_of(source, concept)
+        units = {str(cell.get("unit")).casefold()
+                 for cell in (source.get("cells") or {}).values() if cell.get("unit")}
+        unit = str(line.get("unit") or "").casefold()
+        if units != {unit}:
+            raise ForecastModelUnavailable(
+                f"statement line {line.get('ref')} unit differs from its filed concept")
+        drivers.append({
+            "ref": f"concept:{concept}",
+            "kind": "statement_line",
+            "label": str(line.get("label") or line.get("ref")),
+            "concept": concept,
+            "unit": unit,
+            "statement": str(line.get("statement")),
+            "status": FILED,
+            "role": str(line.get("role")),
+            "spec_rows": [str(line.get("ref"))],
+            "note": None,
+            "history": cells,
+            "structure_line_ref": str(line.get("ref")),
+            "forecast_method": str(line.get("forecast_method")),
+            "forecast_base_ref": line.get("forecast_base_ref"),
+        })
+    if not drivers:
+        raise ForecastModelUnavailable("statement structure has no filed forecast leaves")
+    return drivers
+
+
+def _structure_historical_values(
+    drivers: Sequence[Mapping[str, Any]], structure: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Decimal]], dict[str, dict[str, list[dict[str, Any]]]]]:
+    """Replay line values and their filed-cell refs without filling a term."""
+
+    by_line = {str(item.get("structure_line_ref")): item for item in drivers}
+    values: dict[str, dict[str, Decimal]] = {}
+    refs: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for line_ref, driver in by_line.items():
+        values[line_ref] = {}
+        refs[line_ref] = {}
+        for cell in quarterly_history(driver):
+            end = str(cell["period_end"])
+            values[line_ref][end] = _decimal(cell["value"], "history value")
+            refs[line_ref][end] = [_cell_ref(cell)]
+    pending = {str(item["output_ref"]): item for item in (structure.get("formulas") or [])}
+    while pending:
+        progressed = False
+        for output, formula in list(pending.items()):
+            dependencies = (
+                [str(item["line_ref"]) for item in formula["terms"]]
+                if formula.get("operator") == "sum"
+                else [str(formula["numerator_ref"]), str(formula["denominator_ref"])]
+            )
+            if any(ref not in values for ref in dependencies):
+                continue
+            ends = set(values[dependencies[0]])
+            for ref in dependencies[1:]:
+                ends &= set(values[ref])
+            values[output], refs[output] = {}, {}
+            for end in sorted(ends):
+                if formula.get("operator") == "sum":
+                    value = sum(
+                        (_decimal(term["coefficient"], "coefficient")
+                         * values[str(term["line_ref"])][end]
+                         for term in formula["terms"]), Decimal(0))
+                else:
+                    divisor = values[str(formula["denominator_ref"])][end]
+                    if divisor == 0:
+                        continue
+                    value = values[str(formula["numerator_ref"])][end] / divisor
+                values[output][end] = value
+                combined: list[dict[str, Any]] = []
+                seen: set[tuple[Any, ...]] = set()
+                for ref in dependencies:
+                    for item in refs[ref][end]:
+                        key = tuple(item.get(name) for name in
+                                    ("kind", "concept", "period_end", "accession"))
+                        if key not in seen:
+                            seen.add(key)
+                            combined.append(dict(item))
+                refs[output][end] = combined
+            del pending[output]
+            progressed = True
+        if not progressed:
+            raise ForecastModelUnavailable("statement formula graph cannot be replayed")
+    return values, refs
+
+
+def default_structure_assumptions(
+    drivers: Sequence[Mapping[str, Any]], periods: Sequence[Mapping[str, Any]],
+    structure: Mapping[str, Any], *, decided_by: str = AUTOMATION_ACTOR,
+) -> list[dict[str, Any]]:
+    """Generate assumptions only for methods named by the validated structure."""
+
+    historical, historical_refs = _structure_historical_values(drivers, structure)
+    by_line = {str(item.get("structure_line_ref")): item for item in drivers}
+    assumptions: list[dict[str, Any]] = []
+    for line in structure.get("lines") or []:
+        if line.get("kind") != "filed":
+            continue
+        line_ref = str(line["ref"])
+        driver = by_line.get(line_ref)
+        if driver is None:
+            continue
+        method = str(line.get("forecast_method"))
+        rate: dict[str, Any] | None = None
+        measure = method
+        if method == "quarterly_growth":
+            rate = trailing_growth(quarterly_history(driver))
+        elif method == "share_of_line":
+            base_ref = str(line.get("forecast_base_ref"))
+            samples: list[tuple[Decimal, str]] = []
+            for end, value in historical.get(line_ref, {}).items():
+                base = historical.get(base_ref, {}).get(end)
+                if base is not None and base != 0:
+                    samples.append(((value / base).quantize(_RATE_QUANT, ROUND_HALF_UP), end))
+            if samples:
+                used = samples[-TRAILING_QUARTERS:]
+                signs = {historical[base_ref][end] > 0 for _value, end in used}
+                if len(signs) > 1:
+                    continue
+                mean = sum((value for value, _end in used), Decimal(0)) / Decimal(len(used))
+                evidence: list[dict[str, Any]] = []
+                seen: set[tuple[Any, ...]] = set()
+                for _value, end in used:
+                    for source in (historical_refs.get(line_ref, {}).get(end, [])
+                                   + historical_refs.get(base_ref, {}).get(end, [])):
+                        key = tuple(source.get(name) for name in
+                                    ("kind", "concept", "period_end", "accession"))
+                        if key not in seen:
+                            seen.add(key)
+                            evidence.append(dict(source))
+                rate = {"value": mean, "refs": evidence,
+                        "last_period": used[-1][1]}
+        elif method == "unavailable":
+            continue
+        else:
+            raise ForecastModelUnavailable(
+                f"filed statement line {line_ref} has invalid forecast method {method}")
+        if rate is None:
+            continue
+        for period in periods:
+            assumptions.append(_assumption(
+                driver_ref=str(driver["ref"]), period=period, measure=measure,
+                value=_decimal(rate["value"], "assumption value"), unit="ratio",
+                kind="estimate",
+                because=(f"the trailing filed history through {rate.get('last_period')} "
+                         f"for structure line {line_ref} is carried forward unchanged"),
+                refs=[dict(item) for item in rate.get("refs") or []],
+                decided_by=decided_by,
+            ))
+    return assumptions
+
+
 def revenue_anchor(drivers: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
     """The one filed concept this model calls revenue.
 
@@ -1375,6 +1555,182 @@ def compute_results(
                         "available for this quarter"))
             results.append(_finish(fcf))
     return results
+
+
+def _structure_result_refs(structure: Mapping[str, Any]) -> dict[str, str]:
+    """Stable result refs: familiar role refs when unique, line refs otherwise."""
+
+    counts: dict[str, int] = {}
+    for line in structure.get("lines") or []:
+        role = str(line.get("role"))
+        counts[role] = counts.get(role, 0) + 1
+    refs: dict[str, str] = {}
+    for line in structure.get("lines") or []:
+        line_ref, role = str(line["ref"]), str(line["role"])
+        refs[line_ref] = (
+            f"result:{role}" if counts[role] == 1
+            else f"result:{role}:{line_ref}"
+        )
+    return refs
+
+
+def compute_structure_results(
+    drivers: Sequence[Mapping[str, Any]],
+    assumptions: Sequence[Mapping[str, Any]],
+    periods: Sequence[Mapping[str, Any]],
+    structure: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Execute the validated company formula DAG over forecast leaves.
+
+    Every dependency is explicit in the structure.  A missing assumption,
+    missing result or zero denominator produces an unavailable cell; it is
+    never interpreted as a zero-valued term.
+    """
+
+    lines = {str(item["ref"]): dict(item) for item in (structure.get("lines") or [])}
+    formulas = {str(item["output_ref"]): dict(item)
+                for item in (structure.get("formulas") or [])}
+    result_refs = _structure_result_refs(structure)
+    drivers_by_line = {str(item.get("structure_line_ref")): item for item in drivers}
+    assumptions_by_driver_period = {
+        (str(item["driver_ref"]), str(item["period"]["end"])): item
+        for item in assumptions if not item.get("superseded_by")
+    }
+    results: dict[str, dict[str, Any]] = {}
+    values: dict[str, dict[str, Decimal]] = {}
+    pending = dict(lines)
+    prior_growth_values: dict[str, Decimal] = {}
+    prior_growth_refs: dict[str, dict[str, Any]] = {}
+    for line_ref, driver in drivers_by_line.items():
+        history = quarterly_history(driver)
+        if history:
+            prior_growth_values[line_ref] = _decimal(history[-1]["value"], "history value")
+            prior_growth_refs[line_ref] = _cell_ref(history[-1])
+
+    while pending:
+        progressed = False
+        for line_ref, line in list(pending.items()):
+            method = str(line.get("forecast_method"))
+            formula = formulas.get(line_ref)
+            dependencies: list[str] = []
+            if method == "share_of_line":
+                dependencies = [str(line.get("forecast_base_ref"))]
+            elif method == "formula":
+                if formula is None:
+                    raise ForecastModelUnavailable(
+                        f"derived statement line {line_ref} has no formula")
+                dependencies = (
+                    [str(item["line_ref"]) for item in formula["terms"]]
+                    if formula.get("operator") == "sum"
+                    else [str(formula["numerator_ref"]),
+                          str(formula["denominator_ref"])]
+                )
+            if any(ref not in results for ref in dependencies):
+                continue
+            ref = result_refs[line_ref]
+            driver = drivers_by_line.get(line_ref)
+            driver_ref = None if driver is None else str(driver["ref"])
+            if method == "quarterly_growth":
+                formula_text = f"{line_ref}[k] = {line_ref}[k-1] * (1 + growth[k])"
+            elif method == "share_of_line":
+                formula_text = f"{line_ref}[k] = {line['forecast_base_ref']}[k] * share[k]"
+            elif method == "formula" and formula is not None:
+                formula_text = canonical_json({
+                    key: formula[key] for key in formula
+                    if key in {"operator", "terms", "numerator_ref", "denominator_ref"}
+                })
+            else:
+                formula_text = f"{line_ref}[k] unavailable by company structure"
+            result = _result(
+                ref, str(line.get("role")), str(line.get("label")),
+                str(line.get("unit")), formula_text, driver_ref=driver_ref)
+            values[line_ref] = {}
+            for period in periods:
+                end = str(period["end"])
+                if method == "unavailable":
+                    result["cells"].append(_unavailable_cell(
+                        ref, period,
+                        f"statement line {line_ref} is explicitly unavailable for forecast"))
+                    continue
+                if method in {"quarterly_growth", "share_of_line"}:
+                    if driver is None:
+                        result["cells"].append(_unavailable_cell(
+                            ref, period, f"statement line {line_ref} has no filed driver"))
+                        continue
+                    assumption = assumptions_by_driver_period.get((driver_ref, end))
+                    if assumption is None:
+                        result["cells"].append(_unavailable_cell(
+                            ref, period,
+                            f"statement line {line_ref} has no forecast assumption for this quarter"))
+                        continue
+                    rate = _decimal(assumption["value"], "assumption value")
+                    if method == "quarterly_growth":
+                        base = prior_growth_values.get(line_ref)
+                        if base is None:
+                            result["cells"].append(_unavailable_cell(
+                                ref, period,
+                                f"statement line {line_ref} has no prior quarter value"))
+                            continue
+                        value = base * (Decimal(1) + rate)
+                        result_refs_for_cell = []
+                        inputs = []
+                        prior_result = prior_growth_refs.get(line_ref)
+                        if prior_result and prior_result.get("kind") == "input_cell":
+                            inputs = [prior_result]
+                        elif prior_result:
+                            result_refs_for_cell = [prior_result]
+                        prior_growth_values[line_ref] = value
+                        prior_growth_refs[line_ref] = {"ref": ref, "period_end": end}
+                    else:
+                        base_ref = dependencies[0]
+                        base = values[base_ref].get(end)
+                        if base is None:
+                            result["cells"].append(_unavailable_cell(
+                                ref, period,
+                                f"forecast base {base_ref} is unavailable for this quarter"))
+                            continue
+                        value = base * rate
+                        inputs = []
+                        result_refs_for_cell = [{"ref": result_refs[base_ref],
+                                                 "period_end": end}]
+                    values[line_ref][end] = value
+                    result["cells"].append(_computed_cell(
+                        ref, period, value,
+                        assumptions=[str(assumption["ref"])], inputs=inputs,
+                        results=result_refs_for_cell))
+                    continue
+                assert formula is not None
+                missing = [dependency for dependency in dependencies
+                           if end not in values[dependency]]
+                if missing:
+                    result["cells"].append(_unavailable_cell(
+                        ref, period, "formula terms unavailable for this quarter: "
+                        + ", ".join(missing)))
+                    continue
+                if formula["operator"] == "sum":
+                    value = sum(
+                        (_decimal(term["coefficient"], "coefficient")
+                         * values[str(term["line_ref"])][end]
+                         for term in formula["terms"]), Decimal(0))
+                else:
+                    denominator = values[str(formula["denominator_ref"])][end]
+                    if denominator == 0:
+                        result["cells"].append(_unavailable_cell(
+                            ref, period, "formula denominator is zero for this quarter"))
+                        continue
+                    value = (values[str(formula["numerator_ref"])][end]
+                             / denominator)
+                values[line_ref][end] = value
+                result["cells"].append(_computed_cell(
+                    ref, period, value,
+                    results=[{"ref": result_refs[dependency], "period_end": end}
+                             for dependency in dependencies]))
+            results[line_ref] = _finish(result)
+            del pending[line_ref]
+            progressed = True
+        if not progressed:
+            raise ForecastModelUnavailable("statement forecast dependency graph contains a cycle")
+    return [results[str(line["ref"])] for line in (structure.get("lines") or [])]
 
 
 # -- the record -------------------------------------------------------------
