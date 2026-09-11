@@ -96,3 +96,10 @@ has to infer `operating income - tax = net income` from vocabulary alone.
 Typed note evidence remains unavailable in this slice.  The prompt says so,
 and neither concept labels nor numeric proximity are treated as note semantics.
 No live state, source call, model call, or deployment was performed.
+
+
+## Integration and next freeze
+
+Final reviewed author tip `1cad3053f0d75af1b5a4a7dccdb8772f114a8f59` is integrated as `f4968cec`, `53148a76`, `3ea4a845`. Independent review passed 141 focused tests; root integration passed 188 tests in 4.166 seconds, including legacy financial inputs and statement structure. Frozen R16 source `3ea4a84563fc6fbd349c025c9602cf5d177addd7` is pushed and running full discovery and fresh copied-state rehearsal. Its 606-file wheel/three embedded JS checks pass, wheel SHA `df30eabd6bce37edcf32cd0dd34ae60cd1e56e75051bacbfe18982acf4d3e483`. It is not deployed; R15b runtime acceptance is independent.
+
+Next foundation work is typed original-document financial-note evidence, initially EPS numerator applicability. Three isolated branches own planner target identity, canonical-promoted text-evidence resolution, and exact-period statement replay; production state/prompt/forecast plumbing follows their shared contract. Annual Note 3 evidence alone must not create quarterly readiness. Full statements, segments/category/Street and investment-return decisions remain distinct capabilities, not implied by this numeric-context change.
