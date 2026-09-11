@@ -1276,6 +1276,37 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("daltond", controller["ProgramArguments"][0])
             self.assertNotIn("model", " ".join(controller["ProgramArguments"]).lower())
 
+    def test_launchagent_persists_the_explicit_web_search_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "service.json"
+            raw = {
+                "schema_version": "0.1",
+                "core_db": str(root / "state" / "core.sqlite"),
+                "scheduler_db": str(root / "state" / "scheduler.sqlite"),
+                "projection_db": str(root / "state" / "projection.sqlite"),
+                "model_router_db": None,
+                "capability_catalog_db": None,
+                "heartbeat_path": str(root / "state" / "heartbeat.json"),
+                "writer_socket": str(root / "state" / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+                "web_search_expected_provider": "antigravity",
+            }
+            config_path.write_text(json.dumps(raw), encoding="utf-8")
+            paths = render(
+                root / "LaunchAgents", root / "venv" / "bin",
+                root / "state", config_path, root / "logs",
+            )
+            writer = plistlib.loads(Path(paths["writer"]).read_bytes())
+            argv = writer["ProgramArguments"]
+            self.assertEqual(
+                argv[argv.index("--web-search-expected-provider") + 1],
+                "antigravity",
+            )
+
     def test_writer_launchagent_is_standard_process_type_others_background(self) -> None:
         # S7d: writer-hosted children inherit the writer's launchd process
         # type; Background runs CPU work ~6x slower and cannot be lifted from

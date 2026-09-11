@@ -955,6 +955,31 @@ fi
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.
 "$venv_dir/bin/python" -m dalton_core.cockpit_setup --config "$config_path"
+
+# Bind Dalton's payload validator to the exact provider configured on the
+# host broker. An absent value preserves the historical Gemini contract and
+# an existing explicit value survives every plain reinstall.
+if [[ -n "${DALTON_WEB_SEARCH_EXPECTED_PROVIDER:-}" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "$DALTON_WEB_SEARCH_EXPECTED_PROVIDER" <<'PYWEBPROVIDER'
+import json
+import os
+import sys
+from pathlib import Path
+
+from dalton_core.public_web_connector import validate_web_search_provider
+from dalton_core.store import canonical_json
+
+path = Path(sys.argv[1])
+provider = validate_web_search_provider(sys.argv[2])
+config = json.loads(path.read_text(encoding="utf-8"))
+config["web_search_expected_provider"] = provider
+temporary = path.with_name(path.name + ".web-search-provider.tmp")
+temporary.write_text(canonical_json(config) + "\n", encoding="utf-8")
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+print("web_search_expected_provider=" + provider)
+PYWEBPROVIDER
+fi
 # INT2 / P14-M: tell the cockpit where the gateway's own model catalog is, so
 # the page can say whether the models this Core holds are the models the broker
 # offers -- and which way they differ, because "out of sync" on its own tells

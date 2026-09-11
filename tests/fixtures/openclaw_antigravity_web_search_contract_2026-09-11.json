@@ -1,0 +1,27 @@
+{
+  "evidence": {
+    "kind": "source-derived-contract-fixture",
+    "provider_environment": "AGY_SEARCH_PROVIDER_ID=antigravity",
+    "service_source_sha256": "719eb1c947b05f06a788457efa114091106b66d99e19b0b26f0f4e035962b3e1",
+    "note": "Constructed from the service payload constructor; no provider call was made."
+  },
+  "result": {
+    "query": "Accenture AI demand",
+    "provider": "antigravity",
+    "model": "gemini-2.5-flash",
+    "tookMs": 25,
+    "externalContent": {
+      "untrusted": true,
+      "source": "web_search",
+      "provider": "antigravity",
+      "wrapped": true
+    },
+    "content": "EXTERNAL_UNTRUSTED_CONTENT source-derived contract fixture",
+    "citations": [
+      {
+        "url": "https://example.com/investors?q=ai",
+        "title": "Investor relations"
+      }
+    ]
+  }
+}

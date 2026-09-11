@@ -5497,6 +5497,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--web-search-broker-client-id", default="client:dalton-core")
     parser.add_argument("--web-search-broker-profile-id", default="profile:web-search")
     parser.add_argument(
+        "--web-search-expected-provider", default="gemini",
+        help="exact provider id configured on the host web-search broker",
+    )
+    parser.add_argument(
         "--sec-filings-governance",
         help="owner-approved SEC filings-index capability record (P10u); enables "
              "discovering an issuer's filings and queueing them for the fetch lane",
@@ -5691,6 +5695,7 @@ def main(argv: list[str] | None = None) -> int:
                 broker_auth_key=args.web_search_broker_auth_key,
                 broker_client_id=args.web_search_broker_client_id,
                 broker_profile_id=args.web_search_broker_profile_id,
+                expected_provider=args.web_search_expected_provider,
             )
         web_fetch_launcher = None
         if args.web_fetch_governance is not None:

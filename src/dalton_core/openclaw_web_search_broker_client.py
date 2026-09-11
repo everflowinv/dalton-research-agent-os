@@ -56,10 +56,15 @@ _CALL_REF_RE = re.compile(r"^credential-use:[A-Za-z0-9._:-]+$")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _PERMISSION_CODES = frozenset({"PROVIDER_PERMISSION_DENIED"})
 _RATE_LIMIT_CODES = frozenset({"PROVIDER_RATE_LIMITED"})
+_PROVIDER_CONTRACT_CODES = frozenset({"PROVIDER_CONTRACT_DRIFT"})
 
 
 class WebSearchBrokerError(RuntimeError):
     """The broker socket, key or reply is unusable."""
+
+
+class WebSearchProviderContractDrift(BridgeRequestRejected):
+    """The broker proved its configured provider did not match the payload."""
 
 
 def _require_owner_only(path: Path, label: str) -> None:
@@ -269,6 +274,8 @@ class WebSearchBrokerHandle:
             raise BridgeRateLimited(text, retry_after_ms=self.retry_after_ms)
         if code in _PERMISSION_CODES:
             raise BridgePermissionDenied(text)
+        if code in _PROVIDER_CONTRACT_CODES:
+            raise WebSearchProviderContractDrift(text)
         raise BridgeRequestRejected(text)
 
 
@@ -280,6 +287,7 @@ __all__ = [
     "TOOL_NAME",
     "WebSearchBrokerError",
     "WebSearchBrokerHandle",
+    "WebSearchProviderContractDrift",
     "load_broker_key",
     "sign_request",
 ]

@@ -25,6 +25,7 @@ from dalton_core.live_mcp_connector import (
 )
 from dalton_core.observability import ObservabilityStore
 from dalton_core.openclaw_connector_bridge import BridgeRateLimited, HostToolInvocationResult
+from dalton_core.openclaw_web_search_broker_client import WebSearchProviderContractDrift
 from dalton_core.public_web_connector import (
     OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
     OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF,
@@ -42,6 +43,8 @@ from dalton_core.public_web_core_search import (
     public_web_urls_in_authority,
     validate_web_search_spec,
     web_search_spec_hash,
+    web_search_adapter_hash,
+    web_search_provider_contract_hash,
     write_web_search_governance_proposal,
 )
 from dalton_core.raw_spool import RawSpool
@@ -79,7 +82,10 @@ def approved_governance() -> WebSearchConnectorGovernance:
 class WebSearchHarness:
     """Core + governed web search in one temp dir (search runs in-process)."""
 
-    def __init__(self, root: Path, handle, *, governance=None, clock: Clock | None = None) -> None:
+    def __init__(
+        self, root: Path, handle, *, governance=None,
+        clock: Clock | None = None, expected_provider: str = "gemini",
+    ) -> None:
         self.clock = clock or Clock()
         self.core = DaltonStore(str(root / "core.sqlite"))
         self.connectors = ConnectorStore(self.core, clock=self.clock)
@@ -100,6 +106,7 @@ class WebSearchHarness:
             store=self.core, connectors=self.connectors, observability=self.observability,
             journal=self.journal, scheduler=self.scheduler, catalog=self.catalog,
             spool=self.spool, governance=governance, host_handle=self.handle, clock=self.clock,
+            expected_provider=expected_provider,
         )
 
     def close(self) -> None:
@@ -115,6 +122,17 @@ class RateLimitedHandle:
     def invoke(self, tool_name, arguments, *, call_ref, deadline_at, max_response_bytes):
         self.calls += 1
         raise BridgeRateLimited("gemini quota exhausted", retry_after_ms=30_000)
+
+
+class ProviderDriftHandle:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, *args, **kwargs):
+        self.calls += 1
+        raise WebSearchProviderContractDrift(
+            "PROVIDER_CONTRACT_DRIFT: host provider differs from broker config"
+        )
 
 
 class GovernanceAndSpecTests(unittest.TestCase):
@@ -192,7 +210,26 @@ class ExecutorTests(unittest.TestCase):
     def test_search_leaves_url_refs_raw_artifact_and_free_replay(self) -> None:
         h = WebSearchHarness(self.root, FakeWebSearchHandle(CITATIONS))
         self.addCleanup(h.close)
-        request = h.search.build_request(SPEC)
+        request = h.search.build_request(
+            SPEC, created_at="2026-09-11T12:00:00.000000+00:00"
+        )
+        # Absent configuration is the immutable Gemini contract: neither the
+        # request shape nor its historical adapter hash gains provider fields.
+        legacy_identity = {
+            "operation": "search_web",
+            "parameters": SPEC,
+            "created_at": request["created_at"],
+        }
+        self.assertEqual(set(request), {
+            "operation", "parameters", "created_at", "query_hash", "request_hash",
+        })
+        self.assertEqual(request["request_hash"], content_hash(legacy_identity))
+        self.assertEqual(web_search_adapter_hash(), content_hash({
+            "target_ref": "host-tool:gemini-web-search",
+            "package": "openclaw-gemini-web-search-live-adapter:0.1",
+            "bridge_hash": OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
+            "operation": "search_web",
+        }))
         receipt = h.search.search(request)
         expected_refs = [
             public_web_url_ref("https://example.com/investors?q=ai"),
@@ -238,6 +275,74 @@ class ExecutorTests(unittest.TestCase):
         # Trailing window: 25 hours later the call no longer counts.
         h.clock.advance(hours=25)
         self.assertEqual(count_recent_web_search_calls(h.core.connection, as_of=h.clock()), 0)
+
+    def test_antigravity_contract_versions_identity_profile_and_raw_reverification(self) -> None:
+        provider = "antigravity"
+        handle = FakeWebSearchHandle(CITATIONS, provider=provider)
+        h = WebSearchHarness(
+            self.root, handle, expected_provider=provider,
+        )
+        self.addCleanup(h.close)
+        request = h.search.build_request(
+            SPEC, created_at="2026-09-11T12:00:00.000000+00:00"
+        )
+        self.assertEqual(
+            request["provider_contract_hash"],
+            web_search_provider_contract_hash(provider),
+        )
+        legacy_handle = FakeWebSearchHandle(CITATIONS)
+        legacy_search = PublicWebCoreSearch(
+            store=h.core, connectors=h.connectors, observability=h.observability,
+            journal=h.journal, scheduler=h.scheduler, catalog=h.catalog,
+            spool=h.spool, governance=approved_governance(),
+            host_handle=legacy_handle, clock=h.clock,
+        )
+        legacy = legacy_search.build_request(
+            SPEC, created_at=request["created_at"]
+        )
+        self.assertNotEqual(request["request_hash"], legacy["request_hash"])
+        legacy_receipt = legacy_search.search(legacy)
+        self.assertEqual(legacy_receipt["connector_profile_ref"], SEARCH_PROFILE_REF)
+
+        receipt = h.search.search(request)
+        self.assertEqual(receipt["outcome"], "succeeded")
+        self.assertIn(":provider-antigravity:", receipt["connector_profile_ref"])
+        profile = h.connectors.get_profile(receipt["connector_profile_ref"])
+        self.assertEqual(profile["adapter_hash"], web_search_adapter_hash(provider))
+        self.assertEqual(
+            profile["terms_policy_ref"],
+            "policy:terms:openclaw-web-search-provider:0.1:antigravity",
+        )
+        authorities = h.search.url_authorities(receipt["source_envelope_ref"])
+        self.assertEqual(len(authorities), 2)
+        replay = h.search.search(request)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(handle.calls), 1)
+        self.assertEqual(
+            count_recent_web_search_calls(h.core.connection, as_of=h.clock()), 2
+        )
+
+    def test_antigravity_contract_rejects_a_gemini_payload_before_raw_commit(self) -> None:
+        handle = FakeWebSearchHandle(CITATIONS, provider="gemini")
+        h = WebSearchHarness(
+            self.root, handle, expected_provider="antigravity",
+        )
+        self.addCleanup(h.close)
+        receipt = h.search.search(h.search.build_request(SPEC))
+        self.assertEqual(receipt["outcome"], "failed")
+        self.assertIsNone(receipt["source_envelope_ref"])
+        self.assertEqual(len(handle.calls), 1)
+
+    def test_broker_provider_mismatch_is_terminal_and_never_creates_an_envelope(self) -> None:
+        handle = ProviderDriftHandle()
+        h = WebSearchHarness(
+            self.root, handle, expected_provider="antigravity",
+        )
+        self.addCleanup(h.close)
+        receipt = h.search.search(h.search.build_request(SPEC))
+        self.assertEqual(receipt["outcome"], "failed")
+        self.assertIsNone(receipt["source_envelope_ref"])
+        self.assertEqual(handle.calls, 1)
 
     def test_empty_citations_and_rate_limit_are_recorded_not_hidden(self) -> None:
         (self.root / "empty").mkdir()

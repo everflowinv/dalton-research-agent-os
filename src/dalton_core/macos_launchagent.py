@@ -280,6 +280,15 @@ def render(
             ]
             if web_search_broker_socket is not None else []
         ) + (
+            [
+                "--web-search-expected-provider",
+                service_config.web_search_expected_provider,
+            ]
+            if (
+                service_config is not None
+                and service_config.web_search_expected_provider is not None
+            ) else []
+        ) + (
             # S7d: the SEC company-facts lane stages into the same Cockpit
             # staging file and is only enabled when that file is configured.
             [

@@ -675,6 +675,27 @@ class WebSearchChildTests(unittest.TestCase):
         self.assertIn("probe_only", status["summary"]["failure_reason"])
         self.assertEqual(status["summary"]["provider_calls"], 0)
 
+    def test_antigravity_provider_reaches_the_actual_search_child(self) -> None:
+        launcher = WebSearchLauncher(
+            state_dir=self.state,
+            governance_path=self.governance_path,
+            plan_path=self.plan_path,
+            mode_args=("--fake-citations-file", str(self.citations_path)),
+            expected_provider="antigravity",
+        )
+        ticket = launcher.start(
+            authorization=self.authorization(),
+            spec_ref="management-changes",
+            as_of=date(2026, 9, 6),
+        )
+        self.assertEqual(launcher.wait(timeout=120), 0)
+        status = launcher.status(ticket["id"])
+        self.assertEqual(status["status"], "succeeded")
+        self.assertIn(
+            ":provider-antigravity:",
+            status["summary"]["search"]["connector_profile_ref"],
+        )
+
 
 class P9d4WriterHarness(P9aWriterHarness):
     """P9a harness plus rehearsal AlphaEngine + web search launchers and plans."""

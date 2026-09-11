@@ -37,6 +37,11 @@ from .store import canonical_json, content_hash
 
 
 GEMINI_WEB_SEARCH_ADAPTER_PROTOCOL_VERSION = "0.1"
+WEB_SEARCH_PROVIDER_CONTRACT_VERSION = "0.1"
+LEGACY_WEB_SEARCH_PROVIDER = "gemini"
+WEB_SEARCH_PROVIDER_TERMS_PREFIX = (
+    "policy:terms:openclaw-web-search-provider:0.1:"
+)
 OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF = (
     "openclaw-bridge:gemini-web-search:0.1"
 )
@@ -54,6 +59,7 @@ OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH = content_hash(
 )
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_PROVIDER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _RAW_SINK_RE = re.compile(r"^raw-sink:[0-9a-f]{64}$")
 _MEDIA_TYPE_RE = re.compile(
@@ -91,6 +97,49 @@ class PublicWebConnectorError(ValueError):
 
 class PublicWebAuthorityConflict(PublicWebConnectorError):
     """Discovery, URL, fetch, or source authority drifted."""
+
+
+def validate_web_search_provider(value: Any) -> str:
+    """Return one configured provider id; payloads must match it exactly."""
+
+    if not isinstance(value, str) or _PROVIDER_RE.fullmatch(value) is None:
+        raise RunnerValidationError("web search provider id is invalid")
+    return value
+
+
+def web_search_provider_contract(provider: str) -> dict[str, Any]:
+    expected = validate_web_search_provider(provider)
+    return {
+        "schema_version": WEB_SEARCH_PROVIDER_CONTRACT_VERSION,
+        "expected_provider": expected,
+        "payload_contract": "openclaw-web-search-provider-result:0.1",
+        "trust_label_contract": "openclaw-external-content:0.1",
+    }
+
+
+def web_search_provider_terms_ref(provider: str) -> str:
+    expected = validate_web_search_provider(provider)
+    if expected == LEGACY_WEB_SEARCH_PROVIDER:
+        return "policy:terms:openclaw-gemini-web-search"
+    return WEB_SEARCH_PROVIDER_TERMS_PREFIX + expected
+
+
+def web_search_provider_from_source_envelope(
+    source_envelope: Mapping[str, Any],
+) -> str:
+    """Resolve the exact payload contract, including historical Gemini rows."""
+
+    terms = source_envelope.get("terms_policy_ref")
+    # The first stored/search-fixture envelope shape did not project the
+    # profile's terms ref into this helper. Its only possible payload contract
+    # was Gemini; retain that exact historical interpretation.
+    if terms is None or terms == "policy:terms:openclaw-gemini-web-search":
+        return LEGACY_WEB_SEARCH_PROVIDER
+    if isinstance(terms, str) and terms.startswith(WEB_SEARCH_PROVIDER_TERMS_PREFIX):
+        provider = terms.removeprefix(WEB_SEARCH_PROVIDER_TERMS_PREFIX)
+        if web_search_provider_terms_ref(provider) == terms:
+            return provider
+    raise PublicWebAuthorityConflict("search provider contract is not bound by its envelope")
 
 
 def _closed(value: Any, fields: set[str], name: str) -> dict[str, Any]:
@@ -429,14 +478,15 @@ def is_search_redirect_proxy(canonical_url: str) -> bool:
     return host.lower() in REDIRECT_PROXY_HOSTS
 
 
-def normalize_gemini_web_search_payload(
+def normalize_web_search_payload(
     payload: Mapping[str, Any],
     *,
     expected_query: str,
+    expected_provider: str,
     max_records: int,
     drop_redirect_proxies: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """Validate the current OpenClaw Gemini provider result and derive URL refs.
+    """Validate one provider-bound OpenClaw result and derive URL refs.
 
     Verified against a real host call on 2026-09-06: the plugin runtime helper
     ``api.runtime.webSearch.search`` returns ``{provider, result}`` and this is
@@ -453,11 +503,12 @@ def normalize_gemini_web_search_payload(
     that era can still be re-verified against their raw bytes.
     """
 
+    provider = validate_web_search_provider(expected_provider)
     if not isinstance(payload, Mapping):
-        raise RunnerValidationError("Gemini web_search payload must be an object")
+        raise RunnerValidationError("web_search payload must be an object")
     if "error" in payload:
         raise RunnerValidationError(
-            "Gemini web_search provider returned an error payload"
+            "web_search provider returned an error payload"
         )
     required = {
         "query",
@@ -469,34 +520,34 @@ def normalize_gemini_web_search_payload(
         "citations",
     }
     if set(payload) != required:
-        raise RunnerValidationError("Gemini web_search payload shape drifted")
-    if payload["query"] != expected_query or payload["provider"] != "gemini":
-        raise RunnerConflict("Gemini web_search query/provider drifted")
-    _text(payload["model"], "Gemini model")
-    _integer(payload["tookMs"], "Gemini tookMs")
-    _text(payload["content"], "Gemini synthesized content")
+        raise RunnerValidationError("web_search payload shape drifted")
+    if payload["query"] != expected_query or payload["provider"] != provider:
+        raise RunnerConflict("web_search query/provider drifted")
+    _text(payload["model"], "web search model")
+    _integer(payload["tookMs"], "web search tookMs")
+    _text(payload["content"], "web search synthesized content")
     external = payload["externalContent"]
     if external != {
         "untrusted": True,
         "source": "web_search",
-        "provider": "gemini",
+        "provider": provider,
         "wrapped": True,
     }:
-        raise RunnerConflict("Gemini external-content trust label drifted")
+        raise RunnerConflict("web_search external-content trust label drifted")
     citations = payload["citations"]
     if not isinstance(citations, list):
-        raise RunnerValidationError("Gemini citations must be an array")
+        raise RunnerValidationError("web search citations must be an array")
     discoveries: list[dict[str, str]] = []
     seen: set[str] = set()
     for index, item in enumerate(citations):
         if not isinstance(item, Mapping) or not set(item).issubset({"url", "title"}):
             raise RunnerValidationError(
-                f"Gemini citation[{index}] has an invalid shape"
+                f"web search citation[{index}] has an invalid shape"
             )
         canonical = canonical_public_web_url(item.get("url"))
         title = item.get("title")
         if title is not None:
-            _text(title, f"Gemini citation[{index}].title")
+            _text(title, f"web search citation[{index}].title")
         if drop_redirect_proxies and is_search_redirect_proxy(canonical):
             # Skipped before the max_records slice, so a proxy link never costs
             # a real citation its place in the admitted top slice.
@@ -518,6 +569,24 @@ def normalize_gemini_web_search_payload(
         "provider_status": 200,
     }
     return structured, discoveries
+
+
+def normalize_gemini_web_search_payload(
+    payload: Mapping[str, Any],
+    *,
+    expected_query: str,
+    max_records: int,
+    drop_redirect_proxies: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Re-verify the immutable legacy Gemini payload contract."""
+
+    return normalize_web_search_payload(
+        payload,
+        expected_query=expected_query,
+        expected_provider=LEGACY_WEB_SEARCH_PROVIDER,
+        max_records=max_records,
+        drop_redirect_proxies=drop_redirect_proxies,
+    )
 
 
 def _observation(
@@ -552,6 +621,9 @@ def _observation(
 
 class GeminiWebSearchAdapter:
     """Invoke only OpenClaw's host-owned Gemini ``web_search`` tool."""
+
+    def __init__(self, *, expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER) -> None:
+        self.expected_provider = validate_web_search_provider(expected_provider)
 
     def __call__(
         self,
@@ -639,9 +711,10 @@ class GeminiWebSearchAdapter:
                     "retryable": not permission,
                 },
             )
-        structured, _ = normalize_gemini_web_search_payload(
+        structured, _ = normalize_web_search_payload(
             payload,
             expected_query=wire["parameters"]["query"],
+            expected_provider=self.expected_provider,
             max_records=wire["max_records"],
         )
         raw_sink.write(invocation.raw_response)
@@ -768,9 +841,11 @@ def _verified_search_discoveries(
     if source.get("raw_response_hash") != raw_hash:
         raise PublicWebAuthorityConflict("search raw response hash drifted")
     payload = _payload_from_raw_host_response(raw_response)
-    structured, discoveries = normalize_gemini_web_search_payload(
+    expected_provider = web_search_provider_from_source_envelope(source)
+    structured, discoveries = normalize_web_search_payload(
         payload,
         expected_query=payload.get("query"),
+        expected_provider=expected_provider,
         max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
     )
     if structured["source_record_refs"] != source.get("source_record_refs"):
@@ -781,9 +856,10 @@ def _verified_search_discoveries(
         # policy of which citations may become documents is applied only to
         # what is emitted.  Live, 16 documents from two such discoveries
         # became unfetchable when the first check alone was applied.
-        legacy, legacy_discoveries = normalize_gemini_web_search_payload(
+        legacy, legacy_discoveries = normalize_web_search_payload(
             payload,
             expected_query=payload.get("query"),
+            expected_provider=expected_provider,
             max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
             drop_redirect_proxies=False,
         )
@@ -1101,6 +1177,7 @@ class PublicWebFetchAdapter:
 
 __all__ = [
     "GEMINI_WEB_SEARCH_ADAPTER_PROTOCOL_VERSION",
+    "LEGACY_WEB_SEARCH_PROVIDER",
     "GeminiWebSearchAdapter",
     "OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH",
     "OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF",
@@ -1115,8 +1192,13 @@ __all__ = [
     "gemini_web_search_tool_arguments",
     "is_search_redirect_proxy",
     "normalize_gemini_web_search_payload",
+    "normalize_web_search_payload",
     "public_web_url_ref",
     "validate_gemini_search_parameters",
     "validate_gemini_web_search_adapter_request",
     "validate_public_web_url_authority",
+    "validate_web_search_provider",
+    "web_search_provider_contract",
+    "web_search_provider_from_source_envelope",
+    "web_search_provider_terms_ref",
 ]

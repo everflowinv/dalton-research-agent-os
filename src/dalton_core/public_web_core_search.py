@@ -55,6 +55,7 @@ from .connector_quota_policy import (
     governed_daily_quota,
 )
 from .connector_runner import (
+    RunnerConflict,
     RunnerValidationError,
     StaticAdapterResolver,
     validate_runner_environment_manifest,
@@ -75,13 +76,18 @@ from .openclaw_connector_bridge import (
     BridgeRateLimited,
     HostToolInvocationResult,
 )
+from .openclaw_web_search_broker_client import WebSearchProviderContractDrift
 from .public_web_connector import (
     GEMINI_WEB_SEARCH_MAX_RECORDS,
+    LEGACY_WEB_SEARCH_PROVIDER,
     OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
     build_public_web_url_authorities,
     gemini_web_search_payload_from_result,
-    normalize_gemini_web_search_payload,
+    normalize_web_search_payload,
     validate_gemini_search_parameters,
+    validate_web_search_provider,
+    web_search_provider_contract,
+    web_search_provider_terms_ref,
 )
 from .raw_spool import RawSpool
 from .research_context import build_compiled_connector_plan
@@ -116,6 +122,15 @@ SEARCH_MAX_RESPONSE_BYTES = 256_000
 TRAILING_WINDOW = timedelta(hours=24)
 _SPEC_FIELDS = frozenset({"query", "date_after", "date_before"})
 _URL_REF_RE = re.compile(r"^public-web-url:sha256:[0-9a-f]{64}$")
+
+
+def web_search_provider_contract_hash(expected_provider: str) -> str:
+    return content_hash(web_search_provider_contract(expected_provider))
+
+
+def _provider_suffix(expected_provider: str) -> str:
+    provider = validate_web_search_provider(expected_provider)
+    return "" if provider == LEGACY_WEB_SEARCH_PROVIDER else f":provider-{provider}"
 
 
 class PublicWebCoreSearchError(RuntimeError):
@@ -173,15 +188,23 @@ def web_search_schema_hash() -> str:
     )
 
 
-def web_search_adapter_hash() -> str:
-    return content_hash(
-        {
-            "target_ref": ADAPTER_REF,
-            "package": ADAPTER_PACKAGE,
-            "bridge_hash": OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
-            "operation": OPERATION,
-        }
-    )
+def web_search_adapter_hash(
+    expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER,
+) -> str:
+    legacy = {
+        "target_ref": ADAPTER_REF,
+        "package": ADAPTER_PACKAGE,
+        "bridge_hash": OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
+        "operation": OPERATION,
+    }
+    provider = validate_web_search_provider(expected_provider)
+    if provider == LEGACY_WEB_SEARCH_PROVIDER:
+        return content_hash(legacy)
+    return content_hash({
+        "schema_version": "0.2",
+        "legacy_bridge": legacy,
+        "provider_contract": web_search_provider_contract(provider),
+    })
 
 
 def web_search_fixture_hash() -> str:
@@ -310,8 +333,9 @@ def count_recent_web_search_calls(connection: Any, *, as_of: datetime | None = N
     window_start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
     row = connection.execute(
         "SELECT COUNT(*) FROM connector_invocations "
-        "WHERE connector_profile_ref=? AND created_at >= ?",
-        (SEARCH_PROFILE_REF, window_start),
+        "WHERE (connector_profile_ref=? OR connector_profile_ref LIKE ?) "
+        "AND created_at >= ?",
+        (SEARCH_PROFILE_REF, "connector-profile:gemini-web-search:provider-%", window_start),
     ).fetchone()
     return int(row[0])
 
@@ -354,6 +378,9 @@ class GeminiWebSearchLiveAdapter:
     uses; only the derived URL refs leave as structured output.
     """
 
+    def __init__(self, *, expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER) -> None:
+        self.expected_provider = validate_web_search_provider(expected_provider)
+
     def __call__(
         self,
         request: Mapping[str, Any],
@@ -389,6 +416,12 @@ class GeminiWebSearchLiveAdapter:
                 wire, outcome="failed", code="permission_denied", message=str(exc),
                 retryable=False, provider_status=403, retry_after_ms=None,
             )
+        except WebSearchProviderContractDrift as exc:
+            return self._failure(
+                wire, outcome="failed", code="provider_contract_drift",
+                message=str(exc), retryable=False, provider_status=502,
+                retry_after_ms=None,
+            )
         if not isinstance(invocation, HostToolInvocationResult):
             raise RunnerValidationError("host-owned web search handle returned another type")
         if len(invocation.raw_response) > wire["max_response_bytes"]:
@@ -410,9 +443,18 @@ class GeminiWebSearchLiveAdapter:
                 message=str(payload.get("message") or code), retryable=not permission,
                 provider_status=403 if permission else 502, retry_after_ms=None,
             )
-        structured, _ = normalize_gemini_web_search_payload(
-            payload, expected_query=parameters["query"], max_records=wire["max_records"],
-        )
+        try:
+            structured, _ = normalize_web_search_payload(
+                payload, expected_query=parameters["query"],
+                expected_provider=self.expected_provider,
+                max_records=wire["max_records"],
+            )
+        except RunnerConflict as exc:
+            return self._failure(
+                wire, outcome="failed", code="provider_contract_drift",
+                message=str(exc), retryable=False, provider_status=502,
+                retry_after_ms=None,
+            )
         raw_sink.write(invocation.raw_response)
         refs = structured["source_record_refs"]
         # S2: a ranked page that came back full is the top of a list whose
@@ -476,8 +518,12 @@ class GeminiWebSearchLiveAdapter:
 class FakeWebSearchHandle:
     """Rehearsal stand-in returning canned citations in OpenClaw's exact shape."""
 
-    def __init__(self, citations: list[Mapping[str, Any]]) -> None:
+    def __init__(
+        self, citations: list[Mapping[str, Any]], *,
+        provider: str = LEGACY_WEB_SEARCH_PROVIDER,
+    ) -> None:
         self.citations = [dict(item) for item in citations]
+        self.provider = validate_web_search_provider(provider)
         self.calls: list[dict[str, Any]] = []
 
     def invoke(self, tool_name, arguments, *, call_ref, deadline_at, max_response_bytes):
@@ -490,11 +536,12 @@ class FakeWebSearchHandle:
             # The exact inner shape the host runtime helper returns (the
             # broker unwraps {provider, result} before Dalton sees it).
             "query": arguments["query"],
-            "provider": "gemini",
+            "provider": self.provider,
             "model": "gemini-2.5-flash",
             "tookMs": 25,
             "externalContent": {
-                "untrusted": True, "source": "web_search", "provider": "gemini", "wrapped": True,
+                "untrusted": True, "source": "web_search",
+                "provider": self.provider, "wrapped": True,
             },
             "content": "UNTRUSTED rehearsal synthesis; never promoted as page content",
             "citations": self.citations[:count],
@@ -523,6 +570,7 @@ class PublicWebCoreSearch:
         spool: RawSpool,
         governance: WebSearchConnectorGovernance,
         host_handle: Any,
+        expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER,
         clock: Callable[[], datetime] | None = None,
         lease_seconds: int = 60,
         grant_seconds: int = 900,
@@ -552,6 +600,8 @@ class PublicWebCoreSearch:
         self.catalog = catalog
         self.spool = spool
         self.governance = governance
+        self.expected_provider = validate_web_search_provider(expected_provider)
+        self.provider_contract = web_search_provider_contract(self.expected_provider)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lease_seconds = lease_seconds
         self.grant_seconds = grant_seconds
@@ -559,7 +609,9 @@ class PublicWebCoreSearch:
             store, handle_resolver=lambda _grant: host_handle, clock=self.clock
         )
         self.template, self.contract = web_search_contract()
-        self.adapter = GeminiWebSearchLiveAdapter()
+        self.adapter = GeminiWebSearchLiveAdapter(
+            expected_provider=self.expected_provider
+        )
         self.receipts = ConnectorCompletionReceiptReader(
             connectors=connectors, observability=observability
         )
@@ -617,6 +669,19 @@ class PublicWebCoreSearch:
         if self._authorities is not None:
             return self._authorities
         self.governance._require_approved()
+        provider_suffix = _provider_suffix(self.expected_provider)
+        profile_ref = (
+            SEARCH_PROFILE_REF if not provider_suffix
+            else f"connector-profile:gemini-web-search{provider_suffix}:v1"
+        )
+        binding_ref = f"runner-binding:gemini-web-search{provider_suffix}:0.1"
+        adapter_hash = web_search_adapter_hash(self.expected_provider)
+        package = (
+            ADAPTER_PACKAGE if not provider_suffix
+            else "openclaw-web-search-live-adapter:0.2"
+        )
+        rate_policy_ref = SEARCH_RATE_POLICY_REF + provider_suffix
+        price_rate_ref = SEARCH_PRICE_RATE_REF + provider_suffix
         spec = self._descriptor_spec()
         try:
             descriptor = self.catalog.describe(
@@ -634,11 +699,11 @@ class PublicWebCoreSearch:
                 "published web search capability differs from governed spec"
             )
         binding = {
-            "binding_ref": "runner-binding:gemini-web-search:0.1",
+            "binding_ref": binding_ref,
             "descriptor_revision_ref": descriptor.revision_ref,
             "descriptor_hash": descriptor.content_hash,
             "adapter_ref": ADAPTER_REF,
-            "adapter_hash": web_search_adapter_hash(),
+            "adapter_hash": adapter_hash,
             "source_ref": self.template["source_identity"]["source_ref"],
             "source_hash": web_search_source_hash(),
             "operation": OPERATION,
@@ -650,22 +715,27 @@ class PublicWebCoreSearch:
             "credential_slot_refs": [CREDENTIAL_SLOT_REF],
             "required_permissions": web_search_permissions(),
             "side_effects": [SIDE_EFFECT],
-            "rate_policy_ref": SEARCH_RATE_POLICY_REF,
+            "rate_policy_ref": rate_policy_ref,
         }
         manifest_base = {
             "schema_version": "0.1",
-            "id": "runner-environment:dalton-core-gemini-web-search:0.1",
+            "id": f"runner-environment:dalton-core-gemini-web-search{provider_suffix}:0.1",
             "created_at": self.governance.effective_from,
             "runner_runtime_ref": RUNNER_RUNTIME_REF,
             "runner_actor_ref": RUNNER_ACTOR_REF,
             "resolver_ref": RESOLVER_REF,
             "resolver_version": "0.1",
-            "package_manifest_ref": "artifact:runner-packages:gemini-web-search:0.1",
+            "package_manifest_ref": (
+                f"artifact:runner-packages:gemini-web-search{provider_suffix}:0.1"
+            ),
             "package_manifest_hash": content_hash(
                 {
-                    "package": ADAPTER_PACKAGE,
+                    "package": package,
                     "bridge_hash": OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
-                    "adapter_hash": web_search_adapter_hash(),
+                    "adapter_hash": adapter_hash,
+                    **({} if not provider_suffix else {
+                        "provider_contract": self.provider_contract,
+                    }),
                 }
             ),
             "bindings": [binding],
@@ -673,7 +743,7 @@ class PublicWebCoreSearch:
         manifest = validate_runner_environment_manifest(_with_hash(manifest_base))
         profile_wire = {
             "schema_version": "0.1",
-            "id": SEARCH_PROFILE_REF,
+            "id": profile_ref,
             "created_at": self.governance.effective_from,
             "connector_ref": self.template["connector_ref"],
             "version": None,
@@ -686,7 +756,7 @@ class PublicWebCoreSearch:
             "schema_hash": web_search_schema_hash(),
             "catalog_epoch": descriptor.catalog_epoch,
             "adapter_ref": ADAPTER_REF,
-            "adapter_hash": web_search_adapter_hash(),
+            "adapter_hash": adapter_hash,
             "runner_runtime_ref": RUNNER_RUNTIME_REF,
             "runner_actor_ref": RUNNER_ACTOR_REF,
             "runner_environment_hash": manifest["content_hash"],
@@ -709,18 +779,21 @@ class PublicWebCoreSearch:
             "timeout_ms": 120_000,
             "access_policy_ref": "policy:access:public-web",
             "retention_policy_ref": "policy:retention:public-web-discovery",
-            "terms_policy_ref": "policy:terms:openclaw-gemini-web-search",
+            "terms_policy_ref": web_search_provider_terms_ref(
+                self.expected_provider
+            ),
             "network_policy": None,
         }
         profile = register_chained_profile(
-            self.connectors, profile_wire, idempotency_key="gemini-web-search:profile:v1"
+            self.connectors, profile_wire,
+            idempotency_key=f"gemini-web-search{provider_suffix}:profile:v1",
         )
         price = self.connectors.register_price_rate(
             {
                 "schema_version": "0.1",
-                "id": f"{SEARCH_PRICE_RATE_REF}:v1",
+                "id": f"{price_rate_ref}:v1",
                 "created_at": self.governance.effective_from,
-                "price_rate_ref": SEARCH_PRICE_RATE_REF,
+                "price_rate_ref": price_rate_ref,
                 "version": 1,
                 "prior_version_ref": None,
                 "connector_profile_ref": profile["id"],
@@ -733,19 +806,23 @@ class PublicWebCoreSearch:
                 "currency": "USD",
                 "effective_from": self.governance.effective_from,
                 "effective_until": None,
-                "source_ref": "pricing:openclaw-gemini-web-search:host-owned-unmetered",
+                "source_ref": (
+                    "pricing:openclaw-gemini-web-search:host-owned-unmetered"
+                    if not provider_suffix else
+                    f"pricing:openclaw-web-search:{self.expected_provider}:host-owned-unmetered"
+                ),
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key="gemini-web-search:price:v1",
+            idempotency_key=f"gemini-web-search{provider_suffix}:price:v1",
         )
         quota = governed_daily_quota(TEMPLATE_KEY, OPERATION)
         price_book = {"price_rate_refs": [price["id"]], "required_price_meters": ["calls"]}
         rate_policy = self.connectors.register_rate_policy(
             {
                 "schema_version": "0.1",
-                "id": f"{SEARCH_RATE_POLICY_REF}:v1",
+                "id": f"{rate_policy_ref}:v1",
                 "created_at": self.governance.effective_from,
-                "policy_ref": SEARCH_RATE_POLICY_REF,
+                "policy_ref": rate_policy_ref,
                 "quota_scope_ref": "connector-quota-scope:gemini-web-search:search_web",
                 "version": 1,
                 "prior_version_ref": None,
@@ -765,7 +842,7 @@ class PublicWebCoreSearch:
                 "effective_until": None,
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key="gemini-web-search:rate-policy:v1",
+            idempotency_key=f"gemini-web-search{provider_suffix}:rate-policy:v1",
         )
         self._authorities = {
             "descriptor": descriptor,
@@ -785,20 +862,33 @@ class PublicWebCoreSearch:
         created = created_at or _wire_time(self.clock())
         _parse_time(created, "created_at")
         identity = {"operation": OPERATION, "parameters": parameters, "created_at": created}
+        provider_binding = {}
+        if self.expected_provider != LEGACY_WEB_SEARCH_PROVIDER:
+            provider_binding = {
+                "provider_contract": self.provider_contract,
+                "provider_contract_hash": web_search_provider_contract_hash(
+                    self.expected_provider
+                ),
+            }
+            identity.update(provider_binding)
         return {
             "operation": OPERATION,
             "parameters": parameters,
             "created_at": created,
             "query_hash": web_search_spec_hash(parameters),
             "request_hash": content_hash(identity),
+            **provider_binding,
         }
 
     def search(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Execute (or durably replay) one search; return the bound discovery receipt."""
 
-        if not isinstance(request, Mapping) or set(request) != {
+        expected_fields = {
             "operation", "parameters", "created_at", "query_hash", "request_hash",
-        }:
+        }
+        if self.expected_provider != LEGACY_WEB_SEARCH_PROVIDER:
+            expected_fields |= {"provider_contract", "provider_contract_hash"}
+        if not isinstance(request, Mapping) or set(request) != expected_fields:
             raise PublicWebCoreSearchError("search request has an invalid closed shape")
         rebuilt = self.build_request(request["parameters"], created_at=request["created_at"])
         if rebuilt != dict(request):
@@ -825,8 +915,10 @@ class PublicWebCoreSearch:
             created_at=created_at,
             updated_at=created_at,
             question=(
-                "Search the public web through the host-owned Gemini web_search tool "
-                "into Core connector authority (discovery only)"
+                "Search the public web through the host-owned "
+                + ("Gemini web_search tool " if self.expected_provider == LEGACY_WEB_SEARCH_PROVIDER
+                   else f"{self.expected_provider} web_search tool ")
+                + "into Core connector authority (discovery only)"
             ),
             requested_capabilities=(SEARCH_CAPABILITY_ID,),
             runtime_profile_ref=RUNNER_RUNTIME_REF,
@@ -1005,7 +1097,7 @@ class PublicWebCoreSearch:
                 "capability_lease_ref": lease.id,
                 "capability_lease_hash": lease.content_hash,
                 "adapter_ref": ADAPTER_REF,
-                "adapter_hash": web_search_adapter_hash(),
+                "adapter_hash": web_search_adapter_hash(self.expected_provider),
                 "principal_ref": self.governance.principal_ref,
                 "credential_slot_refs": [CREDENTIAL_SLOT_REF],
                 "allowed_operations": [OPERATION],
@@ -1147,6 +1239,7 @@ __all__ = [
     "web_search_adapter_hash",
     "web_search_fixture_hash",
     "web_search_permissions",
+    "web_search_provider_contract_hash",
     "web_search_schema_hash",
     "web_search_source_hash",
     "web_search_spec_hash",

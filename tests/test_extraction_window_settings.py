@@ -179,6 +179,17 @@ class ConfigKeyTests(unittest.TestCase):
         self.assertEqual(self.load({"alphaengine_owner_call_cap": 130})
                          .alphaengine_owner_call_cap, 130)
 
+    def test_the_web_search_provider_the_installer_writes_is_accepted(self):
+        self.assertEqual(
+            self.load({"web_search_expected_provider": "antigravity"})
+            .web_search_expected_provider,
+            "antigravity",
+        )
+        from dalton_core.service import ServiceConfigError
+        for value in ("Antigravity", "", True, 1, "a/b"):
+            with self.assertRaises(ServiceConfigError, msg=repr(value)):
+                self.load({"web_search_expected_provider": value})
+
     def test_it_is_absent_when_unset(self):
         self.assertIsNone(self.load({}).alphaengine_owner_call_cap)
 
@@ -202,8 +213,9 @@ class ConfigKeyTests(unittest.TestCase):
         self.assertIn("alphaengine_owner_call_cap", written)
         top_level = written - {"max_windows_per_tick", "numeric_windows_per_tick",
                                "discovery_windows_per_tick", "document_extraction"}
+        values = {"web_search_expected_provider": "antigravity"}
         for key in top_level:
-            self.load({key: 130})  # must not raise
+            self.load({key: values.get(key, 130)})  # must not raise
 
 
 if __name__ == "__main__":

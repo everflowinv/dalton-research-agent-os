@@ -62,7 +62,11 @@ from .coverage_mission import (
     CoverageMissionError,
     CoverageMissionNotFound,
 )
-from .public_web_connector import REDIRECT_PROXY_HOSTS
+from .public_web_connector import (
+    LEGACY_WEB_SEARCH_PROVIDER,
+    REDIRECT_PROXY_HOSTS,
+    validate_web_search_provider,
+)
 from .public_web_core_fetch import (
     PublicWebCoreFetchError,
     cited_hosts_from_discovery,
@@ -994,6 +998,7 @@ class WebSearchLauncher(_SearchLauncherBase):
         broker_auth_key: str | Path | None = None,
         broker_client_id: str = "client:dalton-core",
         broker_profile_id: str = "profile:web-search",
+        expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -1001,6 +1006,7 @@ class WebSearchLauncher(_SearchLauncherBase):
         self.broker_auth_key = None if broker_auth_key is None else str(Path(broker_auth_key).expanduser())
         self.broker_client_id = broker_client_id
         self.broker_profile_id = broker_profile_id
+        self.expected_provider = validate_web_search_provider(expected_provider)
 
     def _load_governance_record(self) -> WebSearchConnectorGovernance:
         return WebSearchConnectorGovernance.load(self.governance_path)
@@ -1016,14 +1022,18 @@ class WebSearchLauncher(_SearchLauncherBase):
             )
 
     def _extra_command_args(self) -> list[str]:
+        provider_args = (
+            [] if self.expected_provider == LEGACY_WEB_SEARCH_PROVIDER
+            else ["--expected-provider", self.expected_provider]
+        )
         if not self.networked or not self.broker_socket or not self.broker_auth_key:
-            return []
+            return provider_args
         return [
             "--broker-socket", self.broker_socket,
             "--broker-auth-key", self.broker_auth_key,
             "--broker-client-id", self.broker_client_id,
             "--broker-profile-id", self.broker_profile_id,
-        ]
+        ] + provider_args
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from dalton_core.openclaw_connector_bridge import (
 from dalton_core.openclaw_web_search_broker_client import (
     WebSearchBrokerError,
     WebSearchBrokerHandle,
+    WebSearchProviderContractDrift,
     load_broker_key,
     sign_request,
 )
@@ -200,7 +201,7 @@ class BrokerClientTests(unittest.TestCase):
         cases = {
             "PROVIDER_RATE_LIMITED": BridgeRateLimited,
             "PROVIDER_PERMISSION_DENIED": BridgePermissionDenied,
-            "PROVIDER_CONTRACT_DRIFT": BridgeRequestRejected,
+            "PROVIDER_CONTRACT_DRIFT": WebSearchProviderContractDrift,
             "IDEMPOTENCY_CONFLICT": BridgeRequestRejected,
             "AUTH_INVALID": BridgeRequestRejected,
         }

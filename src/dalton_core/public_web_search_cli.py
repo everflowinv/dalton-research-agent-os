@@ -54,6 +54,10 @@ from .public_web_core_search import (
     public_web_urls_in_authority,
     web_search_spec_hash,
 )
+from .public_web_connector import (
+    LEGACY_WEB_SEARCH_PROVIDER,
+    validate_web_search_provider,
+)
 from .raw_spool import RawSpool
 from .runner_journal import RunnerJournal
 from .scheduler import Scheduler
@@ -93,6 +97,7 @@ def run_discovery(
     handle: Any,
     transport: str,
     summary_dir: Path,
+    expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER,
     catalog_db: Path | None = None,
     spool_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -180,6 +185,7 @@ def run_discovery(
             spool=spool,
             governance=governance,
             host_handle=handle,
+            expected_provider=expected_provider,
         )
         receipt = search.search(search.build_request(parameters))
         summary["search"] = {
@@ -262,6 +268,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--broker-auth-key", help="owner-only shared key file for that broker")
     parser.add_argument("--broker-client-id", default="client:dalton-core")
     parser.add_argument("--broker-profile-id", default="profile:web-search")
+    parser.add_argument(
+        "--expected-provider", default=LEGACY_WEB_SEARCH_PROVIDER,
+        type=validate_web_search_provider,
+        help="exact provider id configured on the host web-search broker",
+    )
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument(
         "--catalog-db", type=Path,
@@ -331,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         citations = json.loads(args.fake_citations_file.read_text(encoding="utf-8"))
         if not isinstance(citations, list):
             parser.error("--fake-citations-file must hold a JSON array of citations")
-        handle = FakeWebSearchHandle(citations)
+        handle = FakeWebSearchHandle(citations, provider=args.expected_provider)
         transport_label = "fake"
     summary = run_discovery(
         state_dir=args.state_dir,
@@ -346,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         handle=handle,
         transport=transport_label,
         summary_dir=summary_dir,
+        expected_provider=args.expected_provider,
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
     )

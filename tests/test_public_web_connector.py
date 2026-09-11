@@ -27,9 +27,12 @@ from dalton_core.public_web_connector import (
     GEMINI_WEB_SEARCH_MAX_RECORDS,
     gemini_web_search_tool_arguments,
     normalize_gemini_web_search_payload,
+    normalize_web_search_payload,
     public_web_url_ref,
     validate_gemini_search_parameters,
     validate_gemini_web_search_adapter_request,
+    web_search_provider_contract,
+    web_search_provider_terms_ref,
 )
 from dalton_core.research_verification import (
     ResearchVerificationError,
@@ -613,6 +616,51 @@ class RealHostPayloadContractTests(unittest.TestCase):
         forwarded = json.dumps(structured)
         self.assertNotIn("EXTERNAL_UNTRUSTED_CONTENT", forwarded)
         self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", payload["content"])
+
+    def test_antigravity_payload_requires_its_exact_configured_provider(self) -> None:
+        fixture = json.loads(
+            (ROOT / "tests/fixtures/openclaw_antigravity_web_search_contract_2026-09-11.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            fixture["evidence"]["service_source_sha256"],
+            "719eb1c947b05f06a788457efa114091106b66d99e19b0b26f0f4e035962b3e1",
+        )
+        payload = fixture["result"]
+        structured, discoveries = normalize_web_search_payload(
+            payload,
+            expected_query=payload["query"],
+            expected_provider="antigravity",
+            max_records=10,
+        )
+        self.assertEqual(
+            structured["source_record_refs"],
+            [item["url_ref"] for item in discoveries],
+        )
+        self.assertEqual(
+            web_search_provider_contract("antigravity")["expected_provider"],
+            "antigravity",
+        )
+        self.assertEqual(
+            web_search_provider_terms_ref("antigravity"),
+            "policy:terms:openclaw-web-search-provider:0.1:antigravity",
+        )
+        with self.assertRaisesRegex(RunnerConflict, "query/provider"):
+            normalize_web_search_payload(
+                payload,
+                expected_query=payload["query"],
+                expected_provider="gemini",
+                max_records=10,
+            )
+        wrong_label = copy.deepcopy(payload)
+        wrong_label["externalContent"]["provider"] = "gemini"
+        with self.assertRaisesRegex(RunnerConflict, "trust label"):
+            normalize_web_search_payload(
+                wrong_label,
+                expected_query=payload["query"],
+                expected_provider="antigravity",
+                max_records=10,
+            )
 
     def test_the_agent_tool_shape_is_not_accepted_on_this_path(self) -> None:
         """OpenClaw's agent tool normalizes differently; Dalton never takes it."""

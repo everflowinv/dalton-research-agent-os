@@ -130,6 +130,9 @@ class ServiceConfig:
     # P12d: the AlphaEngine safety cap. In the config so a plain re-install
     # keeps the owner's number, exactly as the window settings are.
     alphaengine_owner_call_cap: int | None = None
+    # Exact host broker/provider contract. Absent keeps the byte-compatible
+    # historical Gemini path; an explicit value is rendered into Writer argv.
+    web_search_expected_provider: str | None = None
     # ADR-0009: the one key that can bring the retired plane back. Default
     # false, so a config that never heard of the retirement gets the
     # retirement.
@@ -147,7 +150,8 @@ class ServiceConfig:
         optional = {
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
             "backup", "thesis_impact", "document_extraction",
-            "alphaengine_owner_call_cap", LEGACY_AGENDA_PLANE_KEY, "workspace",
+            "alphaengine_owner_call_cap", "web_search_expected_provider",
+            LEGACY_AGENDA_PLANE_KEY, "workspace",
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
@@ -339,6 +343,17 @@ class ServiceConfig:
             or not 1 <= owner_call_cap <= 2000
         ):
             raise ServiceConfigError("alphaengine_owner_call_cap must be an integer 1..2000")
+        web_search_expected_provider = raw.get("web_search_expected_provider")
+        if web_search_expected_provider is not None:
+            from .public_web_connector import validate_web_search_provider
+            try:
+                web_search_expected_provider = validate_web_search_provider(
+                    web_search_expected_provider
+                )
+            except Exception as exc:
+                raise ServiceConfigError(
+                    "web_search_expected_provider is invalid"
+                ) from exc
         extraction_raw = raw.get("document_extraction")
         if extraction_raw is not None:
             if not isinstance(extraction_raw, Mapping) or not set(extraction_raw) <= {
@@ -390,6 +405,7 @@ class ServiceConfig:
             document_extraction_numeric_windows=extraction_numeric_windows,
             document_extraction_discovery_windows=extraction_discovery_windows,
             alphaengine_owner_call_cap=owner_call_cap,
+            web_search_expected_provider=web_search_expected_provider,
             legacy_agenda_plane=legacy_agenda_plane,
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
