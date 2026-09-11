@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,8 @@ from dalton_core.mission_annual_research import (
     WORKFLOW_CONTRACT_REF,
 )
 from dalton_core.model_router import ModelRouter
-from dalton_core.registered_annual_report import OPERATION
+from dalton_core.registered_annual_report import OPERATION, RegisteredAnnualReportError
+from dalton_core.sec_company_facts_lane import LanePreconditionError
 from dalton_core.store import canonical_json
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -263,7 +265,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
             "SELECT count(*) FROM scheduler_work_orders"
         ).fetchone()[0], before_work)
         self.assertEqual(len(fixture.router.list_decisions()), before_routes)
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
             fixture.store.connection.execute(
                 "UPDATE mission_annual_research_admissions SET company_ref='company:other'"
             )
@@ -271,18 +273,18 @@ class MissionAnnualResearchTests(unittest.TestCase):
     def test_foreign_scope_stale_authority_unsupported_workflow_and_actor_are_refused(self):
         fixture = MissionAnnualFixture(self)
         cases = (
-            {"company_ref": "company:other"},
-            {"mission_version_hash": "0" * 64},
-            {"repair_target_hash": "0" * 64},
-            {"inquiry": {
+            ({"company_ref": "company:other"}, LanePreconditionError),
+            ({"mission_version_hash": "0" * 64}, MissionAnnualResearchError),
+            ({"repair_target_hash": "0" * 64}, MissionAnnualResearchError),
+            ({"inquiry": {
                 **fixture.args()["inquiry"], "repair_target_ref": "dossier-repair-target:other",
-            }},
-            {"accession": "0000320193-25-000080"},
-            {"workflow_contract_ref": "workflow:unsupported"},
-            {"actor_ref": "human:owner"},
+            }}, MissionAnnualResearchError),
+            ({"accession": "0000320193-25-000080"}, RegisteredAnnualReportError),
+            ({"workflow_contract_ref": "workflow:unsupported"}, MissionAnnualResearchError),
+            ({"actor_ref": "human:owner"}, MissionAnnualResearchError),
         )
-        for overrides in cases:
-            with self.subTest(overrides=overrides), self.assertRaises(Exception):
+        for overrides, error_type in cases:
+            with self.subTest(overrides=overrides), self.assertRaises(error_type):
                 fixture.authority.admit(**fixture.args(**overrides))
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_annual_research_admissions"
@@ -291,7 +293,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
     def test_unconnected_source_and_nonindependent_verifier_are_refused(self):
         with self.subTest("unconnected"):
             fixture = MissionAnnualFixture(self, sec_connected=False)
-            with self.assertRaises(Exception):
+            with self.assertRaises(LanePreconditionError):
                 fixture.authority.admit(**fixture.args())
         with self.subTest("same-family"):
             fixture = MissionAnnualFixture(self, same_family=True)
@@ -305,7 +307,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
     def test_budget_refusal_and_stale_feedback_have_no_model_side_effect(self):
         fixture = MissionAnnualFixture(self, mission_calls=1)
         before = len(fixture.router.list_decisions())
-        with self.assertRaises(Exception):
+        with self.assertRaises(RegisteredAnnualReportError):
             fixture.authority.admit(**fixture.args())
         self.assertEqual(len(fixture.router.list_decisions()), before)
         self.assertEqual(fixture.store.connection.execute(
