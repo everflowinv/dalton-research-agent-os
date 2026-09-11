@@ -1285,6 +1285,23 @@ class CoordinatorTests(unittest.TestCase):
         self.assertNotEqual(retried["ticket_ref"], first["ticket_ref"])
         self.assertEqual(launcher.started_companies, [ACN, ACN])
 
+    def test_a_reviewed_output_rubric_gets_a_new_ticket_after_constitution_hold(self):
+        launcher = self.Launcher(
+            ticket_status="succeeded",
+            summary={"dossier_status": "constitution_refused",
+                     "failure_reason": "historical price target attribution"},
+        )
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN])
+        first = coordinator.dispatch_once()
+        self.assertEqual(coordinator.dispatch_once()["status"], "terminal")
+        with patch("dalton_core.company_dossier.output_rubric_contract_fingerprint",
+                   return_value="c" * 64):
+            retried = coordinator.dispatch_once()
+        self.assertEqual(retried["status"], "launched")
+        self.assertNotEqual(retried["ticket_ref"], first["ticket_ref"])
+        self.assertEqual(launcher.started_companies, [ACN, ACN])
+
     def test_a_reviewed_verifier_contract_gets_a_new_ticket_after_cached_reject(self):
         launcher = self.Launcher(
             ticket_status="failed",

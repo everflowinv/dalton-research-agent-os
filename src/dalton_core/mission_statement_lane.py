@@ -327,8 +327,7 @@ class MissionStatementLaneCoordinator:
                             coverage: Mapping[str, Any]) -> dict[str, Any] | None:
         failures = [item for item in (coverage.get("failures") or [])
                     if item.get("form") == form]
-            # Only the failures this company is actually responsible for spend
-            # its budget, and only those number its attempts.
+        # Only failures for this company and form spend its attempt budget.
         charged = [item for item in failures
                    if not _is_configuration_failure(item.get("reason"))]
         if len(charged) >= MAX_FAILURES_PER_COMPANY:
@@ -349,12 +348,8 @@ class MissionStatementLaneCoordinator:
                               "run; holding rather than asking SEC again",
                 }
             retry_salt = self._retry_salt()
-            # P13am: how much history this company needs is its own model's
-            # answer, not a constant. IBM's specification asked for twenty
-            # quarters to separate mainframe launch cycles from the underlying
-            # business; a consultancy with a steady book needs far less. Until
-            # a specification exists, one quarter is the floor that keeps the
-            # lane moving and gives the model something to reason over.
+        # Explicit form targets override the specification's historical depth;
+        # without either, the existing one-filing floor still applies.
         wanted = self._wanted_filings(company_ref, form)
         if coverage.get("held_by_form", {}).get(form, 0) >= wanted:
             return None
