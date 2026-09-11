@@ -342,6 +342,32 @@ class ModelInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelInputError, "known capital_expenditure"):
             build_model_inputs(self.ledger(), spec)
 
+    def test_v04_cash_input_refuses_duplicate_end_and_overlapping_windows(self):
+        concept = "acme:CashGeneratedFromOperations"
+        periods = [
+            ("2025-01-01", "2025-03-31"), ("2025-04-01", "2025-06-30"),
+            ("2025-04-02", "2025-06-30"), ("2025-07-01", "2025-09-30"),
+            ("2025-10-01", "2025-12-31"),
+        ]
+        cash = [_line(concept, start, end, "100", statement="cash")
+                for start, end in periods]
+        spec = {
+            **_spec(), "schema_version": "0.4",
+            "forecast_statements": [{"statement": "cash", "importance": "required"}],
+            "cash_flow_companion": {
+                "schema_version": "0.1",
+                "lines": [
+                    {"role": "operating_cash_flow", "concept": concept},
+                    {"role": "capital_expenditure", "concept": None},
+                ],
+            },
+        }
+        table = build_model_inputs(FakeMissions(self.ledger().lines + cash), spec)
+        operating = next(item for item in table["cash_flow_inputs"]
+                         if item["role"] == "operating_cash_flow")
+        self.assertEqual(operating["status"], NOT_FOUND)
+        self.assertIn("duplicate or overlapping", operating["reason"])
+
     def test_cash_input_rejects_wrong_statement_dimensions_and_mixed_units(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
         capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"

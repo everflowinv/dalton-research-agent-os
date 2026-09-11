@@ -71,6 +71,24 @@ class ModelInputError(ValueError):
     """The specification cannot be joined to this company's filings."""
 
 
+def cash_quarter_windows_are_unique(quarters: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether each held cash quarter has one non-overlapping fiscal window."""
+
+    windows = sorted(
+        (str(item.get("period_start") or ""), str(item.get("period_end") or ""))
+        for item in quarters
+    )
+    if any(not start or not end or start > end for start, end in windows):
+        return False
+    if len({end for _start, end in windows}) != len(windows):
+        return False
+    return all(
+        current_start > previous_end
+        for (_previous_start, previous_end), (current_start, _current_end)
+        in zip(windows, windows[1:])
+    )
+
+
 def _rows_of(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     anchor = spec.get("revenue_anchor_concept")
@@ -226,6 +244,7 @@ def _cash_flow_inputs(
             series = entry.get("series") or {}
             quarters = list(series.get("quarters") or [])
             units = set(entry.get("source_units") or [])
+            windows_valid = cash_quarter_windows_are_unique(quarters)
             sign_valid = True
             if role == "capital_expenditure":
                 try:
@@ -233,10 +252,12 @@ def _cash_flow_inputs(
                 except (InvalidOperation, ValueError):
                     sign_valid = False
             if entry.get("status") == FILED and entry.get("statement") == "cash" \
-                    and quarters and len(units) == 1 and sign_valid:
+                    and quarters and len(units) == 1 and sign_valid and windows_valid:
                 candidates.append((concept, entry))
             elif entry.get("status") != NOT_FOUND:
                 rejected.append(
+                    f"{concept} has duplicate or overlapping cash quarter windows"
+                    if not windows_valid else
                     f"{concept} is not a dimension-free, single-unit cash statement "
                     "series with the filed outflow sign convention"
                 )
@@ -561,6 +582,7 @@ def readiness(
 __all__ = [
     "AMBIGUOUS",
     "CASH_FLOW_ROLE_CONCEPTS",
+    "cash_quarter_windows_are_unique",
     "ESTIMATED",
     "FILED",
     "INCOMPLETE",

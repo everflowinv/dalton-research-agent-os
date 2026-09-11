@@ -65,7 +65,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .claim_index_authority import MARKET_PROXY
 from .company_model_inputs import (
     AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, INCOMPLETE, NOT_FOUND,
-    SHARED,
+    SHARED, cash_quarter_windows_are_unique,
 )
 from .driver_template import COST_DRIVER_TEMPLATES
 from .model_forecast import (
@@ -1990,6 +1990,10 @@ def build_cash_flow_companion(
             and str(source.get("concept")) == str(declared_concept)
         )
         if source_bound:
+            if not cash_quarter_windows_are_unique(
+                    list((source.get("series") or {}).get("quarters") or [])):
+                raise ForecastModelUnavailable(
+                    f"cash-flow companion {role} has duplicate or overlapping quarters")
             source_unit = str(source.get("unit") or "").casefold()
             base_unit = str((structure_lines.get(str(base_ref)) or {}).get("unit") or "").casefold()
             if source_unit != reporting_unit or source_unit != base_unit:
@@ -2261,7 +2265,10 @@ def build_cash_flow_companion_drivers(
             "basis": str(item["basis"]),
             "accessions": [str(ref) for ref in item.get("source_accessions") or []],
             "source_forms": [str(form) for form in item.get("source_forms") or []],
-            **({"derived_from": [dict(operand) for operand in item["derived_from"]]}
+            **({"derived_from": [
+                {**dict(operand), "unit": str(operand.get("unit") or "").casefold()}
+                for operand in item["derived_from"]
+            ]}
                if item.get("derived_from") else {}),
         } for item in ((source.get("series") or {}).get("quarters") or [])]
         drivers.append({
@@ -3402,7 +3409,12 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
                                             f"{operand_name}.period_end"),
                     "value": format(_decimal(operand.get("value"),
                                              f"{operand_name}.value"), "f"),
-                    "unit": _text(operand.get("unit"), f"{operand_name}.unit"),
+                    "unit": (
+                        _text(operand.get("unit"), f"{operand_name}.unit").casefold()
+                        if (schema_version == STRUCTURED_CASH_SCHEMA_VERSION
+                            and wire["kind"] == "cash_flow")
+                        else _text(operand.get("unit"), f"{operand_name}.unit")
+                    ),
                     "accession": _text(operand.get("accession"),
                                        f"{operand_name}.accession"),
                     "form": _one_of(operand.get("form"), ("10-Q", "10-K"),

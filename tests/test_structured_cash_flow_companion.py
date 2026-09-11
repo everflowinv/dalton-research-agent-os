@@ -17,6 +17,8 @@ from dalton_core.forecast_sensitivity import build_projection, recompute
 from dalton_core.model_forecast_driver import (
     STRUCTURED_CASH_SCHEMA_VERSION,
     ForecastModelAuthority,
+    ForecastModelUnavailable,
+    ForecastModelValidationError,
     actualize_model,
     build_cash_flow_companion_drivers,
     build_structured_forecast_model,
@@ -238,6 +240,20 @@ class StructuredCashFlowCompanionTests(unittest.TestCase):
         self.assertEqual(annual_ocf["status"], "unavailable")
         self.assertEqual(len(annual_ocf["source_periods"]), 3)
 
+    def test_duplicate_cash_quarter_end_cannot_enter_the_companion(self):
+        inputs, spec, structure, replay, binding = authorities()
+        duplicate = copy.deepcopy(
+            inputs["cash_flow_inputs"][0]["series"]["quarters"][1])
+        duplicate["period_start"] = "2025-04-02"
+        duplicate["value"] = "999"
+        inputs["cash_flow_inputs"][0]["series"]["quarters"].append(duplicate)
+        structure, replay = materialize_financial_statement_structure(spec, inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        with self.assertRaisesRegex(
+                ForecastModelUnavailable, "duplicate or overlapping quarters"):
+            build_structured_forecast_model(
+                spec, inputs, structure=structure, replay=replay, binding=binding)
+
     def test_non_usd_cash_companion_keeps_bound_company_currency(self):
         _inputs, _spec, _structure, _replay, _binding = authorities(unit="eur")
         body = build_structured_forecast_model(
@@ -356,6 +372,42 @@ class StructuredCashFlowCompanionTests(unittest.TestCase):
             {ACCESSION, "0000000000-25-000001"},
         )
         self.assertEqual(len(first["derived_from"]), 2)
+
+    def test_cumulative_cash_operand_units_are_casefolded_but_not_cross_currency(self):
+        inputs, spec, _structure, _replay, _binding = authorities(unit="eur")
+        for source in inputs["cash_flow_inputs"]:
+            source["unit"] = "EUR"
+            for quarter in source["series"]["quarters"]:
+                quarter["unit"] = "EUR"
+        source = inputs["cash_flow_inputs"][0]["series"]["quarters"][1]
+        source["basis"] = "derived_from_cumulative"
+        source["source_accessions"] = [ACCESSION, "0000000000-25-000001"]
+        source["source_forms"] = ["10-Q"]
+        source["derived_from"] = [
+            {"period_start": "2025-01-01", "period_end": "2025-03-31",
+             "value": "100", "unit": "EUR", "accession": ACCESSION,
+             "form": "10-Q"},
+            {"period_start": "2025-01-01", "period_end": "2025-06-30",
+             "value": "210", "unit": "EUR",
+             "accession": "0000000000-25-000001", "form": "10-Q"},
+        ]
+        structure, replay = materialize_financial_statement_structure(spec, inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            spec, inputs, structure=structure, replay=replay, binding=binding)
+        _authority, held = self.publish(body)
+        driver = next(item for item in held["drivers"]
+                      if item.get("role") == "operating_cash_flow")
+        derived = driver["history"][1]["derived_from"]
+        self.assertEqual({item["unit"] for item in derived}, {"eur"})
+
+        wrong = copy.deepcopy(body)
+        cash_driver = next(item for item in wrong["drivers"]
+                           if item.get("role") == "operating_cash_flow")
+        cash_driver["history"][1]["derived_from"][1]["unit"] = "USD"
+        with self.assertRaisesRegex(
+                ForecastModelValidationError, "derived arithmetic does not replay"):
+            self.publish(wrong)
 
     def test_annual_fcf_refuses_cash_lines_with_different_quarter_windows(self):
         inputs, spec, _structure, _replay, _binding = authorities()
