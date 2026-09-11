@@ -301,6 +301,54 @@ def copy_plan(live_root: Path, temp_root: Path) -> list[CopyItem]:
     return items
 
 
+DEFAULT_REHEARSAL_RESERVE_BYTES = 4 * 1024 ** 3
+
+
+class RehearsalDiskSpaceError(RuntimeError):
+    """Stop scratch work before it consumes the live host's free-space reserve."""
+
+
+def rehearsal_reserve_bytes(value: int | None = None) -> int:
+    if value is None:
+        raw = os.environ.get("DALTON_REHEARSAL_RESERVE_BYTES")
+        value = DEFAULT_REHEARSAL_RESERVE_BYTES if raw is None else int(raw)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("rehearsal reserve bytes must be a positive integer")
+    return value
+
+
+def check_rehearsal_space(destination: Path, *, reserve_bytes: int,
+                          incoming_bytes: int = 0) -> dict[str, int]:
+    reserve_bytes = rehearsal_reserve_bytes(reserve_bytes)
+    if isinstance(incoming_bytes, bool) or not isinstance(incoming_bytes, int) or incoming_bytes < 0:
+        raise ValueError("incoming rehearsal bytes must be a non-negative integer")
+    ancestor = destination
+    while not ancestor.exists():
+        ancestor = ancestor.parent
+    free = shutil.disk_usage(ancestor).free
+    required = reserve_bytes + incoming_bytes
+    if free < required:
+        raise RehearsalDiskSpaceError(
+            f"insufficient rehearsal disk space: need {required} bytes, have {free} "
+            f"(incoming={incoming_bytes}, preserved_reserve={reserve_bytes})")
+    return {"required_bytes": required, "free_bytes": free,
+            "reserve_bytes": reserve_bytes, "incoming_bytes": incoming_bytes}
+
+
+def copy_item_bytes(item: CopyItem) -> int:
+    if not item.source.exists():
+        return 0
+    if item.kind == "tree":
+        return sum(path.stat().st_size for path in item.source.rglob("*")
+                   if path.is_file() and not copy_excluded(path))
+    total = item.source.stat().st_size
+    if item.kind == "sqlite":
+        wal = Path(str(item.source) + "-wal")
+        if wal.is_file():
+            total += wal.stat().st_size
+    return total
+
+
 def copy_excluded(path: Path) -> bool:
     """Whether this file must not be copied into the rehearsal root."""
 
@@ -1484,8 +1532,10 @@ class Rehearsal:
         openclaw_config: Path,
         source_root: Path | None = None,
         rehearse_reviewed_model_setup: bool = False,
+        scratch_reserve_bytes: int | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
+        self.scratch_reserve_bytes = rehearsal_reserve_bytes(scratch_reserve_bytes)
         self.live_root = live_root.expanduser().resolve()
         # The root the copy was taken *from*.  When ``--live-root`` already is
         # the live Dalton root the two are the same and nothing changes.  When
@@ -1558,6 +1608,7 @@ class Rehearsal:
         self.log(f"\n== {name}")
         started = time.monotonic()
         try:
+            check_rehearsal_space(self.temp_root, reserve_bytes=self.scratch_reserve_bytes)
             detail, findings = fn()
             result = StepResult(name, True, time.monotonic() - started, detail, findings)
         except Exception as exc:  # noqa: BLE001 - a failed step is the output
@@ -1565,7 +1616,7 @@ class Rehearsal:
                 name, False, time.monotonic() - started,
                 f"{type(exc).__name__}: {exc}",
             )
-            if fatal:
+            if fatal or isinstance(exc, RehearsalDiskSpaceError):
                 self._aborted_by = name
         self.steps.append(result)
         self.log(f"   [{'ok' if result.ok else 'FAILED'}] {result.seconds:.1f}s {result.detail}")
@@ -1577,6 +1628,16 @@ class Rehearsal:
 
     def copy_state(self) -> tuple[str, list[str]]:
         items = copy_plan(self.live_root, self.temp_root)
+        # Allow another copied-state-sized working set for scratch migrations/WAL.
+        # The explicit reserve remains available for live snapshots and writes.
+        estimate = sum(copy_item_bytes(item) for item in items)
+        disk = check_rehearsal_space(self.temp_root,
+            reserve_bytes=self.scratch_reserve_bytes, incoming_bytes=2 * estimate)
+        self.log("copy disk admission: " + json.dumps(disk, sort_keys=True))
+        def progress_check(incoming_bytes: int = 0) -> None:
+            check_rehearsal_space(self.temp_root,
+                reserve_bytes=self.scratch_reserve_bytes,
+                incoming_bytes=incoming_bytes)
         copied = skipped = 0
         total_bytes = 0
         findings: list[str] = []
@@ -1586,11 +1647,12 @@ class Rehearsal:
                     raise FileNotFoundError(f"live root is missing {item.source}")
                 skipped += 1
                 continue
+            progress_check(copy_item_bytes(item))
             item.destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if item.kind == "sqlite":
-                total_bytes += backup_sqlite(item.source, item.destination)
+                total_bytes += backup_sqlite(item.source, item.destination, progress_check=progress_check)
             elif item.kind == "tree":
-                total_bytes += copy_tree(item.source, item.destination)
+                total_bytes += copy_tree(item.source, item.destination, progress_check=progress_check)
             else:
                 shutil.copy2(item.source, item.destination)
                 total_bytes += item.source.stat().st_size
@@ -2548,7 +2610,8 @@ def _construct_sidecar(symbol: Any, path: Path) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def backup_sqlite(source: Path, destination: Path) -> int:
+def backup_sqlite(source: Path, destination: Path, *,
+                  progress_check: Callable[..., None] | None = None) -> int:
     """Copy a possibly-live SQLite database without writing to it.
 
     ``mode=ro`` plus the backup API is the pattern the repo's other live
@@ -2561,7 +2624,10 @@ def backup_sqlite(source: Path, destination: Path) -> int:
     try:
         writer = sqlite3.connect(destination)
         try:
-            reader.backup(writer)
+            def progress(_status: int, remaining: int, _total: int) -> None:
+                if progress_check is not None:
+                    progress_check()
+            reader.backup(writer, pages=32, progress=progress)
         finally:
             writer.close()
     finally:
@@ -2569,7 +2635,8 @@ def backup_sqlite(source: Path, destination: Path) -> int:
     return destination.stat().st_size
 
 
-def copy_tree(source: Path, destination: Path) -> int:
+def copy_tree(source: Path, destination: Path, *,
+              progress_check: Callable[..., None] | None = None) -> int:
     total = 0
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     for path in sorted(source.rglob("*")):
@@ -2577,6 +2644,8 @@ def copy_tree(source: Path, destination: Path) -> int:
             continue
         if copy_excluded(path):
             continue
+        if progress_check is not None:
+            progress_check(path.stat().st_size)
         target = destination / path.relative_to(source)
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         shutil.copy2(path, target)
@@ -2762,6 +2831,8 @@ def main(argv: list[str] | None = None) -> int:
             "12-to-14 preservation delta"
         ),
     )
+    parser.add_argument("--scratch-reserve-bytes", type=int, default=None,
+        help="free bytes to preserve; defaults to DALTON_REHEARSAL_RESERVE_BYTES or 4 GiB")
     parser.add_argument("--report", type=Path, default=None, help="also write the summary here")
     args = parser.parse_args(argv)
     temp_root = args.temp_root or Path("/tmp") / (
@@ -2778,6 +2849,7 @@ def main(argv: list[str] | None = None) -> int:
         openclaw_config=args.openclaw_config,
         source_root=args.source_root,
         rehearse_reviewed_model_setup=args.rehearse_reviewed_model_setup,
+        scratch_reserve_bytes=args.scratch_reserve_bytes,
     )
     code = rehearsal.run()
     summary = rehearsal.report()

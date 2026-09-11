@@ -941,6 +941,7 @@ class FatalStepTests(unittest.TestCase):
             Path(directory.name).resolve() / "live",
             Path(directory.name).resolve() / "temp",
             openclaw_config=Path(directory.name).resolve() / "openclaw.json",
+            scratch_reserve_bytes=1,  # no scratch data in step-control unit tests
             log=lambda _line: None,
         )
 
