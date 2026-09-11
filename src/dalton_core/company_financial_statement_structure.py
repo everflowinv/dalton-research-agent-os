@@ -68,8 +68,8 @@ _TYPED_NOTE_FIELDS = {
     "applicability_kind", "periods",
 }
 _NOTE_PERIOD_FIELDS = {"period_start", "period_end"}
-_FINANCIAL_NOTE_AUTHORITY_VERSION = "financial-note-evidence-binding-0.1"
-_DILUTED_EPS_NUMERATOR_TARGET = "financial_note:diluted_eps_numerator:0.1"
+FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION = "financial-note-evidence-binding-0.1"
+DILUTED_EPS_NUMERATOR_NOTE_TARGET = "financial_note:diluted_eps_numerator:0.1"
 _ANNUAL_STRUCTURE_VERSIONS = {ANNUAL_SCHEMA_VERSION, SCHEMA_VERSION}
 
 
@@ -307,9 +307,9 @@ def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
         ref = _text(wire["ref"], f"note_evidence[{index}].ref")
         _digest(wire["content_hash"], f"note_evidence[{index}].content_hash")
         if schema_version == SCHEMA_VERSION:
-            if wire["schema_version"] != _FINANCIAL_NOTE_AUTHORITY_VERSION:
+            if wire["schema_version"] != FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION:
                 raise FinancialStatementStructureError("note evidence schema_version is invalid")
-            if wire["target_ref"] != _DILUTED_EPS_NUMERATOR_TARGET:
+            if wire["target_ref"] != DILUTED_EPS_NUMERATOR_NOTE_TARGET:
                 raise FinancialStatementStructureError(
                     "note evidence target is not the diluted EPS numerator target"
                 )
