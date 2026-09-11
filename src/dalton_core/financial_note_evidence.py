@@ -77,6 +77,17 @@ class _ReadOnlyCandidateView:
         self.connection = connection
 
 
+def _period_kind(period_start: str, period_end: str) -> str | None:
+    """Classify an exact duration using the shared inclusive-day convention."""
+
+    elapsed = (date.fromisoformat(period_end) - date.fromisoformat(period_start)).days + 1
+    if NINE_MONTH_MAX_DAYS < elapsed <= ANNUAL_MAX_DAYS:
+        return "annual"
+    if QUARTER_MIN_DAYS <= elapsed <= QUARTER_MAX_DAYS:
+        return "quarter"
+    return None
+
+
 def _statement_filing(connection: Any, target: Mapping[str, Any],
                       *, company_ref: str, registration: Mapping[str, Any]) -> dict[str, Any]:
     row = connection.execute(
@@ -121,11 +132,8 @@ def _statement_filing(connection: Any, target: Mapping[str, Any],
               "financial note period lacks filed diluted EPS authority")
         _need(str(share_rows[0]["unit"]).casefold() == "shares",
               "financial note period lacks filed diluted share authority")
-        elapsed = (date.fromisoformat(item["period_end"])
-                   - date.fromisoformat(item["period_start"])).days
-        expected = "annual" if NINE_MONTH_MAX_DAYS < elapsed <= ANNUAL_MAX_DAYS else (
-            "quarter" if QUARTER_MIN_DAYS <= elapsed <= QUARTER_MAX_DAYS else None)
-        _need(expected == target["applicability_kind"],
+        _need(_period_kind(item["period_start"], item["period_end"])
+              == target["applicability_kind"],
               "financial note applicability differs from its exact duration")
     return {
         "ref": row["ingest_id"], "hash": row["content_hash"],

@@ -11,6 +11,7 @@ from dalton_core.document_research import (
 from dalton_core.financial_note_evidence import (
     FinancialNoteEvidenceError,
     _execution_checkpoint,
+    _period_kind,
     financial_note_evidence_binding,
     resolve_financial_note_evidence,
     resolve_financial_note_evidence_ref,
@@ -98,6 +99,14 @@ class FinancialNoteTargetTests(unittest.TestCase):
         tampered["periods"][0]["period_end"] = "2025-08-30"
         with self.assertRaisesRegex(FinancialNoteEvidenceError, "drifted"):
             financial_note_evidence_binding(tampered)
+
+    def test_resolver_uses_shared_inclusive_period_boundaries(self):
+        self.assertEqual(_period_kind("2025-01-01", "2025-10-18"), "annual")
+        self.assertEqual(_period_kind("2024-01-01", "2025-01-14"), "annual")
+        self.assertEqual(_period_kind("2025-01-01", "2025-03-21"), "quarter")
+        self.assertEqual(_period_kind("2025-01-01", "2025-04-10"), "quarter")
+        self.assertIsNone(_period_kind("2025-01-01", "2025-10-17"))
+        self.assertIsNone(_period_kind("2025-01-01", "2025-04-11"))
 
 
 class FinancialNoteExecutionCheckpointTests(unittest.TestCase):
