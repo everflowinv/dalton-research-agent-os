@@ -333,6 +333,32 @@ class ChooseCompanyTests(unittest.TestCase):
         )
         self.assertEqual(summary["spec_status"], "gated")
 
+    def test_dry_run_rebuilds_the_state_with_the_configured_numeric_bounds(self):
+        policy = {"max_periods_per_series": 1, "max_total_cells": 2}
+        config = self.state_dir / "numeric-context-model.json"
+        config.write_text(json.dumps({
+            "model_spec_numeric_context": policy,
+        }), encoding="utf-8")
+        expected = build_company_model_state(
+            self.missions, ACN, ticker="ACN", numeric_context_policy=policy,
+        )
+
+        summary = run_model_spec(
+            state_dir=self.state_dir, model_config_path=config,
+            summary_dir=self.state_dir / "numeric-context-summary",
+            scheduler_db=None, company_ref=ACN,
+            expected_state_hash=expected["state_hash"],
+            expected_task_hash=TASK_HASH, dry_run=True,
+        )
+
+        self.assertEqual(summary["spec_status"], "gated")
+        self.assertEqual(summary["state_hash"], expected["state_hash"])
+        self.assertEqual(summary["numeric_context_policy"], policy)
+        self.assertEqual(
+            summary["numeric_context_hash"],
+            expected["numeric_context"]["content_hash"],
+        )
+
     def test_filed_classification_selects_the_same_state_the_child_rebuilds(self):
         dossiers = CompanyDossierAuthority(self.store)
         dossiers.publish(dossier_body(

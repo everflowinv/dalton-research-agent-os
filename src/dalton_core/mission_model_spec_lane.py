@@ -140,6 +140,10 @@ class MissionModelSpecLaneCoordinator:
         held_companies: dict[str, Any] = {}
         try:
             repair_policy_hash = self.launcher.repair_policy_hash()
+            numeric_context_policy = (
+                self.launcher.numeric_context_policy()
+                if hasattr(self.launcher, "numeric_context_policy") else None
+            )
         except Exception as exc:  # noqa: BLE001 - malformed config cannot launch
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -155,6 +159,7 @@ class MissionModelSpecLaneCoordinator:
                 company_ref, state = choose_company(
                     self.missions, mission,
                     classifications=classifications,
+                    numeric_context_policy=numeric_context_policy,
                     exclude_company_refs=frozenset(excluded))
             except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
                 return {"status": "unavailable", "settled": settled,

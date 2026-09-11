@@ -119,14 +119,19 @@ class MarketProxyClaimTests(unittest.TestCase):
             def statement_filings(inner, company_ref):
                 return [{"company_ref": company_ref, "report_date": "2026-06-30",
                          "accession": "fixture", "entity_name": "Fixture",
-                         "cik": "1467373", "form": "10-Q", "line_count": 1,
-                         "ingest_id": "filing:1"}]
+                         "cik": "1467373", "form": "10-Q", "filed": "2026-07-01",
+                         "line_count": 1, "ingest_id": "filing:1",
+                         "content_hash": content_hash({"filing": "fixture"}),
+                         "source_record_refs": ["raw-sink:" + "a" * 64]}]
             def statement_lines(inner, ingest_id):
-                return [{"statement": "income", "concept": "Revenue",
+                return [{"line_id": "filing:1#0", "ingest_id": "filing:1",
+                         "ordinal": 0, "statement": "income", "concept": "Revenue",
                          "label": "Revenue", "level": 0, "parent_concept": None,
                          "is_breakdown": False, "dimension_axis": None,
-                         "dimension_member": None, "unit": "USD",
-                         "period_start": "2026-04-01", "period_end": "2026-06-30"}]
+                         "dimension_member": None, "dimension_count": None,
+                         "unit": "USD", "period_start": "2026-04-01",
+                         "period_end": "2026-06-30", "value": "1000",
+                         "balance": "credit"}]
         state = build_company_model_state(Missions(), TARGET)
         self.assertEqual(state["market_proxies"][0]["mapping_ref"], MAPPING["mapping_ref"])
         self.assertNotIn("market_proxy", json.dumps(state["statements"]))

@@ -11,10 +11,15 @@ from __future__ import annotations
 import unittest
 
 from dalton_core.company_model_state import (
+    DEFAULT_NUMERIC_CONTEXT_POLICY,
     MAX_CONCEPTS_PER_STATEMENT,
     CompanyModelStateError,
+    _numeric_line_authority,
     build_company_model_state,
+    validate_numeric_context_policy,
 )
+from dalton_core.company_model_spec import build_prompt
+from dalton_core.company_model_cli import MAX_INPUT_TOKENS
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -48,9 +53,10 @@ class CompanyModelStateTests(unittest.TestCase):
             mission_version_hash=self.mission["content_hash"],
         )
 
-    def ingest(self, accession, lines, *, report_date="2026-06-30", attempt=0):
+    def ingest(self, accession, lines, *, report_date="2026-06-30",
+               filed=None, form="10-Q", attempt=0):
         dispatch = self.missions.queue_statement_dispatch(
-            authorization=self.authorization, attempt=attempt)
+            authorization=self.authorization, form=form, attempt=attempt)
         self.missions.mark_statement_dispatch_launched(
             dispatch["dispatch_id"], f"sec-financials-run:{attempt:024d}")
         self.missions.record_statement_observation(
@@ -59,7 +65,8 @@ class CompanyModelStateTests(unittest.TestCase):
                 "schema_version": "0.1", "cik": "0001467373",
                 "entity_name": "Accenture plc",
                 "filings": [{
-                    "accession": accession, "form": "10-Q", "filed": report_date,
+                    "accession": accession, "form": form,
+                    "filed": filed or report_date,
                     "report_date": report_date, "lines": lines,
                 }],
                 "source_record_refs": ["raw-sink:" + "c" * 64],
@@ -91,6 +98,25 @@ class CompanyModelStateTests(unittest.TestCase):
         self.assertNotIn("value", income[0])
         self.assertNotIn("period_end", income[0])
         self.assertEqual(len(state["state_hash"]), 64)
+        numeric = state["numeric_context"]
+        self.assertEqual(numeric["policy"], DEFAULT_NUMERIC_CONTEXT_POLICY)
+        self.assertEqual(numeric["included_cells"], 3)
+        revenue = next(
+            item for item in numeric["cells"]
+            if item["concept"] == "us-gaap:Revenues"
+        )
+        filing = self.missions.statement_filings(ACN)[0]
+        raw_line = next(
+            item for item in self.missions.statement_lines(filing["ingest_id"])
+            if item["concept"] == "us-gaap:Revenues"
+        )
+        self.assertEqual(revenue["value"], "1000")
+        self.assertEqual(revenue["filing_content_hash"], filing["content_hash"])
+        self.assertEqual(
+            revenue["line_content_hash"],
+            _numeric_line_authority(raw_line)["content_hash"],
+        )
+        self.assertEqual(revenue["filing_form"], "10-Q")
 
     def test_the_same_concept_across_periods_appears_once(self):
         self.ingest("0001467373-26-000031", [
@@ -147,6 +173,115 @@ class CompanyModelStateTests(unittest.TestCase):
         state = build_company_model_state(self.missions, ACN)
         self.assertEqual(len(state["statements"]["income"]),
                          MAX_CONCEPTS_PER_STATEMENT)
+        self.assertLess(len(build_prompt(state).encode("utf-8")), MAX_INPUT_TOKENS)
+
+    def test_full_numeric_cell_budget_fits_the_existing_prompt_limit(self):
+        lines = []
+        for index in range(150):
+            lines.extend([
+                _line(f"acn:Concept{index}", period_start="2026-04-01",
+                      period_end="2026-06-30"),
+                _line(f"acn:Concept{index}", period_start="2026-01-01",
+                      period_end="2026-03-31"),
+            ])
+        self.ingest("0001467373-26-000031", lines)
+        state = build_company_model_state(self.missions, ACN)
+        self.assertEqual(state["numeric_context"]["included_cells"], 300)
+        self.assertLess(len(build_prompt(state).encode("utf-8")), MAX_INPUT_TOKENS)
+
+    def test_numeric_context_preserves_quarter_and_annual_windows_without_fiscal_inference(self):
+        self.ingest("0001467373-26-000031", [
+            _line("us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+                  period_start="2026-04-01", period_end="2026-06-30",
+                  value="100.2500", unit="shares"),
+            _line("us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+                  period_start="2025-07-01", period_end="2026-06-30",
+                  value="99.8750", unit="shares"),
+        ])
+        cells = build_company_model_state(self.missions, ACN)["numeric_context"]["cells"]
+        by_start = {item["period_start"]: item for item in cells}
+        self.assertEqual(by_start["2026-04-01"]["period_shape"], "quarter")
+        self.assertEqual(by_start["2026-04-01"]["duration_days"], 91)
+        self.assertEqual(by_start["2025-07-01"]["period_shape"], "cumulative")
+        self.assertEqual(by_start["2025-07-01"]["duration_days"], 365)
+        self.assertEqual(by_start["2025-07-01"]["value"], "99.8750")
+        self.assertNotIn("fiscal_year", by_start["2025-07-01"])
+
+    def test_latest_filing_wins_but_same_filing_conflicts_remain_explicit(self):
+        concept = "us-gaap:OtherNonoperatingIncomeExpense"
+        self.ingest("0001467373-26-000030", [
+            _line(concept, value="10.00")], report_date="2026-03-31",
+                    filed="2026-04-10")
+        self.ingest("0001467373-26-000031", [
+            _line(concept, value="15.00"),
+            _line(concept, value="16.00"),
+        ], report_date="2026-06-30", filed="2026-07-10", attempt=1)
+        cells = [
+            item for item in build_company_model_state(
+                self.missions, ACN,
+            )["numeric_context"]["cells"]
+            if item["concept"] == concept
+        ]
+        self.assertEqual([item["value"] for item in cells], ["15.00", "16.00"])
+        self.assertEqual({item["status"] for item in cells}, {"ambiguous"})
+        self.assertEqual(len({item["ambiguity_ref"] for item in cells}), 1)
+        self.assertNotIn("10.00", {item["value"] for item in cells})
+        bounded = build_company_model_state(
+            self.missions, ACN,
+            numeric_context_policy={"max_periods_per_series": 1,
+                                    "max_total_cells": 1},
+        )["numeric_context"]
+        self.assertEqual(bounded["included_cells"], 0)
+        self.assertEqual(bounded["omitted_by_total_limit"], 2)
+
+    def test_bounds_are_explicit_and_policy_changes_the_state_identity(self):
+        self.ingest("0001467373-26-000031", [
+            _line("us-gaap:Revenues", value="100"),
+            _line("us-gaap:OperatingIncomeLoss", value="20"),
+        ])
+        default = build_company_model_state(self.missions, ACN)
+        bounded = build_company_model_state(
+            self.missions, ACN,
+            numeric_context_policy={"max_periods_per_series": 1,
+                                    "max_total_cells": 1},
+        )
+        context = bounded["numeric_context"]
+        self.assertEqual(context["included_cells"], 1)
+        self.assertEqual(context["omitted_by_total_limit"], 1)
+        self.assertTrue(context["truncated"])
+        self.assertNotEqual(default["state_hash"], bounded["state_hash"])
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            validate_numeric_context_policy({"max_periods_per_series": 0,
+                                             "max_total_cells": 1})
+        with self.assertRaisesRegex(ValueError, "closed shape"):
+            validate_numeric_context_policy({
+                "max_periods_per_series": 1, "max_total_cells": 1,
+                "prefer_concept": "us-gaap:Revenues",
+            })
+
+    def test_prompt_exposes_the_source_bound_nonoperating_bridge_values(self):
+        self.ingest("0001467373-26-000031", [
+            _line("us-gaap:Revenues", value="1000.00"),
+            _line("us-gaap:OperatingIncomeLoss", value="100.00"),
+            _line("us-gaap:OtherNonoperatingIncomeExpense", value="15.00"),
+            _line("us-gaap:IncomeBeforeTaxExpenseBenefit", value="115.00"),
+            _line("us-gaap:IncomeTaxExpenseBenefit", value="20.00"),
+            _line("us-gaap:NetIncomeLoss", value="95.00"),
+        ])
+        state = build_company_model_state(self.missions, ACN)
+        prompt = build_prompt(state)
+
+        self.assertIn("NUMERIC_PERIODS", prompt)
+        self.assertIn('"us-gaap:OtherNonoperatingIncomeExpense"', prompt)
+        self.assertIn('"15.00"', prompt)
+        self.assertIn('"100.00"', prompt)
+        self.assertIn('"95.00"', prompt)
+        cell = next(
+            item for item in state["numeric_context"]["cells"]
+            if item["concept"] == "us-gaap:OtherNonoperatingIncomeExpense"
+        )
+        self.assertIn(state["numeric_context"]["content_hash"], prompt)
+        self.assertIn(cell["filing_content_hash"], prompt)
 
 
 if __name__ == "__main__":

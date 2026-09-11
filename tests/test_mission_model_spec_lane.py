@@ -27,9 +27,15 @@ class FakeLauncher:
         self.started: list[dict] = []
         self.raise_on_start: Exception | None = None
         self.repair_config = {"max_attempts": 0}
+        self.numeric_policy = {
+            "max_periods_per_series": 8, "max_total_cells": 300,
+        }
 
     def repair_policy_hash(self):
         return content_hash(self.repair_config)
+
+    def numeric_context_policy(self):
+        return dict(self.numeric_policy)
 
     def start(self, *, company_ref, state_hash, task_hash=None,
               repair_policy_hash=None):
@@ -71,18 +77,24 @@ class FakeMissions:
         refs = self.companies if company_ref is None else [company_ref]
         return [{"company_ref": ref, "ingest_id": f"ingest:{ref}",
                  "entity_name": ref, "cik": "0000000001", "accession": "a",
-                 "form": "10-Q", "report_date": "2026-06-30", "line_count": 1}
+                 "form": "10-Q", "filed": "2026-07-01",
+                 "report_date": "2026-06-30", "line_count": 1,
+                 "content_hash": content_hash({"company_ref": ref}),
+                 "source_record_refs": ["raw-sink:" + "a" * 64]}
                 for ref in refs if ref in self.companies]
 
     def statement_lines(self, ingest_id, statement=None):
         company_ref = ingest_id.split(":", 1)[1]
-        return [{"statement": "income", "concept": concept,
+        return [{"line_id": f"{ingest_id}#{ordinal}", "ingest_id": ingest_id,
+                 "ordinal": ordinal, "statement": "income", "concept": concept,
                  "label": concept.split(":")[-1], "level": 0,
                  "parent_concept": None, "is_breakdown": 0,
                  "dimension_axis": None, "dimension_member": None,
+                 "dimension_count": None,
                  "unit": "USD", "period_start": "2026-04-01",
-                 "period_end": "2026-06-30"}
-                for concept in self.lines.get(company_ref, [])]
+                 "period_end": "2026-06-30", "value": "1000",
+                 "balance": "credit"}
+                for ordinal, concept in enumerate(self.lines.get(company_ref, []))]
 
     def discloses(self, company_ref, concept):
         """This company filed something nobody had seen before."""
@@ -127,6 +139,21 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertEqual(result["status"], "launched")
         self.assertEqual(result["company_ref"], ACN)
         self.assertEqual(len(self.launcher.started), 1)
+
+    def test_numeric_context_policy_is_part_of_the_parent_selected_state(self):
+        first = self.lane.dispatch_once()
+        other_launcher = FakeLauncher()
+        other_launcher.numeric_policy = {
+            "max_periods_per_series": 1, "max_total_cells": 1,
+        }
+        other = MissionModelSpecLaneCoordinator(
+            missions=self.missions, launcher=other_launcher,
+            mission=lambda: self.mission,
+        ).dispatch_once()
+
+        self.assertEqual(first["status"], "launched")
+        self.assertEqual(other["status"], "launched")
+        self.assertNotEqual(first["state_hash"], other["state_hash"])
 
     def test_the_next_tick_settles_the_last_child_before_starting_another(self):
         first = self.lane.dispatch_once()

@@ -50,7 +50,11 @@ from .company_model_spec import (
 from .company_financial_statement_structure import FinancialStatementStructureError
 from .company_model_inputs import ModelInputError
 from .model_forecast_driver import ForecastModelError
-from .company_model_state import CompanyModelStateError, build_company_model_state
+from .company_model_state import (
+    CompanyModelStateError,
+    build_company_model_state,
+    model_spec_numeric_context_config,
+)
 from .driver_template import REGISTRY_HASH as TEMPLATE_REGISTRY_HASH, template_for
 from .coverage_mission import CoverageMissionAuthority
 from .scheduler import SchedulerError
@@ -417,6 +421,7 @@ def choose_company(
     missions: CoverageMissionAuthority, mission: dict[str, Any],
     *, company_ref: str | None = None,
     classifications: Mapping[str, str] | None = None,
+    numeric_context_policy: Mapping[str, Any] | None = None,
     exclude_company_refs: frozenset[str] = frozenset(),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The company to decide about, and the disclosure to decide from.
@@ -460,7 +465,9 @@ def choose_company(
                 # reason to decide its model again, and a selector that
                 # ignored the reclassification would keep replaying the
                 # specification written under the old frame.
-                industry_classification=(classifications or {}).get(held))
+                industry_classification=(classifications or {}).get(held),
+                numeric_context_policy=numeric_context_policy,
+            )
         except CompanyModelStateError:
             if company_ref is not None:
                 raise
@@ -494,6 +501,10 @@ def run_model_spec(
         "mode": "dry_run" if dry_run else "model",
         "company_ref": company_ref,
         "state_hash": None,
+        "numeric_context_hash": None,
+        "numeric_context_policy": None,
+        "numeric_context_cells": 0,
+        "numeric_context_omitted_cells": 0,
         "spec_status": None,
         "revenue_drivers": 0,
         "expense_lines": 0,
@@ -521,10 +532,21 @@ def run_model_spec(
             summary.update({"status": "idle", "spec_status": "no_mission"})
             return summary
         mission = missions.mission(pointer["mission_version_id"])
+        config_path = (
+            None if model_config_path is None
+            else Path(model_config_path).expanduser()
+        )
+        raw_model_config = (
+            None if config_path is None or not config_path.is_file()
+            else json.loads(config_path.read_text(encoding="utf-8"))
+        )
+        numeric_policy = model_spec_numeric_context_config(raw_model_config)
         try:
             chosen, state = choose_company(
                 missions, mission, company_ref=company_ref,
-                classifications=filed_classifications(store))
+                classifications=filed_classifications(store),
+                numeric_context_policy=numeric_policy,
+            )
         except CompanyModelStateError as exc:
             summary.update({"status": "idle", "spec_status": "no_statements",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
@@ -534,8 +556,20 @@ def run_model_spec(
             # asked for already does. Both are "nothing to decide".
             summary.update({"status": "idle", "spec_status": "nothing_to_decide"})
             return summary
+        if config_path is not None and raw_model_config is None:
+            # Preserve the no-work fast path above. A selected paid run still
+            # requires the configured file and surfaces its absence exactly.
+            raw_model_config = json.loads(config_path.read_text(encoding="utf-8"))
         summary["company_ref"] = chosen
         summary["state_hash"] = state["state_hash"]
+        numeric_context = state["numeric_context"]
+        summary["numeric_context_hash"] = numeric_context["content_hash"]
+        summary["numeric_context_policy"] = numeric_context["policy"]
+        summary["numeric_context_cells"] = numeric_context["included_cells"]
+        summary["numeric_context_omitted_cells"] = (
+            numeric_context["omitted_by_series_limit"]
+            + numeric_context["omitted_by_total_limit"]
+        )
         summary["concepts"] = len(state["concepts"])
         template = template_for(state.get("industry_classification"))
         summary["driver_template"] = {
@@ -543,10 +577,6 @@ def run_model_spec(
             "generic": bool(template["generic"]),
             "registry_hash": TEMPLATE_REGISTRY_HASH,
         }
-        raw_model_config = (
-            None if model_config_path is None
-            else json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
-        )
         repair_config = structured_output_repair_config(raw_model_config)
         repair_policy_hash = content_hash(repair_config)
         summary["repair_policy_hash"] = repair_policy_hash

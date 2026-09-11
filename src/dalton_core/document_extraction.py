@@ -109,7 +109,8 @@ def validate_model_config(value):
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
                 "capacity_retry", "reading_limits", "transport_retry", "provider_retry",
-                "structured_output_repair", "broker_max_frame_bytes"}
+                "structured_output_repair", "broker_max_frame_bytes",
+                "model_spec_numeric_context"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -141,6 +142,12 @@ def validate_model_config(value):
         raise ResearchVerificationError(f"invalid model call budget: {exc}") from exc
     try:
         resolve_reading_limits(config)
+    except ValueError as exc:
+        raise ResearchVerificationError(str(exc)) from exc
+    try:
+        from .company_model_state import model_spec_numeric_context_config
+
+        model_spec_numeric_context_config(config)
     except ValueError as exc:
         raise ResearchVerificationError(str(exc)) from exc
     if "capacity_retry" in config:

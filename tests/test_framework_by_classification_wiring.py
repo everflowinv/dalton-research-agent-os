@@ -26,7 +26,7 @@ from dalton_core.model_forecast_driver import (
     ForecastModelValidationError,
     market_proxy_ref,
 )
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 
 from tests.test_company_model_inputs import ACN
 from tests.test_model_forecast_driver import model
@@ -76,16 +76,20 @@ class StubMissions:
 
     def statement_filings(self, company_ref=None):
         return [{"ingest_id": "ingest:1", "accession": "0000-1", "form": "10-Q",
-                 "report_date": "2026-06-30", "line_count": 1,
+                 "filed": "2026-07-01", "report_date": "2026-06-30", "line_count": 1,
                  "entity_name": "A Producer", "cik": "0000001",
-                 "company_ref": ACN}]
+                 "company_ref": ACN,
+                 "content_hash": content_hash({"filing": "ingest:1"}),
+                 "source_record_refs": ["raw-sink:" + "a" * 64]}]
 
     def statement_lines(self, ingest_id):
-        return [{"statement": "income", "concept": "us-gaap:Revenues",
+        return [{"line_id": "ingest:1#0", "ingest_id": "ingest:1", "ordinal": 0,
+                 "statement": "income", "concept": "us-gaap:Revenues",
                  "label": "Revenues", "level": 1, "parent_concept": None,
                  "is_breakdown": False, "dimension_axis": None,
-                 "dimension_member": None, "unit": "USD",
-                 "period_start": "2026-04-01", "period_end": "2026-06-30"}]
+                 "dimension_member": None, "dimension_count": None, "unit": "USD",
+                 "period_start": "2026-04-01", "period_end": "2026-06-30",
+                 "value": "1000", "balance": "credit"}]
 
 
 class ModelStateTests(unittest.TestCase):

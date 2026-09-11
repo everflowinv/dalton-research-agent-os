@@ -66,7 +66,7 @@ from .company_financial_statement_structure import (
 
 SCHEMA_VERSION = "0.4"
 LEGACY_SCHEMA_VERSION = "0.3"
-TASK_REF = "task:company-model-spec:0.6"
+TASK_REF = "task:company-model-spec:0.7"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -312,8 +312,8 @@ TASK_HASH = content_hash({
     "cost_driver_template_registry": {
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
-    "authority_projection": "cost_driver_template_metadata:0.1",
-    "prompt_contract": "company-model-spec-prompt:0.7",
+    "authority_projection": "company-model-state-with-numeric-periods:0.1",
+    "prompt_contract": "company-model-spec-prompt:0.8",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -356,6 +356,43 @@ def _statement_table(state: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _numeric_period_table(state: Mapping[str, Any]) -> str:
+    context = state.get("numeric_context")
+    if not isinstance(context, Mapping):
+        return "NUMERIC CONTEXT UNAVAILABLE"
+    metadata = {
+        key: context.get(key) for key in (
+            "schema_version", "policy", "available_cells",
+            "after_series_limit_cells", "included_cells",
+            "omitted_by_series_limit", "omitted_by_total_limit", "truncated",
+            "content_hash",
+        )
+    }
+    lines = [
+        "CONTEXT=" + json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+        "FILINGS=" + json.dumps(
+            context.get("filing_authorities") or [],
+            ensure_ascii=False, sort_keys=True,
+        ),
+        "FIELDS=statement\tconcept\tdimension_axis\tdimension_member\t"
+        "period_start\tperiod_end\tperiod_shape\tduration_days\tvalue\tunit\t"
+        "balance\taccession\tfiling_form\tline_content_hash\tstatus\t"
+        "ambiguity_ref",
+    ]
+    fields = (
+        "statement", "concept", "dimension_axis", "dimension_member",
+        "period_start", "period_end", "period_shape", "duration_days", "value",
+        "unit", "balance", "accession", "filing_form", "line_content_hash",
+        "status", "ambiguity_ref",
+    )
+    for cell in context.get("cells") or []:
+        lines.append("\t".join(
+            json.dumps(cell.get(field), ensure_ascii=False, separators=(",", ":"))
+            for field in fields
+        ))
+    return "\n".join(lines)
+
+
 def build_prompt(state: Mapping[str, Any]) -> str:
     """The four questions, plus the driver template this kind of company gets.
 
@@ -378,7 +415,8 @@ def build_prompt(state: Mapping[str, Any]) -> str:
     return (
         "You decide how one company should be modelled.\n\n"
         "Below is the bounded input this call actually has: company identity, filed "
-        "statement structure, the selected industry driver templates, and any explicitly "
+        "statement structure, source-bound dated statement amounts, the selected industry "
+        "driver templates, and any explicitly "
         "labelled market proxies. It cannot browse, retrieve missing filings, or inspect "
         "documents outside these blocks. Every line in the statements carries the structure "
         "the company itself disclosed -- which line rolls into which, and "
@@ -388,6 +426,13 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "<dimension axis>\\t<unit>\\t<period kind>\n"
         "where the mark is '-' for a reported line and '*' for a segment or "
         "geographic breakdown, and the last two fields may be empty.\n\n"
+        "NUMERIC_PERIODS contains exact strings read from the held statement ledger. "
+        "Its filing and line hashes bind every amount to that authority. period_shape and "
+        "duration_days describe only the dated window; they do not infer a fiscal year. "
+        "Rows marked ambiguous are conflicting values in the same latest filing and period "
+        "and cannot support a formula choice. The context reports every omission caused by "
+        "its configured bounds. Do not infer an omitted or missing amount, treat it as zero, "
+        "or infer note semantics from a concept label.\n\n"
         "Return a model specification. The frame is fixed; the judgement is "
         "yours. Four questions:\n\n"
         "1. What actually drives this company's revenue? Volume, price, mix, a "
@@ -433,7 +478,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "or shares to those totals as a substitute for the bridge. Every line "
         "also returns annual_forecast_method. It is null except for diluted "
         "weighted-average shares. Use unavailable there unless this exact company "
-        "supports day_weighted_quarters and the held filed history contains four "
+        "supports day_weighted_quarters and NUMERIC_PERIODS contains four "
         "positive contiguous quarter averages that tie to a direct annual share "
         "value. quarterly_growth does not itself authorize annual weighting.\n\n"
         "Then return cash_flow_companion separately from the income DAG. Select "
@@ -474,6 +519,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "citing one):\n"
         f"{json.dumps(state.get('market_proxies') or [], ensure_ascii=False, sort_keys=True)}\n\n"
         f"STATEMENTS:\n{_statement_table(state)}\n"
+        f"\nNUMERIC_PERIODS:\n{_numeric_period_table(state)}\n"
     )
 
 

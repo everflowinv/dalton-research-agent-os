@@ -56,14 +56,22 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
     def repair_policy_hash(self) -> str:
         from .company_model_cli import structured_output_repair_config
+        config = self._validated_model_config()
+        return content_hash(structured_output_repair_config(config))
+
+    def numeric_context_policy(self) -> dict[str, int]:
+        from .company_model_state import model_spec_numeric_context_config
+
+        return model_spec_numeric_context_config(self._validated_model_config())
+
+    def _validated_model_config(self) -> dict[str, Any] | None:
         from .document_extraction import validate_model_config
 
-        config = None
-        if self.model_config_path is not None:
-            config = validate_model_config(json.loads(
-                self.model_config_path.read_text(encoding="utf-8")
-            ))
-        return content_hash(structured_output_repair_config(config))
+        if self.model_config_path is None:
+            return None
+        return validate_model_config(json.loads(
+            self.model_config_path.read_text(encoding="utf-8")
+        ))
 
     def _command(self, *, ticket_dir: Path, company_ref: str,
                  expected_state_hash: str, expected_task_hash: str,

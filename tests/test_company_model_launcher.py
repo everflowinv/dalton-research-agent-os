@@ -8,6 +8,7 @@ that has filed something new is a different one.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,6 +88,27 @@ class CompanyModelSpecLauncherTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(LaneChildRejected):
                     launcher.start(**kwargs)
+
+    def test_the_launcher_reads_the_same_numeric_context_policy_as_the_child(self):
+        config = self.state / "model.json"
+        config.write_text(json.dumps({
+            "routing_policy_ref": "routing-policy:test:1",
+            "credential_slot_refs": ["credential-slot:test"],
+            "model_router_db": str(self.state / "router.sqlite"),
+            "broker_socket": str(self.state / "broker.sock"),
+            "broker_auth_key": str(self.state / "broker.key"),
+            "broker_client_id": "client:dalton-core",
+            "expected_agent_id": "dalton-model-broker",
+            "budget_db": str(self.state / "budget.sqlite"),
+            "budget_policy_ref": "budget-policy:test:1",
+            "model_spec_numeric_context": {
+                "max_periods_per_series": 5, "max_total_cells": 120,
+            },
+        }), encoding="utf-8")
+        launcher = self.launcher(model_config_path=config)
+        self.assertEqual(launcher.numeric_context_policy(), {
+            "max_periods_per_series": 5, "max_total_cells": 120,
+        })
 
 
 if __name__ == "__main__":
