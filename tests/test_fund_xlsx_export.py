@@ -367,8 +367,14 @@ class FundXlsxExportTests(unittest.TestCase):
             "is_breakdown INTEGER,dimension_axis TEXT,dimension_member TEXT,"
             "dimension_count INTEGER,period_start TEXT,period_end TEXT,"
             "value TEXT,unit TEXT,balance TEXT)")
+        identity = {
+            "company_ref": "company:test", "cik": "0000000001",
+            "accession": "0000000001-25-000001", "form": "10-K",
+            "line_count": 1,
+        }
+        ingest_id = f"statement-ingest:{content_hash(identity)[:32]}"
         stored = {
-            "line_id": "statement-ingest:test#0", "ingest_id": "statement-ingest:test",
+            "line_id": f"{ingest_id}#0", "ingest_id": ingest_id,
             "statement": "cash", "ordinal": 0, "concept": "us-gaap:Cash",
             "label": "Cash flow", "level": 0, "parent_concept": None,
             "is_breakdown": 0, "dimension_axis": None, "dimension_member": None,
@@ -385,9 +391,7 @@ class FundXlsxExportTests(unittest.TestCase):
             "period_end", "value", "unit", "balance")}
         common["is_breakdown"] = False
         filing = {
-            "ingest_id": stored["ingest_id"], "company_ref": "company:test",
-            "cik": "0000000001", "accession": "0000000001-25-000001",
-            "form": "10-K", "line_count": 1, "entity_name": "Test",
+            "ingest_id": stored["ingest_id"], **identity, "entity_name": "Test",
             "filed": "2026-01-01", "report_date": "2025-12-31",
             "source_record_refs": ["raw-sink:" + "1" * 64],
             "governance_ref": "governance:test", "governance_hash": "2" * 64,
@@ -404,6 +408,62 @@ class FundXlsxExportTests(unittest.TestCase):
             _verify_statement_filing(connection, filing)
         filing["report_date"] = "2025-11-30"
         with self.assertRaisesRegex(FundWorkbookExportError, "authority hash"):
+            _verify_statement_filing(connection, filing)
+
+    def test_annual_filing_rejects_forged_ingest_and_line_identities(self):
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE coverage_mission_statement_lines("
+            "line_id TEXT,ingest_id TEXT,statement TEXT,ordinal INTEGER,"
+            "concept TEXT,label TEXT,level INTEGER,parent_concept TEXT,"
+            "is_breakdown INTEGER,dimension_axis TEXT,dimension_member TEXT,"
+            "dimension_count INTEGER,period_start TEXT,period_end TEXT,"
+            "value TEXT,unit TEXT,balance TEXT)")
+        identity = {"company_ref": "company:test", "cik": "0000000001",
+                    "accession": "0000000001-25-000001", "form": "10-K",
+                    "line_count": 2}
+        expected = f"statement-ingest:{content_hash(identity)[:32]}"
+        base = ["cash", "us-gaap:Cash", "Cash flow", 0, None, 0, None, None,
+                0, "2025-01-01", "2025-12-31", "100", "usd", None]
+        for ordinal in range(2):
+            connection.execute(
+                "INSERT INTO coverage_mission_statement_lines VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{expected}#{ordinal}", expected, base[0], ordinal, *base[1:]))
+        lines = []
+        for _ in range(2):
+            lines.append({
+                "statement": "cash", "concept": "us-gaap:Cash", "label": "Cash flow",
+                "level": 0, "parent_concept": None, "is_breakdown": False,
+                "dimension_axis": None, "dimension_member": None,
+                "period_start": "2025-01-01", "period_end": "2025-12-31",
+                "value": "100", "unit": "usd", "balance": None,
+            })
+        body = {**identity, "entity_name": "Test", "filed": "2026-01-01",
+                "report_date": "2025-12-31",
+                "source_record_refs": ["raw-sink:" + "1" * 64],
+                "governance_ref": "governance:test", "governance_hash": "2" * 64}
+        filing = {"ingest_id": expected, **body,
+                  "content_hash": content_hash({**body,
+                                                "statement_lines_hash": content_hash(lines)})}
+        _verify_statement_filing(connection, filing)
+
+        forged = "statement-ingest:" + "f" * 32
+        connection.execute("UPDATE coverage_mission_statement_lines SET ingest_id=?,line_id=replace(line_id,?,?)",
+                           (forged, expected, forged))
+        with self.assertRaisesRegex(FundWorkbookExportError, "ingest identity"):
+            _verify_statement_filing(connection, {**filing, "ingest_id": forged})
+        connection.execute("UPDATE coverage_mission_statement_lines SET ingest_id=?,line_id=replace(line_id,?,?)",
+                           (expected, forged, expected))
+
+        connection.execute("UPDATE coverage_mission_statement_lines SET ordinal=7,line_id=? WHERE ordinal=1",
+                           (f"{expected}#7",))
+        with self.assertRaisesRegex(FundWorkbookExportError, "line identity"):
+            _verify_statement_filing(connection, filing)
+        connection.execute("UPDATE coverage_mission_statement_lines SET ordinal=1,line_id=? WHERE ordinal=7",
+                           (f"{expected}#wrong",))
+        with self.assertRaisesRegex(FundWorkbookExportError, "line identity"):
             _verify_statement_filing(connection, filing)
 
     def test_closed_cash_formulas_translate_without_display_label_inference(self):

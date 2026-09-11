@@ -737,6 +737,19 @@ def _verify_statement_filing(
     ).fetchall()
     if len(rows) != int(filing["line_count"]):
         raise FundWorkbookExportError("annual filing authority line count is invalid")
+    identity = {
+        "company_ref": filing["company_ref"], "cik": filing["cik"],
+        "accession": filing["accession"], "form": filing["form"],
+        "line_count": int(filing["line_count"]),
+    }
+    expected_ingest_id = f"statement-ingest:{content_hash(identity)[:32]}"
+    if filing["ingest_id"] != expected_ingest_id:
+        raise FundWorkbookExportError("annual filing authority ingest identity is invalid")
+    for ordinal, row in enumerate(rows):
+        if (row["ingest_id"] != expected_ingest_id
+                or row["ordinal"] != ordinal
+                or row["line_id"] != f"{expected_ingest_id}#{ordinal}"):
+            raise FundWorkbookExportError("annual filing authority line identity is invalid")
     common_fields = (
         "statement", "concept", "label", "level", "parent_concept",
         "is_breakdown", "dimension_axis", "dimension_member", "period_start",
