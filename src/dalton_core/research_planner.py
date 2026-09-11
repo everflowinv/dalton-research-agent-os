@@ -54,6 +54,9 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .store import canonical_json, content_hash
+from .document_research_strategy import (
+    STRATEGY_VERSION, DocumentResearchStrategyError, resolve_strategy,
+)
 
 SCHEMA_VERSION = "0.1"
 TASK_REF = "task:research-plan-directives:0.1"
@@ -146,6 +149,19 @@ OUTPUT_SCHEMA = {
                             "Exact dossier repair target this inquiry addresses; "
                             "omit when it was prompted by something else."
                         ),
+                    },
+                    "directed_document": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["strategy_version", "document_ref", "document_version_hash",
+                                     "query_terms", "query_rationale"],
+                        "properties": {
+                            "strategy_version": {"const": STRATEGY_VERSION},
+                            "document_ref": {"type": "string", "minLength": 1},
+                            "document_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                            "query_terms": {"type": "array", "minItems": 1,
+                                            "items": {"type": "string", "minLength": 1}},
+                            "query_rationale": {"type": "string", "minLength": 1},
+                        },
                     },
                 },
             },
@@ -247,6 +263,15 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "`repair_target_ref`; never invent a ref. The system binds that identity and "
         "separately decides whether an approved directed retrieval capability can "
         "answer it. Do not turn a missing-evidence target into a general web request.\n\n"
+        "Claims summarize previous findings; they do not replace original documents. "
+        "For any inquiry that available original material can answer, use `directed_document` "
+        "to select an exact document_ref and document_version_hash from that company's "
+        "readable_documents. This applies to new questions as well as Dossier repairs. "
+        "Choose query_terms in the document's language, with synonyms or translated terms "
+        "when useful, and explain how they test the question in query_rationale. Follow "
+        "document_research_policy's query bounds. Never invent a document, version, "
+        "path or model route. A retrieval miss means the query found no match, not that "
+        "the document contains no answer; expand context or revise the strategy when warranted.\n\n"
         "Also return `sufficiency`: for any item where the count and the truth differ, "
         "whether what is actually held answers what this stage needs. A company can hold "
         "eighteen broker reports and still hold nothing that bears on its driver; the "
@@ -454,7 +479,7 @@ def plan_from_response(
         if not isinstance(inquiry, Mapping) or not {
             "question", "wants", "because",
         } <= set(inquiry) or set(inquiry) - {
-            "company_ref", "question", "wants", "because", "repair_target_ref",
+            "company_ref", "question", "wants", "because", "repair_target_ref", "directed_document",
         }:
             raise ResearchPlanError(f"inquiry {index} has an invalid closed shape")
         company_ref = inquiry.get("company_ref")
@@ -488,6 +513,13 @@ def plan_from_response(
                 "repair_target_ref": target_ref,
                 "repair_target_hash": target_hash,
             })
+        if "directed_document" in inquiry:
+            try:
+                strategy, _ = resolve_strategy(inquiry["directed_document"],
+                                               company_ref=company_ref, state=state)
+            except DocumentResearchStrategyError as exc:
+                raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
+            normalized["directed_document"] = strategy
         inquiries.append(normalized)
     floors = _required_floors(state)
     judgements: list[dict[str, Any]] = []

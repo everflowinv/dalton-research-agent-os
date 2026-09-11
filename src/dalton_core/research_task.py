@@ -363,6 +363,12 @@ def inquiry_content_hash(inquiry: Mapping[str, Any]) -> str:
             "repair_target_ref": target_ref,
             "repair_target_hash": target_hash,
         })
+    if "directed_document" in inquiry:
+        from .document_research_strategy import strategy_identity, DocumentResearchStrategyError
+        try:
+            identity["directed_document"] = strategy_identity(inquiry["directed_document"])
+        except DocumentResearchStrategyError as exc:
+            raise ResearchTaskError(str(exc)) from exc
     return content_hash(identity)
 
 
@@ -817,7 +823,7 @@ def _parameters_for(
     # automated templates binds that target to a local annual-report query or
     # to an exact AlphaEngine query. Keyword inference would silently turn it
     # into a broad paid refresh, so hold it as a visible capability gap.
-    if inquiry.get("repair_target_ref") is not None:
+    if inquiry.get("repair_target_ref") is not None or "directed_document" in inquiry:
         return None
     if operation == "get_company_facts":
         intent = _collapse(f"{inquiry.get('question', '')} {inquiry.get('wants', '')}").lower()
@@ -989,7 +995,8 @@ def plan_admissions(
                 "reason": (
                     "industry_inquiry_has_no_company_probe"
                     if inquiry.get("company_ref") is None
-                    else ("repair_target_capability_gap"
+                    else ("directed_document_capability_gap" if "directed_document" in inquiry
+                          else "repair_target_capability_gap"
                           if inquiry.get("repair_target_ref") is not None
                           else "no_bindable_template")
                 ),
@@ -1042,7 +1049,7 @@ def admit_inquiry(
 
     if not entry.get("admissible"):
         raise ResearchTaskError(f"inquiry is not admissible: {entry.get('reason')}")
-    if inquiry.get("repair_target_ref") is not None:
+    if inquiry.get("repair_target_ref") is not None or "directed_document" in inquiry:
         # There is no mission-authorized directed repair capability yet. Do
         # not let a caller bypass plan_admissions by presenting a forged
         # admissible entry to this lower-level mutation seam.
