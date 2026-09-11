@@ -7,10 +7,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from pathlib import Path
 
 from dalton_core.document_extraction import DocumentExtractionService
+from dalton_core.document_extraction_cli import run_extraction
 from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
 from dalton_core.store import content_hash
 from dalton_core.transcript_correction import TranscriptCorrectionConflict, TranscriptCorrectionValidationError
@@ -154,6 +156,75 @@ class AutomationDraftingTests(unittest.TestCase):
 
 class AutomationAdmissionTests(AutomationDraftingTests):
     """ADR-0005 / P9d-17b: drafts become Claims under the mission document rule."""
+
+    def _run_with_generation_results(self, results: list[dict]) -> dict:
+        self._grant_automation()
+        self._policy_with_document_rule()
+        fixture = self.root / "unused-fixture.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        values = iter(results)
+
+        def generated(_service, **_kwargs):
+            return next(values)
+
+        with patch.object(DocumentExtractionService, "generate", generated):
+            return run_extraction(
+                state_dir=self.root, model_config_path=self._model_config(),
+                summary_dir=self.root / "direct-summary", spool_dir=self.root / "spool",
+                scheduler_db=self.root / "scheduler.sqlite", requested_by=None,
+                max_windows=2, max_numeric_windows=0, max_discovery_windows=0,
+                connector_governance=None, web_fetch_governance=None,
+                hermetic_fixture=fixture, candidate_staging=self.root / "staging.sqlite",
+            )
+
+    def test_failed_qualitative_windows_never_dismiss_the_review(self) -> None:
+        summary = self._run_with_generation_results([
+            {"status": "failed", "suggestions": [], "error_code": "BUSY",
+             "work_order_ref": "work:document-extraction:failed-0"},
+            {"status": "failed", "suggestions": [], "error_code": "MODEL_CHAIN_EXHAUSTED",
+             "work_order_ref": "work:document-extraction:failed-1"},
+        ])
+        self.assertEqual(summary["reviews_complete"], 0)
+        self.assertEqual(summary["resolved_reviews"], [])
+        self.assertEqual(
+            [(item["status"], item["error_code"], item["work_order_ref"])
+             for item in summary["drafted"]],
+            [("failed", "BUSY", "work:document-extraction:failed-0"),
+             ("failed", "MODEL_CHAIN_EXHAUSTED", "work:document-extraction:failed-1")],
+        )
+        review = self.h.missions.document_reviews(
+            self.h.missions.active_mission("coverage-mission:us-it-services")["id"]
+        )[0]
+        self.assertEqual(review["state"], "awaiting_human_extraction")
+
+    def test_one_failed_window_prevents_mixed_review_dismissal(self) -> None:
+        summary = self._run_with_generation_results([
+            {"status": "succeeded", "suggestions": [],
+             "work_order_ref": "work:document-extraction:ok"},
+            {"status": "failed", "suggestions": [], "error_code": "BUSY",
+             "work_order_ref": "work:document-extraction:failed"},
+        ])
+        self.assertEqual(summary["reviews_complete"], 0)
+        self.assertEqual(summary["resolved_reviews"], [])
+
+    def test_all_valid_empty_windows_may_still_be_dismissed(self) -> None:
+        self._grant_automation()
+        self._policy_with_document_rule()
+        fixture = self.root / "empty-fixture.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        summary = run_extraction(
+            state_dir=self.root, model_config_path=self._model_config(),
+            summary_dir=self.root / "empty-summary", spool_dir=self.root / "spool",
+            scheduler_db=self.root / "scheduler.sqlite", requested_by=None,
+            max_windows=2, max_numeric_windows=0, max_discovery_windows=0,
+            connector_governance=None, web_fetch_governance=None,
+            hermetic_fixture=fixture, candidate_staging=self.root / "staging.sqlite",
+        )
+        self.assertEqual(summary["reviews_complete"], 1)
+        self.assertEqual(
+            [(item["status"], item["admitted"]) for item in summary["resolved_reviews"]],
+            [("dismissed", 0)],
+        )
 
     def test_correction_scope_for_automation_is_the_mirror_of_the_human_one(self) -> None:
         authority, manifest = self.h.writer._transcript_corrections(self.h.manifest)

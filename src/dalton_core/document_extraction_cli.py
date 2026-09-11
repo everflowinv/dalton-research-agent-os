@@ -418,6 +418,10 @@ def run_extraction(
                                  "document_ref": review["document_ref"], "offset": offset,
                                  "status": result.get("status"),
                                  "suggestions": len(result.get("suggestions", []))}
+                        for field in ("error_code", "work_order_ref"):
+                            value = result.get(field)
+                            if isinstance(value, str) and value:
+                                entry[field] = value
                         budget = result.get("model_budget") or {}
                         if isinstance(budget, dict) and budget.get("status"):
                             entry["budget"] = budget["status"]
@@ -426,6 +430,12 @@ def run_extraction(
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
                             break
+                        if result.get("status") != "succeeded":
+                            # A terminal model failure is a statement about the
+                            # execution, not about the source window.  Keep the
+                            # review open so it cannot be mislabeled as a full
+                            # successful read with no admissible statements.
+                            complete = False
                         if isinstance(budget, dict) and budget.get("status") == "rejected":
                             stop_reason = "budget_rejected"
                             complete = False
