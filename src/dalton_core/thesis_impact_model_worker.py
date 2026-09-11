@@ -24,7 +24,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from fractions import Fraction
 from typing import Any
@@ -33,9 +33,10 @@ from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .model_router import ModelRouter, RoutingPolicyNotFound
 from .observability import ObservabilityStore
 from .openclaw_model_adapter import (
-    BrokerConnectionError,
+    BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
+    PostSendUnknownEvidence,
 )
 from .research_context import count_dalton_search_tokens
 from .scheduler import Scheduler
@@ -110,6 +111,14 @@ class ThesisImpactModelWorker:
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
         fault_hook: Callable[[str], None] | None = None,
+        assessment_adapter: OpenClawModelAdapter | None = None,
+        verifier_adapter: OpenClawModelAdapter | None = None,
+        assessment_provider_retry: Mapping[str, Any] | None = None,
+        verifier_provider_retry: Mapping[str, Any] | None = None,
+        assessment_transport_retry: Mapping[str, Any] | None = None,
+        verifier_transport_retry: Mapping[str, Any] | None = None,
+        assessment_timeout_seconds: float | None = None,
+        verifier_timeout_seconds: float | None = None,
     ) -> None:
         if impact.scheduler is not scheduler:
             raise TypeError("worker and impact must share one Scheduler authority")
@@ -156,6 +165,10 @@ class ThesisImpactModelWorker:
         self.scheduler = scheduler
         self.router = router
         self.adapter = adapter
+        self.phase_adapters = {
+            "assessment": assessment_adapter or adapter,
+            "verification": verifier_adapter or adapter,
+        }
         self.impact = impact
         self.store = impact.store
         self.observability = observability
@@ -171,6 +184,46 @@ class ThesisImpactModelWorker:
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.fault_hook = fault_hook
+        from .document_extraction import validate_transport_retry
+        from .provider_retry import ProviderRetryError, validate_provider_retry
+
+        self.phase_provider_retry: dict[str, dict[str, Any] | None] = {}
+        self.phase_transport_retry: dict[str, dict[str, Any] | None] = {}
+        self.phase_timeout_seconds: dict[str, float | None] = {}
+        for phase, provider, transport, timeout in (
+            ("assessment", assessment_provider_retry, assessment_transport_retry,
+             assessment_timeout_seconds),
+            ("verification", verifier_provider_retry, verifier_transport_retry,
+             verifier_timeout_seconds),
+        ):
+            if timeout is not None and (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not math.isfinite(float(timeout))
+                or float(timeout) <= 0
+            ):
+                raise ValueError(f"invalid {phase} adapter timeout")
+            try:
+                parsed_provider = (
+                    None if provider is None else validate_provider_retry(provider)
+                )
+            except ProviderRetryError as exc:
+                raise ValueError(f"invalid {phase} provider retry policy") from exc
+            if parsed_provider is not None and "unknown_recovery" in parsed_provider:
+                raise ValueError(
+                    f"{phase} provider retry does not support unknown-result recovery"
+                )
+            try:
+                parsed_transport = (
+                    None if transport is None else validate_transport_retry(transport)
+                )
+            except Exception as exc:
+                raise ValueError(f"invalid {phase} transport retry policy") from exc
+            self.phase_provider_retry[phase] = parsed_provider
+            self.phase_transport_retry[phase] = parsed_transport
+            self.phase_timeout_seconds[phase] = (
+                None if timeout is None else float(timeout)
+            )
 
     @staticmethod
     def _work(value: WorkOrder | Mapping[str, Any]) -> WorkOrder:
@@ -236,6 +289,42 @@ class ThesisImpactModelWorker:
                 f"{phase} routing policy is not pinned to exactly one profile"
             )
         return pinned_ref
+
+    def _execution_binding(self, phase: str, capability: str) -> dict[str, Any]:
+        policy_ref = self._phase_policy_ref(phase)
+        policy = self.router.get_policy(policy_ref)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "purpose": (
+                "thesis_impact_assessment"
+                if phase == "assessment"
+                else "thesis_impact_verifier"
+            ),
+            "capability": capability,
+            "routing_policy_ref": policy_ref,
+            "routing_policy_hash": policy["content_hash"],
+            "credential_slot_refs": list(self.credential_slot_refs),
+            "adapter_timeout_seconds": self.phase_timeout_seconds[phase],
+            "transport_retry": self.phase_transport_retry[phase],
+            "provider_retry": self.phase_provider_retry[phase],
+        }
+
+    def _validate_execution_binding(
+        self, work: WorkOrder, phase: str, capability: str
+    ) -> dict[str, Any]:
+        expected = self._execution_binding(phase, capability)
+        actual = work.metadata.get("model_execution")
+        if actual is None and all(
+            expected[key] is None for key in ("transport_retry", "provider_retry")
+        ):
+            # Compatibility for already-admitted pre-binding WorkOrders. New
+            # production Work carries the full phase execution object.
+            return expected
+        if actual != expected:
+            raise ThesisImpactModelWorkerRejected(
+                f"{phase} WorkOrder model execution differs from the worker"
+            )
+        return expected
 
     def _producer_family(self, work: WorkOrder, phase: str) -> str | None:
         if phase == "assessment":
@@ -440,6 +529,8 @@ class ThesisImpactModelWorker:
         invocation: ModelInvocation,
         route: Mapping[str, Any],
         profile: Mapping[str, Any],
+        *,
+        conservative_reservation_micros: int | None = None,
     ) -> dict[str, Any]:
         usage = dict(invocation.usage)
         input_tokens = usage.get("input_tokens")
@@ -509,7 +600,12 @@ class ThesisImpactModelWorker:
         amount_micros: int
         cost_status: str
         calculation_ref: str
-        if reported:
+        if conservative_reservation_micros is not None:
+            amount_micros = conservative_reservation_micros
+            charge_specs = [("request", 1, amount_micros)]
+            cost_status = "estimated"
+            calculation_ref = "calculator:unknown-completion-reservation:0.1"
+        elif reported:
             amount_micros = int(
                 (Decimal(str(raw_cost["usd"])) * Decimal(1_000_000)).quantize(
                     Decimal("1"), rounding=ROUND_HALF_UP
@@ -604,6 +700,7 @@ class ThesisImpactModelWorker:
         created_at: str | None = None,
         redriveable: bool = True,
         route_ref: str | None = None,
+        definitely_not_sent: bool = False,
     ) -> ResultEnvelope:
         identity = {
             "work_order_ref": work.id,
@@ -635,7 +732,43 @@ class ThesisImpactModelWorker:
                 # EXCEEDED) and already-paid model-output rejections must not.
                 "control_plane_redriveable": redriveable,
                 "route_decision_ref": route_ref,
+                **(
+                    {"dispatch_proof": {
+                        "authority": "openclaw-model-adapter",
+                        "state": "definitely_not_sent",
+                        "version": "0.1",
+                    }}
+                    if definitely_not_sent
+                    else {}
+                ),
             },
+        )
+
+    @staticmethod
+    def _local_not_sent(result: ResultEnvelope) -> bool:
+        return (
+            result.status == "failed"
+            and str((result.error or {}).get("code", "")).upper() in {
+                "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                "QUEUE_TIMEOUT", "BROKER_CLOSED",
+            }
+            and result.metadata.get("dispatch_proof") == {
+                "authority": "openclaw-model-adapter",
+                "state": "definitely_not_sent",
+                "version": "0.1",
+            }
+        )
+
+    @staticmethod
+    def _reported_cost_available(invocation: ModelInvocation) -> bool:
+        raw = invocation.usage.get("raw_provider_telemetry", {}).get("cost", {})
+        return (
+            isinstance(raw, Mapping)
+            and raw.get("available") is True
+            and isinstance(raw.get("usd"), (int, float))
+            and not isinstance(raw.get("usd"), bool)
+            and math.isfinite(float(raw["usd"]))
+            and float(raw["usd"]) >= 0
         )
 
     @staticmethod
@@ -663,6 +796,173 @@ class ThesisImpactModelWorker:
             for event in self.scheduler.attempt_history(work_order_id)
             if event.get("result_envelope_id") is not None
         }
+
+    def _provider_retry_state(
+        self, work: WorkOrder, phase: str
+    ) -> dict[str, Any] | None:
+        policy = self.phase_provider_retry[phase]
+        if policy is None:
+            return None
+        rows = self.scheduler.connection.execute(
+            "SELECT result_envelope_json,result_envelope_hash,attempt_number "
+            "FROM scheduler_result_envelopes WHERE work_order_id=? "
+            "AND outcome='retryable' ORDER BY attempt_number DESC",
+            (work.id,),
+        ).fetchall()
+        selected = None
+        for row in rows:
+            try:
+                wire = json.loads(row["result_envelope_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ThesisImpactModelWorkerConflict(
+                    "persisted provider retry result is invalid"
+                ) from exc
+            if (
+                canonical_json(wire) != row["result_envelope_json"]
+                or content_hash(wire) != row["result_envelope_hash"]
+            ):
+                raise ThesisImpactModelWorkerConflict(
+                    "persisted provider retry result drifted"
+                )
+            metadata = wire.get("metadata") if isinstance(wire, Mapping) else None
+            if not isinstance(metadata, Mapping) or "provider_retry_proof" not in metadata:
+                continue
+            selected = (row, wire, metadata.get("provider_retry_state"))
+            break
+        if selected is None:
+            return {
+                "excluded_profile_ids": [],
+                "retry_profile_version_ref": None,
+                "same_profile_retries": 0,
+            }
+        row, wire, state = selected
+        if (
+            not isinstance(state, Mapping)
+            or set(state) != {
+                "excluded_profile_ids", "retry_profile_version_ref",
+                "same_profile_retries",
+            }
+            or not isinstance(state.get("excluded_profile_ids"), list)
+            or not all(isinstance(item, str) and item for item in state["excluded_profile_ids"])
+            or len(set(state["excluded_profile_ids"])) != len(state["excluded_profile_ids"])
+            or state.get("retry_profile_version_ref") is not None
+               and not isinstance(state["retry_profile_version_ref"], str)
+            or isinstance(state.get("same_profile_retries"), bool)
+            or not isinstance(state.get("same_profile_retries"), int)
+            or state["same_profile_retries"] < 0
+        ):
+            raise ThesisImpactModelWorkerConflict(
+                "persisted provider retry state is invalid"
+            )
+        decisions = self.router.list_decisions(work_order_id=work.id)
+        matching = [
+            item for item in decisions
+            if item.get("attempt_number") == row["attempt_number"]
+        ]
+        route = matching[-1] if matching else None
+        selected_version = (
+            None if route is None else route.get("selected_profile_version_ref")
+        )
+        selected_id = (
+            None if selected_version is None
+            else self.router.get_profile(selected_version)["id"]
+        )
+        try:
+            invocation_wire = self.impact.find_invocation(wire["invocation_ref"])
+            invocation = ModelInvocation.from_dict(invocation_wire)
+            failed_wire = dict(wire)
+            failed_wire["status"] = "failed"
+            failed_result = ResultEnvelope.from_dict(failed_wire)
+            from .provider_retry import returned_provider_failure_proof
+
+            proof = returned_provider_failure_proof(invocation, failed_result)
+        except Exception as exc:
+            raise ThesisImpactModelWorkerConflict(
+                "persisted provider retry proof is invalid"
+            ) from exc
+        if proof is None or proof != wire["metadata"].get("provider_retry_proof"):
+            raise ThesisImpactModelWorkerConflict(
+                "persisted provider retry proof is invalid"
+            )
+        if (
+            wire.get("work_order_ref") != work.id
+            or route is None
+            or wire.get("metadata", {}).get("route_decision_ref") != route.get("id")
+            or state["retry_profile_version_ref"] is not None
+               and state["retry_profile_version_ref"] != selected_version
+            or state["retry_profile_version_ref"] is None
+               and selected_id not in state["excluded_profile_ids"]
+            or state["same_profile_retries"] > policy["max_same_profile_retries"]
+        ):
+            raise ThesisImpactModelWorkerConflict(
+                "persisted provider retry state does not match route history"
+            )
+        return dict(state)
+
+    def _paid_retry_result(
+        self,
+        *,
+        lease: Mapping[str, Any],
+        phase: str,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+        invocation: ModelInvocation,
+        result: ResultEnvelope,
+        state: Mapping[str, Any] | None,
+    ) -> ResultEnvelope:
+        policy = self.phase_provider_retry[phase]
+        if policy is None or state is None:
+            return result
+        from .provider_retry import returned_provider_failure_proof
+
+        proof = returned_provider_failure_proof(invocation, result)
+        if proof is None:
+            return result
+        used = int(state["same_profile_retries"])
+        excluded = list(state["excluded_profile_ids"])
+        if used < policy["max_same_profile_retries"]:
+            retry_profile = profile["profile_version_ref"]
+            used += 1
+        else:
+            if profile["id"] not in excluded:
+                excluded.append(profile["id"])
+            retry_profile = None
+            used = 0
+        return replace(
+            result,
+            status=self._bounded_failure_status(lease),
+            metadata=dict(result.metadata) | {
+                "provider_retry_proof": proof,
+                "provider_retry_state": {
+                    "excluded_profile_ids": excluded,
+                    "retry_profile_version_ref": retry_profile,
+                    "same_profile_retries": used,
+                },
+            },
+        )
+
+    def _execute_with_safe_retry(
+        self,
+        work: WorkOrder,
+        phase: str,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> tuple[ModelInvocation, ResultEnvelope]:
+        import time
+
+        policy = self.phase_transport_retry[phase] or {}
+        maximum = int(policy.get("max_definitely_not_sent_retries", 0))
+        adapter = self.phase_adapters[phase]
+        for retry_number in range(maximum + 1):
+            try:
+                return adapter.execute(work, route, profile)
+            except BrokerDefinitelyNotSent:
+                if retry_number >= maximum:
+                    raise
+                backoff = int(policy.get("retry_backoff_seconds", 0))
+                if backoff:
+                    time.sleep(backoff)
+        raise AssertionError("thesis-impact transport retry did not return")
 
     @staticmethod
     def _reuse_invocation(
@@ -707,6 +1007,7 @@ class ThesisImpactModelWorker:
 
         work = self._work(work_order)
         phase, capability = self._phase(work)
+        execution = self._validate_execution_binding(work, phase, capability)
         status = self.scheduler.status(work.id)
         if status["work_order_hash"] != content_hash(work.to_dict()):
             raise ThesisImpactModelWorkerConflict(
@@ -722,7 +1023,7 @@ class ThesisImpactModelWorker:
                 "invocation_ref": formal["result_envelope"]["invocation_ref"],
                 "replayed": True,
             }
-        phase_policy_ref = self._phase_policy_ref(phase)
+        phase_policy_ref = execution["routing_policy_ref"]
         lease = self.scheduler.claim(
             WORKER_REF,
             work_order_id=work.id,
@@ -743,6 +1044,7 @@ class ThesisImpactModelWorker:
             )
         attempt_number = lease["attempt"]["attempt_number"]
         producer_family = self._producer_family(work, phase)
+        provider_retry_state = self._provider_retry_state(work, phase)
         previous = self.router.list_decisions(work_order_id=work.id)
         accepted_attempts = self._accepted_attempts(work.id)
         recovery_route = (
@@ -771,6 +1073,14 @@ class ThesisImpactModelWorker:
                 decision_kind=decision_kind,
                 previous_decision_ref=previous_ref,
                 producer_family=producer_family,
+                excluded_profile_ids=(
+                    () if provider_retry_state is None
+                    else provider_retry_state["excluded_profile_ids"]
+                ),
+                required_profile_version_ref=(
+                    None if provider_retry_state is None
+                    else provider_retry_state["retry_profile_version_ref"]
+                ),
                 purpose=("thesis_impact_assessment" if phase == "assessment"
                          else "thesis_impact_verifier"),
                 idempotency_key=(
@@ -861,11 +1171,84 @@ class ThesisImpactModelWorker:
                 }
         try:
             if route_replayed:
-                invocation, adapter_result = self.adapter.replay(work, routed, profile)
+                invocation, adapter_result = self.phase_adapters[phase].replay(
+                    work, routed, profile
+                )
             else:
-                invocation, adapter_result = self.adapter.execute(work, routed, profile)
+                invocation, adapter_result = self._execute_with_safe_retry(
+                    work, phase, routed, profile
+                )
         except OpenClawModelAdapterError as exc:
-            retryable = isinstance(exc, BrokerConnectionError)
+            evidence = getattr(exc, "post_send_unknown_evidence", None)
+            if evidence is not None:
+                if not isinstance(evidence, PostSendUnknownEvidence):
+                    raise ThesisImpactModelWorkerConflict(
+                        "adapter post-send unknown evidence is invalid"
+                    ) from exc
+                invocation = evidence.invocation
+                result = evidence.result
+                if (
+                    invocation.work_order_ref != work.id
+                    or invocation.parent_ref != routed["id"]
+                    or result.work_order_ref != work.id
+                    or result.invocation_ref != invocation.id
+                    or result.status != "failed"
+                    or (result.error or {}).get("code")
+                       != "POST_SEND_RESULT_UNKNOWN"
+                    or result.metadata.get("route_decision_ref") != routed["id"]
+                ):
+                    raise ThesisImpactModelWorkerConflict(
+                        "adapter post-send unknown evidence is invalid"
+                    ) from exc
+                saved = self.impact.find_invocation(invocation.id)
+                if saved is None:
+                    self.store.register_invocation(invocation.to_dict())
+                else:
+                    invocation = self._reuse_invocation(saved, invocation)
+                reserved = self._budget_reserved_micros(work)
+                accounting = self._account(
+                    invocation,
+                    routed,
+                    profile,
+                    conservative_reservation_micros=reserved,
+                )
+                if admission is not None:
+                    self.budget.settle(
+                        admission["admission_id"],
+                        actual_micros=reserved,
+                        usage_entry_ref=accounting["usage"]["id"],
+                    )
+                completed = self.scheduler.complete(
+                    work.id,
+                    attempt_number,
+                    WORKER_REF,
+                    lease["lease_token"],
+                    result,
+                    idempotency_key=(
+                        f"thesis-impact-complete:{work.id}:{attempt_number}"
+                    ),
+                )
+                return {
+                    "status": "failed",
+                    "phase": phase,
+                    "work_order_ref": work.id,
+                    "route": routed,
+                    "profile": profile,
+                    "invocation": invocation.to_dict(),
+                    "result": result.to_dict(),
+                    "accounting": accounting,
+                    "completion": completed,
+                    "post_send_result_unknown": True,
+                }
+            retryable = isinstance(exc, BrokerDefinitelyNotSent)
+            if admission is not None:
+                self.budget.settle(
+                    admission["admission_id"],
+                    actual_micros=(
+                        0 if retryable else self._budget_reserved_micros(work)
+                    ),
+                    usage_entry_ref=None,
+                )
             failure_status = (
                 self._bounded_failure_status(lease) if retryable else "failed"
             )
@@ -891,6 +1274,7 @@ class ThesisImpactModelWorker:
                 code="MODEL_ADAPTER_UNAVAILABLE" if retryable else "MODEL_ADAPTER_REJECTED",
                 status=failure_status,
                 route_ref=routed["id"],
+                definitely_not_sent=retryable,
             )
             completed = self.scheduler.complete(
                 work.id,
@@ -958,7 +1342,22 @@ class ThesisImpactModelWorker:
             self.store.register_invocation(invocation.to_dict())
         else:
             invocation = self._reuse_invocation(saved_invocation, invocation)
-        accounting = self._account(invocation, routed, profile)
+        local_not_sent = self._local_not_sent(adapter_result)
+        conservative = (
+            0
+            if local_not_sent
+            else (
+                None
+                if self._reported_cost_available(invocation)
+                else self._budget_reserved_micros(work)
+            )
+        )
+        accounting = self._account(
+            invocation,
+            routed,
+            profile,
+            conservative_reservation_micros=conservative,
+        )
         if admission is not None:
             self.budget.settle(
                 admission["admission_id"],
@@ -968,24 +1367,21 @@ class ThesisImpactModelWorker:
         if self.fault_hook is not None:
             self.fault_hook("after_model_accounting")
         result = adapter_result
-        if (
-            result.status == "failed"
-            and isinstance(result.error, Mapping)
-            and result.error.get("code") == "HOST_COMPLETION_FAILED"
-        ):
-            # A broker-reported host completion failure is a transient
-            # provider-side stop (live 2026-08-27: one Gemini verifier call
-            # died inside the host).  Retry inside the existing bounded
-            # attempts instead of parking the exact binding on attempt one;
-            # the day budget still gates every new paid call and this stays
-            # non-redriveable.
+        if local_not_sent:
             result = replace(
                 result,
                 status=self._bounded_failure_status(lease),
-                metadata={
-                    **dict(result.metadata),
-                    "host_failure_bounded_retry": True,
-                },
+                metadata=dict(result.metadata) | {"capacity_deferred": True},
+            )
+        elif result.status == "failed":
+            result = self._paid_retry_result(
+                lease=lease,
+                phase=phase,
+                route=routed,
+                profile=profile,
+                invocation=invocation,
+                result=result,
+                state=provider_retry_state,
             )
         if result.status == "succeeded":
             try:
@@ -1014,6 +1410,18 @@ class ThesisImpactModelWorker:
             lease["lease_token"],
             result,
             idempotency_key=f"thesis-impact-complete:{work.id}:{attempt_number}",
+            retry_at=(
+                self.clock().astimezone(timezone.utc)
+                + timedelta(
+                    seconds=self.phase_provider_retry[phase][
+                        "retry_backoff_seconds"
+                    ]
+                )
+                if self.phase_provider_retry[phase] is not None
+                and result.status == "retryable"
+                and result.metadata.get("provider_retry_proof") is not None
+                else None
+            ),
         )
         if result.status == "succeeded":
             normalized_status = "succeeded"

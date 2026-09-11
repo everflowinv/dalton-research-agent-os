@@ -2098,6 +2098,17 @@ class WriterServer:
             self._research_plan, self._backlog, self._observability,
             self._research_plan_scheduler,
         )
+        thesis_execution_bindings = None
+        thesis_runtime_config = None
+        if self._scheduler_path is not None:
+            from .thesis_impact_production import (
+                ThesisImpactProductionError,
+                thesis_impact_runtime_config,
+            )
+            try:
+                thesis_runtime_config = thesis_impact_runtime_config(self.state_dir)
+            except ThesisImpactProductionError as exc:
+                raise WriterServerError(str(exc)) from exc
         if self._scheduler_path is not None:
             scheduler_kwargs: dict[str, Any] = {}
             if self._document_extraction_model_config is not None:
@@ -2145,6 +2156,51 @@ class WriterServer:
                     })[:24]
                     + "-0.1"
                 )
+            if thesis_runtime_config is not None:
+                from .model_router import ModelRouter
+                from .thesis_impact_production import (
+                    thesis_impact_execution_bindings,
+                    thesis_impact_scheduler_requirements,
+                )
+
+                # The resident writer is already an authority owner. Opening
+                # the router normally also works immediately after a clean
+                # checkpoint, when SQLite has removed the WAL/SHM sidecars
+                # required by the strict read-only helper.
+                with ModelRouter(
+                    thesis_runtime_config.model_router_db
+                ) as thesis_router:
+                    thesis_execution_bindings = thesis_impact_execution_bindings(
+                        thesis_runtime_config, thesis_router
+                    )
+                    thesis_attempts, thesis_lease, thesis_binding_hash = (
+                        thesis_impact_scheduler_requirements(
+                            thesis_runtime_config, thesis_router
+                        )
+                    )
+                scheduler_kwargs["max_attempts"] = max(
+                    int(scheduler_kwargs.get("max_attempts", 3)), thesis_attempts
+                )
+                scheduler_kwargs["max_lease_seconds"] = max(
+                    float(scheduler_kwargs.get("max_lease_seconds", 60.0)),
+                    thesis_lease,
+                )
+                scheduler_kwargs["max_total_lease_seconds"] = max(
+                    float(scheduler_kwargs.get("max_total_lease_seconds", 300.0)),
+                    thesis_lease * 2,
+                )
+                scheduler_kwargs["policy_version_id"] = (
+                    "scheduler-policy-thesis-impact-retry-"
+                    + content_hash({
+                        "base": scheduler_kwargs.get(
+                            "policy_version_id", "scheduler-policy-0.1"
+                        ),
+                        "execution_binding_hash": thesis_binding_hash,
+                        "max_attempts": scheduler_kwargs["max_attempts"],
+                        "lease_seconds": thesis_lease,
+                    })[:24]
+                    + "-0.1"
+                )
             self._scheduler = Scheduler(self._scheduler_path, **scheduler_kwargs)
             self._planner_scheduler = self._scheduler
             self._bounded_control = BoundedPlannerControlPlane(
@@ -2165,6 +2221,7 @@ class WriterServer:
                 scheduler=self._scheduler,
                 impact=self._thesis_impact,
                 budget_config_path=self.state_dir / "thesis-impact-budget-config.json",
+                model_execution_bindings=thesis_execution_bindings,
             )
 
     def serve_forever(self) -> None:

@@ -36,7 +36,19 @@ from dalton_core.thesis_impact_model_worker import (
     ThesisImpactModelWorkerConflict,
     ThesisImpactModelWorkerRejected,
 )
-from tests.test_openclaw_model_adapter import FakeBroker
+from dalton_core.thesis_impact_production import (
+    ThesisImpactProductionConfig,
+    thesis_impact_execution_bindings,
+    thesis_impact_scheduler_requirements,
+)
+from tests.test_openclaw_model_adapter import (
+    AUTH_SECRET,
+    FakeBroker,
+    core_request,
+    failure_response,
+    seal,
+    success_response,
+)
 from tests.test_research_plan_executor import PlanExecutorHarness
 
 
@@ -1115,7 +1127,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 model="claude-impact-b",
                 family="impact-family-b",
                 cost=2.0,
-                capabilities=["verify"],
+                capabilities=["research", "verify"],
             ),
         ]
         for item in profiles:
@@ -1185,6 +1197,386 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 ],
             })
         return shared_ref, assessment_ref, verifier_ref
+
+    def _production_config(
+        self,
+        *,
+        router_path: Path,
+        shared_ref: str,
+        assessment_ref: str,
+        verifier_ref: str,
+        assessment_provider_retry: dict[str, int] | None = None,
+        verifier_provider_retry: dict[str, int] | None = None,
+        assessment_transport_retry: dict[str, int] | None = None,
+        verifier_transport_retry: dict[str, int] | None = None,
+    ) -> ThesisImpactProductionConfig:
+        raw: dict[str, Any] = {
+            "scheduler_db": str(Path(self.temp.name) / "scheduler.sqlite"),
+            "model_router_db": str(router_path),
+            "writer_socket": str(Path(self.temp.name) / "writer.sock"),
+            "token_config": str(Path(self.temp.name) / "writer-tokens.json"),
+            "broker_socket": str(Path(self.temp.name) / "broker.sock"),
+            "broker_auth_key": str(Path(self.temp.name) / "broker.key"),
+            "budget_db": str(Path(self.temp.name) / "budget.sqlite"),
+            "routing_policy_ref": shared_ref,
+            "assessment_routing_policy_ref": assessment_ref,
+            "verifier_routing_policy_ref": verifier_ref,
+            "budget_policy_version_id": "budget-policy:thesis-impact-retry:1",
+            "day_cap_micros": 5_000_000,
+            "credential_slot_refs": [
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ],
+            "broker_client_id": "client:thesis-impact-runtime",
+            "expected_agent_id": "dalton-model-broker",
+            "company_thesis_refs": {},
+            "max_targets": 1,
+            "timeout_seconds": 1,
+        }
+        for key, value in (
+            ("assessment_provider_retry", assessment_provider_retry),
+            ("verifier_provider_retry", verifier_provider_retry),
+            ("assessment_transport_retry", assessment_transport_retry),
+            ("verifier_transport_retry", verifier_transport_retry),
+        ):
+            if value is not None:
+                raw[key] = value
+        return ThesisImpactProductionConfig.from_mapping(raw)
+
+    def test_real_uds_returned_failure_uses_new_attempt_and_fallback(self) -> None:
+        """A paid retry keeps the phase authority and changes invocation/route."""
+
+        fixed_now = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
+        self.harness.clock.value = fixed_now
+        router_path = Path(self.temp.name) / "retry-router.sqlite"
+        router = ModelRouter(router_path, clock=lambda: fixed_now)
+        self.addCleanup(router.close)
+        shared_ref, original_assessment_ref, verifier_ref = (
+            self._impact_profiles_and_policies(
+                router, pinned_profile_id="profile:impact-a"
+            )
+        )
+        original = router.get_policy(original_assessment_ref)
+        assessment_ref = "model-routing-policy-version:thesis-impact-assessment:2"
+        chained = {
+            key: value for key, value in original.items()
+            if key not in {"content_hash", "created_at"}
+        }
+        chained.update({
+            "policy_version_ref": assessment_ref,
+            "version": 2,
+            "created_at": "2026-08-22T01:01:00+00:00",
+            "prior_version_ref": original_assessment_ref,
+            "filters": dict(original["filters"]) | {
+                "allowed_profile_ids": ["profile:impact-a", "profile:impact-b"],
+            },
+            "purpose_overrides": {
+                "thesis_impact_assessment": {
+                    "mode": "explicit",
+                    "chain": ["profile:impact-a", "profile:impact-b"],
+                },
+            },
+        })
+        router.register_policy(chained)
+        assessment_retry = {
+            "max_same_profile_retries": 0,
+            "retry_backoff_seconds": 0,
+        }
+        verifier_retry = {
+            "max_same_profile_retries": 1,
+            "retry_backoff_seconds": 7,
+        }
+        assessment_transport = {
+            "queue_wait_seconds": 7,
+            "max_definitely_not_sent_retries": 1,
+            "retry_backoff_seconds": 0,
+        }
+        verifier_transport = {
+            "queue_wait_seconds": 11,
+            "max_definitely_not_sent_retries": 2,
+            "retry_backoff_seconds": 3,
+        }
+        config = self._production_config(
+            router_path=router_path,
+            shared_ref=shared_ref,
+            assessment_ref=assessment_ref,
+            verifier_ref=verifier_ref,
+            assessment_provider_retry=assessment_retry,
+            verifier_provider_retry=verifier_retry,
+            assessment_transport_retry=assessment_transport,
+            verifier_transport_retry=verifier_transport,
+        )
+        bindings = thesis_impact_execution_bindings(config, router)
+        attempts, lease_seconds, binding_hash = thesis_impact_scheduler_requirements(
+            config, router
+        )
+        self.assertEqual(attempts, 2)
+        self.assertEqual(lease_seconds, 72.0)
+        self.assertEqual(len(binding_hash), 64)
+        self.control = ResearchPlanThesisImpactCoordinator(
+            closure=self.closure,
+            impact=self.impact,
+            model_execution_bindings=bindings,
+        )
+        committed = self._seed_thesis()
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        started = self._close_and_start()
+        work = started["impact"]["assessment_work_order"]
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        output = {
+            "schema_version": "0.1",
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "thesis_version_ref": thesis["id"],
+            "thesis_version_hash": thesis["content_hash"],
+            "driver_statement": thesis["mechanism"],
+            "impact": "supports",
+            "rationale": "The exact formal claim supports the bound driver.",
+            "follow_up_question": None,
+        }
+
+        def respond(request: dict[str, Any]) -> dict[str, Any]:
+            if len(broker.requests) == 1:
+                response = failure_response(
+                    request,
+                    code="RATE_LIMITED",
+                    dispatch_proof={
+                        "authority": "openclaw-model-broker",
+                        "state": "provider_completed_failure",
+                        "version": "0.1",
+                    },
+                )
+            elif len(broker.requests) == 2:
+                response = success_response(
+                    request, text=canonical_json(output)
+                )
+                provider, model = core_request(request)["model"].split("/", 1)
+                response.update({
+                    "provider": provider,
+                    "model": model,
+                    "canonicalModel": f"{provider}/{model}",
+                })
+            else:
+                response = success_response(
+                    request,
+                    text=canonical_json({
+                        "schema_version": "0.1",
+                        "verdict": "pass",
+                        "findings": [],
+                    }),
+                )
+                provider, model = core_request(request)["model"].split("/", 1)
+                response.update({
+                    "provider": provider,
+                    "model": model,
+                    "canonicalModel": f"{provider}/{model}",
+                })
+            execution = core_request(request)
+            execution.pop("queueWaitMs", None)
+            response["requestHash"] = broker_hash(execution)
+            response.pop("contentHash")
+            return seal(response)
+
+        broker = FakeBroker(Path(self.temp.name), respond, connections=3)
+        self.addCleanup(broker.close)
+        key = Path(self.temp.name) / "retry-broker.key"
+        key.write_bytes(AUTH_SECRET)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id=config.broker_client_id,
+            auth_key_provider=lambda: key.read_bytes(),
+            timeout_seconds=1,
+            queue_wait_seconds=7,
+            expected_agent_id=config.expected_agent_id,
+            clock=lambda: fixed_now,
+        )
+        verifier_adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id=config.broker_client_id,
+            auth_key_provider=lambda: key.read_bytes(),
+            timeout_seconds=1,
+            queue_wait_seconds=11,
+            expected_agent_id=config.expected_agent_id,
+            clock=lambda: fixed_now,
+        )
+        budget = ThesisImpactBudgetStore(
+            Path(self.temp.name) / "retry-budget.sqlite", clock=lambda: fixed_now
+        )
+        self.addCleanup(budget.close)
+        budget.register_policy(
+            policy_version_id=config.budget_policy_version_id,
+            day_cap_micros=config.day_cap_micros,
+        )
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            assessment_adapter=adapter,
+            verifier_adapter=verifier_adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
+            verifier_routing_policy_ref=verifier_ref,
+            credential_slot_refs=config.credential_slot_refs,
+            budget=budget,
+            budget_policy_version_id=config.budget_policy_version_id,
+            assessment_provider_retry=assessment_retry,
+            verifier_provider_retry=verifier_retry,
+            assessment_transport_retry=assessment_transport,
+            verifier_transport_retry=verifier_transport,
+            assessment_timeout_seconds=config.timeout_seconds,
+            verifier_timeout_seconds=config.timeout_seconds,
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
+        first = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(first["status"], "assessment_retryable", first)
+        second = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(second["status"], "eligible")
+        self.assertEqual(
+            [request["profileId"] for request in broker.requests],
+            ["profile:impact-a", "profile:impact-b", "profile:impact-a"],
+            second,
+        )
+        self.assertEqual(
+            len({request["invocationId"] for request in broker.requests}), 3
+        )
+        self.assertEqual(
+            [request["queueWaitMs"] for request in broker.requests],
+            [7000, 7000, 11000],
+        )
+        history = self.harness.scheduler().attempt_history(work["id"])
+        self.assertEqual(
+            [(row["attempt_number"], row["state"]) for row in history
+             if row["state"] in {"retryable", "succeeded"}],
+            [(1, "retryable"), (2, "succeeded")],
+        )
+        authority = self.harness.scheduler().work_order_authority(work["id"])
+        self.assertEqual(
+            authority["work_order"]["metadata"]["model_execution"],
+            bindings["assessment"],
+        )
+        verifier_work = second["assessment"]["verifier_work_order"]
+        self.assertEqual(
+            verifier_work["metadata"]["model_execution"],
+            bindings["verification"],
+        )
+        self.assertNotEqual(
+            bindings["assessment"]["routing_policy_hash"],
+            bindings["verification"]["routing_policy_hash"],
+        )
+        admissions = budget.connection.execute(
+            "SELECT attempt_number,reserved_micros FROM thesis_impact_day_admissions "
+            "WHERE work_order_ref=? ORDER BY attempt_number",
+            (work["id"],),
+        ).fetchall()
+        settlements = budget.connection.execute(
+            "SELECT a.attempt_number,s.actual_micros "
+            "FROM thesis_impact_day_admissions a JOIN thesis_impact_day_settlements s "
+            "ON s.admission_id=a.admission_id WHERE a.work_order_ref=? "
+            "ORDER BY a.attempt_number",
+            (work["id"],),
+        ).fetchall()
+        self.assertEqual([row["attempt_number"] for row in admissions], [1, 2])
+        self.assertEqual(settlements[0]["actual_micros"], admissions[0]["reserved_micros"])
+
+    def test_real_uds_sent_then_drop_is_terminal_and_retains_reservation(self) -> None:
+        fixed_now = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
+        self.harness.clock.value = fixed_now
+        router_path = Path(self.temp.name) / "unknown-router.sqlite"
+        router = ModelRouter(router_path, clock=lambda: fixed_now)
+        self.addCleanup(router.close)
+        shared_ref, assessment_ref, verifier_ref = self._impact_profiles_and_policies(
+            router, pinned_profile_id="profile:impact-b"
+        )
+        provider_retry = {
+            "max_same_profile_retries": 2,
+            "retry_backoff_seconds": 0,
+        }
+        config = self._production_config(
+            router_path=router_path,
+            shared_ref=shared_ref,
+            assessment_ref=assessment_ref,
+            verifier_ref=verifier_ref,
+            assessment_provider_retry=provider_retry,
+        )
+        bindings = thesis_impact_execution_bindings(config, router)
+        self.control = ResearchPlanThesisImpactCoordinator(
+            closure=self.closure,
+            impact=self.impact,
+            model_execution_bindings=bindings,
+        )
+        self._seed_thesis()
+        started = self._close_and_start()
+        work = started["impact"]["assessment_work_order"]
+        broker = FakeBroker(Path(self.temp.name), lambda _request: None, connections=1)
+        self.addCleanup(broker.close)
+        key = Path(self.temp.name) / "unknown-broker.key"
+        key.write_bytes(AUTH_SECRET)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id=config.broker_client_id,
+            auth_key_provider=lambda: key.read_bytes(),
+            timeout_seconds=1,
+            expected_agent_id=config.expected_agent_id,
+            clock=lambda: fixed_now,
+        )
+        budget = ThesisImpactBudgetStore(
+            Path(self.temp.name) / "unknown-budget.sqlite", clock=lambda: fixed_now
+        )
+        self.addCleanup(budget.close)
+        budget.register_policy(
+            policy_version_id=config.budget_policy_version_id,
+            day_cap_micros=config.day_cap_micros,
+        )
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(), router=router, adapter=adapter,
+            impact=self.impact, observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
+            verifier_routing_policy_ref=verifier_ref,
+            credential_slot_refs=config.credential_slot_refs,
+            budget=budget,
+            budget_policy_version_id=config.budget_policy_version_id,
+            assessment_provider_retry=provider_retry,
+            assessment_timeout_seconds=config.timeout_seconds,
+            verifier_timeout_seconds=config.timeout_seconds,
+            token_counter=lambda _text: 800, clock=lambda: fixed_now,
+        )
+        result = worker.run_once(work)
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["post_send_result_unknown"])
+        self.assertEqual(len(broker.requests), 1)
+        formal = self.harness.scheduler().formal_result(work["id"])
+        self.assertEqual(formal["terminal_state"], "failed")
+        envelope = formal["result_envelope"]
+        self.assertEqual(envelope["error"]["code"], "POST_SEND_RESULT_UNKNOWN")
+        invocation_wire = self.impact.find_invocation(envelope["invocation_ref"])
+        self.assertEqual(
+            invocation_wire["usage"]["raw_provider_telemetry"]
+            ["post_send_unknown"]["state"],
+            "post_send_result_unknown",
+        )
+        row = budget.connection.execute(
+            "SELECT a.reserved_micros,s.actual_micros "
+            "FROM thesis_impact_day_admissions a JOIN thesis_impact_day_settlements s "
+            "ON s.admission_id=a.admission_id WHERE a.work_order_ref=?",
+            (work["id"],),
+        ).fetchone()
+        self.assertEqual(row["actual_micros"], row["reserved_micros"])
 
     @staticmethod
     def _recorded_response(
@@ -1475,7 +1867,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         ):
             assessment_unpinned._phase_policy_ref("assessment")
 
-    def test_host_completion_failure_retries_within_bounded_attempts(self) -> None:
+    def test_unproved_host_completion_failure_is_terminal_and_fully_reserved(self) -> None:
         committed = self._seed_thesis()
         started = self._close_and_start()
         claim = self.harness.core.get_claim(
@@ -1504,6 +1896,15 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         self.addCleanup(router.close)
         shared_ref, assessment_ref, verifier_ref = self._impact_profiles_and_policies(
             router, pinned_profile_id=None
+        )
+        budget = ThesisImpactBudgetStore(
+            Path(self.temp.name) / "host-failure-budget.sqlite",
+            clock=lambda: fixed_now,
+        )
+        self.addCleanup(budget.close)
+        budget.register_policy(
+            policy_version_id="budget-policy:host-failure:1",
+            day_cap_micros=1_000_000,
         )
 
         def responder(request: dict[str, Any]) -> dict[str, Any]:
@@ -1590,30 +1991,36 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 "credential-slot:openai:impact-a",
                 "credential-slot:anthropic:impact-b",
             ),
+            budget=budget,
+            budget_policy_version_id="budget-policy:host-failure:1",
             token_counter=lambda _text: 800,
             clock=lambda: fixed_now,
         )
         runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
-        # First pass: the verifier's first attempt dies in the host; the
-        # bounded retry keeps the phase runnable instead of parking it.
+        # A code without the broker's closed returned-provider proof cannot
+        # authorize another paid call.
         first = runtime.run_once(
             plan_version_ref=self.harness.plan_wire["id"],
             thesis_ref=self.thesis_ref,
         )
-        self.assertEqual("verification_retryable", first["status"])
+        self.assertEqual("verification_failed", first["status"])
         self.assertEqual(2, len(broker.requests))
-        # Second pass: the retried verifier attempt completes and passes.
-        second = runtime.run_once(
-            plan_version_ref=self.harness.plan_wire["id"],
-            thesis_ref=self.thesis_ref,
-        )
-        self.assertEqual("eligible", second["status"])
-        self.assertEqual(3, len(broker.requests))
         self.assertEqual(
-            1,
+            0,
             self.harness.core.connection.execute(
                 "SELECT COUNT(*) FROM thesis_impact_verifications"
             ).fetchone()[0],
+        )
+        verifier_work = first["assessment"]["verifier_work_order"]
+        settlement = budget.connection.execute(
+            "SELECT actual_micros FROM thesis_impact_day_settlements "
+            "WHERE admission_id IN (SELECT admission_id FROM "
+            "thesis_impact_day_admissions WHERE work_order_ref=?)",
+            (verifier_work["id"],),
+        ).fetchone()
+        self.assertEqual(
+            settlement["actual_micros"],
+            int(verifier_work["budget"]["max_cost_usd"] * 1_000_000),
         )
 
     def test_day_budget_gates_paid_calls_and_alerts(self) -> None:

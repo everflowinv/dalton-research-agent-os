@@ -20,6 +20,7 @@ from .model_router import ModelRouter
 from .observability import ObservabilityStore
 from .openclaw_model_adapter import OpenClawModelAdapter
 from .scheduler import Scheduler
+from .store import content_hash
 from .thesis_impact_budget import ThesisImpactBudgetStore
 from .thesis_impact_control import POLICY_SUPERSEDED_STATUS
 from .thesis_impact_model_worker import ThesisImpactModelWorker
@@ -71,10 +72,14 @@ class ThesisImpactProductionConfig:
     company_thesis_refs: Mapping[str, str]
     max_targets: int
     timeout_seconds: float
+    assessment_transport_retry: Mapping[str, int] | None = None
+    verifier_transport_retry: Mapping[str, int] | None = None
+    assessment_provider_retry: Mapping[str, Any] | None = None
+    verifier_provider_retry: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ThesisImpactProductionConfig":
-        expected = {
+        required = {
             "scheduler_db",
             "model_router_db",
             "writer_socket",
@@ -94,7 +99,11 @@ class ThesisImpactProductionConfig:
             "max_targets",
             "timeout_seconds",
         }
-        if set(raw) != expected:
+        optional = {
+            "assessment_transport_retry", "verifier_transport_retry",
+            "assessment_provider_retry", "verifier_provider_retry",
+        }
+        if set(raw) - optional != required:
             raise ThesisImpactProductionError(
                 "thesis-impact production config has an invalid closed shape"
             )
@@ -139,6 +148,35 @@ class ThesisImpactProductionConfig:
             raise ThesisImpactProductionError(
                 "timeout_seconds must be positive and finite"
             )
+        retries: dict[str, Any] = {}
+        from .document_extraction import validate_transport_retry
+        from .provider_retry import ProviderRetryError, validate_provider_retry
+
+        for phase in ("assessment", "verifier"):
+            transport_key = f"{phase}_transport_retry"
+            provider_key = f"{phase}_provider_retry"
+            transport = None
+            provider = None
+            if transport_key in raw:
+                try:
+                    transport = validate_transport_retry(raw[transport_key])
+                except Exception as exc:
+                    raise ThesisImpactProductionError(
+                        f"{transport_key} is invalid"
+                    ) from exc
+            if provider_key in raw:
+                try:
+                    provider = validate_provider_retry(raw[provider_key])
+                except ProviderRetryError as exc:
+                    raise ThesisImpactProductionError(
+                        f"{provider_key} is invalid"
+                    ) from exc
+                if "unknown_recovery" in provider:
+                    raise ThesisImpactProductionError(
+                        f"{provider_key} does not support unknown-result recovery"
+                    )
+            retries[transport_key] = transport
+            retries[provider_key] = provider
         return cls(
             scheduler_db=_path(raw["scheduler_db"], "scheduler_db"),
             model_router_db=_path(raw["model_router_db"], "model_router_db"),
@@ -165,7 +203,127 @@ class ThesisImpactProductionConfig:
             company_thesis_refs=dict(bindings),
             max_targets=maximum,
             timeout_seconds=float(timeout),
+            **retries,
         )
+
+    def transport_retry(self, phase: str) -> Mapping[str, int] | None:
+        if phase not in {"assessment", "verifier"}:
+            raise ThesisImpactProductionError("thesis-impact phase is invalid")
+        return (
+            self.assessment_transport_retry
+            if phase == "assessment"
+            else self.verifier_transport_retry
+        )
+
+    def provider_retry(self, phase: str) -> Mapping[str, Any] | None:
+        if phase not in {"assessment", "verifier"}:
+            raise ThesisImpactProductionError("thesis-impact phase is invalid")
+        return (
+            self.assessment_provider_retry
+            if phase == "assessment"
+            else self.verifier_provider_retry
+        )
+
+
+def thesis_impact_execution_bindings(
+    config: ThesisImpactProductionConfig,
+    router: ModelRouter,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for phase, purpose, policy_ref in (
+        ("assessment", "thesis_impact_assessment",
+         config.assessment_routing_policy_ref),
+        ("verification", "thesis_impact_verifier",
+         config.verifier_routing_policy_ref),
+    ):
+        policy = router.get_policy(policy_ref)
+        result[phase] = {
+            "schema_version": "0.1",
+            "purpose": purpose,
+            "capability": "research" if phase == "assessment" else "verify",
+            "routing_policy_ref": policy_ref,
+            "routing_policy_hash": policy["content_hash"],
+            "credential_slot_refs": list(config.credential_slot_refs),
+            "adapter_timeout_seconds": config.timeout_seconds,
+            "transport_retry": config.transport_retry(
+                "assessment" if phase == "assessment" else "verifier"
+            ),
+            "provider_retry": config.provider_retry(
+                "assessment" if phase == "assessment" else "verifier"
+            ),
+        }
+    return result
+
+
+def thesis_impact_runtime_config(
+    state_dir: str | Path,
+) -> ThesisImpactProductionConfig | None:
+    path = Path(state_dir).expanduser().resolve().parents[1] / "config" / "service.json"
+    if not path.is_file():
+        return None
+    try:
+        service = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ThesisImpactProductionError(
+            "thesis-impact service config is unavailable"
+        ) from exc
+    block = service.get("thesis_impact") if isinstance(service, Mapping) else None
+    if not isinstance(block, Mapping) or block.get("enabled") is not True:
+        return None
+    config = block.get("config")
+    if not isinstance(config, Mapping):
+        raise ThesisImpactProductionError("enabled thesis-impact config is invalid")
+    return ThesisImpactProductionConfig.from_mapping(config)
+
+
+def thesis_impact_scheduler_requirements(
+    config: ThesisImpactProductionConfig,
+    router: ModelRouter,
+) -> tuple[int, float, str]:
+    from .model_fallback_chain import purpose_tiers
+    from .model_router import resolve_chain
+
+    profiles = {profile["id"]: profile for profile in router.latest_profiles()}
+    attempts = 1
+    lease = 30.0
+    bindings = thesis_impact_execution_bindings(config, router)
+    for phase in ("assessment", "verification"):
+        binding = bindings[phase]
+        policy = router.get_policy(binding["routing_policy_ref"])
+        resolved = resolve_chain(
+            policy,
+            tier=purpose_tiers()[binding["purpose"]],
+            purpose=binding["purpose"],
+            profiles=profiles,
+        )
+        allowed = policy.get("filters", {}).get("allowed_profile_ids") or []
+        policy_candidates = (
+            [item for item in allowed if item in profiles]
+            if allowed
+            else list(profiles)
+        )
+        candidates = max(
+            1,
+            len(resolved["chain"]) if resolved is not None
+            else len(policy_candidates),
+        )
+        provider = binding["provider_retry"] or {}
+        attempts = max(
+            attempts,
+            candidates * (int(provider.get("max_same_profile_retries", 0)) + 1),
+        )
+        transport = binding["transport_retry"] or {}
+        safe = int(transport.get("max_definitely_not_sent_retries", 0))
+        phase_lease = (
+            (safe + 1) * (
+                config.timeout_seconds
+                + float(transport.get("queue_wait_seconds", 0))
+            )
+            + safe * float(transport.get("retry_backoff_seconds", 0))
+            + 30.0
+        )
+        lease = max(lease, phase_lease)
+    return attempts, lease, content_hash(bindings)
 
 
 class _WriterBackedStore:
@@ -242,21 +400,33 @@ class ThesisImpactProductionRunner:
         router: ModelRouter,
         budget: ThesisImpactBudgetStore,
     ) -> ThesisImpactModelWorker:
+        _, lease_seconds, _ = thesis_impact_scheduler_requirements(
+            self.config, router
+        )
         store = _WriterBackedStore(client)
         impact = _WriterBackedImpact(client, scheduler, store)
         observability = _WriterBackedObservability(client, store)
-        adapter = OpenClawModelAdapter(
-            self.config.broker_socket,
-            route_resolver=lambda decision_ref: router.get_decision(decision_ref),
-            auth_client_id=self.config.broker_client_id,
-            auth_key_provider=lambda: self.config.broker_auth_key.read_bytes().strip(),
-            timeout_seconds=self.config.timeout_seconds,
-            expected_agent_id=self.config.expected_agent_id,
-        )
+
+        def adapter(phase: str) -> OpenClawModelAdapter:
+            transport = self.config.transport_retry(phase) or {}
+            return OpenClawModelAdapter(
+                self.config.broker_socket,
+                route_resolver=lambda decision_ref: router.get_decision(decision_ref),
+                auth_client_id=self.config.broker_client_id,
+                auth_key_provider=lambda: self.config.broker_auth_key.read_bytes().strip(),
+                timeout_seconds=self.config.timeout_seconds,
+                queue_wait_seconds=float(transport.get("queue_wait_seconds", 0)),
+                expected_agent_id=self.config.expected_agent_id,
+            )
+
+        assessment_adapter = adapter("assessment")
+        verifier_adapter = adapter("verifier")
         return ThesisImpactModelWorker(
             scheduler=scheduler,
             router=router,
-            adapter=adapter,
+            adapter=assessment_adapter,
+            assessment_adapter=assessment_adapter,
+            verifier_adapter=verifier_adapter,
             impact=impact,  # type: ignore[arg-type]
             observability=observability,  # type: ignore[arg-type]
             routing_policy_ref=self.config.routing_policy_ref,
@@ -265,6 +435,13 @@ class ThesisImpactProductionRunner:
             credential_slot_refs=self.config.credential_slot_refs,
             budget=budget,
             budget_policy_version_id=self.config.budget_policy_version_id,
+            assessment_provider_retry=self.config.assessment_provider_retry,
+            verifier_provider_retry=self.config.verifier_provider_retry,
+            assessment_transport_retry=self.config.assessment_transport_retry,
+            verifier_transport_retry=self.config.verifier_transport_retry,
+            assessment_timeout_seconds=self.config.timeout_seconds,
+            verifier_timeout_seconds=self.config.timeout_seconds,
+            lease_seconds=lease_seconds,
         )
 
     @staticmethod
@@ -431,4 +608,7 @@ __all__ = [
     "ThesisImpactProductionError",
     "ThesisImpactProductionRunner",
     "load_config",
+    "thesis_impact_execution_bindings",
+    "thesis_impact_runtime_config",
+    "thesis_impact_scheduler_requirements",
 ]

@@ -122,6 +122,7 @@ class ResearchPlanThesisImpactCoordinator:
         scheduler: Scheduler | None = None,
         impact: ThesisImpactAuthority,
         budget_config_path: Path | None = None,
+        model_execution_bindings: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         if closure is not None:
             if any(item is not None for item in (plan, backlog, scheduler)):
@@ -147,6 +148,20 @@ class ResearchPlanThesisImpactCoordinator:
         self.impact = impact
         self.store = impact.store
         self.budget_config_path = budget_config_path
+        if model_execution_bindings is not None and set(model_execution_bindings) != {
+            "assessment", "verification"
+        }:
+            raise TypeError(
+                "model_execution_bindings must bind assessment and verification"
+            )
+        self.model_execution_bindings = (
+            None
+            if model_execution_bindings is None
+            else {
+                phase: dict(binding)
+                for phase, binding in model_execution_bindings.items()
+            }
+        )
 
     def _call_budget(self, purpose: str, legacy: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
         from .call_budget import budget_fingerprint, resolve_call_budget
@@ -355,6 +370,8 @@ class ResearchPlanThesisImpactCoordinator:
         budget, budget_hash = self._call_budget("thesis_impact_assessment", ASSESSMENT_BUDGET)
         if budget_hash is not None:
             identity["call_budget_fingerprint"] = budget_hash
+        if self.model_execution_bindings is not None:
+            identity["model_execution"] = self.model_execution_bindings["assessment"]
         work_id = self._work_id_with_redrive("assessment", identity)
         prompt = (
             "Assess whether the exact formal ClaimVersion supports, weakens, leaves "
@@ -431,6 +448,8 @@ class ResearchPlanThesisImpactCoordinator:
         budget, budget_hash = self._call_budget("thesis_impact_verifier", VERIFIER_BUDGET)
         if budget_hash is not None:
             identity["call_budget_fingerprint"] = budget_hash
+        if self.model_execution_bindings is not None:
+            identity["model_execution"] = self.model_execution_bindings["verification"]
         work_id = self._work_id_with_redrive("verifier", identity)
         prompt = (
             "Independently verify the exact thesis-impact assessment against the exact "
