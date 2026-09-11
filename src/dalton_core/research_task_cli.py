@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import sys
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,10 @@ def run_admissions(
     retired_templates: tuple[str, ...] = (),
     dry_run: bool = False,
     task_budget: dict[str, int] | None = None,
+    planner_scheduler_db: Path | None = None,
+    planner_model_config_path: Path | None = None,
+    document_draft_model_config_path: Path | None = None,
+    document_verifier_model_config_path: Path | None = None,
 ) -> dict[str, Any]:
     if isinstance(max_admissions, bool) or not isinstance(max_admissions, int) or max_admissions < 1:
         raise ResearchTaskError("max_admissions must be a positive integer")
@@ -118,74 +123,184 @@ def run_admissions(
         day = now.date().isoformat()
         summary["pool"] = pool_state(
             authority, mission, day=day, budget_db=budget_db)
-        if not decision["granted"]:
-            # Not a failure: an ungranted lane is a lane the owner has not
-            # turned on, and saying so every tick is how it stays visible.
-            summary.update({"status": "idle", "failure_reason": "not_granted"})
-            return summary
         plan = missions.latest_research_plan(mission["id"])
         if plan is None:
             summary.update({"status": "idle", "failure_reason": "no_research_plan"})
             return summary
         summary["plan_ref"] = plan["plan_id"]
+        has_directed = any(
+            isinstance(inquiry, dict) and "directed_document" in inquiry
+            for inquiry in plan.get("inquiries", ())
+        )
+        if not decision["granted"] and not has_directed:
+            # Not a failure: an ungranted lane is a lane the owner has not
+            # turned on, and saying so every tick is how it stays visible.
+            summary.update({"status": "idle", "failure_reason": "not_granted"})
+            return summary
         entries = plan_admissions(
             authority, mission=mission, plan=plan, templates=templates, day=day,
             # Only what this pass will actually create spends the day's pool.
-            limit=max_admissions, budget_db=budget_db,
+            limit=None, budget_db=budget_db,
             budget_overrides=task_budget, planner_cost_usd=planner_cost,
         )
         summary["considered"] = len(entries)
-        summary["refused"] = [
-            {
-                "inquiry_ref": entry.get("inquiry_ref"),
-                "company_ref": entry.get("company_ref"),
-                "reason": entry["reason"],
-            }
-            for entry in entries if not entry["admissible"]
-        ]
-        if dry_run:
-            summary.update({
-                "status": "succeeded",
-                "tasks": [
-                    {
+        backlog = ResearchQuestionBacklog(store)
+        admitted: list[dict[str, Any]] = []
+        slots_used = 0
+        with ExitStack() as resources:
+            document_runtime = None
+            document_failure = None
+            if has_directed:
+                if dry_run:
+                    try:
+                        from .document_research_inventory import (
+                            load_document_inventory_authority,
+                        )
+                        from .mission_document_research_admission import registration_index
+                        inventory = load_document_inventory_authority(
+                            core=store, mission=mission, state_dir=state_dir,
+                        )
+                        if inventory.get("registry") is None:
+                            raise ValueError("document research inventory is not configured")
+                        document_runtime = (
+                            None,
+                            registration_index(inventory.get("registration_by_hash")),
+                        )
+                    except Exception as exc:
+                        document_failure = f"{type(exc).__name__}: {exc}"
+                elif planner_scheduler_db is None or planner_model_config_path is None:
+                    document_failure = (
+                        "MissionDocumentAdmissionHostError: directed document admission "
+                        "requires the exact planner Scheduler and model configuration"
+                    )
+                else:
+                    try:
+                        from .mission_document_research_admission import (
+                            open_mission_document_admission_authority,
+                        )
+                        document_runtime = resources.enter_context(
+                            open_mission_document_admission_authority(
+                                store=store, state_dir=state_dir, mission=mission,
+                                planner_scheduler_db=planner_scheduler_db,
+                                planner_model_config_path=planner_model_config_path,
+                                draft_model_config_path=document_draft_model_config_path,
+                                verifier_model_config_path=document_verifier_model_config_path,
+                            )
+                        )
+                    except Exception as exc:  # exact refusal is reported per inquiry
+                        document_failure = f"{type(exc).__name__}: {exc}"
+            for entry in entries:
+                # By ordinal, not by position: refused entries are in this list too.
+                inquiry = plan["inquiries"][entry["ordinal"]]
+                directed = "directed_document" in inquiry
+                if not directed and not entry["admissible"]:
+                    summary["refused"].append({
+                        "inquiry_ref": entry.get("inquiry_ref"),
+                        "company_ref": entry.get("company_ref"),
+                        "reason": entry["reason"],
+                    })
+                    continue
+                if slots_used >= max_admissions:
+                    summary["refused"].append({
+                        "inquiry_ref": entry.get("inquiry_ref"),
+                        "company_ref": entry.get("company_ref"),
+                        "reason": "deferred_to_a_later_tick",
+                    })
+                    continue
+                if directed:
+                    if document_runtime is None:
+                        summary["refused"].append({
+                            "inquiry_ref": entry.get("inquiry_ref"),
+                            "company_ref": entry.get("company_ref"),
+                            "reason": document_failure or "document authority unavailable",
+                        })
+                        continue
+                    document_authority, registrations = document_runtime
+                    if dry_run:
+                        strategy = inquiry.get("directed_document") or {}
+                        available = any(
+                            item.get("content_hash") == strategy.get("document_version_hash")
+                            and item.get("document_ref") == strategy.get("document_ref")
+                            for item in registrations.values()
+                        )
+                        if not available:
+                            summary["refused"].append({
+                                "inquiry_ref": entry.get("inquiry_ref"),
+                                "company_ref": entry.get("company_ref"),
+                                "reason": "selected document registration is unavailable",
+                            })
+                        else:
+                            admitted.append({
+                                "kind": "mission_directed_document_research",
+                                "inquiry_ref": entry["inquiry_ref"],
+                                "company_ref": entry.get("company_ref"),
+                                "status": "would_validate_and_admit",
+                            })
+                            slots_used += 1
+                        continue
+                    try:
+                        from .mission_document_research_admission import (
+                            MissionDocumentAdmissionHostError,
+                            admit_directed_inquiry,
+                        )
+                        from .mission_document_research import (
+                            MissionDocumentResearchError,
+                        )
+                        result = admit_directed_inquiry(
+                            authority=document_authority,
+                            registrations=registrations,
+                            backlog=backlog, mission=mission, plan=plan,
+                            inquiry=inquiry,
+                        )
+                        admitted.append(result)
+                        if result["status"] == "fresh":
+                            slots_used += 1
+                    except (
+                        MissionDocumentAdmissionHostError,
+                        MissionDocumentResearchError,
+                        ResearchQuestionError,
+                        ResearchTaskError,
+                    ) as exc:
+                        summary["refused"].append({
+                            "inquiry_ref": entry.get("inquiry_ref"),
+                            "company_ref": entry.get("company_ref"),
+                            "reason": f"{type(exc).__name__}: {exc}",
+                        })
+                    continue
+                if not decision["granted"]:
+                    summary["refused"].append({
+                        "inquiry_ref": entry.get("inquiry_ref"),
+                        "company_ref": entry.get("company_ref"),
+                        "reason": "not_granted:" + ",".join(decision["reasons"]),
+                    })
+                    continue
+                if dry_run:
+                    admitted.append({
                         "inquiry_ref": entry["inquiry_ref"],
                         "loop_ref": entry["loop_ref"],
                         "subject_ref": entry["subject_ref"],
                         "budget": entry["budget"],
                         "estimated_micros": entry["estimated_micros"],
                         "status": "would_admit",
-                    }
-                    for entry in entries if entry["admissible"]
-                ][:max_admissions],
-            })
-            return summary
-        backlog = ResearchQuestionBacklog(store)
-        admitted: list[dict[str, Any]] = []
-        for entry in entries:
-            if len(admitted) >= max_admissions:
-                break
-            if not entry["admissible"]:
-                continue
-            # By ordinal, not by position: the refused entries are in this list
-            # too, and zipping the two lists would hand the wrong inquiry to an
-            # entry the moment one is refused.
-            inquiry = plan["inquiries"][entry["ordinal"]]
-            try:
-                admitted.append(admit_inquiry(
-                    authority, backlog, mission=mission,
-                    plan_ref=plan["plan_id"], inquiry=inquiry, entry=entry,
-                ))
-            except (
-                BoundedPlannerError, ResearchQuestionError, ResearchTaskError,
-            ) as exc:
-                # One refused inquiry is that inquiry's, never the run's: the
-                # next one may well be admissible, and a summary that names the
-                # refusal is what the lane shows the owner.
-                summary["refused"].append({
-                    "inquiry_ref": entry["inquiry_ref"],
-                    "company_ref": entry.get("company_ref"),
-                    "reason": f"{type(exc).__name__}: {exc}",
-                })
+                    })
+                    slots_used += 1
+                    continue
+                try:
+                    result = admit_inquiry(
+                        authority, backlog, mission=mission,
+                        plan_ref=plan["plan_id"], inquiry=inquiry, entry=entry,
+                    )
+                    admitted.append(result)
+                    if result["status"] == "fresh":
+                        slots_used += 1
+                except (
+                    BoundedPlannerError, ResearchQuestionError, ResearchTaskError,
+                ) as exc:
+                    summary["refused"].append({
+                        "inquiry_ref": entry["inquiry_ref"],
+                        "company_ref": entry.get("company_ref"),
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    })
         summary.update({
             "status": "succeeded",
             "admitted": sum(1 for item in admitted if item["status"] == "fresh"),
@@ -212,6 +327,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="An ad-hoc ProbeTemplate this deployment has withdrawn. Repeatable.",
     )
     parser.add_argument("--task-budget", type=json.loads, default={})
+    parser.add_argument("--planner-scheduler-db", type=Path)
+    parser.add_argument("--planner-model-config", type=Path)
+    parser.add_argument("--mission-document-draft-model-config", type=Path)
+    parser.add_argument("--mission-document-verifier-model-config", type=Path)
     parser.add_argument("--dry-run", action="store_true",
                         help="decide and stop; no authority writes")
     parser.add_argument("--quiet", action="store_true")
@@ -225,6 +344,10 @@ def main(argv: list[str] | None = None) -> int:
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         max_admissions=args.max_admissions,
         task_budget=args.task_budget,
+        planner_scheduler_db=args.planner_scheduler_db,
+        planner_model_config_path=args.planner_model_config,
+        document_draft_model_config_path=args.mission_document_draft_model_config,
+        document_verifier_model_config_path=args.mission_document_verifier_model_config,
         retired_templates=tuple(args.retired_templates or ()),
         dry_run=args.dry_run,
     )

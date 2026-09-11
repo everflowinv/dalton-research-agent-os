@@ -147,6 +147,8 @@ class ResearchTaskCoordinator:
             "tasks": count(
                 "SELECT COUNT(*) FROM bounded_planner_loop_versions "
                 "WHERE json_extract(record_json,'$.admission.source')='inquiry'"),
+            "document_admissions": count(
+                "SELECT COUNT(*) FROM mission_document_research_admissions"),
             "templates": count(
                 "SELECT COUNT(*) FROM bounded_probe_template_versions"),
         }
@@ -189,10 +191,22 @@ class ResearchTaskCoordinator:
         retired = configuration.get("retired_templates", getattr(self.launcher, "retired_templates", ()))
         decision = grant(mission, bindable_templates(authority, retired=retired))
         settled = self.settle()
+        from .coverage_mission import CoverageMissionAuthority
+
+        plan = CoverageMissionAuthority(self.store).latest_research_plan(mission["id"])
+        if plan is None:
+            return {"status": "idle", "reason": "no research plan yet", **settled}
+        has_directed = any(
+            isinstance(inquiry, Mapping) and "directed_document" in inquiry
+            for inquiry in plan.get("inquiries", ())
+        )
+        directed_granted = has_directed and {
+            "research_task", "model_run", "stage_record",
+        }.issubset(set(mission["autonomy"]["may_write"]))
         top_permission = permission_key(
             "permission|research_task", mission, self.launcher, connection=self.store.connection)
         clear_obsolete_permissions(self.failure_budget, top_permission, scope_prefix="permission|")
-        if not decision["granted"]:
+        if not decision["granted"] and not directed_granted:
             # The switch, stated rather than hidden: the reasons are the two
             # owner acts that are missing.
             permission = self.failure_budget.blocked(top_permission)
@@ -201,7 +215,11 @@ class ResearchTaskCoordinator:
                     top_permission, status="gated:not permitted " + ",".join(decision["reasons"]))
             return {"status": "not_granted", "reasons": decision["reasons"],
                     "failure": permission.as_wire(), **settled}
-        self.failure_budget.retire(top_permission, reason="mission_grant_available")
+        self.failure_budget.retire(
+            top_permission,
+            reason=("directed_document_grant_available"
+                    if directed_granted else "mission_grant_available"),
+        )
         day = self.clock().astimezone(timezone.utc).date().isoformat()
         state = pool_state(
             authority, mission, day=day, budget_db=self.budget_db)
@@ -248,12 +266,7 @@ class ResearchTaskCoordinator:
                     resumed = self.failure_budget.clear(succeeded_item)
                     if resumed:
                         result["last"]["resumed"] = resumed
-        from .coverage_mission import CoverageMissionAuthority
-
-        plan = CoverageMissionAuthority(self.store).latest_research_plan(mission["id"])
-        if plan is None:
-            return {**result, "status": "idle", "reason": "no research plan yet"}
-        if state["remaining_micros"] <= 0:
+        if state["remaining_micros"] <= 0 and not directed_granted:
             # C2 will name three more pools; this is the first, and the word
             # the cockpit reads is the one C2 generalises.
             return {**result, "status": "skipped:pool_exhausted",
@@ -387,6 +400,8 @@ def build_launcher(args: Any) -> Any | None:
         retired_templates=configuration["retired_templates"],
         task_budget=configuration["task_budget"],
         config_path=args.research_task_lane,
+        planner_scheduler_db=getattr(args, "scheduler", None),
+        planner_model_config_path=getattr(args, "research_planner_model_config", None),
     )
 
 

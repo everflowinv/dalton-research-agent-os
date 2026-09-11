@@ -253,6 +253,22 @@ class UngrantedLaneTests(ResearchTaskFixture):
         self.assertEqual(result["reasons"], ["no_executable_adhoc_template_published"])
         self.assertEqual(launcher.started, [])
 
+    def test_directed_inquiry_does_not_require_an_adhoc_probe_template(self) -> None:
+        launcher = FakeLauncher(self.state_dir / "research-tasks")
+        coordinator = ResearchTaskCoordinator(store=self.store, launcher=launcher)
+        wire = inquiry(question="What does the selected original say?")
+        wire["directed_document"] = {
+            "strategy_version": "directed-document:0.1",
+            "document_ref": "document:1",
+            "document_version_hash": "a" * 64,
+            "query_terms": ["selected original"],
+            "query_rationale": "Read the exact selected document.",
+        }
+        self.record_plan([wire])
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(len(launcher.started), 1)
+
 
 class WiringTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -291,13 +307,43 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(launcher.max_admissions_per_tick, 2)
 
     def test_the_child_command_names_this_state_and_this_ticket(self) -> None:
-        launcher = ResearchTaskLauncher(state_dir=self.state, max_admissions_per_tick=3)
+        planner = self.state / "research-planner-model-config.json"
+        planner.write_text("{}\n", encoding="utf-8")
+        scheduler = self.state / "scheduler.sqlite"
+        launcher = ResearchTaskLauncher(
+            state_dir=self.state, max_admissions_per_tick=3,
+            planner_scheduler_db=scheduler,
+            planner_model_config_path=planner,
+        )
         self.addCleanup(launcher.close)
         command = launcher._command(ticket_dir=self.state / "t")
         self.assertIn("dalton_core.research_task_cli", command)
         self.assertIn(str(self.state.resolve()), command)
         self.assertIn("--max-admissions", command)
         self.assertEqual(command[command.index("--max-admissions") + 1], "3")
+        self.assertEqual(
+            command[command.index("--planner-scheduler-db") + 1], str(scheduler.resolve())
+        )
+        self.assertEqual(
+            command[command.index("--planner-model-config") + 1], str(planner.resolve())
+        )
+
+    def test_a_model_authority_config_change_rekeys_the_child_ticket(self) -> None:
+        planner = self.state / "research-planner-model-config.json"
+        draft = self.state / "mission-document-draft-model-config.json"
+        verifier = self.state / "mission-document-verifier-model-config.json"
+        for path in (planner, draft, verifier):
+            path.write_text("{}\n", encoding="utf-8")
+        launcher = ResearchTaskLauncher(
+            state_dir=self.state,
+            planner_scheduler_db=self.state / "scheduler.sqlite",
+            planner_model_config_path=planner,
+        )
+        self.addCleanup(launcher.close)
+        before = launcher.configuration_signature()
+        draft.write_text('{"route":"new"}\n', encoding="utf-8")
+        after = launcher.configuration_signature()
+        self.assertNotEqual(before, after)
 
     def test_the_same_plan_and_signature_is_the_same_ticket(self) -> None:
         launcher = ResearchTaskLauncher(state_dir=self.state)

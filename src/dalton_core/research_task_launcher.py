@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .mission_document_model_authority import (
+    DRAFT_MODEL_CONFIG_NAME as DOCUMENT_DRAFT_MODEL_CONFIG_NAME,
+    VERIFIER_MODEL_CONFIG_NAME as DOCUMENT_VERIFIER_MODEL_CONFIG_NAME,
+)
 from .store import canonical_json
 
 TICKET_PREFIX = "research-task"
@@ -41,6 +45,10 @@ class ResearchTaskLauncher(LaneChildLauncher):
         retired_templates: Sequence[str] = (),
         task_budget: dict[str, int] | None = None,
         config_path: str | Path | None = None,
+        planner_scheduler_db: str | Path | None = None,
+        planner_model_config_path: str | Path | None = None,
+        document_draft_model_config_path: str | Path | None = None,
+        document_verifier_model_config_path: str | Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -55,6 +63,30 @@ class ResearchTaskLauncher(LaneChildLauncher):
         from .research_task import validate_task_budget
         self.task_budget = validate_task_budget({} if task_budget is None else task_budget)
         self.config_path = None if config_path is None else Path(config_path)
+        self.planner_scheduler_db = (
+            None if planner_scheduler_db is None
+            else Path(planner_scheduler_db).expanduser().resolve()
+        )
+        self.planner_model_config_path = (
+            None if planner_model_config_path is None
+            else Path(planner_model_config_path).expanduser().resolve()
+        )
+        self.document_draft_model_config_path = (
+            Path(document_draft_model_config_path).expanduser().resolve()
+            if document_draft_model_config_path is not None
+            else self.state_dir / DOCUMENT_DRAFT_MODEL_CONFIG_NAME
+        )
+        self.document_verifier_model_config_path = (
+            Path(document_verifier_model_config_path).expanduser().resolve()
+            if document_verifier_model_config_path is not None
+            else self.state_dir / DOCUMENT_VERIFIER_MODEL_CONFIG_NAME
+        )
+
+    @staticmethod
+    def _file_digest(path: Path | None) -> str | None:
+        if path is None or not path.is_file() or path.is_symlink():
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def configuration(self) -> dict[str, Any]:
         from .mission_research_task_lane import lane_configuration
@@ -64,14 +96,43 @@ class ResearchTaskLauncher(LaneChildLauncher):
             "retired_templates": self.retired_templates,
             "task_budget": self.task_budget,
         })
-        return {**settings, "planner_cost_usd": str(default_planner_cost_usd(self.state_dir))}
+        authority = {
+            "planner_scheduler_db": (
+                None if self.planner_scheduler_db is None
+                else str(self.planner_scheduler_db)
+            ),
+            "planner_model_config_path": (
+                None if self.planner_model_config_path is None
+                else str(self.planner_model_config_path)
+            ),
+            "document_draft_model_config_path": str(
+                self.document_draft_model_config_path
+            ),
+            "document_verifier_model_config_path": str(
+                self.document_verifier_model_config_path
+            ),
+            "planner_model_config_hash": self._file_digest(
+                self.planner_model_config_path
+            ),
+            "document_draft_model_config_hash": self._file_digest(
+                self.document_draft_model_config_path
+            ),
+            "document_verifier_model_config_hash": self._file_digest(
+                self.document_verifier_model_config_path
+            ),
+        }
+        return {
+            **settings,
+            "planner_cost_usd": str(default_planner_cost_usd(self.state_dir)),
+            "document_authority": authority,
+        }
 
     def configuration_signature(self) -> str:
         return hashlib.sha256(canonical_json(self.configuration()).encode()).hexdigest()
 
     def _command(self, *, ticket_dir: Path, **kwargs: Any) -> list[str]:
         settings = kwargs.get("configuration") or self.configuration()
-        return [
+        command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--summary-dir", str(ticket_dir),
@@ -83,6 +144,17 @@ class ResearchTaskLauncher(LaneChildLauncher):
             for template_ref in settings["retired_templates"]
             for argument in ("--retired-template", template_ref)
         ]
+        if self.planner_scheduler_db is not None:
+            command += ["--planner-scheduler-db", str(self.planner_scheduler_db)]
+        if self.planner_model_config_path is not None:
+            command += ["--planner-model-config", str(self.planner_model_config_path)]
+        command += [
+            "--mission-document-draft-model-config",
+            str(self.document_draft_model_config_path),
+            "--mission-document-verifier-model-config",
+            str(self.document_verifier_model_config_path),
+        ]
+        return command
 
     def start(self, *, plan_ref: str, signature: str) -> dict[str, Any]:
         """Start one admission pass for one plan.
