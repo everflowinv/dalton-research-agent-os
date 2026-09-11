@@ -81,12 +81,12 @@ def observe(manifest_path: Path, deployment_receipt_path: Path, output: Path,
          "health output path is unavailable")
     manifest = json.loads(manifest_path.read_text())
     deployment = json.loads(deployment_receipt_path.read_text())
-    need(manifest.get("source_commit") == deployment.get("source_commit") == COMMIT
-         and manifest.get("acceptance_state") == "passed"
-         and deployment.get("status") == "installer_finished" and deployment.get("exit_code") == 0,
+    need(manifest.get("source", {}).get("commit") == deployment.get("source_commit") == COMMIT
+         and manifest.get("status") == "staged_pending_owner_acceptance"
+         and deployment.get("status") == "installer_finished_runtime_health_pending" and deployment.get("exit_code") == 0,
          "deployment precondition differs")
-    need(deployment.get("approved_manifest_sha256") == sha(manifest_path),
-         "deployment receipt is not bound to approved manifest")
+    need(deployment.get("candidate_manifest_sha256") == sha(manifest_path),
+         "deployment receipt is not bound to candidate manifest")
     start, end = timestamp(deployment["started_at"]), timestamp(deployment["finished_at"])
     output.mkdir(mode=0o700)
     samples: list[dict[str, Any]] = []
@@ -113,7 +113,7 @@ def observe(manifest_path: Path, deployment_receipt_path: Path, output: Path,
     elapsed = clock() - started
     decision = acceptance(samples, elapsed, start, end)
     summary = {"schema_version": "r11a-health-observation-0.1", "source_commit": COMMIT,
-               "approved_manifest_sha256": sha(manifest_path),
+               "candidate_manifest_sha256": sha(manifest_path),
                "deployment_receipt_sha256": sha(deployment_receipt_path),
                "sample_count": len(samples), "elapsed_seconds": elapsed,
                **decision, "samples": samples}

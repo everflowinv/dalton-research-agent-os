@@ -25,7 +25,7 @@ CANDIDATE_SCHEMA = "r11a-ops-packet-candidate-0.1"
 COMMIT = "424c22529d5317c4c5c9dc8ba88f37299cea3f49"
 SOURCE = Path("/Users/everflow/Projects/dalton-foundation-followup-r11a-acceptance-worktree")
 WHEEL_SHA256 = "418bf77f7b5285f9e53e041bdcf9d36463e57a7fa0bd4ce368ded2ec1e50d046"
-OPENCLAW_SHA256 = "249124e3d372aaab5479a272f4901046fb04aec3339d3276711c2068edcb402e"
+OPENCLAW_SHA256 = "f45fa4698e55e6404f2558b2aa5f558bd906fd68f1d2e8c0914c475bd5b6a9a6"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 SNAPSHOT_ID = re.compile(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z")
 BOUNDARIES = {
@@ -38,14 +38,16 @@ ARTIFACTS = (
     "wheel", "wheel_verification", "full_suite_log", "full_suite_receipt",
     "full_suite_runner", "full_suite_native_result", "rehearsal_binding",
     "rehearsal_report", "service_config_before", "service_config_after",
-    "model_config_snapshot", "openclaw_config_snapshot", "provider_bridge_install_receipt",
+    "model_config_snapshot", "openclaw_config_snapshot", "runtime_snapshot_receipt",
+    "provider_plugin_snapshot",
+    "provider_bridge_install_receipt",
     "mission_authority_snapshot", "web_v6_activation_receipt",
     "provider_bridge_activation_receipt", "alpha_v3_activation_receipt",
     "latest_backup_manifest", "backup_retention_receipt",
 )
 HELPERS = (
     "configure_backup_retention_stopped_window.py",
-    "run_r11a_deploy_candidate.py",
+    "execute_r11a_stopped_window_candidate.py",
     "observe_r11a_health_candidate.py",
     "finalize_r11a_health_candidate.py",
 )
@@ -195,11 +197,34 @@ def validate_configuration(document: Mapping[str, Any], paths: Mapping[str, Path
     web = json_file(paths["web_v6_activation_receipt"], "web v6 activation receipt")
     alpha = json_file(paths["alpha_v3_activation_receipt"], "Alpha v3 activation receipt")
     mission = json_file(paths["mission_authority_snapshot"], "mission authority snapshot")
+    current_runtime = json_file(paths["runtime_snapshot_receipt"], "current runtime snapshot receipt")
+    need(current_runtime.get("status") == "current_web_provider_configuration_snapshotted"
+         and current_runtime.get("source_commit") == COMMIT
+         and current_runtime.get("model_config_count") == count
+         and current_runtime.get("prior_openclaw_sha256") == provider_install.get("owned_sha256", {}).get("config")
+         and current_runtime.get("model_catalog_and_model_broker_subtree_unchanged") is True
+         and current_runtime.get("model_config_snapshot_unchanged") is True
+         and current_runtime.get("service_before_unchanged") is True,
+         "current web-provider configuration delta differs")
     need(provider_install.get("status") == "installed_verified"
-         and provider_install.get("owned_sha256", {}).get("config") == OPENCLAW_SHA256
          and provider_activation.get("status") == "activated_verified"
          and provider_activation.get("bridge_receipt_sha256") == sha(paths["provider_bridge_install_receipt"]),
          "provider bridge activation differs")
+    plugin = json_file(paths["provider_plugin_snapshot"], "provider plugin snapshot")
+    plugin_root = Path(plugin.get("root", ""))
+    plugin_rows = plugin.get("files")
+    need(plugin.get("schema_version") == "r11a-provider-plugin-snapshot-0.1"
+         and plugin.get("openclaw_config_sha256") == OPENCLAW_SHA256
+         and isinstance(plugin_rows, list) and plugin_rows
+         and canonical_hash(plugin_rows) == plugin.get("tree_sha256")
+         and plugin_root.is_dir() and not plugin_root.is_symlink(),
+         "provider plugin snapshot differs")
+    for row in plugin_rows:
+        need(isinstance(row, Mapping) and set(row) == {"path", "sha256"}
+             and isinstance(row["path"], str) and not Path(row["path"]).is_absolute()
+             and ".." not in Path(row["path"]).parts
+             and sha(plugin_root / row["path"]) == row["sha256"],
+             "provider plugin bytes differ")
     need(web.get("status") == "activated_verified"
          and web.get("selected_plan", {}).get("path", "").endswith("us-it-services-web-search-v6-host-recovery.json"),
          "web v6 activation differs")

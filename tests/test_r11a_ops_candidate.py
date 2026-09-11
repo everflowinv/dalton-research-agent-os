@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,60 +37,6 @@ class R11aOpsCandidateTests(unittest.TestCase):
         self.assertTrue(any(row["path"] is None or row["sha256"] is None
                             for row in template["artifacts"].values()))
 
-    def _approved_plan(self, root: Path):
-        deploy = load("run_r11a_deploy_candidate")
-        wheel = root / "accepted.whl"; wheel.write_bytes(b"wheel")
-        deploy.WHEEL_SHA256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
-        steps = []
-        for name in deploy.ORDER:
-            program_name = "zsh" if name == "frozen_installer" else f"{name}.py"
-            program = root / program_name
-            program.write_text("#!/bin/sh\nexit 0\n")
-            argv = [str(program)]
-            if name == "preinstall_wheel": argv += ["--no-deps", "--force-reinstall", str(wheel)]
-            if name == "configure_retention": argv += ["--service-config", "/config", "--expected-before-sha256", "a" * 64]
-            if name == "frozen_installer": argv += [str(root / "install.sh")]
-            steps.append({"name": name, "argv": argv,
-                          "program_sha256": hashlib.sha256(program.read_bytes()).hexdigest()})
-        manifest = {"schema_version": deploy.SCHEMA, "release_ref": "foundation-followup-r11a",
-                    "source_commit": deploy.COMMIT, "acceptance_state": "passed",
-                    "deployment_state": "not_started", "wheel_file": wheel.name,
-                    "wheel_sha256": deploy.WHEEL_SHA256, "deployment_steps": steps}
-        manifest["content_hash"] = deploy.canonical_hash(manifest)
-        path = root / "release-manifest.approved.json"; write_json(path, manifest)
-        return deploy, path
-
-    def test_deploy_review_is_inert_and_execution_order_is_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary); deploy, manifest = self._approved_plan(root)
-            reviewed = deploy.run(manifest, root / "unused.json", execute=False)
-            self.assertEqual("approved_plan_verified_inert", reviewed["status"])
-            self.assertFalse(reviewed["live_mutation"])
-            calls = []
-            def invoke(argv, **_kwargs):
-                calls.append(Path(argv[0]).name)
-                return subprocess.CompletedProcess(argv, 0, "ok", "")
-            receipt_path = root / "execution.json"
-            receipt = deploy.run(manifest, receipt_path, execute=True, invoke=invoke)
-            self.assertEqual("installer_finished", receipt["status"])
-            self.assertEqual(list(deploy.ORDER), [row["name"] for row in receipt["steps"]])
-            self.assertEqual(7, len(calls))
-            self.assertTrue(receipt_path.is_file())
-            self.assertEqual("not_started", json.loads(manifest.read_text())["deployment_state"])
-
-    def test_deploy_stops_after_first_failed_step(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary); deploy, manifest = self._approved_plan(root)
-            calls = []
-            def invoke(argv, **_kwargs):
-                calls.append(argv)
-                code = 9 if len(calls) == 3 else 0
-                return subprocess.CompletedProcess(argv, code, "", "failed" if code else "")
-            receipt = deploy.run(manifest, root / "execution.json", execute=True, invoke=invoke)
-            self.assertEqual("deployment_step_failed", receipt["status"])
-            self.assertEqual(9, receipt["exit_code"])
-            self.assertEqual(3, len(calls))
-
     def test_health_acceptance_requires_one_postdeployment_controller_and_full_duration(self) -> None:
         health = load("observe_r11a_health_candidate")
         start = datetime(2026, 9, 11, tzinfo=timezone.utc)
@@ -114,15 +61,17 @@ class R11aOpsCandidateTests(unittest.TestCase):
             (installed_root / "dalton_core/example.py").write_bytes(body)
             final.WHEEL_SHA256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
             manifest_path = root / "approved.json"
-            write_json(manifest_path, {"source_commit": final.COMMIT, "acceptance_state": "passed"})
+            write_json(manifest_path, {"source": {"commit": final.COMMIT},
+                                      "status": "staged_pending_owner_acceptance"})
             deployment_path = root / "deployment.json"
             deploy_start = datetime(2026, 9, 11, tzinfo=timezone.utc)
             deploy_finish = deploy_start + timedelta(seconds=10)
-            write_json(deployment_path, {"source_commit": final.COMMIT, "status": "installer_finished",
+            write_json(deployment_path, {"source_commit": final.COMMIT,
+                                         "status": "installer_finished_runtime_health_pending",
                                          "exit_code": 0,
                                          "started_at": deploy_start.isoformat(),
                                          "finished_at": deploy_finish.isoformat(),
-                                         "approved_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()})
+                                         "candidate_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()})
             summary_path = root / "summary.json"
             controller_started = (deploy_start + timedelta(seconds=5)).isoformat()
             samples = []
@@ -141,7 +90,7 @@ class R11aOpsCandidateTests(unittest.TestCase):
                                       "all_healthy": True, "same_controller": True,
                                       "postdeployment_controller": True, "observed_long_enough": True,
                                       "sample_count": 45, "elapsed_seconds": 660, "samples": samples,
-                                      "approved_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                                      "candidate_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                                       "deployment_receipt_sha256": hashlib.sha256(deployment_path.read_bytes()).hexdigest()})
             installed_path = root / "installed.json"
             write_json(installed_path, {"status": "installed_bytes_verified_runtime_pending",
@@ -153,6 +102,71 @@ class R11aOpsCandidateTests(unittest.TestCase):
             self.assertEqual("passed_pending_owner_publication", receipt["status"])
             self.assertFalse(receipt["manifest_publication"])
             self.assertEqual(before, manifest_path.read_bytes())
+
+    def test_stopped_window_rollback_restores_runtime_config_state_database_and_plists(self) -> None:
+        execute = load("execute_r11a_stopped_window_candidate")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            execute.DALTON = root / "Dalton"; execute.STATE = execute.DALTON / "state/dalton-core"
+            execute.CONFIG_DIR = execute.DALTON / "config"; execute.SERVICE_CONFIG = execute.CONFIG_DIR / "service.json"
+            execute.RUNTIME = execute.DALTON / "runtime"; execute.VENV = execute.RUNTIME / "venv"
+            execute.LAUNCH_AGENTS = root / "LaunchAgents"
+            execute.STATE.mkdir(parents=True); execute.CONFIG_DIR.mkdir(); execute.VENV.mkdir(parents=True)
+            execute.LAUNCH_AGENTS.mkdir()
+            (execute.VENV / "new.txt").write_text("new")
+            write_json(execute.SERVICE_CONFIG, {"version": "new"})
+            write_json(execute.STATE / "owned.json", {"version": "old"})
+            (execute.STATE / "authority.sqlite").write_bytes(b"new-database")
+            (execute.STATE / "discovery-plans").mkdir(); (execute.STATE / "discovery-plans/old.json").write_text("old")
+            writer = execute.LABELS[0]
+            (execute.LAUNCH_AGENTS / f"{writer}.plist").write_bytes(b"new-plist")
+            rollback = root / "rollback"; rollback.mkdir()
+            (rollback / "venv").mkdir(); (rollback / "venv/old.txt").write_text("old")
+            (rollback / "config").mkdir(); write_json(rollback / "config/service.json", {"version": "old"})
+            state_files = rollback / "state-files"; state_files.mkdir(); write_json(state_files / "owned.json", {"version": "old"})
+            (state_files / "discovery-plans").mkdir(); (state_files / "discovery-plans/old.json").write_text("old")
+            (rollback / "plists").mkdir(); (rollback / f"plists/{writer}.plist").write_bytes(b"old-plist")
+            write_json(rollback / "initial-state.json", {"loaded": [writer],
+                "plists": {label: label == writer for label in execute.LABELS},
+                "databases": ["authority.sqlite"],
+                "backup_tree_hashes": {
+                    "venv": execute.tree_hash(rollback / "venv"),
+                    "config": execute.tree_hash(rollback / "config"),
+                    "state-files": execute.tree_hash(state_files),
+                    "plists": execute.tree_hash(rollback / "plists"),
+                }})
+            snapshot = "snapshot"; (rollback / f"databases/{snapshot}").mkdir(parents=True)
+            write_json(rollback / f"databases/{snapshot}/manifest.json",
+                       {"files": [{"file": "authority.sqlite"}]})
+            (rollback / "restore").mkdir(); (rollback / "restore/authority.sqlite").write_bytes(b"old-database")
+            class Fake(execute.Orchestrator):
+                def __init__(self):
+                    super().__init__(root, io.StringIO()); self.restarted = False
+                def stop(self, _label): pass
+                def restart_initial(self): self.restarted = True
+            worker = Fake(); worker.stopped = worker.mutations_started = True
+            artifacts = root / "artifacts"; artifacts.mkdir()
+            write_json(artifacts / "service-after.json", {"version": "new"})
+            worker.rollback_root = rollback; worker.snapshot_id = snapshot; worker.initially_loaded = [writer]
+            worker.source = root; worker.artifacts = {"service_config_after": artifacts / "service-after.json"}
+            # The physical rollback test bypasses only process drain commands.
+            worker.command = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", "")
+            write_json(execute.STATE / "owned.json", {"version": "concurrent-owner"})
+            with self.assertRaisesRegex(execute.ExecuteError, "refusing to overwrite concurrent"):
+                worker.rollback()
+            self.assertTrue((execute.VENV / "new.txt").is_file())
+            self.assertEqual({"version": "concurrent-owner"},
+                             json.loads((execute.STATE / "owned.json").read_text()))
+            write_json(execute.STATE / "owned.json", {"version": "old"})
+            result = worker.rollback()
+            self.assertEqual("rolled_back_healthy", result["status"])
+            self.assertTrue(worker.restarted)
+            self.assertTrue((execute.VENV / "old.txt").is_file())
+            self.assertEqual({"version": "old"}, json.loads(execute.SERVICE_CONFIG.read_text()))
+            self.assertEqual(b"old-database", (execute.STATE / "authority.sqlite").read_bytes())
+            self.assertTrue((execute.STATE / "discovery-plans/old.json").is_file())
+            self.assertEqual(b"old-plist", (execute.LAUNCH_AGENTS / f"{writer}.plist").read_bytes())
+            self.assertFalse((execute.LAUNCH_AGENTS / f"{execute.LABELS[-1]}.plist").exists())
 
 
 if __name__ == "__main__":
