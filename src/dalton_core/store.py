@@ -1322,6 +1322,7 @@ class DaltonStore:
         claim_wire = validate_candidate_claim(claim)
         if decision_wire["verdict"] != "accept":
             raise GateRejected("only an accepted authorization can enter the Ledger")
+        policy_admitted = False
         if claim_wire["claim_kind"] == "qualitative":
             # ADR-0003 option B, narrowed by ADR-0005: a semantic candidate
             # enters the Ledger through explicit human review, or through the
@@ -1341,7 +1342,11 @@ class DaltonStore:
                     "qualitative candidates enter the Ledger only through explicit human review"
                 )
             from .transcript_correction import CITED_EVIDENCE_SOURCE_TYPES
-            if evidence_wire["source_type"] not in CITED_EVIDENCE_SOURCE_TYPES:
+            policy_annual = policy_admitted and evidence_wire["source_type"] == "official_filing"
+            if (
+                evidence_wire["source_type"] not in CITED_EVIDENCE_SOURCE_TYPES
+                and not policy_annual
+            ):
                 raise GateRejected(
                     "qualitative candidates require cited original evidence"
                 )
@@ -1445,8 +1450,18 @@ class DaltonStore:
             if source is None or source["content_hash"] != evidence_wire["source_envelope_hash"]:
                 raise GateRejected("candidate SourceEnvelope is not exact Core authority")
             source_doc = json.loads(source["record_json"])
+            policy_annual_source = (
+                policy_admitted
+                and evidence_wire["source_type"] == "official_filing"
+                and evidence_wire["source_ref"] == "source:sec-edgar"
+                and source_doc.get("source") == "source:public-web"
+                and source_doc.get("operation") == "fetch_get"
+            )
             if (
-                source_doc.get("source") != evidence_wire["source_ref"]
+                (
+                    source_doc.get("source") != evidence_wire["source_ref"]
+                    and not policy_annual_source
+                )
                 or source_doc.get("raw_artifact_version_ref")
                 != evidence_wire["artifact_refs"][0]["ref"]
             ):

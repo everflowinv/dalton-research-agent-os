@@ -569,6 +569,160 @@ class MissionAnnualResearchExecutor:
             raise MissionAnnualResearchExecutorError("stored annual research outcome drifted")
         return body
 
+    def _promote(
+        self, admission: Mapping[str, Any], records: Mapping[str, Any],
+        outcome: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        existing = self.connection.execute(
+            "SELECT * FROM mission_annual_research_promotions WHERE admission_ref=?",
+            (admission["id"],),
+        ).fetchone()
+        if existing is not None:
+            try:
+                promotion = json.loads(existing["record_json"])
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise MissionAnnualResearchExecutorError(
+                    "stored annual research promotion is invalid"
+                ) from exc
+            base = dict(promotion) if isinstance(promotion, Mapping) else {}
+            asserted = base.pop("content_hash", None)
+            columns = {
+                "id": existing["promotion_id"],
+                "outcome_ref": existing["outcome_ref"],
+                "admission_ref": existing["admission_ref"],
+                "evidence_version_ref": existing["evidence_version_ref"],
+                "evidence_version_hash": existing["evidence_version_hash"],
+                "claim_version_ref": existing["claim_version_ref"],
+                "claim_version_hash": existing["claim_version_hash"],
+                "policy_authorization_ref": existing["policy_authorization_ref"],
+                "policy_authorization_hash": existing["policy_authorization_hash"],
+                "created_at": existing["created_at"],
+            }
+            evidence = self.connection.execute(
+                "SELECT content_hash FROM evidence_versions WHERE evidence_version_id=?",
+                (existing["evidence_version_ref"],),
+            ).fetchone()
+            claim = self.authority.store.get_claim(existing["claim_version_ref"])
+            decision_row = self.connection.execute(
+                "SELECT decision_json FROM reviewed_candidate_commits "
+                "WHERE review_decision_ref=?",
+                (existing["policy_authorization_ref"],),
+            ).fetchone()
+            try:
+                from .research_auto_commit import validate_policy_commit_decision
+
+                decision = validate_policy_commit_decision(
+                    json.loads(decision_row["decision_json"])
+                    if decision_row is not None else {}
+                )
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise MissionAnnualResearchExecutorError(
+                    "stored annual research promotion authorization is invalid"
+                ) from exc
+            if (
+                not isinstance(promotion, Mapping)
+                or canonical_json(promotion) != existing["record_json"]
+                or asserted != existing["content_hash"]
+                or asserted != content_hash(base)
+                or any(promotion.get(key) != value for key, value in columns.items())
+                or promotion.get("research_status") != "canonical_claim_promoted"
+                or promotion.get("outcome_ref") != outcome["id"]
+                or evidence is None
+                or evidence["content_hash"] != promotion.get("evidence_version_hash")
+                or claim is None
+                or claim["content_hash"] != promotion.get("claim_version_hash")
+                or decision["content_hash"]
+                != promotion.get("policy_authorization_hash")
+                or canonical_json(decision) != decision_row["decision_json"]
+            ):
+                raise MissionAnnualResearchExecutorError(
+                    "stored annual research promotion drifted"
+                )
+            return {
+                "status": "complete", **dict(records),
+                "research_status": "canonical_claim_promoted",
+                "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"],
+                "promotion_ref": promotion["id"],
+                "promotion_hash": promotion["content_hash"],
+                "evidence_version_ref": promotion["evidence_version_ref"],
+                "claim_version_ref": promotion["claim_version_ref"],
+            }
+        from .research_auto_commit import policy_lists_document_rule
+
+        if not policy_lists_document_rule(self.authority.store.active_policy()):
+            return {
+                "status": "complete", **dict(records),
+                "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"],
+            }
+        # Re-resolve immediately before the formal Ledger boundary. The
+        # policy evaluator independently re-reads the immutable admission,
+        # model invocations, Scheduler WorkOrders and Core source authority.
+        self.authority.resolve_for_execution(admission["id"])
+        staged = self.staging.exact_candidate_bundle(
+            evidence_ref=records["candidate_evidence_ref"],
+            claim_ref=records["candidate_claim_ref"],
+            idempotency_key=f"mission-annual-research-candidate:{admission['id']}",
+        )
+        promoted = self.authority.store.commit_policy_candidate(
+            evidence=staged["evidence"], claim=staged["claim"],
+            material=staged["material"],
+            source_verification=staged["source_verification"],
+            numeric_spec=None, numeric_verification=None,
+            idempotency_key=f"policy-ledger:mission-annual-research:{admission['id']}",
+        )
+        evidence = self.authority.store.connection.execute(
+            "SELECT content_hash FROM evidence_versions WHERE evidence_version_id=?",
+            (promoted["evidence_version_ref"],),
+        ).fetchone()
+        claim = self.authority.store.get_claim(promoted["claim_version_ref"])
+        authorization = promoted["authorization"]
+        if evidence is None or claim is None:
+            raise MissionAnnualResearchExecutorError(
+                "policy promotion did not persist canonical Evidence/Claim"
+            )
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": _ref("mission-annual-research-promotion", {
+                "outcome_ref": outcome["id"],
+                "claim_version_ref": promoted["claim_version_ref"],
+                "authorization_hash": authorization["content_hash"],
+            }),
+            "outcome_ref": outcome["id"], "admission_ref": admission["id"],
+            "research_status": "canonical_claim_promoted",
+            "evidence_version_ref": promoted["evidence_version_ref"],
+            "evidence_version_hash": evidence["content_hash"],
+            "claim_version_ref": promoted["claim_version_ref"],
+            "claim_version_hash": claim["content_hash"],
+            "policy_authorization_ref": authorization["id"],
+            "policy_authorization_hash": authorization["content_hash"],
+            "created_at": authorization["created_at"],
+        }
+        record["content_hash"] = content_hash(record)
+        row = self.connection.execute(
+            "SELECT record_json,content_hash FROM mission_annual_research_promotions "
+            "WHERE promotion_id=?", (record["id"],),
+        ).fetchone()
+        if row is None:
+            with self._transaction() as cursor:
+                cursor.execute(
+                    "INSERT INTO mission_annual_research_promotions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (record["id"], outcome["id"], admission["id"],
+                     record["evidence_version_ref"], record["evidence_version_hash"],
+                     record["claim_version_ref"], record["claim_version_hash"],
+                     record["policy_authorization_ref"], record["policy_authorization_hash"],
+                     canonical_json(record), record["content_hash"], record["created_at"]),
+                )
+        elif row["record_json"] != canonical_json(record) or row["content_hash"] != record["content_hash"]:
+            raise MissionAnnualResearchExecutorError("stored annual research promotion drifted")
+        return {
+            "status": "complete", **dict(records),
+            "research_status": "canonical_claim_promoted",
+            "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"],
+            "promotion_ref": record["id"], "promotion_hash": record["content_hash"],
+            "evidence_version_ref": record["evidence_version_ref"],
+            "claim_version_ref": record["claim_version_ref"],
+        }
+
     def run_once(self, admission_ref: str) -> dict[str, Any]:
         try:
             admission = self.authority.resolve_for_execution(admission_ref)
@@ -612,10 +766,11 @@ class MissionAnnualResearchExecutor:
             else:
                 records = formal["result_envelope"]["outputs"]
                 self._stage_formal_owned_by_executor(work, formal)
-                outcome = self._store_outcome(admission, [
+                resolved_works = [
                     self._derive_work(admission, blueprints, i) for i in range(4)
-                ], records)
-                return {"status": "complete", **records, "outcome_ref": outcome["id"], "outcome_hash": outcome["content_hash"]}
+                ]
+                outcome = self._store_outcome(admission, resolved_works, records)
+                return self._promote(admission, records, outcome)
         raise MissionAnnualResearchExecutorError("annual research run has invalid shape")
 
 

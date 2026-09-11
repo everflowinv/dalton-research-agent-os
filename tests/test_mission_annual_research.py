@@ -25,6 +25,9 @@ from dalton_core.mission_annual_research_executor import (
 )
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_model_adapter import _WORK_ID_RE
+from dalton_core.mission_dossier_lane import ledger_signature
+from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
+from dalton_core.research_auto_commit import ResearchAutoCommitRejected
 from dalton_core.annual_report_qualitative import (
     AnnualReportQualitativeError, RegisteredAnnualReportDraftWorker,
     RegisteredAnnualReportVerifierWorker,
@@ -62,7 +65,8 @@ class CountingFakeAdapter(FakeAdapter):
 class MissionAnnualFixture:
     def __init__(self, case: unittest.TestCase, *, mission_calls: int = 10,
                  same_family: bool = False, sec_connected: bool = True,
-                 unusable_route: bool = False) -> None:
+                 unusable_route: bool = False, auto_commit: bool = False,
+                 canonical_writes: bool = True) -> None:
         self.case = case
         self.harness = PlanExecutorHarness(suffix="mission-annual-admission")
         case.addCleanup(self.harness.close)
@@ -76,8 +80,14 @@ class MissionAnnualFixture:
             "max_alphaengine_calls_24h": 30,
         }
         active = self.store.active_policy_version()
+        policy_body = {**active.policy, "research_budget": outer}
+        if auto_commit:
+            policy_body["research_candidate_auto_commit"] = {
+                "enabled": True, "max_records": 20,
+                "rules": [DOCUMENT_QUALITATIVE_RULE_REF],
+            }
         self.store.create_policy(
-            {**active.policy, "research_budget": outer},
+            policy_body,
             policy_version_id="governance-policy-version:mission-annual:2",
             version_number=2, prior_version_ref=active.id,
             effective_from=NOW.isoformat(),
@@ -103,10 +113,13 @@ class MissionAnnualFixture:
                 "max_alphaengine_calls_24h": 0,
             },
         })
+        may_write = list(params["autonomy"]["may_write"]) + ["research_task"]
+        if not canonical_writes:
+            may_write = [item for item in may_write if item not in {"claim", "evidence"}]
         params["autonomy"] = {
             **params["autonomy"],
             "automation_principal": "automation:test",
-            "may_write": list(params["autonomy"]["may_write"]) + ["research_task"],
+            "may_write": may_write,
         }
         if not sec_connected:
             for source in params["source_plan"]:
@@ -595,6 +608,88 @@ class MissionAnnualResearchTests(unittest.TestCase):
         self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 1)
         replay = executor.run_once(admission["id"])
         self.assertEqual(replay["outcome_ref"], completed["outcome_ref"])
+
+    def test_policy_promotes_exact_annual_candidate_to_canonical_evidence_and_claim(self):
+        fixture = MissionAnnualFixture(self, auto_commit=True)
+        before_signature = ledger_signature(fixture.store.connection)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, draft, verifier = self._executor(fixture)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(9)]
+        promoted = outcomes[-1]
+        self.assertEqual(promoted["status"], "complete")
+        self.assertEqual(promoted["research_status"], "canonical_claim_promoted")
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        self.assertIsNotNone(fixture.store.get_claim(promoted["claim_version_ref"]))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM evidence_versions WHERE evidence_version_id=?",
+            (promoted["evidence_version_ref"],),
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_annual_research_promotions"
+        ).fetchone()[0], 1)
+        self.assertNotEqual(
+            ledger_signature(fixture.store.connection),
+            before_signature,
+        )
+        canonical_evidence = json.loads(fixture.store.connection.execute(
+            "SELECT evidence_json FROM evidence_versions WHERE evidence_version_id=?",
+            (promoted["evidence_version_ref"],),
+        ).fetchone()[0])
+        self.assertEqual(canonical_evidence["source_type"], "official_filing")
+        self.assertEqual(
+            canonical_evidence["source_envelope_ref"],
+            fixture.source.manifest["source_envelope_ref"],
+        )
+        self.assertEqual(
+            canonical_evidence["artifact_refs"][0]["ref"],
+            fixture.source.manifest["raw_artifact_version_ref"],
+        )
+        staged_outcome = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM mission_annual_research_outcomes"
+        ).fetchone()[0])
+        self.assertEqual(staged_outcome["research_status"], "candidate_staged")
+        replay = executor.run_once(admission["id"])
+        self.assertEqual(replay["promotion_ref"], promoted["promotion_ref"])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+
+    def test_policy_promotion_refuses_missing_exact_budget_authority(self):
+        fixture = MissionAnnualFixture(self, auto_commit=True)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, draft, verifier = self._executor(fixture)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(8)]
+        self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
+        budget_path = Path(fixture.budget.path)
+        moved = budget_path.with_suffix(".unavailable")
+        budget_path.rename(moved)
+        self.addCleanup(lambda: moved.rename(budget_path) if moved.exists() else None)
+        with self.assertRaisesRegex(
+            MissionAnnualResearchExecutorError, "budget policy is unavailable"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM evidence_versions"
+        ).fetchone()[0], 0)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM claim_versions"
+        ).fetchone()[0], 0)
+
+    def test_policy_promotion_requires_mission_evidence_and_claim_permissions(self):
+        fixture = MissionAnnualFixture(
+            self, auto_commit=True, canonical_writes=False
+        )
+        admission = fixture.authority.admit(**fixture.args())
+        executor, draft, verifier = self._executor(fixture)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(8)]
+        self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
+        with self.assertRaisesRegex(
+            ResearchAutoCommitRejected, "does not grant canonical research writes"
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM claim_versions"
+        ).fetchone()[0], 0)
 
 
 if __name__ == "__main__":

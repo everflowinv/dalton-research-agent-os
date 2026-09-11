@@ -13,6 +13,9 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from .research_verification import (
@@ -166,6 +169,8 @@ def _decision(policy_version: Mapping[str, Any], *, claim_wire: Mapping[str, Any
 def _authorize_document_qualitative(
     *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
     evidence_wire: Mapping[str, Any], claim_wire: Mapping[str, Any],
+    material: Mapping[str, Any] | None = None,
+    source_verification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """ADR-0005: admit one automation-drafted qualitative candidate from a verified original."""
 
@@ -195,6 +200,12 @@ def _authorize_document_qualitative(
         raise ResearchAutoCommitRejected("document qualitative rule admits no numeric statement")
     if statement_is_boilerplate(claim_wire["normalized_statement"]):
         raise ResearchAutoCommitRejected("document qualitative rule admits no disclaimer or boilerplate")
+    if evidence_wire["source_type"] == "official_filing":
+        return _authorize_registered_annual_qualitative(
+            connection=connection, policy_version=policy_version,
+            evidence_wire=evidence_wire, claim_wire=claim_wire,
+            material=material, source_verification=source_verification,
+        )
     expected_operation = {
         (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "source:alphaengine"): "get_document",
         ("public_web", "source:public-web"): "fetch_get",
@@ -241,6 +252,416 @@ def _authorize_document_qualitative(
         policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
         rule_ref=DOCUMENT_QUALITATIVE_RULE_REF,
         rationale="Mission automation draft bound to an exact verified raw span of an acquired original (ADR-0005).",
+    )
+
+
+def _scheduler_work(
+    connection: sqlite3.Connection, work_ref: str
+) -> dict[str, Any]:
+    from .contracts import WorkOrder
+
+    row = connection.execute(
+        "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+        "WHERE work_order_id=?", (work_ref,),
+    ).fetchone()
+    if row is None:
+        raise ResearchAutoCommitRejected("annual candidate WorkOrder is unavailable")
+    try:
+        wire = WorkOrder.from_dict(json.loads(row["work_order_json"])).to_dict()
+    except Exception as exc:
+        raise ResearchAutoCommitRejected("annual candidate WorkOrder is invalid") from exc
+    if canonical_json(wire) != row["work_order_json"] or content_hash(wire) != row["work_order_hash"]:
+        raise ResearchAutoCommitRejected("annual candidate WorkOrder authority drifted")
+    return wire
+
+
+class _ReadOnlySchedulerAuthority:
+    """Narrow Scheduler reader used by policy evaluation without queue writes."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def work_order_authority(self, work_ref: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT 1 FROM scheduler_work_orders WHERE work_order_id=?", (work_ref,)
+        ).fetchone()
+        if row is None:
+            return None
+        wire = _scheduler_work(self.connection, work_ref)
+        return {"work_order": wire, "work_order_hash": content_hash(wire)}
+
+    def formal_result(self, work_ref: str) -> dict[str, Any] | None:
+        from .contracts import ResultEnvelope
+
+        row = self.connection.execute(
+            "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+            (work_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            envelope = ResultEnvelope.from_dict(
+                json.loads(row["result_envelope_json"])
+            ).to_dict()
+        except Exception as exc:
+            raise ResearchAutoCommitRejected(
+                "annual candidate upstream formal result is invalid"
+            ) from exc
+        formal = {
+            "id": row["result_record_id"], "work_order_id": row["work_order_id"],
+            "attempt_number": row["attempt_number"],
+            "result_envelope_id": row["result_envelope_id"],
+            "result_envelope_hash": row["result_envelope_hash"],
+            "terminal_state": row["terminal_state"], "created_at": row["created_at"],
+        }
+        if (
+            canonical_json(envelope) != row["result_envelope_json"]
+            or envelope["id"] != row["result_envelope_id"]
+            or envelope["work_order_ref"] != work_ref
+            or content_hash(envelope) != row["result_envelope_hash"]
+            or content_hash(formal) != row["content_hash"]
+        ):
+            raise ResearchAutoCommitRejected(
+                "annual candidate upstream formal result drifted"
+            )
+        return {
+            **{key: row[key] for key in row.keys() if key != "result_envelope_json"},
+            "result_envelope": envelope,
+        }
+
+
+def _model_invocation(
+    connection: sqlite3.Connection, invocation_ref: str
+) -> dict[str, Any]:
+    from .contracts import ModelInvocation
+
+    row = connection.execute(
+        "SELECT * FROM model_invocations "
+        "WHERE invocation_id=?", (invocation_ref,),
+    ).fetchone()
+    if row is None:
+        raise ResearchAutoCommitRejected("annual candidate model invocation is unavailable")
+    try:
+        stored = json.loads(row["invocation_json"])
+        if (
+            not isinstance(stored, Mapping)
+            or stored.get("invocation_id") != stored.get("id")
+        ):
+            raise ValueError("model invocation aliases disagree")
+        normalized = dict(stored)
+        normalized.pop("invocation_id")
+        wire = ModelInvocation.from_dict(normalized).to_dict()
+    except Exception as exc:
+        raise ResearchAutoCommitRejected("annual candidate model invocation is invalid") from exc
+    columns = {
+        "id": row["invocation_id"], "profile_ref": row["profile_ref"],
+        "provider": row["provider"], "model": row["model"],
+        "capability": row["capability"], "runtime_ref": row["runtime_ref"],
+        "actor_ref": row["actor_ref"], "environment_hash": row["environment_hash"],
+        "granularity": row["granularity"], "work_order_ref": row["work_order_ref"],
+        "model_family": row["model_family"],
+    }
+    if (
+        canonical_json(stored) != row["invocation_json"]
+        or stored.get("invocation_id") != row["invocation_id"]
+        or any(wire.get(key) != value for key, value in columns.items())
+    ):
+        raise ResearchAutoCommitRejected("annual candidate model invocation drifted")
+    return dict(wire)
+
+
+def _annual_budget_proof(
+    *, work: Mapping[str, Any], proof: Mapping[str, Any], phase: str,
+    mission: Mapping[str, Any], purpose: str,
+) -> dict[str, Any]:
+    from .budget_pools import mission_pool_scope
+    from .thesis_impact_budget import ThesisImpactBudgetError, ThesisImpactBudgetStore
+
+    budget_path = Path(work["metadata"]["budget_db"])
+    try:
+        with ThesisImpactBudgetStore(budget_path, read_only=True) as budget_store:
+            rows = budget_store.connection.execute(
+                "SELECT attempt_number FROM thesis_impact_day_admissions "
+                "WHERE work_order_ref=? AND phase=? AND route_decision_ref=?",
+                (work["id"], phase, proof["route_decision_ref"]),
+            ).fetchall()
+            if len(rows) != 1:
+                raise ResearchAutoCommitRejected(
+                    "annual candidate has no unique model budget admission"
+                )
+            authority = budget_store.admission(
+                work_order_ref=work["id"],
+                attempt_number=rows[0]["attempt_number"], phase=phase,
+            )
+    except (OSError, sqlite3.Error, ThesisImpactBudgetError) as exc:
+        raise ResearchAutoCommitRejected(
+            "annual candidate model budget authority is unavailable"
+        ) from exc
+    if authority is None:
+        raise ResearchAutoCommitRejected(
+            "annual candidate model budget admission is unavailable"
+        )
+    admission = authority["admission"]
+    binding = authority["mission_binding"]
+    expected_binding = {
+        "mission_ref": mission["mission_ref"],
+        "mission_version_ref": mission["id"],
+        "mission_version_hash": mission["content_hash"],
+        "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
+        "max_daily_cost_micros": int(
+            Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000
+        ),
+        "outer_budget": dict(mission["outer_budget"]),
+        **mission_pool_scope(mission, purpose=purpose),
+    }
+    ceiling = int(Decimal(str(work["budget"]["max_cost_usd"])) * 1_000_000)
+    if (
+        admission["policy_version_id"] != work["metadata"]["budget_policy_ref"]
+        or admission["reserved_micros"] != ceiling
+        or admission["route_decision_ref"] != proof["route_decision_ref"]
+        or canonical_json(binding) != canonical_json(expected_binding)
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual candidate model budget binding drifted"
+        )
+    return authority
+
+
+def _authorize_registered_annual_qualitative(
+    *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
+    evidence_wire: Mapping[str, Any], claim_wire: Mapping[str, Any],
+    material: Mapping[str, Any] | None,
+    source_verification: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Closed ADR-0005 branch for a mission-targeted registered SEC read."""
+
+    from .annual_report_qualitative import (
+        build_annual_report_candidate_bundle, validate_draft_output,
+        validate_model_proof, validate_verifier_output,
+    )
+    from .mission_annual_research_executor import (
+        AUTHORITY_KIND, _derive_mission_annual_work, _mission_annual_blueprints,
+    )
+    from .model_router import independent_families
+    from .registered_annual_report import validate_retrieval_proof
+    from .research_verification import (
+        REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
+        REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH,
+        REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
+        validate_source_verification_material, validate_verification_bundle,
+    )
+    from .sec_company_facts_lane import read_active_annual_budget_mission
+
+    if material is None or source_verification is None:
+        raise ResearchAutoCommitRejected(
+            "annual qualitative candidate requires its exact staged authority bundle"
+        )
+    material_wire = validate_source_verification_material(material)
+    verification = validate_verification_bundle(source_verification)
+    if (
+        material_wire.get("provenance_mode")
+        != REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE
+        or material_wire.get("source_type") != "official_filing"
+        or material_wire.get("source_ref") != "source:sec-edgar"
+        or verification.get("kind") != "source"
+        or verification.get("verdict") != "pass"
+        or verification.get("subject_ref") != material_wire["id"]
+        or verification.get("subject_hash") != material_wire["content_hash"]
+        or (verification.get("verifier_ref"), verification.get("verifier_hash"))
+        != (REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF,
+            REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH)
+        or evidence_wire["source_envelope_ref"] != material_wire["source_envelope_ref"]
+        or evidence_wire["source_envelope_hash"] != material_wire["source_envelope_hash"]
+        or evidence_wire["artifact_refs"] != [{
+            "ref": material_wire["artifact_ref"], "hash": material_wire["artifact_hash"],
+        }]
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual qualitative candidate source authority is not exact"
+        )
+    payload = material_wire.get("normalized_payload")
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "question", "retrieval_proof", "draft_proof", "verifier_proof",
+        "mission_admission",
+    }:
+        raise ResearchAutoCommitRejected("annual candidate payload has an invalid closed shape")
+    admission_binding = payload["mission_admission"]
+    if not isinstance(admission_binding, Mapping) or set(admission_binding) != {
+        "ref", "hash", "mission_version_ref", "mission_version_hash",
+        "repair_target_ref", "repair_target_hash",
+    }:
+        raise ResearchAutoCommitRejected("annual candidate mission binding is invalid")
+    admission_row = connection.execute(
+        "SELECT record_json,content_hash FROM mission_annual_research_admissions "
+        "WHERE admission_id=?", (admission_binding["ref"],),
+    ).fetchone()
+    admission = _record(admission_row, "mission annual research admission")
+    if (
+        admission["content_hash"] != admission_binding["hash"]
+        or admission["mission_version_ref"] != admission_binding["mission_version_ref"]
+        or admission["mission_version_hash"] != admission_binding["mission_version_hash"]
+        or admission["repair_target_ref"] != admission_binding["repair_target_ref"]
+        or admission["repair_target_hash"] != admission_binding["repair_target_hash"]
+        or admission["actor_ref"] != claim_wire["actor_ref"]
+        or admission["company_ref"] != claim_wire["subject_ref"]
+    ):
+        raise ResearchAutoCommitRejected("annual candidate mission admission drifted")
+    try:
+        active = read_active_annual_budget_mission(
+            connection, admission["mission_version_ref"], admission["company_ref"],
+            now=datetime.now(timezone.utc),
+        )
+    except Exception as exc:
+        raise ResearchAutoCommitRejected("annual candidate mission is no longer active") from exc
+    if active["content_hash"] != admission["mission_version_hash"] or (
+        "claim" not in set(active["autonomy"]["may_write"])
+        or "evidence" not in set(active["autonomy"]["may_write"])
+        or "research_task" not in set(active["autonomy"]["may_write"])
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual candidate mission does not grant canonical research writes"
+        )
+    proof = validate_retrieval_proof(
+        payload["retrieval_proof"], expected_request=admission["request"]
+    )
+    if (
+        material_wire["source_content_hash"] != admission["request"]["source_content_hash"]
+        or proof["registration"]["company_ref"] != admission["company_ref"]
+        or proof["registration"]["source_manifest_ref"]
+        not in material_wire["source_lineage"]
+    ):
+        raise ResearchAutoCommitRejected("annual candidate retrieval source drifted")
+    draft_raw, verifier_raw = payload["draft_proof"], payload["verifier_proof"]
+    if not isinstance(draft_raw, Mapping) or not isinstance(verifier_raw, Mapping):
+        raise ResearchAutoCommitRejected("annual candidate model proofs are invalid")
+    draft_work = _scheduler_work(connection, draft_raw.get("work_order_ref"))
+    verifier_work = _scheduler_work(connection, verifier_raw.get("work_order_ref"))
+    scheduler = _ReadOnlySchedulerAuthority(connection)
+    blueprints = _mission_annual_blueprints(admission)
+    expected_draft = _derive_mission_annual_work(
+        admission, scheduler, blueprints, 1
+    )
+    expected_verifier = _derive_mission_annual_work(
+        admission, scheduler, blueprints, 2
+    )
+    if (
+        canonical_json(draft_work) != canonical_json(expected_draft)
+        or canonical_json(verifier_work) != canonical_json(expected_verifier)
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual candidate Work drifted from exact mission derivation"
+        )
+    for work, stage in (
+        (draft_work, "qualitative_model_draft"),
+        (verifier_work, "independent_qualitative_verifier"),
+    ):
+        metadata = work["metadata"]
+        if (
+            metadata.get("authority_kind") != AUTHORITY_KIND
+            or metadata.get("mission_annual_research_admission_ref") != admission["id"]
+            or metadata.get("mission_annual_research_admission_hash")
+            != admission["content_hash"]
+            or metadata.get("repair_target_ref") != admission["repair_target_ref"]
+            or metadata.get("repair_target_hash") != admission["repair_target_hash"]
+            or metadata.get("stage") != stage
+        ):
+            raise ResearchAutoCommitRejected("annual candidate Work authority drifted")
+    draft = validate_model_proof(draft_raw, stage="qualitative_model_draft", work=draft_work)
+    verifier = validate_model_proof(
+        verifier_raw, stage="independent_qualitative_verifier", work=verifier_work
+    )
+    validate_draft_output(draft["output"], match_count=len(proof["matches"]))
+    checked = validate_verifier_output(verifier["output"], draft=draft["output"])
+    source = _record(connection.execute(
+        "SELECT record_json,content_hash FROM connector_source_envelopes "
+        "WHERE source_envelope_id=?", (material_wire["source_envelope_ref"],),
+    ).fetchone(), "annual candidate SourceEnvelope")
+    artifact = _record(connection.execute(
+        "SELECT record_json,content_hash FROM observability_artifact_versions_v2 "
+        "WHERE version_id=?", (material_wire["artifact_ref"],),
+    ).fetchone(), "annual candidate ArtifactVersion")
+    connector_invocation = _record(connection.execute(
+        "SELECT record_json,content_hash FROM connector_invocations "
+        "WHERE connector_invocation_id=?", (source["connector_invocation_ref"],),
+    ).fetchone(), "annual candidate ConnectorInvocation")
+    if (
+        source["content_hash"] != material_wire["source_envelope_hash"]
+        or source.get("raw_artifact_version_ref") != artifact["id"]
+        or artifact["content_hash"] != material_wire["artifact_hash"]
+        or source.get("connector_invocation_ref") != connector_invocation["id"]
+        or artifact.get("producer_execution_ref")
+        != connector_invocation.get("execution_ref")
+        or source.get("raw_response_hash") != artifact.get("artifact_content_hash")
+        or source.get("raw_response_hash") != proof["registration"]["source_raw_hash"]
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual candidate Core source authority drifted"
+        )
+    source_authority = {
+        "source_envelope_ref": source["id"],
+        "source_envelope_hash": source["content_hash"],
+        "raw_artifact_version_ref": artifact["id"],
+        "raw_artifact_version_hash": artifact["content_hash"],
+        "connector_invocation_ref": connector_invocation["id"],
+        "connector_invocation_hash": connector_invocation["content_hash"],
+        "source_manifest_ref": proof["registration"]["source_manifest_ref"],
+        "source_manifest_hash": proof["registration"]["source_manifest_hash"],
+        "source_raw_hash": proof["registration"]["source_raw_hash"],
+    }
+    expected_bundle = build_annual_report_candidate_bundle(
+        question_ref=admission["repair_target_ref"],
+        question=admission["planner_inquiry"]["question"], proof=proof,
+        draft_proof=draft, verifier_proof=verifier,
+        draft_work=expected_draft, verifier_work=expected_verifier,
+        actor_ref=admission["actor_ref"], created_at=material_wire["created_at"],
+        source_authority=source_authority, mission_admission=admission,
+    )
+    supplied_bundle = {
+        "material": material_wire, "source_verification": verification,
+        "evidence": evidence_wire, "claim": claim_wire,
+    }
+    if any(
+        canonical_json(supplied_bundle[key]) != canonical_json(expected_bundle[key])
+        for key in supplied_bundle
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual candidate bundle drifted from exact mission authority"
+        )
+    draft_invocation = _model_invocation(connection, draft["model_invocation_ref"])
+    verifier_invocation = _model_invocation(connection, verifier["model_invocation_ref"])
+    _annual_budget_proof(
+        work=expected_draft, proof=draft, phase="assessment", mission=active,
+        purpose="registered_annual_report_draft",
+    )
+    _annual_budget_proof(
+        work=expected_verifier, proof=verifier, phase="verification", mission=active,
+        purpose="registered_annual_report_verifier",
+    )
+    if (
+        draft_invocation.get("work_order_ref") != draft_work["id"]
+        or verifier_invocation.get("work_order_ref") != verifier_work["id"]
+        or draft_invocation.get("model_family") != draft["model_family"]
+        or verifier_invocation.get("model_family") != verifier["model_family"]
+        or draft_invocation.get("parent_ref") != draft["route_decision_ref"]
+        or verifier_invocation.get("parent_ref") != verifier["route_decision_ref"]
+        or not independent_families(
+            verifier_invocation["model_family"], draft_invocation["model_family"]
+        )
+        or checked["verdict"] != "pass"
+        or checked["verified_statement"] != claim_wire["normalized_statement"]
+        or draft["output"]["candidate"]["normalized_statement"]
+        != claim_wire["normalized_statement"]
+    ):
+        raise ResearchAutoCommitRejected(
+            "annual candidate lacks an exact independent passing model chain"
+        )
+    return _decision(
+        policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
+        rule_ref=DOCUMENT_QUALITATIVE_RULE_REF,
+        rationale=(
+            "Mission automation draft bound to exact cited matches in a registered "
+            "SEC annual report and an independent passing verifier (ADR-0005)."
+        ),
     )
 
 
@@ -316,6 +737,7 @@ def authorize_policy_candidate(
         return _authorize_document_qualitative(
             connection=connection, policy_version=policy_version,
             evidence_wire=evidence_wire, claim_wire=claim_wire,
+            material=material, source_verification=source_verification,
         )
     rule = _policy_rule(policy_version)
     selected_rule = rule["selected_rule"]
