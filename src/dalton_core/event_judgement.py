@@ -299,11 +299,17 @@ def build_judge_prompt(
         "beside it, and a decision that treats the proxy as the realised figure is wrong",
         "however good the proxy is.",
         "",
-        "Standing instruction: agreeing with the market is worth nothing. In `because`,",
-        "say whether our view differs from what the price and the street imply, and if it",
-        "does, name the observable that would move the market toward our view. If the",
+        "In `because`, connect the event to business fundamentals and the existing",
+        "driver model. Distinguish earnings delivery, expectation revisions and valuation",
+        "changes where the supplied evidence supports them. Agreement with the market",
+        "does not erase investment value; do not manufacture a disagreement. If our view",
+        "does differ, name the assumption and observable that could resolve it. If the",
         "event is a price_divergence, the price has been running against our thesis: say",
         "what we may have missed rather than restating the thesis.",
+        "State the current preferred interpretation explicitly. Explain the conditions",
+        "under which it or the alternative would hold, their effects, and what new",
+        "observation would make you change your decision. 'Both may happen' is not a",
+        "judgement. Be decisive within the evidence; do not invent facts or probabilities.",
         "",
         f"## The event ({event['kind']}, evidence tier: {event['evidence_tier']})",
         f"ref: {event['id']}",
@@ -609,9 +615,18 @@ def build_reflection_prompt(
         "holding through and why. This is not a defence of the thesis and it changes",
         "nothing: a person reads it beside the revision candidate.",
         "",
-        "The point of the exercise: if the market is bullish and we are bullish, our view",
-        "is worth nothing. Say where the market's pricing is wrong and what would bring",
-        "the market to our view -- or say that we now think the market was right.",
+        "Compare what we expected with the new evidence, preserving the earlier view",
+        "as it was. Explain whether the evidence changes a business driver, an earnings",
+        "expectation, valuation or only market attention. Identify alternative explanations,",
+        "counterevidence and the next observable check. Agreement with the market can",
+        "still support earnings delivery or valuation normalization; do not force a variant",
+        "view or invent numerical probabilities from an uncalibrated impression.",
+        "Choose a current main case. For that case and its material alternative, say",
+        "what conditions trigger it and what changes for the business, expectations",
+        "or valuation. Put the discriminating observation, source and review cadence",
+        "into followup_tracking where the supplied source table supports it; use",
+        "followup_research for unresolved assumptions. These remain proposals until",
+        "the existing authority actually admits them; never claim a task was scheduled.",
         "",
         f"## Trigger ({event['kind']}, ref {event['id']})",
         *_payload_lines(event),
@@ -634,8 +649,8 @@ def build_reflection_prompt(
             lines.append(f"- {row['ref']} ({row['kind']}, {row['tier']}): {row['payload']}")
     else:
         lines.append(
-            "(nothing: no consensus authority exists yet and no rating change, sales note "
-            "or crowd post has been recorded for this company. Say so; do not infer a "
+            "(no market-view evidence is supplied in this context. This does not prove "
+            "the system has no consensus capability or no other stored material. Do not infer a "
             "street view from the absence of one.)"
         )
     lines.append("")
@@ -1047,6 +1062,11 @@ def build_verifier_prompt(
         "if anything, should change. You do not re-decide and you do not improve it. You",
         "answer one question: does the decision follow from what the event actually says,",
         "at the weight its evidence tier deserves?",
+        "A supported no-change decision or agreement with the market is valid. Reject",
+        "unsupported causal attribution or a proxy presented as a fact, not the absence",
+        "of contrarianism. Confidence changes must follow the cited new evidence.",
+        "Check that the stated decision has a preferred interpretation and concrete",
+        "conditions or observations that could change it, not uncommitted alternatives.",
         "",
         f"Event ({event['kind']}, evidence tier {event['evidence_tier']}, ref {event['id']}):",
         *_payload_lines(event),

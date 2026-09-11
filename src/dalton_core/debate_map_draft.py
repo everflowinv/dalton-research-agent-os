@@ -281,9 +281,16 @@ def build_prompt(table: Mapping[str, Any]) -> str:
     ) or "  (no previous map)"
     return (
         "You keep the map of what is contested about one research subject.\n"
-        "You are not writing a summary. A debate that both sides of the market "
-        "agree about is worth nothing; what is worth writing down is where we "
-        "differ from consensus and what evidence would settle it.\n\n"
+        "Organize consequential, evidenced disagreements about industry structure, "
+        "business quality and operating drivers, including emerging questions. Our "
+        "position can agree with a market view or remain undecided; do not invent "
+        "disagreement to make the research appear valuable. Explain what evidence "
+        "would settle each question and what changed since the previous map.\n\n"
+        "Understand how the market reasons now and what could change its expectations "
+        "next. State the condition under which each side would prevail, its consequence "
+        "for the relevant driver, and the observable that distinguishes those conditions. "
+        "Do not substitute 'both are possible' for an evidenced assessment. Preserve the "
+        "difference between an admitted thesis and an unresolved research hypothesis.\n\n"
         f"SUBJECT: {table['subject_ref']} ({table['subject_kind']})\n\n"
         "DRIVERS you may bind a debate to -- <driver_ref>\\t<label>\\t<mechanism>:\n"
         f"{drivers}\n\n"
@@ -309,10 +316,12 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "DRIVERS.\n"
         "* Both sides need evidence. A side with no claim behind it is not a "
         "side, and a debate you cannot evidence both ways is not a debate.\n"
-        "* market_position is where consensus stands -- sell-side ratings and "
-        "targets, the sales-note and crowd tiers, management's own framing. "
-        "If the rows do not tell you, say available:false rather than "
-        "guessing; that is an answer.\n"
+        "* market_position describes the observed external view, with its source "
+        "class named in the statement. Sell-side opinions, sales-desk observations "
+        "and crowd attention are different signals, not interchangeable consensus. "
+        "Management framing alone does not establish an external market position. "
+        "Never infer buy-side consensus or positioning from these proxies. If the "
+        "rows do not establish an external view, say available:false.\n"
         "* our_position is what OUR THESIS commits us to. If we have no view, "
         "say none_yet. Do not copy the market into it.\n"
         "* gaining says which side has been gaining ground since PREVIOUS "
@@ -642,6 +651,10 @@ def build_verifier_prompt(
         "redraw it and you do not improve it. You answer two questions: is each",
         "debate supported by the rows it cites, and does it sit on the causal",
         "link and satisfy the admission rule it named?",
+        "Do not reject a supported debate merely because our position agrees with",
+        "an observed market view. Check that management framing, sell-side opinion,",
+        "desk observations and crowd attention are described as their actual source",
+        "classes; none alone establishes buy-side consensus or positioning.",
         "",
         f"SUBJECT: {table['subject_ref']}",
         "",

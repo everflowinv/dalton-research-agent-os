@@ -542,6 +542,20 @@ class AnswerShapeTests(unittest.TestCase):
         self.assertIn("市场向我们靠拢的路径", answer["answer"])
         self.assertNotIn("market_vs_us_present", answer["verification"]["failed_checks"])
 
+    def test_supported_agreement_does_not_require_inventing_market_error(self):
+        view = self.variant()
+        view.update({
+            "our_view": "客户预算恢复支持经营兑现。",
+            "market_view": "展示的卖方观点也认为预算在恢复。",
+            "where_market_is_wrong": "目前没有已证实的分歧。",
+            "convergence_pathway": "继续观察合同兑现；不需要假定市场改口。",
+        })
+        answer = ask_answer.parse_answer(self.reply(market_vs_us=view),
+                                         context=self.context())
+        self.assertNotIn("market_vs_us_present", answer["verification"]["failed_checks"])
+        self.assertFalse(answer["refused"])
+        self.assertIn("没有已证实的分歧", answer["answer"])
+
     def test_a_variant_view_with_an_empty_slot_fails_and_names_the_slot(self):
         # The report claims this; the check has to make it true. An answer
         # that says "we disagree" and leaves the pathway blank has answered

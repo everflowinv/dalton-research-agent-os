@@ -149,11 +149,11 @@ class InputTableTests(unittest.TestCase):
 
     def test_the_prompt_asks_for_the_market_and_our_position_separately(self) -> None:
         prompt = build_prompt(table())
-        self.assertIn("market_position is where consensus stands", prompt)
+        self.assertIn("market_position describes the observed external view", prompt)
         self.assertIn("our_position is what OUR THESIS commits us to", prompt)
         self.assertIn("Do not copy the market into it.", prompt)
         self.assertIn("which side has been gaining ground since PREVIOUS", prompt)
-        self.assertIn("agree about is worth nothing", prompt)
+        self.assertIn("Management framing alone does not establish an external market position", prompt)
         # the tier and the publisher are on every claim row, so two notes
         # from one house never look like two sources to the drafter either
         self.assertIn("C1\tdemand_drivers\tsell_side\ttd\t", prompt)

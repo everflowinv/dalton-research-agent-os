@@ -41,6 +41,9 @@ class ReadingLimitsTests(unittest.TestCase):
             self.assertEqual(first["quotes"][0]["source_end"], 600)
             self.assertEqual(first["next_offset"], second["offset"])
             self.assertNotEqual(content_hash(before), content_hash(first))
+            self.assertEqual(h.service._document_text(first)[:600], first["quotes"][0]["raw_text"])
+            with self.assertRaisesRegex(Exception, "differs from the bound source context"):
+                h.service._document_text({**first, "source_content_hash": "0" * 64})
             # Config must also reach receipt verification, not just slicing.
             with patch("dalton_core.document_extraction.verified_source", wraps=__import__(
                     "dalton_core.document_extraction", fromlist=["verified_source"]).verified_source) as verify:

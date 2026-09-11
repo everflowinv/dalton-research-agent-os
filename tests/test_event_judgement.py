@@ -1036,15 +1036,15 @@ class ReflectionContractTests(JudgementHarness):
 
     def test_the_prompt_says_out_loud_when_there_is_no_market_data(self):
         prompt = build_reflection_prompt(self.reflection_context(), decision())
-        self.assertIn("no consensus authority exists yet", prompt)
-        self.assertIn("if the market is bullish and we are bullish, our view",
+        self.assertIn("no market-view evidence is supplied in this context", prompt)
+        self.assertIn("compare what we expected with the new evidence",
                       prompt.lower())
         self.assertIn("convergence_pathway", prompt)
 
     def test_the_judge_prompt_carries_the_standing_instruction(self):
         prompt = build_judge_prompt(self.reflection_context())
-        self.assertIn("agreeing with the market is worth nothing", prompt.lower())
-        self.assertIn("move the market toward our view", prompt.lower())
+        self.assertIn("does not erase investment value", prompt.lower())
+        self.assertIn("observable that could resolve it", prompt.lower())
         self.assertIn("price_divergence", prompt)
 
 

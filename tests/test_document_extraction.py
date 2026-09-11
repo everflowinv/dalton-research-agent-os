@@ -223,8 +223,10 @@ class DocumentExtractionTests(unittest.TestCase):
             "max_seconds": 600,
         })
         self.assertIn("call_budget_fingerprint", work.metadata)
-        legacy = build_work(context, call_budget=LEGACY_CALL_BUDGET)
-        self.assertNotEqual(work.id, legacy.id)
+        # The richer reading instructions and full source do not fit this
+        # historical cap. Refuse it before enqueue instead of truncating.
+        with self.assertRaisesRegex(ResearchVerificationError, "canonical extraction prompt requires"):
+            build_work(context, call_budget=LEGACY_CALL_BUDGET)
 
     def test_transport_retry_policy_changes_work_identity(self):
         context = self.h.context()

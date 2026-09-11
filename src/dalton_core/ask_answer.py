@@ -25,9 +25,11 @@ map says is impossible.  That is the difference between an answer that says it
 is stuck and an answer that says what would unstick it -- and it is what the
 refresh in :mod:`ask_refresh` reads to decide where to look.
 
-**A view question is answered with a variant view.**  The owner's instruction
-of 2026-09-09: agreeing with the market is worth nothing; what matters is where
-the market's price is wrong and what pathway brings it round.  So a question of
+**A view question compares our understanding with the observed market view.**
+The owner's later clarification allows earnings delivery, expectation revision
+or valuation change to support an investment, separately or together. Agreement
+does not itself make a view worthless and disagreement must not be invented.
+A question of
 kind ``view`` or ``debate`` must come back with the five slots P12a already
 froze for the dossier's variant view -- our view, the market's, where it is
 wrong, the pathway, the observable signals -- or the answer is marked as
@@ -213,14 +215,28 @@ def build_prompt(context: Mapping[str, Any], *, mission: Mapping[str, Any] | Non
     if wants_variant:
         lines += [
             "",
-            "这是一个「看法」类问题。owner 的原则：跟市场看法一致的判断没有价值。",
+            "这是一个「看法」类问题。先说清对行业、业务本质、竞争优势和关键经营驱动的判断，"
+            "再说明这些认知对当前问题的意义；不强行制造与市场的分歧。",
+            "目标是理解市场现在怎么想，并判断下一步会怎样，而不是只描述我们是否与市场一致。"
+            "先明确当前主判断，承担这个判断；再说明另一情景在什么条件下成立、各自会造成什么影响。"
+            "不要用『A 有可能，B 也有可能』代替结论。信息不足时指出决定分歧的具体缺口，"
+            "并在证据允许的范围内给出当前倾向，不能为了语气坚决而编造事实。",
+            "涉及投资建议时，基金持有期不超过十二个月。区分盈利增长兑现、盈利预期变化和估值变化，"
+            "其中单一来源也可有价值；不要求一定共振或必须有短期催化剂。"
+            "只引用已展示的同口径模型、价格和预期；缺少回报桥时不自行编算收益。",
             "market_vs_us 的五格必须**每一格都写满**，空一格就算没写："
             + "、".join(f"{slot}（{SLOT_LABELS[slot]}）" for slot in VARIANT_SLOTS)
             + "。其中 market_view 只能来自被展示的一致预期、评级、sales note 或大众叙事；",
             "没有这些材料时把 market_view_available 设为 false，并在 market_view_reason 里"
             "写清是缺什么材料——不要替市场编一个看法，也不要只写一个「未知」了事。",
-            "where_market_is_wrong 与 convergence_pathway 要具体：错在哪个假设、",
-            "什么事件或数据会让市场改口、我们能提前观察到什么信号。",
+            "where_market_is_wrong 写有证据的假设差异；若尚无证据证明市场错了，明确写没有已证实的分歧。"
+            "convergence_pathway 可以说明盈利兑现或估值正常化的验证路径，不必虚构市场改口。",
+            "把卖方一致预期、sales desk 观察和社媒注意力分开；它们不等于买方共识或仓位。"
+            "区分事实、研究推断和未知，说明反证与下一验证信号；资料更新时重新评估旧观点，"
+            "不把一次股价变化直接当成因果或论点被证实。",
+            "observable_signals 必须对应主情景和替代情景的条件：观察什么指标或事件、"
+            "来自哪里、什么变化会支持或推翻当前判断、何时复查。"
+            "这是待纳入 tracking 的观测建议；没有实际调度凭证时不要声称已经安排跟踪。",
         ]
     else:
         lines += ["", "这不是看法类问题，market_vs_us 填 null。"]
