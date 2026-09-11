@@ -11,6 +11,9 @@ from datetime import date
 import re
 from typing import Any
 
+from .company_model_series import (
+    ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS, QUARTER_MAX_DAYS, QUARTER_MIN_DAYS,
+)
 from .store import content_hash
 
 STRATEGY_VERSION = "directed-document:0.1"
@@ -73,9 +76,11 @@ def normalize_evidence_target(value: Any) -> dict[str, Any]:
                 "financial note target period is not canonical")
         if start > end:
             raise DocumentResearchStrategyError("financial note target period is reversed")
-        elapsed = (date.fromisoformat(end) - date.fromisoformat(start)).days
-        if ((value["applicability_kind"] == "annual" and not 290 < elapsed <= 380)
-                or (value["applicability_kind"] == "quarter" and not 60 < elapsed <= 120)):
+        days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+        if ((value["applicability_kind"] == "annual"
+             and not NINE_MONTH_MAX_DAYS < days <= ANNUAL_MAX_DAYS)
+                or (value["applicability_kind"] == "quarter"
+                    and not QUARTER_MIN_DAYS <= days <= QUARTER_MAX_DAYS)):
             raise DocumentResearchStrategyError(
                 "financial note period differs from its applicability")
         normalized_periods.append({"period_start": start, "period_end": end})

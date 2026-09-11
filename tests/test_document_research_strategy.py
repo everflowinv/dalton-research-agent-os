@@ -3,9 +3,11 @@ from __future__ import annotations
 import unittest
 
 from dalton_core.document_research_strategy import (
+    DocumentResearchStrategyError,
     FINANCIAL_NOTE_TARGET_REF,
     FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
     STRATEGY_VERSION,
+    validate_financial_note_target,
 )
 from dalton_core.research_planner import ResearchPlanError, plan_from_response, build_prompt
 from dalton_core.research_task import inquiry_content_hash, _parameters_for
@@ -45,6 +47,33 @@ def with_document(source="source:sales-notes", **overrides):
 
 
 class DocumentStrategyTests(unittest.TestCase):
+    def test_financial_note_periods_use_the_canonical_model_series_boundaries(self):
+        for kind, start, end in (
+            ("annual", "2025-01-01", "2025-10-18"),  # 291 inclusive days
+            ("annual", "2025-01-01", "2026-01-15"),  # 380 inclusive days
+            ("quarter", "2025-01-01", "2025-03-21"),  # 80 inclusive days
+            ("quarter", "2025-01-01", "2025-04-10"),  # 100 inclusive days
+        ):
+            with self.subTest(kind=kind, end=end):
+                value = evidence_target(
+                    applicability_kind=kind,
+                    periods=[{"period_start": start, "period_end": end}],
+                )
+                self.assertEqual(validate_financial_note_target(value), value)
+        for kind, start, end in (
+            ("annual", "2025-01-01", "2025-10-17"),
+            ("annual", "2025-01-01", "2026-01-16"),
+            ("quarter", "2025-01-01", "2025-03-20"),
+            ("quarter", "2025-01-01", "2025-04-11"),
+        ):
+            with self.subTest(kind=kind, end=end), self.assertRaises(
+                DocumentResearchStrategyError
+            ):
+                validate_financial_note_target(evidence_target(
+                    applicability_kind=kind,
+                    periods=[{"period_start": start, "period_end": end}],
+                ))
+
     def test_old_strategy_and_inquiry_identity_remain_byte_exact(self):
         original = inquiry(directed_document=strategy())
         planned = plan_from_response(

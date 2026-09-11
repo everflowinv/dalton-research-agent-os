@@ -18,6 +18,7 @@ from .document_research import (
     build_document_research_registry, validate_document_research_policy,
 )
 from .company_model_annual_projection import AnnualProjectionError, verify_statement_filing
+from .company_model_series import ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS
 from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF,
     FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
@@ -159,11 +160,11 @@ def financial_note_targets_for_registration(
     annual_periods = []
     for (start, end), concepts in concepts_by_period.items():
         try:
-            elapsed = (date.fromisoformat(end) - date.fromisoformat(start)).days
+            days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
         except (TypeError, ValueError):
             return []
         if concepts == {_DILUTED_EPS_CONCEPT, _DILUTED_SHARES_CONCEPT} \
-                and 290 < elapsed <= 380:
+                and NINE_MONTH_MAX_DAYS < days <= ANNUAL_MAX_DAYS:
             annual_periods.append({"period_start": start, "period_end": end})
     if len(annual_periods) != 1:
         return []
