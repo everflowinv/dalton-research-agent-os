@@ -12,11 +12,12 @@ import hashlib
 import json
 import os
 import plistlib
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from scripts.prepare_successor_config_transition import (
-    DOCUMENT_CONFIG, LANE_CONFIG, apply_transition_to_scratch,
+    DOCUMENT_CONFIG, LANE_CONFIG, apply_transition_to_scratch, canonical_hash,
     expected_transition_state,
 )
 from scripts.run_release_copied_state_rehearsal import (
@@ -47,6 +48,89 @@ def _json(path: Path, expected: str, label: str) -> dict[str, Any]:
         raise RehearsalBindingError(f"{label} is invalid JSON") from exc
     _need(isinstance(value, dict), f"{label} is not an object")
     return value
+
+
+def _write_json(path: Path, value: Mapping[str, Any]) -> None:
+    _write_exclusive(path, (json.dumps(dict(value), ensure_ascii=False,
+                                      indent=2) + "\n").encode("utf-8"))
+
+
+def derive_confined_transition(
+    module: Any, rehearsal: Any, *, packet_root: Path,
+    manifest: Mapping[str, Any], original_manifest_sha256: str,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Derive a scratch-path CAS manifest from one exact reviewed transition."""
+    derived_root = rehearsal.temp_root / "successor-confined-transition"
+    _need(not derived_root.exists(), "confined transition root already exists")
+    original_unsigned = dict(manifest)
+    original_content_hash = original_unsigned.pop("content_hash", None)
+    _need(original_content_hash == canonical_hash(original_unsigned)
+          and manifest.get("status") == "prepared_inert",
+          "original successor transition authority differs")
+    derived_root.mkdir(mode=0o700)
+    derived = json.loads(json.dumps(manifest))
+    supporting = derived["supporting_evidence"]
+
+    raw_models = module.model_config_inventory(rehearsal.temp_state)
+    baseline_path = derived_root / "model-config-before.snapshot.json"
+    _write_json(baseline_path, raw_models)
+    supporting["baseline_model_snapshot"] = {
+        "file": baseline_path.name, "sha256": _sha(baseline_path)}
+    original_audit = packet_root / manifest["supporting_evidence"][
+        "document_research_readonly_audit"]["file"]
+    _artifact(
+        original_audit,
+        manifest["supporting_evidence"]["document_research_readonly_audit"]["sha256"],
+        "original document research audit")
+    audit_path = derived_root / "document-research-readonly-audit.json"
+    _write_exclusive(audit_path, original_audit.read_bytes())
+    supporting["document_research_readonly_audit"] = {
+        "file": audit_path.name, "sha256": _sha(audit_path)}
+
+    final_models = json.loads(json.dumps(raw_models))
+    for index, (original, target) in enumerate(
+            zip(manifest["targets"], derived["targets"], strict=True)):
+        name = original["name"]
+        original_after = packet_root / original["after"]["file"]
+        after_value = json.loads(original_after.read_text(encoding="utf-8"))
+        confined_after = module.rewrite_paths(after_value, rehearsal.replacements)
+        after_path = derived_root / f"{index:02d}-{name}.after.json"
+        _write_json(after_path, confined_after)
+        target["after"] = {"file": after_path.name, "sha256": _sha(after_path)}
+        if name.endswith("-model-config.json"):
+            final_models[name] = confined_after
+        if target["kind"] == "compare_and_replace":
+            original_before = packet_root / original["before"]["file"]
+            _artifact(original_before, original["before"]["sha256"],
+                      f"original {name} precondition")
+            before_path = derived_root / f"{index:02d}-{name}.before.json"
+            _write_exclusive(before_path, (rehearsal.temp_state / name).read_bytes())
+            target["before"] = {"file": before_path.name,
+                                "sha256": _sha(before_path)}
+
+    derived["model_inventory"] = {
+        "before_count": len(raw_models), "after_count": len(final_models),
+        "before_semantic_sha256": canonical_hash(raw_models),
+        "after_semantic_sha256": canonical_hash(final_models),
+    }
+    derived.pop("content_hash", None)
+    derived["content_hash"] = canonical_hash(derived)
+    manifest_path = derived_root / "successor-config-transition.confined.json"
+    _write_json(manifest_path, derived)
+    proof = {
+        "schema_version": "successor-confined-transition-derivation-0.1",
+        "original_transition_manifest_sha256": original_manifest_sha256,
+        "confined_transition_manifest_sha256": _sha(manifest_path),
+        "replacement_map_sha256": canonical_hash(rehearsal.replacements),
+        "original_semantics_sha256": manifest["model_inventory"][
+            "after_semantic_sha256"],
+        "confined_semantics_sha256": derived["model_inventory"][
+            "after_semantic_sha256"],
+    }
+    proof["content_hash"] = canonical_hash(proof)
+    proof_path = derived_root / "derivation-proof.json"
+    _write_json(proof_path, proof)
+    return manifest_path, proof_path, proof
 
 
 def validate_successor_snapshots(
@@ -106,6 +190,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _need(not output.exists() and not output.is_symlink(),
               f"output already exists: {output}")
     _verify_frozen_source(source_root, args.code_commit)
+    ops_root = Path(__file__).resolve().parent.parent
+    _need(subprocess.check_output(
+        ["git", "-C", str(ops_root), "rev-parse", "HEAD"], text=True).strip()
+        == args.ops_code_commit
+        and not subprocess.check_output(
+            ["git", "-C", str(ops_root), "status", "--porcelain",
+             "--untracked-files=all"], text=True),
+        "successor rehearsal helper checkout is not the frozen ops commit")
     manifest = _json(args.transition_manifest, args.transition_manifest_sha256,
                      "successor transition manifest")
     _need(manifest.get("status") == "prepared_inert"
@@ -143,13 +235,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                   "document research config already exists in copied baseline")
             _need(not (self.temp_state / LANE_CONFIG).exists(),
                   "mission document lane config already exists in copied baseline")
+            confined_manifest, proof_path, proof = derive_confined_transition(
+                module, self, packet_root=packet_root, manifest=manifest,
+                original_manifest_sha256=args.transition_manifest_sha256)
             receipt = apply_transition_to_scratch(
-                packet_root=packet_root, scratch_root=temp_root,
+                packet_root=confined_manifest.parent, scratch_root=temp_root,
                 state_dir=self.temp_state,
-                manifest_path=args.transition_manifest,
-                expected_manifest_sha256=args.transition_manifest_sha256,
+                manifest_path=confined_manifest,
+                expected_manifest_sha256=_sha(confined_manifest),
                 receipt_path=temp_root / "successor-config-transition-receipt.json",
             )
+            self.successor_derivation = {
+                **proof, "proof_path": str(proof_path),
+                "proof_sha256": _sha(proof_path),
+                "receipt_sha256": _sha(
+                    temp_root / "successor-config-transition-receipt.json"),
+            }
             self.confine_to_temp_root()
             return (receipt["status"], [])
 
@@ -181,7 +282,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "openclaw_config_snapshot_sha256": args.openclaw_config_snapshot_sha256,
         },
         "results": {**final, "step_count": len(rehearsal.steps),
-                    "tick_entries": len(rehearsal.rows), "escaped": 0},
+                    "tick_entries": len(rehearsal.rows), "escaped": 0,
+                    "confined_transition_derivation":
+                        rehearsal.successor_derivation},
+        "ops_helpers": {
+            "git_commit": args.ops_code_commit,
+            "runner_sha256": _sha(Path(__file__).resolve()),
+            "transition_helper_sha256": _sha(
+                Path(__file__).with_name(
+                    "prepare_successor_config_transition.py").resolve()),
+        },
         "execution_boundary": {"live_mutation": False, "external_calls": False,
                                "model_calls": False},
         "artifacts": {
@@ -200,6 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
+    parser.add_argument("--ops-code-commit", required=True)
     parser.add_argument("--live-root", type=Path, required=True)
     parser.add_argument("--packet-root", type=Path, required=True)
     parser.add_argument("--temp-root", type=Path, required=True)
