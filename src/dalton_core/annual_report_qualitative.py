@@ -588,11 +588,24 @@ class RegisteredAnnualReportVerifierWorker(RegisteredAnnualReportModelWorker):
 class AnnualReportCandidateAuthority:
     """Rebuild CandidateStaging provenance from exact formal plan outputs."""
 
-    def __init__(self, *, question: str, proof: Mapping[str, Any], draft_proof: Mapping[str, Any], verifier_proof: Mapping[str, Any]):
+    def __init__(self, *, question: str, proof: Mapping[str, Any], draft_proof: Mapping[str, Any], verifier_proof: Mapping[str, Any], source_authority: Mapping[str, Any] | None = None, mission_admission: Mapping[str, Any] | None = None):
         self.question = question
         self.proof = dict(proof)
         self.draft_proof = dict(draft_proof)
         self.verifier_proof = dict(verifier_proof)
+        self.source_authority = (
+            None if source_authority is None else dict(source_authority)
+        )
+        self.mission_admission = (
+            None if mission_admission is None else {
+                "ref": mission_admission["id"],
+                "hash": mission_admission["content_hash"],
+                "mission_version_ref": mission_admission["mission_version_ref"],
+                "mission_version_hash": mission_admission["mission_version_hash"],
+                "repair_target_ref": mission_admission["repair_target_ref"],
+                "repair_target_hash": mission_admission["repair_target_hash"],
+            }
+        )
 
     def build_material(self, created_at: str) -> dict[str, Any]:
         registration = self.proof["registration"]
@@ -601,18 +614,42 @@ class AnnualReportCandidateAuthority:
             "retrieval_proof": self.proof,
             "draft_proof": self.draft_proof,
             "verifier_proof": self.verifier_proof,
+            **({"mission_admission": self.mission_admission}
+               if self.mission_admission is not None else {}),
         }
         locations = list(dict.fromkeys(
             item["source_location"] for item in self.proof["matches"]
         ))
+        source_envelope_ref = registration["id"]
+        source_envelope_hash = content_hash(registration)
+        artifact_ref = registration["source_manifest_ref"]
+        artifact_hash = registration["source_manifest_hash"]
+        if self.source_authority is not None:
+            required = {
+                "source_envelope_ref", "source_envelope_hash",
+                "raw_artifact_version_ref", "raw_artifact_version_hash",
+                "connector_invocation_ref", "connector_invocation_hash",
+                "source_manifest_ref", "source_manifest_hash", "source_raw_hash",
+            }
+            if set(self.source_authority) != required or any(
+                self.source_authority[key] != registration[key]
+                for key in ("source_manifest_ref", "source_manifest_hash", "source_raw_hash")
+            ):
+                raise ResearchVerificationConflict(
+                    "annual report candidate source authority is invalid"
+                )
+            source_envelope_ref = self.source_authority["source_envelope_ref"]
+            source_envelope_hash = self.source_authority["source_envelope_hash"]
+            artifact_ref = self.source_authority["raw_artifact_version_ref"]
+            artifact_hash = self.source_authority["raw_artifact_version_hash"]
         base = {
             "schema_version": "0.2",
             "id": "source-material:registered-annual-report:" + self.proof["content_hash"],
             "created_at": created_at,
-            "source_envelope_ref": registration["id"],
-            "source_envelope_hash": content_hash(registration),
-            "artifact_ref": registration["source_manifest_ref"],
-            "artifact_hash": registration["source_manifest_hash"],
+            "source_envelope_ref": source_envelope_ref,
+            "source_envelope_hash": source_envelope_hash,
+            "artifact_ref": artifact_ref,
+            "artifact_hash": artifact_hash,
             "source_ref": "source:sec-edgar", "source_type": "official_filing",
             "operation": "search_registered_annual_report",
             "provenance_mode": REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
@@ -632,7 +669,10 @@ class AnnualReportCandidateAuthority:
             "source_lineage": [
                 "source:sec-edgar", registration["company_ref"],
                 f"sec:filing:{registration['accession']}",
-                registration["source_manifest_ref"], self.proof["id"],
+                registration["source_manifest_ref"],
+                *([self.source_authority["connector_invocation_ref"]]
+                  if self.source_authority is not None else []),
+                self.proof["id"],
                 self.draft_proof["id"], self.verifier_proof["id"],
             ],
             "published_at": None, "updated_at": None, "as_of": None,
@@ -715,6 +755,8 @@ def stage_annual_report_candidate(
     draft_work: WorkOrder | Mapping[str, Any],
     verifier_work: WorkOrder | Mapping[str, Any],
     actor_ref: str, created_at: str, idempotency_key: str,
+    source_authority: Mapping[str, Any] | None = None,
+    mission_admission: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     draft_proof = validate_model_proof(
         draft_proof, stage="qualitative_model_draft", work=draft_work
@@ -726,7 +768,8 @@ def stage_annual_report_candidate(
         raise VerificationRejected("independent qualitative verifier rejected the draft")
     authority = AnnualReportCandidateAuthority(
         question=question, proof=proof, draft_proof=draft_proof,
-        verifier_proof=verifier_proof,
+        verifier_proof=verifier_proof, source_authority=source_authority,
+        mission_admission=mission_admission,
     )
     material = authority.build_material(created_at)
     source_verification = authority.verify_source_material(material)

@@ -383,6 +383,10 @@ class MissionAnnualResearchExecutor:
                 verifier_proof=verifier, draft_work=works[1], verifier_work=upstream,
                 actor_ref=admission["actor_ref"], created_at=_wire_time(self.clock()),
                 idempotency_key=f"mission-annual-research-candidate:{admission['id']}",
+                source_authority=self.registry.candidate_source_authority(
+                    admission["request"]
+                ),
+                mission_admission=admission,
             )
         except (AnnualReportQualitativeError, ResearchVerificationError) as exc:
             raise MissionAnnualResearchExecutorError(str(exc)) from exc

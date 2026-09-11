@@ -613,6 +613,54 @@ class RegisteredAnnualReportRegistry:
             )
         return registration, manifest, text
 
+    def candidate_source_authority(
+        self, request: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Return the exact Core SourceEnvelope/Artifact behind a request.
+
+        Candidate staging historically named the annual-report registration
+        and fetch manifest as if they were the Core source/artifact records.
+        Those are useful lineage records, but the Ledger commit boundary can
+        only authenticate the actual connector SourceEnvelope and
+        Observability ArtifactVersion.  Re-run the complete local source
+        verification before exposing that bridge.
+        """
+
+        registration, manifest, _text_value = self._verified_text(request)
+        source = self.receipt_reader.get_source_envelope(
+            manifest["source_envelope_ref"]
+        )
+        artifact = self.receipt_reader.get_artifact_version(
+            manifest["raw_artifact_version_ref"]
+        )
+        if (
+            source is None
+            or source.get("content_hash") != manifest["source_envelope_hash"]
+            or source.get("connector_invocation_ref")
+            != manifest["connector_invocation_ref"]
+            or source.get("raw_artifact_version_ref")
+            != manifest["raw_artifact_version_ref"]
+            or source.get("raw_response_hash") != manifest["raw_response_hash"]
+            or artifact is None
+            or artifact.get("id") != manifest["raw_artifact_version_ref"]
+            or artifact.get("artifact_content_hash") != manifest["raw_response_hash"]
+            or not isinstance(artifact.get("content_hash"), str)
+        ):
+            raise RegisteredAnnualReportError(
+                "annual-report candidate source authority drifted"
+            )
+        return {
+            "source_envelope_ref": source["id"],
+            "source_envelope_hash": source["content_hash"],
+            "raw_artifact_version_ref": artifact["id"],
+            "raw_artifact_version_hash": artifact["content_hash"],
+            "connector_invocation_ref": manifest["connector_invocation_ref"],
+            "connector_invocation_hash": manifest["connector_invocation_hash"],
+            "source_manifest_ref": registration["source_manifest_ref"],
+            "source_manifest_hash": registration["source_manifest_hash"],
+            "source_raw_hash": registration["source_raw_hash"],
+        }
+
     def bind_request(
         self,
         *,

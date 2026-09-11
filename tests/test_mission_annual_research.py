@@ -430,6 +430,14 @@ class MissionAnnualResearchTests(unittest.TestCase):
         self.assertEqual(outcome["repair_target_ref"], admission["repair_target_ref"])
         self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
         self.assertEqual(outcomes[-2]["outcome_ref"], outcomes[-1]["outcome_ref"])
+        evidence = json.loads(fixture.harness.staging.connection.execute(
+            "SELECT record_json FROM candidate_evidence_versions"
+        ).fetchone()[0])
+        self.assertTrue(evidence["source_envelope_ref"].startswith("source-envelope:"))
+        self.assertTrue(evidence["artifact_refs"][0]["ref"].startswith("artifact-version:"))
+        self.assertEqual(
+            evidence["source_envelope_ref"], fixture.source.manifest["source_envelope_ref"]
+        )
         self.assertEqual(fixture.harness.staging.counts(), {
             "candidate_source_materials": 1, "candidate_verifications": 1,
             "candidate_numeric_specs": 0, "candidate_evidence_versions": 1,
