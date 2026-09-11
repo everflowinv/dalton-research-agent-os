@@ -778,6 +778,7 @@ class OpenClawModelAdapter:
         auth_client_id: str,
         auth_key_provider: Callable[[], bytes],
         timeout_seconds: float = 5.0,
+        queue_wait_seconds: float = 0.0,
         max_frame_bytes: int = 262_144,
         expected_agent_id: str = BROKER_AGENT_ID,
         provider_control_mode: ProviderControlMode = PROVIDER_CONTROL_MODE_REQUIRED,
@@ -794,6 +795,11 @@ class OpenClawModelAdapter:
             or timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be positive and finite")
+        if (isinstance(queue_wait_seconds, bool)
+                or not isinstance(queue_wait_seconds, (int, float))
+                or not math.isfinite(float(queue_wait_seconds))
+                or not 0 <= float(queue_wait_seconds) <= 3600):
+            raise ValueError("queue_wait_seconds must be finite and between 0 and 3600")
         if (
             isinstance(max_frame_bytes, bool)
             or not isinstance(max_frame_bytes, int)
@@ -819,6 +825,7 @@ class OpenClawModelAdapter:
             raise ValueError("provider_control_mode is unsupported")
         self._socket_path = path
         self._timeout_seconds = float(timeout_seconds)
+        self._queue_wait_seconds = float(queue_wait_seconds)
         self._max_frame_bytes = max_frame_bytes
         self._expected_agent_id = expected_agent_id
         self._route_resolver = route_resolver
@@ -1243,11 +1250,15 @@ class OpenClawModelAdapter:
             "maxTokens": max_tokens,
             "timeoutMs": max(1, int(timeout * 1000)),
         }
+        if self._queue_wait_seconds:
+            core_request["queueWaitMs"] = int(self._queue_wait_seconds * 1000)
         if required_controls is not None:
             core_request["requiredControls"] = required_controls
         expected_core_keys = set(_CORE_REQUEST_KEYS) | (
             {"requiredControls"} if required_controls is not None else set()
         )
+        if self._queue_wait_seconds:
+            expected_core_keys.add("queueWaitMs")
         if set(core_request) != expected_core_keys:  # defensive assertion
             raise AssertionError("internal broker request shape drift")
         timestamp_ms = int(now_dt.astimezone(timezone.utc).timestamp() * 1000)
@@ -1259,6 +1270,8 @@ class OpenClawModelAdapter:
             expected_request_keys.add("replayOnly")
         if required_controls is not None:
             expected_request_keys.add("requiredControls")
+        if self._queue_wait_seconds:
+            expected_request_keys.add("queueWaitMs")
         if set(request) != expected_request_keys:  # defensive assertion
             raise AssertionError("internal authenticated broker request shape drift")
         started_at = _timestamp(now_dt)
@@ -1322,9 +1335,14 @@ class OpenClawModelAdapter:
                     capacity.mark_dispatched(reservation["reservation_ref"])
                 dispatched = True
 
-            response = self._exchange(request, timeout, before_send=dispatch)
+            response = self._exchange(
+                request, timeout + self._queue_wait_seconds,
+                before_send=dispatch,
+            )
+            execution_request = dict(core_request)
+            execution_request.pop("queueWaitMs", None)
             usage, cost = self._validate_response(
-                response, core_request, profile, self._expected_agent_id
+                response, execution_request, profile, self._expected_agent_id
             )
             if capacity is not None and reservation is not None:
                 actual = (

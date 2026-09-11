@@ -231,11 +231,13 @@ class DocumentExtractionTests(unittest.TestCase):
     def test_transport_retry_policy_changes_work_identity(self):
         context = self.h.context()
         retried = build_work(context, model_config={
-            "transport_retry": {"max_definitely_not_sent_retries": 1},
+            "transport_retry": {"max_definitely_not_sent_retries": 1, "queue_wait_seconds": 0, "retry_backoff_seconds": 0},
         })
         self.assertNotEqual(retried.id, build_work(context).id)
         self.assertEqual(retried.metadata["transport_retry"], {
             "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 0,
+            "retry_backoff_seconds": 0,
         })
 
     def setUp(self):

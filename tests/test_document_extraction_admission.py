@@ -326,6 +326,7 @@ class BrokerAdmissionTests(unittest.TestCase):
     def test_configured_same_model_retry_precedes_fallback(self):
         self.h.writer._document_extraction_model_config['transport_retry'] = {
             'max_definitely_not_sent_retries': 1,
+            'queue_wait_seconds': 0, 'retry_backoff_seconds': 0,
         }
         original = self.execute
         calls = []
@@ -355,6 +356,7 @@ class BrokerAdmissionTests(unittest.TestCase):
     def test_disconnect_keeps_full_reservation_and_no_automatic_paid_retry(self):
         self.h.writer._document_extraction_model_config['transport_retry'] = {
             'max_definitely_not_sent_retries': 3,
+            'queue_wait_seconds': 0, 'retry_backoff_seconds': 0,
         }
         def uncertain_disconnect(adapter, work, route, profile, *, before_send=None):
             before_send()
@@ -409,6 +411,26 @@ class BrokerAdmissionTests(unittest.TestCase):
         self.assertEqual(self.b.connection.execute(
             'SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],
             expected)
+
+    def test_queue_timeout_defers_same_work_without_fallback(self):
+        def queued(adapter, work, route, profile, *, before_send=None):
+            invocation, result = self.execute(
+                adapter, work, route, profile, before_send=before_send)
+            return invocation, replace(
+                result, status='failed', outputs={},
+                error={'code': 'QUEUE_TIMEOUT', 'message': 'queue wait elapsed'},
+            )
+
+        with patch.object(OpenClawModelAdapter, 'execute', autospec=True,
+                          side_effect=queued):
+            result = self.h.generate()
+        self.assertEqual(result['status'], 'pending', result)
+        status = self.h.h.scheduler.status(result['work_order_ref'])
+        self.assertEqual(status['state'], 'ready')
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.b.connection.execute(
+            'SELECT actual_micros FROM thesis_impact_day_settlements'
+        ).fetchone()[0], 0)
 
     def test_owner_budget_exhausted_blocks_before_adapter(self):
         self.b.admit(policy_version_id='budget:owner:1',day=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).date().isoformat(),

@@ -83,10 +83,17 @@ TASK_HASH = content_hash({"task": TASK_REF, "prompt_contract": PROMPT_CONTRACT_R
 
 def validate_transport_retry(value):
     if (not isinstance(value, Mapping)
-            or set(value) != {"max_definitely_not_sent_retries"}
+            or set(value) != {"max_definitely_not_sent_retries", "queue_wait_seconds",
+                              "retry_backoff_seconds"}
             or isinstance(value["max_definitely_not_sent_retries"], bool)
             or not isinstance(value["max_definitely_not_sent_retries"], int)
-            or not 0 <= value["max_definitely_not_sent_retries"] <= 3):
+            or not 0 <= value["max_definitely_not_sent_retries"] <= 3
+            or isinstance(value["queue_wait_seconds"], bool)
+            or not isinstance(value["queue_wait_seconds"], int)
+            or not 0 <= value["queue_wait_seconds"] <= 3600
+            or isinstance(value["retry_backoff_seconds"], bool)
+            or not isinstance(value["retry_backoff_seconds"], int)
+            or not 0 <= value["retry_backoff_seconds"] <= 60):
         raise ResearchVerificationError("invalid transport retry configuration")
     return dict(value)
 
@@ -534,7 +541,8 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
     purpose = "document_extraction"
 
     def __init__(self, *, context_resolver, adapter, budget_store=None, budget_policy_ref=None,
-                 mission_resolver=None, max_definitely_not_sent_retries=0, **kwargs):
+                 mission_resolver=None, max_definitely_not_sent_retries=0,
+                 retry_backoff_seconds=0, **kwargs):
         from .openclaw_model_adapter import OpenClawModelAdapter
         from .thesis_impact_budget import ThesisImpactBudgetStore
         if type(adapter) is not HermeticExtractionAdapter and not (
@@ -553,6 +561,7 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                 or not 0 <= max_definitely_not_sent_retries <= 3):
             raise ResearchVerificationError("invalid definitely-not-sent retry bound")
         self.max_definitely_not_sent_retries = max_definitely_not_sent_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
         super().__init__(adapter=adapter, polish_worker=None, **kwargs)
 
     def _before_model_call(self, work, route, profile, replayed):
@@ -654,6 +663,9 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             except BrokerDefinitelyNotSent:
                 if retry_number >= self.max_definitely_not_sent_retries:
                     raise
+                if self.retry_backoff_seconds:
+                    import time
+                    time.sleep(self.retry_backoff_seconds)
 
     def _after_accounting(self, work, route, accounting):
         if self.budget_store is None:
@@ -671,10 +683,15 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             self.budget_store.settle(self.admission["admission_id"], actual_micros=cost["amount_micros"],
                                      usage_entry_ref=accounting["usage"]["id"])
 
+    def _after_capacity_deferred(self, work, route, adapter_result):
+        if self.budget_store is not None and self.admission is not None:
+            self.budget_store.settle(
+                self.admission["admission_id"], actual_micros=0)
+
     @staticmethod
     def _bounded_failure_status(lease):
-        # A malformed output/adapter error is terminal. A late result can
-        # still replay through the existing Scheduler recovery mechanism.
+        # A malformed output/adapter error is terminal. Capacity deferral is
+        # selected explicitly by the shared worker before this hook.
         return "failed"
 
     @staticmethod
@@ -711,9 +728,14 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
 
         if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
             return build_numeric_work(current, work.metadata.get("requests") or (),
-                                      call_budget=work.metadata.get("call_budget"))
+                                      call_budget=work.metadata.get("call_budget"),
+                                      model_config={"transport_retry": work.metadata["transport_retry"]}
+                                      if work.metadata.get("transport_retry") else None)
         if work.metadata.get("task_ref") == DISCOVERY_TASK_REF:
-            return build_discovery_work(current, call_budget=work.metadata.get("call_budget"))
+            return build_discovery_work(
+                current, call_budget=work.metadata.get("call_budget"),
+                model_config={"transport_retry": work.metadata["transport_retry"]}
+                if work.metadata.get("transport_retry") else None)
         return build_work(
             current,
             call_budget=work.metadata.get("call_budget"),
@@ -1616,13 +1638,30 @@ class DocumentExtractionService:
         from .openclaw_model_adapter import OpenClawModelAdapter
         from .thesis_impact_budget import ThesisImpactBudgetStore
         config = self.writer._document_extraction_model_config
+        requested_lease = (float(work.budget["max_seconds"])
+                           + float((config.get("transport_retry") or {}).get(
+                               "queue_wait_seconds", 0))
+                           + (int((config.get("transport_retry") or {}).get(
+                               "max_definitely_not_sent_retries", 0))
+                              * int((config.get("transport_retry") or {}).get(
+                                  "retry_backoff_seconds", 0)))
+                           + 30)
+        # Test/embedded hosts may inject model config after constructing their
+        # Scheduler. They retain its short default lease; installed services
+        # construct the bound long-lease policy in WriterServer.start.
+        worker_lease = (requested_lease
+                        if requested_lease <= self.writer._scheduler.max_lease_seconds
+                        else None)
         with ExitStack() as stack:
             router = stack.enter_context(ModelRouter(config["model_router_db"]))
             budget = stack.enter_context(ThesisImpactBudgetStore(config["budget_db"]))
             adapter = OpenClawModelAdapter(config["broker_socket"], route_resolver=router.get_decision,
                 auth_client_id=config["broker_client_id"], auth_key_provider=lambda: Path(config["broker_auth_key"]).read_bytes().strip(),
                 expected_agent_id=config["expected_agent_id"],
-                timeout_seconds=float(work.budget["max_seconds"]))
+                timeout_seconds=float((work.metadata.get("call_budget") or {}).get(
+                    "timeout_seconds", work.budget["max_seconds"])),
+                queue_wait_seconds=float((config.get("transport_retry") or {}).get(
+                    "queue_wait_seconds", 0)))
             worker = DocumentExtractionModelWorker(scheduler=self.writer._scheduler, router=router, adapter=adapter,
                 store=self.writer.store, observability=self.writer.observability,
                 context_resolver=lambda c: self.reread(c, actor_ref),
@@ -1631,6 +1670,9 @@ class DocumentExtractionService:
                 routing_policy_ref=config["routing_policy_ref"], credential_slot_refs=config["credential_slot_refs"],
                 max_definitely_not_sent_retries=(config.get("transport_retry") or {}).get(
                     "max_definitely_not_sent_retries", 0),
+                retry_backoff_seconds=(config.get("transport_retry") or {}).get(
+                    "retry_backoff_seconds", 0),
+                lease_seconds=worker_lease,
                 token_counter=lambda text: len(text.encode("utf-8")))
             saved = worker.scheduler.enqueue(work)
             if saved["status"] == "conflict":

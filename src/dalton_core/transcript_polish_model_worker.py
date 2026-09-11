@@ -270,6 +270,9 @@ class RoutedTranscriptPolishModelWorker:
     def _after_accounting(self, work, route, accounting):
         """Specialized tasks settle only after durable usage/cost records."""
 
+    def _after_capacity_deferred(self, work, route, adapter_result):
+        """Specialized budget ledgers may release proved broker-local refusal."""
+
     def _execute_model(self, work, route, profile):
         """Admit immediately before the adapter's execution boundary."""
         self._before_model_call(work, route, profile, False)
@@ -443,6 +446,19 @@ class RoutedTranscriptPolishModelWorker:
                             "outcome": "failed",
                             "failure_class": "unclassified_failure",
                         }
+                    invocation, envelope = value
+                    code = str((envelope.error or {}).get("code", "")).upper()
+                    if envelope.status == "failed" and code in {
+                        "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                        "QUEUE_TIMEOUT", "BROKER_CLOSED",
+                    }:
+                        return {
+                            "outcome": "failed",
+                            "failure_class": "capacity_busy",
+                            "error_code": code,
+                            "reason": (envelope.error or {}).get(
+                                "message", "broker capacity unavailable"),
+                        }
                     # A returned envelope may represent a paid provider response.
                     # Preserve it for the normal accounting path; only failures
                     # before an invocation exists are safe to switch past here.
@@ -474,9 +490,10 @@ class RoutedTranscriptPolishModelWorker:
                         attempt_number,
                         code="MODEL_CHAIN_" + chained["status"].upper(),
                         status=(
-                            self._bounded_failure_status(lease)
-                            if chained["status"] == "exhausted"
-                            else "failed"
+                            "retryable" if chained.get("reason") == "capacity_busy"
+                            else (self._bounded_failure_status(lease)
+                                  if chained["status"] == "exhausted"
+                                  else "failed")
                         ),
                         route_ref=route_ref,
                     )
@@ -528,6 +545,24 @@ class RoutedTranscriptPolishModelWorker:
                 ),
             )
             return {"status": "failed", "route": route, "completion": completion}
+        capacity_code = str((adapter_result.error or {}).get("code", "")).upper()
+        if adapter_result.status == "failed" and capacity_code in {
+            "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+            "QUEUE_TIMEOUT", "BROKER_CLOSED",
+        }:
+            self._after_capacity_deferred(work, route, adapter_result)
+            result = self._control_result(
+                work, attempt_number, code=capacity_code, status="retryable",
+                route_ref=route["id"], created_at=adapter_result.created_at,
+            )
+            completion = self.scheduler.complete(
+                work.id, attempt_number, self.worker_ref, lease["lease_token"],
+                result, idempotency_key=(
+                    f"{self.namespace}-complete:{work.id}:{attempt_number}"),
+            )
+            return {"status": ("retryable" if completion["work_state"] == "ready"
+                               else "failed"),
+                    "route": route, "completion": completion}
         saved = self._saved_invocation(invocation.id)
         if saved is None:
             self.store.register_invocation(invocation.to_dict())

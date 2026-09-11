@@ -1813,7 +1813,31 @@ class WriterServer:
             self._candidate_staging = CandidateStagingStore(self._candidate_staging_path)
             self._candidate_review = HumanReviewAuthority(self._candidate_staging_path)
         if self._scheduler_path is not None:
-            self._scheduler = Scheduler(self._scheduler_path)
+            scheduler_kwargs: dict[str, Any] = {}
+            if self._document_extraction_model_config is not None:
+                from .call_budget import resolve_call_budget
+                from .document_extraction import LEGACY_CALL_BUDGET
+                retry = (self._document_extraction_model_config.get(
+                    "transport_retry") or {})
+                call_budget = resolve_call_budget(
+                    self._document_extraction_model_config,
+                    "document_extraction", defaults=LEGACY_CALL_BUDGET)
+                lease_seconds = (int(call_budget["timeout_seconds"])
+                                 + int(retry.get("queue_wait_seconds", 0))
+                                 + int(retry.get("max_definitely_not_sent_retries", 0))
+                                 * int(retry.get("retry_backoff_seconds", 0))
+                                 + 30)
+                attempts = int((self._document_extraction_model_config.get(
+                    "capacity_retry") or {}).get("scheduler_max_attempts", 3))
+                scheduler_kwargs = {
+                    "policy_version_id": (
+                        f"scheduler-policy-extraction-lease-{lease_seconds}s-"
+                        f"attempts-{attempts}-0.1"),
+                    "max_attempts": attempts,
+                    "max_lease_seconds": lease_seconds,
+                    "max_total_lease_seconds": lease_seconds * 2,
+                }
+            self._scheduler = Scheduler(self._scheduler_path, **scheduler_kwargs)
             self._bounded_control = BoundedPlannerControlPlane(
                 self._bounded_planner,
                 self._observability,

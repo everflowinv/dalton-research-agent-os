@@ -157,10 +157,14 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
     resolved = dict(call_budget or resolve_call_budget(
         model_config or {}, "metric_discovery_extraction", defaults=LEGACY_CALL_BUDGET,
     ))
+    explicit = explicit or resolved != LEGACY_CALL_BUDGET
+    transport_retry = dict((model_config or {}).get("transport_retry") or {})
     budget_hash = budget_fingerprint(resolved)
     identity = {"task": TASK_HASH, "context": context["content_hash"]}
     if explicit:
         identity["call_budget"] = budget_hash
+    if transport_retry:
+        identity["transport_retry"] = content_hash(transport_retry)
     digest = content_hash(identity)
     return WorkOrder(
         schema_version="0.1",
@@ -187,6 +191,7 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
             "context": dict(context), "request": request,
             **({"call_budget": resolved, "call_budget_fingerprint": budget_hash}
                if explicit else {}),
+            **({"transport_retry": transport_retry} if transport_retry else {}),
             # The same fixture guard the prose pass carries: a fixture
             # adapter may only run an order that declared itself one, so a
             # test model cannot answer where the broker was expected.

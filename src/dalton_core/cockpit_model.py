@@ -530,7 +530,8 @@ def _capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
         and isinstance(failures[0], Mapping)
         and failures[0].get("failure_class") == "capacity_busy"
         and failures[0].get("code") in {
-            "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT"}
+            "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+            "QUEUE_TIMEOUT", "BROKER_CLOSED"}
     )
 
 
@@ -600,6 +601,8 @@ class CockpitModel:
             config["broker_socket"], route_resolver=router.get_decision, auth_client_id=config["broker_client_id"],
             auth_key_provider=lambda: Path(config["broker_auth_key"]).read_bytes().strip(),
             expected_agent_id=config["expected_agent_id"], timeout_seconds=float(timeout_seconds),
+            queue_wait_seconds=float((config.get("transport_retry") or {}).get(
+                "queue_wait_seconds", 0)),
         )
 
     def _execute_with_safe_retry(self, adapter: Any, work: WorkOrder,
@@ -616,6 +619,11 @@ class CockpitModel:
             except BrokerDefinitelyNotSent:
                 if retry_number >= maximum:
                     raise
+                backoff = int((self.config.get("transport_retry") or {}).get(
+                    "retry_backoff_seconds", 0))
+                if backoff:
+                    import time
+                    time.sleep(backoff)
 
     def call(self, *, purpose: str, request_id: str, prompt: str,
              mission: Mapping[str, Any],
@@ -705,7 +713,14 @@ class CockpitModel:
         # longer than either. When the lease lapsed mid-call the completion was
         # refused with "attempt is not the current leased attempt" -- the work
         # was done and paid for, and the answer was thrown away.
-        lease_seconds = float(effective["timeout_seconds"]) + _LEASE_GRACE_SECONDS
+        lease_seconds = (float(effective["timeout_seconds"])
+                         + float((self.config.get("transport_retry") or {}).get(
+                             "queue_wait_seconds", 0))
+                         + (int((self.config.get("transport_retry") or {}).get(
+                             "max_definitely_not_sent_retries", 0))
+                            * int((self.config.get("transport_retry") or {}).get(
+                                "retry_backoff_seconds", 0)))
+                         + _LEASE_GRACE_SECONDS)
         # The lease bounds are a frozen versioned policy: the same
         # policy_version_id with different settings is a conflict, and the
         # shared "scheduler-policy-0.1" is sized for calls that finish in
@@ -922,6 +937,7 @@ class CockpitModel:
                                     broker_local_not_sent = code in {
                                         "BUSY", "CONCURRENCY_LIMIT",
                                         "BROKER_CONCURRENCY_LIMIT",
+                                        "QUEUE_TIMEOUT", "BROKER_CLOSED",
                                     }
                                     if broker_local_not_sent:
                                         cost_micros, cost_status = 0, "failed"
@@ -1119,6 +1135,7 @@ class CockpitModel:
                 code = str((envelope.error or {}).get("code", "")).upper()
                 may_have_reached_provider = code not in {
                     "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                    "QUEUE_TIMEOUT", "BROKER_CLOSED",
                 }
                 spend[route["id"]] = ((ceiling, "reserved")
                                       if may_have_reached_provider else (0, "failed"))

@@ -626,7 +626,7 @@ class CockpitChainTests(unittest.TestCase):
         adapter = Once({})
         answer = self._model(
             adapter, policy_version_ref=self.chain_policy,
-            transport_retry={"max_definitely_not_sent_retries": 1},
+            transport_retry={"max_definitely_not_sent_retries": 1, "queue_wait_seconds": 0, "retry_backoff_seconds": 0},
         ).call(purpose="plan", request_id="same-model-retry",
                prompt="what next?", mission=self.mission)
         self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")

@@ -192,11 +192,7 @@ class WorkOrderTests(unittest.TestCase):
         numeric = build_work(self.context(), SLOTS)
         self.assertTrue(numeric.id.startswith("work:document-numeric-"))
         self.assertNotEqual(numeric.id, qualitative(self.context()).id)
-        # The answer is a short list of figures or nothing, not prose.
-        self.assertLess(
-            numeric.budget["max_output_tokens"],
-            qualitative(self.context()).budget["max_output_tokens"],
-        )
+        self.assertEqual(numeric.budget["max_output_tokens"], 4096)
         self.assertTrue(numeric.metadata["candidate_only"])
 
 

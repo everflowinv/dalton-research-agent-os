@@ -275,7 +275,8 @@ def classify_model_failure(failure: Any) -> str:
         code = failure.upper()
 
     if code:
-        if code in {"BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT"}:
+        if code in {"BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
+                    "QUEUE_TIMEOUT", "BROKER_CLOSED"}:
             return "capacity_busy"
         for needles, outcome in _FAILURE_CODES:
             if any(needle in code for needle in needles):

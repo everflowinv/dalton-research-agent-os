@@ -329,6 +329,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         route: dict[str, Any] | None = None,
         profile: dict[str, Any] | None = None,
         timeout: float = 1.0,
+        queue_wait: float = 0.0,
         frame_limit: int = 262_144,
         expected_agent_id: str = "dalton-model-broker",
         route_resolver: Callable[[str], dict[str, Any] | None] | None = None,
@@ -352,6 +353,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                     else auth_key_provider
                 ),
                 timeout_seconds=timeout,
+                queue_wait_seconds=queue_wait,
                 max_frame_bytes=frame_limit,
                 expected_agent_id=expected_agent_id,
                 provider_control_mode=provider_control_mode,
@@ -462,6 +464,26 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             self.assertEqual(accepted["work_state"], "succeeded")
         finally:
             scheduler.close()
+
+    def test_queue_wait_is_authenticated_transport_instruction(self) -> None:
+        def queued_success(request):
+            execution = dict(request)
+            execution.pop("queueWaitMs")
+            return success_response(execution)
+
+        (_, _), broker = self.run_with(queued_success, queue_wait=7)
+        broker.close()
+        request = broker.requests[0]
+        self.assertEqual(request["queueWaitMs"], 7000)
+        unsigned = dict(request)
+        unsigned["auth"] = {
+            key: value for key, value in request["auth"].items() if key != "mac"
+        }
+        self.assertEqual(
+            request["auth"]["mac"],
+            hmac.new(AUTH_SECRET, canonical_json(unsigned).encode("utf-8"),
+                     hashlib.sha256).hexdigest(),
+        )
 
     def test_independent_verifier_binds_required_provider_controls(self) -> None:
         verifier = WorkOrder.from_dict({
