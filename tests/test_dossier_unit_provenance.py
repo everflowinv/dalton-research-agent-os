@@ -46,8 +46,10 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         self.producer_input={"unit":self.unit,"company":self.company,
             "prompt_sha":content_hash({"prompt":self.producer_prompt}),
             "mission":{"ref":"mission:v14","hash":"c"*64},
-            "constitution":{"ref":"constitution:v1","hash":"d"*64},
-            "policy":{"ref":"policy:v1","hash":"e"*64},"parse_input":self.parse_input}
+            "constitution":{"ref":"constitution-version:us-it-services:1","hash":"c"*64},
+            "policy":{"ref":"dossier-policy:test:v1",
+                      "hash":"ef91d84cfaf1c2c67d2482c4fe97ba8bd4ef373e9db503cc543654b8d3246cf5"},
+            "parse_input":self.parse_input}
         self.verified_draft_hash=draft_hash(self.blocks)
         producer_route = self._call(scheduler, router, "producer", [])
         self._call(scheduler, router, "verifier", [producer_route])

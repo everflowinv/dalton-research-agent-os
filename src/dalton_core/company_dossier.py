@@ -1444,6 +1444,7 @@ class CompanyDossierAuthority:
             provenance, mission_ref=mission_ref, current_prior_ref=prior_ref,
             company_ref=body.get("company_ref"), current_units=changed_units,
             current_blocks=changed_blocks,
+            current_bindings=body.get("bindings"),
             scheduler_db=scheduler_db, router_db=router_db,
         )
         return self.publish(body, _provenance_verified=True)
