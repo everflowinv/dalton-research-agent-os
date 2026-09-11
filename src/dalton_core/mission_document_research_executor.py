@@ -1758,7 +1758,7 @@ class MissionDocumentResearchExecutor:
         if stage_formal is None:
             raise MissionDocumentResearchExecutorError("staging formal result is unavailable")
         self._candidate_observation(admission, work, stage_formal, records)
-        return self._outcome(admission, works, records)
+        return self._finish_candidate(admission, works, records)
 
     def _stage_owned(self, work, formal):
         row = self.connection.execute(
@@ -1795,6 +1795,13 @@ class MissionDocumentResearchExecutor:
             raise MissionDocumentResearchExecutorError("stored outcome drifted")
         return {"status": "complete", **records, "outcome_ref": body["id"],
                 "outcome_hash": body["content_hash"]}
+
+    def _finish_candidate(self, admission, works, records):
+        outcome = self._outcome(admission, works, records)
+        if self.fault_injector is not None:
+            self.fault_injector("after_candidate_outcome")
+        from .mission_document_research_promotion import promote_document_candidate
+        return promote_document_candidate(self, admission, works, records, outcome)
 
     def run_once(self, admission_ref: str):
         try:
@@ -1867,7 +1874,7 @@ class MissionDocumentResearchExecutor:
                 self._stage_owned(work, formal)
                 self._candidate_observation(
                     admission, work, formal, formal["result_envelope"]["outputs"])
-                return self._outcome(
+                return self._finish_candidate(
                     admission, effective, formal["result_envelope"]["outputs"])
         raise MissionDocumentResearchExecutorError("directed-document run has invalid shape")
 
