@@ -108,7 +108,7 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
         self.assertEqual(before, self.event.read_bytes())
         self.assertEqual(history, list((self.root / "model-budget-revisions").glob("*.json")))
 
-    def test_five_uncatalogued_purposes_save_and_reach_their_consumer(self):
+    def test_purpose_overrides_reach_cockpit_and_extraction_consumers(self):
         """An absent central default is a placeholder, not a disabled editor."""
         base = self.root / "installed"
         state = base / "state" / "dalton-core"
@@ -134,8 +134,9 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
                 view = call_budget_view(state, purpose)
                 self.assertTrue(view["editable"], view)
                 if purpose == "document_extraction":
-                    from dalton_core.document_extraction import LEGACY_CALL_BUDGET
-                    self.assertEqual(view["effective"], LEGACY_CALL_BUDGET)
+                    self.assertEqual(view["effective"], {
+                        "max_input_tokens": 64000, "max_output_tokens": 4096,
+                        "max_cost_usd": 1.0, "timeout_seconds": 600})
                 else:
                     self.assertIsNone(view["effective"])
                 result = set_model_call_budget(
@@ -154,12 +155,9 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
         configured = json.loads(extraction.read_text())
         effective = resolve_call_budget(
             configured, "document_extraction", defaults=LEGACY_CALL_BUDGET)
-        self.assertEqual(effective["max_input_tokens"],
-                         LEGACY_CALL_BUDGET["max_input_tokens"])
-        self.assertEqual(effective["max_output_tokens"],
-                         LEGACY_CALL_BUDGET["max_output_tokens"])
-        self.assertEqual(effective["timeout_seconds"],
-                         LEGACY_CALL_BUDGET["timeout_seconds"])
+        self.assertEqual(effective, {"max_input_tokens": 64000,
+                                    "max_output_tokens": 4096,
+                                    "max_cost_usd": 0.42, "timeout_seconds": 600})
 
 
 class BudgetGovernanceTests(unittest.TestCase):

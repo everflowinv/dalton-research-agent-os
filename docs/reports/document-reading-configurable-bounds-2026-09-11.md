@@ -29,3 +29,5 @@ Next: include explicit long-document bounds in the reviewed deployment delta;
 verify real annual source completion separately from process health. Output
 schema item counts and acquisition byte/page contracts remain separate audit
 items, not claims that every operating limit is now configurable.
+
+Installation follow-up: model configuration regeneration now preserves validated explicit reading limits, in addition to transport/capacity and call/run budgets. Invalid limits refuse replacement. An installed-config round trip and the actual Cockpit/extraction budget consumers pass 18 tests; extraction uses its declared 64k/4096/$1/600-second defaults while explicit purpose overrides remain final.

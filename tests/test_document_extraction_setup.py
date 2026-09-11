@@ -43,6 +43,7 @@ class ExtractionSetupTests(unittest.TestCase):
             target = root / "state" / CONFIG_FILE_NAME
             wire = json.loads(target.read_text(encoding="utf-8"))
             budgets = {
+                "reading_limits": {"max_document_chars": 900000, "max_pdf_pages": 700},
                 "call_budget": {"max_cost_usd": 0.04},
                 "purpose_call_budgets": {"document_numeric_extraction": {"max_output_tokens": 777}},
                 "run_budget": {"max_units": 9},
@@ -56,6 +57,19 @@ class ExtractionSetupTests(unittest.TestCase):
             rewritten = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual({key: rewritten[key] for key in budgets}, budgets)
             self.assertNotIn("unknown_private_field", rewritten)
+
+    def test_invalid_existing_reading_limits_refuse_before_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config_path = _service(root)
+            install(config_path)
+            target = root / "state" / CONFIG_FILE_NAME
+            wire = json.loads(target.read_text())
+            wire["reading_limits"] = {"max_pdf_pages": False}
+            target.write_text(json.dumps(wire))
+            before = target.read_bytes()
+            with self.assertRaises(ValueError):
+                install(config_path)
+            self.assertEqual(target.read_bytes(), before)
 
     def test_invalid_existing_budget_refuses_before_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

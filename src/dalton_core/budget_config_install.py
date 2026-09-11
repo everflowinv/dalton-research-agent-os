@@ -10,7 +10,7 @@ from typing import Any
 from .call_budget import validate_budget_overrides, validate_run_budget_overrides
 
 BUDGET_KEYS = ("call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
-               "capacity_retry")
+               "capacity_retry", "transport_retry", "reading_limits")
 
 
 class BudgetConfigInstallError(ValueError):
@@ -18,7 +18,7 @@ class BudgetConfigInstallError(ValueError):
 
 
 def preserved_budget_overrides(path: str | Path) -> dict[str, Any]:
-    """Read only the four owner budget blocks; malformed blocks fail closed."""
+    """Preserve supported execution controls; malformed blocks fail closed."""
 
     target = Path(path)
     if not target.exists():
@@ -36,6 +36,10 @@ def preserved_budget_overrides(path: str | Path) -> dict[str, Any]:
         # of a malformed recovery policy.
         validate_model_config(wire)
         kept["capacity_retry"] = dict(wire["capacity_retry"])
+    if "reading_limits" in wire:
+        from .document_reading_limits import resolve_reading_limits
+        resolve_reading_limits(wire)
+        kept["reading_limits"] = dict(wire["reading_limits"])
     if "transport_retry" in wire:
         from .document_extraction import validate_transport_retry
         kept["transport_retry"] = validate_transport_retry(wire["transport_retry"])
