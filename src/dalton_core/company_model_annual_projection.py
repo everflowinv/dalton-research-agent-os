@@ -24,13 +24,14 @@ from .company_financial_statement_structure import (
 from .model_forecast_driver import (
     STRUCTURED_SCHEMA_VERSION,
     build_structure_drivers,
+    structure_result_refs,
     structure_historical_values,
     validate_forecast_model,
 )
 from .store import canonical_json, content_hash
 
 
-SCHEMA_VERSION = "company-model-annual-projection-0.1"
+SCHEMA_VERSION = "company-model-annual-projection-0.2"
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -82,7 +83,99 @@ def validate_calendar_binding(value: Mapping[str, Any] | None) -> dict[str, Any]
             raise AnnualProjectionError(f"fiscal calendar {field} is invalid")
     if _HEX64.fullmatch(binding["source_hash"]) is None:
         raise AnnualProjectionError("fiscal calendar source_hash is invalid")
+    try:
+        as_of = date.fromisoformat(binding["as_of"])
+    except ValueError as exc:
+        raise AnnualProjectionError("fiscal calendar as_of is not an ISO date") from exc
+    if as_of.month != month:
+        raise AnnualProjectionError(
+            "fiscal calendar month differs from its annual filing date")
     return {**binding, "content_hash": asserted}
+
+
+def verify_statement_filing(
+    connection: Any, filing: Mapping[str, Any],
+) -> None:
+    """Replay one immutable statement filing and all of its stored lines."""
+
+    rows = connection.execute(
+        "SELECT * FROM coverage_mission_statement_lines "
+        "WHERE ingest_id=? ORDER BY ordinal", (filing["ingest_id"],),
+    ).fetchall()
+    if len(rows) != int(filing["line_count"]):
+        raise AnnualProjectionError("annual filing authority line count is invalid")
+    identity = {
+        "company_ref": filing["company_ref"], "cik": filing["cik"],
+        "accession": filing["accession"], "form": filing["form"],
+        "line_count": int(filing["line_count"]),
+    }
+    ingest_id = f"statement-ingest:{content_hash(identity)[:32]}"
+    if filing["ingest_id"] != ingest_id:
+        raise AnnualProjectionError("annual filing authority ingest identity is invalid")
+    for ordinal, row in enumerate(rows):
+        if (row["ingest_id"] != ingest_id or row["ordinal"] != ordinal
+                or row["line_id"] != f"{ingest_id}#{ordinal}"):
+            raise AnnualProjectionError("annual filing authority line identity is invalid")
+    common_fields = (
+        "statement", "concept", "label", "level", "parent_concept",
+        "is_breakdown", "dimension_axis", "dimension_member", "period_start",
+        "period_end", "value", "unit", "balance",
+    )
+    line_hashes = []
+    for fields in (
+            common_fields,
+            common_fields[:8] + ("dimension_count",) + common_fields[8:]):
+        lines = []
+        for row in rows:
+            line = {field: row[field] for field in fields}
+            line["is_breakdown"] = bool(line["is_breakdown"])
+            lines.append(line)
+        line_hashes.append(content_hash(lines))
+    source_refs = filing.get("source_record_refs")
+    if source_refs is None:
+        try:
+            source_refs = json.loads(filing["source_record_refs_json"])
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise AnnualProjectionError(
+                "annual filing source records are invalid") from exc
+    body = {
+        "company_ref": filing["company_ref"], "cik": filing["cik"],
+        "accession": filing["accession"], "form": filing["form"],
+        "line_count": filing["line_count"], "entity_name": filing["entity_name"],
+        "filed": filing["filed"], "report_date": filing["report_date"],
+        "source_record_refs": source_refs,
+        "governance_ref": filing["governance_ref"],
+        "governance_hash": filing["governance_hash"],
+    }
+    matches = [line_hash for line_hash in line_hashes
+               if content_hash({**body, "statement_lines_hash": line_hash})
+               == filing["content_hash"]]
+    if len(matches) != 1:
+        raise AnnualProjectionError("annual filing authority hash is invalid")
+
+
+def validate_stored_calendar_binding(
+    connection: Any, value: Mapping[str, Any], *, company_ref: str,
+) -> dict[str, Any]:
+    """Bind a calendar to the exact stored 10-K whose lines replay."""
+
+    binding = validate_calendar_binding(value)
+    assert binding is not None
+    row = connection.execute(
+        "SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?",
+        (binding["calendar_ref"],),
+    ).fetchone()
+    if row is None:
+        raise AnnualProjectionError("fiscal calendar annual filing is unavailable")
+    filing = dict(row)
+    if (filing.get("company_ref") != company_ref or filing.get("form") != "10-K"):
+        raise AnnualProjectionError(
+            "fiscal calendar is not this company's stored annual filing")
+    if (filing.get("content_hash") != binding["source_hash"]
+            or filing.get("report_date") != binding["as_of"]):
+        raise AnnualProjectionError("fiscal calendar differs from its stored annual filing")
+    verify_statement_filing(connection, filing)
+    return binding
 
 
 def fiscal_groups(
@@ -350,6 +443,83 @@ def _forecast_outcomes(
     }
 
 
+def _line_outcomes(
+    model: Mapping[str, Any], inputs: Mapping[str, Any],
+    structure: Mapping[str, Any], label: str, group: Sequence[str],
+    calendar: Mapping[str, Any], *,
+    historical_values: Mapping[str, Mapping[str, Decimal]],
+    historical_refs: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    historical_starts: Mapping[str, str],
+    historical_eps: Mapping[str, Any] | None,
+    forecast_shares: Mapping[str, Any] | None,
+    forecast_eps: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Project every structured income result under its declared semantics."""
+
+    result_refs = structure_result_refs(structure)
+    results = {str(item["ref"]): item for item in (model.get("results") or [])}
+    formulas = {str(item["output_ref"]): item
+                for item in (structure.get("formulas") or [])}
+    fiscal_year = f"{calendar['calendar_ref']}:{label}"
+    projected: dict[str, dict[str, Any]] = {}
+    for line in structure.get("lines") or []:
+        if line.get("statement") != "income":
+            continue
+        line_ref = str(line["ref"])
+        result_ref = result_refs[line_ref]
+        result = results.get(result_ref)
+        if not isinstance(result, Mapping):
+            raise AnnualProjectionError(
+                f"structured income line {line_ref} has no model result")
+        role = str(line["role"])
+        if role == "diluted_eps":
+            outcome = historical_eps if historical_eps is not None else forecast_eps
+            outcome = dict(outcome or {
+                "status": "unavailable", "value": None,
+                "reason": "annual diluted EPS authority is unavailable",
+            })
+        elif (role == "diluted_weighted_average_shares"
+              and forecast_shares is not None):
+            outcome = dict(forecast_shares)
+        elif line.get("annual_semantics") == "sum_quarters":
+            definition = _line_definition_ref(
+                structure, line,
+                line.get("concept") if line.get("kind") == "filed"
+                else (formulas.get(line_ref) or {}).get("tie_out_concept"),
+            )
+            cells = _projected_quarter_cells(
+                model, line, result, group, calendar=calendar,
+                definition_ref=definition,
+                historical_values=historical_values,
+                historical_refs=historical_refs,
+                historical_starts=historical_starts,
+            )
+            for cell in cells:
+                cell["fiscal_year"] = fiscal_year
+            outcome = aggregate_fiscal_year(
+                cells, semantic="sum_quarters", fiscal_year=fiscal_year)
+        elif line.get("annual_semantics") == "direct_annual":
+            cells = _structure_facts(
+                inputs, structure, line, group, label, calendar,
+                formulas.get(line_ref),
+            )
+            outcome = aggregate_fiscal_year(
+                cells, semantic="direct_annual", fiscal_year=fiscal_year)
+        else:
+            outcome = {
+                "status": "unavailable", "value": None,
+                "reason": (
+                    f"annual semantics {line.get('annual_semantics')} "
+                    "has no amount aggregation contract"
+                ),
+            }
+        projected[result_ref] = {
+            "line_ref": line_ref, "role": role, "label": str(line["label"]),
+            **outcome,
+        }
+    return projected
+
+
 def build_annual_projection(
     *, model: Mapping[str, Any], inputs: Mapping[str, Any],
     calendar_binding: Mapping[str, Any] | None,
@@ -413,6 +583,15 @@ def build_annual_projection(
             )
             row["forecast_shares"] = shares
             row["forecast_eps"] = eps
+        row["line_outcomes"] = _line_outcomes(
+            held, inputs, structure, label, group, calendar,
+            historical_values=historical_values,
+            historical_refs=historical_refs,
+            historical_starts=historical_starts,
+            historical_eps=row["historical_eps"],
+            forecast_shares=row["forecast_shares"],
+            forecast_eps=row["forecast_eps"],
+        )
         rows.append(row)
     body = {
         "schema_version": SCHEMA_VERSION,
@@ -474,6 +653,9 @@ def validate_projection_record(
         or wire.get("structure_hash") != structure.get("content_hash")
         or wire.get("structure_replay_hash") != content_hash(replay)
         or wire.get("forecast_structure_binding_hash") != binding.get("content_hash")
+        or wire.get("projection_ref") != (
+            f"annual-projection:{model.get('id')}:"
+            f"{(wire.get('calendar_binding') or {}).get('content_hash')}")
         or validate_calendar_binding(wire.get("calendar_binding"))
             != wire.get("calendar_binding")
         or not isinstance(wire.get("periods"), list)
@@ -486,5 +668,6 @@ __all__ = [
     "AnnualProjectionError", "SCHEMA_VERSION", "build_annual_projection",
     "calendar_binding_from_annual_filing", "fiscal_groups",
     "validate_annual_projection", "validate_calendar_binding",
-    "validate_projection_record",
+    "validate_projection_record", "validate_stored_calendar_binding",
+    "verify_statement_filing",
 ]

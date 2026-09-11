@@ -22,6 +22,7 @@ judgement, and this layer does not make judgements.
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
@@ -36,6 +37,7 @@ from dalton_core.company_model_forecast import (
     run_company_forecast,
 )
 from dalton_core.company_model_forecast_cli import choose_company, run_model_forecast
+from dalton_core.company_model_annual_projection import build_annual_projection
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.company_model_spec import spec_from_response
 from dalton_core.company_model_state import build_company_model_state
@@ -368,6 +370,11 @@ class LaneStateTests(unittest.TestCase):
                          self.missions.statement_filings(ACN)[-1]["ingest_id"])
         self.assertEqual(summary["annual_projection_ref"], projection["projection_ref"])
         self.assertEqual(summary["annual_projection_hash"], projection["content_hash"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            authority.connection.execute(
+                "UPDATE forecast_model_annual_projections SET content_hash=? "
+                "WHERE model_version_id=?", ("0" * 64, record["id"]),
+            )
 
         authority.connection.execute(
             "DROP TRIGGER forecast_model_annual_projection_no_delete")
@@ -382,6 +389,45 @@ class LaneStateTests(unittest.TestCase):
         ).fetchone()["n"], 1)
         third = self.child()
         self.assertEqual(third["forecast_status"], "nothing_to_model")
+
+    def test_projection_authority_rejects_rehashed_calendar_report_date(self):
+        summary = self.child()
+        authority = ForecastModelAuthority(self.store)
+        model = authority.model(summary["model_version_ref"])
+        inputs = build_model_inputs(
+            self.missions, self.missions.latest_company_model_spec(ACN))
+        held = authority.annual_projection(model["id"])
+        calendar = dict(held["calendar_binding"])
+        calendar["as_of"] = "2025-05-31"
+        calendar["content_hash"] = content_hash({
+            key: value for key, value in calendar.items()
+            if key != "content_hash"
+        })
+        forged = build_annual_projection(
+            model=model, inputs=inputs, calendar_binding=calendar)
+        with self.assertRaisesRegex(
+                ForecastModelValidationError, "annual model projection authority differs"):
+            authority.publish_annual_projection(
+                forged, inputs=inputs, calendar_binding=calendar)
+
+    def test_projection_authority_rejects_foreign_company_filing_ref(self):
+        summary = self.child()
+        authority = ForecastModelAuthority(self.store)
+        model = authority.model(summary["model_version_ref"])
+        inputs = build_model_inputs(
+            self.missions, self.missions.latest_company_model_spec(ACN))
+        held = authority.annual_projection(model["id"])
+        filing_ref = held["calendar_binding"]["calendar_ref"]
+        self.store.connection.execute(
+            "DROP TRIGGER coverage_mission_statement_filings_no_update")
+        self.store.connection.execute(
+            "UPDATE coverage_mission_statement_filings SET company_ref=? "
+            "WHERE ingest_id=?", ("company:foreign", filing_ref),
+        )
+        with self.assertRaisesRegex(
+                ForecastModelValidationError, "annual model projection authority differs"):
+            authority.publish_annual_projection(
+                held, inputs=inputs, calendar_binding=held["calendar_binding"])
 
     def test_mismatched_filed_segments_refuse_the_model_end_to_end(self):
         filing = self.missions.statement_filings(ACN)[0]
@@ -753,7 +799,7 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(summary["forecast_status"], "nothing_to_model")
         self.assertEqual(len(ForecastModelAuthority(self.store).versions(ACN)), 1)
 
-    def test_a_filing_makes_the_estimated_quarter_actual_and_nothing_else(self):
+    def test_a_filing_reanchors_later_formulas_without_new_judgement(self):
         first = self.child()
         self.file_quarters((("2026-06-01", "2026-08-31"),),
                            {REVENUE_CONCEPT: ("1500000000",),
@@ -765,8 +811,9 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(summary["realised_quarters"], 1)
         self.assertEqual(summary["model_version"], 2)
         self.assertEqual(summary["forecast_quarters"], 3)
-        # Nothing was written to the forecast lines: the quarters still ahead
-        # did not move, and the one that was filed is no longer a forecast.
+        # Nothing was written to the separate forecast-line authority. The
+        # structured model keeps its 10% assumptions but replays later formula
+        # cells from the filed actual, so value and formula stay identical.
         models = ForecastModelAuthority(self.store)
         second = models.latest(ACN)
         revenue = next(item for item in second["results"]
@@ -775,13 +822,12 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(Decimal(cells[("2026-08-31", "actual")]["value"]),
                          Decimal("1500000000"))
         self.assertTrue(cells[("2026-08-31", "estimate")]["superseded_by"])
-        before = next(item for item in models.model(first["model_version_ref"])["results"]
-                      if item["ref"] == "result:revenue")
         self.assertEqual(
-            {cell["period"]["end"]: cell["value"] for cell in before["cells"]
-             if cell["period"]["end"] != "2026-08-31"},
-            {cell["period"]["end"]: cell["value"] for cell in revenue["cells"]
-             if cell["period"]["end"] != "2026-08-31"})
+            [Decimal(cells[(end, "estimate")]["value"]) for end in (
+                "2026-11-30", "2027-02-28", "2027-05-31")],
+            [Decimal("1650000000"), Decimal("1815000000"),
+             Decimal("1996500000")],
+        )
 
     def test_a_mission_without_the_write_scope_is_refused_by_name(self):
         params = dict(self.params)

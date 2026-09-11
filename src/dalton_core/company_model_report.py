@@ -270,6 +270,24 @@ def render_forecast_model(
         from .company_model_annual_projection import validate_projection_record
 
         projection = validate_projection_record(annual_projection, model=record)
+        result_labels = {str(item["ref"]): str(item["label"])
+                         for item in record.get("results") or []}
+        out.append("")
+        out.append("ANNUAL STRUCTURED FINANCIALS")
+        out.append("-" * DRIVER_LABEL_WIDTH)
+        for period in projection["periods"]:
+            out.append(f"  {period['label']}")
+            for result_ref, outcome in period["line_outcomes"].items():
+                label = result_labels.get(result_ref, result_ref)
+                if outcome.get("status") == "computed":
+                    out.append(
+                        f"    {label}: {outcome.get('value')} {outcome.get('unit')}"
+                    )
+                else:
+                    out.append(
+                        f"    {label}: unavailable: "
+                        f"{outcome.get('reason') or 'no reason recorded'}"
+                    )
         out.append("")
         out.append("ANNUAL DILUTED EPS")
         out.append("-" * DRIVER_LABEL_WIDTH)

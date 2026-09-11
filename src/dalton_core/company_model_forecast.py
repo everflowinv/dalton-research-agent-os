@@ -269,13 +269,12 @@ def _annual_projection(
     # statement_filings() is a useful read API but its row mapping alone is
     # not the content authority. Rebuild the filing hash over the stored lines
     # before its report date becomes the projection's fiscal calendar.
-    from .fund_xlsx_export import _verify_statement_filing
-
-    _verify_statement_filing(models.connection, filing)
     from .company_model_annual_projection import (
         build_annual_projection, calendar_binding_from_annual_filing,
+        verify_statement_filing,
     )
 
+    verify_statement_filing(models.connection, filing)
     calendar = calendar_binding_from_annual_filing(
         filing, company_ref=str(record["company_ref"]))
     projection = build_annual_projection(

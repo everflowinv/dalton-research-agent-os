@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 from decimal import Decimal
 from pathlib import Path
-import sqlite3
 import tempfile
 import unittest
 
@@ -32,6 +31,7 @@ from dalton_core.company_model_annual_projection import (
     AnnualProjectionError,
     build_annual_projection,
     validate_annual_projection,
+    validate_calendar_binding,
 )
 from dalton_core.company_model_report import render_forecast_model
 from dalton_core.model_forecast import (
@@ -316,6 +316,21 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             {"ref": "result:diluted_weighted_average_shares",
              "period_end": "2026-03-31"},
         ])
+        next_end = record["forecast_periods"][0]["end"]
+        revenue = by_cell[("revenue", next_end)]
+        revenue_result = next(
+            item for item in record["results"] if item["role"] == "revenue")
+        growth = next(
+            item for item in record["assumptions"]
+            if item["driver_ref"] == revenue_result["driver_ref"]
+            and item["period"]["end"] == next_end
+            and not item.get("superseded_by")
+        )
+        self.assertEqual(
+            Decimal(revenue["value"]),
+            (Decimal("1400") * (Decimal(1) + Decimal(growth["value"]))).quantize(
+                Decimal("0.00000001")),
+        )
 
     def test_v03_actualization_refuses_changed_formula_topology(self):
         inputs, structure = self.authority()
@@ -447,7 +462,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             path = Path(temporary) / "structured.xlsx"
             calendar = {
                 "calendar_ref": "calendar:test", "source_hash": "c" * 64,
-                "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+                "as_of": "2025-12-31", "fiscal_year_end_month": 12,
             }
             calendar["content_hash"] = content_hash(calendar)
             export_fund_workbook(
@@ -490,7 +505,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             path = Path(temporary) / "annual-eps.xlsx"
             calendar = {
                 "calendar_ref": "calendar:test", "source_hash": "c" * 64,
-                "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+                "as_of": "2025-12-31", "fiscal_year_end_month": 12,
             }
             calendar["content_hash"] = content_hash(calendar)
             export_fund_workbook(
@@ -506,20 +521,20 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             financials.cell(
                 rows["diluted_weighted_average_shares"], 5).value, 0.0001)
         self.assertEqual(
-            financials.cell(rows["diluted_eps"], 5).value,
-            f"='Financials'!E{rows['diluted_eps_numerator']}/"
-            f"'Financials'!E{rows['diluted_weighted_average_shares']}",
+            financials.cell(rows["diluted_eps"], 5).value, 6.7,
         )
         self.assertTrue(any(
             "shares millions" in str(financials.cell(
                 rows["diluted_weighted_average_shares"], column).value)
             for column in range(1, 5)
         ))
-        self.assertIn(
-            "historical-structured-annual-diluted-eps",
-            [book["Formula Map"].cell(row, 2).value
-             for row in range(5, book["Formula Map"].max_row + 1)],
-        )
+        self.assertTrue(any(
+            str(book["Formula Map"].cell(row, 2).value).startswith(
+                "annual-projection:")
+            and "result:diluted_eps" in str(
+                book["Formula Map"].cell(row, 2).value)
+            for row in range(5, book["Formula Map"].max_row + 1)
+        ))
 
     def test_v03_workbook_forecasts_annual_shares_only_with_bound_method(self):
         from openpyxl import load_workbook
@@ -539,7 +554,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             path = Path(temporary) / "forecast-annual-eps.xlsx"
             calendar = {
                 "calendar_ref": "calendar:test", "source_hash": "c" * 64,
-                "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+                "as_of": "2025-12-31", "fiscal_year_end_month": 12,
             }
             calendar["content_hash"] = content_hash(calendar)
             export_fund_workbook(
@@ -591,7 +606,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             unavailable_rows["diluted_weighted_average_shares"], 6).value)
         self.assertIsNone(unavailable.cell(unavailable_rows["diluted_eps"], 6).value)
 
-    def test_annual_projection_is_internal_immutable_and_shared_with_report(self):
+    def test_annual_projection_is_shared_by_report_and_export(self):
         inputs = annual_authority_inputs()
         candidate = annual_forecastable_proposal(inputs)
         structure, replay = validate_financial_statement_structure(
@@ -601,7 +616,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             company_spec(), inputs, structure=structure, replay=replay, binding=binding)
         calendar = {
             "calendar_ref": "calendar:test", "source_hash": "c" * 64,
-            "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+            "as_of": "2025-12-31", "fiscal_year_end_month": 12,
         }
         calendar["content_hash"] = content_hash(calendar)
         with tempfile.TemporaryDirectory() as temporary:
@@ -611,27 +626,24 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             record = authority.publish(body)
             projection = build_annual_projection(
                 model=record, inputs=inputs, calendar_binding=calendar)
-            stored = authority.publish_annual_projection(
-                projection, inputs=inputs, calendar_binding=calendar)
-            held = authority.annual_projection(record["id"])
-            with self.assertRaises(sqlite3.IntegrityError):
-                store.connection.execute(
-                    "UPDATE forecast_model_annual_projections SET content_hash=? "
-                    "WHERE model_version_id=?", ("0" * 64, record["id"]),
-                )
+            held = projection
             exported = export_fund_workbook(
                 Path(temporary) / "projection.xlsx", model=record,
                 spec=company_spec(), inputs=inputs,
                 calendar_binding=calendar, annual_projection=held)
 
-        self.assertEqual(stored["status"], "fresh")
-        self.assertIsNotNone(held)
         self.assertEqual(exported["annual_projection_hash"], held["content_hash"])
         rows = {item["label"]: item for item in held["periods"]}
         self.assertEqual(rows["FY2025A"]["historical_eps"]["value"], "6.7")
         self.assertEqual(rows["FY2026E"]["forecast_shares"]["value"], "100.00000000")
         self.assertEqual(rows["FY2026E"]["forecast_eps"]["value"], "9.4678918595")
+        revenue = rows["FY2026E"]["line_outcomes"]["result:revenue"]
+        self.assertEqual(revenue["status"], "computed")
+        self.assertEqual(len(revenue["source_periods"]), 4)
+        self.assertTrue(all(item.get("model_cell_ref")
+                            for item in revenue["source_periods"]))
         rendered = render_forecast_model(record, annual_projection=held)
+        self.assertIn("ANNUAL STRUCTURED FINANCIALS", rendered)
         self.assertIn("ANNUAL DILUTED EPS", rendered)
         self.assertIn("FY2025A", rendered)
         self.assertIn(held["content_hash"], rendered)
@@ -642,6 +654,15 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             validate_annual_projection(
                 tampered, model=record, inputs=inputs,
                 calendar_binding=calendar)
+        identity_tampered = copy.deepcopy(held)
+        identity_tampered["projection_ref"] = "annual-projection:forged"
+        identity_tampered["content_hash"] = content_hash({
+            key: value for key, value in identity_tampered.items()
+            if key != "content_hash"
+        })
+        from dalton_core.company_model_annual_projection import validate_projection_record
+        with self.assertRaisesRegex(AnnualProjectionError, "authority differs"):
+            validate_projection_record(identity_tampered, model=record)
 
     def test_annual_projection_combines_filed_and_forecast_quarters(self):
         inputs = annual_authority_inputs()
@@ -684,7 +705,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             record = authority.publish(body)
         calendar = {
             "calendar_ref": "calendar:test", "source_hash": "c" * 64,
-            "as_of": "2026-09-11", "fiscal_year_end_month": 12,
+            "as_of": "2025-12-31", "fiscal_year_end_month": 12,
         }
         calendar["content_hash"] = content_hash(calendar)
         projection = build_annual_projection(
@@ -697,6 +718,29 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertEqual(len(source_periods), 4)
         self.assertIn("input_cell_refs", source_periods[0])
         self.assertTrue(all("model_cell_ref" in item for item in source_periods[1:]))
+        annual_revenue = mixed["line_outcomes"]["result:revenue"]
+        self.assertEqual(annual_revenue["status"], "computed")
+        self.assertIn("input_cell_refs", annual_revenue["source_periods"][0])
+        self.assertTrue(all("model_cell_ref" in item
+                            for item in annual_revenue["source_periods"][1:]))
+        with tempfile.TemporaryDirectory() as exported_dir:
+            exported = export_fund_workbook(
+                Path(exported_dir) / "mixed.xlsx", model=record, spec=spec,
+                inputs=current, calendar_binding=calendar,
+                annual_projection=projection,
+            )
+        self.assertEqual(exported["annual_projection_hash"], projection["content_hash"])
+
+    def test_annual_calendar_requires_iso_date_and_matching_fiscal_month(self):
+        for as_of, month in (("not-a-date", 12), ("2025-11-30", 12)):
+            with self.subTest(as_of=as_of, month=month):
+                calendar = {
+                    "calendar_ref": "calendar:test", "source_hash": "c" * 64,
+                    "as_of": as_of, "fiscal_year_end_month": month,
+                }
+                calendar["content_hash"] = content_hash(calendar)
+                with self.assertRaises(AnnualProjectionError):
+                    validate_calendar_binding(calendar)
 
 
 if __name__ == "__main__":

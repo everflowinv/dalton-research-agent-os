@@ -642,6 +642,10 @@ def export_fund_workbook(
         for row in ((annual_projection or {}).get("periods") or [])
         if row.get("forecast_eps") is not None
     }
+    annual_line_outcomes = {
+        row["label"]: row.get("line_outcomes") or {}
+        for row in ((annual_projection or {}).get("periods") or [])
+    }
     result_cells: dict[tuple[str, str], str] = {}
     result_flow_periods: set[tuple[str, str]] = set()
     result_values = {
@@ -779,6 +783,76 @@ def export_fund_workbook(
                 None if structured_line is None else structured_line.get("role")
             )
             annual_eps = annual_eps_results.get(label)
+            projection_outcome = (
+                annual_line_outcomes.get(label, {}).get(result["ref"])
+                if structured_line is not None else None
+            )
+            if structured_line is not None:
+                if projection_outcome is None:
+                    raise FundWorkbookExportError(
+                        f"annual projection lacks structured result {result['ref']}")
+                if structured_role == "diluted_eps":
+                    # Written after numerator/share result rows exist.
+                    continue
+                if projection_outcome.get("status") != "computed":
+                    gaps.append(
+                        f"{result['ref']} {label}: annual unavailable; "
+                        f"{projection_outcome.get('reason')}"
+                    )
+                    continue
+                source_periods = projection_outcome.get("source_periods") or []
+                coordinates = [
+                    result_cells.get((result["ref"], str(cell.get("period_end"))))
+                    for cell in source_periods if cell.get("period_kind") == "quarter"
+                ]
+                if (structured_role == "diluted_weighted_average_shares"
+                        and len(source_periods) == 4):
+                    if len(coordinates) != 4 or not all(coordinates):
+                        gaps.append(
+                            f"{result['ref']} {label}: annual projection source "
+                            "quarters cannot be rendered"
+                        )
+                        continue
+                    weights = [_inclusive_duration_days(cell) for cell in source_periods]
+                    target.value = "=(" + "+".join(
+                        f"{coordinate}*{weight}"
+                        for coordinate, weight in zip(coordinates, weights)
+                    ) + f")/{sum(weights)}"
+                    target.font = Font(name="Arial", color="000000")
+                    model_formula = "day_weighted_quarters"
+                elif structured_line.get("annual_semantics") == "sum_quarters":
+                    if len(coordinates) != 4 or not all(coordinates):
+                        gaps.append(
+                            f"{result['ref']} {label}: annual projection source "
+                            "quarters cannot be rendered"
+                        )
+                        continue
+                    target.value = f"=SUM({','.join(coordinates)})"
+                    target.font = Font(name="Arial", color="000000")
+                    model_formula = "projection_sum_quarters"
+                elif structured_line.get("annual_semantics") == "direct_annual":
+                    if len(source_periods) != 1:
+                        raise FundWorkbookExportError(
+                            "computed direct annual projection lacks one source period")
+                    target.value = _number(projection_outcome["value"])
+                    target.font = Font(name="Arial", color="0000FF")
+                    model_formula = "direct_annual_filed_value"
+                else:
+                    raise FundWorkbookExportError(
+                        "computed structured annual result has unsupported semantics")
+                target.number_format = _number_format(result["unit"])
+                result_cells[(result["ref"], label)] = (
+                    f"'Financials'!{target.coordinate}"
+                )
+                formula_map.append({
+                    "cell": f"Financials!{target.coordinate}",
+                    "model_cell_ref": (
+                        f"{annual_projection['projection_ref']}:{result['ref']}:{label}"
+                    ),
+                    "formula": str(target.value), "model_formula": model_formula,
+                    "model_label": result["label"],
+                })
+                continue
             if (
                 annual_eps is not None and annual_eps.get("status") == "computed"
                 and structured_role == "diluted_eps"
@@ -914,6 +988,25 @@ def export_fund_workbook(
                         f"{eps_result['ref']} {label}: annual unavailable; "
                         f"{outcome.get('reason')}"
                     )
+                    continue
+                if label in annual_eps_results:
+                    target = financials.cell(eps_row, annual_columns[label])
+                    target.value = _number(outcome["value"])
+                    target.font = Font(name="Arial", color="0000FF")
+                    target.number_format = _number_format(eps_result["unit"])
+                    result_cells[(eps_result["ref"], label)] = (
+                        f"'Financials'!{target.coordinate}"
+                    )
+                    formula_map.append({
+                        "cell": f"Financials!{target.coordinate}",
+                        "model_cell_ref": (
+                            f"{annual_projection['projection_ref']}:"
+                            f"{eps_result['ref']}:{label}"
+                        ),
+                        "formula": str(target.value),
+                        "model_formula": "direct_annual_diluted_eps_authority",
+                        "model_label": eps_result["label"],
+                    })
                     continue
                 numerator_cell = result_cells.get((numerator_result["ref"], label))
                 share_cell = result_cells.get((share_result["ref"], label))
@@ -1307,55 +1400,14 @@ def _verify_statement_filing(
     connection: sqlite3.Connection, filing: Mapping[str, Any],
 ) -> None:
     """Replay accepted statement-line wire versions from immutable rows."""
-
-    rows = connection.execute(
-        "SELECT * FROM coverage_mission_statement_lines "
-        "WHERE ingest_id=? ORDER BY ordinal", (filing["ingest_id"],),
-    ).fetchall()
-    if len(rows) != int(filing["line_count"]):
-        raise FundWorkbookExportError("annual filing authority line count is invalid")
-    identity = {
-        "company_ref": filing["company_ref"], "cik": filing["cik"],
-        "accession": filing["accession"], "form": filing["form"],
-        "line_count": int(filing["line_count"]),
-    }
-    expected_ingest_id = f"statement-ingest:{content_hash(identity)[:32]}"
-    if filing["ingest_id"] != expected_ingest_id:
-        raise FundWorkbookExportError("annual filing authority ingest identity is invalid")
-    for ordinal, row in enumerate(rows):
-        if (row["ingest_id"] != expected_ingest_id
-                or row["ordinal"] != ordinal
-                or row["line_id"] != f"{expected_ingest_id}#{ordinal}"):
-            raise FundWorkbookExportError("annual filing authority line identity is invalid")
-    common_fields = (
-        "statement", "concept", "label", "level", "parent_concept",
-        "is_breakdown", "dimension_axis", "dimension_member", "period_start",
-        "period_end", "value", "unit", "balance",
+    from .company_model_annual_projection import (
+        AnnualProjectionError, verify_statement_filing,
     )
-    line_hashes = []
-    for fields in (
-            common_fields,
-            common_fields[:8] + ("dimension_count",) + common_fields[8:]):
-        lines = []
-        for row in rows:
-            line = {field: row[field] for field in fields}
-            line["is_breakdown"] = bool(line["is_breakdown"])
-            lines.append(line)
-        line_hashes.append(content_hash(lines))
-    body = {
-        "company_ref": filing["company_ref"], "cik": filing["cik"],
-        "accession": filing["accession"], "form": filing["form"],
-        "line_count": filing["line_count"], "entity_name": filing["entity_name"],
-        "filed": filing["filed"], "report_date": filing["report_date"],
-        "source_record_refs": filing["source_record_refs"],
-        "governance_ref": filing["governance_ref"],
-        "governance_hash": filing["governance_hash"],
-    }
-    matches = [line_hash for line_hash in line_hashes
-               if content_hash({**body, "statement_lines_hash": line_hash})
-               == filing["content_hash"]]
-    if len(matches) != 1:
-        raise FundWorkbookExportError("annual filing authority hash is invalid")
+
+    try:
+        verify_statement_filing(connection, filing)
+    except AnnualProjectionError as exc:
+        raise FundWorkbookExportError(str(exc)) from exc
 
 
 def export_company_workbook(

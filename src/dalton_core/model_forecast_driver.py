@@ -1602,6 +1602,12 @@ def _structure_result_refs(structure: Mapping[str, Any]) -> dict[str, str]:
     return refs
 
 
+def structure_result_refs(structure: Mapping[str, Any]) -> dict[str, str]:
+    """Public deterministic line-to-result identity for annual projections."""
+
+    return _structure_result_refs(structure)
+
+
 def compute_structure_results(
     drivers: Sequence[Mapping[str, Any]],
     assumptions: Sequence[Mapping[str, Any]],
@@ -2167,6 +2173,35 @@ def _actualize_structured_model(
             + [periods_by_end[end] for end in ends])[-MAX_REALISED_PERIODS:]
     forecast = [dict(item) for item in (prior.get("forecast_periods") or [])
                 if str(item["end"]) not in realised]
+    if forecast:
+        # The forecasting judgement is unchanged, but a growth chain's k-1 is
+        # now the filed actual rather than the superseded estimate. Replay the
+        # remaining cells from the same immutable assumptions and company DAG
+        # so their stored formulas and values continue to agree exactly.
+        replayed = {
+            str(item["ref"]): item
+            for item in compute_structure_results(
+                drivers, assumptions, forecast, structure)
+        }
+        forecast_ends = {str(item["end"]) for item in forecast}
+        reanchored: list[dict[str, Any]] = []
+        for result in results:
+            fresh = replayed.get(str(result["ref"]))
+            if fresh is None:
+                raise ForecastModelUnavailable(
+                    f"result {result['ref']} could not replay after actualisation")
+            cells = [dict(item) for item in result.get("cells") or []
+                     if not (item.get("kind") == "estimate"
+                             and str(item["period"]["end"]) in forecast_ends)]
+            cells.extend(dict(item) for item in fresh.get("cells") or [])
+            reanchored.append(_finish({
+                **dict(result),
+                "cells": sorted(cells, key=lambda item: (
+                    str(item["period"]["end"]),
+                    0 if item["kind"] == "estimate" else 1,
+                )),
+            }))
+        results = reanchored
     if evidence_refs is None:
         evidence_refs = filing_refs(drivers, ends)
     body = {
@@ -2210,9 +2245,9 @@ def actualize_model(
     The one near-mechanical version in this layer. A quarter this model
     forecast has been filed; the estimate stays exactly where it is, marked
     ``superseded_by`` the actual that answered it, and the actual arrives with
-    the accession it came from. Future quarters are not touched, not rebased
-    and not re-estimated -- whether a print changes the view of next year is a
-    judgement, and it belongs to whoever makes it, not to this function.
+    the accession it came from. A structured model replays later formula cells
+    from that actual using the same recorded assumptions and company DAG. It
+    does not choose a new assumption or interpret what the print means.
 
     Returns ``None`` when no forecast quarter has been filed yet.
     """
@@ -3499,14 +3534,20 @@ class ForecastModelAuthority:
     ) -> dict[str, Any]:
         """Persist one exact deterministic annual view beside its model version."""
 
-        from .company_model_annual_projection import validate_annual_projection
+        from .company_model_annual_projection import (
+            validate_annual_projection, validate_stored_calendar_binding,
+        )
 
         version_ref = _text(projection.get("model_version_ref"), "model_version_ref")
         model = self.model(version_ref)
         try:
+            exact_calendar = validate_stored_calendar_binding(
+                self.connection, calendar_binding,
+                company_ref=str(model["company_ref"]),
+            )
             wire = validate_annual_projection(
                 projection, model=model, inputs=inputs,
-                calendar_binding=calendar_binding)
+                calendar_binding=exact_calendar)
         except Exception as exc:
             raise ForecastModelValidationError(
                 "annual model projection authority differs") from exc
@@ -3569,6 +3610,19 @@ class ForecastModelAuthority:
                 != (model.get("forecast_structure_binding") or {}).get("content_hash")
         ):
             raise ForecastModelConflict("annual model projection authority drifted")
+        try:
+            from .company_model_annual_projection import (
+                validate_projection_record, validate_stored_calendar_binding,
+            )
+
+            validate_projection_record(wire, model=model)
+            validate_stored_calendar_binding(
+                self.connection, wire["calendar_binding"],
+                company_ref=str(model["company_ref"]),
+            )
+        except Exception as exc:
+            raise ForecastModelConflict(
+                "annual model projection source authority drifted") from exc
         return wire
 
     def model(self, version_ref: str) -> dict[str, Any]:

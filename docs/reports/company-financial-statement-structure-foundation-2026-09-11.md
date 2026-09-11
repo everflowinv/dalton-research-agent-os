@@ -107,20 +107,32 @@ averages at the precision the company reported.
 `company_model_annual_projection.py` executes that method outside the workbook.
 It binds the exact forecast model version and hash, model-input hash, structure,
 historical replay, forecast-structure binding, and the verified annual filing's
-fiscal-calendar authority. It combines filed and forecast quarters only when
+fiscal-calendar authority. Persistence re-reads that exact stored 10-K and its
+statement lines, checks company, form, report date and source hash, and refuses
+a caller-rehashed calendar that differs. It combines filed and forecast quarters only when
 the four source windows are contiguous, calculates the company-specific
 diluted-EPS numerator through the held DAG, day-weights the four diluted-share
 quarters, and emits a self-hashed projection with each source model cell or
-filed input ref. A missing quarter or invalid denominator remains unavailable.
+filed input ref. The same projection carries every structured income result's
+annual outcome under that line's declared `sum_quarters`, `direct_annual`, or
+ratio semantics. A missing quarter or invalid denominator remains unavailable.
 
 The forecast runtime persists one immutable projection beside the model version
 and backfills it idempotently when an unchanged structured model predates the
 table. The human-readable model report and the workbook consume that same
 projection. Excel translates the bound source cells into visible formulas and
-records the projection ref/hash; it no longer creates annual share or EPS math
-that exists nowhere in the internal model. Without the explicit annual method
+records the projection ref/hash; structured-model annual income totals, shares,
+and EPS no longer first come into existence in Excel. When a filed actual
+supersedes an estimate, later structured result cells replay from that actual
+with the same stored assumptions and graph, keeping formula and value aligned
+without choosing a new judgement. Without the explicit annual method
 and historical tie, forecast annual shares and annual EPS stay unavailable.
 Structure 0.1 bytes and replay identity do not gain the new field.
+
+The current fiscal grouping binds the month of the exact annual filing report
+date. It does not infer a 52/53-week calendar whose fiscal close can cross a
+month boundary. Such a company must remain unavailable until an exact fiscal
+period calendar authority is present; a month label is not evidence for one.
 
 The current structure-0.2 test request is 17,012 prompt characters and its
 provider schema is 9,520 characters. The earlier complete representative
