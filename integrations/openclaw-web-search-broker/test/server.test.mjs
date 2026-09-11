@@ -10,6 +10,7 @@ import { WebSearchBroker } from "../src/broker.mjs";
 import { loadOrCreateSecret, signRequest } from "../src/auth.mjs";
 import { BrokerServer } from "../src/server.mjs";
 import { createPluginDefinition } from "../src/plugin-definition.mjs";
+import { BROKER_VERSION } from "../src/protocol.mjs";
 
 const CONFIG = {
   clientId: "client:dalton-core",
@@ -174,6 +175,13 @@ test("the plugin registers one service and logs no query or result content", asy
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
+});
+
+test("package, plugin manifest and response contract identify the same broker version", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const pluginManifest = JSON.parse(await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  assert.equal(packageJson.version, BROKER_VERSION);
+  assert.equal(pluginManifest.version, BROKER_VERSION);
 });
 
 test("the plugin source holds no Dalton authority, no provider transport and no credential read", async () => {

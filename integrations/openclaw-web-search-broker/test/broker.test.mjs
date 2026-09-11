@@ -311,4 +311,10 @@ test("legacy requests bind the selected provider and unsupported host selection 
   assert.equal(unsupported.error.code, "PROVIDER_CONTRACT_DRIFT");
   assert.match(unsupported.error.message, /unsupported/);
   assert.equal(searches, 1);
+
+  currentConfig = { tools: { web: { search: { enabled: false, provider: "gemini" } } } };
+  const disabled = await broker.handle(request({ callRef: "credential-use:web-search:disabled" }));
+  assert.equal(disabled.error.code, "PROVIDER_CONTRACT_DRIFT");
+  assert.match(disabled.error.message, /disabled/);
+  assert.equal(searches, 1);
 });

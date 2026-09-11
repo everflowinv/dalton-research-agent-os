@@ -224,7 +224,11 @@ export class WebSearchBroker {
     if (!hostConfig || typeof hostConfig !== "object" || Array.isArray(hostConfig)) {
       throw new ProtocolError("INVALID_CONFIG", "host runtime configuration is unavailable");
     }
-    const configured = hostConfig.tools?.web?.search?.provider;
+    const searchConfig = hostConfig.tools?.web?.search;
+    if (searchConfig?.enabled === false) {
+      throw new ProtocolError("INVALID_CONFIG", "host web search is disabled");
+    }
+    const configured = searchConfig?.provider;
     const provider = configured === undefined ? this.config.expectedProvider : configured;
     if (typeof provider !== "string" || !PROVIDER_ID.test(provider)) {
       throw new ProtocolError("INVALID_CONFIG", "host web search provider is invalid");

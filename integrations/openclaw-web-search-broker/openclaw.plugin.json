@@ -2,7 +2,7 @@
   "id": "dalton-openclaw-web-search-broker",
   "name": "Dalton OpenClaw Web Search Broker",
   "description": "Host-owned web search bridge for an external Dalton runtime.",
-  "version": "0.1.0-spike.1",
+  "version": "0.1.0-spike.2",
   "activation": {
     "onStartup": true
   },

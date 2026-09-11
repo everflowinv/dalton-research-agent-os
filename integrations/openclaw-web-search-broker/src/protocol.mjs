@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = "0.1";
-export const BROKER_VERSION = "0.1.0-spike.1";
+export const BROKER_VERSION = "0.1.0-spike.2";
 export const TOOL_NAME = "web_search";
 
 const REQUIRED_REQUEST_KEYS = new Set([
