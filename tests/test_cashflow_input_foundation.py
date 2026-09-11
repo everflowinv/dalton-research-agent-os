@@ -103,6 +103,9 @@ class CashFlowAuthorityRoundTripTests(unittest.TestCase):
                 "period_end", "2025-09-01"),
             lambda cell: cell.__setitem__("derived_from", []),
             lambda cell: cell.__setitem__("derived_from", ["not-an-operand", {}]),
+            lambda cell: cell["derived_from"][0].__setitem__("unknown", "field"),
+            lambda cell: cell["derived_from"][0].pop("unit"),
+            lambda cell: cell.__setitem__("source_forms", [{"form": "10-K"}]),
         ):
             tampered = deepcopy(draft)
             tampered_ocf = next(item for item in tampered["drivers"]

@@ -258,6 +258,9 @@ _CELL_FIELDS = frozenset({
     "concept", "period_start", "period_end", "value", "basis", "accessions",
 })
 _CELL_OPTIONAL_FIELDS = frozenset({"source_forms", "derived_from"})
+_DERIVED_OPERAND_FIELDS = frozenset({
+    "period_start", "period_end", "value", "unit", "accession", "form",
+})
 _ASSUMPTION_FIELDS = frozenset({
     "ref", "driver_ref", "period", "measure", "value", "unit", "kind",
     "because", "refs", "provenance", "superseded_by", "outside_band",
@@ -1971,11 +1974,18 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
             for entry in (item["accessions"] or [])]
         if "source_forms" in item:
             forms = item["source_forms"]
-            if (not isinstance(forms, list)
-                    or len(set(forms)) != len(forms)
-                    or any(form not in ("10-Q", "10-K") for form in forms)):
+            if not isinstance(forms, list):
                 raise ForecastModelValidationError(
                     f"{name}.history[{index}].source_forms must contain 10-Q/10-K")
+            normalized_forms = [
+                _one_of(form, ("10-Q", "10-K"),
+                        f"{name}.history[{index}].source_forms[{form_index}]")
+                for form_index, form in enumerate(forms)
+            ]
+            if len(set(normalized_forms)) != len(normalized_forms):
+                raise ForecastModelValidationError(
+                    f"{name}.history[{index}].source_forms must be unique")
+            item["source_forms"] = normalized_forms
         if "derived_from" in item:
             operands = item["derived_from"]
             if not isinstance(operands, list) or len(operands) != 2:
@@ -1983,22 +1993,21 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
                     f"{name}.history[{index}].derived_from must contain two operands")
             normalized_operands = []
             for operand_index, operand in enumerate(operands):
-                if not isinstance(operand, Mapping):
-                    raise ForecastModelValidationError(
-                        f"{name}.history[{index}].derived_from[{operand_index}] "
-                        "must be an object")
+                operand_name = (
+                    f"{name}.history[{index}].derived_from[{operand_index}]")
+                operand = _closed(operand, _DERIVED_OPERAND_FIELDS, operand_name)
                 normalized_operands.append({
                     "period_start": _iso_date(operand.get("period_start"),
-                                              f"{name}.derived_from.period_start"),
+                                              f"{operand_name}.period_start"),
                     "period_end": _iso_date(operand.get("period_end"),
-                                            f"{name}.derived_from.period_end"),
+                                            f"{operand_name}.period_end"),
                     "value": format(_decimal(operand.get("value"),
-                                             f"{name}.derived_from.value"), "f"),
-                    "unit": _text(operand.get("unit"), f"{name}.derived_from.unit"),
+                                             f"{operand_name}.value"), "f"),
+                    "unit": _text(operand.get("unit"), f"{operand_name}.unit"),
                     "accession": _text(operand.get("accession"),
-                                       f"{name}.derived_from.accession"),
+                                       f"{operand_name}.accession"),
                     "form": _one_of(operand.get("form"), ("10-Q", "10-K"),
-                                    f"{name}.derived_from.form"),
+                                    f"{operand_name}.form"),
                 })
             item["derived_from"] = normalized_operands
             derived = item["derived_from"]
