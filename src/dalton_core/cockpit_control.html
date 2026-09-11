@@ -466,7 +466,40 @@ async function downloadResearch(companyRef,format,button,status){
     status.textContent="文件已下载。请查看文件中的来源、预测缺口及审批状态。";
   }catch(e){status.textContent=`导出未完成：${e.message}`}finally{button.disabled=false}
 }
-async function loadResearchProducts(companyRef,box){try{const r=await getJson(`/v1/cockpit/research?company=${encodeURIComponent(companyRef)}`);const products=r.products||[];if(!products.length){box.className="empty";box.textContent="暂无已发布研究产物";return}box.className="";box.replaceChildren(...products.map(p=>{const d=node("article",null,"detail-box");d.append(node("h3",p.label||p.kind),node("div",p.status==="available"?[p.version_ref,fmtDate(p.created_at)].filter(Boolean).join(" · "):`${p.status==="invalid"?"记录无效":"尚未发布"} · ${p.reason||(p.gaps||[]).join("；")||"暂无可核验记录"}`,p.status==="available"?"hint":"gap"));(p.sections||[]).forEach(sec=>{const part=node("div",null,"memo-section");part.append(node("h5",sec.title));renderText(part,sec.body||"");(sec.gaps||[]).forEach(g=>part.append(node("div",g,"gap")));if((sec.sources||[]).length)part.append(node("div",`来源：${sec.sources.map(sourceLabel).join(" · ")}`,"hint"));d.append(part)});return d}))}catch(e){box.className="gap";box.textContent=`研究产物暂时读不到：${e.message}`}}
+function appendProductState(d,p){
+  if(p.status!=="available")return;
+  const binding={current:"当前研究任务版本",historical:"历史研究任务版本",unknown:"研究任务绑定未确认"};
+  d.append(node("div",binding[p.mission_binding]||binding.unknown,p.mission_binding==="current"?"hint":"gap"));
+  if(p.completeness){
+    const c=p.completeness,all=c.status==="all_units_drafted";
+    d.append(node("div",`${all?"所有单元已起草":"部分档案，仍在起草"}：${c.drafted_units}/${c.total_units} 单元。起草进度不代表资料已更新或研究质量已验收。`,all?"hint":"gap"));
+  }
+  if(p.kind==="investment_memo"){
+    const a=p.approval||{},labels={approved:"人工审批已通过",rejected:"人工审批未通过",pending_human_decision:"等待人工审批",historical:"历史版本，当前审批不适用"};
+    const detail=[a.decision_record_ref,a.actor_ref,a.decided_at?fmtDate(a.decided_at):null].filter(Boolean).join(" · ");
+    d.append(node("div",`${labels[a.status]||"人工审批状态未确认"}${detail?" · "+detail:""}`,a.status==="approved"?"hint":"gap"));
+    if(a.reason)d.append(node("div",a.reason,"gap"));
+  }
+}
+async function loadResearchProducts(companyRef,box){
+  try{
+    const r=await getJson(`/v1/cockpit/research?company=${encodeURIComponent(companyRef)}`),products=r.products||[];
+    if(!products.length){box.className="empty";box.textContent="暂无已发布研究产物";return}
+    box.className="";
+    box.replaceChildren(...products.map(p=>{
+      const d=node("article",null,"detail-box");
+      d.append(node("h3",p.label||p.kind),node("div",p.status==="available"?[p.version_ref,fmtDate(p.created_at)].filter(Boolean).join(" · "):`${p.status==="invalid"?"记录无效":"尚未发布"} · ${p.reason||(p.gaps||[]).join("；")||"暂无可核验记录"}`,p.status==="available"?"hint":"gap"));
+      appendProductState(d,p);
+      (p.sections||[]).forEach(sec=>{
+        const part=node("div",null,"memo-section");part.append(node("h5",sec.title));renderText(part,sec.body||"");
+        (sec.gaps||[]).forEach(g=>part.append(node("div",g,"gap")));
+        if((sec.sources||[]).length)part.append(node("div",`来源：${sec.sources.map(sourceLabel).join(" · ")}`,"hint"));
+        d.append(part);
+      });
+      return d;
+    }));
+  }catch(e){box.className="gap";box.textContent=`研究产物暂时读不到：${e.message}`}
+}
 
 // ---------- overview
 function renderOverview(o){

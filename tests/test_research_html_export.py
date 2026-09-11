@@ -350,6 +350,11 @@ class PublishedAuthorityExportTests(unittest.TestCase):
         )
         self.assertEqual(exported["version_ref"], published["id"])
         self.assertEqual(exported["content_hash"], published["content_hash"])
+        self.assertEqual(exported["completeness"]["status"], "partial")
+        self.assertEqual(exported["completeness"]["drafted_units"], 1)
+        self.assertEqual(exported["completeness"]["total_units"], 12)
+        self.assertIn("部分档案，仍在起草：1/12 单元", page)
+        self.assertIn("起草进度不代表资料已更新或研究质量已验收", page)
 
     def test_asset_hash_and_shape_fail_closed(self):
         asset = self.chain.root / "figure.png"

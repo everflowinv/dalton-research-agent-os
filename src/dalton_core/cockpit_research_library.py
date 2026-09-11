@@ -6,8 +6,10 @@ import json
 import sqlite3
 from typing import Any, Mapping
 
-from .company_dossier import CompanyDossierAuthority, CompanyDossierError, section_body
-from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+from .company_dossier import (CompanyDossierAuthority, CompanyDossierError,
+                              dossier_completeness, section_body)
+from .coverage_mission import (CoverageMissionAuthority, CoverageMissionError,
+                               validate_mission_stage_record)
 from .debate_map import DebateMapAuthority, DebateMapError
 from .industry_framework import (IndustryFrameworkAuthority, IndustryFrameworkError,
                                  deliverable_sections)
@@ -102,6 +104,8 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
                         mission_version_ref=bound,
                         mission_binding="current" if bound == mission["id"] else "historical",
                         sections=_sections(kind, record), gaps=list(record.get("gaps") or []))
+            if kind == "dossier":
+                item["completeness"] = dossier_completeness(record)
             if kind == "investment_memo":
                 item["approval"] = _memo_approval(
                     connection, mission, company_ref, record)
@@ -127,16 +131,26 @@ def _memo_approval(connection: sqlite3.Connection, mission: Mapping[str, Any],
     if stage.get("status") not in {"gate_passed", "gate_failed"} or not record_ref:
         return {"status": "pending_human_decision", "decision_record_ref": None}
     row = connection.execute(
-        "SELECT record_json,content_hash FROM coverage_mission_stage_records WHERE record_id=?",
+        "SELECT * FROM coverage_mission_stage_records WHERE record_id=?",
         (record_ref,),
     ).fetchone()
     if row is None:
         raise ValueError("memo stage decision record is missing")
-    decision = json.loads(row["record_json"])
-    if decision.get("content_hash") != row["content_hash"] or content_hash(
-            {key: value for key, value in decision.items() if key != "content_hash"}
-    ) != row["content_hash"]:
-        raise ValueError("memo stage decision integrity check failed")
+    decision = validate_mission_stage_record(json.loads(row["record_json"]))
+    columns = {
+        "id": "record_id", "mission_version_ref": "mission_version_ref",
+        "company_ref": "company_ref", "stage_ref": "stage_ref", "status": "status",
+        "actor_ref": "actor_ref", "created_at": "created_at", "content_hash": "content_hash",
+    }
+    if (any(decision[key] != row[column] for key, column in columns.items())
+            or decision["id"] != record_ref
+            or decision["mission_version_ref"] != mission["id"]
+            or decision["mission_version_hash"] != mission["content_hash"]
+            or decision["company_ref"] != company_ref
+            or decision["stage_ref"] != "investment_memo"
+            or decision["status"] != stage["status"]
+            or not decision["actor_ref"].startswith("human:")):
+        raise ValueError("memo stage decision authority binding drifted")
     if record["id"] not in (decision.get("evidence_refs") or []):
         return {"status": "pending_human_decision", "decision_record_ref": None,
                 "reason": "current stage decision belongs to another memo version"}

@@ -352,6 +352,16 @@ def render_research_html(
         status = product.get("status", "unknown")
         binding = product.get("mission_binding", "unknown")
         head = f'<section id="{anchor}"><h2>{_esc(product.get("label") or product.get("kind"))}</h2><p class="meta">status={_esc(status)} · mission_binding={_esc(binding)} · version={_esc(product.get("version_ref") or "unknown")} · hash={_esc(product.get("content_hash") or "unknown")}</p>'
+        completeness = product.get("completeness")
+        if completeness:
+            partial = completeness.get("status") == "partial"
+            label = "部分档案，仍在起草" if partial else "所有单元已起草"
+            head += (
+                f'<p class="{"unavailable" if partial else "meta"}">'
+                f'{label}：{_esc(completeness.get("drafted_units"))}/'
+                f'{_esc(completeness.get("total_units"))} 单元。'
+                '起草进度不代表资料已更新或研究质量已验收。</p>'
+            )
         approval = product.get("approval") or {"status": "unknown"}
         head += f'<p class="approval">Human approval: {_esc(approval.get("status", "unknown"))} · decision {_esc(approval.get("decision_record_ref") or "none")} · actor {_esc(approval.get("actor_ref") or "unknown")} · at {_esc(approval.get("decided_at") or "unknown")}</p>'
         if product.get("reason"):
@@ -499,6 +509,8 @@ def export_research_html(
                 "content_hash": p.get("content_hash"),
                 "mission_binding": p.get("mission_binding", "unknown"),
                 "approval": (p.get("approval") or {}).get("status", "unknown"),
+                **({"completeness": p["completeness"]}
+                   if p.get("completeness") is not None else {}),
             }
             for p in library["products"]
         ],
