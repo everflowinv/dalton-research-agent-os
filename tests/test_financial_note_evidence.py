@@ -135,6 +135,64 @@ class FinancialNoteExecutionCheckpointTests(unittest.TestCase):
         finally:
             case.doCleanups()
 
+    def test_embedded_formal_and_model_invocation_columns_are_exact(self):
+        case = promotion_fixtures.DocumentPromotionTests()
+        try:
+            fixture, executor, _admission, _works, _records, _outcome, *_ = (
+                case._completed())
+            promotion = json.loads(fixture.store.connection.execute(
+                "SELECT record_json FROM mission_document_research_promotions"
+            ).fetchone()[0])
+            receipt = fixture.store.connection.execute(
+                "SELECT candidate_evidence_ref,candidate_claim_ref "
+                "FROM reviewed_candidate_commits"
+            ).fetchone()
+            bundle = executor.staging.exact_candidate_bundle(
+                evidence_ref=receipt["candidate_evidence_ref"],
+                claim_ref=receipt["candidate_claim_ref"],
+                idempotency_key=("mission-document-research-candidate:"
+                                 + promotion["admission_ref"]),
+            )
+            connection = fixture.store.connection
+            formal_ref = promotion["execution_proof"]["stages"][0]["formal_ref"]
+            formal = connection.execute(
+                "SELECT result_record_id,result_envelope_json "
+                "FROM scheduler_formal_results WHERE result_record_id=?",
+                (formal_ref,),
+            ).fetchone()
+            embedded = json.loads(formal["result_envelope_json"])
+            original_json = formal["result_envelope_json"]
+            embedded["metadata"] = {**embedded.get("metadata", {}), "tampered": True}
+            connection.execute("DROP TRIGGER scheduler_result_no_update")
+            connection.execute(
+                "UPDATE scheduler_formal_results SET result_envelope_json=? "
+                "WHERE result_record_id=?",
+                (json.dumps(embedded, sort_keys=True, separators=(",", ":")),
+                 formal["result_record_id"]),
+            )
+            with self.assertRaisesRegex(FinancialNoteEvidenceError,
+                                        "execution stage drifted"):
+                _execution_checkpoint(
+                    connection, fixture.router.connection,
+                    promotion["execution_proof"], material=bundle["material"])
+            connection.execute(
+                "UPDATE scheduler_formal_results SET result_envelope_json=? "
+                "WHERE result_record_id=?", (original_json, formal["result_record_id"]))
+
+            invocation_ref = promotion["execution_proof"]["accounting_proofs"][0][
+                "model_invocation_ref"]
+            connection.execute("DROP TRIGGER model_invocations_no_update")
+            connection.execute(
+                "UPDATE model_invocations SET provider='foreign-provider' "
+                "WHERE invocation_id=?", (invocation_ref,))
+            with self.assertRaisesRegex(FinancialNoteEvidenceError,
+                                        "execution identity drifted"):
+                _execution_checkpoint(
+                    connection, fixture.router.connection,
+                    promotion["execution_proof"], material=bundle["material"])
+        finally:
+            case.doCleanups()
+
 
 class FinancialNoteResolverTests(unittest.TestCase):
     @staticmethod

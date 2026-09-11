@@ -178,6 +178,8 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
               "promotion execution authority is unavailable")
         try:
             work = WorkOrder.from_dict(json.loads(work_row["work_order_json"])).to_dict()
+            formal_envelope = ResultEnvelope.from_dict(
+                json.loads(formal_row["result_envelope_json"])).to_dict()
             envelope = ResultEnvelope.from_dict(
                 json.loads(result_row["result_envelope_json"])).to_dict()
         except Exception as exc:
@@ -188,13 +190,28 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
                 "work_order_id", "attempt_number", "result_envelope_id",
                 "result_envelope_hash", "terminal_state", "created_at")},
         })
+        receipt_hash = content_hash({
+            "result_envelope_id": result_row["result_envelope_id"],
+            "work_order_id": result_row["work_order_id"],
+            "attempt_number": result_row["attempt_number"],
+            "result_envelope_hash": result_row["result_envelope_hash"],
+            "outcome": result_row["outcome"],
+            "created_at": result_row["created_at"],
+        })
         _need(canonical_json(work) == work_row["work_order_json"]
               and content_hash(work) == work_row["work_order_hash"] == stage.get("work_hash")
               and formal_hash == formal_row["content_hash"] == stage.get("formal_hash")
               and formal_row["work_order_id"] == work["id"]
               and formal_row["terminal_state"] == "succeeded"
+              and canonical_json(formal_envelope) == formal_row["result_envelope_json"]
+              and formal_envelope == envelope
               and formal_row["result_envelope_id"] == envelope["id"]
               and formal_row["result_envelope_hash"] == content_hash(envelope)
+              and result_row["work_order_id"] == work["id"]
+              and result_row["attempt_number"] == formal_row["attempt_number"]
+              and result_row["outcome"] == "succeeded"
+              and result_row["content_hash"] == receipt_hash
+              and canonical_json(envelope) == result_row["result_envelope_json"]
               and result_row["result_envelope_hash"] == content_hash(envelope)
               and stage.get("result_hash") == content_hash(envelope)
               and envelope["work_order_ref"] == work["id"],
@@ -234,6 +251,19 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
             saved_invocation = json.loads(invocation_row["invocation_json"])
             alias = saved_invocation.pop("invocation_id", None)
             invocation = ModelInvocation.from_dict(saved_invocation).to_dict()
+            invocation_columns = {
+                "id": invocation_row["invocation_id"],
+                "profile_ref": invocation_row["profile_ref"],
+                "provider": invocation_row["provider"],
+                "model": invocation_row["model"],
+                "capability": invocation_row["capability"],
+                "runtime_ref": invocation_row["runtime_ref"],
+                "actor_ref": invocation_row["actor_ref"],
+                "environment_hash": invocation_row["environment_hash"],
+                "granularity": invocation_row["granularity"],
+                "work_order_ref": invocation_row["work_order_ref"],
+                "model_family": invocation_row["model_family"],
+            }
             _need(canonical_json(route) == route_row["decision_json"]
                   and route.get("content_hash") == route_row["decision_hash"]
                   and content_hash({key: item for key, item in route.items()
@@ -245,9 +275,14 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
                   and alias == invocation["id"] == accounting.get("model_invocation_ref")
                   and canonical_json({**invocation, "invocation_id": alias})
                       == invocation_row["invocation_json"]
+                  and all(invocation.get(key) == value
+                          for key, value in invocation_columns.items())
                   and content_hash(invocation) == accounting.get("model_invocation_hash")
                   and invocation["work_order_ref"] == work["id"]
                   and invocation["parent_ref"] == route["id"]
+                  and invocation["profile_ref"] == route.get(
+                      "selected_profile_version_ref")
+                  and invocation["completed_at"] is not None
                   and envelope["invocation_ref"] == invocation["id"],
                   "promotion model execution identity drifted")
         checked.append({"work_ref": work["id"], "work_hash": content_hash(work),
