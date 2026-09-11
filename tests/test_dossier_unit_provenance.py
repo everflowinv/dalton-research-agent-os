@@ -303,6 +303,7 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         self.assertIsNotNone(second["unit_provenance"]["business_model"])
         carried=authority.publish_verified(second,scheduler_db=self.scheduler_path,
                                            router_db=self.router_path)
+        self.assertEqual((carried["status"],carried["version"]),("fresh",2))
         self.assertEqual(carried["unit_provenance"][self.unit],
                          published["unit_provenance"][self.unit])
         self.assertEqual(carried["unit_provenance"][self.unit]["producer_input"]
