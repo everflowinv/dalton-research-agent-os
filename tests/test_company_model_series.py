@@ -70,6 +70,12 @@ class QuarterlySeriesTests(unittest.TestCase):
                          ["1400061000", "1414767000"])
         self.assertEqual(series["cumulative_used"], 1)
         self.assertEqual(series["derived_count"], 0)
+        self.assertEqual(
+            [(item["period_end"], item["period_kind"])
+             for item in series["durations"]],
+            [("2026-03-31", QUARTER), ("2026-06-30", CUMULATIVE),
+             ("2026-06-30", QUARTER)],
+        )
 
     def test_a_quarter_nobody_reported_is_derived_and_says_so(self):
         # A filer that reports only cumulative figures: the third quarter is
@@ -109,6 +115,28 @@ class QuarterlySeriesTests(unittest.TestCase):
         self.assertEqual(series["quarters"], [])
         self.assertEqual(series["derived_count"], 0)
 
+    def test_cumulative_figures_with_different_units_are_not_subtracted(self):
+        series = quarterly_series([
+            _row("2026-01-01", "2026-03-31", "100", unit="USD"),
+            _row("2026-01-01", "2026-06-30", "250", unit="EUR"),
+        ])
+        self.assertEqual([item["period_end"] for item in series["quarters"]],
+                         ["2026-03-31"])
+        self.assertEqual(series["derived_count"], 0)
+
+    def test_direct_annual_duration_stays_separate_from_same_end_quarter(self):
+        series = quarterly_series([
+            _row("2025-01-01", "2025-12-31", "400"),
+            _row("2025-10-01", "2025-12-31", "110"),
+        ])
+        self.assertEqual([item["value"] for item in series["quarters"]], ["110"])
+        self.assertEqual(
+            [(item["period_start"], item["period_kind"], item["value"])
+             for item in series["durations"]],
+            [("2025-01-01", CUMULATIVE, "400"),
+             ("2025-10-01", QUARTER, "110")],
+        )
+
     def test_the_most_recently_filed_statement_of_a_quarter_wins(self):
         series = quarterly_series([
             _row("2026-01-01", "2026-03-31", "100", filed="2026-04-30",
@@ -119,6 +147,20 @@ class QuarterlySeriesTests(unittest.TestCase):
         self.assertEqual(series["quarters"][0]["value"], "104")
         self.assertEqual(series["quarters"][0]["source_accessions"],
                          ["0000000000-26-000002"])
+
+    def test_conflicting_values_in_one_filing_are_ambiguous_not_parse_order(self):
+        series = quarterly_series([
+            _row("2026-04-01", "2026-06-30", "953300000",
+                 accession="0000051143-26-000078"),
+            _row("2026-04-01", "2026-06-30", "953263534",
+                 accession="0000051143-26-000078"),
+        ])
+        self.assertEqual(series["quarters"], [])
+        self.assertEqual(series["durations"], [])
+        self.assertEqual(series["ambiguous_periods"][0]["values"], [
+            {"value": "953263534", "unit": "usd"},
+            {"value": "953300000", "unit": "usd"},
+        ])
 
     def test_a_breakdown_is_never_mistaken_for_the_total(self):
         # Live: Accenture reports Consulting and Managed Services against the

@@ -144,6 +144,8 @@ def _statement_structure_concepts(spec: Mapping[str, Any]) -> set[str]:
             if not isinstance(tie, str) or not tie:
                 raise ModelInputError("statement structure tie-out concept is invalid")
             concepts.add(tie)
+    if not concepts:
+        raise ModelInputError("financial statement structure has no filed authority")
     return concepts
 
 
@@ -331,7 +333,9 @@ def build_model_inputs(
     # attribution, share and filed subtotal concepts even when none is a
     # revenue driver or expense row. Keep them as source authority lines; do
     # not manufacture economic model rows for them.
-    for concept in _statement_structure_concepts(spec):
+    statement_structure_bound = spec.get("financial_statement_structure") is not None
+    statement_structure_concepts = _statement_structure_concepts(spec)
+    for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
 
     filed: dict[str, dict[str, Any]] = {}
@@ -379,6 +383,8 @@ def build_model_inputs(
             "cells": {},
             "gaps": [],
         }
+        if statement_structure_bound:
+            line.update({"duration_facts": [], "ambiguous_periods": []})
         series = entry.get("series")
         if series:
             # A line is one shape or the other, never both: a balance is an
@@ -403,6 +409,9 @@ def build_model_inputs(
             }
             line["gaps"] = series_gaps(series) if quarters else []
             line["derived_count"] = series["derived_count"]
+            if statement_structure_bound:
+                line["duration_facts"] = list(series.get("durations") or [])
+                line["ambiguous_periods"] = list(series.get("ambiguous_periods") or [])
         filed_lines.append(line)
 
     for row in rows:
@@ -431,7 +440,7 @@ def build_model_inputs(
         row["statement"] = entry["statement"]
 
     result = {
-        "schema_version": "0.2",
+        "schema_version": "0.3" if statement_structure_bound else "0.2",
         "company_ref": company_ref,
         "spec_ref": spec.get("spec_id"),
         "state_hash": spec.get("state_hash"),

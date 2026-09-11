@@ -73,8 +73,34 @@ def _model_spec(*, historical_quarters):
                 "statement": "income", "unit": "usd", "period_kind": "duration",
                 "annual_semantics": "sum_quarters",
                 "forecast_method": "quarterly_growth", "forecast_base_ref": None,
+            }, {
+                "ref": "pretax", "role": "pretax_income", "label": "Pretax",
+                "kind": "filed", "concept": "us-gaap:IncomeBeforeTax",
+                "statement": "income", "unit": "usd", "period_kind": "duration",
+                "annual_semantics": "sum_quarters", "forecast_method": "unavailable",
+                "forecast_base_ref": None,
+            }, {
+                "ref": "tax", "role": "income_tax_expense", "label": "Tax",
+                "kind": "filed", "concept": "us-gaap:IncomeTaxExpenseBenefit",
+                "statement": "income", "unit": "usd", "period_kind": "duration",
+                "annual_semantics": "sum_quarters", "forecast_method": "unavailable",
+                "forecast_base_ref": None,
+            }, {
+                "ref": "net", "role": "net_income", "label": "Net income",
+                "kind": "derived", "concept": None, "statement": "income",
+                "unit": "usd", "period_kind": "duration",
+                "annual_semantics": "sum_quarters", "forecast_method": "formula",
+                "forecast_base_ref": None,
             }],
-            "formulas": [],
+            "formulas": [{
+                "output_ref": "net", "operator": "sum",
+                "terms": [
+                    {"line_ref": "pretax", "coefficient": "1"},
+                    {"line_ref": "tax", "coefficient": "-1"},
+                ],
+                "tie_out_concept": "us-gaap:NetIncomeLoss",
+                "evidence_refs": [ACCESSION],
+            }],
         },
     }
 
@@ -91,6 +117,29 @@ def _observation(accession=ACCESSION, *, form="10-Q", report_date="2026-06-30"):
                 "is_breakdown": False, "dimension_axis": None,
                 "dimension_member": None, "period_start": "2026-04-01",
                 "period_end": "2026-06-30", "value": "17700000000",
+                "unit": "USD", "balance": "credit",
+            }, {
+                "statement": "income", "concept": "us-gaap:IncomeBeforeTax",
+                "label": "Income before tax", "level": 0,
+                "parent_concept": "us-gaap:NetIncomeLoss",
+                "is_breakdown": False, "dimension_axis": None,
+                "dimension_member": None, "period_start": "2026-04-01",
+                "period_end": "2026-06-30", "value": "100",
+                "unit": "USD", "balance": "credit",
+            }, {
+                "statement": "income", "concept": "us-gaap:IncomeTaxExpenseBenefit",
+                "label": "Income tax", "level": 1,
+                "parent_concept": "us-gaap:NetIncomeLoss",
+                "is_breakdown": False, "dimension_axis": None,
+                "dimension_member": None, "period_start": "2026-04-01",
+                "period_end": "2026-06-30", "value": "20",
+                "unit": "USD", "balance": "debit",
+            }, {
+                "statement": "income", "concept": "us-gaap:NetIncomeLoss",
+                "label": "Net income", "level": 0, "parent_concept": None,
+                "is_breakdown": False, "dimension_axis": None,
+                "dimension_member": None, "period_start": "2026-04-01",
+                "period_end": "2026-06-30", "value": "80",
                 "unit": "USD", "balance": "credit",
             }],
         }],
@@ -177,7 +226,7 @@ class StatementLaneTests(unittest.TestCase):
         self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
         settled = self.lane.dispatch_once()
         self.assertEqual(settled["settled"][0]["outcome"], "succeeded")
-        self.assertEqual(settled["settled"][0]["line_count"], 1)
+        self.assertEqual(settled["settled"][0]["line_count"], 4)
         held = self.missions.statement_filings(ACN)
         self.assertEqual([item["accession"] for item in held], [ACCESSION])
         lines = self.missions.statement_lines(held[0]["ingest_id"])
@@ -344,7 +393,8 @@ class StatementLaneTests(unittest.TestCase):
         spec = spec_from_response(
             {"company_ref": ACN, "state_hash": "a" * 64,
              "filings": [{"accession": ACCESSION}],
-             "concepts": ["us-gaap:Revenues"],
+             "concepts": ["us-gaap:Revenues", "us-gaap:IncomeBeforeTax",
+                          "us-gaap:IncomeTaxExpenseBenefit", "us-gaap:NetIncomeLoss"],
              "statements": {"income": _observation()["filings"][0]["lines"]}},
             _model_spec(historical_quarters=20), decided_by="automation:x")
         self.missions.record_company_model_spec(
@@ -358,7 +408,8 @@ class StatementLaneTests(unittest.TestCase):
         spec = spec_from_response(
             {"company_ref": ACN, "state_hash": "a" * 64,
              "filings": [{"accession": ACCESSION}],
-             "concepts": ["us-gaap:Revenues"],
+             "concepts": ["us-gaap:Revenues", "us-gaap:IncomeBeforeTax",
+                          "us-gaap:IncomeTaxExpenseBenefit", "us-gaap:NetIncomeLoss"],
              "statements": {"income": _observation()["filings"][0]["lines"]}},
             _model_spec(historical_quarters=1), decided_by="automation:x")
         self.missions.record_company_model_spec(

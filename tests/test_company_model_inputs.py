@@ -96,6 +96,7 @@ class ModelInputTests(unittest.TestCase):
 
     def test_a_row_with_its_own_filed_line_carries_the_history(self):
         table = build_model_inputs(self.ledger(), _spec())
+        self.assertEqual(table["schema_version"], "0.2")
         self.assertEqual(table["periods"], ["2026-02-28", "2026-05-31"])
         row = next(item for item in table["rows"] if item["ref"] == "service-mix")
         self.assertEqual(row["status"], FILED)
@@ -107,6 +108,7 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(line["cells"]["2026-05-31"]["source_accessions"],
                          ["0001467373-26-000032"])
         self.assertFalse(line["is_split"])
+        self.assertNotIn("duration_facts", line)
 
     def test_built_inputs_materialize_the_persisted_statement_definition(self):
         spec = {
@@ -139,6 +141,27 @@ class ModelInputTests(unittest.TestCase):
                         "period_kind": "duration", "annual_semantics": "sum_quarters",
                         "forecast_method": "formula", "forecast_base_ref": None,
                     },
+                    {
+                        "ref": "pretax", "role": "pretax_income", "label": "Pretax",
+                        "kind": "derived", "concept": None, "statement": "income",
+                        "unit": "usd", "period_kind": "duration",
+                        "annual_semantics": "sum_quarters", "forecast_method": "formula",
+                        "forecast_base_ref": None,
+                    },
+                    {
+                        "ref": "tax", "role": "income_tax_expense", "label": "Tax",
+                        "kind": "filed", "concept": "us-gaap:IncomeTaxExpenseBenefit",
+                        "statement": "income", "unit": "usd",
+                        "period_kind": "duration", "annual_semantics": "sum_quarters",
+                        "forecast_method": "unavailable", "forecast_base_ref": None,
+                    },
+                    {
+                        "ref": "net", "role": "net_income", "label": "Net income",
+                        "kind": "derived", "concept": None, "statement": "income",
+                        "unit": "usd", "period_kind": "duration",
+                        "annual_semantics": "sum_quarters", "forecast_method": "formula",
+                        "forecast_base_ref": None,
+                    },
                 ],
                 "formulas": [{
                     "output_ref": "operating", "operator": "sum",
@@ -148,6 +171,19 @@ class ModelInputTests(unittest.TestCase):
                     ],
                     "tie_out_concept": "us-gaap:OperatingIncomeLoss",
                     "evidence_refs": ["0001467373-26-000032"],
+                }, {
+                    "output_ref": "pretax", "operator": "sum",
+                    "terms": [{"line_ref": "operating", "coefficient": "1"}],
+                    "tie_out_concept": "us-gaap:IncomeBeforeTax",
+                    "evidence_refs": ["0001467373-26-000032"],
+                }, {
+                    "output_ref": "net", "operator": "sum",
+                    "terms": [
+                        {"line_ref": "pretax", "coefficient": "1"},
+                        {"line_ref": "tax", "coefficient": "-1"},
+                    ],
+                    "tie_out_concept": "us-gaap:NetIncomeLoss",
+                    "evidence_refs": ["0001467373-26-000032"],
                 }],
             },
         }
@@ -155,13 +191,27 @@ class ModelInputTests(unittest.TestCase):
         ledger = FakeMissions(self.ledger().lines + [
             _line("us-gaap:OperatingIncomeLoss",
                   "2026-03-01", "2026-05-31", "6718144000"),
+            _line("us-gaap:IncomeBeforeTax",
+                  "2026-03-01", "2026-05-31", "6718144000"),
+            _line("us-gaap:IncomeTaxExpenseBenefit",
+                  "2026-03-01", "2026-05-31", "1000000000"),
+            _line("us-gaap:NetIncomeLoss",
+                  "2026-03-01", "2026-05-31", "5718144000"),
         ])
         table = build_model_inputs(ledger, spec)
+        self.assertEqual(table["schema_version"], "0.3")
         # This concept is used only as a formula tie-out. It must still be in
         # the exact current financial authority, without becoming a model row.
         self.assertIn("us-gaap:OperatingIncomeLoss",
                       {line["concept"] for line in table["filed_lines"]})
         self.assertNotIn("operating", {row["ref"] for row in table["rows"]})
+        revenue = next(line for line in table["filed_lines"]
+                       if line["concept"] == "us-gaap:Revenues")
+        self.assertEqual(
+            [(item["period_end"], item["period_kind"])
+             for item in revenue["duration_facts"]],
+            [("2026-02-28", "quarter"), ("2026-05-31", "quarter")],
+        )
         structure, replay = materialize_financial_statement_structure(spec, table)
         binding = forecast_structure_binding(structure, replay, table)
         self.assertEqual(binding["financial_input_hash"],
@@ -169,7 +219,8 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(
             {item["line_ref"]: item["status"] for item in replay["forecast_methods"]},
             {"delivery": "validated", "operating": "validated",
-             "revenue": "validated"},
+             "net": "validated", "pretax": "validated",
+             "revenue": "validated", "tax": "unavailable"},
         )
 
     def test_cash_input_refuses_ambiguous_frozen_operating_cash_concepts(self):

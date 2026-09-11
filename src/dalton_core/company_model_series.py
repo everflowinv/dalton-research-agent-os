@@ -98,7 +98,9 @@ def period_kind(period_start: Any, period_end: Any) -> str:
     return UNKNOWN
 
 
-def _latest_by_period(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def _latest_by_period(
+    rows: Iterable[Mapping[str, Any]],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
     """One figure per period: the most recently filed statement of it.
 
     A quarter appears in several filings, and restatements mean the figures are
@@ -107,7 +109,7 @@ def _latest_by_period(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str]
     the company currently says and one that reflects parse order.
     """
 
-    best: dict[tuple[str, str], dict[str, Any]] = {}
+    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
         if row.get("is_breakdown") or row.get("dimension_axis"):
             continue
@@ -116,18 +118,48 @@ def _latest_by_period(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str]
         if value is None or not end:
             continue
         key = (str(row.get("period_start") or ""), str(end))
-        held = best.get(key)
-        if held is None or str(row.get("filed") or "") >= str(held.get("filed") or ""):
-            best[key] = {
-                "period_start": row.get("period_start"),
-                "period_end": end,
-                "value": value,
-                "filed": row.get("filed"),
-                "accession": row.get("accession"),
-                "form": row.get("filing_form"),
-                "unit": row.get("unit"),
-            }
-    return best
+        candidates.setdefault(key, []).append({
+            "period_start": row.get("period_start"),
+            "period_end": end,
+            "value": value,
+            "filed": row.get("filed"),
+            "accession": row.get("accession"),
+            "form": row.get("filing_form"),
+            "unit": row.get("unit"),
+        })
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    ambiguous: list[dict[str, Any]] = []
+    for key, items in candidates.items():
+        latest_authority = max(
+            (str(item.get("filed") or ""), str(item.get("accession") or ""))
+            for item in items
+        )
+        latest = [
+            item for item in items
+            if (str(item.get("filed") or ""), str(item.get("accession") or ""))
+            == latest_authority
+        ]
+        values = {
+            (item["value"], str(item.get("unit") or "").casefold())
+            for item in latest
+        }
+        if len(values) != 1:
+            ambiguous.append({
+                "period_start": key[0] or None, "period_end": key[1],
+                "filed": latest_authority[0] or None,
+                "accession": latest_authority[1] or None,
+                "values": [
+                    {"value": format(value, "f"), "unit": unit}
+                    for value, unit in sorted(values, key=lambda item: (item[1], item[0]))
+                ],
+                "reason": "the same filing carries conflicting values for this period",
+            })
+            continue
+        best[key] = latest[-1]
+    return best, sorted(
+        ambiguous,
+        key=lambda item: (str(item["period_end"]), str(item["period_start"] or "")),
+    )
 
 
 def _derive_quarters(
@@ -154,7 +186,9 @@ def _derive_quarters(
         ordered = sorted(items, key=lambda item: str(item["period_end"]))
         previous: Mapping[str, Any] | None = None
         for item in ordered:
-            if previous is not None:
+            if previous is not None and str(previous.get("unit") or "").casefold() == str(
+                item.get("unit") or ""
+            ).casefold():
                 previous_end = _date(previous["period_end"])
                 quarter_start = (previous_end.toordinal() + 1
                                  if previous_end is not None else None)
@@ -205,7 +239,7 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """
 
     rows = list(rows)
-    best = _latest_by_period(rows)
+    best, ambiguous = _latest_by_period(rows)
     quarters: list[dict[str, Any]] = []
     durations: list[dict[str, Any]] = []
     instants: list[dict[str, Any]] = []
@@ -258,6 +292,20 @@ def quarterly_series(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             ],
             key=lambda item: str(item["period_end"]),
         ),
+        "durations": sorted(
+            [
+                {"period_start": item["period_start"],
+                 "period_end": item["period_end"],
+                 "period_kind": period_kind(item["period_start"], item["period_end"]),
+                 "value": format(item["value"], "f"), "unit": item.get("unit"),
+                 "source_accessions": sorted(
+                     {str(item.get("accession") or "")} - {""}),
+                 "source_forms": sorted({str(item.get("form") or "")} - {""})}
+                for item in durations
+            ],
+            key=lambda item: (str(item["period_end"]), str(item["period_start"])),
+        ),
+        "ambiguous_periods": ambiguous,
         "cumulative_used": cumulative_count,
         "derived_count": len(derived),
         "unclassified_periods": unknown,

@@ -281,6 +281,38 @@ class FinancialStatementStructureTests(unittest.TestCase):
                                     "must tie to an exact filed concept"):
             validate_financial_statement_structure(candidate, company_spec(), inputs)
 
+    def test_structure_cannot_claim_readiness_without_a_tied_final_earnings_bridge(self):
+        inputs = financial_inputs()
+        candidate = proposal(inputs)
+        candidate["lines"] = [
+            line for line in candidate["lines"] if line["kind"] == "filed"
+        ]
+        candidate["formulas"] = []
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "at least one formula"):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
+
+        candidate = proposal(inputs)
+        net = next(line for line in candidate["lines"] if line["ref"] == "net")
+        net.update({
+            "kind": "filed", "concept": "net",
+            "forecast_method": "quarterly_growth",
+        })
+        candidate["formulas"] = [
+            formula for formula in candidate["formulas"]
+            if formula["output_ref"] != "net"
+        ]
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "filed subtotal.*unavailable"):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
+
+        candidate = proposal(inputs)
+        next(formula for formula in candidate["formulas"]
+             if formula["output_ref"] == "net")["tie_out_concept"] = None
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "every derived formula must tie"):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
+
     def test_historical_mismatch_refuses_the_structure(self):
         inputs = financial_inputs()
         target = next(line for line in inputs["filed_lines"] if line["concept"] == "pretax")

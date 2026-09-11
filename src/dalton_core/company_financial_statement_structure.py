@@ -118,7 +118,7 @@ STRUCTURE_PROPOSAL_SCHEMA = _schema_object(
         "schema_version": {"const": SCHEMA_VERSION},
         "lines": {"type": "array", "minItems": 1,
                   "maxItems": MAX_STRUCTURE_LINES, "items": _STRUCTURE_LINE_SCHEMA},
-        "formulas": {"type": "array", "minItems": 0,
+        "formulas": {"type": "array", "minItems": 1,
                      "maxItems": MAX_STRUCTURE_FORMULAS,
                      "items": {"oneOf": [_SUM_FORMULA_SCHEMA,
                                           _DIVIDE_FORMULA_SCHEMA]}},
@@ -160,6 +160,15 @@ _COMPANY_SUBTOTAL_ROLE = "company_presented_subtotal"
 _COMPANY_SUM_INPUT_ROLES = frozenset(ROLES) - {
     "diluted_weighted_average_shares", "diluted_eps",
 }
+_FORMULA_TOTAL_ROLES = frozenset({
+    "gross_profit", "operating_income", "nonoperating_income_expense",
+    "pretax_income", "income_from_continuing_operations", "net_income",
+    "parent_net_income", "diluted_eps_numerator", "diluted_eps",
+    _COMPANY_SUBTOTAL_ROLE,
+})
+_FINAL_EARNINGS_ROLES = frozenset({
+    "income_from_continuing_operations", "net_income", "parent_net_income",
+})
 
 
 class FinancialStatementStructureError(ValueError):
@@ -200,7 +209,11 @@ def financial_input_authority(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(lines, list):
         raise FinancialStatementStructureError("financial inputs filed_lines must be a list")
     projection = {
-        "schema_version": "financial-input-authority-0.1",
+        "schema_version": (
+            "financial-input-authority-0.2"
+            if value.get("schema_version") == "0.3"
+            else "financial-input-authority-0.1"
+        ),
         "company_ref": company_ref,
         "periods": list(value.get("periods") or []),
         "filed_lines": lines,
@@ -390,6 +403,14 @@ def _normalize_line(
         if units != {line["unit"]}:
             raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
         line["concept"] = concept
+        if (
+            line["role"] in _FORMULA_TOTAL_ROLES
+            and line["forecast_method"] != "unavailable"
+        ):
+            raise FinancialStatementStructureError(
+                "a filed subtotal may only be actual/tie authority or unavailable; "
+                "forecasted subtotals require an explicit formula"
+            )
     if line["forecast_method"] == "share_of_line":
         line["forecast_base_ref"] = _text(
             line["forecast_base_ref"], f"lines[{index}].forecast_base_ref"
@@ -474,6 +495,10 @@ def _normalize_formula(
             raise FinancialStatementStructureError("formula tie-out unit differs")
         if target.get("period_basis") != lines[output]["period_kind"]:
             raise FinancialStatementStructureError("formula tie-out period kind differs")
+    else:
+        raise FinancialStatementStructureError(
+            "every derived formula must tie to an exact filed concept"
+        )
     result: dict[str, Any] = {
         "output_ref": output, "operator": operator,
         "tie_out_concept": tie, "evidence_refs": list(refs),
@@ -514,10 +539,6 @@ def _normalize_formula(
         ):
             raise FinancialStatementStructureError(
                 "sum formula roles do not match its company statement output"
-            )
-        if output_role == _COMPANY_SUBTOTAL_ROLE and tie is None:
-            raise FinancialStatementStructureError(
-                "a company-presented subtotal must tie to an exact filed concept"
             )
         result["terms"] = normalized
     elif operator == "divide":
@@ -697,7 +718,7 @@ def validate_structure_proposal(
     if (
         not isinstance(raw_lines, list) or not 1 <= len(raw_lines) <= MAX_STRUCTURE_LINES
         or not isinstance(raw_formulas, list)
-        or not 0 <= len(raw_formulas) <= MAX_STRUCTURE_FORMULAS
+        or not 1 <= len(raw_formulas) <= MAX_STRUCTURE_FORMULAS
     ):
         raise FinancialStatementStructureError("structure proposal exceeds its bounded shape")
     filed, accessions = _presentation_filed(state)
@@ -722,6 +743,13 @@ def validate_structure_proposal(
     if sorted(outputs) != derived or len(outputs) != len(set(outputs)):
         raise FinancialStatementStructureError(
             "every derived line must have exactly one formula"
+        )
+    if not any(
+        line["kind"] == "derived" and line["role"] in _FINAL_EARNINGS_ROLES
+        for line in lines
+    ):
+        raise FinancialStatementStructureError(
+            "structure needs a formula-derived filed final earnings result"
         )
     _validate_formula_evidence(formulas, by_ref, filed, set())
     return {"schema_version": SCHEMA_VERSION, "lines": lines, "formulas": formulas}
@@ -912,8 +940,10 @@ def validate_financial_statement_structure(
     note_refs = {item["ref"] for item in notes}
     allowed_evidence = _statement_refs(financial_inputs) | note_refs
     raw_formulas = body["formulas"]
-    if not isinstance(raw_formulas, list):
-        raise FinancialStatementStructureError("formulas must be a list")
+    if not isinstance(raw_formulas, list) or not raw_formulas:
+        raise FinancialStatementStructureError(
+            "structure needs at least one formula and a tied final earnings result"
+        )
     formulas = [
         _normalize_formula(raw, index, by_ref, filed, allowed_evidence)
         for index, raw in enumerate(raw_formulas)
@@ -923,6 +953,13 @@ def validate_financial_statement_structure(
     if sorted(outputs) != derived or len(outputs) != len(set(outputs)):
         raise FinancialStatementStructureError(
             "every derived line must have exactly one formula"
+        )
+    if not any(
+        line["kind"] == "derived" and line["role"] in _FINAL_EARNINGS_ROLES
+        for line in lines
+    ):
+        raise FinancialStatementStructureError(
+            "structure needs a formula-derived filed final earnings result"
         )
     _validate_formula_evidence(formulas, by_ref, filed, note_refs)
     normalized = {

@@ -25,6 +25,17 @@ same persisted definition to each current financial-input version and reruns
 all historical checks, which lets a new filing actualize a model without
 pretending the old input hash is still current.
 
+The 0.3 financial-input table loads every filed concept and formula tie-out
+named by that persisted definition, including concepts that are neither an
+economic driver nor an expense row. It also keeps authoritative duration facts
+separate from quarterly cells, so a direct annual weighted-share disclosure is
+not discarded or confused with a quarter ending on the same date. Conflicting
+values for one concept, period, and filing are retained as an ambiguity and
+excluded from arithmetic; parse order does not choose between a rounded and an
+exact-looking fact when the source ledger has no precision field to authorize
+that choice. Legacy specifications still produce their unchanged 0.2 input
+shape.
+
 A structure proposal may use only concepts in those inputs. It describes filed
 and derived lines and a directed acyclic graph of `sum` and EPS `divide`
 formulas. Every derived line needs one formula, each formula cites held operand
@@ -33,6 +44,14 @@ resolver, and any tie-out names an exact filed concept with the same statement,
 period kind, and unit. Revenue must be the exact anchor selected by the current
 company spec; expense concepts selected by that spec cannot disappear from the
 extension.
+
+The proposal cannot call a collection of independently forecast filed totals a
+complete statement. At least one company-presented final earnings result must
+be formula-derived and tied to its exact filed result. Filed gross profit,
+operating income, pretax income, continuing income, net income, attribution
+totals, and EPS remain historical/tie authorities and must be marked
+unavailable for direct forecasting. The formula graph, rather than an
+independent growth rate on each subtotal, carries the selected company bridge.
 
 The closed common roles do not impose one universal income-statement topology.
 An exact filed line with a company-specific position uses
@@ -57,6 +76,17 @@ convertible adjustments only when this company disclosed evidence for them;
 parent-attributable net income is not treated as a universal substitute.
 Quarterly EPS and quarterly share counts are not summed or averaged into annual
 EPS.
+
+A read-only five-company production-state audit found 29--59 consolidated
+income presentation rows per company, below the 200-row prompt limit. CTSH's
+filed presentation includes a separate after-tax equity-method line between
+pretax income and net income, confirming the need for company-presented bridge
+components. IBM's current ledger contains rounded and exact-looking diluted and
+basic share values for the same filing and period; those facts are now retained
+as ambiguous and excluded from formula arithmetic. The current statement input
+does not contain note text or an explicit diluted-EPS numerator authority for
+any of the five companies, so a new structure must leave diluted EPS
+unavailable unless a later held note/formula source supplies that authority.
 
 The forecast integration must consume
 `forecast_structure_binding(structure, replay, financial_inputs)`. That call
