@@ -431,6 +431,7 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                verifier_provider_schema_hash: str | None = None,
                mission_version_hash: str | None = None,
                request_identity: Mapping[str, Any] | None = None,
+               model_spec_request_identity: Mapping[str, Any] | None = None,
                structured_output_repair: Mapping[str, Any] | None = None,
                provider_retry: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
@@ -458,6 +459,10 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         identity["producer_route_decision_refs"] = list(producer_route_decision_refs)
     if request_identity is not None:
         identity["request_identity_hash"] = content_hash(request_identity)
+    if model_spec_request_identity is not None:
+        identity["model_spec_request_identity_hash"] = content_hash(
+            model_spec_request_identity
+        )
     if structured_output_repair is not None:
         identity["structured_output_repair_hash"] = content_hash(
             structured_output_repair
@@ -490,6 +495,9 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "producer_route_decision_refs": list(producer_route_decision_refs)}),
                                  **({} if request_identity is None else {
                                      "request_identity": dict(request_identity)}),
+                                 **({} if model_spec_request_identity is None else {
+                                     "model_spec_request_identity": dict(
+                                         model_spec_request_identity)}),
                                  **({} if structured_output_repair is None else {
                                      "structured_output_repair": dict(
                                          structured_output_repair)}),
@@ -504,10 +512,26 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
 
 
 def _validate_structured_output_repair_authority(
-    scheduler: Scheduler, binding: Mapping[str, Any]
+    scheduler: Scheduler, binding: Mapping[str, Any], child_work: WorkOrder,
+    config: Mapping[str, Any],
 ) -> None:
     """Prove both named parent results before admitting a repair Work."""
 
+    child_metadata = child_work.metadata
+    expected_mission = (
+        child_metadata.get("mission_version_ref"),
+        child_metadata.get("mission_version_hash"),
+    )
+    if (
+        child_metadata.get("purpose") != "model_spec"
+        or child_metadata.get("control_plane") != "cockpit"
+        or child_work.input_refs
+        or expected_mission[0] is None
+        or expected_mission[1] is None
+        or child_metadata.get("structured_output_repair") != binding
+    ):
+        raise CockpitModelError("structured output repair child binding is invalid")
+    proved: dict[str, tuple[dict[str, Any], str]] = {}
     for name in ("root_original", "repair_parent"):
         proof = binding.get(name)
         if not isinstance(proof, Mapping):
@@ -543,6 +567,9 @@ def _validate_structured_output_repair_authority(
         ).fetchone()
         if receipt is None:
             raise CockpitModelError("structured output repair result authority is invalid")
+        parent_work = work["work_order"]
+        parent_metadata = parent_work.get("metadata") or {}
+        text = envelope.get("outputs", {}).get("text")
         if (
             proof.get("work_order_hash") != work.get("work_order_hash")
             or formal_row["work_order_id"] != work_ref
@@ -559,8 +586,102 @@ def _validate_structured_output_repair_authority(
             or proof.get("invocation_ref") != envelope.get("invocation_ref")
             or proof.get("route_decision_ref")
                != (envelope.get("metadata") or {}).get("route_decision_ref")
+            or parent_metadata.get("purpose") != "model_spec"
+            or parent_metadata.get("control_plane") != "cockpit"
+            or parent_work.get("input_refs") != []
+            or (
+                parent_metadata.get("mission_version_ref"),
+                parent_metadata.get("mission_version_hash"),
+            ) != expected_mission
+            or not isinstance(text, str)
         ):
             raise CockpitModelError("structured output repair parent authority drifted")
+        proved[name] = (parent_work, text)
+
+    root_work, root_text = proved["root_original"]
+    parent_work, parent_text = proved["repair_parent"]
+    from .company_model_cli import (
+        _repair_prompt,
+        validate_model_spec_request_identity,
+    )
+    from .company_model_spec import CompanyModelSpecError
+    try:
+        root_identity = validate_model_spec_request_identity(
+            root_work["metadata"]["model_spec_request_identity"]
+        )
+    except (KeyError, TypeError, ValueError, CockpitModelError) as exc:
+        raise CockpitModelError(
+            "structured output repair root request identity is invalid"
+        ) from exc
+    if (
+        root_identity["state_hash"] != binding.get("state_hash")
+        or root_identity["task_hash"] != binding.get("task_hash")
+        or root_identity["structured_output_repair"] != binding.get("repair_config")
+        or hashlib.sha256(root_text.encode("utf-8")).hexdigest()
+           != binding.get("original_text_sha256")
+        or hashlib.sha256(parent_text.encode("utf-8")).hexdigest()
+           != binding.get("parent_text_sha256")
+    ):
+        raise CockpitModelError("structured output repair semantic authority drifted")
+    _validate_model_spec_request_namespace(
+        root_work["metadata"].get("request_id", ""),
+        content_hash(root_identity)[:32], config,
+    )
+    number = binding["repair_number"]
+    root_proof = binding["root_original"]
+    parent_proof = binding["repair_parent"]
+    if number == 1:
+        if parent_proof != root_proof:
+            raise CockpitModelError("first structured output repair parent is not its root")
+    else:
+        parent_binding = (parent_work.get("metadata") or {}).get(
+            "structured_output_repair"
+        )
+        if (
+            not isinstance(parent_binding, Mapping)
+            or parent_binding.get("root_original") != root_proof
+            or parent_binding.get("state_hash") != binding.get("state_hash")
+            or parent_binding.get("task_hash") != binding.get("task_hash")
+            or parent_binding.get("repair_config") != binding.get("repair_config")
+            or parent_binding.get("repair_number") != number - 1
+        ):
+            raise CockpitModelError("structured output repair ancestry is not contiguous")
+        parent_base = "model-spec-repair:" + content_hash(parent_binding)[:32]
+        _validate_model_spec_request_namespace(
+            parent_work["metadata"].get("request_id", ""), parent_base, config,
+        )
+    error = CompanyModelSpecError(
+        binding["validation_error"]["message"],
+        code=binding["validation_error"]["code"],
+    )
+    if child_work.question != _repair_prompt(parent_text, error):
+        raise CockpitModelError("structured output repair prompt differs from its parent")
+
+
+def _validate_model_spec_request_namespace(
+    request_id: str, base_request_id: str, config: Mapping[str, Any],
+) -> None:
+    """Accept only Cockpit's versioned policy/recovery decorations."""
+
+    if request_id == base_request_id:
+        return
+    decorated = base_request_id
+    if "capacity_retry" in config:
+        decorated += ":capacity-policy:" + content_hash(
+            _capacity_retry(config)
+        )[:16]
+    if "transport_retry" in config:
+        decorated += ":transport-policy:" + content_hash(
+            config["transport_retry"]
+        )[:16]
+    remainder = request_id.removeprefix(decorated)
+    recovery = (
+        r"(?::operator-recovery:[0-9a-f]{16}"
+        r"|:route-admission:[0-9a-f]{64}"
+        r"|:capacity-recovery:[0-9]+:[0-9a-f]{16})?"
+    )
+    if not request_id.startswith(decorated) or re.fullmatch(recovery, remainder) is None:
+        raise CockpitModelError("model specification request namespace is invalid")
 
 
 def dossier_request_identity(
@@ -1180,6 +1301,7 @@ class CockpitModel:
              mission: Mapping[str, Any],
              producer_route_decision_refs: Sequence[str] = (),
              _dossier_recovery_parent: Mapping[str, Any] | None = None,
+             _model_spec_request_identity: Mapping[str, Any] | None = None,
              _structured_output_repair: Mapping[str, Any] | None = None,
              ) -> dict[str, Any]:
         """Run configured paid retries without retaining prior call contexts."""
@@ -1192,6 +1314,7 @@ class CockpitModel:
                 mission=mission,
                 producer_route_decision_refs=producer_route_decision_refs,
                 _dossier_recovery_parent=_dossier_recovery_parent,
+                _model_spec_request_identity=_model_spec_request_identity,
                 _structured_output_repair=_structured_output_repair,
             )
             if "_provider_retry_backoff_seconds" not in outcome:
@@ -1205,12 +1328,22 @@ class CockpitModel:
                    mission: Mapping[str, Any],
                    producer_route_decision_refs: Sequence[str] = (),
                    _dossier_recovery_parent: Mapping[str, Any] | None = None,
+                   _model_spec_request_identity: Mapping[str, Any] | None = None,
                    _structured_output_repair: Mapping[str, Any] | None = None,
                    ) -> dict[str, Any]:
         """Run one Scheduler attempt and request another through a private marker."""
         capacity_retry = _capacity_retry(self.config)
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         semantic_request_id = request_id
+        if _model_spec_request_identity is not None:
+            if purpose != "model_spec" or _structured_output_repair is not None:
+                raise CockpitModelError("model specification request identity is invalid")
+            from .company_model_cli import validate_model_spec_request_identity
+            _model_spec_request_identity = validate_model_spec_request_identity(
+                _model_spec_request_identity
+            )
+            expected = content_hash(_model_spec_request_identity)[:32]
+            _validate_model_spec_request_namespace(request_id, expected, self.config)
         if _structured_output_repair is not None:
             if purpose != "model_spec" or not isinstance(
                 _structured_output_repair, Mapping
@@ -1221,8 +1354,14 @@ class CockpitModel:
             from .company_model_cli import (
                 validate_structured_output_repair_binding,
             )
+            repair_base = "model-spec-repair:" + content_hash(
+                _structured_output_repair
+            )[:32]
+            _validate_model_spec_request_namespace(
+                request_id, repair_base, self.config
+            )
             _structured_output_repair = validate_structured_output_repair_binding(
-                _structured_output_repair, prompt=prompt, request_id=request_id,
+                _structured_output_repair, prompt=prompt, request_id=repair_base,
             )
         request_identity = None
         if (
@@ -1319,12 +1458,13 @@ class CockpitModel:
                 mission["content_hash"]
                 if purpose in {
                     "investment_memo", "investment_memo_verifier",
-                    "dossier", "dossier_verifier",
+                    "dossier", "dossier_verifier", "model_spec",
                 }
                 else None
             ),
             "producer_route_decision_refs": producer_refs,
             "provider_retry": self.config.get("provider_retry"),
+            "model_spec_request_identity": _model_spec_request_identity,
             "structured_output_repair": _structured_output_repair,
         }
         work = build_work(
@@ -1392,7 +1532,7 @@ class CockpitModel:
         ) as scheduler:
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
-                    scheduler, _structured_output_repair
+                    scheduler, _structured_output_repair, work, self.config
                 )
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
@@ -1440,6 +1580,7 @@ class CockpitModel:
                             mission=mission,
                             producer_route_decision_refs=producer_refs,
                             _dossier_recovery_parent=parent,
+                            _model_spec_request_identity=_model_spec_request_identity,
                             _structured_output_repair=_structured_output_repair,
                         )
                     return self.call(
@@ -1448,6 +1589,7 @@ class CockpitModel:
                         prompt=prompt,
                         mission=mission,
                         producer_route_decision_refs=producer_refs,
+                        _model_spec_request_identity=_model_spec_request_identity,
                         _structured_output_repair=_structured_output_repair,
                     )
             from .model_route_recovery import route_recovery_request
@@ -1472,11 +1614,13 @@ class CockpitModel:
                         mission=mission,
                         producer_route_decision_refs=producer_refs,
                         _dossier_recovery_parent=parent,
+                        _model_spec_request_identity=_model_spec_request_identity,
                         _structured_output_repair=_structured_output_repair,
                     )
                 return self.call(
                     purpose=purpose, request_id=recovery_request, prompt=prompt,
                     mission=mission, producer_route_decision_refs=producer_refs,
+                    _model_spec_request_identity=_model_spec_request_identity,
                     _structured_output_repair=_structured_output_repair,
                 )
             capacity_terminal = formal
@@ -1534,6 +1678,7 @@ class CockpitModel:
                             mission=mission,
                             producer_route_decision_refs=producer_refs,
                             _dossier_recovery_parent=parent,
+                            _model_spec_request_identity=_model_spec_request_identity,
                             _structured_output_repair=_structured_output_repair,
                         )
                     clean_request = (base_request_id[:match.start()] if match
@@ -1546,6 +1691,7 @@ class CockpitModel:
                         prompt=prompt,
                         mission=mission,
                         producer_route_decision_refs=producer_refs,
+                        _model_spec_request_identity=_model_spec_request_identity,
                         _structured_output_repair=_structured_output_repair,
                     )
             if _capacity_busy_terminal(capacity_terminal):

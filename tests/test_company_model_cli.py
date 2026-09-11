@@ -382,6 +382,24 @@ class StructuredOutputRepairTests(unittest.TestCase):
             )
         self.assertEqual(attempts[0]["cost_micros"], 91)
 
+    def test_text_length_repair_cannot_exchange_equal_python_scalar_types(self):
+        original = _spec_body()
+        original["assessment"] = "x" * 1201
+        hostile = copy.deepcopy(original)
+        hostile["assessment"] = "short"
+        hostile["horizon"]["forecast_quarters"] = 8.0
+
+        class Model:
+            def call(inner, **kwargs):
+                return self.call(json.dumps(hostile), "1", 1)
+
+        with self.assertRaisesRegex(Exception, "already valid"):
+            _validated_spec_with_repair(
+                model=Model(), state=self.state(), mission=self.mission(),
+                original_call=self.call(json.dumps(original)),
+                repair_config={"max_attempts": 1}, decided_by="automation:test",
+            )
+
     def test_semantic_failure_never_calls_repair(self):
         semantic = _spec_body()
         semantic["revenue_anchor_concept"] = "us-gaap:NotFiled"

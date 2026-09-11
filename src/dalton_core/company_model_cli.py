@@ -82,6 +82,23 @@ _REPAIR_AUTHORITY_KEYS = {
 }
 
 
+def model_spec_request_identity(
+    state_hash: str,
+    task_hash: str = TASK_HASH,
+    *,
+    repair_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Closed semantic identity for one disclosure and repair policy."""
+
+    resolved = {"max_attempts": 0} if repair_config is None else dict(repair_config)
+    return {
+        "schema_version": "company-model-spec-request-0.1",
+        "state_hash": state_hash,
+        "task_hash": task_hash,
+        "structured_output_repair": resolved,
+    }
+
+
 def model_spec_request_id(
     state_hash: str,
     task_hash: str = TASK_HASH,
@@ -90,10 +107,37 @@ def model_spec_request_id(
 ) -> str:
     """Scheduler identity for one disclosure under one immutable contract."""
 
-    identity: dict[str, Any] = {"state_hash": state_hash, "task_hash": task_hash}
-    if repair_config is not None:
-        identity["structured_output_repair"] = dict(repair_config)
-    return content_hash(identity)[:32]
+    return content_hash(model_spec_request_identity(
+        state_hash, task_hash, repair_config=repair_config,
+    ))[:32]
+
+
+def validate_model_spec_request_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    identity = dict(value)
+    config = identity.get("structured_output_repair")
+    if (
+        set(identity) != {
+            "schema_version", "state_hash", "task_hash",
+            "structured_output_repair",
+        }
+        or identity.get("schema_version") != "company-model-spec-request-0.1"
+        or not isinstance(identity.get("state_hash"), str)
+        or len(identity["state_hash"]) != 64
+        or not isinstance(identity.get("task_hash"), str)
+        or len(identity["task_hash"]) != 64
+        or identity["task_hash"] != TASK_HASH
+        or not isinstance(config, Mapping)
+        or set(config) != {"max_attempts"}
+        or isinstance(config.get("max_attempts"), bool)
+        or not isinstance(config.get("max_attempts"), int)
+        or config["max_attempts"] < 0
+    ):
+        raise CockpitModelError("model specification request identity is invalid")
+    for name in ("state_hash", "task_hash"):
+        if any(ch not in "0123456789abcdef" for ch in identity[name]):
+            raise CockpitModelError("model specification request identity is invalid")
+    identity["structured_output_repair"] = dict(config)
+    return identity
 
 
 def structured_output_repair_config(
@@ -230,7 +274,7 @@ def _assert_text_length_only_changed(original: Any, repaired: Any) -> None:
             for index, item in enumerate(left):
                 compare(item, right[index], path + (index,))
             return
-        if left != right:
+        if type(left) is not type(right) or left != right:
             raise CompanyModelSpecError(
                 "text-length repair changed a field that was already valid"
             )
@@ -526,7 +570,9 @@ def run_model_spec(
             max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
         )
         repair_config = structured_output_repair_config(model.config)
-        explicit_repair = "structured_output_repair" in model.config
+        initial_identity = model_spec_request_identity(
+            state["state_hash"], repair_config=repair_config,
+        )
         try:
             call = model.call(
                 purpose="model_spec",
@@ -534,9 +580,10 @@ def run_model_spec(
                 # instead of being paid for again.
                 request_id=model_spec_request_id(
                     state["state_hash"],
-                    repair_config=(repair_config if explicit_repair else None),
+                    repair_config=repair_config,
                 ),
                 prompt=build_prompt(state), mission=mission,
+                _model_spec_request_identity=initial_identity,
             )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "spec_status": "busy",
@@ -652,6 +699,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 __all__ = [
     "MAX_COST_USD", "build_parser", "choose_company", "main",
-    "model_spec_request_id", "run_model_spec", "structured_output_repair_config",
+    "model_spec_request_id", "model_spec_request_identity", "run_model_spec",
+    "structured_output_repair_config", "validate_model_spec_request_identity",
     "validate_structured_output_repair_binding",
 ]

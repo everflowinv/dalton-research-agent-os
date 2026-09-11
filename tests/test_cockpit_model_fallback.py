@@ -399,7 +399,10 @@ class CockpitChainTests(unittest.TestCase):
                 })
 
     def test_model_spec_repair_is_a_second_budgeted_scheduler_work(self) -> None:
-        from dalton_core.company_model_cli import _validated_spec_with_repair
+        from dalton_core.company_model_cli import (
+            _validated_spec_with_repair, model_spec_request_id,
+            model_spec_request_identity,
+        )
         from tests.test_company_model_spec import STATE, _spec
 
         initial_body = _spec(assessment="x" * 1201)
@@ -420,9 +423,15 @@ class CockpitChainTests(unittest.TestCase):
 
         adapter = SequenceAdapter()
         model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        initial_identity = model_spec_request_identity(
+            STATE["state_hash"], repair_config={"max_attempts": 1},
+        )
         first = model.call(
-            purpose="model_spec", request_id="real-model-spec-repair",
+            purpose="model_spec", request_id=model_spec_request_id(
+                STATE["state_hash"], repair_config={"max_attempts": 1},
+            ),
             prompt="decide model structure", mission=self.mission,
+            _model_spec_request_identity=initial_identity,
         )
         spec, repairs, accepted = _validated_spec_with_repair(
             model=model, state=STATE, mission=self.mission,
@@ -442,6 +451,18 @@ class CockpitChainTests(unittest.TestCase):
             ).fetchall()
             works = [json.loads(row["work_order_json"]) for row in rows]
         self.assertEqual(len(works), 2)
+        original_work = next(
+            work for work in works
+            if work["id"] == first["work_order_ref"]
+        )
+        self.assertEqual(
+            original_work["metadata"]["model_spec_request_identity"],
+            initial_identity,
+        )
+        self.assertEqual(
+            original_work["metadata"]["mission_version_hash"],
+            self.mission["content_hash"],
+        )
         repair_work = next(
             work for work in works
             if work["id"] == accepted["work_order_ref"]
@@ -480,23 +501,235 @@ class CockpitChainTests(unittest.TestCase):
         self.assertTrue(replayed_repairs[0]["replayed"])
         self.assertEqual(len(adapter.served), 2)
 
+        tampered = []
         forged = copy.deepcopy(binding)
         forged["repair_parent"]["result_envelope_hash"] = "f" * 64
-        with self.assertRaisesRegex(
-            CockpitModelError, "parent authority drifted"
-        ):
-            model.call(
-                purpose="model_spec",
-                request_id="model-spec-repair:" + content_hash(forged)[:32],
-                prompt=repair_work["question"], mission=self.mission,
-                _structured_output_repair=forged,
-            )
+        tampered.append((forged, "parent authority drifted"))
+        relabelled = copy.deepcopy(binding)
+        relabelled["parent_text_sha256"] = "e" * 64
+        tampered.append((relabelled, "semantic authority drifted"))
+        other_state = copy.deepcopy(binding)
+        other_state["state_hash"] = "9" * 64
+        tampered.append((other_state, "semantic authority drifted"))
+        other_policy = copy.deepcopy(binding)
+        other_policy["repair_config"] = {"max_attempts": 2}
+        tampered.append((other_policy, "semantic authority drifted"))
+        for forged, reason in tampered:
+            with self.subTest(reason=reason), self.assertRaisesRegex(
+                CockpitModelError, reason
+            ):
+                model.call(
+                    purpose="model_spec",
+                    request_id="model-spec-repair:" + content_hash(forged)[:32],
+                    prompt=repair_work["question"], mission=self.mission,
+                    _structured_output_repair=forged,
+                )
         self.assertEqual(len(adapter.served), 2)
         with Scheduler(self.root / "scheduler.sqlite") as scheduler:
             count = scheduler.connection.execute(
                 "SELECT count(*) FROM scheduler_work_orders"
             ).fetchone()[0]
         self.assertEqual(count, 2)
+
+    def test_model_spec_repair_rejects_a_genuine_foreign_mission_parent(self) -> None:
+        from dalton_core.company_model_cli import (
+            _validated_spec_with_repair, model_spec_request_id,
+            model_spec_request_identity,
+        )
+        from tests.test_company_model_spec import STATE, _spec
+
+        overlong = _spec(assessment="x" * 1201)
+
+        class TextAdapter(ChainAdapter):
+            def execute(inner, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                return invocation, replace(
+                    envelope, outputs={"text": json.dumps(overlong)}
+                )
+
+        adapter = TextAdapter({})
+        model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        identity = model_spec_request_identity(
+            STATE["state_hash"], repair_config={"max_attempts": 1},
+        )
+        foreign = {
+            **self.mission,
+            "mission_ref": "coverage-mission:foreign",
+            "id": "coverage-mission-version:foreign:1",
+            "content_hash": content_hash({"mission": "foreign"}),
+        }
+        call = model.call(
+            purpose="model_spec", request_id=model_spec_request_id(
+                STATE["state_hash"], repair_config={"max_attempts": 1},
+            ),
+            prompt="foreign mission model structure", mission=foreign,
+            _model_spec_request_identity=identity,
+        )
+        with self.assertRaisesRegex(CockpitModelError, "parent authority drifted"):
+            _validated_spec_with_repair(
+                model=model, state=STATE, mission=self.mission,
+                original_call=call, repair_config={"max_attempts": 1},
+                decided_by="automation:test",
+            )
+        self.assertEqual(len(adapter.served), 1)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            count = scheduler.connection.execute(
+                "SELECT count(*) FROM scheduler_work_orders"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_model_spec_repair_rejects_a_genuine_other_purpose_parent(self) -> None:
+        from dalton_core.company_model_cli import _validated_spec_with_repair
+        from tests.test_company_model_spec import STATE, _spec
+
+        overlong = _spec(assessment="x" * 1201)
+
+        class TextAdapter(ChainAdapter):
+            def execute(inner, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                return invocation, replace(
+                    envelope, outputs={"text": json.dumps(overlong)}
+                )
+
+        adapter = TextAdapter({})
+        model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        call = model.call(
+            purpose="plan", request_id="foreign-purpose",
+            prompt="plan something else", mission=self.mission,
+        )
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            authority = scheduler.work_order_authority(call["work_order_ref"])
+            formal = scheduler.formal_result(call["work_order_ref"])
+        call.update({
+            "work_order_hash": authority["work_order_hash"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+        })
+        with self.assertRaisesRegex(CockpitModelError, "parent authority drifted"):
+            _validated_spec_with_repair(
+                model=model, state=STATE, mission=self.mission,
+                original_call=call, repair_config={"max_attempts": 1},
+                decided_by="automation:test",
+            )
+        self.assertEqual(len(adapter.served), 1)
+
+    def test_model_spec_repair_survives_versioned_capacity_recovery(self) -> None:
+        from dalton_core.company_model_cli import (
+            _validated_spec_with_repair, model_spec_request_id,
+            model_spec_request_identity,
+        )
+        from tests.test_company_model_spec import STATE, _spec
+
+        overlong = _spec(assessment="x" * 1201)
+        repaired = _spec(assessment="x" * 1199)
+
+        class BusyRepairAdapter(ChainAdapter):
+            def __init__(inner):
+                super().__init__({})
+                inner.number = 0
+
+            def execute(inner, work, route, profile):
+                inner.number += 1
+                invocation, envelope = super().execute(work, route, profile)
+                if inner.number == 2:
+                    return invocation, replace(
+                        envelope, status="failed", outputs={},
+                        error={"code": "BUSY", "message": "local queue full"},
+                        metadata={
+                            **envelope.metadata,
+                            "dispatch_proof": {
+                                "authority": "openclaw-model-adapter",
+                                "state": "definitely_not_sent", "version": "0.1",
+                            },
+                        },
+                    )
+                body = overlong if inner.number == 1 else repaired
+                return invocation, replace(
+                    envelope, outputs={"text": json.dumps(body)}
+                )
+
+        clock = MutableClock()
+        retry = {"cooldown_seconds": 10, "max_recovery_epochs": 1,
+                 "scheduler_max_attempts": 1}
+        adapter = BusyRepairAdapter()
+        model = self._model(
+            adapter, policy_version_ref=self.chain_policy,
+            capacity_retry=retry, clock=clock,
+        )
+        identity = model_spec_request_identity(
+            STATE["state_hash"], repair_config={"max_attempts": 1},
+        )
+        first = model.call(
+            purpose="model_spec", request_id=model_spec_request_id(
+                STATE["state_hash"], repair_config={"max_attempts": 1},
+            ),
+            prompt="capacity recovery model structure", mission=self.mission,
+            _model_spec_request_identity=identity,
+        )
+        args = dict(
+            model=model, state=STATE, mission=self.mission,
+            original_call=first, repair_config={"max_attempts": 1},
+            decided_by="automation:test",
+        )
+        with self.assertRaisesRegex(CockpitModelError, "local queue full"):
+            _validated_spec_with_repair(**args)
+        clock.advance(10)
+        spec, repairs, _ = _validated_spec_with_repair(**args)
+        self.assertEqual(spec["assessment"], repaired["assessment"])
+        self.assertEqual(len(adapter.served), 3)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            repaired_work = scheduler.work_order_authority(
+                repairs[0]["work_order_ref"]
+            )["work_order"]
+        self.assertIn(
+            ":capacity-recovery:1:", repaired_work["metadata"]["request_id"]
+        )
+
+    def test_model_spec_repair_survives_proved_route_recovery(self) -> None:
+        from dalton_core.company_model_cli import (
+            _validated_spec_with_repair, model_spec_request_id,
+            model_spec_request_identity,
+        )
+        from tests.test_company_model_spec import STATE, _spec
+
+        bodies = [_spec(assessment="x" * 1201), _spec(assessment="x" * 1199)]
+
+        class TextAdapter(ChainAdapter):
+            def execute(inner, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                return invocation, replace(
+                    envelope, outputs={"text": json.dumps(bodies.pop(0))}
+                )
+
+        adapter = TextAdapter({})
+        good = self._model(adapter, policy_version_ref=self.pinned_policy)
+        identity = model_spec_request_identity(
+            STATE["state_hash"], repair_config={"max_attempts": 1},
+        )
+        first = good.call(
+            purpose="model_spec", request_id=model_spec_request_id(
+                STATE["state_hash"], repair_config={"max_attempts": 1},
+            ),
+            prompt="route recovery model structure", mission=self.mission,
+            _model_spec_request_identity=identity,
+        )
+        bad = self._model(
+            adapter, policy_version_ref=self.pinned_policy,
+            slots=["credential-slot:not-authorized"],
+        )
+        args = dict(
+            state=STATE, mission=self.mission, original_call=first,
+            repair_config={"max_attempts": 1}, decided_by="automation:test",
+        )
+        with self.assertRaisesRegex(CockpitModelError, "route"):
+            _validated_spec_with_repair(model=bad, **args)
+        spec, repairs, _ = _validated_spec_with_repair(model=good, **args)
+        self.assertEqual(spec["assessment"], "x" * 1199)
+        self.assertEqual(len(adapter.served), 2)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            repaired_work = scheduler.work_order_authority(
+                repairs[0]["work_order_ref"]
+            )["work_order"]
+        self.assertIn(":route-admission:", repaired_work["metadata"]["request_id"])
 
     def test_explicit_capacity_policy_versions_base_work_but_default_does_not(self) -> None:
         default_adapter = ChainAdapter({})
