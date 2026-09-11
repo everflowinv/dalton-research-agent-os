@@ -990,6 +990,82 @@ _CONCLUSION_PATTERNS = (
     "should buy", "should sell", "price target", "undervalued", "overvalued",
 )
 
+# Only attributed, source-supported historical target *changes* qualify. A
+# target level, recommendation, or our own valuation judgement still fails.
+_TARGET_CHANGE_PATTERNS = {
+    "down": (
+        r"(?:分析师|券商|卖方)(?:曾|此前|当时|随后|已)?(?:下调|调低)目标价",
+        r"\b(?:analysts?|brokers?)\s+(?:previously\s+)?(?:cut|lowered|reduced)\s+(?:their\s+|its\s+|the\s+)?price targets?\b",
+    ),
+    "up": (
+        r"(?:分析师|券商|卖方)(?:曾|此前|当时|随后|已)?(?:上调|调高)目标价",
+        r"\b(?:analysts?|brokers?)\s+(?:previously\s+)?(?:raised|increased)\s+(?:their\s+|its\s+|the\s+)?price targets?\b",
+    ),
+}
+_TARGET_SOURCE_ACTIONS = {
+    "down": {"verb": "cut|lowered|reduced", "noun": "reduction|cuts?"},
+    "up": {"verb": "raised|increased", "noun": "increase|raises?"},
+}
+_TARGET_SOURCE_ACTOR = r"\b(?:analysts?|brokers?|investment bank)\b|分析师|券商|卖方"
+_TARGET_NEGATION = r"\b(?:no|not|never|without|denied)\b|未|没有|并非|否认|不曾|不会"
+_TARGET_AUTHOR_VIEW = r"我们|本基金|本系统|建议|预计|预测|\b(?:we|our|should|expect|recommend)\b"
+
+
+def _source_supports_target_change(text: str, direction: str) -> bool:
+    """Require an explicit actor/action phrase, not nearby unrelated words."""
+    actor = _TARGET_SOURCE_ACTOR
+    verb = _TARGET_SOURCE_ACTIONS[direction]["verb"]
+    noun = _TARGET_SOURCE_ACTIONS[direction]["noun"]
+    direct = (rf"(?:{actor})\s+(?:previously\s+)?(?:{verb})\s+"
+              r"(?:their\s+|its\s+|the\s+)?price targets?\b")
+    attributed = (rf"price targets?\s+(?:{noun})\s+(?:from|by)\s+"
+                  rf"(?:a\s+major\s+|a\s+|the\s+)?(?:{actor})")
+    return bool(
+        re.search(direct + "|" + attributed + "|" + _TARGET_CHANGE_PATTERNS[direction][0],
+                  text, re.IGNORECASE)
+        and not re.search(_TARGET_NEGATION, text, re.IGNORECASE)
+    )
+
+
+def output_rubric_contract_fingerprint() -> str:
+    """Version only the deterministic admission check, not published bodies."""
+    return content_hash({
+        "version": "company-dossier-output-rubric:0.2",
+        "conclusion_patterns": _CONCLUSION_PATTERNS,
+        "target_changes": _TARGET_CHANGE_PATTERNS,
+        "target_sources": _TARGET_SOURCE_ACTIONS,
+        "source_actor": _TARGET_SOURCE_ACTOR,
+        "source_attribution": "direct-actor-action-or-target-change-from-actor:1",
+        "negation": _TARGET_NEGATION,
+        "author_view": _TARGET_AUTHOR_VIEW,
+    })
+
+
+def _conclusion_check_body(block: Mapping[str, Any]) -> str:
+    """Mask only supported target-change spans in historical sentence rows."""
+    if block.get("aspect") != "history_of_price_drivers":
+        return section_body(block)
+    sources = {row["ref"]: row for row in block.get("sources") or []
+               if row.get("kind") == "claim"}
+    checked_slots = []
+    for slot in block.get("slots") or []:
+        checked_rows = []
+        for sentence in slot.get("sentences") or []:
+            text = sentence["text"]
+            if not re.search(_TARGET_AUTHOR_VIEW + "|" + _TARGET_NEGATION,
+                             text, re.IGNORECASE):
+                for direction, patterns in _TARGET_CHANGE_PATTERNS.items():
+                    supported = any(
+                        _source_supports_target_change(sources[ref]["text"], direction)
+                        for ref in sentence.get("refs") or [] if ref in sources
+                    )
+                    if supported:
+                        for pattern in patterns:
+                            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+            checked_rows.append({**sentence, "text": text})
+        checked_slots.append({**slot, "sentences": checked_rows})
+    return section_body({**block, "slots": checked_slots})
+
 
 def output_rubric_findings(
     record: Mapping[str, Any],
@@ -1045,9 +1121,12 @@ def output_rubric_findings(
                     "code": "no_new_evidence", "criterion_index": index,
                 })
         elif check == "no_investment_conclusion":
+            blocks = {item["aspect"]: item for item in record.get("sections") or []}
             for part in parts:
+                checked_body = (_conclusion_check_body(blocks[part["title"]])
+                                if part["title"] in blocks else part["body"])
                 for pattern in _CONCLUSION_PATTERNS:
-                    if pattern in part["body"]:
+                    if pattern in checked_body.casefold():
                         findings.append({
                             "code": "investment_conclusion", "criterion_index": index,
                             "section": part["title"], "phrase": pattern,

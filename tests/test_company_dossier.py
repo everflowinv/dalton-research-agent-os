@@ -579,6 +579,77 @@ class VariantViewPublishTests(unittest.TestCase):
 
 
 class OutputRubricTests(unittest.TestCase):
+    def _conclusion_findings(self, section):
+        criteria = CRITERIA + ["outputs never auto-generate investment conclusions"]
+        mapped = validate_policy({
+            **policy(),
+            "output_rubric_bindings": policy()["output_rubric_bindings"] + [{
+                "criterion_hash": content_hash(criteria[2]),
+                "check": "no_investment_conclusion", "reason": ""}],
+        })
+        return [item for item in output_rubric_findings(
+            body(drafted_sections={section["aspect"]: section}),
+            constitution=constitution(criteria=criteria), policy=mapped,
+        ) if item["code"] == "investment_conclusion"]
+
+    def test_cited_third_party_historical_target_change_is_a_fact(self):
+        section = drafted(
+            "history_of_price_drivers", "claim-version:target-change",
+            "股价下跌被报道归因于分析师下调目标价。",
+            source_text="The stock decline reflected analyst concerns including "
+                        "a price target reduction from a major investment bank.",
+        )
+        before = content_hash(section)
+        self.assertEqual(self._conclusion_findings(section), [])
+        self.assertEqual(content_hash(section), before)
+        section["slots"][0]["sentences"][0]["text"] = "Analysts lowered their price target."
+        self.assertEqual(self._conclusion_findings(section), [])
+
+    def test_target_attribution_requires_the_same_sentences_cited_claim(self):
+        source_text = "Analysts lowered their price target."
+        for case in ("wrong_ref", "unrelated_source", "unrelated_actor_action", "nearby_other_actor",
+                     "opposite_direction",
+                     "negated_source", "non_claim_source", "wrong_section"):
+            with self.subTest(case=case):
+                section = drafted("history_of_price_drivers", "claim-version:a",
+                                  "分析师下调目标价。", source_text=source_text)
+                if case == "wrong_ref":
+                    section["slots"][0]["sentences"][0]["refs"] = ["claim-version:other"]
+                elif case == "unrelated_source":
+                    section["sources"][0]["text"] = "The shares fell after a broker downgrade."
+                elif case == "unrelated_actor_action":
+                    section["sources"][0]["text"] = (
+                        "Analysts discussed demand. " + "x" * 121
+                        + " Management lowered the price target.")
+                elif case == "nearby_other_actor":
+                    section["sources"][0]["text"] = (
+                        "Analysts discussed demand while management lowered the price target.")
+                elif case == "opposite_direction":
+                    section["sources"][0]["text"] = "Analysts raised their price target."
+                elif case == "negated_source":
+                    section["sources"][0]["text"] = "There was no analyst price target reduction."
+                elif case == "non_claim_source":
+                    section["sources"][0]["kind"] = "figure"
+                else:
+                    section["aspect"] = "business_model"
+                self.assertTrue(self._conclusion_findings(section))
+
+    def test_historical_target_fact_does_not_allow_an_authors_conclusion(self):
+        for text in (
+            "分析师下调目标价，所以建议买入。",
+            "分析师下调目标价；我们的目标价为 USD 50。",
+            "我们预计分析师下调目标价。",
+            "分析师下调目标价，但我们认为低估。",
+            "分析师未下调目标价。",
+            "分析师将下调目标价。",
+            "Our price target is USD 50.",
+            "Analysts lowered their price target; we should buy.",
+        ):
+            with self.subTest(text=text):
+                section = drafted("history_of_price_drivers", "claim-version:a", text,
+                                  source_text="Analysts lowered their price target.")
+                self.assertTrue(self._conclusion_findings(section))
+
     def test_a_criterion_the_policy_never_mentions_is_a_finding(self):
         record = body(drafted_sections={
             "business_model": drafted("business_model", "claim-version:a")})
