@@ -209,13 +209,20 @@ def _plan_acquisition(value: Any, *, cooldown: bool = False) -> dict[str, Any]:
     if cooldown:
         raw = value["failure_cooldown"]
         fields = {"minimum_distinct_urls", "window_seconds", "cooldown_seconds"}
-        if not isinstance(raw, Mapping) or set(raw) != fields:
+        if not isinstance(raw, Mapping) or set(raw) not in (fields, fields | {"recovery"}):
             raise DiscoveryPlanError("failure_cooldown has an invalid closed shape")
         result["failure_cooldown"] = {
             "minimum_distinct_urls": _positive_int(raw["minimum_distinct_urls"], "minimum_distinct_urls", maximum=100),
             "window_seconds": _positive_int(raw["window_seconds"], "window_seconds", maximum=2592000),
             "cooldown_seconds": _positive_int(raw["cooldown_seconds"], "cooldown_seconds", maximum=2592000),
         }
+        if "recovery" in raw:
+            from .host_recovery import validate_recovery_policy
+            try:
+                result["failure_cooldown"]["recovery"] = validate_recovery_policy(
+                    raw["recovery"], initial_seconds=raw["cooldown_seconds"])
+            except ValueError as exc:
+                raise DiscoveryPlanError(str(exc)) from exc
     return result
 _COMPANY_FIELDS = frozenset({"search_terms"})
 _COMPANY_FIELDS_V6 = frozenset({"name", "ticker", "aliases"})
@@ -1944,6 +1951,58 @@ class MissionSourceDiscoveryCoordinator:
                     self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_selected","ticket_ref":ticket["id"],
                             "discovery_ref":discovery["id"]}
+        if document is None:
+            # No fresh documents: retry the oldest acquisition failure whose
+            # interval has passed (e.g. a child orphaned by a deploy restart).
+            document = self.missions.retryable_failed_document(
+                older_than=(
+                    _IMMEDIATE_RETRY if self._retry_failures_now
+                    else ACQUISITION_RETRY_INTERVAL
+                ),
+                as_of=self.clock(),
+                source_ref=self.source_ref,
+                skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
+                excluded_needs=stopped_needs,
+                excluded_mission_version_ref=None if mission is None else mission["id"],
+                included_document_refs=current_selection_refs,
+                restricted_spec_refs=tuple(spec['spec_ref'] for spec in self.plan['specs']
+                                           if spec.get('document_type')=='meeting_minutes'),
+            )
+            retry = document is not None
+        recovery_probe = False
+        if document is None and self.failure_cooldown and self.failure_cooldown.get("recovery"):
+            # Quarantined hosts never occupy the normal runnable queue. Only
+            # when another host has no work do we admit one due probe. The
+            # existing source-wide in-flight guard keeps it single-flight.
+            probe_hosts = [row["host"] for row in cooldowns
+                           if row.get("state") == "probe_due" and row["host"] not in self.skip_hosts]
+            if probe_hosts:
+                document = self.missions.next_discovered_document(
+                    source_ref=self.source_ref, included_hosts=probe_hosts,
+                    preferred_needs=needs, excluded_needs=stopped_needs,
+                    excluded_mission_version_ref=None if mission is None else mission["id"])
+                if document is None:
+                    document = self.missions.retryable_failed_document(
+                        older_than=_IMMEDIATE_RETRY, as_of=self.clock(),
+                        source_ref=self.source_ref, recovery_probe_hosts=probe_hosts,
+                        excluded_needs=stopped_needs,
+                        excluded_mission_version_ref=None if mission is None else mission["id"])
+                    retry = document is not None
+                recovery_probe = document is not None
+        if document is None:
+            idle: dict[str, Any] = {
+                "status": "idle", "stage_order": stage_order,
+                "plan_stopped_needs": stopped_needs,
+                "cooldown_hosts": cooldowns,
+            }
+            if self.skip_hosts:
+                idle["held_by_skip_hosts"] = self.missions.discovered_documents_held_by_skip(
+                    source_ref=self.source_ref, skip_hosts=self.skip_hosts
+                )
+            if cooldown_hosts:
+                idle["held_by_host_quarantine"] = self.missions.discovered_documents_held_by_skip(
+                    source_ref=self.source_ref, skip_hosts=cooldown_hosts)
+            return idle
         if document is not None and self._document_in_authority(
             document["document_ref"], document.get("discovery_ref")
         ):
@@ -1965,35 +2024,6 @@ class MissionSourceDiscoveryCoordinator:
             except CoverageMissionError as exc:
                 entry["review_status"] = f"not_registered:{type(exc).__name__}"
             return entry
-        if document is None:
-            # No fresh documents: retry the oldest acquisition failure whose
-            # interval has passed (e.g. a child orphaned by a deploy restart).
-            document = self.missions.retryable_failed_document(
-                older_than=(
-                    _IMMEDIATE_RETRY if self._retry_failures_now
-                    else ACQUISITION_RETRY_INTERVAL
-                ),
-                as_of=self.clock(),
-                source_ref=self.source_ref,
-                skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
-                excluded_needs=stopped_needs,
-                excluded_mission_version_ref=None if mission is None else mission["id"],
-                included_document_refs=current_selection_refs,
-                restricted_spec_refs=tuple(spec['spec_ref'] for spec in self.plan['specs']
-                                           if spec.get('document_type')=='meeting_minutes'),
-            )
-            retry = document is not None
-        if document is None:
-            idle: dict[str, Any] = {
-                "status": "idle", "stage_order": stage_order,
-                "plan_stopped_needs": stopped_needs,
-                "cooldown_hosts": cooldowns,
-            }
-            if self.skip_hosts:
-                idle["held_by_skip_hosts"] = self.missions.discovered_documents_held_by_skip(
-                    source_ref=self.source_ref, skip_hosts=self.skip_hosts
-                )
-            return idle
         try:
             authorization = self.missions.authorize_source_discovery(
                 company_ref=document["company_ref"],
@@ -2032,6 +2062,7 @@ class MissionSourceDiscoveryCoordinator:
             "document_ref": document["document_ref"], "ticket_ref": ticket["id"],
             "retry": retry, "budget": budget,
             "cooldown_hosts": cooldowns,
+            **({"host_recovery_probe": True} if recovery_probe else {}),
         }
 
     def _acquire_within_budget(

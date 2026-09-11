@@ -2032,6 +2032,7 @@ class CoverageMissionAuthority:
         included_document_refs: Sequence[str] | None = None,
         included_discovery_ref: str | None = None,
         excluded_discovery_refs: Sequence[str] = (),
+        included_hosts: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -2088,6 +2089,12 @@ class CoverageMissionAuthority:
         if skipped:
             query += " AND (d.host IS NULL OR d.host NOT IN (%s))" % ",".join("?" * len(skipped))
             params.extend(skipped)
+        if included_hosts is not None:
+            included = _host_list(included_hosts, "included_hosts")
+            if not included:
+                return None
+            query += " AND d.host IN (%s)" % ",".join("?" * len(included))
+            params.extend(included)
         for need in excluded:
             query += (
                 " AND NOT (d.mission_version_ref=? AND d.company_ref=? AND EXISTS ("
@@ -2648,6 +2655,7 @@ class CoverageMissionAuthority:
         excluded_mission_version_ref: str | None = None,
         included_document_refs: Sequence[str] | None = None,
         restricted_spec_refs: Sequence[str] = (),
+        recovery_probe_hosts: Sequence[str] = (),
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -2664,9 +2672,16 @@ class CoverageMissionAuthority:
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
             "WHERE d.status='acquisition_failed' AND d.updated_at<? "
-            "AND d.failure_retryable IS NOT 0"
         )
         params: list[Any] = [cutoff]
+        probes = _host_list(recovery_probe_hosts, "recovery_probe_hosts")
+        if probes:
+            # An explicit, due host recovery probe may revisit one prior
+            # terminal fetch. Normal retries never gain this exception.
+            query += " AND d.host IN (%s)" % ",".join("?" * len(probes))
+            params.extend(probes)
+        else:
+            query += " AND d.failure_retryable IS NOT 0"
         restricted=tuple(dict.fromkeys(_text(ref,"restricted_spec_ref") for ref in restricted_spec_refs))
         if included_document_refs is not None and restricted:
             included=tuple(dict.fromkeys(_text(ref,"included_document_ref") for ref in included_document_refs))
@@ -2889,7 +2904,8 @@ class CoverageMissionAuthority:
 
     def host_failure_cooldowns(self, *, source_ref: str, minimum_distinct_urls: int,
                                window_seconds: int, cooldown_seconds: int,
-                               as_of: datetime) -> list[dict[str, Any]]:
+                               as_of: datetime,
+                               recovery: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         source_ref = _text(source_ref, "source_ref")
         for value, name, maximum in ((minimum_distinct_urls, "minimum_distinct_urls", 100),
                                      (window_seconds, "window_seconds", 2592000),
@@ -2898,6 +2914,19 @@ class CoverageMissionAuthority:
                 raise CoverageMissionValidationError(f"{name} must be an integer 1..{maximum}")
         if not isinstance(as_of, datetime) or as_of.tzinfo is None:
             raise CoverageMissionValidationError("as_of must be timezone-aware")
+        if recovery is not None:
+            from .host_recovery import host_recovery_states, validate_recovery_policy
+            policy = validate_recovery_policy(recovery, initial_seconds=cooldown_seconds)
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_acquisition_attempts "
+                "WHERE source_ref=? AND host IS NOT NULL AND created_at<=? "
+                "ORDER BY created_at,attempt_ref",
+                (source_ref, as_of.astimezone(timezone.utc).isoformat(timespec="microseconds")),
+            )
+            return host_recovery_states(rows, minimum_distinct_urls=minimum_distinct_urls,
+                                        window_seconds=window_seconds,
+                                        cooldown_seconds=cooldown_seconds,
+                                        as_of=as_of, recovery=policy)
         cutoff = (as_of - timedelta(seconds=window_seconds)).isoformat(timespec="microseconds")
         upper = as_of.isoformat(timespec="microseconds")
         rows = self.connection.execute(
