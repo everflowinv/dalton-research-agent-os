@@ -620,6 +620,22 @@ class LaneCoordinatorTests(ConvictionHarness):
         self.assertEqual(probe["settled"]["failure"]["failure_class"],
                          "dependency_unavailable")
 
+    def test_completed_verifier_rejection_holds_until_evidence_or_task_changes(self):
+        from unittest.mock import patch
+
+        self.eligible_company()
+        launched = self.coordinator.dispatch_once()
+        self.launcher.settle(launched["ticket_ref"], {
+            "call_status": "verifier_rejected",
+            "failure_reason": "market_view_not_supported_by_cited_rows",
+        })
+        held = self.coordinator.dispatch_once()
+        self.assertEqual("held", held["status"])
+        self.assertEqual("content_refused", held["settled"]["failure"]["failure_class"])
+        self.assertEqual("held", self.coordinator.dispatch_once()["status"])
+        with patch("dalton_core.conviction_call_draft.TASK_HASH", "changed-task-contract"):
+            self.assertEqual("launched", self.coordinator.dispatch_once()["status"])
+
     def test_a_weeks_call_stops_the_next_one_even_across_a_restart(self):
         from tests.test_conviction_call import proposal_kwargs
 

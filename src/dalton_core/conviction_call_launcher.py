@@ -96,7 +96,8 @@ class ConvictionCallLauncher(LaneChildLauncher):
         contract_fingerprint = verifier_provider_contract_fingerprint(
             "conviction_call_verifier")
         config_fingerprint = self.configuration_fingerprint()
-        ticket_contract = contract_fingerprint
+        from .conviction_call_draft import TASK_HASH
+        ticket_contract = contract_fingerprint + ":draft-task:" + TASK_HASH
         if config_fingerprint is not None:
             ticket_contract += ":model-config:" + config_fingerprint
         digest = run_digest(company_ref, fingerprint, ticket_contract)
@@ -107,6 +108,7 @@ class ConvictionCallLauncher(LaneChildLauncher):
                 "evidence_fingerprint": fingerprint,
                 "run_digest": digest,
                 "verifier_provider_contract": contract_fingerprint,
+                "draft_task_hash": TASK_HASH,
                 "model_configured": self.configured,
                 "model_config_fingerprint": config_fingerprint,
             },

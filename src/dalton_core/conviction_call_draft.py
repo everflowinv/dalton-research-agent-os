@@ -43,6 +43,8 @@ from .conviction_call import (
     DIRECTIONS,
     MARKET_VIEW_SOURCES,
     MAX_PERCENT,
+    MAX_SIGNALS,
+    MAX_FALSIFIERS,
     POLICY_HASH,
     POLICY_REF,
     TIME_HORIZONS,
@@ -57,7 +59,7 @@ from .research_playbook import DECISION_VOCABULARY
 from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
-TASK_REF = "task:conviction-call-draft:0.1"
+TASK_REF = "task:conviction-call-draft:0.2"
 
 # The lane names its own purpose from its own module (P14-0's registry).
 PURPOSE = register_purpose("conviction_call")
@@ -108,6 +110,9 @@ TASK_HASH = content_hash({
     "policy_hash": POLICY_HASH,
     "output": "one JSON object in the closed conviction-call draft shape",
     "authority": "cites_only_shown_row_ids; dates come from the calendar rows",
+    "output_limits": {"signal_chars": MAX_SIGNAL_CHARS,
+                      "statement_chars": MAX_STATEMENT_OUT_CHARS,
+                      "signals": MAX_SIGNALS, "falsifiers": MAX_FALSIFIERS},
 })
 
 
@@ -311,11 +316,14 @@ def build_prompt(table: Mapping[str, Any]) -> str:
     return (
         "You write one investment call for a fundamental long-biased fund's own "
         "file. A person decides whether to act on it; you only propose it.\n\n"
-        "The only thing that makes a call worth writing is that it differs from "
-        "the market. Being bullish while the street is bullish is worth nothing. "
-        "So the call has to say where the market's price is wrong and what "
-        "observable events would drag it towards us. If you cannot say both, say "
-        "so plainly rather than dressing agreement up as a view.\n\n"
+        "Understand what the market expects and how the investment can earn its "
+        "return. Agreement on business direction can still leave a meaningful "
+        "difference in magnitude, timing, probability or valuation. Do not "
+        "invent disagreement to make a call qualify. This version of the call "
+        "requires a supported pricing difference and an observable path to "
+        "realizing it; state plainly when the supplied evidence cannot establish "
+        "those. Commit to the best-supported current judgement, explain the "
+        "condition that would change it and name the next observation.\n\n"
         f"COMPANY: {table['company_ref']}\n\n"
         "OUR ADMITTED THESES -- <row id>\\t<statement>:\n"
         f"{theses}\n\n"
@@ -356,6 +364,11 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "* decision is one of the five Active Coverage words: "
         + ", ".join(DECISION_VOCABULARY) + ".\n"
         "* Every falsifier names the thesis row it would break.\n"
+        f"* Text limits count characters, not words: every statement and "
+        f"market_view.reason at most {MAX_STATEMENT_OUT_CHARS}; each "
+        f"event_pathway.signal at most {MAX_SIGNAL_CHARS}. Use 1–{MAX_SIGNALS} "
+        f"pathway steps and 1–{MAX_FALSIFIERS} falsifiers. Keep each signal a "
+        "concise observable condition; put its explanation in the statement.\n"
         "* Return one raw JSON object and nothing else. No prose, no code "
         "fence.\n\n"
         "{\"direction\": \"long|short|avoid\", \"decision\": \"<one of the five>\",\n"
@@ -653,8 +666,10 @@ def build_verifier_prompt(
         "You are an independent verifier. Another model wrote the investment call",
         "below from the table that follows it. You do not rewrite it and you do not",
         "improve it. You answer one question: is every part of this call supported",
-        "by the rows it cites, and is it actually a disagreement with the market",
-        "rather than a restatement of it?",
+        "by the rows it cites, including a concrete pricing difference? Shared",
+        "bullish or bearish direction does not establish identical expectations:",
+        "compare magnitude, timing, probability and valuation. Do not demand",
+        "contrarianism or invent a market position absent from the evidence.",
         "",
         f"COMPANY: {table['company_ref']}",
         "",
@@ -726,9 +741,10 @@ def build_verifier_prompt(
         + "|".join(VERIFIER_FINDING_CODES) + '",',
         '   "detail": "<one sentence>"}]}',
         "A pass verdict has no findings; a reject verdict has at least one.",
-        "Use this_is_not_a_disagreement when the call's view and the market view",
-        "say the same thing in different words -- that is the failure this",
-        "verification exists to catch.",
+        "Use this_is_not_a_disagreement only when there is no supported pricing",
+        "difference in the claimed magnitude, timing, probability or valuation.",
+        f"Return at most 8 findings; each detail is at most {MAX_STATEMENT_OUT_CHARS} "
+        "characters, not words. State the specific unsupported claim concisely.",
     ]
     prompt = "\n".join(lines)
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:

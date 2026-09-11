@@ -61,9 +61,10 @@ def _business_key(company_ref: str, fingerprint: str, launcher: Any = None) -> s
 
     contract = verifier_provider_contract_fingerprint(
         "conviction_call_verifier")
+    from .conviction_call_draft import TASK_HASH
     from .model_route_recovery import configured_business_key
     return configured_business_key(
-        f"{company_ref}|{fingerprint}|verifier_contract:{contract}", launcher)
+        f"{company_ref}|{fingerprint}|verifier_contract:{contract}|draft_task:{TASK_HASH}", launcher)
 
 
 class MissionConvictionLaneCoordinator:
@@ -141,11 +142,19 @@ class MissionConvictionLaneCoordinator:
         if hold and company_ref and fingerprint:
             key = business_key or _business_key(str(company_ref), str(fingerprint), self.launcher)
             reason = settled.get("failure_reason") or f"last run: {call_status or settled.get('status')}"
+            # A completed content verdict is not a transport failure. Keep
+            # that evidence/contract held until either changes, rather than
+            # repeatedly launching the same refused draft on a timer.
+            failure_status = (
+                f"content_refused:{call_status}"
+                if call_status in {"verifier_rejected", "rubric_failed", "no_variant_view"}
+                else str(call_status or settled.get("status"))
+            )
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
                 reason=reason, connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
-                    getattr(self, "models", None)), status=str(call_status or settled.get("status")),
+                    getattr(self, "models", None)), status=failure_status,
             ).as_wire()
         elif company_ref and fingerprint:
             settled["resumed"] = self.budget.clear(
