@@ -68,3 +68,10 @@ and confirms the phase policies enlarge Scheduler authority and reach the
 coordinator. Existing thesis-impact closure, policy rollover, day-budget,
 replay, output-contract, and verifier-family tests remain in the focused suite.
 
+The exact focused command was:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.test_thesis_impact_control tests.test_thesis_impact_production tests.test_thesis_impact_budget tests.test_service tests.test_writer_service tests.test_model_selection tests.test_model_budget_configuration tests.test_openclaw_model_adapter tests.test_provider_retry tests.test_scheduler tests.test_contracts tests.test_thesis_impact tests.test_thesis_impact_policy_rollover tests.test_model_router tests.test_model_fallback_chain tests.test_cockpit_model_fallback
+```
+
+It passed 370 tests in 46.994 seconds with zero failures or errors.
