@@ -441,7 +441,7 @@ class DocumentResearchTests(unittest.TestCase):
             "company_ref": "company:fixture",
             "source_ref": SALES_NOTES_SOURCE_REF,
             "document_ref": document_ref,
-            "ticket_ref": ticket_ref,
+            "ticket_ref": None,
             "status": "acquired",
         })
         registry = DocumentResearchRegistry(
@@ -463,6 +463,28 @@ class DocumentResearchTests(unittest.TestCase):
         )
         self.assertEqual(authority["company_ref"], "company:fixture")
         self.assertEqual(registration["acquisition_ticket_ref"], ticket_ref)
+        source_adapter = registry.adapters[SALES_NOTES_SOURCE_REF]
+        source_adapter.launcher.add_version(
+            "feed-run:newer", source_adapter.launcher.manifests[ticket_ref]
+        )
+        proof = registry.read({
+            "schema_version": READ_REQUEST_SCHEMA_VERSION,
+            "operation": READ_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "What did the historical note say?",
+            "registration": registration,
+            "source_start": 0,
+            "source_end": registration["normalized_text"]["characters"],
+            "policy_ref": self.policy["policy_ref"],
+            "policy_hash": self.policy["content_hash"],
+        })
+        self.assertEqual(
+            proof["text"], "The channel expects a two-quarter conversion window."
+        )
+        core.rows[record_id]["ticket_ref"] = "feed-run:newer"
+        with self.assertRaisesRegex(DocumentResearchConflict, "ticket differs"):
+            registry.verify_read_proof(proof)
+        core.rows[record_id]["ticket_ref"] = None
         self.assertTrue(registry.inspect_acquired_document(
             record_id=record_id, purpose="qualitative_research"
         )["available"])
@@ -910,7 +932,7 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
             "company_ref": "company:alpha-fixture",
             "source_ref": "source:alphaengine",
             "document_ref": NEW_DOC,
-            "ticket_ref": ALPHA_TICKET,
+            "ticket_ref": None,
             "status": "acquired",
         })
         acquired_registry = DocumentResearchRegistry(

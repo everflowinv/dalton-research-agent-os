@@ -676,7 +676,8 @@ class CoreAcquiredDocumentSourceAdapter:
         return _record(body)
 
     def materialize_record(
-        self, *, record_id: str
+        self, *, record_id: str,
+        acquisition_ticket_ref: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         record_id = _text(record_id, "record_id")
         rows = self.core.connection.execute(
@@ -690,8 +691,11 @@ class CoreAcquiredDocumentSourceAdapter:
         row = dict(rows[0])
         if (
             row.get("status") != "acquired"
-            or not isinstance(row.get("ticket_ref"), str)
-            or not row["ticket_ref"]
+            or row.get("ticket_ref") is not None
+            and (
+                not isinstance(row["ticket_ref"], str)
+                or not row["ticket_ref"]
+            )
         ):
             raise DocumentResearchConflict(
                 "Core row is not a readable acquired document"
@@ -702,14 +706,27 @@ class CoreAcquiredDocumentSourceAdapter:
             raise DocumentResearchConflict(
                 "Core acquired-document source has no configured adapter"
             ) from exc
+        row_ticket = row["ticket_ref"]
+        if (
+            row_ticket is not None
+            and acquisition_ticket_ref is not None
+            and acquisition_ticket_ref != row_ticket
+        ):
+            raise DocumentResearchConflict(
+                "registered ticket differs from the acquired Core row"
+            )
+        resolved_ticket = row_ticket or acquisition_ticket_ref
         registration, text = adapter.materialize(
             document_ref=row["document_ref"],
-            acquisition_ticket_ref=row["ticket_ref"],
+            acquisition_ticket_ref=resolved_ticket,
         )
         if (
             registration.get("source_ref") != row["source_ref"]
             or registration.get("document_ref") != row["document_ref"]
-            or registration.get("acquisition_ticket_ref") != row["ticket_ref"]
+            or not isinstance(registration.get("acquisition_ticket_ref"), str)
+            or not registration["acquisition_ticket_ref"]
+            or resolved_ticket is not None
+            and registration["acquisition_ticket_ref"] != resolved_ticket
         ):
             raise DocumentResearchConflict(
                 "Core acquired row and source acquisition authority disagree"
@@ -1099,7 +1116,8 @@ class DocumentResearchRegistry:
                     "Core acquired-document adapter is not configured"
                 )
             actual, text = self.acquired_document_adapter.materialize_record(
-                record_id=expected["source_authority"]["ref"]
+                record_id=expected["source_authority"]["ref"],
+                acquisition_ticket_ref=expected["acquisition_ticket_ref"],
             )
             if actual != expected:
                 raise DocumentResearchConflict("registered document authority changed")
