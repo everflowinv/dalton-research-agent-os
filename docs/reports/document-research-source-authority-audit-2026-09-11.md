@@ -119,7 +119,11 @@ policy outside that configured grant is refused.
    discovery envelope. The production factory consumes injected, already-open
    Core/spool/receipt/launcher authorities and verifies every launcher belongs
    to one state directory; it does not open or migrate authority on a read
-   path. This lets a planner use read-only spool and receipt-reader ports.
+   path. Dedicated AlphaEngine, public-web, and feed manifest readers reopen
+   existing owner-only ticket files without exposing start/status operations,
+   creating directories, or changing permissions. This lets a planner compose
+   the registry entirely from read-only spool, receipt, Core, and manifest
+   ports.
 2. **Prior research authority closure:** version the feed manifest so it binds
    `source_artifact` and `artifact-manifest.json`, records renderer/loss and
    truncation explicitly, and proves the normalized projection came from that

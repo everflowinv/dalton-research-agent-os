@@ -37,6 +37,9 @@ from tests.test_document_extraction import (
     ExtractionHarness, NEW_DOC, ORIGINAL, TICKET as ALPHA_TICKET,
 )
 from dalton_core.public_web_fetch_launcher import PublicWebFetchLauncher
+from dalton_core.public_web_fetch_launcher import ReadOnlyPublicWebFetchManifestReader
+from dalton_core.alphaengine_acquisition_launcher import ReadOnlyAlphaEngineManifestReader
+from dalton_core.feed_launcher import FeedLaunchRejected, ReadOnlyFeedManifestReader
 from dalton_core.capability_catalog import CapabilityCatalog
 from dalton_core.connector_authority_port import ConnectorCompletionReceiptReader
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -559,6 +562,71 @@ class DocumentResearchTests(unittest.TestCase):
                 },
             )
 
+    def test_read_only_feed_manifest_reader_reopens_without_state_mutation(self):
+        document_ref = "sales-note:fixture-read-only"
+        adapter, launcher, _ = self._source(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            text="Read-only source text.",
+            ticket_ref="feed-run:source",
+            doc_kind="broker_note",
+        )
+        del adapter
+        ticket_ref = "sales-notes-run:" + "6" * 24
+        tickets_dir = Path(self.temp.name) / "feed-acquisitions-sales-notes"
+        directory = tickets_dir / ("6" * 24)
+        directory.mkdir(parents=True, mode=0o700)
+        for name, value in {
+            "ticket.json": {
+                "id": ticket_ref, "status": "succeeded",
+                "document_ref": document_ref,
+                "source_ref": SALES_NOTES_SOURCE_REF,
+                "started_at": "2026-09-11T12:00:00.000000+00:00",
+            },
+            "summary.json": {
+                "status": "succeeded", "document_ref": document_ref,
+                "source_ref": SALES_NOTES_SOURCE_REF,
+                "manifest_ref": launcher.manifest["id"],
+                "manifest_hash": launcher.manifest["content_hash"],
+            },
+            "manifest.json": launcher.manifest,
+        }.items():
+            path = directory / name
+            path.write_text(__import__("json").dumps(value), encoding="utf-8")
+            path.chmod(0o600)
+        before = {
+            path: (
+                path.stat().st_mode,
+                path.stat().st_mtime_ns,
+                path.stat().st_ctime_ns,
+            )
+            for path in (Path(self.temp.name), tickets_dir, directory)
+        }
+        reader = ReadOnlyFeedManifestReader(
+            state_dir=self.temp.name, source_ref=SALES_NOTES_SOURCE_REF
+        )
+        binding = reader.locate_completed_manifest_binding(document_ref)
+        self.assertEqual(binding["ticket_ref"], ticket_ref)
+        self.assertEqual(binding["manifest"], launcher.manifest)
+        after = {
+            path: (
+                path.stat().st_mode,
+                path.stat().st_mtime_ns,
+                path.stat().st_ctime_ns,
+            )
+            for path in before
+        }
+        self.assertEqual(after, before)
+        state_link = Path(self.temp.name).with_name(
+            Path(self.temp.name).name + "-state-link"
+        )
+        state_link.symlink_to(self.temp.name, target_is_directory=True)
+        self.addCleanup(state_link.unlink)
+        with self.assertRaisesRegex(FeedLaunchRejected, "symlink"):
+            ReadOnlyFeedManifestReader(
+                state_dir=state_link, source_ref=SALES_NOTES_SOURCE_REF
+            )
+
 
 class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
     @staticmethod
@@ -612,6 +680,22 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
             path.chmod(0o600)
         self.assertEqual(
             launcher.locate_completed_manifest_binding(URL_A)["ticket_ref"], ticket
+        )
+        directory_before = (
+            launcher.tickets_dir.stat().st_mode,
+            launcher.tickets_dir.stat().st_mtime_ns,
+            launcher.tickets_dir.stat().st_ctime_ns,
+        )
+        launcher.close()
+        launcher = ReadOnlyPublicWebFetchManifestReader(state_dir=temp.name)
+        self.assertEqual(
+            launcher.locate_completed_manifest_binding(URL_A)["ticket_ref"], ticket
+        )
+        self.assertEqual(
+            (launcher.tickets_dir.stat().st_mode,
+             launcher.tickets_dir.stat().st_mtime_ns,
+             launcher.tickets_dir.stat().st_ctime_ns),
+            directory_before,
         )
         adapter = PublicWebDocumentSourceAdapter(
             source_ref=discovery["source"],
@@ -709,6 +793,23 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
             launcher.locate_completed_manifest_binding(NEW_DOC)["ticket_ref"],
             ALPHA_TICKET,
         )
+        directory_before = (
+            launcher.tickets_dir.stat().st_mode,
+            launcher.tickets_dir.stat().st_mtime_ns,
+            launcher.tickets_dir.stat().st_ctime_ns,
+        )
+        read_only_launcher = ReadOnlyAlphaEngineManifestReader(state_dir=temp.name)
+        self.assertEqual(
+            read_only_launcher.locate_completed_manifest_binding(NEW_DOC)["ticket_ref"],
+            ALPHA_TICKET,
+        )
+        self.assertEqual(
+            (read_only_launcher.tickets_dir.stat().st_mode,
+             read_only_launcher.tickets_dir.stat().st_mtime_ns,
+             read_only_launcher.tickets_dir.stat().st_ctime_ns),
+            directory_before,
+        )
+        launcher = read_only_launcher
         first_page = harness.manifest["pages"][0]
         profile = harness.h.acquisition.receipts.get_profile(
             first_page["connector_profile_ref"]

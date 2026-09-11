@@ -470,6 +470,50 @@ class PublicWebFetchLauncher:
                 current[1].kill()
 
 
+class ReadOnlyPublicWebFetchManifestReader:
+    """Read completed fetch manifests without creating or chmodding state."""
+
+    def __init__(self, *, state_dir: str | Path) -> None:
+        configured_state = Path(state_dir).expanduser()
+        if configured_state.is_symlink():
+            raise FetchLaunchError(
+                "read-only fetch manifest state directory cannot be a symlink"
+            )
+        self.state_dir = configured_state.resolve()
+        self.tickets_dir = self.state_dir / "fetches"
+        if (
+            not self.state_dir.is_dir()
+            or self.state_dir.is_symlink()
+            or not self.tickets_dir.is_dir()
+            or self.tickets_dir.is_symlink()
+        ):
+            raise FetchLaunchError(
+                "read-only fetch manifest state directory is unavailable"
+            )
+
+    def _ticket_path(self, ticket_id: str) -> Path:
+        return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
+
+    @staticmethod
+    def _fetched_url_ref(summary: Mapping[str, Any], document_ref: str) -> str:
+        return PublicWebFetchLauncher._fetched_url_ref(summary, document_ref)
+
+    def read_completed_manifest(
+        self, ticket_ref: str, document_ref: str
+    ) -> dict[str, Any]:
+        return PublicWebFetchLauncher.read_completed_manifest(
+            self, ticket_ref, document_ref
+        )
+
+    def locate_completed_manifest(self, document_ref: str) -> dict[str, Any]:
+        return self.locate_completed_manifest_binding(document_ref)["manifest"]
+
+    def locate_completed_manifest_binding(self, document_ref: str) -> dict[str, Any]:
+        return PublicWebFetchLauncher.locate_completed_manifest_binding(
+            self, document_ref
+        )
+
+
 __all__ = [
     "FetchLaunchConflict",
     "FetchLaunchError",
@@ -477,5 +521,6 @@ __all__ = [
     "FetchTicketNotFound",
     "LIVE_MODE_ARGS",
     "PublicWebFetchLauncher",
+    "ReadOnlyPublicWebFetchManifestReader",
     "TICKET_PREFIX",
 ]
