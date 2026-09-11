@@ -2,7 +2,19 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-11，01:48 UTC）
+## 当前检查点（2026-09-11，02:06 UTC）
+
+**继续完成基础产物闭环；live 保持已验收 R5 `598f285`。** ACN 10-K → 新规格 → schema 0.2 模型已自然完成，OCF/CapEx 各 13 个季度、FCF 8/8 已计算。真实导出暴露的年度 filing hash 漏项和三条现金流公式缺口已修复，并补齐 ingest/ordinal/line identity 证明；修复版 ACN Excel 的 88 个模型单元格经 LibreOffice 重算全部匹配、无公式错误。尚未部署这些导出修复。
+
+阅读页现已在候选版明确区分部分档案、全部单元已起草、当前/历史任务和人工审批；正式 memo 决策 JSON 须与行身份、公司、阶段、mission/hash 逐项匹配。23 项 authority/export 检查、13 项真实浏览器检查通过。研究质量评分的可选独立 verifier 已接入实际 CLI/config/预算合同；真实 router/scheduler/预算集成验证不同家族双路由、同家族零核验发送以及失败不得冒充 verified。合并聚焦 225 项通过，已提交。
+
+ACN 最新 Dossier 拒绝是实际内容在 variant_view 写了“低估”，被 Constitution 禁止投资结论的规则拒绝，不是日期或来源校验误报。保持原 hold。IBM 年报已成功采集，正常队列正推进规格与模型。Dossier 新单元 provenance 的旧 0.2 增量迁移及跨 mission carry-forward 仍在作者/独立审查者并行验证，不提前冻结未完成候选。
+
+本轮三份较旧部署备份已逐文件/元数据核对后压缩，保留可恢复 archive、manifest 和 verification receipts；最新三份展开备份保留，释放到约 5.1 GiB。另一会话 main 的四份 DeepSeek diff hash 仍完全不变。
+
+**Next step：** 完成 Dossier 来源记录交叉审查及五家公司实际季度/年度现金流 Excel 验收；统一冻结、全量/wheel/状态副本演练后部署。高级投资方法继续后排，资料来源批准和人类研究裁决仍是独立事项。
+
+## 前一检查点（2026-09-11，01:48 UTC）
 
 **R5 已部署并保持运行验收通过；真实基础产物尚未整体验收。** 01:37 的模型快照共 48 条正式预测线；五家公司 filing proof 可回放，经济校验报告 available。IBM 为 schema 0.2，其余四份仍是兼容读取的 0.1，不能把新输入合同下的 hash 差异说成已重新生成。IBM 实际 Excel 184 个公式，经离线 LibreOffice 重算无公式错误；当时尚缺年报和现金流驱动，年度/OCF/CapEx/FCF 明确不可用。
 
