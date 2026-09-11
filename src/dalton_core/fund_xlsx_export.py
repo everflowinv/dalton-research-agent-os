@@ -175,6 +175,8 @@ def _formula_for(
     if (formula in {
             "cost_of_revenue[k] = revenue[k] * share[k]",
             "income_tax_expense[k] = operating_income[k] * share[k]",
+            "operating_cash_flow[k] = revenue[k] * share[k]",
+            "capital_expenditure[k] = revenue[k] * share[k]",
             } or _is_operating_expense_share_formula(result, formula)) \
             and len(refs) == 1 and len(assumptions) == 1:
         return f"={refs[0]}*{assumptions[0]}"
@@ -182,6 +184,7 @@ def _formula_for(
             "gross_profit[k] = revenue[k] - cost_of_revenue[k]",
             "operating_income[k] = gross_profit[k] - sum(operating_expense[k])",
             "net_income[k] = operating_income[k] - income_tax[k]",
+            "free_cash_flow[k] = operating_cash_flow[k] - capital_expenditure[k]",
             } and len(refs) >= 2 and not assumptions):
         return f"={refs[0]}-SUM({','.join(refs[1:])})"
     return None
@@ -209,6 +212,8 @@ def _verify_translated_value(
     if expected is None and (formula in {
             "cost_of_revenue[k] = revenue[k] * share[k]",
             "income_tax_expense[k] = operating_income[k] * share[k]",
+            "operating_cash_flow[k] = revenue[k] * share[k]",
+            "capital_expenditure[k] = revenue[k] * share[k]",
             } or _is_operating_expense_share_formula(result, formula)):
         if refs and assumptions:
             expected = refs[0] * assumptions[0]
@@ -216,6 +221,7 @@ def _verify_translated_value(
             "gross_profit[k] = revenue[k] - cost_of_revenue[k]",
             "operating_income[k] = gross_profit[k] - sum(operating_expense[k])",
             "net_income[k] = operating_income[k] - income_tax[k]",
+            "free_cash_flow[k] = operating_cash_flow[k] - capital_expenditure[k]",
             } and refs and all(item is not None for item in refs):
         expected = refs[0] - sum(refs[1:], Decimal(0))
     if expected is None or "value" not in cell:
@@ -720,6 +726,48 @@ def export_fund_workbook(
             "gaps": gaps}
 
 
+def _verify_statement_filing(
+    connection: sqlite3.Connection, filing: Mapping[str, Any],
+) -> None:
+    """Replay accepted statement-line wire versions from immutable rows."""
+
+    rows = connection.execute(
+        "SELECT * FROM coverage_mission_statement_lines "
+        "WHERE ingest_id=? ORDER BY ordinal", (filing["ingest_id"],),
+    ).fetchall()
+    if len(rows) != int(filing["line_count"]):
+        raise FundWorkbookExportError("annual filing authority line count is invalid")
+    common_fields = (
+        "statement", "concept", "label", "level", "parent_concept",
+        "is_breakdown", "dimension_axis", "dimension_member", "period_start",
+        "period_end", "value", "unit", "balance",
+    )
+    line_hashes = []
+    for fields in (
+            common_fields,
+            common_fields[:8] + ("dimension_count",) + common_fields[8:]):
+        lines = []
+        for row in rows:
+            line = {field: row[field] for field in fields}
+            line["is_breakdown"] = bool(line["is_breakdown"])
+            lines.append(line)
+        line_hashes.append(content_hash(lines))
+    body = {
+        "company_ref": filing["company_ref"], "cik": filing["cik"],
+        "accession": filing["accession"], "form": filing["form"],
+        "line_count": filing["line_count"], "entity_name": filing["entity_name"],
+        "filed": filing["filed"], "report_date": filing["report_date"],
+        "source_record_refs": filing["source_record_refs"],
+        "governance_ref": filing["governance_ref"],
+        "governance_hash": filing["governance_hash"],
+    }
+    matches = [line_hash for line_hash in line_hashes
+               if content_hash({**body, "statement_lines_hash": line_hash})
+               == filing["content_hash"]]
+    if len(matches) != 1:
+        raise FundWorkbookExportError("annual filing authority hash is invalid")
+
+
 def export_company_workbook(
     core_db: Path, company_ref: str, output: Path,
     *, valuation_scenario: Mapping[str, Any] | None = None,
@@ -795,19 +843,7 @@ def export_company_workbook(
             if calendar_binding is None:
                 if annual_filings:
                     filing = latest_annual
-                    body = {
-                        "company_ref": filing["company_ref"], "cik": filing["cik"],
-                        "accession": filing["accession"], "form": filing["form"],
-                        "line_count": filing["line_count"],
-                        "entity_name": filing["entity_name"], "filed": filing["filed"],
-                        "report_date": filing["report_date"],
-                        "source_record_refs": filing["source_record_refs"],
-                        "governance_ref": filing["governance_ref"],
-                        "governance_hash": filing["governance_hash"],
-                    }
-                    if content_hash(body) != filing["content_hash"]:
-                        raise FundWorkbookExportError(
-                            "annual filing authority hash is invalid")
+                    _verify_statement_filing(store.connection, filing)
                     base = {
                         "calendar_ref": filing["ingest_id"],
                         "source_hash": filing["content_hash"],

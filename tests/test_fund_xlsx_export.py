@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -9,7 +10,9 @@ from pathlib import Path
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.fund_xlsx_export import (
     FundWorkbookExportError,
+    _formula_for,
     _four_quarter_flow_cells,
+    _verify_statement_filing,
     export_company_workbook,
     export_fund_workbook,
 )
@@ -352,6 +355,90 @@ class FundXlsxExportTests(unittest.TestCase):
         with self.assertRaisesRegex(FundWorkbookExportError, "Core database"):
             export_company_workbook(core, self.model["company_ref"], core)
         self.assertEqual(core.read_bytes(), b"sqlite authority bytes")
+
+    def test_annual_filing_hash_replays_both_statement_wire_versions(self):
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE coverage_mission_statement_lines("
+            "line_id TEXT,ingest_id TEXT,statement TEXT,ordinal INTEGER,"
+            "concept TEXT,label TEXT,level INTEGER,parent_concept TEXT,"
+            "is_breakdown INTEGER,dimension_axis TEXT,dimension_member TEXT,"
+            "dimension_count INTEGER,period_start TEXT,period_end TEXT,"
+            "value TEXT,unit TEXT,balance TEXT)")
+        stored = {
+            "line_id": "statement-ingest:test#0", "ingest_id": "statement-ingest:test",
+            "statement": "cash", "ordinal": 0, "concept": "us-gaap:Cash",
+            "label": "Cash flow", "level": 0, "parent_concept": None,
+            "is_breakdown": 0, "dimension_axis": None, "dimension_member": None,
+            "dimension_count": 0, "period_start": "2025-01-01",
+            "period_end": "2025-12-31", "value": "100", "unit": "usd",
+            "balance": None,
+        }
+        connection.execute(
+            "INSERT INTO coverage_mission_statement_lines VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            tuple(stored.values()))
+        common = {key: stored[key] for key in (
+            "statement", "concept", "label", "level", "parent_concept",
+            "is_breakdown", "dimension_axis", "dimension_member", "period_start",
+            "period_end", "value", "unit", "balance")}
+        common["is_breakdown"] = False
+        filing = {
+            "ingest_id": stored["ingest_id"], "company_ref": "company:test",
+            "cik": "0000000001", "accession": "0000000001-25-000001",
+            "form": "10-K", "line_count": 1, "entity_name": "Test",
+            "filed": "2026-01-01", "report_date": "2025-12-31",
+            "source_record_refs": ["raw-sink:" + "1" * 64],
+            "governance_ref": "governance:test", "governance_hash": "2" * 64,
+        }
+        for include_dimension_count in (False, True):
+            line = dict(common)
+            if include_dimension_count:
+                line["dimension_count"] = 0
+            filing["content_hash"] = content_hash({
+                **{key: value for key, value in filing.items()
+                   if key not in ("ingest_id", "content_hash")},
+                "statement_lines_hash": content_hash([line]),
+            })
+            _verify_statement_filing(connection, filing)
+        filing["report_date"] = "2025-11-30"
+        with self.assertRaisesRegex(FundWorkbookExportError, "authority hash"):
+            _verify_statement_filing(connection, filing)
+
+    def test_closed_cash_formulas_translate_without_display_label_inference(self):
+        period = "2027-08-31"
+        result_cells = {
+            ("result:revenue", period): "'Financials'!B5",
+            ("result:operating_cash_flow", period): "'Financials'!B12",
+            ("result:capital_expenditure", period): "'Financials'!B13",
+        }
+        assumptions = {"assumption:cash-share": "'Driver'!B20"}
+        share_cell = {
+            "result_refs": [{"ref": "result:revenue", "period_end": period}],
+            "assumption_refs": ["assumption:cash-share"],
+        }
+        ocf = {"ref": "result:operating_cash_flow", "label": "Localized label",
+               "formula": "operating_cash_flow[k] = revenue[k] * share[k]"}
+        self.assertEqual(
+            _formula_for(ocf, share_cell, period, result_cells, assumptions, {}),
+            "='Financials'!B5*'Driver'!B20",
+        )
+        fcf = {"ref": "result:free_cash_flow", "label": "Localized label",
+               "formula": (
+                   "free_cash_flow[k] = operating_cash_flow[k] "
+                   "- capital_expenditure[k]")}
+        fcf_cell = {
+            "result_refs": [
+                {"ref": "result:operating_cash_flow", "period_end": period},
+                {"ref": "result:capital_expenditure", "period_end": period},
+            ],
+            "assumption_refs": [],
+        }
+        self.assertEqual(
+            _formula_for(fcf, fcf_cell, period, result_cells, assumptions, {}),
+            "='Financials'!B12-SUM('Financials'!B13)",
+        )
 
 
 if __name__ == "__main__":
