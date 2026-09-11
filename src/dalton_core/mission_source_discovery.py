@@ -1722,7 +1722,7 @@ class MissionSourceDiscoveryCoordinator:
             for spec in self.plan["specs"]:
                 if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                         and self.source_ref == ALPHAENGINE_SOURCE_REF
-                        and spec.get("document_type") == "meeting_minutes"
+                        and spec.get("document_type") in {"meeting_minutes", "sell_side_report"}
                         and self.selection_launcher is None):
                     skipped.append({"company_ref": company_ref, "spec_ref": spec["spec_ref"],
                                     "reason": "discovery_selection configuration is required"})
@@ -1865,10 +1865,11 @@ class MissionSourceDiscoveryCoordinator:
         }
         empty_discoveries = ()
         current_selection_refs = None
+        selected_document_types = {"meeting_minutes", "sell_side_report"}
         selection_required = (
             self.source_ref == ALPHAENGINE_SOURCE_REF
             and self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
-            and any(spec.get("document_type") == "meeting_minutes" for spec in self.plan["specs"])
+            and any(spec.get("document_type") in selected_document_types for spec in self.plan["specs"])
         )
         # An empty tuple deliberately keeps failed meeting-minute acquisitions
         # behind the selection boundary when the configured selector is absent.
@@ -1903,7 +1904,7 @@ class MissionSourceDiscoveryCoordinator:
             discovery = self.missions.discovery_record(document["discovery_ref"])
             spec = next((item for item in self.plan["specs"]
                          if item["spec_ref"] == discovery["spec_ref"]), None)
-            if spec is not None and spec.get("document_type") == "meeting_minutes":
+            if spec is not None and spec.get("document_type") in selected_document_types:
                 return {"status": "selection_unavailable",
                         "reason": "discovery_selection configuration is required"}
         if (document is not None and self.selection_launcher is not None
@@ -1913,10 +1914,7 @@ class MissionSourceDiscoveryCoordinator:
             discovery=self.missions.discovery_record(document["discovery_ref"])
             spec=next((item for item in self.plan["specs"]
                        if item["spec_ref"] == discovery["spec_ref"]), None)
-            # Candidate selection currently has an earnings-call contract.
-            # Industry and sell-side discovery retain their existing governed
-            # acquisition path instead of being misclassified as calls.
-            if spec is not None and spec["document_type"] == "meeting_minutes":
+            if spec is not None and spec["document_type"] in selected_document_types:
                 try:
                     from .discovery_candidate_selection import candidate_view
                     row=self.store.connection.execute("SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",(discovery["source_envelope_ref"],)).fetchone()
@@ -1934,7 +1932,18 @@ class MissionSourceDiscoveryCoordinator:
                     ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
                         mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,
                         "ticker":member["ticker"],"aliases":list(company_plan.get("aliases") or [member["ticker"]])},
-                        missing_periods=list(item.get("missing_periods") or ()))
+                        missing_periods=(list(item.get("missing_periods") or ())
+                                         if spec["document_type"] == "meeting_minutes" else []),
+                        selection_context={
+                            "research_purpose": ("earnings_call_transcript"
+                                                 if spec["document_type"] == "meeting_minutes"
+                                                 else "sell_side_research"),
+                            "research_question": (
+                                "Find the specified company's missing quarterly earnings-call transcript."
+                                if spec["document_type"] == "meeting_minutes" else
+                                "Find research about the company, a relevant peer, or its industry that helps assess its business and key drivers."
+                            ),
+                        })
                 except Exception as exc:
                     return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
                 if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
@@ -1966,7 +1975,7 @@ class MissionSourceDiscoveryCoordinator:
                 excluded_mission_version_ref=None if mission is None else mission["id"],
                 included_document_refs=current_selection_refs,
                 restricted_spec_refs=tuple(spec['spec_ref'] for spec in self.plan['specs']
-                                           if spec.get('document_type')=='meeting_minutes'),
+                                           if spec.get('document_type') in selected_document_types),
             )
             retry = document is not None
         recovery_probe = False

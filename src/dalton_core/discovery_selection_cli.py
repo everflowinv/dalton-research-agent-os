@@ -13,7 +13,7 @@ def run(args):
         model=CockpitModel(json.loads(args.model_config.read_text()),scheduler_db=str(args.scheduler_db))
         result=CockpitDiscoveryCandidateSelector(model).select(data['view'],mission=mission,
             company=data['company'],missing_periods=data['missing_periods'],
-            recovery_epoch=data['recovery_epoch'])
+            recovery_epoch=data['recovery_epoch'],selection_context=data.get('selection_context'))
         summary.update(status='succeeded',selection=result)
     except Exception as exc: summary['failure_reason']=f'{type(exc).__name__}: {exc}'[:500]
     finally: store.close()

@@ -41,7 +41,8 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any],
             and work.get("metadata", {}).get("purpose") == "discovery_selection"
             and work.get("metadata", {}).get("mission_version_ref") == source["mission_ref"]
             and work["question"] == selection_prompt(source["view"], company=source["company"],
-                                                       missing_periods=source["missing_periods"])
+                                                       missing_periods=source["missing_periods"],
+                                                       selection_context=source.get("selection_context"))
             and canonical_json(envelope) == formal["result_envelope_json"]
             and content_hash(envelope) == formal["result_envelope_hash"]
             and content_hash(record) == formal["content_hash"]
@@ -124,6 +125,8 @@ class DiscoverySelectionLauncher:
                          "company":source['company'],
                          "missing_periods":missing_periods_by_company[company_ref],
                          "config_hash":config_hash}
+                if source.get('selection_context') is not None:
+                    current['selection_context']=source['selection_context']
                 if (marker.get('ticket_ref') == ticket.get('id')
                         and marker.get('identity_hash') == ticket.get('identity_hash')
                         and ticket.get('base_identity_hash') == content_hash(current)):
@@ -142,6 +145,8 @@ class DiscoverySelectionLauncher:
                          "company":source['company'],
                          "missing_periods":missing_periods_by_company[source['company']['company_ref']],
                          "config_hash":config_hash}
+                if source.get('selection_context') is not None:
+                    current['selection_context']=source['selection_context']
                 if (ticket['status']=='succeeded'
                         and ticket.get('base_identity_hash')==content_hash(current)):
                     result[ticket['discovery_ref']]=tuple(
@@ -150,9 +155,11 @@ class DiscoverySelectionLauncher:
                 continue
         return result
     def start(self,*,discovery_ref:str,view:Mapping[str,Any],mission_ref:str,
-              company:Mapping[str,Any],missing_periods:list[str]):
+              company:Mapping[str,Any],missing_periods:list[str],
+              selection_context:Mapping[str,Any]|None=None):
         identity={"view_hash":view['content_hash'],"mission_ref":mission_ref,"company":dict(company),
                   "missing_periods":missing_periods,"config_hash":hashlib.sha256(self.config.read_bytes()).hexdigest()}
+        if selection_context is not None:identity["selection_context"]=dict(selection_context)
         existing=self.latest(discovery_ref)
         epoch = 0
         if existing and existing.get('base_identity_hash', existing.get('identity_hash')) == content_hash(identity):
@@ -179,6 +186,7 @@ class DiscoverySelectionLauncher:
                     return {"status":"busy"}
             _write(directory/'input.json',{"view":dict(view),"mission_ref":mission_ref,
                 "company":dict(company),"missing_periods":missing_periods,
+                **({"selection_context":dict(selection_context)} if selection_context is not None else {}),
                 "identity_hash":content_hash(attempt_identity), "recovery_epoch":epoch})
             log=os.open(directory/'run.log',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
             command=[self.python,'-m','dalton_core.discovery_selection_cli',

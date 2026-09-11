@@ -22,7 +22,8 @@
         "0.2",
         "0.3",
         "0.4",
-        "0.5"
+        "0.5",
+        "0.6"
       ]
     },
     "id": {
@@ -50,6 +51,17 @@
       "minProperties": 1,
       "additionalProperties": {
         "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "ticker", "aliases"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1, "maxLength": 120},
+              "ticker": {"type": "string", "minLength": 1, "maxLength": 20},
+              "aliases": {"type": "array", "maxItems": 10, "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 80}}
+            }
+          },
           {
             "type": "object",
             "additionalProperties": false,
@@ -85,6 +97,26 @@
       "minItems": 1,
       "items": {
         "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["spec_ref", "lookback_days", "rediscovery_interval_days",
+              "retry_interval_days", "query_variants", "document_type"],
+            "properties": {
+              "spec_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+              "lookback_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+              "rediscovery_interval_days": {"type": "integer", "minimum": 1, "maximum": 365},
+              "retry_interval_days": {"type": "integer", "minimum": 1, "maximum": 365},
+              "document_type": {"type": "string"},
+              "query_variants": {"type": "array", "minItems": 1, "maxItems": 12,
+                "items": {"type": "object", "additionalProperties": false,
+                  "required": ["query_template", "filters"],
+                  "properties": {
+                    "query_template": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "filters": {"type": "object", "additionalProperties": {"type": "string"}}
+                  }}}
+            }
+          },
           {
             "type": "object",
             "additionalProperties": false,
