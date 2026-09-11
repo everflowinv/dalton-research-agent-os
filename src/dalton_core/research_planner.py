@@ -50,6 +50,7 @@ planner decides what to do next and what is worth going deeper on.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Mapping, Sequence
 
@@ -68,6 +69,29 @@ MAX_SUFFICIENCY = 12
 # the point is to let the brain say "this one needs more", not to remove the
 # bound that makes the work finite.
 MAX_REQUIRED_MULTIPLE = 3
+
+# The planner must continue to see every registered document identity as the
+# original inventory grows.  Preview bodies are useful for choosing a document,
+# but they are not authority: the eventual directed read revalidates the exact
+# registration and source bytes.  When the configured model-input budget cannot
+# carry every preview, this rule retains all identities and prior-review facts,
+# admits complete preview+proof triplets in a fair deterministic order, and
+# describes exactly what it omitted.  Changing that policy changes the prompt
+# and therefore the model Work identity.
+PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.1"
+PROMPT_PROJECTION_RULE = {
+    "ref": PROMPT_PROJECTION_REF,
+    "preserved": "the complete research state except original document preview bodies and their proof refs",
+    "preview_unit": "original_preview, preview_proof_ref and preview_proof_hash travel together",
+    "priority": [
+        "documents without a prior review",
+        "documents whose prior review is not dismissed",
+        "documents whose prior review is dismissed",
+    ],
+    "fairness": "within each priority, offer one document per company before a second",
+    "refusal": "if the complete state without preview triplets exceeds the configured input bound, send nothing",
+}
+PROMPT_PROJECTION_HASH = content_hash(PROMPT_PROJECTION_RULE)
 
 # What the dispatcher can actually do. A plan may only ask for these, because
 # a directive nobody can execute is a plan that looks like work and is not.
@@ -224,6 +248,223 @@ class ResearchPlanError(ValueError):
     """The plan is malformed, or names work that does not exist."""
 
 
+class ResearchPlanInputTooLarge(ResearchPlanError):
+    """Even the authority-preserving prompt projection exceeds its bound."""
+
+    def __init__(self, report: Mapping[str, Any]) -> None:
+        self.report = dict(report)
+        super().__init__(
+            "the research state identity inventory exceeds the configured model "
+            f"input bound by {self.report['over_by_bytes']} UTF-8 bytes"
+        )
+
+
+def _wire_bytes(value: Any) -> int:
+    return len(canonical_json(value).encode("utf-8"))
+
+
+def prompt_size_report(
+    state: Mapping[str, Any], *, max_input_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Attribute the exact prompt size without treating a token name as a guess.
+
+    ``CockpitModel`` has always enforced ``max_input_tokens`` against UTF-8
+    bytes.  This report uses the same unit and names the large state sections so
+    an operator can change the input budget or the original-preview policy with
+    evidence instead of repeatedly raising a number blind.
+    """
+
+    prompt_bytes = len(build_prompt(state).encode("utf-8"))
+    top_level = sorted(
+        ({"field": str(key), "bytes": _wire_bytes(value)}
+         for key, value in state.items()),
+        key=lambda item: (-item["bytes"], item["field"]),
+    )
+    companies = []
+    for company in state.get("companies") or []:
+        if not isinstance(company, Mapping):
+            continue
+        fields = sorted(
+            ({"field": str(key), "bytes": _wire_bytes(value)}
+             for key, value in company.items()),
+            key=lambda item: (-item["bytes"], item["field"]),
+        )
+        companies.append({
+            "company_ref": company.get("company_ref"),
+            "bytes": _wire_bytes(company),
+            "largest_fields": fields[:5],
+        })
+    companies.sort(key=lambda item: (-item["bytes"], str(item["company_ref"])))
+    report = {
+        "unit": "utf8_bytes",
+        "prompt_bytes": prompt_bytes,
+        "state_bytes": _wire_bytes(state),
+        "fixed_prompt_bytes": prompt_bytes - _wire_bytes(state),
+        "largest_state_fields": top_level[:8],
+        "largest_companies": companies,
+    }
+    if max_input_bytes is not None:
+        report.update({
+            "configured_max_input_bytes": max_input_bytes,
+            "fits": prompt_bytes <= max_input_bytes,
+            "over_by_bytes": max(0, prompt_bytes - max_input_bytes),
+        })
+    return report
+
+
+def _preview_priority(companies: Sequence[Mapping[str, Any]]) -> list[tuple[int, int]]:
+    """Document coordinates ordered by review priority and company fairness."""
+
+    buckets: dict[int, list[list[tuple[int, int]]]] = {
+        priority: [[] for _ in companies] for priority in range(3)
+    }
+    for company_index, company in enumerate(companies):
+        for document_index, document in enumerate(company.get("readable_documents") or []):
+            if not isinstance(document, Mapping) or "original_preview" not in document:
+                continue
+            review = document.get("prior_review")
+            if not isinstance(review, Mapping):
+                priority = 0
+            elif review.get("state") != "dismissed":
+                priority = 1
+            else:
+                priority = 2
+            buckets[priority][company_index].append((company_index, document_index))
+    ordered: list[tuple[int, int]] = []
+    for priority in range(3):
+        queues = buckets[priority]
+        depth = 0
+        while any(depth < len(queue) for queue in queues):
+            for queue in queues:
+                if depth < len(queue):
+                    ordered.append(queue[depth])
+            depth += 1
+    return ordered
+
+
+def project_state_for_prompt(
+    state: Mapping[str, Any], *, max_input_bytes: int,
+) -> dict[str, Any]:
+    """Fit a prompt without losing a document identity or hiding an omission.
+
+    The returned mapping is prompt material, not a replacement ResearchState.
+    Its ``content_hash`` remains the hash of the complete state used to validate
+    the response.  Only verified preview triplets may be omitted.  If that is
+    insufficient, the call is refused before routing rather than silently
+    dropping documents, feedback, figures, or checklist facts.
+    """
+
+    if isinstance(max_input_bytes, bool) or not isinstance(max_input_bytes, int) \
+            or max_input_bytes <= 0:
+        raise ResearchPlanError("the planner model input bound must be a positive integer")
+    full_prompt = build_prompt(state)
+    full_prompt_bytes = len(full_prompt.encode("utf-8"))
+    if full_prompt_bytes <= max_input_bytes:
+        return dict(state)
+
+    projected = json.loads(canonical_json(state))
+    companies = projected.get("companies") or []
+    original_companies = list(state.get("companies") or [])
+    order = _preview_priority(original_companies)
+    preview_triplets: dict[tuple[int, int], dict[str, Any]] = {}
+    identities: dict[tuple[int, int], dict[str, Any]] = {}
+    for company_index, document_index in order:
+        original = original_companies[company_index]["readable_documents"][document_index]
+        preview_triplets[(company_index, document_index)] = {
+            key: original[key] for key in (
+                "original_preview", "preview_proof_ref", "preview_proof_hash"
+            ) if key in original
+        }
+        identities[(company_index, document_index)] = {
+            "company_ref": original_companies[company_index].get("company_ref"),
+            "document_ref": original.get("document_ref"),
+            "document_version_hash": original.get("document_version_hash"),
+            "preview_proof_ref": original.get("preview_proof_ref"),
+            "preview_proof_hash": original.get("preview_proof_hash"),
+        }
+        document = companies[company_index]["readable_documents"][document_index]
+        for key in ("original_preview", "preview_proof_ref", "preview_proof_hash"):
+            document.pop(key, None)
+
+    def projection_meta(retained: set[tuple[int, int]], prompt_bytes: int | None) -> dict[str, Any]:
+        omitted = [identities[position] for position in order if position not in retained]
+        by_company: dict[str, dict[str, int]] = {}
+        for position in order:
+            company_ref = str(identities[position]["company_ref"])
+            counts = by_company.setdefault(company_ref, {"retained": 0, "omitted": 0})
+            counts["retained" if position in retained else "omitted"] += 1
+        return {
+            "schema_version": "0.1",
+            "rule_ref": PROMPT_PROJECTION_REF,
+            "rule_hash": PROMPT_PROJECTION_HASH,
+            "full_state_hash": state.get("content_hash"),
+            "full_prompt_sha256": hashlib.sha256(full_prompt.encode("utf-8")).hexdigest(),
+            "full_prompt_bytes": full_prompt_bytes,
+            "configured_max_input_bytes": max_input_bytes,
+            "projected_prompt_bytes": prompt_bytes,
+            "document_identities_preserved": True,
+            "preview_triplets_total": len(order),
+            "preview_triplets_retained": len(retained),
+            "preview_triplets_omitted": len(omitted),
+            "omitted_preview_set_hash": content_hash(omitted),
+            "preview_counts_by_company": by_company,
+            "notice": (
+                "Some verified opening previews and their proof refs were omitted "
+                "from this model prompt to fit the configured input bound. Every "
+                "document identity, version, source, completeness and prior review "
+                "remains present. An omitted preview is unread here and says nothing "
+                "about whether that document answers a question."
+            ),
+        }
+
+    retained: set[tuple[int, int]] = set()
+    projected["prompt_projection"] = projection_meta(retained, None)
+    base_report = prompt_size_report(projected, max_input_bytes=max_input_bytes)
+    if not base_report["fits"]:
+        raise ResearchPlanInputTooLarge({
+            **base_report,
+            "full_prompt_bytes": full_prompt_bytes,
+            "projection_rule_ref": PROMPT_PROJECTION_REF,
+            "document_identities_preserved": True,
+        })
+
+    # Try every preview, because a later short one may fit when an earlier long
+    # one does not. A preview and its exact proof identity are always restored as
+    # one unit.
+    for position in order:
+        company_index, document_index = position
+        document = companies[company_index]["readable_documents"][document_index]
+        document.update(preview_triplets[position])
+        candidate_retained = {*retained, position}
+        projected["prompt_projection"] = projection_meta(candidate_retained, None)
+        if len(build_prompt(projected).encode("utf-8")) <= max_input_bytes:
+            retained = candidate_retained
+        else:
+            for key in preview_triplets[position]:
+                document.pop(key, None)
+            projected["prompt_projection"] = projection_meta(retained, None)
+
+    # The byte count is part of the disclosure. Iterate to stability in case
+    # writing the decimal count changes its own number of digits.
+    prompt_bytes: int | None = None
+    for _ in range(3):
+        projected["prompt_projection"] = projection_meta(retained, prompt_bytes)
+        measured = len(build_prompt(projected).encode("utf-8"))
+        if measured == prompt_bytes:
+            break
+        prompt_bytes = measured
+    projected["prompt_projection"] = projection_meta(retained, prompt_bytes)
+    final_report = prompt_size_report(projected, max_input_bytes=max_input_bytes)
+    if not final_report["fits"]:
+        raise ResearchPlanInputTooLarge({
+            **final_report,
+            "full_prompt_bytes": full_prompt_bytes,
+            "projection_rule_ref": PROMPT_PROJECTION_REF,
+            "document_identities_preserved": True,
+        })
+    return projected
+
+
 def build_prompt(state: Mapping[str, Any]) -> str:
     return (
         "You decide what a research system works on next.\n\n"
@@ -291,6 +532,11 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "rationale. candidate_staged means a candidate awaits completion of the publication "
         "path; it does not establish a Claim or satisfy a Dossier gap. recovery_required means "
         "execution is blocked, not that the research question has no answer.\n\n"
+        "When RESEARCH_STATE carries `prompt_projection`, read its notice before using "
+        "the document inventory. Every document identity is still listed, but a document "
+        "without original_preview was not shown to you; do not infer its contents or claim "
+        "that you read it. The omission only means the configured model-input budget could "
+        "not carry every verified preview in this call.\n\n"
         "Also return `sufficiency`: for any item where the count and the truth differ, "
         "whether what is actually held answers what this stage needs. A company can hold "
         "eighteen broker reports and still hold nothing that bears on its driver; the "
@@ -638,13 +884,19 @@ __all__ = [
     "MAX_DIRECTIVES",
     "MAX_INQUIRIES",
     "OUTPUT_SCHEMA",
+    "PROMPT_PROJECTION_HASH",
+    "PROMPT_PROJECTION_REF",
+    "PROMPT_PROJECTION_RULE",
     "TASK_HASH",
     "TASK_REF",
     "ResearchPlanError",
+    "ResearchPlanInputTooLarge",
     "build_prompt",
     "build_work",
     "directives_for",
     "parse_response",
     "plan_from_response",
+    "project_state_for_prompt",
+    "prompt_size_report",
     "wanted_specs",
 ]

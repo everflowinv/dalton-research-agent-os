@@ -9,14 +9,20 @@ from dalton_core.research_planner import (
     ACTIONS,
     MAX_DIRECTIVES,
     MAX_INQUIRIES,
+    PROMPT_PROJECTION_HASH,
+    PROMPT_PROJECTION_REF,
     ResearchPlanError,
+    ResearchPlanInputTooLarge,
     build_prompt,
     build_work,
     directives_for,
     parse_response,
     plan_from_response,
+    project_state_for_prompt,
+    prompt_size_report,
     wanted_specs,
 )
+from dalton_core.store import canonical_json
 from dalton_core.research_state import build_research_state, company_state, state_digest
 
 NOW = "2026-09-08T16:00:00.000000+00:00"
@@ -301,6 +307,122 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Spend is real", prompt)
         # The state itself has to be in the prompt or the plan is a guess.
         self.assertIn("quarterly_financials", prompt)
+
+    @staticmethod
+    def document(company_ref, number, *, preview_bytes, reviewed=False):
+        digest = f"{number:064x}"
+        document = {
+            "registration_id": f"registered-document:{digest[:32]}",
+            "document_ref": f"document:{company_ref}:{number}",
+            "document_version_hash": digest,
+            "source_ref": "source:broker-research",
+            "source_content_hash": digest,
+            "readability": "complete",
+            "completeness": "complete_original",
+            "operations": ["search", "read"],
+            "original_preview": "x" * preview_bytes,
+            "preview_proof_ref": f"document-read-proof:{digest[:32]}",
+            "preview_proof_hash": digest,
+        }
+        if reviewed:
+            document["prior_review"] = {
+                "state": "reviewed",
+                "question": "Does this address the driver?",
+                "outcome": "query_miss",
+            }
+        return document
+
+    def document_state(self):
+        built = state()
+        for company_index, company in enumerate(built["companies"]):
+            company["readable_documents"] = [
+                self.document(
+                    company["company_ref"], company_index * 10 + document_index + 1,
+                    preview_bytes=1100 + document_index * 37,
+                    reviewed=document_index == 1,
+                )
+                for document_index in range(4)
+            ]
+        # This helper deliberately extends an already valid state. Bind the
+        # state identity again so the projection disclosure can prove which
+        # complete state it was derived from.
+        from dalton_core.store import content_hash
+        built.pop("content_hash", None)
+        built["content_hash"] = content_hash(built)
+        return built
+
+    def test_projection_preserves_every_document_identity_and_discloses_omissions(self):
+        built = self.document_state()
+        before = canonical_json(built)
+        full_bytes = len(build_prompt(built).encode("utf-8"))
+        identity_only = project_state_for_prompt(
+            built, max_input_bytes=full_bytes - 5_000)
+        prompt = build_prompt(identity_only)
+        meta = identity_only["prompt_projection"]
+
+        self.assertLessEqual(len(prompt.encode("utf-8")), full_bytes - 5_000)
+        self.assertEqual(canonical_json(built), before)
+        self.assertEqual(meta["rule_ref"], PROMPT_PROJECTION_REF)
+        self.assertEqual(meta["rule_hash"], PROMPT_PROJECTION_HASH)
+        self.assertEqual(meta["full_state_hash"], built["content_hash"])
+        self.assertEqual(
+            meta["projected_prompt_bytes"], len(prompt.encode("utf-8")))
+        self.assertTrue(meta["document_identities_preserved"])
+        self.assertGreater(meta["preview_triplets_retained"], 0)
+        self.assertGreater(meta["preview_triplets_omitted"], 0)
+        self.assertEqual(
+            meta["preview_triplets_total"],
+            meta["preview_triplets_retained"] + meta["preview_triplets_omitted"],
+        )
+        self.assertIn("without original_preview was not shown", prompt)
+
+        original_ids = [
+            (document["document_ref"], document["document_version_hash"])
+            for company in built["companies"]
+            for document in company["readable_documents"]
+        ]
+        projected_ids = [
+            (document["document_ref"], document["document_version_hash"])
+            for company in identity_only["companies"]
+            for document in company["readable_documents"]
+        ]
+        self.assertEqual(projected_ids, original_ids)
+        for company in identity_only["companies"]:
+            for document in company["readable_documents"]:
+                triplet = [
+                    key in document for key in (
+                        "original_preview", "preview_proof_ref", "preview_proof_hash")
+                ]
+                self.assertIn(triplet, ([True, True, True], [False, False, False]))
+
+    def test_projection_refuses_before_routing_when_identities_do_not_fit(self):
+        built = self.document_state()
+        with self.assertRaises(ResearchPlanInputTooLarge) as caught:
+            project_state_for_prompt(built, max_input_bytes=1)
+        self.assertFalse(caught.exception.report["fits"])
+        self.assertGreater(caught.exception.report["over_by_bytes"], 0)
+        self.assertTrue(caught.exception.report["document_identities_preserved"])
+        self.assertEqual(
+            caught.exception.report["projection_rule_ref"], PROMPT_PROJECTION_REF)
+
+    def test_small_state_keeps_the_historical_prompt_exact(self):
+        built = state()
+        prompt = build_prompt(built)
+        projected = project_state_for_prompt(
+            built, max_input_bytes=len(prompt.encode("utf-8")))
+        self.assertNotIn("prompt_projection", projected)
+        self.assertEqual(build_prompt(projected), prompt)
+
+    def test_size_report_attributes_the_large_company_field(self):
+        report = prompt_size_report(self.document_state(), max_input_bytes=1)
+        self.assertEqual(report["unit"], "utf8_bytes")
+        self.assertFalse(report["fits"])
+        self.assertGreater(report["over_by_bytes"], 0)
+        self.assertEqual(report["largest_state_fields"][0]["field"], "companies")
+        self.assertEqual(
+            report["largest_companies"][0]["largest_fields"][0]["field"],
+            "readable_documents",
+        )
 
 
 class PlanTests(unittest.TestCase):

@@ -42,9 +42,12 @@ from .mission_stage import (
     planned_spec_refs_from_directory,
 )
 from .research_planner import (
+    ResearchPlanInputTooLarge,
     ResearchPlanError,
     build_prompt,
     plan_from_response,
+    project_state_for_prompt,
+    prompt_size_report,
 )
 from .research_state import build_research_state, state_digest
 from .store import DaltonStore, canonical_json
@@ -73,6 +76,53 @@ def _write_owner_only(path: Path, value: Any) -> None:
     tmp.write_text(canonical_json(value) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def effective_planner_model_config(
+    *, state_dir: Path, model_config_path: Path,
+) -> dict[str, Any]:
+    """Load the route sidecar and the current explicit owner plan budget.
+
+    Model setup writes routing, retry and day-ledger authority beside Core.
+    Cockpit budget edits for purpose ``plan`` are intentionally stored in
+    ``service.json#bounded_planner.config.planner_call_budget``.  The resident
+    Writer already consumes that current service value, but this older
+    out-of-process research-planning child used to read only the sidecar, so an
+    owner input-limit change was displayed as active while this call remained
+    on its packaged default.
+
+    An absent service override preserves the child's existing sidecar/default
+    behavior.  Once the owner publishes an explicit override, it wins for new
+    calls and is frozen into CockpitModel's Work budget fingerprint.
+    """
+
+    path = model_config_path.expanduser().resolve()
+    config = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(config, Mapping):
+        raise ValueError("planner model configuration must be an object")
+    result = dict(config)
+    service_path = state_dir.expanduser().resolve().parents[1] / "config" / "service.json"
+    if not service_path.is_file():
+        return result
+    service = json.loads(service_path.read_text(encoding="utf-8"))
+    block = service.get("bounded_planner") if isinstance(service, Mapping) else None
+    nested = block.get("config") if isinstance(block, Mapping) else None
+    if not isinstance(nested, Mapping) or "planner_call_budget" not in nested:
+        return result
+    from .call_budget import default_call_budget, validate_budget_overrides
+
+    override = validate_budget_overrides(nested["planner_call_budget"])
+    effective = default_call_budget("plan", defaults={
+        "max_input_tokens": MAX_INPUT_TOKENS,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_cost_usd": MAX_COST_USD,
+        "timeout_seconds": TIMEOUT_SECONDS,
+    })
+    effective.update(override)
+    purposes = dict(result.get("purpose_call_budgets") or {})
+    purposes["plan"] = effective
+    result["purpose_call_budgets"] = purposes
+    return result
 
 
 def read_spend(store: DaltonStore, mission: Mapping[str, Any], *,
@@ -237,6 +287,7 @@ def run_planner(
         "cost_micros": 0,
         "failure_reason": None,
         "formal_authority_writes": 0,
+        "prompt_input": None,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
@@ -270,23 +321,47 @@ def run_planner(
             })
             return summary
         if dry_run or model_config_path is None:
+            prompt_report = prompt_size_report(state)
+            summary["prompt_input"] = prompt_report
             summary.update({"status": "succeeded", "plan_status": "gated",
                             "failure_reason": None if dry_run else "no planner model configured",
-                            "prompt_bytes": len(build_prompt(state).encode("utf-8"))})
+                            "prompt_bytes": prompt_report["prompt_bytes"]})
             return summary
+        model_config = effective_planner_model_config(
+            state_dir=state_dir, model_config_path=model_config_path)
         model = CockpitModel(
-            json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8")),
+            model_config,
             scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
             max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
             max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
         )
+        call_budget = model.budget_for("plan")
+        try:
+            prompt_state = project_state_for_prompt(
+                state, max_input_bytes=int(call_budget["max_input_tokens"]))
+        except ResearchPlanInputTooLarge as exc:
+            summary.update({
+                "status": "succeeded", "plan_status": "model_unavailable",
+                "failure_reason": f"{type(exc).__name__}: {exc}",
+                "prompt_bytes": exc.report["prompt_bytes"],
+                "prompt_input": exc.report,
+            })
+            return summary
+        prompt = build_prompt(prompt_state)
+        summary["prompt_bytes"] = len(prompt.encode("utf-8"))
+        summary["prompt_input"] = {
+            **prompt_size_report(
+                prompt_state, max_input_bytes=int(call_budget["max_input_tokens"])),
+            "full_state_prompt_bytes": len(build_prompt(state).encode("utf-8")),
+            "projection": prompt_state.get("prompt_projection"),
+        }
         try:
             call = model.call(
                 purpose="plan",
                 # Keyed by the state, so the same world replays instead of
                 # being paid for again.
                 request_id=state["content_hash"][:32],
-                prompt=build_prompt(state), mission=mission,
+                prompt=prompt, mission=mission,
             )
         except SchedulerError as exc:
             # The work order is keyed by the state hash, so two runs against

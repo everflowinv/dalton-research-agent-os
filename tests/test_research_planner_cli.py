@@ -11,8 +11,14 @@ from unittest.mock import patch
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.company_dossier_launcher import run_digest
 from dalton_core.model_forecast_driver import ForecastModelAuthority
-from dalton_core.research_planner_cli import MAX_COST_USD, build_state, run_planner
-from dalton_core.store import DaltonStore
+from dalton_core.research_planner import build_prompt
+from dalton_core.research_planner_cli import (
+    MAX_COST_USD,
+    build_state,
+    effective_planner_model_config,
+    run_planner,
+)
+from dalton_core.store import DaltonStore, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_model_forecast_driver import ACN, model
 
@@ -207,12 +213,73 @@ class PlannerChildTests(unittest.TestCase):
         config = self.root / "model.json"
         config.write_text("{}", encoding="utf-8")
         with patch("dalton_core.research_planner_cli.CockpitModel") as model:
+            model.return_value.budget_for.return_value = {
+                "max_input_tokens": 120_000,
+                "max_output_tokens": 4_000,
+                "max_cost_usd": 1.50,
+                "timeout_seconds": 300,
+            }
             model.return_value.call.side_effect = LeaseRejected(
                 "attempt is not the current leased attempt")
             summary = self.plan(dry_run=False, model_config_path=config)
         self.assertEqual(summary["status"], "succeeded")
         self.assertEqual(summary["plan_status"], "busy")
         self.assertIn("LeaseRejected", summary["failure_reason"])
+
+    def test_model_receives_a_bounded_prompt_without_losing_document_identities(self):
+        mission = self.publish_mission()
+        built = build_state(
+            self.store, self.missions, mission,
+            plans_dir=self.state / "discovery-plans",
+            as_of="2026-09-11T12:01:00+00:00",
+        )
+        for company_index, company in enumerate(built["companies"]):
+            company["readable_documents"] = [{
+                "registration_id": f"registered-document:{company_index:032x}",
+                "document_ref": f"document:{company['company_ref']}:original",
+                "document_version_hash": f"{company_index + 1:064x}",
+                "source_ref": "source:sales-notes",
+                "source_content_hash": f"{company_index + 1:064x}",
+                "readability": "complete",
+                "completeness": "complete_original",
+                "operations": ["search", "read"],
+                "original_preview": "original words " * 600,
+                "preview_proof_ref": f"document-read-proof:{company_index:032x}",
+                "preview_proof_hash": f"{company_index + 2:064x}",
+            }]
+        built.pop("content_hash", None)
+        built["content_hash"] = content_hash(built)
+        full_prompt_bytes = len(build_prompt(built).encode("utf-8"))
+        bound = full_prompt_bytes - 4_000
+        config = self.root / "model.json"
+        config.write_text("{}", encoding="utf-8")
+        response = json.dumps({
+            "schema_version": "0.1", "assessment": "Originals need directed review.",
+            "directives": [], "inquiries": [], "sufficiency": [],
+        })
+        with (
+            patch("dalton_core.research_planner_cli.build_state", return_value=built),
+            patch("dalton_core.research_planner_cli.CockpitModel") as model,
+        ):
+            model.return_value.budget_for.return_value = {
+                "max_input_tokens": bound,
+                "max_output_tokens": 4_000,
+                "max_cost_usd": 1.50,
+                "timeout_seconds": 300,
+            }
+            model.return_value.call.return_value = {
+                "text": response, "cost_micros": 1, "replayed": False,
+            }
+            summary = self.plan(dry_run=False, model_config_path=config)
+
+        self.assertEqual(summary["plan_status"], "fresh")
+        self.assertLessEqual(summary["prompt_bytes"], bound)
+        self.assertTrue(summary["prompt_input"]["projection"][
+            "document_identities_preserved"])
+        sent_prompt = model.return_value.call.call_args.kwargs["prompt"]
+        for company in built["companies"]:
+            self.assertIn(company["readable_documents"][0]["document_ref"], sent_prompt)
+        self.assertIn("without original_preview was not shown", sent_prompt)
 
     def test_the_lease_outlasts_the_call_it_covers(self):
         # The scheduler's default lease is 30s and its ceiling 60; a planner
@@ -224,6 +291,53 @@ class PlannerChildTests(unittest.TestCase):
 
         self.assertGreater(_LEASE_GRACE_SECONDS, 0)
         self.assertGreater(TIMEOUT_SECONDS + _LEASE_GRACE_SECONDS, TIMEOUT_SECONDS)
+
+
+class PlannerEffectiveConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state" / "dalton-core"
+        self.config_dir = self.root / "config"
+        self.state.mkdir(parents=True)
+        self.config_dir.mkdir()
+        self.model_config = self.config_dir / "research-planner-model-config.json"
+        self.model_config.write_text(
+            json.dumps({"purpose": "plan", "routing": {"profile": "owner"}}),
+            encoding="utf-8",
+        )
+
+    def service(self, value):
+        (self.config_dir / "service.json").write_text(
+            json.dumps(value), encoding="utf-8")
+
+    def test_explicit_owner_budget_is_merged_for_new_planner_work(self):
+        self.service({"bounded_planner": {"config": {"planner_call_budget": {
+            "max_input_tokens": 250_000,
+            "timeout_seconds": 720,
+        }}}})
+        result = effective_planner_model_config(
+            state_dir=self.state, model_config_path=self.model_config)
+        budget = result["purpose_call_budgets"]["plan"]
+        self.assertEqual(budget["max_input_tokens"], 250_000)
+        self.assertEqual(budget["timeout_seconds"], 720)
+        self.assertEqual(budget["max_cost_usd"], 1.50)
+        self.assertEqual(result["routing"], {"profile": "owner"})
+
+    def test_absent_owner_override_preserves_the_existing_child_behavior(self):
+        self.service({"bounded_planner": {"config": {}}})
+        result = effective_planner_model_config(
+            state_dir=self.state, model_config_path=self.model_config)
+        self.assertNotIn("purpose_call_budgets", result)
+
+    def test_invalid_owner_budget_is_refused(self):
+        self.service({"bounded_planner": {"config": {"planner_call_budget": {
+            "max_input_tokens": 0,
+        }}}})
+        with self.assertRaises(ValueError):
+            effective_planner_model_config(
+                state_dir=self.state, model_config_path=self.model_config)
 
 
 
