@@ -10,7 +10,8 @@ from pathlib import Path
 from dalton_core.document_research import build_document_research_policy
 from scripts.prepare_successor_config_transition import (
     ConfigTransitionError, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
-    apply_transition, build_transition, canonical_hash,
+    DOCUMENT_CONFIG, PRESERVED_TARGETS, apply_transition,
+    build_preserve_existing_transition, build_transition, canonical_hash,
 )
 
 
@@ -283,6 +284,171 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
         self.assertFalse((self.state / MODEL_ADDITIONS[0]).exists())
         self.assertFalse((self.state / MODEL_ADDITIONS[1]).exists())
         self.assertEqual(unrelated.read_text(), "concurrent\n")
+
+
+class PreserveExistingTransitionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.packet = self.root / "packet"; self.packet.mkdir()
+        self.state = self.root / "state"; self.state.mkdir()
+        self.service = self.root / "config/service.json"
+        self.service.parent.mkdir()
+        self.models = {
+            MODEL_ADDITIONS[0]: model("draft"),
+            MODEL_ADDITIONS[1]: model("verifier"),
+            MODEL_REPLACEMENT: model("initial"),
+            "owner-preserved-model-config.json": {
+                **model("owner"), "owner_metadata": {"signature": "owner:sig"}},
+        }
+        self.preserved = {}
+        for name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT):
+            path = self.packet / name
+            write(path, self.models[name])
+            self.preserved[name] = path
+        self.document = document_config("document-research-policy:production:1")
+        self.lane = {"schema_version": "0.1", "enabled": True}
+        for name, value in ((DOCUMENT_CONFIG, self.document), (LANE_CONFIG, self.lane)):
+            path = self.packet / name
+            write(path, value)
+            self.preserved[name] = path
+        write(self.packet / "models.json", self.models)
+        self.service_before = {
+            "bounded_planner": {"config": {"other_owner_value": "keep"}},
+            "credential": {"slot": "secret-ref"},
+            "owner_metadata": {"signature": "signed"},
+        }
+        write(self.packet / "service.before.json", self.service_before)
+        self.budget = {
+            "max_cost_usd": 3.0, "max_input_tokens": 250000,
+            "max_output_tokens": 4000, "timeout_seconds": 300,
+        }
+        after = json.loads(json.dumps(self.service_before))
+        after["bounded_planner"]["config"]["planner_call_budget"] = self.budget
+        delta = {
+            "activation": "stopped-window CAS; refuse if target bytes or expected absent path drift",
+            "after": self.budget,
+            "expected_after_sha256": hashlib.sha256(
+                (json.dumps(after, ensure_ascii=False, indent=2) + "\n").encode()).hexdigest(),
+            "expected_before": {"state": "absent"},
+            "expected_before_sha256": hashlib.sha256(
+                (self.packet / "service.before.json").read_bytes()).hexdigest(),
+            "json_path": ["bounded_planner", "config", "planner_call_budget"],
+            "preservation": "all other service configuration, model configuration and routing authority remain unchanged",
+            "schema_version": "planner-call-budget-activation-0.1",
+            "target": "config/service.json",
+        }
+        delta["content_hash"] = hashlib.sha256(json.dumps(
+            delta, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        write(self.packet / "service.delta.json", delta)
+
+    def build(self):
+        return build_preserve_existing_transition(
+            packet_root=self.packet, release_ref="code-successor",
+            source_commit="b" * 40,
+            baseline_models_path=self.packet / "models.json",
+            preserved_config_paths=self.preserved,
+            service_config_before_path=self.packet / "service.before.json",
+            service_delta_path=self.packet / "service.delta.json",
+        )
+
+    @staticmethod
+    def accepted():
+        return {
+            "state": "accepted", "health_acceptance_required": True,
+            "full_suite_receipt_sha256": "1" * 64,
+            "wheel_sha256": "2" * 64,
+            "copied_state_rehearsal_binding_sha256": "3" * 64,
+        }
+
+    def install_before(self):
+        for name, value in self.models.items():
+            write(self.state / name, value)
+        for name in (DOCUMENT_CONFIG, LANE_CONFIG):
+            (self.state / name).write_bytes(self.preserved[name].read_bytes())
+        self.service.write_bytes((self.packet / "service.before.json").read_bytes())
+
+    def apply(self, manifest, *, fault_hook=None):
+        manifest_path = self.packet / "transition.json"
+        write(manifest_path, manifest)
+        return apply_transition(
+            packet_root=self.packet, state_dir=self.state,
+            service_config_path=self.service, manifest_path=manifest_path,
+            expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            receipt_path=self.packet / "receipt.json",
+            accepted_evidence=self.accepted(), fault_hook=fault_hook,
+        )
+
+    def test_dynamic_inventory_and_five_configs_are_preserved_exactly(self):
+        manifest = self.build()
+        self.assertEqual("successor-config-transition-0.2", manifest["schema_version"])
+        self.assertEqual(4, manifest["model_inventory"]["before_count"])
+        self.assertEqual(4, manifest["model_inventory"]["after_count"])
+        self.assertEqual(set(PRESERVED_TARGETS),
+                         {row["name"] for row in manifest["targets"]})
+        self.assertTrue(all(row["kind"] == "preserve_existing"
+                            and row["before"]["sha256"] == row["after_sha256"]
+                            for row in manifest["targets"]))
+        self.install_before()
+        before = {path.name: path.read_bytes() for path in self.state.iterdir()}
+        receipt = self.apply(manifest)
+        self.assertEqual(0, receipt["configuration_mutations"])
+        self.assertEqual(1, receipt["service_config_mutations"])
+        self.assertEqual(before, {path.name: path.read_bytes()
+                                  for path in self.state.iterdir()})
+        installed = json.loads(self.service.read_text())
+        self.assertEqual(self.budget,
+                         installed["bounded_planner"]["config"]["planner_call_budget"])
+        self.assertEqual(self.service_before["owner_metadata"],
+                         installed["owner_metadata"])
+        self.assertEqual(self.service_before["credential"], installed["credential"])
+
+    def test_config_drift_refuses_before_service_mutation(self):
+        manifest = self.build(); self.install_before()
+        write(self.state / MODEL_ADDITIONS[0], {"changed": True})
+        service_before = self.service.read_bytes()
+        with self.assertRaisesRegex(ConfigTransitionError, "full model|exact bytes"):
+            self.apply(manifest)
+        self.assertEqual(service_before, self.service.read_bytes())
+
+    def test_late_failure_rolls_back_exact_service_bytes(self):
+        manifest = self.build(); self.install_before()
+        service_before = self.service.read_bytes()
+        config_before = {path.name: path.read_bytes() for path in self.state.iterdir()}
+
+        def fail(stage: str) -> None:
+            if stage == "before_receipt":
+                raise OSError("receipt failed")
+
+        with self.assertRaisesRegex(OSError, "receipt failed"):
+            self.apply(manifest, fault_hook=fail)
+        self.assertEqual(service_before, self.service.read_bytes())
+        self.assertEqual(config_before, {path.name: path.read_bytes()
+                                         for path in self.state.iterdir()})
+
+    def test_late_failure_does_not_overwrite_concurrent_service_change(self):
+        manifest = self.build(); self.install_before()
+
+        def fail(stage: str) -> None:
+            if stage == "before_receipt":
+                write(self.service, {"owner": {"concurrent": True}})
+                raise OSError("receipt failed after external change")
+
+        with self.assertRaisesRegex(
+                ConfigTransitionError, "refused to overwrite concurrent"):
+            self.apply(manifest, fault_hook=fail)
+        self.assertEqual({"owner": {"concurrent": True}},
+                         json.loads(self.service.read_text()))
+
+    def test_service_delta_cannot_overwrite_existing_budget_or_other_path(self):
+        manifest = self.build(); self.install_before()
+        changed = json.loads(self.service.read_text())
+        changed["bounded_planner"]["config"]["planner_call_budget"] = {"old": True}
+        write(self.service, changed)
+        with self.assertRaisesRegex(ConfigTransitionError, "CAS precondition"):
+            self.apply(manifest)
 
 
 if __name__ == "__main__":

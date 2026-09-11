@@ -14,6 +14,7 @@ from scripts import finalize_successor_health_candidate as final
 from scripts import observe_successor_health_candidate as health
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
+    PRESERVE_SCHEMA_VERSION,
 )
 
 
@@ -137,6 +138,53 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
             parent.assert_not_called()
             self.assertEqual({"concurrent": True},
                              json.loads((state / MODEL_ADDITIONS[0]).read_text()))
+
+    def test_preserve_existing_rollback_leaves_configs_and_restores_service(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packet = root / "packet"; packet.mkdir()
+            state = root / "state"; state.mkdir()
+            rollback = root / "rollback"; rollback.mkdir()
+            transition = packet / "transition.json"
+            write_json(transition, {
+                "schema_version": PRESERVE_SCHEMA_VERSION,
+                "targets": [{"name": name, "kind": "preserve_existing"}
+                            for name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT,
+                                         DOCUMENT_CONFIG, LANE_CONFIG)],
+            })
+            for name in (*MODEL_ADDITIONS, MODEL_REPLACEMENT,
+                         DOCUMENT_CONFIG, LANE_CONFIG):
+                write_json(state / name, {"owner": name})
+            config = root / "service.json"
+            before = root / "service.before.json"
+            after = root / "service.after.json"
+            write_json(before, {"bounded_planner": {"config": {}}})
+            write_json(after, {"bounded_planner": {"config": {
+                "planner_call_budget": {"max_cost_usd": 3.0}}}})
+            config.write_bytes(after.read_bytes())
+            exact_configs = {path.name: path.read_bytes() for path in state.iterdir()}
+            worker = execute.SuccessorOrchestrator(packet, io.StringIO())
+            worker.stopped = worker.mutations_started = True
+            worker.rollback_root = rollback
+            worker.artifacts = {
+                "transition_manifest": transition,
+                "service_config_before": before,
+                "service_config_after": after,
+            }
+
+            def parent_rollback(_worker):
+                self.assertEqual(after.read_bytes(), config.read_bytes())
+                config.write_bytes(before.read_bytes())
+                return {"status": "rolled_back_healthy"}
+
+            with patch.object(execute.r11.Orchestrator, "rollback",
+                              autospec=True, side_effect=parent_rollback) as parent:
+                result = worker.rollback()
+            parent.assert_called_once_with(worker)
+            self.assertEqual(before.read_bytes(), config.read_bytes())
+            self.assertEqual(exact_configs,
+                             {path.name: path.read_bytes() for path in state.iterdir()})
+            self.assertEqual([], result["preserved_concurrent_config_targets"])
 
     def test_health_observation_uses_manifest_bound_window(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from scripts.prepare_successor_config_transition import (
-    DOCUMENT_CONFIG, LANE_CONFIG, apply_transition_to_scratch, canonical_hash,
-    expected_transition_state,
+    DOCUMENT_CONFIG, LANE_CONFIG, PRESERVE_SCHEMA_VERSION,
+    _json_bytes, _record_hash, _service_after, _validated_service_delta,
+    apply_transition_to_scratch, canonical_hash,
+    expected_service_transition_state, expected_transition_state,
 )
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
@@ -76,21 +78,31 @@ def derive_confined_transition(
     _write_json(baseline_path, raw_models)
     supporting["baseline_model_snapshot"] = {
         "file": baseline_path.name, "sha256": _sha(baseline_path)}
-    original_audit = packet_root / manifest["supporting_evidence"][
-        "document_research_readonly_audit"]["file"]
-    _artifact(
-        original_audit,
-        manifest["supporting_evidence"]["document_research_readonly_audit"]["sha256"],
-        "original document research audit")
-    audit_path = derived_root / "document-research-readonly-audit.json"
-    _write_exclusive(audit_path, original_audit.read_bytes())
-    supporting["document_research_readonly_audit"] = {
-        "file": audit_path.name, "sha256": _sha(audit_path)}
+    if manifest.get("schema_version") != PRESERVE_SCHEMA_VERSION:
+        original_audit = packet_root / manifest["supporting_evidence"][
+            "document_research_readonly_audit"]["file"]
+        _artifact(
+            original_audit,
+            manifest["supporting_evidence"]["document_research_readonly_audit"]["sha256"],
+            "original document research audit")
+        audit_path = derived_root / "document-research-readonly-audit.json"
+        _write_exclusive(audit_path, original_audit.read_bytes())
+        supporting["document_research_readonly_audit"] = {
+            "file": audit_path.name, "sha256": _sha(audit_path)}
 
     final_models = json.loads(json.dumps(raw_models))
     for index, (original, target) in enumerate(
             zip(manifest["targets"], derived["targets"], strict=True)):
         name = original["name"]
+        if target["kind"] == "preserve_existing":
+            original_before = packet_root / original["before"]["file"]
+            _artifact(original_before, original["before"]["sha256"],
+                      f"original preserved {name}")
+            before_path = derived_root / f"{index:02d}-{name}.preserved.json"
+            _write_exclusive(before_path, (rehearsal.temp_state / name).read_bytes())
+            target["before"] = {"file": before_path.name, "sha256": _sha(before_path)}
+            target["after_sha256"] = _sha(before_path)
+            continue
         original_after = packet_root / original["after"]["file"]
         after_value = json.loads(original_after.read_text(encoding="utf-8"))
         confined_after = module.rewrite_paths(after_value, rehearsal.replacements)
@@ -108,6 +120,28 @@ def derive_confined_transition(
             target["before"] = {"file": before_path.name,
                                 "sha256": _sha(before_path)}
 
+    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        service_row = derived["service_transition"]
+        original_delta_row = manifest["service_transition"]["delta"]
+        original_delta = packet_root / original_delta_row["file"]
+        _artifact(original_delta, original_delta_row["sha256"],
+                  "original planner service budget delta")
+        delta = _validated_service_delta(json.loads(original_delta.read_text()))
+        service_before_path = derived_root / "service-config.before.json"
+        _write_exclusive(service_before_path, rehearsal.temp_config.read_bytes())
+        service_row["before"] = {
+            "file": service_before_path.name, "sha256": _sha(service_before_path)}
+        delta["expected_before_sha256"] = _sha(service_before_path)
+        scratch_before = json.loads(service_before_path.read_text())
+        scratch_after = _json_bytes(_service_after(scratch_before, delta))
+        delta["expected_after_sha256"] = hashlib.sha256(scratch_after).hexdigest()
+        delta.pop("content_hash", None)
+        delta["content_hash"] = _record_hash(delta)
+        delta_path = derived_root / "planner-call-budget.delta.json"
+        _write_json(delta_path, delta)
+        service_row["delta"] = {"file": delta_path.name, "sha256": _sha(delta_path)}
+        service_row["after_sha256"] = delta["expected_after_sha256"]
+
     derived["model_inventory"] = {
         "before_count": len(raw_models), "after_count": len(final_models),
         "before_semantic_sha256": canonical_hash(raw_models),
@@ -118,7 +152,9 @@ def derive_confined_transition(
     manifest_path = derived_root / "successor-config-transition.confined.json"
     _write_json(manifest_path, derived)
     proof = {
-        "schema_version": "successor-confined-transition-derivation-0.1",
+        "schema_version": ("successor-confined-transition-derivation-0.2"
+                           if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION
+                           else "successor-confined-transition-derivation-0.1"),
         "original_transition_manifest_sha256": original_manifest_sha256,
         "confined_transition_manifest_sha256": _sha(manifest_path),
         "replacement_map_sha256": canonical_hash(rehearsal.replacements),
@@ -210,6 +246,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     service = _json(args.service_config_snapshot,
                     args.service_config_snapshot_sha256,
                     "preserved service config snapshot")
+    expected_service = service
+    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        service_before, expected_service = expected_service_transition_state(
+            packet_root=packet_root, manifest=manifest)
+        _need(service_before == service,
+              "service snapshot differs from preserve-existing transition")
     _artifact(args.openclaw_config_snapshot,
               args.openclaw_config_snapshot_sha256, "OpenClaw config snapshot")
     module = _load_frozen_rehearsal(source_root, args.code_commit)
@@ -233,10 +275,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                   "copied live model configs differ from successor baseline")
             _need(_normalised_service_config(module, self) == service,
                   "copied live service config differs from preserved baseline")
-            _need(not (self.temp_state / DOCUMENT_CONFIG).exists(),
-                  "document research config already exists in copied baseline")
-            _need(not (self.temp_state / LANE_CONFIG).exists(),
-                  "mission document lane config already exists in copied baseline")
+            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+                current_document = json.loads(
+                    (self.temp_state / DOCUMENT_CONFIG).read_text(encoding="utf-8"))
+                current_document = module.rewrite_paths(
+                    current_document, module.invert(self.replacements))
+                _need(current_document == expected_document,
+                      "copied document research config differs from preserved baseline")
+                _need(json.loads((self.temp_state / LANE_CONFIG).read_text(
+                    encoding="utf-8")) == expected_lane,
+                    "copied mission document lane config differs from preserved baseline")
+            else:
+                _need(not (self.temp_state / DOCUMENT_CONFIG).exists(),
+                      "document research config already exists in copied baseline")
+                _need(not (self.temp_state / LANE_CONFIG).exists(),
+                      "mission document lane config already exists in copied baseline")
             confined_manifest, proof_path, proof = derive_confined_transition(
                 module, self, packet_root=packet_root, manifest=manifest,
                 original_manifest_sha256=args.transition_manifest_sha256)
@@ -246,6 +299,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 manifest_path=confined_manifest,
                 expected_manifest_sha256=_sha(confined_manifest),
                 receipt_path=temp_root / "successor-config-transition-receipt.json",
+                service_config_path=self.temp_config,
             )
             self.successor_derivation = {
                 **proof, "proof_path": str(proof_path),
@@ -272,7 +326,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     final = validate_successor_snapshots(
         module, rehearsal, expected_models=expected_models,
         expected_document=expected_document, expected_lane=expected_lane,
-        expected_service=service)
+        expected_service=expected_service)
     _verify_frozen_source(source_root, args.code_commit)
     binding = {
         "schema_version": "successor-copied-state-rehearsal-binding-0.1",

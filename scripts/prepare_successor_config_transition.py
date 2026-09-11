@@ -6,10 +6,11 @@ configs and one model-spec repair delta preserve the current model inventory,
 and that a separate document-research activation config is runnable.  The
 read-only audit config is supporting evidence only and is never installable.
 
-``--apply`` is intended for an already controlled stopped window.  It performs
-only the exact transition recorded by the prepared manifest and writes an
-exclusive receipt.  It does not stop/start services, install code, call a
-model, publish a release, or modify any other state.
+Schema 0.1 retains the original five-file activation behavior. Schema 0.2
+preserves an already-installed model/document/lane configuration and applies
+one separately reviewed planner service-budget CAS. ``--apply`` is intended
+for an already controlled stopped window and writes an exclusive receipt. It
+does not stop/start services, install code, call a model, or publish a release.
 """
 from __future__ import annotations
 
@@ -28,7 +29,9 @@ from dalton_core.document_research_inventory import validate_inventory_config
 
 
 SCHEMA_VERSION = "successor-config-transition-0.1"
+PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.2"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
+PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -38,6 +41,8 @@ MODEL_ADDITIONS = (
 MODEL_REPLACEMENT = "initial-screen-model-config.json"
 DOCUMENT_CONFIG = "document-research-config.json"
 LANE_CONFIG = "mission-document-research-lane.json"
+PRESERVED_TARGETS = (*MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG, LANE_CONFIG)
+PLANNER_BUDGET_PATH = ("bounded_planner", "config", "planner_call_budget")
 
 
 class ConfigTransitionError(RuntimeError):
@@ -58,6 +63,12 @@ def canonical_hash(value: Any) -> str:
         (json.dumps(value, ensure_ascii=False, sort_keys=True,
                     separators=(",", ":")) + "\n").encode("utf-8")
     )
+
+
+def _record_hash(value: Any) -> str:
+    return sha256_bytes(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8"))
 
 
 def _read_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
@@ -211,6 +222,166 @@ def build_transition(
     return body
 
 
+def _validated_service_delta(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version", "activation", "target", "expected_before_sha256",
+        "json_path", "expected_before", "after", "expected_after_sha256",
+        "preservation", "content_hash",
+    }
+    _need(set(value) == expected_keys
+          and value.get("schema_version") == "planner-call-budget-activation-0.1"
+          and value.get("activation")
+          == "stopped-window CAS; refuse if target bytes or expected absent path drift"
+          and value.get("target") == "config/service.json"
+          and value.get("json_path") == list(PLANNER_BUDGET_PATH)
+          and value.get("expected_before") == {"state": "absent"}
+          and value.get("preservation")
+          == "all other service configuration, model configuration and routing authority remain unchanged",
+          "planner service budget delta has an invalid closed shape")
+    after = value.get("after")
+    _need(isinstance(after, Mapping) and set(after) == {
+        "max_input_tokens", "max_output_tokens", "max_cost_usd", "timeout_seconds"}
+        and all(isinstance(after[name], int) and not isinstance(after[name], bool)
+                and after[name] > 0
+                for name in ("max_input_tokens", "max_output_tokens", "timeout_seconds"))
+        and isinstance(after["max_cost_usd"], (int, float))
+        and not isinstance(after["max_cost_usd"], bool)
+        and after["max_cost_usd"] > 0
+        and HEX64.fullmatch(str(value.get("expected_before_sha256", ""))) is not None
+        and HEX64.fullmatch(str(value.get("expected_after_sha256", ""))) is not None,
+        "planner service budget delta values are invalid")
+    unsigned = {key: item for key, item in value.items() if key != "content_hash"}
+    _need(value.get("content_hash") == _record_hash(unsigned),
+          "planner service budget delta content hash differs")
+    return json.loads(json.dumps(value))
+
+
+def _service_after(before: Mapping[str, Any], delta: Mapping[str, Any]) -> dict[str, Any]:
+    after = json.loads(json.dumps(before))
+    cursor: dict[str, Any] = after
+    for part in PLANNER_BUDGET_PATH[:-1]:
+        child = cursor.get(part)
+        _need(isinstance(child, dict),
+              "planner service budget parent path is unavailable")
+        cursor = child
+    leaf = PLANNER_BUDGET_PATH[-1]
+    _need(leaf not in cursor, "planner service budget path is no longer absent")
+    cursor[leaf] = json.loads(json.dumps(delta["after"]))
+    return after
+
+
+def _json_bytes(value: Mapping[str, Any]) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def build_preserve_existing_transition(
+    *, packet_root: Path, release_ref: str, source_commit: str,
+    baseline_models_path: Path,
+    preserved_config_paths: Mapping[str, Path],
+    service_config_before_path: Path, service_delta_path: Path,
+) -> dict[str, Any]:
+    """Build a 0.2 transition that preserves configuration and applies one service delta."""
+
+    packet_root = packet_root.resolve()
+    _need(packet_root.is_dir() and not packet_root.is_symlink(),
+          "packet root is unavailable")
+    _need(isinstance(release_ref, str) and release_ref.strip(),
+          "release ref is unresolved")
+    _need(HEX40.fullmatch(source_commit) is not None,
+          "source commit is unresolved")
+    baseline, _ = _read_json(baseline_models_path, "baseline model snapshot")
+    _need(baseline and all(isinstance(name, str)
+                           and name.endswith("-model-config.json")
+                           and isinstance(value, Mapping)
+                           for name, value in baseline.items()),
+          "baseline model inventory is invalid")
+    _need(set(preserved_config_paths) == set(PRESERVED_TARGETS),
+          "preserved target inventory differs from the five reviewed configs")
+
+    targets = []
+    for name in PRESERVED_TARGETS:
+        path = preserved_config_paths[name]
+        value, data = _read_json(path, f"preserved config {name}")
+        if name.endswith("-model-config.json"):
+            _need(name in baseline and value == baseline[name],
+                  f"{name} differs from the full model snapshot")
+            try:
+                parsed = load_annual_report_model_config(path, name)
+            except Exception as exc:
+                raise ConfigTransitionError(
+                    f"{name} is not a valid model config") from exc
+            _need(parsed == value, f"{name} is not canonical model configuration")
+        elif name == DOCUMENT_CONFIG:
+            try:
+                parsed = validate_inventory_config(value)
+            except Exception as exc:
+                raise ConfigTransitionError(
+                    "preserved document research config is invalid") from exc
+            _need(parsed == value, "preserved document research config is not canonical")
+        else:
+            _need(value == {"schema_version": "0.1", "enabled": True},
+                  "preserved mission document lane config has an invalid closed shape")
+        artifact = _artifact(path, packet_root)
+        targets.append({
+            "name": name, "kind": "preserve_existing",
+            "before": artifact, "after_sha256": sha256_bytes(data),
+        })
+
+    service_before, service_before_bytes = _read_json(
+        service_config_before_path, "service config before")
+    delta_value, _ = _read_json(service_delta_path, "planner service budget delta")
+    delta = _validated_service_delta(delta_value)
+    _need(delta["expected_before_sha256"] == sha256_bytes(service_before_bytes),
+          "planner service budget delta does not bind the service baseline")
+    service_after = _service_after(service_before, delta)
+    _need(sha256_bytes(_json_bytes(service_after)) == delta["expected_after_sha256"],
+          "planner service budget expected-after hash differs")
+
+    body = {
+        "schema_version": PRESERVE_SCHEMA_VERSION,
+        "transition_kind": "preserve_existing",
+        "status": "prepared_inert",
+        "release_ref": release_ref,
+        "source_commit": source_commit,
+        "acceptance": {
+            "state": "pending", "full_suite_receipt_sha256": None,
+            "wheel_sha256": None,
+            "copied_state_rehearsal_binding_sha256": None,
+            "health_acceptance_required": True,
+        },
+        "model_inventory": {
+            "before_count": len(baseline), "after_count": len(baseline),
+            "before_semantic_sha256": canonical_hash(baseline),
+            "after_semantic_sha256": canonical_hash(baseline),
+        },
+        "targets": targets,
+        "service_transition": {
+            "kind": "compare_and_patch",
+            "mutation_count": 1,
+            "before": _artifact(service_config_before_path, packet_root),
+            "delta": _artifact(service_delta_path, packet_root),
+            "after_sha256": delta["expected_after_sha256"],
+        },
+        "supporting_evidence": {
+            "baseline_model_snapshot": _artifact(baseline_models_path, packet_root),
+        },
+        "preserved_authorities": [
+            "all_model_configs", "five_reviewed_runtime_configs",
+            "cockpit_model_selection", "active_mission", "router_policies",
+            "openclaw_config", "host_external_configuration",
+            "connector_governance", "owner_metadata", "credentials",
+            "signatures", "disabled_thesis_impact", "backup_keep_latest_3",
+        ],
+        "boundaries": {
+            "configuration_mutations": 0, "service_config_mutations": 1,
+            "live_mutation": False, "manifest_publication": False,
+            "service_lifecycle": False, "model_calls": False,
+        },
+    }
+    body["content_hash"] = canonical_hash(body)
+    return body
+
+
 def _resolve_artifact(packet_root: Path, row: Mapping[str, Any]) -> tuple[Path, bytes]:
     _need(set(row) == {"file", "sha256"}, "artifact shape differs")
     rel = Path(row.get("file", ""))
@@ -239,18 +410,27 @@ def expected_transition_state(
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ConfigTransitionError("baseline model snapshot is invalid") from exc
     _need(isinstance(models, dict), "baseline model snapshot is invalid")
+    version = manifest.get("schema_version")
+    _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION},
+          "transition schema version is unsupported")
     document = None
     lane = None
     for row in manifest.get("targets", []):
-        if not isinstance(row, Mapping) or "after" not in row:
+        artifact = (row.get("before") if isinstance(row, Mapping)
+                    and version == PRESERVE_SCHEMA_VERSION else row.get("after")
+                    if isinstance(row, Mapping) else None)
+        if not isinstance(row, Mapping) or not isinstance(artifact, Mapping):
             raise ConfigTransitionError("transition target is invalid")
-        _, data = _resolve_artifact(packet_root, row["after"])
+        _, data = _resolve_artifact(packet_root, artifact)
         try:
             value = json.loads(data.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise ConfigTransitionError("transition target is invalid JSON") from exc
-        if row.get("name", "").endswith("-model-config.json"):
+        if row.get("name", "").endswith("-model-config.json") and version == SCHEMA_VERSION:
             models[row["name"]] = value
+        elif row.get("name", "").endswith("-model-config.json"):
+            _need(row["name"] in models and models[row["name"]] == value,
+                  "preserved model target differs from full inventory")
         elif row.get("name") == DOCUMENT_CONFIG:
             document = value
         elif row.get("name") == LANE_CONFIG:
@@ -265,6 +445,38 @@ def expected_transition_state(
     return models, document, lane
 
 
+def expected_service_transition_state(
+    *, packet_root: Path, manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the exact semantic service before/after state for a 0.2 manifest."""
+
+    _need(manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION
+          and manifest.get("transition_kind") == "preserve_existing",
+          "service transition requires preserve-existing schema 0.2")
+    row = manifest.get("service_transition")
+    _need(isinstance(row, Mapping)
+          and set(row) == {"kind", "mutation_count", "before", "delta", "after_sha256"}
+          and row.get("kind") == "compare_and_patch"
+          and row.get("mutation_count") == 1,
+          "service transition shape differs")
+    _, before_bytes = _resolve_artifact(packet_root, row["before"])
+    _, delta_bytes = _resolve_artifact(packet_root, row["delta"])
+    try:
+        before = json.loads(before_bytes.decode("utf-8"))
+        delta_value = json.loads(delta_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigTransitionError("service transition artifact is invalid JSON") from exc
+    _need(isinstance(before, dict) and isinstance(delta_value, dict),
+          "service transition artifact is invalid")
+    delta = _validated_service_delta(delta_value)
+    after = _service_after(before, delta)
+    _need(delta["expected_before_sha256"] == sha256_bytes(before_bytes)
+          and row["after_sha256"] == delta["expected_after_sha256"]
+          and sha256_bytes(_json_bytes(after)) == row["after_sha256"],
+          "service transition hashes differ")
+    return before, after
+
+
 def _fsync_directory(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -273,9 +485,202 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _apply_preserve_transition(
+    *, packet_root: Path, state_dir: Path, service_config_path: Path,
+    manifest: Mapping[str, Any], expected_manifest_sha256: str,
+    receipt_path: Path, accepted_evidence: Mapping[str, Any] | None,
+    fault_hook: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    _need(set(manifest) == {
+        "schema_version", "transition_kind", "status", "release_ref",
+        "source_commit", "acceptance", "model_inventory", "targets",
+        "service_transition", "supporting_evidence", "preserved_authorities",
+        "boundaries", "content_hash",
+    } and manifest.get("boundaries") == {
+        "configuration_mutations": 0, "service_config_mutations": 1,
+        "live_mutation": False, "manifest_publication": False,
+        "service_lifecycle": False, "model_calls": False,
+    }, "preserve-existing transition boundary differs")
+    _need(manifest.get("transition_kind") == "preserve_existing",
+          "preserve-existing transition kind differs")
+    rows = manifest.get("targets")
+    _need(isinstance(rows, list) and len(rows) == len(PRESERVED_TARGETS)
+          and {row.get("name") for row in rows if isinstance(row, Mapping)}
+          == set(PRESERVED_TARGETS),
+          "preserve-existing transition must contain the five reviewed configs")
+    supporting = manifest.get("supporting_evidence")
+    _need(isinstance(supporting, Mapping)
+          and set(supporting) == {"baseline_model_snapshot"},
+          "preserve-existing supporting evidence differs")
+    _, baseline_bytes = _resolve_artifact(
+        packet_root, supporting["baseline_model_snapshot"])
+    try:
+        baseline_models = json.loads(baseline_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigTransitionError("baseline model snapshot is invalid") from exc
+    _need(isinstance(baseline_models, dict) and baseline_models,
+          "baseline model snapshot is invalid")
+    actual_model_paths = sorted(state_dir.glob("*-model-config.json"))
+    _need(all(path.is_file() and not path.is_symlink()
+              for path in actual_model_paths),
+          "model configuration inventory contains an unsafe entry")
+    actual_models = {
+        path.name: json.loads(path.read_text(encoding="utf-8"))
+        for path in actual_model_paths
+    }
+    inventory = manifest.get("model_inventory")
+    _need(isinstance(inventory, Mapping)
+          and inventory.get("before_count") == len(baseline_models)
+          and inventory.get("after_count") == len(baseline_models)
+          and inventory.get("before_semantic_sha256") == canonical_hash(baseline_models)
+          and inventory.get("after_semantic_sha256") == canonical_hash(baseline_models)
+          and actual_models == baseline_models,
+          "full model configuration inventory differs from preserved baseline")
+    model_byte_hashes = {path.name: sha256_bytes(path.read_bytes())
+                         for path in actual_model_paths}
+
+    for row in rows:
+        _need(isinstance(row, Mapping)
+              and set(row) == {"name", "kind", "before", "after_sha256"}
+              and row.get("kind") == "preserve_existing"
+              and row.get("name") in PRESERVED_TARGETS,
+              "preserved target shape differs")
+        _, before = _resolve_artifact(packet_root, row["before"])
+        target = state_dir / row["name"]
+        _need(HEX64.fullmatch(str(row.get("after_sha256", ""))) is not None
+              and row["after_sha256"] == sha256_bytes(before)
+              and target.is_file() and not target.is_symlink()
+              and target.read_bytes() == before,
+              f"{row['name']} differs from preserved exact bytes")
+
+    service_row = manifest.get("service_transition")
+    _need(isinstance(service_row, Mapping)
+          and set(service_row) == {
+              "kind", "mutation_count", "before", "delta", "after_sha256"}
+          and service_row.get("kind") == "compare_and_patch"
+          and service_row.get("mutation_count") == 1,
+          "service transition shape differs")
+    _, service_before = _resolve_artifact(packet_root, service_row["before"])
+    _, delta_bytes = _resolve_artifact(packet_root, service_row["delta"])
+    try:
+        service_before_value = json.loads(service_before.decode("utf-8"))
+        delta_value = json.loads(delta_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigTransitionError("service transition artifact is invalid JSON") from exc
+    _need(isinstance(service_before_value, dict) and isinstance(delta_value, dict),
+          "service transition artifact is invalid")
+    delta = _validated_service_delta(delta_value)
+    _need(not service_config_path.is_symlink(),
+          "service config cannot be a symlink")
+    service_config_path = service_config_path.resolve()
+    _need(service_config_path.is_file()
+          and service_config_path.read_bytes() == service_before
+          and delta["expected_before_sha256"] == sha256_bytes(service_before)
+          and service_row["after_sha256"] == delta["expected_after_sha256"],
+          "service config differs from reviewed CAS precondition")
+    service_after = _json_bytes(_service_after(service_before_value, delta))
+    _need(sha256_bytes(service_after) == service_row["after_sha256"],
+          "service transition expected-after bytes differ")
+
+    before_mode = stat.S_IMODE(service_config_path.stat().st_mode)
+    owned_identity: tuple[int, int] | None = None
+
+    def rollback_service() -> bool:
+        if owned_identity is None:
+            return True
+        try:
+            current = service_config_path.stat()
+            if (not service_config_path.is_file() or service_config_path.is_symlink()
+                    or (current.st_dev, current.st_ino) != owned_identity
+                    or service_config_path.read_bytes() != service_after):
+                return False
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=".successor-service-rollback-",
+                dir=service_config_path.parent)
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(service_before); stream.flush(); os.fsync(stream.fileno())
+                os.chmod(temporary, before_mode)
+                os.replace(temporary, service_config_path)
+                _fsync_directory(service_config_path.parent)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".successor-service-", dir=service_config_path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(service_after); stream.flush(); os.fsync(stream.fileno())
+            os.chmod(temporary, before_mode)
+            _need(service_config_path.read_bytes() == service_before,
+                  "service config changed during compare-and-patch")
+            os.replace(temporary, service_config_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        current = service_config_path.stat()
+        owned_identity = (current.st_dev, current.st_ino)
+        _fsync_directory(service_config_path.parent)
+        if fault_hook is not None:
+            fault_hook("service_config")
+
+        after_model_paths = sorted(state_dir.glob("*-model-config.json"))
+        _need({path.name: sha256_bytes(path.read_bytes()) for path in after_model_paths}
+              == model_byte_hashes,
+              "model configuration bytes changed during service transition")
+        for row in rows:
+            target = state_dir / row["name"]
+            _need(target.is_file() and not target.is_symlink()
+                  and sha256_bytes(target.read_bytes()) == row["after_sha256"],
+                  f"{row['name']} changed during preserve-existing transition")
+        _need(service_config_path.read_bytes() == service_after,
+              "installed service config differs from reviewed result")
+        receipt = {
+            "schema_version": PRESERVE_RECEIPT_SCHEMA_VERSION,
+            "status": "configured_controller_start_pending",
+            "release_ref": manifest["release_ref"],
+            "source_commit": manifest["source_commit"],
+            "transition_manifest_sha256": expected_manifest_sha256,
+            "acceptance_evidence_hash": (
+                None if accepted_evidence is None
+                else canonical_hash(dict(accepted_evidence))
+            ),
+            "configuration_mutations": 0,
+            "model_config_byte_sha256": model_byte_hashes,
+            "preserved_targets": [
+                {"name": row["name"], "sha256": row["after_sha256"]}
+                for row in rows
+            ],
+            "service_config_mutations": 1,
+            "service_config_before_sha256": sha256_bytes(service_before),
+            "service_config_after_sha256": sha256_bytes(service_after),
+            "service_lifecycle_mutations": 0, "model_calls": 0,
+            "manifest_publication": False,
+        }
+        receipt["content_hash"] = canonical_hash(receipt)
+        if fault_hook is not None:
+            fault_hook("before_receipt")
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(_json_bytes(receipt)); stream.flush(); os.fsync(stream.fileno())
+    except Exception as exc:
+        if not rollback_service():
+            raise ConfigTransitionError(
+                "transition failed and refused to overwrite concurrent service config"
+            ) from exc
+        raise
+    return receipt
+
+
 def apply_transition(
     *, packet_root: Path, state_dir: Path, manifest_path: Path,
     expected_manifest_sha256: str, receipt_path: Path,
+    service_config_path: Path | None = None,
     fault_hook: Callable[[str], None] | None = None,
     _require_accepted: bool = True,
     accepted_evidence: Mapping[str, Any] | None = None,
@@ -291,7 +696,7 @@ def apply_transition(
           "transition manifest bytes changed")
     asserted = dict(manifest).pop("content_hash", None)
     _need(asserted == canonical_hash({k: v for k, v in manifest.items() if k != "content_hash"})
-          and manifest.get("schema_version") == SCHEMA_VERSION
+          and manifest.get("schema_version") in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -308,6 +713,17 @@ def apply_transition(
         _need(acceptance.get("state") == "pending"
               and acceptance.get("health_acceptance_required") is True,
               "scratch rehearsal requires the inert pending transition")
+
+    if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        _need(service_config_path is not None,
+              "preserve-existing transition requires the service config path")
+        return _apply_preserve_transition(
+            packet_root=packet_root, state_dir=state_dir,
+            service_config_path=service_config_path, manifest=manifest,
+            expected_manifest_sha256=expected_manifest_sha256,
+            receipt_path=receipt_path, accepted_evidence=accepted_evidence,
+            fault_hook=fault_hook,
+        )
 
     rows = manifest.get("targets")
     _need(isinstance(rows, list) and len(rows) == 5
@@ -470,6 +886,7 @@ def apply_transition(
 def apply_transition_to_scratch(
     *, packet_root: Path, scratch_root: Path, state_dir: Path,
     manifest_path: Path, expected_manifest_sha256: str, receipt_path: Path,
+    service_config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Apply a pending transition only under an explicit scratch root."""
 
@@ -481,11 +898,16 @@ def apply_transition_to_scratch(
     _need(state_dir.is_relative_to(scratch_root)
           and receipt_path.is_relative_to(scratch_root),
           "scratch transition output escapes scratch root")
+    if service_config_path is not None:
+        service_config_path = service_config_path.resolve()
+        _need(service_config_path.is_relative_to(scratch_root),
+              "scratch service config escapes scratch root")
     receipt = apply_transition(
         packet_root=packet_root, state_dir=state_dir,
         manifest_path=manifest_path,
         expected_manifest_sha256=expected_manifest_sha256,
-        receipt_path=receipt_path, _require_accepted=False,
+        receipt_path=receipt_path, service_config_path=service_config_path,
+        _require_accepted=False,
     )
     return {**receipt, "status": "scratch_configuration_applied",
             "live_mutation": False}

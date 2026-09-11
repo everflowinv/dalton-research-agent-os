@@ -4,7 +4,9 @@
 The template is inert until a frozen source, wheel, full suite, copied-state
 rehearsal, exact current snapshots and an accepted manifest are supplied.  The
 R11a helper retains ownership of stop/drain/fresh-backup/restart/rollback.  This
-module adds only the successor wheel and the five-file configuration CAS.
+module adds the successor wheel and a versioned configuration transition. The
+0.2 path preserves all installed model/document/lane bytes while applying one
+separately reviewed planner service-budget CAS.
 """
 from __future__ import annotations
 
@@ -23,7 +25,9 @@ from typing import Any, Mapping, Sequence
 from scripts import execute_r11a_stopped_window_candidate as r11
 from scripts import prepare_release_acceptance_candidate as release_acceptance
 from scripts.prepare_successor_config_transition import (
-    DOCUMENT_CONFIG, LANE_CONFIG, apply_transition, expected_transition_state,
+    DOCUMENT_CONFIG, LANE_CONFIG, PRESERVE_SCHEMA_VERSION, _json_bytes,
+    apply_transition, expected_service_transition_state,
+    expected_transition_state,
 )
 
 
@@ -163,6 +167,18 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          and binding.get("transition_manifest_sha256")
          == artifacts["transition_manifest"]["sha256"],
          "copied-state rehearsal does not bind this successor")
+    if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        service_before, service_after = expected_service_transition_state(
+            packet_root=packet, manifest=transition)
+        results = binding.get("results", {})
+        need(load_json(paths["service_config_snapshot"]) == service_before
+             and results.get("model_config_count")
+                 == transition.get("model_inventory", {}).get("after_count")
+             and results.get("model_config_semantic_sha256")
+                 == transition.get("model_inventory", {}).get("after_semantic_sha256")
+             and results.get("service_config_semantic_sha256")
+                 == canonical_hash(service_after),
+             "copied-state rehearsal does not prove the preserve-existing result")
     suite = load_json(paths["full_suite_receipt"])
     try:
         release_acceptance._validate_full_suite(
@@ -260,9 +276,21 @@ class SuccessorOrchestrator(r11.Orchestrator):
              "live service config differs from keep-latest-3 baseline")
         need(r11.OPENCLAW.read_bytes() == artifacts["openclaw_config_snapshot"].read_bytes(),
              "live OpenClaw config differs from successor baseline")
-        need(not (r11.STATE / DOCUMENT_CONFIG).exists()
-             and not (r11.STATE / LANE_CONFIG).exists(),
-             "successor exclusive config target already exists")
+        transition = load_json(artifacts["transition_manifest"])
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            _models, expected_document, expected_lane = expected_transition_state(
+                packet_root=self.packet, manifest=transition)
+            need(load_json(r11.STATE / DOCUMENT_CONFIG) == expected_document
+                 and load_json(r11.STATE / LANE_CONFIG) == expected_lane,
+                 "live preserved document configuration differs")
+            service_before, _service_after = expected_service_transition_state(
+                packet_root=self.packet, manifest=transition)
+            need(service_before == load_json(artifacts["service_config_snapshot"]),
+                 "live service snapshot differs from reviewed service transition")
+        else:
+            need(not (r11.STATE / DOCUMENT_CONFIG).exists()
+                 and not (r11.STATE / LANE_CONFIG).exists(),
+                 "successor exclusive config target already exists")
         need(load_json(r11.SERVICE_CONFIG).get("thesis_impact", {}).get("enabled") is False
              and not (r11.LAUNCH_AGENTS / "space.lumos.dalton.thesis-impact.plist").exists()
              and not self.loaded("space.lumos.dalton.thesis-impact"),
@@ -302,7 +330,19 @@ class SuccessorOrchestrator(r11.Orchestrator):
                           artifacts: Mapping[str, Path]) -> None:
         self.artifacts = dict(artifacts)
         self.artifacts["service_config_before"] = artifacts["service_config_snapshot"]
-        self.artifacts["service_config_after"] = artifacts["service_config_snapshot"]
+        transition = load_json(artifacts["transition_manifest"])
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            service_before, service_after = expected_service_transition_state(
+                packet_root=self.packet, manifest=transition)
+            need(service_before == load_json(artifacts["service_config_snapshot"]),
+                 "service transition baseline differs from packet snapshot")
+            service_after_path = self.rollback_root / "reviewed-service-config.after.json"
+            fd = os.open(service_after_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(_json_bytes(service_after)); stream.flush(); os.fsync(stream.fileno())
+            self.artifacts["service_config_after"] = service_after_path
+        else:
+            self.artifacts["service_config_after"] = artifacts["service_config_snapshot"]
         self.mutations_started = True
         self.command([str(r11.VENV / "bin/python"), "-m", "pip", "install",
                       "--disable-pip-version-check", "--no-deps", "--force-reinstall",
@@ -312,7 +352,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
             packet_root=self.packet, state_dir=r11.STATE,
             manifest_path=artifacts["transition_manifest"],
             expected_manifest_sha256=sha(artifacts["transition_manifest"]),
-            receipt_path=transition_receipt,
+            receipt_path=transition_receipt, service_config_path=r11.SERVICE_CONFIG,
             accepted_evidence=manifest["acceptance"],
         )
         rendered = self.rollback_root / "reviewed-rendered-plists"
@@ -349,9 +389,35 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(load_json(r11.STATE / DOCUMENT_CONFIG) == expected_document
              and load_json(r11.STATE / LANE_CONFIG) == expected_lane,
              "installed successor document configuration differs")
-        need(r11.SERVICE_CONFIG.read_bytes() == artifacts["service_config_snapshot"].read_bytes()
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            need(self.rollback_root is not None,
+                 "preserve-existing transition receipt is unavailable")
+            transition_receipt = load_json(
+                self.rollback_root / "successor-config-transition-receipt.json")
+            expected_model_bytes = transition_receipt.get("model_config_byte_sha256")
+            actual_model_bytes = {
+                path.name: sha(path) for path in sorted(
+                    r11.STATE.glob("*-model-config.json"))
+                if path.is_file() and not path.is_symlink()
+            }
+            need(actual_model_bytes == expected_model_bytes,
+                 "installer changed preserved model config bytes")
+            for row in transition["targets"]:
+                target = r11.STATE / row["name"]
+                need(target.is_file() and not target.is_symlink()
+                     and sha(target) == row["after_sha256"],
+                     f"installer changed preserved config bytes: {row['name']}")
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            service_before, service_after = expected_service_transition_state(
+                packet_root=self.packet, manifest=transition)
+            need(service_before == load_json(artifacts["service_config_snapshot"]),
+                 "service transition baseline differs from packet snapshot")
+            expected_service_bytes = _json_bytes(service_after)
+        else:
+            expected_service_bytes = artifacts["service_config_snapshot"].read_bytes()
+        need(r11.SERVICE_CONFIG.read_bytes() == expected_service_bytes
              and r11.OPENCLAW.read_bytes() == artifacts["openclaw_config_snapshot"].read_bytes(),
-             "installer changed preserved service or OpenClaw config")
+             "installer changed reviewed service result or preserved OpenClaw config")
         need(load_json(r11.SERVICE_CONFIG).get("thesis_impact", {}).get("enabled") is False
              and not (r11.LAUNCH_AGENTS / "space.lumos.dalton.thesis-impact.plist").exists()
              and not self.loaded("space.lumos.dalton.thesis-impact"),
@@ -374,6 +440,10 @@ class SuccessorOrchestrator(r11.Orchestrator):
              "installed successor runtime bytes differ from wheel")
         need(self.rollback_root is not None, "rollback authority is unavailable")
         initial = load_json(self.rollback_root / "initial-state.json")
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            need(r11.protected_state_hash(r11.STATE)
+                 == initial.get("protected_state_sha256"),
+                 "installer changed preserved owner metadata, credentials or signatures")
         need([label for label in r11.LABELS if self.loaded(label)] == self.initially_loaded,
              "installed service set differs from stopped-window precondition")
         for label, expected in initial.get("reviewed_rendered_plist_sha256", {}).items():
@@ -401,9 +471,15 @@ class SuccessorOrchestrator(r11.Orchestrator):
                                str(r11.SERVICE_CONFIG), "--max-age-seconds", "45"])
         need(r11.load_json_bytes(health.stdout).get("ok") is True,
              "installed successor runtime is unhealthy")
-        return {"model_config_count": len(expected_models), "runtime_files": len(files),
-                "authority": authority, "writer_lane_enabled": True,
-                "thesis_impact_enabled": False, "backup_keep_latest": 3}
+        result = {"model_config_count": len(expected_models), "runtime_files": len(files),
+                  "authority": authority, "writer_lane_enabled": True,
+                  "thesis_impact_enabled": False, "backup_keep_latest": 3}
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            result.update({
+                "configuration_mutations": 0, "service_config_mutations": 1,
+                "service_config_sha256": sha(r11.SERVICE_CONFIG),
+            })
+        return result
 
     def rollback(self):
         """Remove/restore exact successor targets, then run the R11a rollback."""
@@ -411,6 +487,9 @@ class SuccessorOrchestrator(r11.Orchestrator):
         if not self.mutations_started or self.artifacts is None or self.rollback_root is None:
             return super().rollback()
         transition = load_json(self.artifacts["transition_manifest"])
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            result = super().rollback()
+            return {**result, "preserved_concurrent_config_targets": []}
         conflicts = []
         for row in reversed(transition["targets"]):
             target = r11.STATE / row["name"]

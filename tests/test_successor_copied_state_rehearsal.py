@@ -57,7 +57,8 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         self.agents = root / "LaunchAgents"; self.agents.mkdir()
         self.config = root / "service.json"
         self.service = {"backup": {"enabled": True, "keep_latest": 3},
-                        "thesis_impact": {"enabled": False}}
+                        "thesis_impact": {"enabled": False},
+                        "bounded_planner": {"config": {}}}
         self.config.write_text(json.dumps(self.service))
         self.models = {
             "initial-screen-model-config.json": {
@@ -216,6 +217,116 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             receipt_path=scratch / "transition-receipt.json")
         self.assertEqual(receipt["status"], "scratch_configuration_applied")
         self.assertEqual(len(PathModule.model_config_inventory(scratch_state)), 3)
+
+    def test_preserve_existing_derivation_normalizes_scratch_and_only_patches_service(self):
+        root = self.state.parent
+        packet = root / "packet-v2"; packet.mkdir()
+        scratch = root / "scratch-v2"; scratch.mkdir()
+        scratch_state = scratch / "state/dalton-core"; scratch_state.mkdir(parents=True)
+        scratch_config = scratch / "config/service.json"; scratch_config.parent.mkdir()
+        live_models = {
+            "initial-screen-model-config.json": {"root": "/live/state", "kind": "initial"},
+            "mission-document-draft-model-config.json": {"root": "/live/state", "kind": "draft"},
+            "mission-document-verifier-model-config.json": {"root": "/live/state", "kind": "verify"},
+        }
+        replacements = {"/live": str(scratch)}
+        scratch_models = PathModule.rewrite_paths(live_models, replacements)
+        for name, value in scratch_models.items():
+            (scratch_state / name).write_text(json.dumps(value))
+        live_document = {"root": "/live/originals"}
+        scratch_document = PathModule.rewrite_paths(live_document, replacements)
+        (scratch_state / "document-research-config.json").write_text(
+            json.dumps(scratch_document))
+        lane = {"schema_version": "0.1", "enabled": True}
+        (scratch_state / "mission-document-research-lane.json").write_text(json.dumps(lane))
+        live_service = {"bounded_planner": {"config": {}},
+                        "owner": {"signature": "unchanged"},
+                        "root": "/live/state"}
+        scratch_service = PathModule.rewrite_paths(live_service, replacements)
+        scratch_config.write_text(json.dumps(scratch_service, indent=2) + "\n")
+        digest = lambda path: __import__('hashlib').sha256(path.read_bytes()).hexdigest()
+        (packet / "models.json").write_text(json.dumps(live_models))
+        targets = []
+        values = {**live_models, "document-research-config.json": live_document,
+                  "mission-document-research-lane.json": lane}
+        for name, value in values.items():
+            path = packet / name; path.write_text(json.dumps(value))
+            targets.append({"name": name, "kind": "preserve_existing",
+                            "before": {"file": name, "sha256": digest(path)},
+                            "after_sha256": digest(path)})
+        (packet / "service.before.json").write_text(
+            json.dumps(live_service, indent=2) + "\n")
+        budget = {"max_input_tokens": 250000, "max_output_tokens": 4000,
+                  "max_cost_usd": 3.0, "timeout_seconds": 300}
+        service_after = json.loads(json.dumps(live_service))
+        service_after["bounded_planner"]["config"]["planner_call_budget"] = budget
+        delta = {
+            "schema_version": "planner-call-budget-activation-0.1",
+            "activation": "stopped-window CAS; refuse if target bytes or expected absent path drift",
+            "target": "config/service.json",
+            "expected_before_sha256": digest(packet / "service.before.json"),
+            "json_path": ["bounded_planner", "config", "planner_call_budget"],
+            "expected_before": {"state": "absent"}, "after": budget,
+            "expected_after_sha256": __import__('hashlib').sha256(
+                (json.dumps(service_after, ensure_ascii=False, indent=2) + "\n").encode()).hexdigest(),
+            "preservation": "all other service configuration, model configuration and routing authority remain unchanged",
+        }
+        delta["content_hash"] = __import__('hashlib').sha256(json.dumps(
+            delta, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        (packet / "service.delta.json").write_text(json.dumps(delta))
+        manifest = {
+            "schema_version": "successor-config-transition-0.2",
+            "transition_kind": "preserve_existing", "status": "prepared_inert",
+            "release_ref": "test", "source_commit": "a" * 40,
+            "acceptance": {"state": "pending", "full_suite_receipt_sha256": None,
+                           "wheel_sha256": None,
+                           "copied_state_rehearsal_binding_sha256": None,
+                           "health_acceptance_required": True},
+            "model_inventory": {"before_count": 3, "after_count": 3,
+                "before_semantic_sha256": canonical_hash(live_models),
+                "after_semantic_sha256": canonical_hash(live_models)},
+            "targets": targets,
+            "service_transition": {"kind": "compare_and_patch", "mutation_count": 1,
+                "before": {"file": "service.before.json",
+                           "sha256": digest(packet / "service.before.json")},
+                "delta": {"file": "service.delta.json",
+                          "sha256": digest(packet / "service.delta.json")},
+                "after_sha256": delta["expected_after_sha256"]},
+            "supporting_evidence": {"baseline_model_snapshot": {
+                "file": "models.json", "sha256": digest(packet / "models.json")}},
+            "preserved_authorities": [], "boundaries": {
+                "configuration_mutations": 0, "service_config_mutations": 1,
+                "live_mutation": False, "manifest_publication": False,
+                "service_lifecycle": False, "model_calls": False},
+        }
+        manifest["content_hash"] = canonical_hash(manifest)
+        rehearsal = SimpleNamespace(temp_root=scratch, temp_state=scratch_state,
+                                    temp_config=scratch_config, replacements=replacements)
+        derived_path, _proof_path, proof = derive_confined_transition(
+            PathModule, rehearsal, packet_root=packet, manifest=manifest,
+            original_manifest_sha256="b" * 64)
+        derived = json.loads(derived_path.read_text())
+        self.assertEqual("successor-confined-transition-derivation-0.2",
+                         proof["schema_version"])
+        before_config_bytes = {path.name: path.read_bytes()
+                               for path in scratch_state.iterdir()}
+        receipt = apply_transition_to_scratch(
+            packet_root=derived_path.parent, scratch_root=scratch,
+            state_dir=scratch_state, service_config_path=scratch_config,
+            manifest_path=derived_path, expected_manifest_sha256=digest(derived_path),
+            receipt_path=scratch / "transition-receipt.json")
+        self.assertEqual(0, receipt["configuration_mutations"])
+        self.assertEqual(1, receipt["service_config_mutations"])
+        self.assertEqual(before_config_bytes, {path.name: path.read_bytes()
+                                               for path in scratch_state.iterdir()})
+        installed = json.loads(scratch_config.read_text())
+        self.assertEqual(budget,
+                         installed["bounded_planner"]["config"]["planner_call_budget"])
+        self.assertEqual("unchanged", installed["owner"]["signature"])
+        self.assertNotIn("/live", json.dumps(installed))
+        self.assertEqual(derived["model_inventory"]["before_count"],
+                         derived["model_inventory"]["after_count"])
 
 
 if __name__ == "__main__":
