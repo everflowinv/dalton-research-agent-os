@@ -280,6 +280,7 @@ def build_preserve_existing_transition(
     baseline_models_path: Path,
     model_config_paths: Mapping[str, Path],
     preserved_config_paths: Mapping[str, Path],
+    preserved_state_authority_paths: Mapping[str, Path],
     service_config_before_path: Path, service_delta_path: Path,
 ) -> dict[str, Any]:
     """Build a 0.2 transition that preserves configuration and applies one service delta."""
@@ -310,6 +311,27 @@ def build_preserve_existing_transition(
               f"model config artifact differs from snapshot: {name}")
         model_artifacts[name] = _artifact(path, packet_root)
         model_file_hashes[name] = sha256_bytes(data)
+    _need(bool(preserved_state_authority_paths),
+          "preserved state authority inventory is empty")
+    preserved_state_authorities = []
+    for relative, path in sorted(preserved_state_authority_paths.items()):
+        rel = Path(relative)
+        _need(isinstance(relative, str) and relative
+              and not rel.is_absolute() and ".." not in rel.parts
+              and rel.suffix == ".json" and len(rel.parts) >= 2,
+              "preserved state authority path is unsafe")
+        value, data = _read_json(path, f"preserved state authority {relative}")
+        asserted = value.get("content_hash")
+        unsigned = {key: item for key, item in value.items() if key != "content_hash"}
+        _need(value.get("status") == "approved"
+              and HEX64.fullmatch(str(asserted or "")) is not None
+              and asserted == _record_hash(unsigned),
+              f"preserved state authority is not approved and canonical: {relative}")
+        preserved_state_authorities.append({
+            "path": rel.as_posix(), "before": _artifact(path, packet_root),
+            "after_sha256": sha256_bytes(data),
+            "content_hash": asserted, "status": "approved",
+        })
 
     targets = []
     for name in PRESERVED_TARGETS:
@@ -371,6 +393,7 @@ def build_preserve_existing_transition(
             "file_sha256": model_file_hashes,
         },
         "targets": targets,
+        "preserved_state_authorities": preserved_state_authorities,
         "service_transition": {
             "kind": "compare_and_patch",
             "mutation_count": 1,
@@ -494,6 +517,58 @@ def expected_service_transition_state(
     return before, after
 
 
+def verify_preserved_state_authorities(
+    *, packet_root: Path, state_dir: Path, manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Verify exact approved authority bytes without mutating the state tree."""
+
+    rows = manifest.get("preserved_state_authorities")
+    _need(isinstance(rows, list) and rows,
+          "preserved state authority inventory is absent")
+    _need(state_dir.is_dir() and not state_dir.is_symlink(),
+          "preserved state authority root is unsafe")
+    paths = []
+    verified = []
+    for row in rows:
+        _need(isinstance(row, Mapping)
+              and set(row) == {"path", "before", "after_sha256",
+                               "content_hash", "status"}
+              and row.get("status") == "approved",
+              "preserved state authority row differs")
+        rel = Path(str(row.get("path", "")))
+        _need(not rel.is_absolute() and ".." not in rel.parts
+              and rel.suffix == ".json" and len(rel.parts) >= 2
+              and rel.as_posix() not in paths,
+              "preserved state authority path is unsafe or duplicated")
+        paths.append(rel.as_posix())
+        _, reviewed = _resolve_artifact(packet_root, row["before"])
+        target = state_dir / rel
+        ancestors = [state_dir.joinpath(*rel.parts[:index])
+                     for index in range(1, len(rel.parts))]
+        _need(target.is_file() and not target.is_symlink()
+              and all(path.is_dir() and not path.is_symlink()
+                      for path in ancestors)
+              and target.resolve().is_relative_to(state_dir.resolve())
+              and target.read_bytes() == reviewed
+              and row.get("after_sha256") == sha256_bytes(reviewed),
+              f"preserved state authority bytes differ: {rel.as_posix()}")
+        try:
+            value = json.loads(reviewed.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigTransitionError(
+                f"preserved state authority is invalid JSON: {rel.as_posix()}") from exc
+        _need(isinstance(value, dict) and value.get("status") == "approved"
+              and value.get("content_hash") == row.get("content_hash")
+              and value["content_hash"] == _record_hash({
+                  key: item for key, item in value.items() if key != "content_hash"}),
+              f"preserved state authority content differs: {rel.as_posix()}")
+        verified.append({"path": rel.as_posix(),
+                         "sha256": row["after_sha256"],
+                         "content_hash": row["content_hash"],
+                         "status": "approved"})
+    return verified
+
+
 def _fsync_directory(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -511,7 +586,8 @@ def _apply_preserve_transition(
     _need(set(manifest) == {
         "schema_version", "transition_kind", "status", "release_ref",
         "source_commit", "acceptance", "model_inventory", "targets",
-        "service_transition", "supporting_evidence", "preserved_authorities",
+        "preserved_state_authorities", "service_transition",
+        "supporting_evidence", "preserved_authorities",
         "boundaries", "content_hash",
     } and manifest.get("boundaries") == {
         "configuration_mutations": 0, "service_config_mutations": 1,
@@ -581,7 +657,10 @@ def _apply_preserve_transition(
               and row["after_sha256"] == sha256_bytes(before)
               and target.is_file() and not target.is_symlink()
               and target.read_bytes() == before,
-              f"{row['name']} differs from preserved exact bytes")
+                  f"{row['name']} differs from preserved exact bytes")
+
+    verified_state_authorities = verify_preserved_state_authorities(
+        packet_root=packet_root, state_dir=state_dir, manifest=manifest)
 
     service_row = manifest.get("service_transition")
     _need(isinstance(service_row, Mapping)
@@ -691,6 +770,10 @@ def _apply_preserve_transition(
             _need(target.is_file() and not target.is_symlink()
                   and sha256_bytes(target.read_bytes()) == row["after_sha256"],
                   f"{row['name']} changed during preserve-existing transition")
+        _need(verify_preserved_state_authorities(
+            packet_root=packet_root, state_dir=state_dir, manifest=manifest)
+            == verified_state_authorities,
+            "preserved state authority changed during service transition")
         _need(service_config_path.read_bytes() == service_after,
               "installed service config differs from reviewed result")
         receipt = {
@@ -709,6 +792,7 @@ def _apply_preserve_transition(
                 {"name": row["name"], "sha256": row["after_sha256"]}
                 for row in rows
             ],
+            "preserved_state_authorities": verified_state_authorities,
             "service_config_mutations": 1,
             "service_config_before_sha256": sha256_bytes(service_before),
             "service_config_after_sha256": sha256_bytes(service_after),

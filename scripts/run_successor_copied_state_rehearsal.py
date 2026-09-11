@@ -143,6 +143,25 @@ def derive_confined_transition(
                                 "sha256": _sha(before_path)}
 
     if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+        authority_root = derived_root / "preserved-state-authorities"
+        authority_root.mkdir(mode=0o700)
+        for index, (original, target) in enumerate(zip(
+                manifest["preserved_state_authorities"],
+                derived["preserved_state_authorities"], strict=True)):
+            original_path = packet_root / original["before"]["file"]
+            _artifact(original_path, original["before"]["sha256"],
+                      f"original preserved state authority {original['path']}")
+            scratch_path = rehearsal.temp_state / original["path"]
+            _need(scratch_path.is_file() and not scratch_path.is_symlink(),
+                  f"copied preserved state authority is absent: {original['path']}")
+            confined = authority_root / f"{index:02d}.json"
+            _write_exclusive(confined, scratch_path.read_bytes())
+            target["before"] = {
+                "file": confined.relative_to(derived_root).as_posix(),
+                "sha256": _sha(confined),
+            }
+            target["after_sha256"] = _sha(confined)
+
         service_row = derived["service_transition"]
         original_delta_row = manifest["service_transition"]["delta"]
         original_delta = packet_root / original_delta_row["file"]

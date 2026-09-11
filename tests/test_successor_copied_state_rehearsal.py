@@ -294,6 +294,14 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             json.dumps(scratch_document))
         lane = {"schema_version": "0.1", "enabled": True}
         (scratch_state / "mission-document-research-lane.json").write_text(json.dumps(lane))
+        authority = {"schema_version": "0.1", "status": "approved",
+                     "id": "connector-governance:test:v1"}
+        authority["content_hash"] = __import__('hashlib').sha256(json.dumps(
+            authority, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        (packet / "authority.json").write_text(json.dumps(authority))
+        scratch_authority = scratch_state / "connector-governance/authority.json"
+        scratch_authority.parent.mkdir()
+        scratch_authority.write_text(json.dumps(authority))
         live_service = {"bounded_planner": {"config": {}},
                         "owner": {"signature": "unchanged"},
                         "root": "/live/state"}
@@ -344,6 +352,12 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 "file_sha256": {name: digest(packet / name)
                                 for name in live_models}},
             "targets": targets,
+            "preserved_state_authorities": [{
+                "path": "connector-governance/authority.json",
+                "before": {"file": "authority.json",
+                           "sha256": digest(packet / "authority.json")},
+                "after_sha256": digest(packet / "authority.json"),
+                "content_hash": authority["content_hash"], "status": "approved"}],
             "service_transition": {"kind": "compare_and_patch", "mutation_count": 1,
                 "before": {"file": "service.before.json",
                            "sha256": digest(packet / "service.before.json")},
@@ -369,8 +383,10 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         derived = json.loads(derived_path.read_text())
         self.assertEqual("successor-confined-transition-derivation-0.2",
                          proof["schema_version"])
-        before_config_bytes = {path.name: path.read_bytes()
-                               for path in scratch_state.iterdir()}
+        before_config_bytes = {
+            path.relative_to(scratch_state).as_posix(): path.read_bytes()
+            for path in scratch_state.rglob("*") if path.is_file()
+        }
         receipt = apply_transition_to_scratch(
             packet_root=derived_path.parent, scratch_root=scratch,
             state_dir=scratch_state, service_config_path=scratch_config,
@@ -378,8 +394,14 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             receipt_path=scratch / "transition-receipt.json")
         self.assertEqual(0, receipt["configuration_mutations"])
         self.assertEqual(1, receipt["service_config_mutations"])
-        self.assertEqual(before_config_bytes, {path.name: path.read_bytes()
-                                               for path in scratch_state.iterdir()})
+        self.assertEqual(before_config_bytes, {
+            path.relative_to(scratch_state).as_posix(): path.read_bytes()
+            for path in scratch_state.rglob("*") if path.is_file()
+        })
+        self.assertEqual(
+            "connector-governance/authority.json",
+            receipt["preserved_state_authorities"][0]["path"],
+        )
         installed = json.loads(scratch_config.read_text())
         self.assertEqual(budget,
                          installed["bounded_planner"]["config"]["planner_call_budget"])

@@ -27,7 +27,7 @@ from scripts import prepare_release_acceptance_candidate as release_acceptance
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, LANE_CONFIG, PRESERVE_SCHEMA_VERSION, _json_bytes,
     apply_transition, expected_service_transition_state,
-    expected_transition_state,
+    expected_transition_state, verify_preserved_state_authorities,
 )
 
 
@@ -287,6 +287,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 packet_root=self.packet, manifest=transition)
             need(service_before == load_json(artifacts["service_config_snapshot"]),
                  "live service snapshot differs from reviewed service transition")
+            state_authorities = verify_preserved_state_authorities(
+                packet_root=self.packet, state_dir=r11.STATE, manifest=transition)
         else:
             need(not (r11.STATE / DOCUMENT_CONFIG).exists()
                  and not (r11.STATE / LANE_CONFIG).exists(),
@@ -323,8 +325,11 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(all(path.exists() and path.resolve().is_file()
                  and os.access(path, os.X_OK) for path in executables),
              "deployment executable is unavailable")
-        return {"source": source, "authority": authority,
-                "provider_plugin_tree_sha256": plugin}
+        result = {"source": source, "authority": authority,
+                  "provider_plugin_tree_sha256": plugin}
+        if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+            result["preserved_state_authorities"] = state_authorities
+        return result
 
     def install_successor(self, source: Path, manifest: Mapping[str, Any],
                           artifacts: Mapping[str, Path]) -> None:
@@ -407,6 +412,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 need(target.is_file() and not target.is_symlink()
                      and sha(target) == row["after_sha256"],
                      f"installer changed preserved config bytes: {row['name']}")
+            state_authorities = verify_preserved_state_authorities(
+                packet_root=self.packet, state_dir=r11.STATE, manifest=transition)
         if transition.get("schema_version") == PRESERVE_SCHEMA_VERSION:
             service_before, service_after = expected_service_transition_state(
                 packet_root=self.packet, manifest=transition)
@@ -478,6 +485,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
             result.update({
                 "configuration_mutations": 0, "service_config_mutations": 1,
                 "service_config_sha256": sha(r11.SERVICE_CONFIG),
+                "preserved_state_authorities": state_authorities,
             })
         return result
 

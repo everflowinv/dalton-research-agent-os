@@ -316,6 +316,12 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             write(path, value)
             self.preserved[name] = path
         write(self.packet / "models.json", self.models)
+        authority = {"schema_version": "0.1", "status": "approved",
+                     "id": "connector-governance:test:v1"}
+        authority["content_hash"] = hashlib.sha256(json.dumps(
+            authority, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        write(self.packet / "yfinance-approved.json", authority)
         self.service_before = {
             "bounded_planner": {"config": {"other_owner_value": "keep"}},
             "credential": {"slot": "secret-ref"},
@@ -353,6 +359,9 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             baseline_models_path=self.packet / "models.json",
             model_config_paths={name: self.packet / name for name in self.models},
             preserved_config_paths=self.preserved,
+            preserved_state_authority_paths={
+                "connector-governance/yfinance-analyst-estimates-v1.json":
+                    self.packet / "yfinance-approved.json"},
             service_config_before_path=self.packet / "service.before.json",
             service_delta_path=self.packet / "service.delta.json",
         )
@@ -372,6 +381,14 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         for name in (DOCUMENT_CONFIG, LANE_CONFIG):
             (self.state / name).write_bytes(self.preserved[name].read_bytes())
         self.service.write_bytes((self.packet / "service.before.json").read_bytes())
+        governance = self.state / "connector-governance"
+        governance.mkdir()
+        (governance / "yfinance-analyst-estimates-v1.json").write_bytes(
+            (self.packet / "yfinance-approved.json").read_bytes())
+
+    def state_files(self):
+        return {path.relative_to(self.state).as_posix(): path.read_bytes()
+                for path in self.state.rglob("*") if path.is_file()}
 
     def apply(self, manifest, *, fault_hook=None):
         manifest_path = self.packet / "transition.json"
@@ -395,18 +412,25 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                             and row["before"]["sha256"] == row["after_sha256"]
                             for row in manifest["targets"]))
         self.install_before()
-        before = {path.name: path.read_bytes() for path in self.state.iterdir()}
+        before = self.state_files()
         receipt = self.apply(manifest)
         self.assertEqual(0, receipt["configuration_mutations"])
         self.assertEqual(1, receipt["service_config_mutations"])
-        self.assertEqual(before, {path.name: path.read_bytes()
-                                  for path in self.state.iterdir()})
+        self.assertEqual(before, self.state_files())
         installed = json.loads(self.service.read_text())
         self.assertEqual(self.budget,
                          installed["bounded_planner"]["config"]["planner_call_budget"])
         self.assertEqual(self.service_before["owner_metadata"],
                          installed["owner_metadata"])
         self.assertEqual(self.service_before["credential"], installed["credential"])
+        self.assertEqual([{
+            "path": "connector-governance/yfinance-analyst-estimates-v1.json",
+            "sha256": hashlib.sha256(
+                (self.packet / "yfinance-approved.json").read_bytes()).hexdigest(),
+            "content_hash": json.loads(
+                (self.packet / "yfinance-approved.json").read_text())["content_hash"],
+            "status": "approved",
+        }], receipt["preserved_state_authorities"])
 
     def test_config_drift_refuses_before_service_mutation(self):
         manifest = self.build(); self.install_before()
@@ -423,6 +447,36 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigTransitionError, "full model"):
             self.apply(manifest)
 
+    def test_approved_state_authority_drift_refuses_before_service_mutation(self):
+        manifest = self.build(); self.install_before()
+        target = (self.state / "connector-governance" /
+                  "yfinance-analyst-estimates-v1.json")
+        changed = json.loads(target.read_text())
+        changed["status"] = "proposed"
+        unsigned = {key: value for key, value in changed.items()
+                    if key != "content_hash"}
+        changed["content_hash"] = hashlib.sha256(json.dumps(
+            unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        write(target, changed)
+        service_before = self.service.read_bytes()
+        with self.assertRaisesRegex(ConfigTransitionError,
+                                    "state authority bytes differ"):
+            self.apply(manifest)
+        self.assertEqual(service_before, self.service.read_bytes())
+
+    def test_state_authority_symlinked_ancestor_refuses_before_service_mutation(self):
+        manifest = self.build(); self.install_before()
+        governance = self.state / "connector-governance"
+        external = self.root / "external-governance"
+        governance.rename(external)
+        governance.symlink_to(external, target_is_directory=True)
+        service_before = self.service.read_bytes()
+        with self.assertRaisesRegex(ConfigTransitionError,
+                                    "state authority bytes differ"):
+            self.apply(manifest)
+        self.assertEqual(service_before, self.service.read_bytes())
+        self.assertTrue(governance.is_symlink())
+
     def test_nonfinite_service_budget_is_rejected_by_runtime_validator(self):
         delta_path = self.packet / "service.delta.json"
         delta = json.loads(delta_path.read_text())
@@ -438,7 +492,7 @@ class PreserveExistingTransitionTests(unittest.TestCase):
     def test_late_failure_rolls_back_exact_service_bytes(self):
         manifest = self.build(); self.install_before()
         service_before = self.service.read_bytes()
-        config_before = {path.name: path.read_bytes() for path in self.state.iterdir()}
+        config_before = self.state_files()
 
         def fail(stage: str) -> None:
             if stage == "before_receipt":
@@ -447,8 +501,7 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "receipt failed"):
             self.apply(manifest, fault_hook=fail)
         self.assertEqual(service_before, self.service.read_bytes())
-        self.assertEqual(config_before, {path.name: path.read_bytes()
-                                         for path in self.state.iterdir()})
+        self.assertEqual(config_before, self.state_files())
 
     def test_late_failure_does_not_overwrite_concurrent_service_change(self):
         manifest = self.build(); self.install_before()
