@@ -29,6 +29,7 @@ from .guidepoint_acquisition import (
 from .public_web_extraction_source import verified_public_web_source
 from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 from .store import canonical_json, content_hash
+from .document_reading_limits import resolve_reading_limits
 from .transcript_candidate_staging import TranscriptCoreAuthorityResolver
 from .transcript_polish_model_worker import RoutedTranscriptPolishModelWorker
 
@@ -83,7 +84,7 @@ def validate_model_config(value):
     required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
                 "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
-                "capacity_retry"}
+                "capacity_retry", "reading_limits"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -107,6 +108,10 @@ def validate_model_config(value):
         resolve_run_budget(config, "validation", defaults={"max_units": 1})
     except CallBudgetError as exc:
         raise ResearchVerificationError(f"invalid model call budget: {exc}") from exc
+    try:
+        resolve_reading_limits(config)
+    except ValueError as exc:
+        raise ResearchVerificationError(str(exc)) from exc
     if "capacity_retry" in config:
         retry = config["capacity_retry"]
         if not isinstance(retry, Mapping) or set(retry) != {
@@ -131,11 +136,14 @@ def _record(value: dict) -> dict:
     return {**value, "content_hash": content_hash(value)}
 
 
-def verified_source(core, spool, manifest, receipt_reader) -> tuple[dict, str]:
+def verified_source(core, spool, manifest, receipt_reader, *,
+                    max_document_chars=MAX_DOCUMENT_CHARS) -> tuple[dict, str]:
     """Re-read every page's immutable Core receipts and raw bytes, not just page 1."""
+    if type(max_document_chars) is not int or max_document_chars <= 0:
+        raise ResearchVerificationError("max_document_chars must be a positive integer")
     manifest = validate_alphaengine_document_acquisition_manifest(manifest)
     if (manifest["status"] != "complete" or manifest["termination_reason"] != "terminal"
-            or manifest["content_chars"] > MAX_DOCUMENT_CHARS):
+            or manifest["content_chars"] > max_document_chars):
         raise ResearchVerificationError("exact complete bounded acquisition is required")
     resolver = TranscriptCoreAuthorityResolver(core)
     chunks = []
@@ -738,6 +746,9 @@ class DocumentExtractionService:
     def _source_context(self, review_id, expected_review_hash, offset, actor_ref,
                         require_open=True):
         writer = self.writer
+        reading_config = getattr(writer, "_document_extraction_model_config", None)
+        limits = resolve_reading_limits(reading_config)
+        window_chars, quote_chars = limits["window_chars"], limits["quote_chars"]
         # ADR-0005: the mission's automation principal drafts as a matter of
         # course; a human may still.  Either way the mission grant below is
         # what authorises the actor (automation must equal the principal and
@@ -791,7 +802,8 @@ class DocumentExtractionService:
                 if row["ticket_ref"] else
                 writer.acquisition_launcher.locate_completed_manifest(review["document_ref"])
             )
-            manifest, text = verified_source(writer.store, writer._transcript_spool, manifest, reader)
+            manifest, text = verified_source(writer.store, writer._transcript_spool, manifest, reader,
+                                            max_document_chars=limits["max_document_chars"])
             source_content_hash = manifest["declared_content_sha256"]
         else:
             # The review names the URL ref; the manifest names the fetched
@@ -802,7 +814,8 @@ class DocumentExtractionService:
                 writer.web_fetch_launcher.locate_completed_manifest(review["document_ref"])
             )
             manifest, rendering = verified_public_web_source(
-                writer.store, writer._transcript_spool, manifest, reader
+                writer.store, writer._transcript_spool, manifest, reader,
+                max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"],
             )
             text = rendering["text"]
             # A web page has no declared content hash of its own: the citable
@@ -814,12 +827,12 @@ class DocumentExtractionService:
                 "raw_media_type": manifest["raw_media_type"], "body_sha256": manifest["body_sha256"],
                 "source_renderer": rendering["renderer"], "source_truncated": rendering["truncated"],
             }
-        if type(offset) is not int or offset < 0 or offset >= len(text) or offset % WINDOW_CHARS:
+        if type(offset) is not int or offset < 0 or offset >= len(text) or offset % window_chars:
             raise ResearchVerificationError("source offset must be a valid bounded window")
-        end = min(offset + WINDOW_CHARS, len(text))
+        end = min(offset + window_chars, len(text))
         quotes = []
-        for start in range(offset, end, QUOTE_CHARS):
-            stop = min(start + QUOTE_CHARS, end)
+        for start in range(offset, end, quote_chars):
+            stop = min(start + quote_chars, end)
             quote = text[start:stop]
             quotes.append({"quote_id": f"quote:{start}:{stop}:{_hash_text(quote)[:16]}",
                            "source_start": start, "source_end": stop, "source_sha256": _hash_text(quote),
@@ -845,6 +858,8 @@ class DocumentExtractionService:
             "quotes": quotes, "untrusted_source": True, "coverage": "visible_window_only",
             **web_fields,
         }
+        if reading_config is not None and "reading_limits" in reading_config:
+            base["reading_limits"] = limits
         return base
 
     def context(self, review_id, expected_review_hash, offset, actor_ref,

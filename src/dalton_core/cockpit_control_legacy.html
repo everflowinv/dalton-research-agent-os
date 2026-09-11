@@ -80,7 +80,7 @@ function documentEvidencePanel(item){
     context.quotes.forEach(q=>{const part=node("div");part.append(node("div",`${q.source_start}–${q.source_end} · SHA-256 ${q.source_sha256}`,"ref"));const pre=node("pre",q.raw_text,"quote");pre.style.cssText="white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow-y:auto";part.append(pre);original.append(part)});body.append(original);
     const paging=node("div",null,"actions"),prev=node("button","上一段","revise"),next=node("button","下一段","revise"),generate=node("button","生成本段抽取建议","accept");
     prev.disabled=context.offset===0;next.disabled=context.next_offset===null;generate.disabled=!data.generation_enabled;
-    prev.onclick=()=>read(Math.max(0,context.offset-12000));next.onclick=()=>read(context.next_offset);
+    prev.onclick=()=>read(Math.max(0,context.offset-(context.reading_limits?.window_chars||12000)));next.onclick=()=>read(context.next_offset);
     generate.onclick=async()=>{if(busy)return;busy=true;prev.disabled=next.disabled=generate.disabled=open.disabled=true;status.textContent="正在生成本段建议…";try{const output=await postJson("/v1/mission-document-review/extract",{...request(),context_hash:context.content_hash});if(output.status==="gated"){status.textContent="真实模型尚未获准，未发起调用";generate.disabled=true}else{render(output);status.textContent="建议已保存，仍需人工核对"}}catch(error){status.textContent=`未生成：${error.message}。请重新打开原文，不能使用旧页面重试。`;body.replaceChildren()}finally{busy=false;open.disabled=false}};
     paging.append(prev,next,generate);body.append(paging);
     if(!data.generation_enabled)body.append(node("div","未安装已批准的抽取模型配置。本页不会调用模型，也不会修改预算或权限。","notice"));

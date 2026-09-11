@@ -44,8 +44,7 @@ from .research_verification import ResearchVerificationConflict, ResearchVerific
 
 SOURCE_REF = "source:public-web"
 OPERATION = "fetch_get"
-# The Cockpit control plane bounds a window offset to < 600000, so a longer
-# page would have unreachable windows; the excess is dropped and declared.
+# Legacy rendering defaults; extraction can provide installed reading limits.
 MAX_SOURCE_CHARS = 600_000
 PDF_MEDIA_TYPE = "application/pdf"
 TEXT_MEDIA_TYPES: frozenset[str] = frozenset({
@@ -164,7 +163,7 @@ def normalized_media_type(raw_media_type: Any) -> tuple[str, str]:
     return parts[0], charset
 
 
-def _render_pdf(raw: bytes) -> tuple[str, str]:
+def _render_pdf(raw: bytes, *, max_pdf_pages: int = MAX_PDF_PAGES) -> tuple[str, str]:
     """Extract PDF text through ``pypdf``; refuse rather than guess."""
 
     try:
@@ -181,9 +180,9 @@ def _render_pdf(raw: bytes) -> tuple[str, str]:
         if reader.is_encrypted:
             raise PublicWebSourceError("fetched PDF is encrypted and is not rendered")
         pages = reader.pages
-        if len(pages) > MAX_PDF_PAGES:
+        if len(pages) > max_pdf_pages:
             raise PublicWebSourceError(
-                f"fetched PDF has {len(pages)} pages, above the {MAX_PDF_PAGES} page ceiling"
+                f"fetched PDF has {len(pages)} pages, above the configured {max_pdf_pages} page ceiling"
             )
         blocks: list[str] = []
         for page in pages:
@@ -202,9 +201,14 @@ def _render_pdf(raw: bytes) -> tuple[str, str]:
     return "\n\n".join(blocks), f"pdf-pypdf-{pypdf.__version__}:0.1"
 
 
-def render_public_web_text(raw: bytes, *, raw_media_type: str) -> dict[str, Any]:
+def render_public_web_text(raw: bytes, *, raw_media_type: str,
+                           max_source_chars: int = MAX_SOURCE_CHARS,
+                           max_pdf_pages: int = MAX_PDF_PAGES) -> dict[str, Any]:
     """Render fetched bytes as deterministic text plus how it was rendered."""
 
+    if (type(max_source_chars) is not int or max_source_chars <= 0
+            or type(max_pdf_pages) is not int or max_pdf_pages <= 0):
+        raise PublicWebSourceError("rendering limits must be positive integers")
     if not isinstance(raw, bytes):
         raise PublicWebSourceError("fetched page bytes are unavailable")
     media_type, charset = normalized_media_type(raw_media_type)
@@ -213,10 +217,10 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str) -> dict[str, Any]
             f"fetched page media type {media_type} cannot be rendered as text for review"
         )
     if media_type == PDF_MEDIA_TYPE:
-        text, renderer = _render_pdf(raw)
-        truncated = len(text) > MAX_SOURCE_CHARS
+        text, renderer = _render_pdf(raw, max_pdf_pages=max_pdf_pages)
+        truncated = len(text) > max_source_chars
         if truncated:
-            text = text[:MAX_SOURCE_CHARS]
+            text = text[:max_source_chars]
         return {
             "text": text, "renderer": renderer, "media_type": media_type,
             "truncated": truncated, "rendered_chars": len(text),
@@ -239,9 +243,9 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str) -> dict[str, Any]
         parser.close()
         text = parser.text()
         renderer = "html-visible-blocks:0.1"
-    truncated = len(text) > MAX_SOURCE_CHARS
+    truncated = len(text) > max_source_chars
     if truncated:
-        text = text[:MAX_SOURCE_CHARS]
+        text = text[:max_source_chars]
     return {
         "text": text,
         "renderer": renderer,
@@ -261,7 +265,8 @@ def _one_row(connection: Any, query: str, params: tuple[Any, ...], label: str) -
 
 
 def verified_public_web_source(
-    core: Any, spool: Any, manifest: Mapping[str, Any], receipt_reader: Any
+    core: Any, spool: Any, manifest: Mapping[str, Any], receipt_reader: Any, *,
+    max_source_chars: int = MAX_SOURCE_CHARS, max_pdf_pages: int = MAX_PDF_PAGES,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Re-verify one fetched page end to end and render it.
 
@@ -394,7 +399,8 @@ def verified_public_web_source(
         "fetched page record ref does not name its own bytes",
     )
 
-    rendering = render_public_web_text(raw, raw_media_type=manifest["raw_media_type"])
+    rendering = render_public_web_text(raw, raw_media_type=manifest["raw_media_type"],
+                                      max_source_chars=max_source_chars, max_pdf_pages=max_pdf_pages)
     return manifest, rendering
 
 

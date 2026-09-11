@@ -763,7 +763,9 @@ class ResearchReviewControlPlane:
         if len(review_id) > 200 or not review_id.startswith("mission-document-review:"):
             raise ResearchReviewControlError("invalid review id")
         offset = value["offset"]
-        if type(offset) is not int or not 0 <= offset < 600000 or offset % 12000:
+        # The source service validates the offset against its installed geometry
+        # and exact document length. A UI copy of those bounds can go stale.
+        if type(offset) is not int or offset < 0:
             raise ResearchReviewControlError("invalid original window")
         params = {"review_id": review_id, "expected_review_hash": _hash(value["review_hash"], "review_hash"),
                   "offset": offset}

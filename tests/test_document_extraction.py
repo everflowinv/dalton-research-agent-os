@@ -388,8 +388,12 @@ class DocumentExtractionTests(unittest.TestCase):
         plane.document_extraction('owner@example.com',body)
         self.assertTrue(calls[-1]['actor_ref'].startswith('human:tailscale-'))
         self.assertEqual(calls[-1]['operation'],'mission_document_evidence')
-        for change in ({'actor_ref':'human:owner'},{'offset':True},{'offset':1},{'review_hash':'bad'},{'source_manifest':h.manifest}):
+        for change in ({'actor_ref':'human:owner'},{'offset':True},{'offset':-1},{'review_hash':'bad'},{'source_manifest':h.manifest}):
             with self.assertRaises(ResearchReviewControlError): plane.document_extraction('owner@example.com',{**body,**change})
+        # Geometry belongs to the source service, including configured windows
+        # beyond the old 600k-character UI ceiling.
+        plane.document_extraction('owner@example.com', {**body, 'offset': 720000})
+        self.assertEqual(calls[-1]['params']['offset'], 720000)
         plane.document_extraction('owner@example.com',{**body,'context_hash':h.context()['content_hash']},generate=True)
         self.assertEqual(calls[-1]['operation'],'generate_document_extraction')
 
