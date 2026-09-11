@@ -21,8 +21,8 @@ retry cannot start while a projection is writing its database.
 The controller thread continues lease sweeping and heartbeat publication while
 these workers run. A previously successful dashboard remains `ready` while a
 replacement is built; the completed refresh changes it to `error` if it fails.
-Initial startup reports the plugin as `running` until the first real artifact is
-complete. Projection state and its error are now present in the heartbeat, and
+Initial startup keeps the plugin `pending` during projection and `running`
+during its first render/publish; it becomes `ready` only after completion. Projection state and its error are now present in the heartbeat, and
 a projection error also supplies the top-level `last_error` for a degraded
 heartbeat.
 
