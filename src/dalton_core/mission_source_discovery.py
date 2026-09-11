@@ -1466,6 +1466,16 @@ class MissionSourceDiscoveryCoordinator:
             or response["raw_artifact_version_ref"] != search.get("raw_artifact_version_ref")
         ):
             raise CoverageMissionError("failed child successful response binding drifted")
+        artifact = self._core_record(
+            self.store.connection, "observability_artifact_versions_v2", "version_id",
+            response["raw_artifact_version_ref"],
+        )
+        if (
+            response["raw_artifact_version_hash"] != artifact["content_hash"]
+            or artifact.get("producer_execution_ref") != invocation_ref
+            or artifact.get("work_order_ref") != invocation.get("work_order_ref")
+        ):
+            raise CoverageMissionError("failed child raw artifact authority drifted")
         envelope = self._core_record(
             self.store.connection, "connector_source_envelopes", "source_envelope_id", envelope_ref,
         )
@@ -1475,6 +1485,8 @@ class MissionSourceDiscoveryCoordinator:
             or envelope.get("connector_invocation_ref") != invocation_ref
             or envelope.get("operation") != WEB_SEARCH_OPERATION
             or envelope.get("status") != search.get("source_status")
+            or envelope.get("raw_artifact_version_ref") != artifact["id"]
+            or envelope.get("raw_response_hash") != artifact.get("artifact_content_hash")
             or document_refs != search.get("document_refs")
             or not document_refs
         ):
@@ -1482,6 +1494,9 @@ class MissionSourceDiscoveryCoordinator:
 
         if self._recovery_spool is None:
             self._recovery_spool = RawSpoolReader(str(self.spool_dir))
+        raw = self._recovery_spool.read_object(envelope["raw_response_hash"])
+        if hashlib.sha256(raw).hexdigest() != artifact["artifact_content_hash"]:
+            raise CoverageMissionError("raw spool bytes differ from the artifact authority")
         hosts = cited_hosts_from_discovery(
             self.store.connection, self._recovery_spool, source_envelope_ref=envelope_ref,
         )

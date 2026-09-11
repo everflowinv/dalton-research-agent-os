@@ -760,7 +760,7 @@ class WebCoordinatorTests(unittest.TestCase):
         self.assertEqual(2, len(missions.discovered_documents(mission["id"])))
 
     def test_local_recovery_rejects_noncanonical_runner_journal_rows(self) -> None:
-        for kind in ("request", "response_event", "response_event_hash"):
+        for kind in ("request", "response_event", "response_event_hash", "artifact_hash"):
             with self.subTest(kind=kind):
                 root = Path(self.temp.name) / f"journal-{kind}"
                 root.mkdir()
@@ -796,13 +796,22 @@ class WebCoordinatorTests(unittest.TestCase):
                         "WHERE state='responded'"
                     )
                     expected = "response journal authority drifted"
-                else:
+                elif kind == "response_event_hash":
                     connection.execute("DROP TRIGGER runner_attempt_journal_no_update")
                     connection.execute(
                         "UPDATE runner_attempt_journal_events SET content_hash=? "
                         "WHERE state='responded'", ("0" * 64,),
                     )
                     expected = "response journal authority drifted"
+                else:
+                    connection.execute(
+                        "DROP TRIGGER observability_artifact_versions_v2_no_update"
+                    )
+                    connection.execute(
+                        "UPDATE observability_artifact_versions_v2 SET content_hash=?",
+                        ("0" * 64,),
+                    )
+                    expected = "artifact_versions_v2 authority hash drifted"
                 refused = coordinator.recover_local_web_discoveries()
                 self.assertEqual("refused", refused[0]["status"])
                 self.assertIn(expected, refused[0]["reason"])
