@@ -2409,20 +2409,26 @@ class ResearchPlanAuthority:
             "draft": dict(draft_model_execution or {
                 "routing_policy_ref": "routing-policy:qualitative-research:development",
                 "credential_slot_refs": ["credential-slot:model:development"],
+                "budget_db": "budget.sqlite",
+                "budget_policy_ref": "budget-policy:development",
                 "max_input_tokens": 32_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120,
                 "max_elapsed_seconds": 120,
                 "max_attempts": 1,
                 "provider_retry": None,
+                "transport_retry": None,
             }),
             "verifier": dict(verifier_model_execution or {
                 "routing_policy_ref": "routing-policy:qualitative-verifier:development",
                 "credential_slot_refs": ["credential-slot:model-verifier:development"],
+                "budget_db": "budget.sqlite",
+                "budget_policy_ref": "budget-policy:development",
                 "max_input_tokens": 48_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120,
                 "max_elapsed_seconds": 120,
                 "max_attempts": 1,
                 "provider_retry": None,
+                "transport_retry": None,
             }),
         }
         try:
@@ -2871,10 +2877,17 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
                 **({
                     "routing_policy_ref": stage_model_config["routing_policy_ref"],
                     "credential_slot_refs": list(stage_model_config["credential_slot_refs"]),
+                    "budget_db": stage_model_config["budget_db"],
+                    "budget_policy_ref": stage_model_config["budget_policy_ref"],
                     "provider_retry": (
                         None
                         if stage_model_config["provider_retry"] is None
                         else dict(stage_model_config["provider_retry"])
+                    ),
+                    "transport_retry": (
+                        None
+                        if stage_model_config["transport_retry"] is None
+                        else dict(stage_model_config["transport_retry"])
                     ),
                 } if stage_model_config is not None else {}),
             },

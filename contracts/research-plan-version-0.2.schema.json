@@ -369,13 +369,16 @@
               "required": [
                 "routing_policy_ref",
                 "credential_slot_refs",
+                "budget_db",
+                "budget_policy_ref",
                 "max_input_tokens",
                 "max_output_tokens",
                 "max_cost_usd",
                 "max_seconds",
                 "max_elapsed_seconds",
                 "max_attempts",
-                "provider_retry"
+                "provider_retry",
+                "transport_retry"
               ],
               "properties": {
                 "routing_policy_ref": {
@@ -390,6 +393,14 @@
                     "type": "string",
                     "minLength": 1
                   }
+                },
+                "budget_db": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "budget_policy_ref": {
+                  "type": "string",
+                  "minLength": 1
                 },
                 "max_input_tokens": {
                   "type": "integer",
@@ -439,6 +450,36 @@
                       "type": "null"
                     }
                   ]
+                },
+                "transport_retry": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_definitely_not_sent_retries",
+                        "queue_wait_seconds",
+                        "retry_backoff_seconds"
+                      ],
+                      "properties": {
+                        "max_definitely_not_sent_retries": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "queue_wait_seconds": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "retry_backoff_seconds": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               }
             },
@@ -448,13 +489,16 @@
               "required": [
                 "routing_policy_ref",
                 "credential_slot_refs",
+                "budget_db",
+                "budget_policy_ref",
                 "max_input_tokens",
                 "max_output_tokens",
                 "max_cost_usd",
                 "max_seconds",
                 "max_elapsed_seconds",
                 "max_attempts",
-                "provider_retry"
+                "provider_retry",
+                "transport_retry"
               ],
               "properties": {
                 "routing_policy_ref": {
@@ -469,6 +513,14 @@
                     "type": "string",
                     "minLength": 1
                   }
+                },
+                "budget_db": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "budget_policy_ref": {
+                  "type": "string",
+                  "minLength": 1
                 },
                 "max_input_tokens": {
                   "type": "integer",
@@ -505,6 +557,36 @@
                       ],
                       "properties": {
                         "max_same_profile_retries": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "retry_backoff_seconds": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "transport_retry": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_definitely_not_sent_retries",
+                        "queue_wait_seconds",
+                        "retry_backoff_seconds"
+                      ],
+                      "properties": {
+                        "max_definitely_not_sent_retries": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "queue_wait_seconds": {
                           "type": "integer",
                           "minimum": 0
                         },

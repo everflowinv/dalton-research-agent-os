@@ -26,6 +26,23 @@ class AnnualReportRuntimeError(ValueError):
     pass
 
 
+def validate_annual_transport_retry(value: Any) -> dict[str, int]:
+    fields = {
+        "max_definitely_not_sent_retries", "queue_wait_seconds",
+        "retry_backoff_seconds",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise AnnualReportRuntimeError("transport_retry has an invalid closed shape")
+    normalized = dict(value)
+    if any(isinstance(normalized[name], bool)
+           or not isinstance(normalized[name], int)
+           or normalized[name] < 0 for name in fields):
+        raise AnnualReportRuntimeError(
+            "transport_retry values must be finite non-negative integers"
+        )
+    return normalized
+
+
 def load_annual_report_model_config(path: str | Path, label: str) -> dict[str, Any]:
     path = Path(path).expanduser().resolve()
     try:
@@ -40,12 +57,21 @@ def load_annual_report_model_config(path: str | Path, label: str) -> dict[str, A
     if not isinstance(raw, Mapping):
         raise AnnualReportRuntimeError(f"{label} must contain a JSON object")
     retry = raw.get("provider_retry")
+    transport_retry = raw.get("transport_retry")
     base = dict(raw)
     base.pop("provider_retry", None)
+    # The shared document reader retains its historical protocol ceiling.
+    # Annual execution is instead bounded by its frozen Work attempt/deadline
+    # budget, so validate this owner policy without inventing a retry ceiling.
+    base.pop("transport_retry", None)
     try:
         config = validate_model_config(base)
         config["provider_retry"] = (
             None if retry is None else validate_provider_retry(retry)
+        )
+        config["transport_retry"] = (
+            None if transport_retry is None
+            else validate_annual_transport_retry(transport_retry)
         )
     except Exception as exc:
         raise AnnualReportRuntimeError(f"{label} is invalid: {exc}") from exc
@@ -107,6 +133,8 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
     return {
         "routing_policy_ref": config["routing_policy_ref"],
         "credential_slot_refs": list(config["credential_slot_refs"]),
+        "budget_db": config["budget_db"],
+        "budget_policy_ref": config["budget_policy_ref"],
         "max_input_tokens": call["max_input_tokens"],
         "max_output_tokens": call["max_output_tokens"],
         "max_cost_usd": float(call["max_cost_usd"]),
@@ -114,6 +142,7 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
         "max_elapsed_seconds": max_elapsed,
         "max_attempts": attempts,
         "provider_retry": retry,
+        "transport_retry": config.get("transport_retry"),
     }
 
 
@@ -159,6 +188,6 @@ __all__ = [
     "AnnualReportRuntimeError", "DRAFT_MODEL_CONFIG_NAME",
     "VERIFIER_MODEL_CONFIG_NAME", "adapter_for_config",
     "load_annual_report_model_config", "load_annual_report_model_configs",
-    "plan_model_execution",
+    "plan_model_execution", "validate_annual_transport_retry",
     "scheduler_policy",
 ]

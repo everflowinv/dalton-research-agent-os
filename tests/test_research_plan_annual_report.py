@@ -459,10 +459,13 @@ class RegisteredAnnualReportPlanTests(unittest.TestCase):
         model = {
             "routing_policy_ref": "routing-policy:test:1",
             "credential_slot_refs": ["credential-slot:model:test"],
+            "budget_db": "/tmp/annual-budget.sqlite",
+            "budget_policy_ref": "budget-policy:test:1",
             "max_input_tokens": 1000, "max_output_tokens": 100,
             "max_cost_usd": 10.0, "max_seconds": 30,
             "max_elapsed_seconds": 3600,
             "max_attempts": 60, "provider_retry": None,
+            "transport_retry": None,
         }
         with self.assertRaisesRegex(ResearchPlanValidationError, "mission"):
             fixture.plans.create_registered_annual_report_plan(
@@ -567,10 +570,13 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
                     draft_preferred["credential_slot_ref"],
                     draft_backup["credential_slot_ref"],
                 ],
+                "budget_db": str(Path(harness.planner.temp.name) / "budget.sqlite"),
+                "budget_policy_ref": "budget-policy:test:1",
                 "max_input_tokens": 32_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120, "max_attempts": 3,
                 "max_elapsed_seconds": 3600,
                 "provider_retry": retry,
+                "transport_retry": None,
             },
             verifier_model_execution={
                 "routing_policy_ref": verifier_policy["policy_version_ref"],
@@ -578,10 +584,13 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
                     verifier_same_family["credential_slot_ref"],
                     verifier_independent["credential_slot_ref"],
                 ],
+                "budget_db": str(Path(harness.planner.temp.name) / "budget.sqlite"),
+                "budget_policy_ref": "budget-policy:test:1",
                 "max_input_tokens": 48_000, "max_output_tokens": 4_000,
                 "max_cost_usd": 1.0, "max_seconds": 120, "max_attempts": 1,
                 "max_elapsed_seconds": 120,
                 "provider_retry": None,
+                "transport_retry": None,
             },
             actor_ref="core:planner",
             idempotency_key="create-plan:annual-executor",

@@ -123,7 +123,8 @@ def normalize_request(value: Any) -> dict[str, Any]:
     model_fields = {
         "routing_policy_ref", "credential_slot_refs", "max_input_tokens",
         "max_output_tokens", "max_cost_usd", "max_seconds", "max_attempts",
-        "max_elapsed_seconds", "provider_retry",
+        "max_elapsed_seconds", "provider_retry", "transport_retry",
+        "budget_db", "budget_policy_ref",
     }
     for stage in ("draft", "verifier"):
         config = raw_model.get(stage)
@@ -168,14 +169,32 @@ def normalize_request(value: Any) -> dict[str, Any]:
                 raise RegisteredAnnualReportError(
                     f"model_execution.{stage}.provider_retry is invalid"
                 ) from exc
+        transport_retry = None
+        if config.get("transport_retry") is not None:
+            try:
+                from .annual_report_runtime import validate_annual_transport_retry
+
+                transport_retry = validate_annual_transport_retry(config["transport_retry"])
+            except Exception as exc:
+                raise RegisteredAnnualReportError(
+                    f"model_execution.{stage}.transport_retry is invalid"
+                ) from exc
         model_execution[stage] = {
             "routing_policy_ref": _nonempty_text(
                 config.get("routing_policy_ref"), f"model_execution.{stage}.routing_policy_ref"
             ),
             "credential_slot_refs": list(slots),
+            "budget_db": _nonempty_text(
+                config.get("budget_db"), f"model_execution.{stage}.budget_db"
+            ),
+            "budget_policy_ref": _nonempty_text(
+                config.get("budget_policy_ref"),
+                f"model_execution.{stage}.budget_policy_ref",
+            ),
             **parsed,
             "max_cost_usd": float(cost),
             "provider_retry": provider_retry,
+            "transport_retry": transport_retry,
         }
     proof_ref = _optional_text(value.get("document_read_proof_ref"), "document_read_proof_ref")
     proof_hash = _optional_sha256(
