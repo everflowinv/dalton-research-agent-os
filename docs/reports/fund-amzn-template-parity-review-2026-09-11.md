@@ -48,3 +48,23 @@ LibreOffice saved a recalculated XLSX, then each relevant cached cell was compar
 The immutable synthetic model/spec/input/projection/calendar files, source/recalculated XLSX and renders remain in private `/private/tmp/dalton-fund-template-numerical-qa.84lnmk/`. No private original model values were committed.
 
 This accepts the three-sheet presentation and numerical scope, **not AMZN-level model completeness**. Full balance sheet, full cash-flow statement, segment operating drivers, Category Analysis and sourced Street comparisons remain separate. A regression audit also found that structured 0.3 drops the existing legacy OCF/CapEx/FCF model outputs; a versioned 0.4 cash-flow companion is being implemented before the financial upgrade may deploy. It preserves explicit selected source lines and the existing FCF definition without claiming a full cash-flow model. R14c1 execution deployment remains separate.
+
+## 21:44 UTC final R15 evidence
+
+The bounded cash-flow companion and final workbook integration are now complete in the frozen R15 source `d1079bafc565e1bfa7d19d3360504fa845e9b327`. The reviewed author boundaries are core `f80fcc7f85aee24fcce81f56903b3db5adde3083` and exporter `c34fc4653876ef854a9e4d898c219a6a92f96f7b`; the corresponding production and test files in R15 are byte-identical. R15 is frozen for acceptance and **has not yet been deployed**.
+
+Root visually accepted the final combined Valuation, Financials and Driver sheets. Financials keeps the income statement and a distinct light-blue Cash flow statement section. OCF, positive-outflow CapEx and FCF occupy their own company-model rows. Driver shows declared cash inputs and assumptions in company order. Historical actual ratios are green cross-sheet formulas tied to Financials; forecast assumptions remain blue. FY2025A and mixed FY2026A/E diluted shares and EPS coexist with the cash companion in the same structured 0.4 workbook. Rows with filed history and unavailable forecasts say `Forecast unavailable`; unavailable cells remain blank.
+
+LibreOffice recalculated that single combined workbook before comparison with the immutable model and annual projection authorities:
+
+- 56 income model quarter cells and 12 cash model quarter cells matched.
+- 28 income annual projection cells and 6 cash annual projection cells matched.
+- 6 income actual-ratio cells and 2 cash actual-ratio cells matched.
+- All **110 comparisons** passed. Maximum absolute residual was `4.31167e-9`; formula errors, missing expected cells, unexpected populated unavailable cells and Formula Map omissions were all zero.
+- The same receipt verifies model schema 0.4, annual projection 0.2, `day_weighted_quarters`, computed FY2025 historical EPS, and computed FY2026A/E shares and EPS.
+- Numerical receipt SHA-256: `ff8ba7916326285adbcfc0138bdc77c7c196a1cd333baa07f043170a4e68aece`.
+- Visual receipt SHA-256: `318acf34d4e9812f5b6e82e801b5e180a3f71d3de9628d36e37f74445732dc4b`.
+- Recalculated XLSX SHA-256: `3c8550e57d70706329ea68cea47950e0634dff42002236681f85ecc94792f392`.
+- Private evidence directory: `/private/tmp/dalton-fund-xlsx-cashflow-qa.0nx1w0kr/`.
+
+The Desktop reference remained read-only at SHA-256 `545709e06eb0c1452cf74224d92e8ecb70bef4764f316e74595b2f41f87567b0`. This closes the accepted Valuation, structured income, bounded cash-flow and Driver presentation scope. It does not claim a full balance sheet, full cash-flow statement, Category Analysis, complete operating-driver model or sourced Street-consensus schedule.
