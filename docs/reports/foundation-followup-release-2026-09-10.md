@@ -122,3 +122,12 @@ Frozen `fdc61e9a140993d5c2af427e53d98ed8eede7845` includes the completed stateme
 The next deployment wrapper retains the already applied broker capacity receipt and verifies current capacity 8, without reapplying gateway maintenance. Independent static review passed. All backup contents remain recoverable; one additional older task-owned backup was compressed only after full 92-member content/metadata equality and empty handle checks. The five newest expanded backups remain intact. Completed R4 rehearsal state/home were removed after process/handle checks, retaining its report, config and logs.
 
 Next: accept only the same frozen full-suite result, bind the new deployment review, deploy under existing authorization, and inspect actual annual sources and formal research products. Advanced investment methodology remains deferred behind these foundations.
+
+
+## Full-suite compatibility refusal and R4a, 2026-09-11 01:04 UTC
+
+R4 full acceptance ran 6,809 tests in 577.922 seconds, with one failure and one skip. The failed check is the existing installer bash/zsh syntax contract: the new zsh-only numeric pattern does not parse in bash. No R4 staging/deployment ran. Root replaced the numeric validation with shared shell syntax, a pre-arithmetic length bound and decimal normalization; 17 focused tests and independent shell review pass. Failed full-suite log SHA-256 `bdaf133827df63aaede6b86305f54ec1839ef1c9da1d9b0a26575c9ac3a60b09` remains intact.
+
+New clean freeze `c0295d89fbf165b7814c16eab459aa862578eb29` is running full acceptance. R4a wheel SHA-256 `a2df61c6d32d7763c78bbdb2785faa093211a7f546fd5f1297eb3ce91374d20f` matches 556 files with three JavaScript checks. Its deployment packet remains pending acceptance. The staging helper now binds the exact accepted rehearsal report and prepares all artifacts before atomically committing its manifest, with exception rollback.
+
+The live read-only product audit now finds five formal EventJudgements with exact producer/verifier task/result/route, mission/event hashes and independent families. ACN Dossier remains absent and EPAM final units incomplete. All five companies are eligible for default annual acquisition once the new installer/runtime is applied. Separately, real IBM OCF/CapEx authority rows exist; their missing typed input path is a foundation consumer defect under isolated implementation and cross-review, not a reason to invent cashflow values or declare a complete model.
