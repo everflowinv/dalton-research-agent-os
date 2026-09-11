@@ -16,7 +16,8 @@ END = "# Validate every independently verified model pair"
 
 
 class InstallerStartupWaitTests(unittest.TestCase):
-    def _run(self, *, timeout: str, healthy_on: int | None):
+    def _run(self, *, timeout: str, healthy_on: int | None,
+             health_delay: str = "0.1"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             venv = root / "venv"
@@ -45,12 +46,13 @@ class InstallerStartupWaitTests(unittest.TestCase):
                 "wait_for_healthy_runtime",
             ])
             env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                   "CALLS": str(calls), "DALTON_STARTUP_TIMEOUT_SECONDS": timeout}
-            env.setdefault("HEALTH_DELAY", "0.1")
+                   "CALLS": str(calls), "DALTON_STARTUP_TIMEOUT_SECONDS": timeout,
+                   "HEALTH_DELAY": health_delay}
             if healthy_on is not None:
                 env["HEALTHY_ON"] = str(healthy_on)
             completed = subprocess.run(
-                ["zsh", "-c", command], text=True, capture_output=True, env=env)
+                ["zsh", "-c", command], text=True, capture_output=True, env=env,
+                timeout=10)
             count = int(calls.read_text()) if calls.exists() else 0
             return completed, count
 
@@ -65,21 +67,13 @@ class InstallerStartupWaitTests(unittest.TestCase):
         self.assertGreaterEqual(calls, 2)
 
     def test_health_execution_time_counts_against_wall_clock_deadline(self):
-        with tempfile.TemporaryDirectory() as directory:
-            # Reuse the fragment runner but make each health probe consume most
-            # of the one-second deadline. The old sleep-counter loop would
-            # always wait a separate two seconds before its final diagnostic.
-            before = __import__("time").monotonic()
-            old = os.environ.get("HEALTH_DELAY")
-            os.environ["HEALTH_DELAY"] = "0.6"
-            try:
-                completed, calls = self._run(timeout="1", healthy_on=None)
-            finally:
-                if old is None:
-                    os.environ.pop("HEALTH_DELAY", None)
-                else:
-                    os.environ["HEALTH_DELAY"] = old
-            elapsed = __import__("time").monotonic() - before
+        # Make each health probe consume most of the one-second deadline. The
+        # old sleep-counter loop would always wait a separate two seconds
+        # before its final diagnostic.
+        before = __import__("time").monotonic()
+        completed, calls = self._run(
+            timeout="1", healthy_on=None, health_delay="0.6")
+        elapsed = __import__("time").monotonic() - before
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(calls, 2)
         self.assertLess(elapsed, 2.4)

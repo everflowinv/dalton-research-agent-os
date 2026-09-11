@@ -12,9 +12,11 @@ runs backup work, and builds the initial projection before it writes a
 `running` or `degraded` heartbeat. `dalton-health` correctly rejects the
 intermediate heartbeat; the defect was only the installer's shorter deadline.
 
-The installer now waits up to 180 seconds of wall-clock time by default. Health
-probe execution time counts against that deadline and the last sleep is clipped
-to its remaining duration. Operators can set
+The installer now waits up to 180 seconds of wall-clock time by default. It
+loads zsh's datetime module and reads `EPOCHREALTIME` into task-specific
+deadline variables without declaring or resetting the shell's `SECONDS` state.
+Health probe execution time counts against that deadline and the last sleep is
+clipped to its remaining duration. Operators can set
 `DALTON_STARTUP_TIMEOUT_SECONDS` to an integer from 1 through 1800. The loop is
 bounded and continues to call `dalton-health --max-age-seconds 45`; `starting`
 never counts as success. On timeout, a final health invocation preserves the
@@ -30,5 +32,5 @@ PYTHONPATH=src python3 -m unittest \
   tests.test_installer_controller_preflight \
   tests.test_installer_model_catalog_order
 
-Ran 10 tests in 6.633s — OK
+Ran 10 tests in 7.004s — OK
 ```

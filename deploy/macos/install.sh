@@ -25,15 +25,14 @@ if [[ "$startup_timeout_seconds" != <-> ]] \
 fi
 
 wait_for_healthy_runtime() {
-  # SECONDS is special to zsh. Localizing it gives this invocation its own
-  # wall-clock timer without changing the shell's outer timer.
-  local -F SECONDS=0
+  zmodload zsh/datetime
+  local -F startup_deadline=$(( EPOCHREALTIME + startup_timeout_seconds ))
   local -F remaining sleep_seconds
-  while (( SECONDS < startup_timeout_seconds )); do
+  while (( EPOCHREALTIME < startup_deadline )); do
     if "$venv_dir/bin/dalton-health" --config "$config_path" --max-age-seconds 45; then
       return 0
     fi
-    remaining=$(( startup_timeout_seconds - SECONDS ))
+    remaining=$(( startup_deadline - EPOCHREALTIME ))
     (( remaining > 0 )) || break
     sleep_seconds=2
     (( remaining < sleep_seconds )) && sleep_seconds=$remaining
