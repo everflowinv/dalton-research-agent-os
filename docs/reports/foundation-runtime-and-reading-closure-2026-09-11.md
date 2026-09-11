@@ -2,7 +2,9 @@
 
 This register preserves the ongoing foundation/Dossier/deployment work and the owner’s new requirements. A source commit or passing unit test does not by itself close a row; actual runtime acceptance is recorded separately.
 
-| Work item | Current evidence and state | Completion criterion / next action |
+The following table preserves the original intake baseline; the dated checkpoints below record subsequent deployments and acceptance results.
+
+| Work item | Evidence and state at intake | Completion criterion / next action at intake |
 | --- | --- | --- |
 | Historical stage vs current source/readiness | API/UI separation merged; acquired/read counts displayed separately | Deploy and check actual five-company page |
 | Missing sources classified unplanned by writer | Wrong coordinator.load_plan call repaired; actual socket test passed | Actual stage tick must show configured source gaps |
@@ -273,3 +275,14 @@ Next steps: independently fix acquisition state replay; strengthen copied-state 
 The immutable 697 full suite completed 7,100 tests in 701.980 seconds: one failure, zero errors, one skip. Log SHA-256 `bc58d900be5efa2661c53f1495337ed1ec5a13f7e03d1848c7348937486fdd20`; failed receipt retained at `/tmp/dalton-foundation-followup-r10-full-suite-receipt.json`. The failing test inspected the public Cockpit call function for lease keywords moved into `_call_once` by iterative retry; it did not execute a model request. Replaced that brittle assertion with a real pinned-router/Scheduler test advancing its clock by configured 600- and 7,200-second queue waits plus the full permitted call duration. Both independently named work orders complete successfully under versioned leases. All 53 Cockpit fallback and planner CLI tests passed (2.109 seconds), log `/tmp/dalton-r10-real-cockpit-lease-regression.log`. This does not relabel the frozen full-suite or copied-state failures.
 
 Two inert release helper candidates now verify exact stage 14 configuration through the separately bound transition verifier, preserving the original 12-file historical baseline independently. Twelve private positive/negative composition tests passed, including artifact/source drift, unsafe paths, failed child verification, and exclusive receipt preservation. They have not been staged or executed on live state.
+
+
+## 2026-09-11 09:47 UTC — actual discovery repair and planner reload integrated
+
+`1286793` permits a failed discovery row to settle as acquired only through the existing caller-proven source-authority path. The live-state copy contained 30 of 33 failed AlphaEngine rows whose exact document was already held; these rows must enter review without another fetch. The atomic transition clears failure fields and deliberately adds no fabricated transport success, so it cannot reset host quarantine. Seventy-five root-integrated host/discovery/fetch tests passed in 24.853 seconds.
+
+`79f6d63` fixes resident Writer planning after Cockpit selection, budget or queue changes. New planning reads current service routing/broker/call budget plus registered sidecar retry/ledger controls; a disabled service cannot be resurrected by stale LaunchAgent arguments. New Work binds the effective budget, retry policies, route policy version/hash and credential slots. Changed requirements create a distinct planner Scheduler policy; admitted old Work and its policy are not expanded or rewritten. The worker checks exact execution authority and reconstructs timeout/queue/lease from its Work. Root integrated planner/driver/Writer/model configuration/router/Scheduler/doctrine/contracts tests: 276 passed in 18.190 seconds (`/tmp/dalton-r10-planner-reload-integrated-tests-v2.log`). The earlier root command named nonexistent `tests.test_writer_server`; its 253-test/one-import-error log is preserved separately.
+
+Remaining actual custom model consumers are explicitly classified: natural-language IntentInterpreter is reachable through the configured control intent composer and is the next bounded retry/accounting task; ThesisImpactModelWorker is reachable through its enabled production service and remains pending. Legacy Agenda coordinator is retired by default under ADR-0009 and only runs with explicit `legacy_agenda_plane:true` plus agenda enablement. No claim is made that every model consumer is closed.
+
+At 09:44 UTC the existing live controller PID 28760 (started 07:19:33) passed the read-only health check; heartbeat age 0.273 seconds. Main's unrelated four-file DeepSeek diff remains SHA-256 `43832e8e6d32cec9bf48b59044d200df0d57a99d30598859c23d4c1360207932`. R10a freeze awaits the bounded copied-state actual setup entrypoint test, then full acceptance/deployment and separate host recovery activation.
