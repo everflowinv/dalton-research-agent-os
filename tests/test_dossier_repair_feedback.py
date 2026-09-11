@@ -63,10 +63,15 @@ class DossierRepairFeedbackTests(unittest.TestCase):
         feedback = read_dossier_repair_feedback(self.state)[COMPANY]
         self.assertEqual(feedback["source_ticket_ref"],
                          f"company-dossier-run:{directory.name}")
-        self.assertEqual(feedback["repair_targets"], [{
+        [target] = feedback["repair_targets"]
+        self.assertEqual({
+            key: target[key] for key in ("unit", "code", "detail")
+        }, {
             "unit": "kpi_dictionary", "code": "missing_evidence",
             "detail": "retention numerator and denominator",
-        }])
+        })
+        self.assertTrue(target["id"].startswith("dossier-repair-target:"))
+        self.assertEqual(len(target["content_hash"]), 64)
         self.assertEqual(len(feedback["content_hash"]), 64)
         self.assertTrue(feedback["id"].endswith(feedback["content_hash"][:32]))
 

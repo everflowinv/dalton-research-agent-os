@@ -341,12 +341,29 @@ def inquiry_content_hash(inquiry: Mapping[str, Any]) -> str:
         not isinstance(company_ref, str) or not company_ref.strip()
     ):
         raise ResearchTaskError("inquiry company_ref must be text or null")
-    return content_hash({
+    identity = {
         "identity_schema": _INQUIRY_IDENTITY_SCHEMA,
         "company_ref": None if company_ref is None else _collapse(company_ref),
         "question": _collapse(inquiry["question"]),
         "wants": _collapse(inquiry["wants"]),
-    })
+    }
+    target_ref = inquiry.get("repair_target_ref")
+    target_hash = inquiry.get("repair_target_hash")
+    if (target_ref is None) != (target_hash is None):
+        raise ResearchTaskError("inquiry repair target binding is incomplete")
+    if target_ref is not None:
+        if (
+            not isinstance(target_ref, str)
+            or not target_ref.startswith("dossier-repair-target:")
+            or not isinstance(target_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", target_hash) is None
+        ):
+            raise ResearchTaskError("inquiry repair target binding is invalid")
+        identity.update({
+            "repair_target_ref": target_ref,
+            "repair_target_hash": target_hash,
+        })
+    return content_hash(identity)
 
 
 def inquiry_ref_for(inquiry_hash: str) -> str:
@@ -796,6 +813,12 @@ def _parameters_for(
     inquiry_hash: str, as_of: str,
 ) -> dict[str, Any] | None:
     operation = template["operation"]
+    # A Dossier repair is an exact missing-evidence request. None of today's
+    # automated templates binds that target to a local annual-report query or
+    # to an exact AlphaEngine query. Keyword inference would silently turn it
+    # into a broad paid refresh, so hold it as a visible capability gap.
+    if inquiry.get("repair_target_ref") is not None:
+        return None
     if operation == "get_company_facts":
         intent = _collapse(f"{inquiry.get('question', '')} {inquiry.get('wants', '')}").lower()
         if not any(term in intent for term in ("revenue", "sales", "营收", "收入")):
@@ -940,6 +963,11 @@ def plan_admissions(
         entry["inquiry_hash"] = digest
         entry["inquiry_ref"] = inquiry_ref_for(digest)
         entry["loop_ref"] = task_loop_ref(digest)
+        if inquiry.get("repair_target_ref") is not None:
+            entry.update({
+                "repair_target_ref": inquiry.get("repair_target_ref"),
+                "repair_target_hash": inquiry.get("repair_target_hash"),
+            })
         if digest in seen or authority.loop_for_admission(digest) is not None:
             results.append({**entry, "admissible": False, "reason": "already_admitted"})
             continue
@@ -961,7 +989,9 @@ def plan_admissions(
                 "reason": (
                     "industry_inquiry_has_no_company_probe"
                     if inquiry.get("company_ref") is None
-                    else "no_bindable_template"
+                    else ("repair_target_capability_gap"
+                          if inquiry.get("repair_target_ref") is not None
+                          else "no_bindable_template")
                 ),
             })
             continue
@@ -1027,6 +1057,19 @@ def admit_inquiry(
         actor_ref=principal,
         idempotency_key=f"research-task:question:{digest[:32]}",
     )
+    admission = {
+        "source": INQUIRY_ADMISSION_SOURCE,
+        "content_hash": digest,
+        "inquiry_ref": inquiry_ref_for(digest),
+        "plan_ref": plan_ref,
+        "mission_version_ref": mission["id"],
+        "mission_version_hash": mission["content_hash"],
+    }
+    if inquiry.get("repair_target_ref") is not None:
+        admission.update({
+            "repair_target_ref": inquiry["repair_target_ref"],
+            "repair_target_hash": inquiry["repair_target_hash"],
+        })
     loop = authority.create_loop(
         task_loop_ref(digest),
         question_version_ref=recorded["question_version_ref"],
@@ -1034,14 +1077,7 @@ def admit_inquiry(
         required_coverage_items=[b["coverage_item_ref"] for b in entry["bindings"]],
         budget=entry["budget"],
         actor_ref=principal,
-        admission={
-            "source": INQUIRY_ADMISSION_SOURCE,
-            "content_hash": digest,
-            "inquiry_ref": inquiry_ref_for(digest),
-            "plan_ref": plan_ref,
-            "mission_version_ref": mission["id"],
-            "mission_version_hash": mission["content_hash"],
-        },
+        admission=admission,
     )
     return {
         "status": loop["status"],

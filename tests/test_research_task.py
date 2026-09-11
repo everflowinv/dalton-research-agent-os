@@ -43,12 +43,18 @@ DAY = datetime.now(timezone.utc).date().isoformat()
 
 def inquiry(
     *, question: str, company_ref: str | None = ACN, wants: str = "Filed exhibits.",
-    rank: int = 0,
+    rank: int = 0, repair_target_ref: str | None = None,
+    repair_target_hash: str | None = None,
 ) -> dict:
-    return {
+    wire = {
         "rank": rank, "company_ref": company_ref, "question": question,
         "wants": wants, "because": "the state prompted it",
     }
+    if repair_target_ref is not None:
+        wire["repair_target_ref"] = repair_target_ref
+    if repair_target_hash is not None:
+        wire["repair_target_hash"] = repair_target_hash
+    return wire
 
 
 class ResearchTaskFixture(unittest.TestCase):
@@ -541,6 +547,26 @@ class IdentityNormalisationTests(ResearchTaskFixture):
             rt.inquiry_content_hash(inquiry(question="Do ACN's revenues reconcile now?")),
         )
 
+    def test_exact_repair_target_is_part_of_inquiry_identity(self) -> None:
+        plain = inquiry(question="Which source defines retention?")
+        repaired = inquiry(
+            question=plain["question"],
+            repair_target_ref="dossier-repair-target:" + "a" * 32,
+            repair_target_hash="b" * 64,
+        )
+        other = {**repaired, "repair_target_hash": "c" * 64}
+        self.assertNotEqual(rt.inquiry_content_hash(plain),
+                            rt.inquiry_content_hash(repaired))
+        self.assertNotEqual(rt.inquiry_content_hash(repaired),
+                            rt.inquiry_content_hash(other))
+
+    def test_incomplete_repair_target_identity_is_refused(self) -> None:
+        with self.assertRaisesRegex(rt.ResearchTaskError, "incomplete"):
+            rt.inquiry_content_hash(inquiry(
+                question="Which source defines retention?",
+                repair_target_ref="dossier-repair-target:" + "a" * 32,
+            ))
+
 
 class RevisionTests(ResearchTaskFixture):
     daily_cost_usd = 20.0
@@ -892,3 +918,16 @@ class InquiryDirectedDiscoveryTests(ResearchTaskFixture):
         other = self.record_plan([inquiry(
             question="How does EPAM reconcile margin guidance?", company_ref=EPAM)])
         self.assertEqual(self.admissions(other)[0]["reason"], "no_bindable_template")
+
+    def test_repair_target_is_not_turned_into_a_keyword_paid_refresh(self):
+        wire = inquiry(
+            question="How does ACN reconcile adjusted margin guidance?",
+            repair_target_ref="dossier-repair-target:" + "a" * 32,
+            repair_target_hash="b" * 64,
+        )
+        plan = self.record_plan([wire])
+        entry = self.admissions(plan)[0]
+        self.assertFalse(entry["admissible"])
+        self.assertEqual(entry["reason"], "repair_target_capability_gap")
+        self.assertEqual(entry["repair_target_ref"], wire["repair_target_ref"])
+        self.assertNotIn("bindings", entry)

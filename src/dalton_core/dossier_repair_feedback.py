@@ -133,6 +133,22 @@ def _outcome(directory: Path) -> dict[str, Any] | None:
         or directory.name != ticket.get("run_digest")
     ):
         return None
+    targets = []
+    for ordinal, target in enumerate(_targets(summary.get("repair_targets"))):
+        target_body = {
+            "schema_version": SCHEMA_VERSION,
+            "source_ticket_ref": ticket_ref,
+            "source_ticket_signature": signature,
+            "company_ref": company_ref,
+            "ordinal": ordinal,
+            "target": target,
+        }
+        target_hash = content_hash(target_body)
+        targets.append({
+            "id": f"dossier-repair-target:{target_hash[:32]}",
+            **target,
+            "content_hash": target_hash,
+        })
     body = {
         "schema_version": SCHEMA_VERSION,
         "source_ticket_ref": ticket_ref,
@@ -140,7 +156,7 @@ def _outcome(directory: Path) -> dict[str, Any] | None:
         "company_ref": company_ref,
         "dossier_status": summary.get("dossier_status"),
         "completed_at": completed_at,
-        "repair_targets": _targets(summary.get("repair_targets")),
+        "repair_targets": targets,
     }
     digest = content_hash(body)
     return {

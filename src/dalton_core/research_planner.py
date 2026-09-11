@@ -140,6 +140,13 @@ OUTPUT_SCHEMA = {
                         "type": "string", "minLength": 1, "maxLength": 400,
                         "description": "What in the state prompted it.",
                     },
+                    "repair_target_ref": {
+                        "type": "string", "minLength": 1, "maxLength": 120,
+                        "description": (
+                            "Exact dossier repair target this inquiry addresses; "
+                            "omit when it was prompted by something else."
+                        ),
+                    },
                 },
             },
         },
@@ -235,6 +242,11 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "collected, a company whose situation warrants more than the standard. Each names "
         "what material would answer it and what in the state prompted it. Return an empty "
         "list when nothing has raised one; padding this is worse than leaving it empty.\n\n"
+        "A company's `dossier_feedback.repair_targets` are exact failed-output gaps, "
+        "not facts. When an inquiry addresses one, copy its exact `id` into "
+        "`repair_target_ref`; never invent a ref. The system binds that identity and "
+        "separately decides whether an approved directed retrieval capability can "
+        "answer it. Do not turn a missing-evidence target into a general web request.\n\n"
         "Also return `sufficiency`: for any item where the count and the truth differ, "
         "whether what is actually held answers what this stage needs. A company can hold "
         "eighteen broker reports and still hold nothing that bears on its driver; the "
@@ -382,6 +394,24 @@ def _required_floors(state: Mapping[str, Any]) -> dict[tuple[str, str], int]:
     return floors
 
 
+def _known_repair_targets(state: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
+    """Exact target ref -> (hash, company), only from verified planner state."""
+
+    known: dict[str, tuple[str, str]] = {}
+    for company in state.get("companies", ()):
+        company_ref = company.get("company_ref")
+        feedback = company.get("dossier_feedback")
+        if not isinstance(company_ref, str) or not isinstance(feedback, Mapping):
+            continue
+        for target in feedback.get("repair_targets", ()):
+            if not isinstance(target, Mapping):
+                continue
+            target_ref, target_hash = target.get("id"), target.get("content_hash")
+            if isinstance(target_ref, str) and isinstance(target_hash, str):
+                known[target_ref] = (target_hash, company_ref)
+    return known
+
+
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
@@ -399,6 +429,7 @@ def plan_from_response(
 
     parsed = parse_response(response_text)
     known = _known_work(state)
+    repair_targets = _known_repair_targets(state)
     for index, directive in enumerate(parsed["directives"]):
         if not isinstance(directive, Mapping) or set(directive) != {
             "company_ref", "item_ref", "action", "reason",
@@ -423,7 +454,7 @@ def plan_from_response(
         if not isinstance(inquiry, Mapping) or not {
             "question", "wants", "because",
         } <= set(inquiry) or set(inquiry) - {
-            "company_ref", "question", "wants", "because",
+            "company_ref", "question", "wants", "because", "repair_target_ref",
         }:
             raise ResearchPlanError(f"inquiry {index} has an invalid closed shape")
         company_ref = inquiry.get("company_ref")
@@ -436,12 +467,28 @@ def plan_from_response(
         for field in ("question", "wants", "because"):
             if not isinstance(inquiry[field], str) or not inquiry[field].strip():
                 raise ResearchPlanError(f"inquiry {index} has an empty {field}")
-        inquiries.append({
+        target_ref = inquiry.get("repair_target_ref")
+        target_hash = None
+        if target_ref is not None:
+            if not isinstance(target_ref, str) or target_ref not in repair_targets:
+                raise ResearchPlanError(
+                    f"inquiry {index} names a dossier repair target outside the state")
+            target_hash, target_company = repair_targets[target_ref]
+            if company_ref != target_company:
+                raise ResearchPlanError(
+                    f"inquiry {index} binds a dossier repair target for another company")
+        normalized = {
             "rank": index, "company_ref": company_ref,
             "question": inquiry["question"].strip(),
             "wants": inquiry["wants"].strip(),
             "because": inquiry["because"].strip(),
-        })
+        }
+        if target_ref is not None:
+            normalized.update({
+                "repair_target_ref": target_ref,
+                "repair_target_hash": target_hash,
+            })
+        inquiries.append(normalized)
     floors = _required_floors(state)
     judgements: list[dict[str, Any]] = []
     for index, item in enumerate(parsed["sufficiency"]):

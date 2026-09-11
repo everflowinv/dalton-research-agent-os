@@ -74,6 +74,23 @@ def state(**overrides):
     return build_research_state(**kwargs)
 
 
+def repair_feedback(company_ref=ACN):
+    target_hash = "b" * 64
+    return {
+        "id": "dossier-repair-feedback:" + "a" * 32,
+        "content_hash": "a" * 64,
+        "source_ticket_ref": "company-dossier-run:" + "c" * 24,
+        "dossier_status": "insufficient_evidence",
+        "company_ref": company_ref,
+        "repair_targets": [{
+            "id": "dossier-repair-target:" + target_hash[:32],
+            "content_hash": target_hash,
+            "unit": "kpi_dictionary", "code": "missing_evidence",
+            "detail": "missing retention numerator and denominator",
+        }],
+    }
+
+
 def response(*directives, assessment="ACN needs one more quarter.", inquiries=(),
              sufficiency=()):
     return json.dumps({"schema_version": "0.1", "assessment": assessment,
@@ -159,6 +176,14 @@ class StateTests(unittest.TestCase):
         # A company nobody has dispatched for still projects.
         self.assertEqual(built["companies"][1]["filing_runs"],
                          {"succeeded": 0, "unsuccessful": 0, "last_failure": None})
+
+    def test_exact_dossier_feedback_moves_the_planner_state(self):
+        without = state()
+        with_gap = state(dossier_feedback_by_company={ACN: repair_feedback()})
+        feedback = with_gap["companies"][0]["dossier_feedback"]
+        self.assertEqual(feedback["feedback_hash"], "a" * 64)
+        self.assertEqual(feedback["repair_targets"][0]["content_hash"], "b" * 64)
+        self.assertNotEqual(without["content_hash"], with_gap["content_hash"])
 
     def test_a_run_that_starts_failing_is_worth_a_new_plan(self):
         # The state is hashed, and the hash is what decides whether to think
@@ -415,6 +440,36 @@ class InquiryTests(unittest.TestCase):
         self.assertIn("utilisation", raised["question"])
         self.assertTrue(raised["wants"])
         self.assertTrue(raised["because"])
+
+    def test_dossier_repair_inquiry_binds_exact_target_ref_and_hash(self):
+        built = state(dossier_feedback_by_company={ACN: repair_feedback()})
+        target = built["companies"][0]["dossier_feedback"]["repair_targets"][0]
+        plan = plan_from_response(
+            built,
+            response(inquiries=[inquiry(repair_target_ref=target["id"])]),
+            created_at=NOW,
+        )
+        [raised] = plan["inquiries"]
+        self.assertEqual(raised["repair_target_ref"], target["id"])
+        self.assertEqual(raised["repair_target_hash"], target["content_hash"])
+
+    def test_invented_or_cross_company_repair_target_is_refused(self):
+        built = state(dossier_feedback_by_company={ACN: repair_feedback()})
+        target = built["companies"][0]["dossier_feedback"]["repair_targets"][0]
+        with self.assertRaisesRegex(ResearchPlanError, "outside the state"):
+            plan_from_response(
+                built,
+                response(inquiries=[inquiry(
+                    repair_target_ref="dossier-repair-target:" + "f" * 32)]),
+                created_at=NOW,
+            )
+        with self.assertRaisesRegex(ResearchPlanError, "another company"):
+            plan_from_response(
+                built,
+                response(inquiries=[inquiry(
+                    company_ref=IBM, repair_target_ref=target["id"])]),
+                created_at=NOW,
+            )
 
     def test_an_inquiry_may_be_industry_wide(self):
         plan = plan_from_response(
