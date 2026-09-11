@@ -462,7 +462,17 @@ _BODY_EXCLUDED = frozenset({
 
 def _unit_was_drafted(record: Mapping[str, Any], unit: str) -> bool:
     if unit == CLASSIFICATION_UNIT:
-        return (record.get("industry_classification") or {}).get("status") == "drafted"
+        classification = record.get("industry_classification") or {}
+        # Classification predates the status-bearing section shape. Its
+        # closed proof of drafting is a cited source actually used by a slot;
+        # the all-unknown/no-source placeholder is not drafted. This also lets
+        # a reasoned insufficient_evidence conclusion count without inventing
+        # a status field that was never in the wire contract.
+        refs = {row.get("ref") for row in classification.get("sources") or []}
+        cited = {ref for slot in classification.get("slots") or []
+                 for sentence in slot.get("sentences") or []
+                 for ref in sentence.get("refs") or []}
+        return bool(refs and cited and cited <= refs)
     if unit == VARIANT_UNIT:
         return (record.get("variant_view") or {}).get("status") == "drafted"
     return any(item.get("aspect") == unit and item.get("status") == "drafted"
