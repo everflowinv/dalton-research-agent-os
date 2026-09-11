@@ -154,6 +154,8 @@ def derive_confined_transition(
             scratch_path = rehearsal.temp_state / original["path"]
             _need(scratch_path.is_file() and not scratch_path.is_symlink(),
                   f"copied preserved state authority is absent: {original['path']}")
+            _need(scratch_path.read_bytes() == original_path.read_bytes(),
+                  f"copied preserved state authority bytes differ: {original['path']}")
             confined = authority_root / f"{index:02d}.json"
             _write_exclusive(confined, scratch_path.read_bytes())
             target["before"] = {
