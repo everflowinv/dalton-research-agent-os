@@ -32,7 +32,7 @@ class ExtractionTransportLifecycleTests(unittest.TestCase):
         # Two credential slots can each consume the full safe retry envelope.
         config["credential_slot_refs"] = ["slot:a", "slot:b"]
         policy = extraction_scheduler_policy(config)
-        self.assertEqual(policy["max_lease_seconds"], 2 * 3 * (600 + 90) + 2 * 7 + 30)
+        self.assertEqual(policy["max_lease_seconds"], 2 * 3 * (600 + 90) + 2 * 2 * 7 + 30)
         self.assertEqual(policy["max_total_lease_seconds"], 2 * policy["max_lease_seconds"])
         self.assertIn(str(policy["max_lease_seconds"]), policy["policy_version_id"])
 

@@ -360,7 +360,7 @@ def extraction_scheduler_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         candidates = max([1, *declared])
         route_binding = str(policy["content_hash"])[:16]
     lease_seconds = (candidates * (retries + 1) * per_try
-                     + retries * int(retry.get("retry_backoff_seconds", 0)) + 30)
+                     + candidates * retries * int(retry.get("retry_backoff_seconds", 0)) + 30)
     attempts = int((config.get("capacity_retry") or {}).get("scheduler_max_attempts", 3))
     return {
         "policy_version_id": (f"scheduler-policy-extraction-lease-{lease_seconds}s-"

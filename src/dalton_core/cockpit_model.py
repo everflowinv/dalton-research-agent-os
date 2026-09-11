@@ -729,7 +729,7 @@ class CockpitModel:
         ]
         candidates = max([1, *declared_chains])
         lease_seconds = (candidates * (retries + 1) * per_try
-                         + retries * int(transport.get("retry_backoff_seconds", 0))
+                         + candidates * retries * int(transport.get("retry_backoff_seconds", 0))
                          + _LEASE_GRACE_SECONDS)
         # The lease bounds are a frozen versioned policy: the same
         # policy_version_id with different settings is a conflict, and the
