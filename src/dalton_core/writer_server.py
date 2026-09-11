@@ -1980,16 +1980,36 @@ class WriterServer:
                 if not line:
                     break
                 request_id = "unknown"
+                operation = None
                 try:
                     raw = decode_frame(line)
                     candidate = raw.get("request_id")
                     if isinstance(candidate, str) and candidate:
                         request_id = candidate
                     request = parse_request(raw)
+                    operation = request.operation
                     executor = self._store_executor
                     if executor is None:
                         raise WriterServerError("writer server is stopping")
-                    result = executor.submit(self._handle, request).result(timeout=STORE_REQUEST_TIMEOUT)
+                    future = executor.submit(self._handle, request)
+                    try:
+                        result = future.result(timeout=STORE_REQUEST_TIMEOUT)
+                    except concurrent.futures.TimeoutError as exc:
+                        # A request that never started must not execute later,
+                        # after the caller has received a terminal timeout.
+                        # cancel() is deliberately ineffective once _handle is
+                        # running: a possibly-mutating operation retains the
+                        # existing conservative completion semantics.
+                        queued_cancelled = future.cancel()
+                        self._log_unhandled(
+                            request_id, exc, operation=operation,
+                            queued_cancelled=queued_cancelled,
+                        )
+                        conn.sendall(error_frame(
+                            request_id, self._error_code(exc),
+                            self._error_message(exc),
+                        ))
+                        continue
                     conn.sendall(success_frame(request.request_id, result))
                 except ProtocolError:
                     conn.sendall(error_frame(request_id, "protocol_error", "malformed request"))
@@ -2002,7 +2022,10 @@ class WriterServer:
                     # owner as "writer service failed to complete the request"
                     # and nothing anywhere says what it was, so a transient
                     # lock and a governance refusal look identical.
-                    self._log_unhandled(request_id, exc)
+                    self._log_unhandled(
+                        request_id, exc,
+                        operation=operation,
+                    )
                     conn.sendall(error_frame(request_id, self._error_code(exc), self._error_message(exc)))
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -4632,7 +4655,11 @@ class WriterServer:
             return "store_error"
         return "internal_error"
 
-    def _log_unhandled(self, request_id: Any, exc: BaseException) -> None:
+    def _log_unhandled(
+        self, request_id: Any, exc: BaseException, *,
+        operation: str | None = None,
+        queued_cancelled: bool | None = None,
+    ) -> None:
         """Record an operation failure on the writer's own side.
 
         Only the unmapped ones carry a traceback: a mapped exception is an
@@ -4641,17 +4668,27 @@ class WriterServer:
         sanitized message tells nobody anything.
         """
 
+        # ``operation`` has already passed the closed protocol operation
+        # vocabulary.  Do not log params: those may contain source text or
+        # credentials.  A malformed request is represented as ``unknown``.
+        operation_label = operation if operation in OPERATION_FIELDS else "unknown"
+        queue_label = (
+            "" if queued_cancelled is None else
+            f" queued_cancelled={str(queued_cancelled).lower()}"
+        )
         mapped = self._error_message(exc) != "writer service failed to complete the request"
         try:
             if mapped:
                 print(
-                    f"writer op failed request={request_id} "
+                    f"writer op failed operation={operation_label} request={request_id}"
+                    f"{queue_label} "
                     f"error={type(exc).__name__}: {exc}",
                     file=sys.stderr, flush=True,
                 )
             else:
                 print(
-                    f"writer op failed (unmapped) request={request_id}",
+                    f"writer op failed (unmapped) operation={operation_label} "
+                    f"request={request_id}{queue_label}",
                     file=sys.stderr, flush=True,
                 )
                 traceback.print_exc()
