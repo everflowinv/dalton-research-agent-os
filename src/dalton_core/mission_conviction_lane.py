@@ -147,7 +147,9 @@ class MissionConvictionLaneCoordinator:
             # repeatedly launching the same refused draft on a timer.
             failure_status = (
                 f"content_refused:{call_status}"
-                if call_status in {"verifier_rejected", "rubric_failed", "no_variant_view"}
+                if call_status in {
+                    "refused", "verifier_rejected", "rubric_failed", "no_variant_view",
+                }
                 else str(call_status or settled.get("status"))
             )
             settled["failure"] = record_controlled_failure(

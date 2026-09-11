@@ -606,6 +606,10 @@ class LaneCoordinatorTests(ConvictionHarness):
         held = self.coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["reason"], "bad draft")
+        self.assertEqual(
+            held["settled"]["failure"]["failure_class"], "content_refused"
+        )
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
         # New material changes the fingerprint, so the hold does not survive it.
         self.admit_thesis(thesis_ref="thesis:us-it-services:second")
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
