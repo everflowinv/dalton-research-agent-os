@@ -343,7 +343,7 @@ class DocumentExtractionCoordinator:
             "SELECT r.review_id,r.updated_at,d.status,d.ticket_ref,d.updated_at "
             "FROM coverage_mission_document_reviews r "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=r.mission_version_ref "
-            "JOIN coverage_mission_discovered_documents d "
+            "LEFT JOIN coverage_mission_discovered_documents d "
             "ON d.record_id=r.discovered_document_ref "
             "WHERE r.state='awaiting_human_extraction' ORDER BY r.review_id"
         ).fetchall()
