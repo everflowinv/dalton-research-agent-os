@@ -544,13 +544,13 @@ class Scheduler:
         )
         return {"expired": expired, "next": next_event}
 
-    def _expire_due(self, cur: sqlite3.Cursor, now_dt: datetime, now: str) -> list[dict[str, Any]]:
+    def _current_leased_events(self, cur: sqlite3.Cursor) -> list[sqlite3.Row]:
         # Start with the small set of leased events and use the existing
         # (work_order_id, event_seq) index to rule out historical leases.  The
         # former GROUP BY materialized the latest event for every WorkOrder
         # while holding BEGIN IMMEDIATE, serializing otherwise independent
         # child completions as the authority grew.
-        current_leased = cur.execute(
+        return cur.execute(
             "SELECT e.* FROM scheduler_attempt_events e "
             "WHERE e.state='leased' AND NOT EXISTS ("
             "  SELECT 1 FROM scheduler_attempt_events newer "
@@ -559,6 +559,9 @@ class Scheduler:
             ") "
             "ORDER BY e.event_seq"
         ).fetchall()
+
+    def _expire_due(self, cur: sqlite3.Cursor, now_dt: datetime, now: str) -> list[dict[str, Any]]:
+        current_leased = self._current_leased_events(cur)
         expired: list[dict[str, Any]] = []
         for event in current_leased:
             lease = self._latest_lease_for_event(cur, event)
@@ -570,6 +573,22 @@ class Scheduler:
         """Expire all overdue leases and create bounded retries atomically."""
         now_dt = self._now()
         now = _timestamp(now_dt)
+        if self.connection.in_transaction:
+            raise RuntimeError("Scheduler operation cannot be nested")
+        # Most controller ticks have nothing to expire. WAL readers can check
+        # this while another worker completes; taking BEGIN IMMEDIATE first
+        # needlessly competes with every paid worker for the single write lock.
+        # This is only an advisory read. If anything looks due, re-read all
+        # current leases under the original transaction before changing them.
+        cur = self.connection.cursor()
+        try:
+            if not any(
+                _parse_time(self._latest_lease_for_event(cur, event)["expires_at"]) <= now_dt
+                for event in self._current_leased_events(cur)
+            ):
+                return []
+        finally:
+            cur.close()
         with self._transaction() as cur:
             return self._expire_due(cur, now_dt, now)
 
