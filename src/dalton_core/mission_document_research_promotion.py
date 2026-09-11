@@ -135,7 +135,14 @@ def persist_document_promotion(cursor, executor, decision, evidence, claim, mate
     """Persist proof in the same Core transaction as Evidence, Claim and decision."""
     _need(cursor.connection is executor.connection and executor.connection.in_transaction,
           "document promotion requires the active Core Ledger transaction")
-    admission_ref = material["normalized_payload"]["mission_document_admission"]["ref"]
+    _need(all(isinstance(value, Mapping)
+              for value in (decision, evidence, claim, material)),
+          "document promotion inputs are malformed")
+    payload = material.get("normalized_payload")
+    binding = payload.get("mission_document_admission") if isinstance(payload, Mapping) else None
+    admission_ref = binding.get("ref") if isinstance(binding, Mapping) else None
+    _need(isinstance(admission_ref, str),
+          "document promotion admission binding is unavailable")
     admission, _works, bundle, outcome, proof = _context_proof(
         executor, store=executor.authority.store, connection=executor.connection,
         admission_ref=admission_ref)
@@ -197,11 +204,15 @@ def persist_document_promotion(cursor, executor, decision, evidence, claim, mate
         and receipt["decision_json"] == canonical_json(decision)
         and receipt["candidate_evidence_ref"] == bundle["evidence"]["id"]
         and receipt["candidate_claim_ref"] == bundle["claim"]["id"]
+        and receipt["idempotency_key"]
+            == f"policy-ledger:mission-document-research:{admission['id']}"
+        and receipt["created_at"] == decision["created_at"]
         and receipt["request_hash"] == content_hash({
             "decision_hash": decision["content_hash"],
             "evidence_hash": bundle["evidence"]["content_hash"],
             "claim_hash": bundle["claim"]["content_hash"],
         })
+        and receipt["result_json"] == canonical_json(result)
         and result.get("review_decision_ref") == decision["id"]
         and result.get("evidence_version_ref") == evidence["id"]
         and result.get("claim_version_ref") == claim["id"],
