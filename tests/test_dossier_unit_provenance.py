@@ -101,16 +101,51 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         return CoverageMissionAuthority(fixture.store).create_mission(
             params.pop("mission_ref"),**params)
 
+    def _additional_unit_proof(self, *, unit, mission, prior_ref):
+        structure=[{"slot_id":unit,"prompt":"Describe it"}]
+        rows=list(material())
+        rows[0]={**rows[0],"ref":"claim-version:new-unit",
+                 "text":"New evidence for the second dossier unit"}
+        text=reply([one_sentence(unit,["C1"])])
+        block=parse_unit_output(text,unit=unit,structure=structure,material=rows)
+        prompt=build_unit_prompt(unit=unit,structure=structure,material=rows,
+                                 company=self.company)
+        parse_input={"structure":structure,"material":rows,"prior_body":"",
+            "profile":None,"profile_table":"","market_view_available":True,
+            "classification":None}
+        frozen={"unit":unit,"company":self.company,
+            "prompt_sha":content_hash({"prompt":prompt}),
+            "mission":{"ref":mission["id"],"hash":mission["content_hash"]},
+            "constitution":self.producer_input["constitution"],
+            "policy":self.producer_input["policy"],"parse_input":parse_input}
+        digest=draft_hash({unit:block})
+        verifier_prompt=build_verifier_prompt({unit:block},company=self.company)
+        scheduler=sqlite3.connect(self.scheduler_path);router=sqlite3.connect(self.router_path)
+        original=(self.unit,self.producer_prompt,self.verifier_prompt,self.producer_text,
+                  self.verified_draft_hash,self.producer_input)
+        self.unit=unit;self.producer_prompt=prompt;self.verifier_prompt=verifier_prompt
+        self.producer_text=text;self.verified_draft_hash=digest;self.producer_input=frozen
+        producer_route=self._call(scheduler,router,"producer-2",[])
+        self._call(scheduler,router,"verifier-2",[producer_route])
+        scheduler.commit();router.commit();scheduler.close();router.close()
+        calls={role:self.calls[f"{role}-2"] for role in ("producer","verifier")}
+        (self.unit,self.producer_prompt,self.verifier_prompt,self.producer_text,
+         self.verified_draft_hash,self.producer_input)=original
+        return block,{"input_fingerprint":content_hash(frozen),"producer_input":frozen,
+            "producer_prior_version_ref":prior_ref,"resolved_classification":None,
+            "verified_draft_hash":digest,**calls}
+
     def _call(self, scheduler, router, name, producer_routes):
         work_ref=f"work:{name}"; route_ref=f"route-decision:{name}"; result_ref=f"result-envelope:{name}"; invocation_ref=f"invocation:{name}"
         from dalton_core.company_dossier_draft import verifier_prompt_contract_fingerprint
-        prompt=self.producer_prompt if name=="producer" else self.verifier_prompt
+        is_producer=name.startswith("producer")
+        prompt=self.producer_prompt if is_producer else self.verifier_prompt
         request_id=(content_hash({"unit":self.unit,"company":"company:acn","prompt_sha":content_hash(prompt)})[:32]
-                    if name=="producer" else
+                    if is_producer else
                     f"verify-{self.verified_draft_hash[:24]}-{verifier_prompt_contract_fingerprint()[:16]}")
-        work={"id":work_ref,"question":prompt,"metadata":{"purpose":"dossier" if name=="producer" else "dossier_verifier","request_id":request_id,"mission_version_ref":"mission:v14","mission_version_hash":"c"*64,"producer_route_decision_refs":producer_routes}}
+        work={"id":work_ref,"question":prompt,"metadata":{"purpose":"dossier" if is_producer else "dossier_verifier","request_id":request_id,"mission_version_ref":self.producer_input["mission"]["ref"],"mission_version_hash":self.producer_input["mission"]["hash"],"producer_route_decision_refs":producer_routes}}
         work_hash=content_hash(work)
-        output=(self.producer_text if name=="producer" else '{"verdict":"pass","findings":[]}')
+        output=(self.producer_text if is_producer else '{"verdict":"pass","findings":[]}')
         envelope={"id":result_ref,"work_order_ref":work_ref,"invocation_ref":invocation_ref,"status":"succeeded","outputs":{"text":output},"metadata":{"route_decision_ref":route_ref}}
         decision={"id":route_ref}; decision["content_hash"]=content_hash(decision)
         scheduler.execute("INSERT INTO scheduler_work_orders VALUES(?,?,?)",(work_ref,canonical_json(work),work_hash))
@@ -243,7 +278,7 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         self.assertIsNone(published["unit_provenance"]["business_model"])
         self.assertEqual(published["sections"][0],legacy_block)
 
-    def test_old_mission_proof_is_carried_exactly_into_a_new_mission_version(self):
+    def test_old_mission_proof_is_carried_while_a_new_unit_binds_the_new_mission(self):
         fixture=LedgerFixture();self.addCleanup(fixture.close)
         mission=self._install_mission(fixture)
         authority=CompanyDossierAuthority(fixture.store)
@@ -256,17 +291,29 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         published=authority.publish_verified(first,scheduler_db=self.scheduler_path,
                                              router_db=self.router_path)
         second_mission=self._next_mission(fixture,mission)
-        second=body(drafted_sections={self.unit:self.block},company_ref="company:acn",
+        new_block,new_proof=self._additional_unit_proof(
+            unit="business_model",mission=second_mission,prior_ref=published["id"])
+        second=body(drafted_sections={self.unit:self.block,"business_model":new_block},company_ref="company:acn",
                     prior_ref=published["id"])
         second["bindings"]["mission_version_ref"]=second_mission["id"]
         second["input_fingerprints"]=published["input_fingerprints"]
         second["unit_provenance"]=published["unit_provenance"]
+        second["input_fingerprints"]["business_model"]=new_proof["input_fingerprint"]
+        second["unit_provenance"]["business_model"]=new_proof
+        self.assertIsNotNone(second["unit_provenance"]["business_model"])
         carried=authority.publish_verified(second,scheduler_db=self.scheduler_path,
                                            router_db=self.router_path)
         self.assertEqual(carried["unit_provenance"][self.unit],
                          published["unit_provenance"][self.unit])
         self.assertEqual(carried["unit_provenance"][self.unit]["producer_input"]
                          ["mission"]["ref"],mission["id"])
+        self.assertEqual(carried["unit_provenance"]["business_model"]["producer_input"]
+                         ["mission"]["ref"],second_mission["id"])
+        forged=json.loads(json.dumps(second))
+        forged["unit_provenance"]["business_model"]["producer_prior_version_ref"]=None
+        with self.assertRaisesRegex(Exception,"exact predecessor"):
+            authority.publish_verified(forged,scheduler_db=self.scheduler_path,
+                                       router_db=self.router_path)
 
 
 if __name__ == "__main__": unittest.main()
