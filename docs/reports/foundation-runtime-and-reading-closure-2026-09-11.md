@@ -188,3 +188,12 @@ The immutable preflight `ee39177bad8edf5ae962e095ba2055788ca2d138` ran 7,040 tes
 Two failures were the unproved-capacity fixtures already corrected above. Two annual raw model-output schema files lacked titles; they now declare their identity while preserving the exact runtime prompt schema. The deterministic registered annual retrieval proof is now tested as a content-addressed derivation, not incorrectly required to carry an event timestamp that would change on replay. Model configuration registration again preserves the original first three names and appends discovery selection after them. The 121-test affected contract/registry/model-selection/annual suite passed in 5.476 seconds; a separate shape check confirmed both published model schemas match the actual prompt schemas excluding annotations.
 
 Next: finish actual budget authority and crash/unknown recovery review, then freeze a new complete candidate and repeat the full suite. This failed preflight remains explicit evidence, regardless of the targeted checks.
+
+
+### Annual child restart path merged; edge-case review remains open — 08:22 UTC
+
+Integration `26b94e8` adds automatic annual child recovery and exclusive first-install configuration publication. A real subprocess fixture was terminated during provider backoff; after reopening the launcher, it resumed the same ticket, plan and Scheduler Work, used attempts one and two, and reached independent verification/staging. A superseding mission pointer prevented recovery. The combined annual/setup/launcher/transport/contracts run passed 33 tests in 16.116 seconds.
+
+Root review found additional recovery edges that those tests did not cover: a child that fails before admitting any Work could be relaunched without bounded process backoff; one nonresumable historical ticket could prevent scanning later eligible tickets; and an inherited still-live child was monitored without reserving the launcher's normal single-flight slot. These are being repaired before release. Successful process restart in a fixture is not the final production acceptance.
+
+The final Alpha activation helper now also publishes through an exclusive hard link, so failed fsync cannot expose a partial target and a concurrent owner write cannot be replaced. Ten private helper tests passed; helper SHA-256 `179e629211a04eefe6e33e36ae8d1b077b3b3baf35c86834b9248bf02b5747cb`. Its provisional source binding still needs the final release commit. The separate v6 host activation helper passed nine private tests and remains explicitly inert until rebind.
