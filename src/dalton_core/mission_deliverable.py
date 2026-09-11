@@ -120,6 +120,26 @@ _BARE_SMALL_INTEGER = 12
 # document's real bound is the 60-entry cap on a section's numbers.
 MAX_NUMBER_TEXT = 1000
 _VALUE_TOKEN_RE = re.compile(r"[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?%|\d[\d,.]*")
+_ISO_DATE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2}-\d{2}-\d{2})(?!\d)")
+_MONTH_DATE_RE = re.compile(
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\s+(?:0?[1-9]|[12]\d|3[01]),?\s+(?:19|20)\d{2}(?!\d)",
+    re.IGNORECASE,
+)
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.2"
+
+
+def number_source_contract_fingerprint() -> str:
+    """Identity for consumers whose terminal hold depends on number sourcing."""
+
+    from .store import content_hash
+
+    return content_hash({
+        "version": NUMBER_SOURCE_CONTRACT_VERSION,
+        "number_source_fields": ["text", "period"],
+        "bound_period_equivalence": "iso-date-to-english-month-date",
+    })
 
 
 def _kind_check_list() -> str:
@@ -189,6 +209,51 @@ def _normalise_number(token: str) -> str:
     return re.sub(r"[\s,]", "", token).rstrip(".")
 
 
+def _normalise_date(value: str) -> str | None:
+    compact = value.replace(",", "")
+    for pattern in ("%b %d %Y", "%B %d %Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(compact, pattern).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _bound_period_dates(numbers: Sequence[Mapping[str, Any]]) -> set[str]:
+    dates: set[str] = set()
+    for item in numbers:
+        period = str(item.get("period") or "")
+        for match in _ISO_DATE_RE.finditer(period):
+            normalised = _normalise_date(match.group(1))
+            if normalised is not None:
+                dates.add(normalised)
+        for match in _MONTH_DATE_RE.finditer(period):
+            normalised = _normalise_date(match.group(0))
+            if normalised is not None:
+                dates.add(normalised)
+    return dates
+
+
+def _remove_bound_month_dates(
+    body: str, numbers: Sequence[Mapping[str, Any]],
+) -> str:
+    """Remove only complete dates proved by a cited number's period.
+
+    ``value_tokens`` still sees every unbound or differently dated expression.
+    This is deliberately an equality check against authority material, not a
+    blanket rule that dates are never figures.
+    """
+
+    bound = _bound_period_dates(numbers)
+    if not bound:
+        return body
+    return _MONTH_DATE_RE.sub(
+        lambda match: (" " * len(match.group(0)))
+        if _normalise_date(match.group(0)) in bound else match.group(0),
+        body,
+    )
+
+
 def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[str]:
     """Figures in the body that no supplied, Claim-bound number accounts for."""
 
@@ -196,8 +261,9 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
     for item in numbers:
         for token in value_tokens(str(item.get("text", ""))):
             sourced.add(_normalise_number(token))
+    checked_body = _remove_bound_month_dates(body, numbers)
     return [
-        token for token in value_tokens(body)
+        token for token in value_tokens(checked_body)
         if _normalise_number(token) not in sourced
     ]
 
@@ -946,6 +1012,7 @@ __all__ = [
     "MissionDeliverableError",
     "MissionDeliverableNotFound",
     "MissionDeliverableValidationError",
+    "number_source_contract_fingerprint",
     "REVISION_FIELDS",
     "WRITE_SCOPE",
     "unsourced_numbers",

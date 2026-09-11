@@ -113,6 +113,29 @@ class NumberDisciplineTests(unittest.TestCase):
         self.assertEqual(unsourced_numbers("收入 18,718,144,000 美元，同比 5.59%。", numbers), [])
         self.assertEqual(unsourced_numbers("2026 财年利润率约 14.2%。", numbers), ["14.2%"])
 
+    def test_english_date_is_sourced_only_by_an_equivalent_bound_period(self) -> None:
+        # Reduced from the refused live ACN dossier output: the cited filed
+        # revenue row carried this exact quarter in ``period``.
+        body = "地域方面，fiscal Q1 ended Nov 30, 2025各地区均增长。"
+        source = {
+            "text": ("Accenture plc reported Revenues of USD 18742125000, "
+                     "up 5.95% year over year."),
+            "period": "2025-09-01..2025-11-30",
+        }
+        self.assertEqual(unsourced_numbers(body, [source]), [])
+        self.assertEqual(unsourced_numbers(body, []), ["30,"])
+        self.assertEqual(
+            unsourced_numbers(body, [{**source, "period": "2025-08-31"}]), ["30,"])
+
+    def test_period_binding_does_not_source_an_unrelated_quantity(self) -> None:
+        source = {"text": "Revenue grew in the quarter.",
+                  "period": "2025-09-01..2025-11-30"}
+        self.assertEqual(
+            unsourced_numbers("Revenue grew in the quarter ended Nov 30, 2025, with 30 clients.",
+                              [source]),
+            ["30"],
+        )
+
 
 class AuthorityTests(DeliverableHarness):
     def test_an_unsourced_figure_fails_the_publish(self) -> None:
