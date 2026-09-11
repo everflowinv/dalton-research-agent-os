@@ -1226,6 +1226,138 @@ def planner_budget_config(state_dir: str | Path) -> dict[str, Any]:
     return result
 
 
+def planner_runtime_model_config(
+    state_dir: str | Path,
+    fallback: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Read the planner wiring the resident Writer must use for new Work.
+
+    The LaunchAgent command is an installation snapshot.  Model selection and
+    plan-budget edits publish into ``service.json`` later, so reusing its old
+    command-line values after a restart would make the Cockpit change inert.
+    Route, broker and call-budget authority therefore come from the current
+    service config.  Retry and day-ledger wiring remain in the registered
+    planner model config beside Core.
+    """
+
+    directory = Path(state_dir).expanduser().resolve()
+    result = None if fallback is None else dict(fallback)
+    service_path = directory.parents[1] / "config" / "service.json"
+    service_controls_call_budget = False
+    if service_path.is_file():
+        from .bounded_planner_driver import (
+            BoundedPlannerDriverConfig, BoundedPlannerDriverError,
+        )
+        try:
+            service = json.loads(service_path.read_text(encoding="utf-8"))
+            block = service.get("bounded_planner")
+            planner = (
+                BoundedPlannerDriverConfig.from_mapping(dict(block["config"]))
+                if isinstance(block, Mapping) and block.get("enabled") is True
+                else None
+            )
+        except (OSError, ValueError, TypeError, KeyError,
+                BoundedPlannerDriverError) as exc:
+            raise WriterServerError(
+                f"planner service configuration is invalid: {exc}"
+            ) from exc
+        if isinstance(block, Mapping) and (
+            planner is None or planner.planner_routing_policy_ref is None
+        ):
+            # An explicit disabled/deterministic service block is current
+            # authority.  Stale LaunchAgent argv must not resurrect its prior
+            # model route.
+            return None
+        if planner is not None and planner.planner_routing_policy_ref is not None:
+            service_controls_call_budget = True
+            result = {
+                "routing_policy_ref": planner.planner_routing_policy_ref,
+                "credential_slot_refs": tuple(
+                    planner.planner_credential_slot_refs or ()
+                ),
+                "model_router_db": str(planner.planner_model_router_db),
+                "broker_socket": str(planner.planner_broker_socket),
+                "broker_auth_key": str(planner.planner_broker_auth_key),
+                "broker_client_id": planner.planner_broker_client_id,
+                "expected_agent_id": planner.planner_expected_agent_id,
+                # This is the live owner-editable plan budget.  The model
+                # config contains the install-time copy, which must not win
+                # after Cockpit publishes a newer service config.
+                "call_budget": dict(planner.planner_call_budget),
+            }
+    if result is None:
+        return None
+    installed = planner_budget_config(directory)
+    # The sidecar owns these fields.  Its copied call budget is used only by a
+    # standalone Writer with no service config.
+    for key, value in installed.items():
+        if service_controls_call_budget and key in {
+            "call_budget", "purpose_call_budgets"
+        }:
+            continue
+        result[key] = value
+    resolved_planner_call_budget(result)
+    return result
+
+
+def planner_execution_binding(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze the exact routing authority one new planner Work may consume."""
+
+    from .model_router import ModelRouter
+
+    with ModelRouter(config["model_router_db"], read_only=True) as router:
+        policy = router.get_policy(config["routing_policy_ref"])
+    return {
+        "schema_version": "0.1",
+        "routing_policy_ref": config["routing_policy_ref"],
+        "routing_policy_hash": policy["content_hash"],
+        "credential_slot_refs": list(config["credential_slot_refs"]),
+    }
+
+
+def planner_scheduler_requirements(
+    config: Mapping[str, Any],
+) -> tuple[int, float, str]:
+    """Return the paid-attempt and lease capacity required by this config."""
+
+    from .llm_research_planner_worker import planner_provider_attempt_bound
+    from .model_router import ModelRouter
+
+    retry = config.get("provider_retry")
+    with ModelRouter(config["model_router_db"], read_only=True) as router:
+        policy = router.get_policy(config["routing_policy_ref"])
+        attempts = 1
+        policy_hash = policy["content_hash"]
+        if retry is not None:
+            attempts, policy_hash = planner_provider_attempt_bound(
+                router, config["routing_policy_ref"], retry
+            )
+    call = resolved_planner_call_budget(config)
+    lease = planner_work_lease_seconds(
+        {"max_seconds": call["timeout_seconds"]},
+        config.get("transport_retry"),
+    )
+    return attempts, lease, str(policy_hash)
+
+
+def planner_work_lease_seconds(
+    budget: Mapping[str, Any], transport_retry: Mapping[str, Any] | None,
+) -> float:
+    """Reconstruct the lease bound frozen into one admitted planner Work."""
+
+    transport = transport_retry or {}
+    safe_retries = int(transport.get("max_definitely_not_sent_retries", 0))
+    return (
+        (safe_retries + 1)
+        * (
+            float(budget["max_seconds"])
+            + float(transport.get("queue_wait_seconds", 0))
+        )
+        + safe_retries * float(transport.get("retry_backoff_seconds", 0))
+        + 30.0
+    )
+
+
 def load_principals(
     path: str | Path,
     *,
@@ -1539,6 +1671,7 @@ class WriterServer:
         self._transcript_spool: RawSpool | None = None
         self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
         self._scheduler: Scheduler | None = None
+        self._planner_scheduler: Scheduler | None = None
         # The writer is the long-lived owner of the writable model authority.
         # Keeping this connection open also keeps WAL/SHM present for strict
         # read-only Cockpit and lane consumers between individual operations.
@@ -1971,59 +2104,23 @@ class WriterServer:
                 from .document_extraction import extraction_scheduler_policy
                 scheduler_kwargs = extraction_scheduler_policy(
                     self._document_extraction_model_config)
-            planner_retry = (
-                None if self._planner_model_config is None
-                else self._planner_model_config.get("provider_retry")
-            )
-            planner_transport = (
-                None if self._planner_model_config is None
-                else self._planner_model_config.get("transport_retry")
-            )
-            if planner_retry is not None or planner_transport is not None:
-                from .model_router import ModelRouter
-                from .llm_research_planner_worker import (
-                    planner_provider_attempt_bound,
+            if (
+                self._planner_model_config is not None
+                and (
+                    self._planner_model_config.get("provider_retry") is not None
+                    or self._planner_model_config.get("transport_retry") is not None
                 )
-
-                with ModelRouter(
-                    self._planner_model_config["model_router_db"]
-                ) as planner_router:
-                    planner_policy = planner_router.get_policy(
-                        self._planner_model_config["routing_policy_ref"]
-                    )
-                    planner_policy_hash = planner_policy["content_hash"]
-                    planner_attempts = 1
-                    if planner_retry is not None:
-                        planner_attempts, planner_policy_hash = planner_provider_attempt_bound(
-                            planner_router,
-                            self._planner_model_config["routing_policy_ref"],
-                            planner_retry,
-                        )
+            ):
+                planner_retry = self._planner_model_config.get("provider_retry")
+                planner_transport = self._planner_model_config.get("transport_retry")
+                planner_attempts, planner_lease, planner_policy_hash = (
+                    planner_scheduler_requirements(self._planner_model_config)
+                )
                 scheduler_kwargs["max_attempts"] = max(
                     int(scheduler_kwargs.get("max_attempts", 3)),
                     planner_attempts,
                 )
-                transport = planner_transport or {}
-                safe_retries = int(
-                    transport.get("max_definitely_not_sent_retries", 0)
-                )
-                configured_call = resolved_planner_call_budget(
-                    self._planner_model_config
-                )
-                # The installed plan-purpose timeout, queue, and proved-
-                # pre-send retries extend the same Scheduler lease. None of
-                # those safe transport retries consumes a paid provider
-                # attempt.
-                self._planner_lease_seconds = (
-                    (safe_retries + 1)
-                    * (
-                        float(configured_call["timeout_seconds"])
-                        + float(transport.get("queue_wait_seconds", 0))
-                    )
-                    + safe_retries
-                    * float(transport.get("retry_backoff_seconds", 0))
-                    + 30.0
-                )
+                self._planner_lease_seconds = planner_lease
                 scheduler_kwargs["max_lease_seconds"] = max(
                     float(scheduler_kwargs.get("max_lease_seconds", 60.0)),
                     self._planner_lease_seconds,
@@ -2049,6 +2146,7 @@ class WriterServer:
                     + "-0.1"
                 )
             self._scheduler = Scheduler(self._scheduler_path, **scheduler_kwargs)
+            self._planner_scheduler = self._scheduler
             self._bounded_control = BoundedPlannerControlPlane(
                 self._bounded_planner,
                 self._observability,
@@ -2157,6 +2255,12 @@ class WriterServer:
         if self._candidate_staging is not None:
             self._candidate_staging.close()
             self._candidate_staging = None
+        if (
+            self._planner_scheduler is not None
+            and self._planner_scheduler is not self._scheduler
+        ):
+            self._planner_scheduler.close()
+        self._planner_scheduler = None
         if self._scheduler is not None:
             self._scheduler.close()
             self._scheduler = None
@@ -2921,13 +3025,24 @@ class WriterServer:
         ):
             raise WriterServerError("chain must be a list of profile ids")
         try:
-            return set_model_selection(
+            result = set_model_selection(
                 self.state_dir,
                 purpose=str(values["purpose"]),
                 mode=str(mode),
                 chain=chain,
                 actor_ref=str(values["actor_ref"]),
             )
+            if values["purpose"] == "plan":
+                applied, reason = self._reload_planner_model_config()
+                result = {
+                    **result,
+                    "requires_restart": not applied,
+                    "reload_note": (
+                        "已用于下一次规划调用。"
+                        if applied else reason
+                    ),
+                }
+            return result
         except (ModelSelectionError, KeyError, ValueError) as exc:
             raise WriterServerError(str(exc)) from exc
 
@@ -2935,11 +3050,22 @@ class WriterServer:
         from .model_budget_configuration import set_model_call_budget, BudgetConfigurationConflict
         from .model_selection import ModelSelectionError
         try:
-            return set_model_call_budget(
+            result = set_model_call_budget(
                 self.state_dir, purpose=p["purpose"], budget=p["budget"],
                 expected_config_hash=p["expected_config_hash"], actor_ref=p["actor_ref"],
                 kind=p.get("kind", "call"),
             )
+            if p["purpose"] == "plan" and p.get("kind", "call") == "call":
+                applied, reason = self._reload_planner_model_config()
+                result = {
+                    **result,
+                    "requires_restart": not applied,
+                    "reload_note": (
+                        "已用于下一次规划调用。"
+                        if applied else reason
+                    ),
+                }
+            return result
         except BudgetConfigurationConflict as exc:
             raise IdempotencyConflict(str(exc)) from exc
         except (KeyError, ValueError, ModelSelectionError) as exc:
@@ -3568,15 +3694,65 @@ class WriterServer:
         )
 
     def _llm_planner_coordinator(self) -> LLMResearchPlannerCoordinator:
-        if self._bounded_planner is None or self._scheduler is None:
+        if self._bounded_planner is None or self._planner_scheduler is None:
             raise WriterServerError("bounded-planner control plane is unavailable")
         if self._llm_planner_coordinator_instance is None:
             self._llm_planner_coordinator_instance = LLMResearchPlannerCoordinator(
-                self._bounded_planner, self._scheduler
+                self._bounded_planner, self._planner_scheduler
             )
         return self._llm_planner_coordinator_instance
 
+    def _reload_planner_model_config(self) -> tuple[bool, str | None]:
+        """Adopt current owner config under a new frozen planner policy."""
+
+        current = self._planner_model_config
+        prospective = planner_runtime_model_config(self.state_dir, current)
+        if prospective == current:
+            return True, None
+        if prospective is None:
+            return False, "planner model execution is no longer configured"
+        attempts, lease, policy_hash = planner_scheduler_requirements(prospective)
+        if self._scheduler_path is None or self._scheduler is None:
+            return False, "planner Scheduler is unavailable"
+        # Preserve the installed Scheduler's ordinary contract-output retry
+        # allowance while adding enough attempts for the configured provider
+        # chain.  Provider retries are not a reason to reduce existing Work's
+        # non-provider retry policy.
+        max_attempts = max(self._scheduler.max_attempts, attempts)
+        retry = prospective.get("provider_retry")
+        transport = prospective.get("transport_retry")
+        policy_version_id = (
+            "scheduler-policy-planner-runtime-"
+            + content_hash({
+                "planner_routing_policy_hash": policy_hash,
+                "planner_provider_retry": retry,
+                "planner_transport_retry": transport,
+                "planner_call_budget": resolved_planner_call_budget(prospective),
+                "max_attempts": max_attempts,
+                "planner_lease_seconds": lease,
+            })[:24]
+            + "-0.1"
+        )
+        replacement = Scheduler(
+            self._scheduler_path,
+            max_attempts=max_attempts,
+            max_lease_seconds=lease,
+            max_total_lease_seconds=lease * 2,
+            policy_version_id=policy_version_id,
+        )
+        previous = self._planner_scheduler
+        self._planner_scheduler = replacement
+        self._llm_planner_coordinator_instance = None
+        self._planner_model_config = prospective
+        self._planner_lease_seconds = lease
+        if previous is not None and previous is not self._scheduler:
+            previous.close()
+        return True, None
+
     def _op_llm_planner_prepare(self, p: Mapping[str, Any]) -> Any:
+        applied, reason = self._reload_planner_model_config()
+        if not applied:
+            raise WriterServerError(reason or "planner configuration requires restart")
         values = dict(p)
         context_pack_ref = values.pop("context_pack_ref")
         requested = {key: value for key, value in values.items() if value is not None}
@@ -3601,6 +3777,10 @@ class WriterServer:
             transport_retry=(
                 None if self._planner_model_config is None
                 else self._planner_model_config.get("transport_retry")
+            ),
+            execution=(
+                None if self._planner_model_config is None
+                else planner_execution_binding(self._planner_model_config)
             ),
             **budget,
         )
@@ -3695,6 +3875,9 @@ class WriterServer:
     def _op_llm_planner_execute(self, p: Mapping[str, Any]) -> Any:
         # Runs inside the writer: the planner model worker writes model
         # accounting into this Core, which the driver process must not open.
+        applied, reason = self._reload_planner_model_config()
+        if not applied:
+            raise WriterServerError(reason or "planner configuration requires restart")
         if self._planner_model_config is None:
             raise WriterServerError("planner model execution is not configured")
         from .budget_pools import POOL_NAMES, pool_for_loop
@@ -3713,26 +3896,43 @@ class WriterServer:
             "max_cost_usd": effective["max_cost_usd"],
             "max_seconds": effective["timeout_seconds"],
         }
-        coordinator = self._llm_planner_coordinator()
-        prepared = coordinator.prepare(
-            context_pack_ref,
-            provider_retry=config.get("provider_retry"),
-            transport_retry=config.get("transport_retry"),
-            **budget,
+        # The loop owns its pool.  Resolve this deterministic authority before
+        # touching model routing so an invalid caller-declared pool is refused
+        # even when model infrastructure is unavailable.
+        from .research_doctrine import revalidate_planner_context_pack
+
+        context = revalidate_planner_context_pack(
+            self.bounded_planner, context_pack_ref
         )
-        if prepared.get("status") != "model_work_ready":
-            return prepared
-        work_order = prepared["work_order"]
-        # The loop decides its own pool. The driver may declare one, and a
-        # declaration that disagrees is refused rather than silently
-        # overridden -- the same shape as the doctrine pack hash the driver
-        # passes and this server verifies.
-        loop = self.bounded_planner.loop(prepared["context"]["loop_version_ref"])
+        loop = self.bounded_planner.loop(context["loop_version_ref"])
         pool = pool_for_loop(loop)
         if declared_pool is not None and declared_pool != pool:
             raise WriterServerError(
                 f"this loop spends from the {pool} pool, not {declared_pool}"
             )
+        coordinator = self._llm_planner_coordinator()
+        prepared = coordinator.prepare(
+            context_pack_ref,
+            provider_retry=config.get("provider_retry"),
+            transport_retry=config.get("transport_retry"),
+            execution=planner_execution_binding(config),
+            **budget,
+        )
+        if prepared.get("status") != "model_work_ready":
+            return prepared
+        work_order = prepared["work_order"]
+        execution = work_order["metadata"].get("execution") or (
+            planner_execution_binding(config)
+        )
+        work_provider_retry = work_order["metadata"].get("provider_retry")
+        work_transport_retry = work_order["metadata"].get("transport_retry")
+        work_lease_seconds = planner_work_lease_seconds(
+            work_order["budget"], work_transport_retry
+        )
+        # The loop decides its own pool. The driver may declare one, and a
+        # declaration that disagrees is refused rather than silently
+        # overridden -- the same shape as the doctrine pack hash the driver
+        # passes and this server verifies.
         binding = self._planner_budget_binding(pool)
         from .model_router import ModelRouter
         from .openclaw_model_adapter import OpenClawModelAdapter
@@ -3750,26 +3950,26 @@ class WriterServer:
                 expected_agent_id=config["expected_agent_id"],
                 timeout_seconds=float(work_order["budget"]["max_seconds"]),
                 queue_wait_seconds=float(
-                    (config.get("transport_retry") or {}).get(
+                    (work_transport_retry or {}).get(
                         "queue_wait_seconds", 0
                     )
                 ),
             )
             worker = LLMResearchPlannerModelWorker(
-                scheduler=self._scheduler,
+                scheduler=self._planner_scheduler,
                 router=router,
                 adapter=adapter,
                 store=self.store,
                 observability=self.observability,
-                routing_policy_ref=config["routing_policy_ref"],
-                credential_slot_refs=config["credential_slot_refs"],
+                routing_policy_ref=execution["routing_policy_ref"],
+                credential_slot_refs=execution["credential_slot_refs"],
                 budget=ledger,
                 budget_policy_ref=(
                     None if ledger is None else config["budget_policy_ref"]),
                 mission_binding=binding,
-                provider_retry=config.get("provider_retry"),
-                transport_retry=config.get("transport_retry"),
-                lease_seconds=self._planner_lease_seconds,
+                provider_retry=work_provider_retry,
+                transport_retry=work_transport_retry,
+                lease_seconds=work_lease_seconds,
             )
             run = worker.run_once(work_order)
         # C2b: the default when the worker said nothing is read off the ledger
@@ -5472,12 +5672,14 @@ def main(argv: list[str] | None = None) -> int:
                 "broker_auth_key": args.planner_broker_auth_key,
                 "broker_client_id": args.planner_broker_client_id,
                 "expected_agent_id": args.planner_expected_agent_id,
-                # C2b: found beside the Core rather than passed in, because
-                # the installer already writes it there and a cap raise
-                # already repoints it. See planner_budget_config.
-                **planner_budget_config(
-                    Path(args.db).expanduser().resolve().parent),
             }
+        # Reload service.json rather than trusting the LaunchAgent's install-
+        # time argv snapshot.  This makes a normal Writer restart apply a
+        # Cockpit route or budget edit without regenerating the plist.
+        planner_model_config = planner_runtime_model_config(
+            Path(args.db).expanduser().resolve().parent,
+            planner_model_config,
+        )
         sec_filings_launcher = None
         if args.sec_filings_governance is not None and args.sec_filings_discovery_plan is not None:
             from .mission_source_discovery import SecFilingsIndexLauncher

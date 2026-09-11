@@ -225,6 +225,24 @@ class LLMResearchPlannerModelWorker:
             raise LLMResearchPlannerWorkerRejected(
                 "planner WorkOrder retry policy differs from the worker"
             )
+        execution = work.metadata.get("execution")
+        if execution is not None:
+            try:
+                policy = self.router.get_policy(self.routing_policy_ref)
+            except RoutingPolicyNotFound as exc:
+                raise LLMResearchPlannerWorkerRejected(
+                    "planner execution routing policy is not registered"
+                ) from exc
+            expected = {
+                "schema_version": "0.1",
+                "routing_policy_ref": self.routing_policy_ref,
+                "routing_policy_hash": policy["content_hash"],
+                "credential_slot_refs": list(self.credential_slot_refs),
+            }
+            if execution != expected:
+                raise LLMResearchPlannerWorkerRejected(
+                    "planner WorkOrder execution authority differs from the worker"
+                )
 
     def _execute_with_safe_retry(
         self,

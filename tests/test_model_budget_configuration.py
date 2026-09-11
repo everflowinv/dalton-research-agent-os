@@ -1,9 +1,11 @@
 import json
+import tempfile
 import unittest
 import threading
 from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
+from pathlib import Path
 
 from dalton_core.call_budget import CallBudgetError
 from dalton_core.cockpit_model import CockpitModel
@@ -225,6 +227,171 @@ class ServiceBudgetTests(unittest.TestCase):
             actual = BoundedPlannerDriverConfig.from_mapping(stored["bounded_planner"]["config"])
             self.assertEqual(actual.planner_call_budget["max_cost_usd"], 0.9)
             self.assertEqual(actual.planner_call_budget["max_output_tokens"], 1800)
+
+    def test_resident_writer_reloads_plan_selection_and_budget_for_next_call(self):
+        from dalton_core.model_router import ModelRouter
+        from dalton_core.writer_server import Principal, WriterServer
+        from tests.test_bounded_planner_driver import StalledLoopTests
+        from tests.test_llm_research_planner_worker import (
+            NOW, alternate_profile, profile, retry_policy,
+        )
+
+        class CaptureCoordinator:
+            def __init__(self):
+                self.calls = []
+
+            def prepare(self, context_pack_ref, **values):
+                self.calls.append((context_pack_ref, values))
+                return {"status": "captured"}
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            state = root / "state" / "dalton-core"
+            state.mkdir(parents=True)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            router_path = state / "model-router.sqlite"
+            with ModelRouter(router_path, clock=lambda: NOW) as router:
+                router.register_profile(profile())
+                router.register_profile(alternate_profile())
+                router.register_policy(retry_policy())
+            planner_raw = json.loads(json.dumps(
+                asdict(StalledLoopTests()._config(state)), default=str
+            ))
+            planner_raw.update(
+                planner_routing_policy_ref=(
+                    "model-routing-policy-version:test-planner-retry:1"
+                ),
+                planner_credential_slot_refs=["credential-slot:openclaw:test"],
+                planner_model_router_db=str(router_path),
+                planner_broker_socket=str(state / "broker.sock"),
+                planner_broker_auth_key=str(state / "broker.key"),
+                planner_max_cost_usd=0.8,
+                planner_call_budget={
+                    "max_input_tokens": 16_000,
+                    "max_output_tokens": 1_200,
+                    "max_cost_usd": 0.8,
+                    "timeout_seconds": 180,
+                },
+            )
+            service_path = config_dir / "service.json"
+            service_path.write_text(json.dumps({
+                "bounded_planner": {"enabled": True, "config": planner_raw},
+            }))
+            retry = {
+                "max_same_profile_retries": 1,
+                "retry_backoff_seconds": 0,
+            }
+            transport = {
+                "max_definitely_not_sent_retries": 1,
+                "queue_wait_seconds": 10,
+                "retry_backoff_seconds": 0,
+            }
+            sidecar = {
+                "routing_policy_ref": planner_raw["planner_routing_policy_ref"],
+                "credential_slot_refs": planner_raw["planner_credential_slot_refs"],
+                "model_router_db": str(router_path),
+                "broker_socket": str(state / "broker.sock"),
+                "broker_auth_key": str(state / "broker.key"),
+                "broker_client_id": "client:dalton-core",
+                "expected_agent_id": "chem",
+                "budget_db": str(state / "budget.sqlite"),
+                "budget_policy_ref": "budget-policy:test:1",
+                "provider_retry": retry,
+                "transport_retry": transport,
+            }
+            (state / "research-planner-model-config.json").write_text(
+                json.dumps(sidecar)
+            )
+            bootstrap = {
+                **sidecar,
+                "call_budget": dict(planner_raw["planner_call_budget"]),
+            }
+            server = WriterServer(
+                state / "core.sqlite", str(state / "writer.sock"),
+                {"core": Principal(
+                    "core", "token", frozenset({"set_model_selection"}),
+                    unrestricted=True,
+                )},
+                scheduler_path=state / "scheduler.sqlite",
+                planner_model_config=bootstrap,
+            )
+            server.start()
+            self.addCleanup(server.stop)
+            capture = CaptureCoordinator()
+            server._llm_planner_coordinator_instance = capture
+
+            selected = server._store_executor.submit(
+                server._op_set_model_selection,
+                {
+                    "purpose": "plan", "mode": "explicit",
+                    "chain": ["profile:test-planner-z"],
+                    "actor_ref": OWNER,
+                },
+            ).result(timeout=30)
+            self.assertFalse(selected["requires_restart"], selected)
+            server._llm_planner_coordinator_instance = capture
+            server._store_executor.submit(
+                server._op_llm_planner_prepare,
+                {"context_pack_ref": "context:after-selection"},
+            ).result(timeout=30)
+            first = capture.calls[-1][1]
+            self.assertEqual(
+                first["execution"]["routing_policy_ref"],
+                selected["policy_versions"][0]["policy_version_ref"],
+            )
+            self.assertIn(
+                "credential-slot:openclaw:test-z",
+                first["execution"]["credential_slot_refs"],
+            )
+
+            view = call_budget_view(state, "plan")
+            changed = server._store_executor.submit(
+                server._op_set_model_call_budget,
+                {
+                    "purpose": "plan", "kind": "call",
+                    "budget": {"max_cost_usd": 0.4},
+                    "expected_config_hash": view["config_hash"],
+                    "actor_ref": OWNER,
+                },
+            ).result(timeout=30)
+            self.assertFalse(changed["requires_restart"], changed)
+            server._llm_planner_coordinator_instance = capture
+            server._store_executor.submit(
+                server._op_llm_planner_prepare,
+                {"context_pack_ref": "context:after-budget"},
+            ).result(timeout=30)
+            second = capture.calls[-1][1]
+            self.assertEqual(second["max_cost_usd"], 0.4)
+            self.assertEqual(first["provider_retry"], second["provider_retry"])
+            self.assertEqual(first["transport_retry"], second["transport_retry"])
+
+            installed = json.loads(
+                (state / "research-planner-model-config.json").read_text()
+            )
+            installed["transport_retry"]["queue_wait_seconds"] = 7_200
+            (state / "research-planner-model-config.json").write_text(
+                json.dumps(installed)
+            )
+            # Reload replaces only the planner's Scheduler policy authority;
+            # the test capture is restored after that replacement below.
+            server._store_executor.submit(
+                server._reload_planner_model_config
+            ).result(timeout=30)
+            server._llm_planner_coordinator_instance = capture
+            server._store_executor.submit(
+                server._op_llm_planner_prepare,
+                {"context_pack_ref": "context:after-queue-expansion"},
+            ).result(timeout=30)
+            third = capture.calls[-1][1]
+            self.assertEqual(
+                third["transport_retry"]["queue_wait_seconds"], 7_200
+            )
+            self.assertGreater(server._planner_lease_seconds, 14_000)
+            self.assertEqual(
+                server._planner_scheduler.max_lease_seconds,
+                server._planner_lease_seconds,
+            )
 
     def test_thesis_budget_first_save_creates_only_budget_overlay(self):
         import tempfile

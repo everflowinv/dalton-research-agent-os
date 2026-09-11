@@ -1064,6 +1064,18 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         self.assertEqual(
             authority["work_order"]["metadata"]["transport_retry"], transport
         )
+        execution = authority["work_order"]["metadata"]["execution"]
+        self.assertEqual(
+            execution["routing_policy_ref"],
+            "model-routing-policy-version:test-planner-retry:1",
+        )
+        with ModelRouter(router_path, read_only=True) as reader:
+            expected_policy_hash = reader.get_policy(
+                "model-routing-policy-version:test-planner-retry:1"
+            )["content_hash"]
+        self.assertEqual(
+            execution["routing_policy_hash"], expected_policy_hash,
+        )
         self.assertEqual(
             authority["work_order"]["budget"]["max_seconds"], 600
         )

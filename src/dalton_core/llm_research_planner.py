@@ -426,6 +426,7 @@ def build_planner_work_order(
     max_seconds: int = 180,
     provider_retry: Mapping[str, Any] | None = None,
     transport_retry: Mapping[str, Any] | None = None,
+    execution: Mapping[str, Any] | None = None,
 ) -> WorkOrder:
     """Create the exact Scheduler contract for one model planning call."""
 
@@ -464,18 +465,54 @@ def build_planner_work_order(
             raise LLMResearchPlannerValidationError(
                 f"invalid planner transport retry policy: {exc}"
             ) from exc
+    if execution is not None:
+        expected = {
+            "schema_version", "routing_policy_ref", "routing_policy_hash",
+            "credential_slot_refs",
+        }
+        execution = _closed(execution, expected, "planner execution")
+        if execution["schema_version"] != SCHEMA_VERSION:
+            raise LLMResearchPlannerValidationError(
+                "planner execution schema_version is unsupported"
+            )
+        execution["routing_policy_ref"] = _text(
+            execution["routing_policy_ref"], "planner execution routing_policy_ref"
+        )
+        execution["routing_policy_hash"] = _hash(
+            execution["routing_policy_hash"], "planner execution routing_policy_hash"
+        )
+        slots = execution["credential_slot_refs"]
+        if (
+            not isinstance(slots, list) or not slots
+            or any(not isinstance(item, str) or not item for item in slots)
+            or len(set(slots)) != len(slots)
+        ):
+            raise LLMResearchPlannerValidationError(
+                "planner execution credential_slot_refs must be unique non-empty text"
+            )
+        execution["credential_slot_refs"] = list(slots)
     visible = planner_visible_context(context)
+    budget = {
+        "max_input_tokens": max_input_tokens,
+        "max_output_tokens": max_output_tokens,
+        "max_total_tokens": max_input_tokens + max_output_tokens,
+        "max_cost_usd": float(max_cost_usd),
+        "max_seconds": max_seconds,
+    }
     identity = {
         "planner_ref": LLM_RESEARCH_PLANNER_REF,
         "planner_hash": LLM_RESEARCH_PLANNER_HASH,
         "context_ref": visible["context_ref"],
         "context_hash": visible["context_hash"],
         "candidate_contract_hash": PLANNER_CANDIDATE_CONTRACT_HASH,
+        "budget": budget,
     }
     if provider_retry is not None:
         identity["provider_retry_hash"] = content_hash(provider_retry)
     if transport_retry is not None:
         identity["transport_retry_hash"] = content_hash(transport_retry)
+    if execution is not None:
+        identity["execution_hash"] = content_hash(execution)
     digest = content_hash(identity)[:32]
     created_at = _text(context.get("created_at"), "planner context created_at")
     return WorkOrder(
@@ -486,13 +523,7 @@ def build_planner_work_order(
         question=build_planner_prompt(context),
         requested_capabilities=("research",),
         runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
-        budget={
-            "max_input_tokens": max_input_tokens,
-            "max_output_tokens": max_output_tokens,
-            "max_total_tokens": max_input_tokens + max_output_tokens,
-            "max_cost_usd": float(max_cost_usd),
-            "max_seconds": max_seconds,
-        },
+        budget=budget,
         idempotency_key=f"llm-research-planner:{content_hash(identity)}",
         declared_side_effects=(),
         status="ready",
@@ -513,6 +544,7 @@ def build_planner_work_order(
                 {} if transport_retry is None
                 else {"transport_retry": dict(transport_retry)}
             ),
+            **({} if execution is None else {"execution": dict(execution)}),
         },
     )
 
@@ -633,6 +665,7 @@ class LLMResearchPlannerCoordinator:
         *,
         provider_retry: Mapping[str, Any] | None = None,
         transport_retry: Mapping[str, Any] | None = None,
+        execution: Mapping[str, Any] | None = None,
         **work_budget: Any,
     ) -> dict[str, Any]:
         disposition = planner_disposition(self.authority, context_pack_ref)
@@ -645,6 +678,7 @@ class LLMResearchPlannerCoordinator:
             disposition["context"],
             provider_retry=provider_retry,
             transport_retry=transport_retry,
+            execution=execution,
             **work_budget,
         )
         enqueued = self.scheduler.enqueue(work)

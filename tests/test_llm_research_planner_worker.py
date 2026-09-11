@@ -353,6 +353,58 @@ class LLMResearchPlannerWorkerTests(unittest.TestCase):
         self.assertNotEqual(first.id, legacy.id)
         self.assertEqual(first.metadata["provider_retry"], first_policy)
 
+    def test_budget_and_routing_authority_are_part_of_the_work_identity(self) -> None:
+        registered = self.router.get_policy(
+            "model-routing-policy-version:test-planner:1"
+        )
+        execution = {
+            "schema_version": "0.1",
+            "routing_policy_ref": registered["policy_version_ref"],
+            "routing_policy_hash": registered["content_hash"],
+            "credential_slot_refs": ["credential-slot:openclaw:test"],
+        }
+        original = build_planner_work_order(
+            context(), max_cost_usd=0.5, execution=execution
+        )
+        dearer = build_planner_work_order(
+            context(), max_cost_usd=0.75, execution=execution
+        )
+        alternate_execution = {
+            **execution,
+            "credential_slot_refs": ["credential-slot:openclaw:alternate"],
+        }
+        rerouted = build_planner_work_order(
+            context(), max_cost_usd=0.5, execution=alternate_execution
+        )
+        self.assertEqual(self.scheduler.enqueue(original)["status"], "fresh")
+        admitted_before = self.scheduler.work_order_authority(original.id)
+        self.assertNotEqual(original.id, dearer.id)
+        self.assertNotEqual(original.id, rerouted.id)
+        self.assertEqual(original.metadata["execution"], execution)
+        self.assertEqual(
+            self.scheduler.work_order_authority(original.id), admitted_before
+        )
+
+    def test_worker_refuses_execution_authority_different_from_the_work(self) -> None:
+        registered = self.router.get_policy(
+            "model-routing-policy-version:test-planner:1"
+        )
+        work = build_planner_work_order(context(), execution={
+            "schema_version": "0.1",
+            "routing_policy_ref": registered["policy_version_ref"],
+            "routing_policy_hash": registered["content_hash"],
+            "credential_slot_refs": ["credential-slot:openclaw:other"],
+        })
+        self.assertEqual(self.scheduler.enqueue(work)["status"], "fresh")
+        with self.assertRaisesRegex(
+            LLMResearchPlannerWorkerRejected, "execution authority differs"
+        ):
+            self._worker({
+                "schema_version": "0.1",
+                "action": {"kind": "probe", "coverage_item_ref": "commitments"},
+                "rationale": "Inspect commitments.",
+            }).run_once(work)
+
     def test_worker_refuses_a_retry_policy_that_differs_from_the_work(self) -> None:
         work = build_planner_work_order(
             context(), provider_retry={
