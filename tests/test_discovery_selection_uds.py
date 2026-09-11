@@ -8,6 +8,7 @@ from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.discovery_candidate_selection import candidate_view
 from dalton_core.discovery_selection_launcher import DiscoverySelectionLauncher
 from dalton_core.mission_source_discovery import MissionSourceDiscoveryCoordinator
+from dalton_core.mission_source_discovery import build_discovery_plan
 from dalton_core.model_router import ModelRouter
 from dalton_core.mission_stage import evaluate_mission
 from dalton_core.store import content_hash
@@ -20,7 +21,7 @@ from tests.test_transcript_polish_model_worker import policy, profile
 
 
 class DiscoverySelectionUDSTests(unittest.TestCase):
-    def test_real_child_uses_broker_and_persists_formal_selected_result(self):
+    def _exercise_real_child(self, *, sell_side=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             other = "alphaengine-doc:other"
@@ -38,12 +39,20 @@ class DiscoverySelectionUDSTests(unittest.TestCase):
                     source["status"] = "connected"
             params["autonomy"]["may_write"] = [*params["autonomy"]["may_write"], "source_discovery"]
             mission = missions.create_mission(params.pop("mission_ref"), **params)
-            plan = plan_for_tests()
+            company_ref = mission["universe"][0]["company_ref"]
+            plan = (build_discovery_plan(plan_id='discovery-plan:sell-side:uds',
+                created_at=harness.clock().isoformat(timespec='microseconds'),
+                mission_ref='coverage-mission:us-it-services',source_ref='source:alphaengine',
+                max_calls_24h=30,companies={company_ref:{'name':'International Business Machines',
+                'ticker':'IBM','aliases':['IBM']}},specs=[{'spec_ref':'sell-side-reports',
+                'document_type':'sell_side_report','query_variants':[{'query_template':'{name} analyst report',
+                'filters':{}}],'lookback_days':180,'rediscovery_interval_days':7,
+                'retry_interval_days':1}]) if sell_side else plan_for_tests())
             search = FakeSearchLauncher(harness, missions, plan)
             authorization = missions.authorize_source_discovery(
                 company_ref=mission["universe"][0]["company_ref"], source_ref="source:alphaengine",
                 requested_by="human:coverage-owner", mission_version_ref=mission["id"])
-            search.start(authorization=authorization, spec_ref="earnings-call-transcripts",
+            search.start(authorization=authorization, spec_ref=("sell-side-reports" if sell_side else "earnings-call-transcripts"),
                          as_of=harness.clock().date())
             discovery = missions.source_discoveries(mission["id"])[0]
             envelope_row = harness.core.connection.execute(
@@ -89,16 +98,17 @@ class DiscoverySelectionUDSTests(unittest.TestCase):
             config_path.write_text(json.dumps(config)); config_path.chmod(0o600)
             launcher = DiscoverySelectionLauncher(state_dir=root, model_config_path=config_path,
                                                    scheduler_db=root / "scheduler.sqlite")
-            company_ref = mission["universe"][0]["company_ref"]
             member = mission["universe"][0]
             stage = next(row for row in evaluate_mission(harness.core.connection, mission)
                          if row["company_ref"] == company_ref)
             periods = list(next(row for row in stage["items"]
                                 if row["item_ref"] == "earnings_calls").get("missing_periods") or ())
+            context=MissionSourceDiscoveryCoordinator._selection_context(mission,plan['specs'][0])
             ticket = launcher.start(discovery_ref=discovery["id"], view=view,
                 mission_ref=mission["id"], company={"company_ref": company_ref,
-                "name": plan["companies"][company_ref]["search_terms"], "ticker": member["ticker"],
-                "aliases": [member["ticker"]]}, missing_periods=periods)
+                "name": plan["companies"][company_ref].get("name",plan["companies"][company_ref].get("search_terms")),
+                "ticker": member["ticker"], "aliases": list(plan["companies"][company_ref].get("aliases") or [member["ticker"]])},
+                missing_periods=[] if sell_side else periods,selection_context=context)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 result = launcher.status(ticket["id"])
@@ -126,6 +136,12 @@ class DiscoverySelectionUDSTests(unittest.TestCase):
             self.assertEqual([chosen], [call["document_ref"] for call in acquisition.calls])
             final = coordinator.launch_acquisition()
             self.assertEqual(final["status"], "idle", final)
+
+    def test_real_earnings_child_uses_broker_and_selected_only_acquisition(self):
+        self._exercise_real_child()
+
+    def test_real_sell_side_child_uses_mission_questions_and_selected_only_acquisition(self):
+        self._exercise_real_child(sell_side=True)
 
 
 if __name__ == "__main__":
