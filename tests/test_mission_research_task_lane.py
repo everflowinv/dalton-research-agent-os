@@ -366,6 +366,37 @@ class WiringTests(unittest.TestCase):
         self.assertIsNone(launcher.config_path)
         self.assertIn("--directed-only", launcher._command(ticket_dir=self.state / "t"))
 
+    def test_document_execution_config_controls_only_the_directed_producer(self):
+        document_lane = self.state / "mission-document-research-lane.json"
+        document_lane.write_text(json.dumps({
+            "schema_version": "0.2", "enabled": True,
+            "directed_admission": {
+                "max_admissions_per_tick": 3,
+                "task_budget": {
+                    "max_rounds": 7, "max_cost_units": 11, "max_seconds": 900,
+                },
+            },
+        }), encoding="utf-8")
+        planner = self.state / "research-planner-model-config.json"
+        planner.write_text("{}\n", encoding="utf-8")
+
+        class Args:
+            db = str(self.state / "core.sqlite")
+            scheduler = str(self.state / "scheduler.sqlite")
+            research_planner_model_config = str(planner)
+            research_task_lane = None
+            mission_document_research_lane = document_lane
+
+        launcher = build_launcher(Args())
+        self.addCleanup(launcher.close)
+        self.assertTrue(launcher.directed_only)
+        self.assertEqual(launcher.max_admissions_per_tick, 3)
+        self.assertEqual(launcher.task_budget, {
+            "max_rounds": 7, "max_cost_units": 11, "max_seconds": 900,
+        })
+        self.assertIn("--directed-only", launcher._command(ticket_dir=self.state / "t"))
+        self.assertNotIn("--research-task-lane", launcher._command(ticket_dir=self.state / "t"))
+
     def test_the_child_command_names_this_state_and_this_ticket(self) -> None:
         planner = self.state / "research-planner-model-config.json"
         planner.write_text("{}\n", encoding="utf-8")
