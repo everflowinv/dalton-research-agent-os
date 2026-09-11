@@ -1,7 +1,7 @@
 """Owner-only asynchronous child lifecycle for discovery candidate selection."""
 from __future__ import annotations
 import hashlib, json, os, re, subprocess, sys, threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from .child_tickets import adopt_finished_child
@@ -19,6 +19,17 @@ class DiscoverySelectionLauncher:
         self.scheduler=Path(scheduler_db).resolve(); self.python=python_executable or sys.executable
         self.root=self.state/'discovery-selections'; self.root.mkdir(parents=True,exist_ok=True); os.chmod(self.root,0o700)
         self._lock=threading.Lock(); self._current=None
+        retry = json.loads(self.config.read_text()).get("discovery_selection_retry", {})
+        if not isinstance(retry, Mapping) or set(retry) - {"max_recovery_epochs", "cooldown_seconds"}:
+            raise ValueError("invalid discovery selection retry policy")
+        self.max_recovery_epochs = retry.get("max_recovery_epochs", 1)
+        self.cooldown_seconds = retry.get("cooldown_seconds", 300)
+        if (not isinstance(self.max_recovery_epochs, int) or isinstance(self.max_recovery_epochs, bool)
+                or not 0 <= self.max_recovery_epochs <= 10):
+            raise ValueError("invalid discovery selection recovery limit")
+        if (not isinstance(self.cooldown_seconds, int) or isinstance(self.cooldown_seconds, bool)
+                or not 0 <= self.cooldown_seconds <= 86_400):
+            raise ValueError("invalid discovery selection retry cooldown")
     def latest(self,discovery_ref:str):
         found=[]
         for path in self.root.glob('*/ticket.json'):
@@ -39,14 +50,25 @@ class DiscoverySelectionLauncher:
               company:Mapping[str,Any],missing_periods:list[str]):
         identity={"view_hash":view['content_hash'],"mission_ref":mission_ref,"company":dict(company),
                   "missing_periods":missing_periods,"config_hash":hashlib.sha256(self.config.read_bytes()).hexdigest()}
-        digest=content_hash(identity)[:24]; tid=f'{PREFIX}:{digest}'; directory=self.root/digest
-        directory.mkdir(mode=0o700,parents=True,exist_ok=True); os.chmod(directory,0o700)
         existing=self.latest(discovery_ref)
-        if existing and existing.get('identity_hash')==content_hash(identity): return existing
+        epoch = 0
+        if existing and existing.get('base_identity_hash', existing.get('identity_hash')) == content_hash(identity):
+            if existing.get('status') in {'running', 'succeeded'}:
+                return existing
+            epoch = int(existing.get('recovery_epoch', 0)) + 1
+            if epoch > self.max_recovery_epochs:
+                return {**existing, "status": "exhausted"}
+            completed = datetime.fromisoformat(existing['completed_at'])
+            if self._now_datetime() < completed + timedelta(seconds=self.cooldown_seconds):
+                return {**existing, "status": "cooldown"}
+        attempt_identity = {**identity, "recovery_epoch": epoch}
+        digest=content_hash(attempt_identity)[:24]; tid=f'{PREFIX}:{digest}'; directory=self.root/digest
+        directory.mkdir(mode=0o700,parents=True,exist_ok=True); os.chmod(directory,0o700)
         with self._lock:
             if self._current and self._current[1].poll() is None: return {"status":"busy"}
             _write(directory/'input.json',{"view":dict(view),"mission_ref":mission_ref,
-                "company":dict(company),"missing_periods":missing_periods,"identity_hash":content_hash(identity)})
+                "company":dict(company),"missing_periods":missing_periods,
+                "identity_hash":content_hash(attempt_identity), "recovery_epoch":epoch})
             log=os.open(directory/'run.log',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
             try: proc=subprocess.Popen([self.python,'-m','dalton_core.discovery_selection_cli',
                 '--state-dir',str(self.state),'--model-config',str(self.config),'--scheduler-db',str(self.scheduler),
@@ -54,7 +76,8 @@ class DiscoverySelectionLauncher:
                 stdout=log,stderr=subprocess.STDOUT,cwd=self.state)
             finally: os.close(log)
             row={"schema_version":"0.1","id":tid,"discovery_ref":discovery_ref,
-                 "identity_hash":content_hash(identity),"started_at":_now(),"pid":proc.pid,"status":"running",
+                 "identity_hash":content_hash(attempt_identity), "base_identity_hash":content_hash(identity),
+                 "recovery_epoch":epoch,"started_at":_now(),"pid":proc.pid,"status":"running",
                  "exit_code":None,"completed_at":None}
             _write(directory/'ticket.json',row); self._current=(tid,proc); return row
     def status(self,ref:str):
@@ -70,9 +93,26 @@ class DiscoverySelectionLauncher:
                     if not adopt_finished_child(row,path.with_name('summary.json'),now=_now()): row.update(status='orphaned',completed_at=_now())
                     _write(path,row)
         summary=path.with_name('summary.json')
-        return {**row,"summary":json.loads(summary.read_text()) if row['status']!='running' and summary.exists() else None}
+        parsed = json.loads(summary.read_text()) if row['status']!='running' and summary.exists() else None
+        if parsed is not None:
+            source = json.loads(path.with_name('input.json').read_text())
+            selection = parsed.get('selection') if isinstance(parsed, Mapping) else None
+            valid = (parsed.get('identity_hash') == row['identity_hash']
+                     and isinstance(selection, Mapping)
+                     and selection.get('candidate_view_hash') == source['view']['content_hash']
+                     and selection.get('recovery_epoch') == row.get('recovery_epoch', 0)
+                     and selection.get('content_hash') == content_hash({
+                         key: value for key, value in selection.items()
+                         if key not in {'content_hash', 'work_order_ref', 'replayed', 'config_hash', 'recovery_epoch'}
+                     }))
+            if parsed.get('status') == 'succeeded' and not valid:
+                row = {**row, 'status': 'failed', 'failure_reason': 'selection summary authority drifted'}
+                parsed = None
+        return {**row,"summary":parsed}
     @staticmethod
     def _alive(pid):
         try: os.kill(pid,0); return True
         except (ProcessLookupError,TypeError): return False
         except PermissionError: return True
+    def _now_datetime(self):
+        return datetime.now(timezone.utc)

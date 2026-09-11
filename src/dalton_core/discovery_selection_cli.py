@@ -12,7 +12,8 @@ def run(args):
         mission=CoverageMissionAuthority(store).mission(data['mission_ref'])
         model=CockpitModel(json.loads(args.model_config.read_text()),scheduler_db=str(args.scheduler_db))
         result=CockpitDiscoveryCandidateSelector(model).select(data['view'],mission=mission,
-            company=data['company'],missing_periods=data['missing_periods'])
+            company=data['company'],missing_periods=data['missing_periods'],
+            recovery_epoch=data['recovery_epoch'])
         summary.update(status='succeeded',selection=result)
     except Exception as exc: summary['failure_reason']=f'{type(exc).__name__}: {exc}'[:500]
     finally: store.close()

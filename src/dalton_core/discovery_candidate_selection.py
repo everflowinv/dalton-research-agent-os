@@ -29,17 +29,22 @@ class CockpitDiscoveryCandidateSelector:
                                          "contract_ref": CONTRACT_REF})
 
     def select(self, view: Mapping[str, Any], *, mission: Mapping[str, Any],
-               company: Mapping[str, Any], missing_periods: list[str]) -> dict[str, Any]:
+               company: Mapping[str, Any], missing_periods: list[str],
+               recovery_epoch: int = 0) -> dict[str, Any]:
+        if not isinstance(recovery_epoch, int) or isinstance(recovery_epoch, bool) or recovery_epoch < 0:
+            raise CandidateSelectionError("selection recovery epoch is invalid")
         identity = content_hash({"config_hash": self.config_hash,
                                  "view_hash": view["content_hash"], "company": dict(company),
-                                 "missing_periods": missing_periods})
+                                 "missing_periods": missing_periods,
+                                 "recovery_epoch": recovery_epoch})
         call = self.model.call(
             purpose=PURPOSE, request_id=f"candidate-selection:{identity[:32]}",
             prompt=selection_prompt(view, company=company, missing_periods=missing_periods),
             mission=mission)
         return {**validate_selection(call["text"], view),
                 "work_order_ref": call["work_order_ref"],
-                "replayed": bool(call.get("replayed")), "config_hash": self.config_hash}
+                "replayed": bool(call.get("replayed")), "config_hash": self.config_hash,
+                "recovery_epoch": recovery_epoch}
 
 
 def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str, Any]:
