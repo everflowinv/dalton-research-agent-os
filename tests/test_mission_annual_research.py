@@ -30,7 +30,7 @@ from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
 from dalton_core.research_auto_commit import ResearchAutoCommitRejected
 from dalton_core.annual_report_qualitative import (
     AnnualReportQualitativeError, RegisteredAnnualReportDraftWorker,
-    RegisteredAnnualReportVerifierWorker,
+    RegisteredAnnualReportVerifierWorker, build_annual_report_candidate_bundle,
 )
 from dalton_core.registered_annual_report import OPERATION, RegisteredAnnualReportError
 from dalton_core.sec_company_facts_lane import LanePreconditionError
@@ -670,6 +670,58 @@ class MissionAnnualResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM evidence_versions"
         ).fetchone()[0], 0)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM claim_versions"
+        ).fetchone()[0], 0)
+
+    def test_policy_promotion_rejects_self_consistent_proof_not_in_formal_result(self):
+        fixture = MissionAnnualFixture(self, auto_commit=True)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, _draft_worker, _verifier_worker = self._executor(fixture)
+        for _ in range(8):
+            executor.run_once(admission["id"])
+        blueprints = executor._blueprints(admission)
+        works = [executor._derive_work(admission, blueprints, index) for index in range(4)]
+        draft = json.loads(canonical_json(
+            executor.scheduler.formal_result(works[1]["id"])["result_envelope"]["outputs"]
+        ))
+        verifier = json.loads(canonical_json(
+            executor.scheduler.formal_result(works[2]["id"])["result_envelope"]["outputs"]
+        ))
+        forged_statement = "A self-consistent statement the model never returned."
+        draft["output"]["answer"] = forged_statement
+        draft["output"]["candidate"]["normalized_statement"] = forged_statement
+        draft["output_hash"] = content_hash(draft["output"])
+        draft["content_hash"] = content_hash({
+            key: value for key, value in draft.items() if key != "content_hash"
+        })
+        verifier["output"]["verified_statement"] = forged_statement
+        verifier["output_hash"] = content_hash(verifier["output"])
+        verifier["content_hash"] = content_hash({
+            key: value for key, value in verifier.items() if key != "content_hash"
+        })
+        bundle = build_annual_report_candidate_bundle(
+            question_ref=admission["repair_target_ref"],
+            question=admission["planner_inquiry"]["question"],
+            proof=works[3]["metadata"]["retrieval_proof"],
+            draft_proof=draft, verifier_proof=verifier,
+            draft_work=works[1], verifier_work=works[2],
+            actor_ref=admission["actor_ref"], created_at=works[3]["created_at"],
+            source_authority=fixture.source.registry.candidate_source_authority(
+                admission["request"]
+            ),
+            mission_admission=admission,
+        )
+        with self.assertRaisesRegex(
+            ResearchAutoCommitRejected, "not the exact formal model result"
+        ):
+            fixture.store.commit_policy_candidate(
+                evidence=bundle["evidence"], claim=bundle["claim"],
+                material=bundle["material"],
+                source_verification=bundle["source_verification"],
+                numeric_spec=None, numeric_verification=None,
+                idempotency_key="policy-ledger:forged-self-consistent-model-proof",
+            )
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM claim_versions"
         ).fetchone()[0], 0)

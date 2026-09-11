@@ -570,6 +570,23 @@ def _authorize_registered_annual_qualitative(
     verifier = validate_model_proof(
         verifier_raw, stage="independent_qualitative_verifier", work=verifier_work
     )
+    draft_formal = scheduler.formal_result(draft_work["id"])
+    verifier_formal = scheduler.formal_result(verifier_work["id"])
+    for name, formal, model_proof in (
+        ("draft", draft_formal, draft),
+        ("verifier", verifier_formal, verifier),
+    ):
+        if (
+            formal is None
+            or formal["terminal_state"] != "succeeded"
+            or canonical_json(formal["result_envelope"].get("outputs"))
+            != canonical_json(model_proof)
+            or formal["result_envelope"].get("invocation_ref")
+            != model_proof["model_invocation_ref"]
+        ):
+            raise ResearchAutoCommitRejected(
+                f"annual candidate {name} proof is not the exact formal model result"
+            )
     validate_draft_output(draft["output"], match_count=len(proof["matches"]))
     checked = validate_verifier_output(verifier["output"], draft=draft["output"])
     source = _record(connection.execute(
