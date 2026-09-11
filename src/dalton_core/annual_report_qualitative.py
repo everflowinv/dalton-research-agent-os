@@ -237,6 +237,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
 
     def __init__(self, *, budget_store=None, budget_policy_ref=None,
                  mission_resolver: Callable[[str, str], Mapping[str, Any]] | None = None,
+                 mission_annual_research_authority=None,
                  transport_retry: Mapping[str, Any] | None = None,
                  **kwargs):
         """Bind production annual calls to the same durable mission budget.
@@ -261,6 +262,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
         self.budget_store = budget_store
         self.budget_policy_ref = budget_policy_ref
         self.mission_resolver = mission_resolver
+        self.mission_annual_research_authority = mission_annual_research_authority
         if transport_retry is None:
             self.transport_retry = None
         else:
@@ -460,6 +462,23 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
                 or metadata.get("transport_retry") != self.transport_retry
                 or metadata.get("prompt_hash") != content_hash(work.question)):
             raise AnnualReportQualitativeError("model WorkOrder routing/prompt binding drifted")
+        if metadata.get("authority_kind") == "mission_annual_research_admission":
+            if self.mission_annual_research_authority is None:
+                raise AnnualReportQualitativeError(
+                    "mission annual WorkOrder has no execution authority resolver"
+                )
+            try:
+                from .mission_annual_research_executor import (
+                    validate_mission_annual_work_authority,
+                )
+
+                validate_mission_annual_work_authority(
+                    self.mission_annual_research_authority, work
+                )
+            except Exception as exc:
+                raise AnnualReportQualitativeError(
+                    "mission annual WorkOrder authority is invalid"
+                ) from exc
         return work
 
     def _parse_candidate(self, text: str, work: WorkOrder) -> None:

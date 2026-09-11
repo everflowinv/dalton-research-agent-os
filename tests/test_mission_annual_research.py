@@ -19,9 +19,17 @@ from dalton_core.mission_annual_research import (
     MissionAnnualResearchAuthority, MissionAnnualResearchError,
     WORKFLOW_CONTRACT_REF,
 )
+from dalton_core.mission_annual_research_executor import (
+    MissionAnnualResearchExecutor,
+)
 from dalton_core.model_router import ModelRouter
+from dalton_core.annual_report_qualitative import (
+    AnnualReportQualitativeError, RegisteredAnnualReportDraftWorker,
+    RegisteredAnnualReportVerifierWorker,
+)
 from dalton_core.registered_annual_report import OPERATION, RegisteredAnnualReportError
 from dalton_core.sec_company_facts_lane import LanePreconditionError
+from dalton_core.sec_company_facts_lane import read_active_annual_budget_mission
 from dalton_core.store import canonical_json
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -31,11 +39,22 @@ from tests.test_research_plan_annual_report import (
 )
 from tests import test_research_plan_annual_report as annual_support
 from tests.test_research_plan_executor import PlanExecutorHarness
+from tests.test_transcript_polish_model_worker import FakeAdapter
 
 
 COMPANY = "wanhua"
 MISSION = "coverage-mission-version:annual-test"
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+
+
+class CountingFakeAdapter(FakeAdapter):
+    def __init__(self, candidate_wire):
+        super().__init__(candidate_wire)
+        self.calls = 0
+
+    def execute(self, work, route, selected):
+        self.calls += 1
+        return super().execute(work, route, selected)
 
 
 class MissionAnnualFixture:
@@ -186,7 +205,7 @@ class MissionAnnualFixture:
             "run_budget": {"max_units": 1},
         }
         self.budget = ThesisImpactBudgetStore(
-            self.state / "budget.sqlite", clock=self.harness.clock
+            (self.state / "budget.sqlite").resolve(), clock=self.harness.clock
         )
         self.case.addCleanup(self.budget.close)
         self.budget.register_policy(
@@ -243,6 +262,60 @@ class MissionAnnualFixture:
 
 
 class MissionAnnualResearchTests(unittest.TestCase):
+    def _executor(self, fixture):
+        statement = (
+            "The company serves varied customers and depends on outsourcing partners."
+        )
+        draft = CountingFakeAdapter({
+            "schema_version": "0.1", "answer": statement,
+            "candidate": {
+                "normalized_statement": statement,
+                "metric_or_aspect": "customer and operating dependencies",
+                "period": "FY2025 annual report", "basis": "reported",
+                "cited_match_indexes": [0],
+            },
+        })
+        verifier = CountingFakeAdapter({
+            "schema_version": "0.1", "verdict": "pass",
+            "verified_statement": statement, "findings": [],
+        })
+        scheduler = fixture.harness.scheduler()
+        draft_worker = RegisteredAnnualReportDraftWorker(
+            scheduler=scheduler, router=fixture.router, adapter=draft,
+            store=fixture.store, observability=fixture.harness.observability,
+            polish_worker=None,
+            routing_policy_ref=fixture.draft_policy["policy_version_ref"],
+            credential_slot_refs=(fixture.draft_profile["credential_slot_ref"],),
+            budget_store=fixture.budget,
+            budget_policy_ref="budget-policy:mission-annual:1",
+            mission_resolver=lambda ref, company: read_active_annual_budget_mission(
+                fixture.store.connection, ref, company, now=fixture.harness.clock()
+            ),
+            mission_annual_research_authority=fixture.authority,
+            clock=fixture.harness.clock,
+        )
+        verifier_worker = RegisteredAnnualReportVerifierWorker(
+            scheduler=scheduler, router=fixture.router, adapter=verifier,
+            store=fixture.store, observability=fixture.harness.observability,
+            polish_worker=None,
+            routing_policy_ref=fixture.verifier_policy["policy_version_ref"],
+            credential_slot_refs=(fixture.verifier_profile["credential_slot_ref"],),
+            budget_store=fixture.budget,
+            budget_policy_ref="budget-policy:mission-annual:1",
+            mission_resolver=lambda ref, company: read_active_annual_budget_mission(
+                fixture.store.connection, ref, company, now=fixture.harness.clock()
+            ),
+            mission_annual_research_authority=fixture.authority,
+            clock=fixture.harness.clock,
+        )
+        executor = MissionAnnualResearchExecutor(
+            authority=fixture.authority, scheduler=scheduler,
+            registry=fixture.source.registry, draft_worker=draft_worker,
+            verifier_worker=verifier_worker, staging=fixture.harness.staging,
+            actor_ref="automation:test", clock=fixture.harness.clock,
+        )
+        return executor, draft, verifier
+
     def test_exact_admission_is_append_only_idempotent_and_resolves_without_dispatch(self):
         fixture = MissionAnnualFixture(self)
         before_work = fixture.store.connection.execute(
@@ -328,6 +401,74 @@ class MissionAnnualResearchTests(unittest.TestCase):
             admitted["request"]["query_terms"],
             ["customer segments", "outsourcing partners"],
         )
+
+    def test_executor_runs_registered_retrieval_models_and_draft_only_staging(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, draft, verifier = self._executor(fixture)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(9)]
+        self.assertEqual(
+            [item["status"] for item in outcomes],
+            ["admitted", "succeeded", "admitted", "succeeded", "admitted",
+             "succeeded", "admitted", "complete", "complete"],
+            outcomes,
+        )
+        self.assertEqual(len(fixture.router.list_decisions()), 2)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_annual_research_starts"
+        ).fetchone()[0], 1)
+        outcome = fixture.store.connection.execute(
+            "SELECT * FROM mission_annual_research_outcomes"
+        ).fetchone()
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome["repair_target_ref"], admission["repair_target_ref"])
+        self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
+        self.assertEqual(fixture.harness.staging.counts(), {
+            "candidate_source_materials": 1, "candidate_verifications": 1,
+            "candidate_numeric_specs": 0, "candidate_evidence_versions": 1,
+            "candidate_claim_versions": 1, "candidate_stage_requests": 1,
+            "candidate_figures": 0,
+        })
+
+    def test_remaining_day_budget_refusal_is_terminal_before_model_adapter(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, draft, verifier = self._executor(fixture)
+        consumed = fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=NOW.date().isoformat(), work_order_ref="work:other-budget-consumer",
+            attempt_number=1, phase="assessment",
+            route_decision_ref="route:other-budget-consumer",
+            reserved_micros=9_500_000,
+        )
+        self.assertEqual(consumed["status"], "fresh")
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        refused = executor.run_once(admission["id"])
+        self.assertEqual(refused["status"], "failed")
+        self.assertEqual(draft.calls, 0)
+        self.assertEqual(verifier.calls, 0)
+        formal = fixture.harness.scheduler().formal_result(refused["work_order_ref"])
+        self.assertEqual(
+            formal["result_envelope"]["error"]["code"],
+            "MODEL_CHAIN_HALTED",
+        )
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM model_invocations WHERE work_order_ref=?",
+            (refused["work_order_ref"],),
+        ).fetchone()[0], 0)
+
+    def test_model_worker_re_resolves_mission_authority_and_rejects_metadata_claim(self):
+        fixture = MissionAnnualFixture(self)
+        admission = fixture.authority.admit(**fixture.args())
+        executor, _draft, _verifier = self._executor(fixture)
+        for _ in range(3):
+            executor.run_once(admission["id"])
+        blueprint = executor._blueprints(admission)
+        work = executor._derive_work(admission, blueprint, 1)
+        work["metadata"]["repair_target_hash"] = "0" * 64
+        with self.assertRaisesRegex(AnnualReportQualitativeError, "authority is invalid"):
+            executor.draft_worker._work(work)
 
 
 if __name__ == "__main__":
