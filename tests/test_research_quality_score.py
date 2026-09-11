@@ -25,6 +25,7 @@ from dalton_core.research_quality_score import (
     artefact_from_deliverable,
     artefact_from_dossier,
     build_judge_prompt,
+    build_verifier_prompt,
     judge,
     judge_fingerprint,
     residual_citation_artefacts,
@@ -459,6 +460,13 @@ class JudgeCallTests(unittest.TestCase):
         # And the notes that stop it marking the document down for obeying its
         # own contract.
         self.assertIn("估值一节", prompt)
+
+    def test_independent_verifier_sees_claims_and_declared_gaps_it_must_check(self):
+        art = self.artefact()
+        prompt = build_verifier_prompt(art, SCREEN, full_scores(SCREEN))
+        self.assertIn("Cited evidence available for independent verification", prompt)
+        self.assertIn("18742125000", prompt)
+        self.assertIn("| ref | period | statement |", prompt)
 
     def test_a_good_reply_is_scored_with_its_provenance(self):
         art = self.artefact()

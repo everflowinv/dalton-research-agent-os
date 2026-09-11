@@ -1380,8 +1380,31 @@ def build_verifier_prompt(art: Mapping[str, Any], rubric: Rubric, judgement: Map
         lines.append("")
         lines.append(f"## {section['title']}")
         lines.append(body if body else "（本节没有正文）")
+        if section["gaps"]:
+            lines.append("gaps: " + " | ".join(section["gaps"])[:1200])
         if budget <= 0:
             break
+    cited: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for section in art["sections"]:
+        for item in section["numbers"]:
+            ref = item["claim_version_ref"]
+            if ref and ref not in seen:
+                seen.add(ref)
+                cited.append({"ref": ref, "period": item.get("period"), "text": item["text"]})
+    for claim in art["shown_claims"]:
+        ref = str(claim.get("ref") or "")
+        if ref and ref not in seen:
+            seen.add(ref)
+            cited.append({"ref": ref, "period": claim.get("period"),
+                          "text": str(claim.get("statement") or "")})
+    if cited:
+        lines.append("")
+        lines.append("Cited evidence available for independent verification:")
+        lines.append("| ref | period | statement |")
+        for item in cited[:MAX_CLAIM_ROWS]:
+            statement = str(item["text"]).replace("\n", " ")[:MAX_CLAIM_TEXT]
+            lines.append(f"| {item['ref'][-16:]} | {item.get('period') or ''} | {statement} |")
     return "\n".join(lines)
 
 
