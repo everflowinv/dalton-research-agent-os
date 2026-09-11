@@ -325,6 +325,26 @@ LEGACY_CALL_BUDGET = {
 }
 
 
+def extraction_scheduler_policy(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable Scheduler policy covering every safe transport try."""
+    from .call_budget import resolve_call_budget
+
+    retry = config.get("transport_retry") or {}
+    budget = resolve_call_budget(config, "document_extraction", defaults=LEGACY_CALL_BUDGET)
+    retries = int(retry.get("max_definitely_not_sent_retries", 0))
+    per_try = int(budget["timeout_seconds"]) + int(retry.get("queue_wait_seconds", 0))
+    lease_seconds = ((retries + 1) * per_try
+                     + retries * int(retry.get("retry_backoff_seconds", 0)) + 30)
+    attempts = int((config.get("capacity_retry") or {}).get("scheduler_max_attempts", 3))
+    return {
+        "policy_version_id": (f"scheduler-policy-extraction-lease-{lease_seconds}s-"
+                              f"attempts-{attempts}-0.1"),
+        "max_attempts": attempts,
+        "max_lease_seconds": lease_seconds,
+        "max_total_lease_seconds": lease_seconds * 2,
+    }
+
+
 def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | None = None,
                call_budget: Mapping[str, Any] | None = None) -> WorkOrder:
     from .call_budget import budget_fingerprint, resolve_call_budget
@@ -1638,14 +1658,7 @@ class DocumentExtractionService:
         from .openclaw_model_adapter import OpenClawModelAdapter
         from .thesis_impact_budget import ThesisImpactBudgetStore
         config = self.writer._document_extraction_model_config
-        requested_lease = (float(work.budget["max_seconds"])
-                           + float((config.get("transport_retry") or {}).get(
-                               "queue_wait_seconds", 0))
-                           + (int((config.get("transport_retry") or {}).get(
-                               "max_definitely_not_sent_retries", 0))
-                              * int((config.get("transport_retry") or {}).get(
-                                  "retry_backoff_seconds", 0)))
-                           + 30)
+        requested_lease = extraction_scheduler_policy(config)["max_lease_seconds"]
         # Test/embedded hosts may inject model config after constructing their
         # Scheduler. They retain its short default lease; installed services
         # construct the bound long-lease policy in WriterServer.start.

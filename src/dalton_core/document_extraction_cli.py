@@ -44,6 +44,7 @@ from .observability import ObservabilityStore
 from .public_web_fetch_launcher import PublicWebFetchLauncher
 from .raw_spool import RawSpool
 from .scheduler import Scheduler
+from .document_extraction import extraction_scheduler_policy
 from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
@@ -75,7 +76,9 @@ class ExtractionHost:
         self._connectors = ConnectorStore(self.store)
         self.observability = ObservabilityStore(self.store)
         self.coverage_mission = CoverageMissionAuthority(self.store)
-        self._scheduler = Scheduler(str(scheduler_db))
+        scheduler_kwargs = (extraction_scheduler_policy(model_config)
+                            if model_config is not None else {})
+        self._scheduler = Scheduler(str(scheduler_db), **scheduler_kwargs)
         self._transcript_spool = RawSpool(str(spool_dir), max_total_bytes=1_000_000_000)
         # Launchers are used read-only here (read_completed_manifest); they
         # never spawn from this process.  Governance is loaded only on start.

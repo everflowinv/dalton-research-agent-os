@@ -1319,7 +1319,8 @@ class OpenClawModelAdapter:
                     invocation_ref=invocation_id, provider=profile["provider"],
                     credential_slot_ref=profile["credential_slot_ref"],
                     maximum_cost_micros=maximum_cost_micros,
-                    expires_at=now_dt + timedelta(seconds=timeout + 30),
+                    expires_at=now_dt + timedelta(
+                        seconds=timeout + self._queue_wait_seconds + 30),
                 )
             except SharedCapacityError as exc:
                 if capacity is not None:

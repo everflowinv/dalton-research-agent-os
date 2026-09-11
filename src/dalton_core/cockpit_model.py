@@ -713,13 +713,12 @@ class CockpitModel:
         # longer than either. When the lease lapsed mid-call the completion was
         # refused with "attempt is not the current leased attempt" -- the work
         # was done and paid for, and the answer was thrown away.
-        lease_seconds = (float(effective["timeout_seconds"])
-                         + float((self.config.get("transport_retry") or {}).get(
-                             "queue_wait_seconds", 0))
-                         + (int((self.config.get("transport_retry") or {}).get(
-                             "max_definitely_not_sent_retries", 0))
-                            * int((self.config.get("transport_retry") or {}).get(
-                                "retry_backoff_seconds", 0)))
+        transport = self.config.get("transport_retry") or {}
+        retries = int(transport.get("max_definitely_not_sent_retries", 0))
+        per_try = (float(effective["timeout_seconds"])
+                   + float(transport.get("queue_wait_seconds", 0)))
+        lease_seconds = ((retries + 1) * per_try
+                         + retries * int(transport.get("retry_backoff_seconds", 0))
                          + _LEASE_GRACE_SECONDS)
         # The lease bounds are a frozen versioned policy: the same
         # policy_version_id with different settings is a conflict, and the
