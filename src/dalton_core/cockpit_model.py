@@ -695,7 +695,8 @@ class CockpitModel:
                           verifier_provider_schema_hash=(
                               provider_contract[1] if provider_contract else None),
                           mission_version_hash=(mission["content_hash"] if purpose in {
-                              "investment_memo", "investment_memo_verifier"} else None),
+                              "investment_memo", "investment_memo_verifier",
+                              "dossier", "dossier_verifier"} else None),
                           producer_route_decision_refs=producer_refs)
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],

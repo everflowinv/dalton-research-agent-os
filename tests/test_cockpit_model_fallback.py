@@ -809,6 +809,76 @@ class CockpitChainTests(unittest.TestCase):
             )
         self.assertEqual(len(adapter.served), 1)
 
+    def test_dossier_provenance_reads_real_producer_and_verifier_authorities(self) -> None:
+        from dataclasses import replace
+        from dalton_core.company_dossier_cli import validate_formal_unit_provenance
+        from dalton_core.company_dossier_draft import build_unit_prompt, draft_unit, verify
+        from tests.test_company_dossier_draft import STRUCTURE, material, reply, one_sentence
+
+        class TextAdapter(ChainAdapter):
+            def __init__(self, text):
+                super().__init__({})
+                self.text = text
+
+            def execute(self, work, route, profile):
+                invocation, envelope = super().execute(work, route, profile)
+                return invocation, replace(envelope, outputs={"text": self.text})
+
+        unit = "demand_drivers"
+        company = {"company_ref": "company:acn", "ticker": "ACN"}
+        rows = material()
+        adapter = TextAdapter(reply([
+            one_sentence("causal_chain:0", ["C1"]),
+            {"slot_id": "causal_chain:1", "unknown": "not yet established"},
+        ]))
+        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        kwargs = dict(unit=unit, structure=STRUCTURE, material=rows,
+                      company=company, mission=self.mission)
+        produced = draft_unit(model, **kwargs)
+        self.assertEqual(produced["status"], "drafted", produced)
+        blocks = {unit: produced["block"]}
+        verifier_adapter = TextAdapter('{"verdict":"pass","findings":[]}')
+        checked = verify(self._model(
+            verifier_adapter, policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots), blocks, company=company,
+            mission=self.mission,
+            producer_route_decision_refs=[produced["model"]["route_decision_ref"]])
+        self.assertEqual(checked["status"], "verified", checked)
+        prompt = build_unit_prompt(unit=unit, structure=STRUCTURE,
+                                   material=rows, company=company)
+        frozen = {
+            "unit": unit, "company": company,
+            "prompt_sha": content_hash({"prompt": prompt}),
+            "mission": {"ref": self.mission["id"], "hash": self.mission["content_hash"]},
+            "parse_input": {"structure": list(STRUCTURE), "material": list(rows),
+                "prior_body": "", "profile": None, "profile_table": "",
+                "market_view_available": True, "classification": None},
+        }
+        call_keys = ("work_order_ref", "result_envelope_ref", "invocation_ref",
+                     "route_decision_ref", "request_id", "prompt_hash")
+        proof = {unit: {
+            "input_fingerprint": content_hash(frozen), "producer_input": frozen,
+            "producer_prior_version_ref": None, "resolved_classification": None,
+            "verified_draft_hash": checked["verified_draft_hash"],
+            "producer": {k: produced["model"][k] for k in call_keys},
+            "verifier": {k: checked["model"][k] for k in call_keys},
+        }}
+        validate_formal_unit_provenance(
+            proof, mission_ref=self.mission["id"], current_prior_ref=None,
+            company_ref=company["company_ref"], current_units={unit},
+            current_blocks=blocks, current_mission_hash=self.mission["content_hash"],
+            scheduler_db=self.root / "scheduler.sqlite", router_db=self.router_db)
+        replay = draft_unit(model, **kwargs)
+        self.assertTrue(replay["model"]["replayed"])
+        self.assertEqual(len(adapter.served), 1)
+        # A changed authority hash cannot borrow the previous paid result,
+        # even when a caller incorrectly keeps the same version reference.
+        changed = draft_unit(model, **{**kwargs, "mission": {
+            **self.mission, "content_hash": "f" * 64}})
+        self.assertEqual(changed["status"], "drafted", changed)
+        self.assertNotEqual(changed["model"]["work_order_ref"],
+                            produced["model"]["work_order_ref"])
+
     def test_memo_writer_reads_real_scheduler_work_and_router_route(self) -> None:
         from dalton_core.writer_server import WriterServer
 

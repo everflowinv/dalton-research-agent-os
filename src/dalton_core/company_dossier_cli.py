@@ -888,11 +888,17 @@ def validate_formal_unit_provenance(
                     "outcome": result_row["outcome"], "created_at": result_row["created_at"],
                 }
                 metadata = work.get("metadata") or {}
+                expected_request_ids = {claimed["request_id"]}
+                if role == "verifier":
+                    producer_refs = sorted(set(metadata.get("producer_route_decision_refs") or []))
+                    if producer_refs:
+                        expected_request_ids.add(
+                            f"{claimed['request_id']}:producer:{content_hash(producer_refs)[:16]}")
                 if (content_hash(work) != work_row["work_order_hash"]
                         or metadata.get("purpose") != purpose
                         or metadata.get("mission_version_ref") != bound_mission.get("ref")
                         or metadata.get("mission_version_hash") != bound_mission.get("hash")
-                        or metadata.get("request_id") != claimed["request_id"]
+                        or metadata.get("request_id") not in expected_request_ids
                         or content_hash(work.get("question")) != claimed["prompt_hash"]
                         or (role == "producer" and
                             producer_input.get("prompt_sha") !=
