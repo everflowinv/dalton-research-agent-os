@@ -197,6 +197,18 @@
       "max_input_tokens": 64000,
       "max_output_tokens": 4096,
       "timeout_seconds": 600
+    },
+    "mission_directed_document_draft": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 64000,
+      "max_output_tokens": 4096,
+      "timeout_seconds": 600
+    },
+    "mission_directed_document_verifier": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 64000,
+      "max_output_tokens": 4096,
+      "timeout_seconds": 600
     }
   },
   "schema_version": "0.1"
