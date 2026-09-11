@@ -126,8 +126,19 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
             f"annual-report {purpose} run budget max_units must be a positive integer"
         )
     retry = config.get("provider_retry")
+    transport = config.get("transport_retry") or {
+        "max_definitely_not_sent_retries": 0,
+        "queue_wait_seconds": 0,
+        "retry_backoff_seconds": 0,
+    }
+    tries = int(transport["max_definitely_not_sent_retries"]) + 1
+    required_transport_seconds = (
+        tries * (call["timeout_seconds"] + transport["queue_wait_seconds"])
+        + (tries - 1) * transport["retry_backoff_seconds"]
+        + ANNUAL_LEASE_COMPLETION_GRACE_SECONDS
+    )
     default_elapsed = (
-        attempts * call["timeout_seconds"]
+        attempts * (required_transport_seconds if retry is not None else call["timeout_seconds"])
         + max(0, attempts - 1) * (0 if retry is None else retry["retry_backoff_seconds"])
     )
     max_elapsed = run.get("max_seconds", default_elapsed)
@@ -150,20 +161,9 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
     # configured queue/call/retry window inside its hard elapsed budget. The
     # legacy multi-route case is checked later against the actual Router.
     if retry is not None:
-        transport = config.get("transport_retry") or {
-            "max_definitely_not_sent_retries": 0,
-            "queue_wait_seconds": 0,
-            "retry_backoff_seconds": 0,
-        }
-        tries = int(transport["max_definitely_not_sent_retries"]) + 1
-        required = (
-            tries * (call["timeout_seconds"] + transport["queue_wait_seconds"])
-            + (tries - 1) * transport["retry_backoff_seconds"]
-            + ANNUAL_LEASE_COMPLETION_GRACE_SECONDS
-        )
-        if required > max_elapsed:
+        if required_transport_seconds > max_elapsed:
             raise AnnualReportRuntimeError(
-                f"annual-report {purpose} one-attempt transport bound {required}s "
+                f"annual-report {purpose} one-attempt transport bound {required_transport_seconds}s "
                 f"exceeds run max_seconds {max_elapsed}s"
             )
     return execution
