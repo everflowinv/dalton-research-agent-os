@@ -97,6 +97,16 @@ class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
         return ModelInvocation.from_dict(wire), result
 
 
+class EstimatedCostAdapter(RouteBoundCountingFakeAdapter):
+    def execute(self, work, route, selected):
+        invocation, result = super().execute(work, route, selected)
+        wire = invocation.to_dict()
+        wire["usage"]["raw_provider_telemetry"]["cost"] = {
+            "available": False, "usd": None,
+        }
+        return ModelInvocation.from_dict(wire), result
+
+
 class MissionDocumentResearchTests(unittest.TestCase):
     def _executor(self, fixture, authority, *, draft_adapter=None,
                   verifier_adapter=None, fault_injector=None):
@@ -1003,19 +1013,24 @@ class MissionDocumentResearchTests(unittest.TestCase):
             required_context_tokens=estimated_input + work.budget["max_output_tokens"],
             estimated_input_tokens=estimated_input,
             estimated_output_tokens=work.budget["max_output_tokens"],
-            idempotency_key="foreign:route-without-budget",
+            idempotency_key="foreign:route-with-unsettled-budget",
             purpose=executor.draft_worker.purpose, tier="brain",
         )["decision"]
         profile = fixture.router.get_profile(route["selected_profile_version_ref"])
         executor.draft_worker._before_model_call(work, route, profile, False)
         invocation, result = draft_adapter.execute(work, route, profile)
         fixture.store.register_invocation(invocation.to_dict())
+        record_model_accounting(
+            fixture.harness.observability, invocation, route, profile,
+            actor_ref=executor.draft_worker.worker_ref,
+            namespace=executor.draft_worker.namespace,
+        )
         formal_envelope = executor.draft_worker._successful_result(
             work, route, invocation, result, result.outputs["text"])
         executor.scheduler.complete(
             work.id, claim["attempt"]["attempt_number"], executor.draft_worker.worker_ref,
             claim["lease_token"], formal_envelope,
-            idempotency_key="foreign:self-consistent-without-budget",
+            idempotency_key="foreign:self-consistent-with-unsettled-budget",
             result_envelope_hash=content_hash(formal_envelope.to_dict()))
         with self.assertRaisesRegex(
             MissionDocumentResearchExecutorError, "budget settlement is unavailable"
@@ -1073,6 +1088,36 @@ class MissionDocumentResearchTests(unittest.TestCase):
             executor.run_once(admission["id"])
         self.assertEqual(verifier.calls, 0)
         self.assertEqual(fixture.harness.staging.counts()["candidate_stage_requests"], 0)
+
+    def test_estimated_cost_success_retains_reservation_and_can_advance(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = EstimatedCostAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        })
+        executor, _draft, verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        final = None
+        for _ in range(9):
+            final = executor.run_once(admission["id"])
+        self.assertEqual(final["research_status"], "candidate_staged")
+        self.assertEqual(verifier.calls, 1)
+        draft = executor._derive_work(admission, executor._blueprints(admission), 1)
+        exact = fixture.budget.admission(
+            work_order_ref=draft["id"], attempt_number=1, phase="assessment")
+        self.assertIsNotNone(exact)
+        self.assertIsNone(exact["settlement"])
+        cost = fixture.harness.observability.connection.execute(
+            "SELECT cost_status FROM observability_cost_entries c JOIN "
+            "observability_usage_entries u ON u.usage_entry_id=c.usage_entry_ref "
+            "WHERE u.work_order_ref=?", (draft["id"],)
+        ).fetchone()
+        self.assertEqual(cost["cost_status"], "estimated")
 
 
 if __name__ == "__main__":

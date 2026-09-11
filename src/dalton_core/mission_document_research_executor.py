@@ -655,16 +655,12 @@ def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], work
             or canonical_json(exact_budget["mission_binding"])
             != canonical_json(expected_binding)):
         raise MissionDocumentResearchExecutorError("model budget binding drifted")
-    settlement = exact_budget["settlement"]
-    if settlement is None or settlement.get("usage_entry_ref") is None:
-        raise MissionDocumentResearchExecutorError(
-            "model budget settlement is unavailable")
     try:
-        usage = worker.observability.get_usage(settlement["usage_entry_ref"])
+        usage = worker.observability.latest_usage(invocation["id"])
         cost_row = worker.observability.connection.execute(
             "SELECT cost_entry_id FROM observability_cost_entries "
-            "WHERE usage_entry_ref=? AND revision_number=1",
-            (settlement["usage_entry_ref"],),
+            "WHERE usage_entry_ref=? ORDER BY revision_number DESC LIMIT 1",
+            (usage["id"],),
         ).fetchone()
         cost = (None if cost_row is None else
                 worker.observability.get_cost(cost_row["cost_entry_id"]))
@@ -681,10 +677,21 @@ def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], work
             or usage.get("capability") != invocation["capability"]
             or not isinstance(cost, Mapping)
             or cost.get("usage_entry_ref") != usage["id"]
-            or cost.get("cost_status") != "actual"
-            or cost.get("amount_micros") != settlement.get("actual_micros")):
+            or cost.get("cost_status") not in {"actual", "estimated"}
+            or not isinstance(cost.get("amount_micros"), int)
+            or cost.get("amount_micros") > exact_budget["admission"]["reserved_micros"]):
         raise MissionDocumentResearchExecutorError(
             "model budget settlement accounting drifted")
+    settlement = exact_budget["settlement"]
+    if cost["cost_status"] == "actual":
+        if (settlement is None
+                or settlement.get("usage_entry_ref") != usage["id"]
+                or settlement.get("actual_micros") != cost["amount_micros"]):
+            raise MissionDocumentResearchExecutorError(
+                "model budget settlement is unavailable")
+    elif settlement is not None:
+        raise MissionDocumentResearchExecutorError(
+            "estimated model cost must retain its full reservation")
     return proof
 
 
