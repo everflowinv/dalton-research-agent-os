@@ -717,7 +717,17 @@ class CockpitModel:
         retries = int(transport.get("max_definitely_not_sent_retries", 0))
         per_try = (float(effective["timeout_seconds"])
                    + float(transport.get("queue_wait_seconds", 0)))
-        candidates = max(1, len(self.config.get("credential_slot_refs") or ()))
+        with ModelRouter(self.config["model_router_db"]) as lease_router:
+            lease_policy = lease_router.get_policy(self.config["routing_policy_ref"])
+        declared_chains = [
+            len(chain) for chain in (lease_policy.get("fallback_chains") or {}).get(
+                "tiers", {}).values()
+        ] + [
+            len(entry.get("chain") or ())
+            for entry in (lease_policy.get("purpose_overrides") or {}).values()
+            if entry.get("mode") == "explicit"
+        ]
+        candidates = max([1, *declared_chains])
         lease_seconds = (candidates * (retries + 1) * per_try
                          + retries * int(transport.get("retry_backoff_seconds", 0))
                          + _LEASE_GRACE_SECONDS)
@@ -731,7 +741,8 @@ class CockpitModel:
             self.scheduler_db,
             clock=self.clock,
             policy_version_id=(f"scheduler-policy-lease-{int(lease_seconds)}s-"
-                               f"attempts-{capacity_retry['scheduler_max_attempts']}-0.1"),
+                               f"attempts-{capacity_retry['scheduler_max_attempts']}-"
+                               f"routes-{lease_policy['content_hash'][:16]}-0.1"),
             max_attempts=capacity_retry["scheduler_max_attempts"],
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,

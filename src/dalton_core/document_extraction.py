@@ -341,12 +341,30 @@ def extraction_scheduler_policy(config: Mapping[str, Any]) -> dict[str, Any]:
     per_try = max(int(item["timeout_seconds"]) for item in budgets) + int(
         retry.get("queue_wait_seconds", 0))
     candidates = max(1, len(config.get("credential_slot_refs") or ()))
+    route_binding = "embedded"
+    if config.get("model_router_db") and config.get("routing_policy_ref"):
+        from .model_router import ModelRouter
+        # Startup owns this authority. Keeping a normal owner while reading is
+        # required for WAL databases whose clean sidecars disappear on close.
+        with ModelRouter(config["model_router_db"]) as router:
+            policy = router.get_policy(config["routing_policy_ref"])
+        declared = [
+            len(chain) for chain in (policy.get("fallback_chains") or {}).get(
+                "tiers", {}).values()
+        ]
+        declared += [
+            len(entry.get("chain") or ())
+            for entry in (policy.get("purpose_overrides") or {}).values()
+            if entry.get("mode") == "explicit"
+        ]
+        candidates = max([1, *declared])
+        route_binding = str(policy["content_hash"])[:16]
     lease_seconds = (candidates * (retries + 1) * per_try
                      + retries * int(retry.get("retry_backoff_seconds", 0)) + 30)
     attempts = int((config.get("capacity_retry") or {}).get("scheduler_max_attempts", 3))
     return {
         "policy_version_id": (f"scheduler-policy-extraction-lease-{lease_seconds}s-"
-                              f"attempts-{attempts}-0.1"),
+                              f"attempts-{attempts}-routes-{route_binding}-0.1"),
         "max_attempts": attempts,
         "max_lease_seconds": lease_seconds,
         "max_total_lease_seconds": lease_seconds * 2,
