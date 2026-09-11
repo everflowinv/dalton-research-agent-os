@@ -25,13 +25,19 @@ if [[ "$startup_timeout_seconds" != <-> ]] \
 fi
 
 wait_for_healthy_runtime() {
-  local elapsed=0
-  while (( elapsed < startup_timeout_seconds )); do
+  # SECONDS is special to zsh. Localizing it gives this invocation its own
+  # wall-clock timer without changing the shell's outer timer.
+  local -F SECONDS=0
+  local -F remaining sleep_seconds
+  while (( SECONDS < startup_timeout_seconds )); do
     if "$venv_dir/bin/dalton-health" --config "$config_path" --max-age-seconds 45; then
       return 0
     fi
-    sleep 2
-    (( elapsed += 2 ))
+    remaining=$(( startup_timeout_seconds - SECONDS ))
+    (( remaining > 0 )) || break
+    sleep_seconds=2
+    (( remaining < sleep_seconds )) && sleep_seconds=$remaining
+    sleep "$sleep_seconds"
   done
   # Preserve the final diagnostic and exit status from dalton-health. A
   # controller that is still `starting` never becomes an installer success.

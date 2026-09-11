@@ -25,6 +25,7 @@ class InstallerStartupWaitTests(unittest.TestCase):
             health = venv / "bin" / "dalton-health"
             health.write_text(
                 "#!/bin/sh\n"
+                "[ -n \"${HEALTH_DELAY:-}\" ] && /bin/sleep \"$HEALTH_DELAY\"\n"
                 "n=0; [ -f \"$CALLS\" ] && n=$(cat \"$CALLS\")\n"
                 "n=$((n + 1)); echo $n > \"$CALLS\"\n"
                 "[ -n \"${HEALTHY_ON:-}\" ] && [ $n -ge \"$HEALTHY_ON\" ]\n",
@@ -45,6 +46,7 @@ class InstallerStartupWaitTests(unittest.TestCase):
             ])
             env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
                    "CALLS": str(calls), "DALTON_STARTUP_TIMEOUT_SECONDS": timeout}
+            env.setdefault("HEALTH_DELAY", "0.1")
             if healthy_on is not None:
                 env["HEALTHY_ON"] = str(healthy_on)
             completed = subprocess.run(
@@ -58,9 +60,29 @@ class InstallerStartupWaitTests(unittest.TestCase):
         self.assertEqual(calls, 4)
 
     def test_starting_never_counts_as_success_and_wait_is_bounded(self):
-        completed, calls = self._run(timeout="6", healthy_on=None)
+        completed, calls = self._run(timeout="1", healthy_on=None)
         self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(calls, 4)  # three polls plus the final diagnostic
+        self.assertGreaterEqual(calls, 2)
+
+    def test_health_execution_time_counts_against_wall_clock_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            # Reuse the fragment runner but make each health probe consume most
+            # of the one-second deadline. The old sleep-counter loop would
+            # always wait a separate two seconds before its final diagnostic.
+            before = __import__("time").monotonic()
+            old = os.environ.get("HEALTH_DELAY")
+            os.environ["HEALTH_DELAY"] = "0.6"
+            try:
+                completed, calls = self._run(timeout="1", healthy_on=None)
+            finally:
+                if old is None:
+                    os.environ.pop("HEALTH_DELAY", None)
+                else:
+                    os.environ["HEALTH_DELAY"] = old
+            elapsed = __import__("time").monotonic() - before
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(calls, 2)
+        self.assertLess(elapsed, 2.4)
 
     def test_invalid_timeout_is_refused_before_health(self):
         completed, calls = self._run(timeout="unbounded", healthy_on=1)
