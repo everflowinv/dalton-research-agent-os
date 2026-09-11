@@ -9,19 +9,13 @@ from typing import Any, Mapping
 from .contracts import ResultEnvelope, WorkOrder
 from .readonly_sqlite import connect_read_only
 from .store import content_hash
-from .document_extraction import OUTPUT_SCHEMA, QUOTE_CHARS, TASK_HASH, TASK_REF, WINDOW_CHARS
+from .document_extraction import TASK_HASH, TASK_REF
 
 
 # Failed windows are immutable and remain eligible after the qualitative prompt
 # contract is revised.  Keep the exact hashes of published task contracts here;
 # never accept a merely well-formed digest supplied by a caller.
-LEGACY_TASK_HASH = content_hash({
-    "task": TASK_REF,
-    "output": OUTPUT_SCHEMA,
-    "window_chars": WINDOW_CHARS,
-    "quote_chars": QUOTE_CHARS,
-    "authority": "suggestions_only_human_citation_and_accept",
-})
+LEGACY_TASK_HASH = "e97a9f0db960da000959f02fd41c978c2745dde1c516e87be95c61208987c55e"
 PUBLISHED_TASK_HASHES = frozenset({LEGACY_TASK_HASH, TASK_HASH})
 
 
