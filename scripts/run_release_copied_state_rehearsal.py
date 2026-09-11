@@ -58,7 +58,7 @@ def _json_artifact(path: Path, expected_sha256: str, label: str) -> Any:
         raise RehearsalBindingError(f"{label} is invalid JSON") from exc
 
 
-def _load_frozen_rehearsal(source_root: Path, commit: str) -> ModuleType:
+def _verify_frozen_source(source_root: Path, commit: str) -> None:
     try:
         actual = subprocess.check_output(
             ["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True
@@ -71,6 +71,10 @@ def _load_frozen_rehearsal(source_root: Path, commit: str) -> ModuleType:
         raise RehearsalBindingError("source root is not a readable Git checkout") from exc
     _need(actual == commit, "source checkout HEAD differs from frozen commit")
     _need(not dirty, "source checkout is not clean")
+
+
+def _load_frozen_rehearsal(source_root: Path, commit: str) -> ModuleType:
+    _verify_frozen_source(source_root, commit)
     source_script = source_root / "scripts" / "rehearse_deploy.py"
     _need(source_script.is_file() and not source_script.is_symlink(), "frozen rehearsal script is unavailable")
     sys.path.insert(0, str(source_root / "src"))
@@ -220,6 +224,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         expected_models=models,
         expected_service=after_service,
     )
+    # A long copied-state run must not bind a source that changed after its
+    # initial preflight. This is deliberately immediately before the binding.
+    _verify_frozen_source(source_root, args.code_commit)
     binding = {
         "schema_version": "r11-copied-state-rehearsal-binding-0.1",
         "status": "passed",

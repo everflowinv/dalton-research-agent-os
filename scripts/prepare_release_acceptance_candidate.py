@@ -179,6 +179,64 @@ def _validate_runtime_snapshot(path: Path, runtime: Mapping[str, Any]) -> tuple[
     return count, semantic
 
 
+def _validate_full_suite(
+    receipt_path: Path,
+    log_path: Path,
+    *,
+    source_root: Path,
+    commit: str,
+    expected_log_sha256: str,
+) -> dict[str, Any]:
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CandidateError("full-suite evidence is unreadable") from exc
+    _need(isinstance(receipt, dict), "full-suite receipt is not an object")
+    _need(
+        receipt.get("status") == "passed"
+        and receipt.get("exit_code") == 0
+        and receipt.get("failures") == 0
+        and receipt.get("errors") == 0
+        and receipt.get("clean") is True,
+        "full-suite receipt did not pass cleanly",
+    )
+    _need(
+        receipt.get("code_commit") == receipt.get("final_commit") == commit
+        and Path(receipt.get("source_root", "")).resolve() == source_root,
+        "full-suite receipt does not bind the frozen source",
+    )
+    command = receipt.get("command")
+    _need(
+        isinstance(command, list)
+        and command[1:] == ["-m", "unittest", "discover", "-s", "tests", "-t", "."],
+        "full-suite receipt command differs",
+    )
+    tests = receipt.get("tests")
+    skipped = receipt.get("skipped")
+    _need(
+        isinstance(tests, int) and not isinstance(tests, bool) and tests > 0
+        and isinstance(skipped, int) and not isinstance(skipped, bool) and skipped >= 0
+        and isinstance(receipt.get("elapsed_seconds"), (int, float))
+        and receipt["elapsed_seconds"] > 0,
+        "full-suite receipt counts are invalid",
+    )
+    _need(
+        receipt.get("log_sha256") == expected_log_sha256 == _sha256(log_path),
+        "full-suite receipt does not bind the packet log",
+    )
+    summary = re.search(
+        r"Ran ([0-9]+) tests in [0-9.]+s\n\nOK(?: \(skipped=([0-9]+)\))?\s*$",
+        log_text,
+    )
+    _need(summary is not None, "full-suite log has no passing unittest summary")
+    _need(
+        int(summary.group(1)) == tests and int(summary.group(2) or 0) == skipped,
+        "full-suite receipt counts differ from the log",
+    )
+    return {"tests": tests, "skipped": skipped, "elapsed_seconds": receipt["elapsed_seconds"]}
+
+
 def _validate_latest_backup(
     manifest_path: Path, retention_path: Path, latest: Mapping[str, Any]
 ) -> str:
@@ -264,6 +322,13 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
         name: _regular_packet_artifact(packet_root, artifacts[name], name)
         for name in ARTIFACT_NAMES
     }
+    suite = _validate_full_suite(
+        paths["full_suite_receipt"],
+        paths["full_suite_log"],
+        source_root=source_root,
+        commit=commit,
+        expected_log_sha256=artifacts["full_suite_log"]["sha256"],
+    )
     count, semantic = _validate_runtime_snapshot(
         paths["final_activated_model_config_snapshot"],
         document.get("runtime_configuration", {}),
@@ -293,6 +358,7 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
             "model_config_count": count,
             "semantic_snapshot_sha256": semantic,
         },
+        "full_suite": suite,
         "latest_backup": {"snapshot_id": snapshot_id},
         "deployment_operations": {"backup_retention": service_delta},
         "boundaries": dict(BOUNDARIES),
