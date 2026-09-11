@@ -101,6 +101,21 @@ def _exact_plan(connection: sqlite3.Connection, plan_ref: str) -> dict[str, Any]
     return {**dict(wire), "plan_id": row["plan_id"]}
 
 
+def _execution_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """The paid work identity; prose-only plan provenance cannot rekey it."""
+
+    return {
+        key: value[key] for key in (
+            "schema_version", "workflow_contract_ref", "mission_version_ref",
+            "mission_version_hash", "mission_ref", "company_ref", "actor_ref",
+            "mandate_binding", "outer_budget", "inquiry_ref", "inquiry_hash",
+            "question_version_ref", "question_version_hash",
+            "document_authority_ref", "document_authority_hash", "source_ref",
+            "request", "model_execution", "model_authority",
+        )
+    }
+
+
 class MissionDocumentResearchAuthority:
     """Append and re-resolve exact directed-document admissions."""
 
@@ -246,11 +261,9 @@ class MissionDocumentResearchAuthority:
         )
         source_authority = registration["source_authority"]
         if (
-            source_authority["mission_version_ref"] is not None
-            and (
-                source_authority["mission_version_ref"] != mission["id"]
-                or source_authority["company_ref"] != inquiry["company_ref"]
-            )
+            source_authority["kind"] != "coverage-mission-acquired-document"
+            or source_authority["mission_version_ref"] != mission["id"]
+            or source_authority["company_ref"] != inquiry["company_ref"]
         ):
             raise MissionDocumentResearchError(
                 "document registration belongs to another mission or company"
@@ -333,14 +346,16 @@ class MissionDocumentResearchAuthority:
 
     def admit_from_plan(self, **kwargs: Any) -> dict[str, Any]:
         identity = self._derive(**kwargs)
-        identity_hash = content_hash(identity)
+        identity_hash = content_hash(_execution_identity(identity))
         admission_id = "mission-document-research-admission:" + identity_hash[:32]
         row = self.connection.execute(
             "SELECT * FROM mission_document_research_admissions WHERE admission_id=?",
             (admission_id,),
         ).fetchone()
         if row is not None:
-            return {"status_marker": "duplicate", **self._read_row(row)}
+            stored = self._read_row(row)
+            self.resolve_for_execution(stored["id"])
+            return {"status_marker": "duplicate", **stored}
         created_at = self.clock().astimezone(timezone.utc).isoformat(timespec="microseconds")
         wire = {**identity, "id": admission_id, "status": "admitted", "created_at": created_at,
                 "identity_hash": identity_hash}
@@ -397,7 +412,7 @@ class MissionDocumentResearchAuthority:
         ):
             raise MissionDocumentResearchError("mission document admission authority drifted")
         identity = {key: wire[key] for key in identity_fields}
-        if content_hash(identity) != row["identity_hash"]:
+        if content_hash(_execution_identity(identity)) != row["identity_hash"]:
             raise MissionDocumentResearchError("mission document admission identity drifted")
         return dict(wire)
 
@@ -417,7 +432,14 @@ class MissionDocumentResearchAuthority:
             question_version_ref=wire["question_version_ref"],
             document_authority_ref=wire["document_authority_ref"],
         )
-        if content_hash(identity) != wire["identity_hash"]:
+        stored_identity = {
+            key: wire[key] for key in wire
+            if key not in {"id", "status", "created_at", "identity_hash", "content_hash"}
+        }
+        if (
+            canonical_json(identity) != canonical_json(stored_identity)
+            or content_hash(_execution_identity(identity)) != wire["identity_hash"]
+        ):
             raise MissionDocumentResearchError("mission document admission is no longer executable")
         return wire
 

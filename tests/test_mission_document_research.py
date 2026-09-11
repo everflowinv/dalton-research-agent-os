@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.document_research import (
-    DocumentResearchRegistry, FeedDocumentSourceAdapter,
+    CoreAcquiredDocumentSourceAdapter, DocumentResearchRegistry, FeedDocumentSourceAdapter,
     build_document_research_policy,
 )
 from dalton_core.document_research_strategy import STRATEGY_VERSION
@@ -70,12 +70,35 @@ class MissionDocumentResearchTests(unittest.TestCase):
             max_results=8, max_context_before_chars=80,
             max_context_after_chars=160, max_read_chars=10_000,
         )
+        adapters = {COMPANY_WIKI_SOURCE_REF: adapter}
         registry = DocumentResearchRegistry(
-            adapters={COMPANY_WIKI_SOURCE_REF: adapter}, policy=policy
+            adapters=adapters, policy=policy,
+            acquired_fetched_adapter=CoreAcquiredDocumentSourceAdapter(
+                core=fixture.store, adapters=adapters,
+            ),
         )
-        registration = registry.register(
-            source_ref=COMPANY_WIKI_SOURCE_REF, document_ref=document_ref,
-            purpose=PURPOSE, acquisition_ticket_ref=ticket_ref,
+        acquired_ref = "mission-discovered-document:mission-document-wiki"
+        coverage = CoverageMissionAuthority(fixture.store)
+        fixture.store.connection.commit()
+        fixture.store.connection.execute("PRAGMA foreign_keys=OFF")
+        self.assertEqual(
+            fixture.store.connection.execute("PRAGMA foreign_keys").fetchone()[0], 0
+        )
+        with coverage._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_discovered_documents"
+                "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                "discovery_ref,status,ticket_ref,failure_reason,failure_retryable,"
+                "created_at,updated_at,host) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (acquired_ref, fixture.mission["id"], COMPANY,
+                 COMPANY_WIKI_SOURCE_REF, document_ref,
+                 "mission-source-discovery:mission-document-wiki", "acquired",
+                 ticket_ref, None, None, NOW.isoformat(timespec="microseconds"),
+                 NOW.isoformat(timespec="microseconds"), None),
+            )
+        fixture.store.connection.execute("PRAGMA foreign_keys=ON")
+        registration = registry.register_acquired_document(
+            record_id=acquired_ref, purpose=PURPOSE,
         )
         inquiry = {
             "rank": 0, "company_ref": COMPANY,
@@ -173,6 +196,60 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_admissions"
         ).fetchone()[0], 0)
+
+    def test_rationale_only_new_plan_reuses_paid_execution_identity(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        first = authority.admit_from_plan(**args)
+        original = json.loads(fixture.store.connection.execute(
+            "SELECT plan_json FROM coverage_mission_research_plans WHERE plan_id=?",
+            (args["plan_ref"],),
+        ).fetchone()[0])
+        second_plan = {key: value for key, value in original.items() if key != "content_hash"}
+        second_plan["state_hash"] = "3" * 64
+        second_plan["inquiries"][0]["directed_document"]["query_rationale"] = (
+            "Equivalent prose explaining the same exact query."
+        )
+        second_plan["content_hash"] = content_hash(second_plan)
+        stored = CoverageMissionAuthority(fixture.store).record_research_plan(
+            second_plan, decided_by=fixture.mission["autonomy"]["automation_principal"]
+        )
+        duplicate = authority.admit_from_plan(**{**args, "plan_ref": stored["plan_id"]})
+        self.assertEqual(duplicate["id"], first["id"])
+        self.assertEqual(duplicate["status_marker"], "duplicate")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_admissions"
+        ).fetchone()[0], 1)
+
+    def test_manifest_only_registration_cannot_claim_company_scope(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        direct = authority.registry.register(
+            source_ref=COMPANY_WIKI_SOURCE_REF,
+            document_ref=authority.registration_resolver(args["document_authority_ref"])["document_ref"],
+            purpose=PURPOSE,
+            acquisition_ticket_ref="feed-run:mission-document:wiki",
+        )
+        original = json.loads(fixture.store.connection.execute(
+            "SELECT plan_json FROM coverage_mission_research_plans WHERE plan_id=?",
+            (args["plan_ref"],),
+        ).fetchone()[0])
+        plan = {key: value for key, value in original.items() if key != "content_hash"}
+        plan["state_hash"] = "4" * 64
+        plan["inquiries"][0]["directed_document"]["document_version_hash"] = direct["content_hash"]
+        plan["content_hash"] = content_hash(plan)
+        stored = CoverageMissionAuthority(fixture.store).record_research_plan(
+            plan, decided_by=fixture.mission["autonomy"]["automation_principal"]
+        )
+        inquiry = plan["inquiries"][0]
+        authority.registration_resolver = lambda _ref: direct
+        with self.assertRaisesRegex(
+            MissionDocumentResearchError, "another mission or company"
+        ):
+            authority.admit_from_plan(
+                plan_ref=stored["plan_id"],
+                inquiry_ref=inquiry_ref_for(inquiry_content_hash(inquiry)),
+                question_version_ref=args["question_version_ref"],
+                document_authority_ref=direct["id"],
+            )
 
 
 if __name__ == "__main__":
