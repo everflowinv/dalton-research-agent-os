@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from dalton_core.mission_statement_lane import argv_fragment
 from dalton_core.sec_financials_core import build_sec_financials_governance_record
+from dalton_core.store import content_hash
 
 
 class StatementContractSelectionTests(unittest.TestCase):
@@ -49,6 +50,34 @@ class StatementContractSelectionTests(unittest.TestCase):
         )
         limit = argv.index("--statement-lane-filing-limit")
         self.assertEqual(argv[limit + 1], "10-K=1")
+
+    def test_install_rerun_preserves_owner_statement_targets(self):
+        self.write(2, "approved")
+        body = {
+            "schema_version": "0.1",
+            "forms": ["10-K", "10-Q"],
+            "filing_limits": {"10-K": 2, "10-Q": 6},
+        }
+        path = self.state / "statement-lane-config.json"
+        original = json.dumps({**body, "content_hash": content_hash(body)}).encode()
+        path.write_bytes(original)
+        first = argv_fragment(self.context)
+        second = argv_fragment(self.context)
+        self.assertEqual(first, second)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertIn("10-K=2", first)
+        self.assertIn("10-Q=6", first)
+
+    def test_invalid_statement_config_refuses_instead_of_falling_back(self):
+        self.write(2, "approved")
+        path = self.state / "statement-lane-config.json"
+        invalid = {
+            "schema_version": "0.1", "forms": ["10-K", "10-K"],
+            "filing_limits": {"10-K": 2}, "content_hash": "0" * 64,
+        }
+        path.write_text(json.dumps(invalid), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "forms must be unique"):
+            argv_fragment(self.context)
 
     def test_fresh_proposed_records_do_not_advertise_a_connected_lane(self):
         self.write(2, "proposed")

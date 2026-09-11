@@ -24,6 +24,14 @@ The installed default requests one 10-K and retains the existing
 specification-derived 10-Q depth. Existing single-form coordinator callers and
 old dispatch/ticket identities remain valid.
 
+An optional owner-managed `state/statement-lane-config.json` persists exact
+targets across installation. Its closed, hash-bound `0.1` shape contains
+`forms` and one `filing_limits` entry for every selected form. Installation
+only reads this file; it neither creates nor overwrites it. A missing file uses
+the default above, while malformed, duplicate, out-of-range, or tampered
+configuration refuses installation argument rendering rather than silently
+falling back.
+
 No source governance, public connector behavior, mission budget, or existing
 statement/model record is changed.
 

@@ -25,7 +25,9 @@ this is where that judgement will attach.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .coverage_mission import CoverageMissionError, MAX_STATEMENT_FILINGS
@@ -35,6 +37,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .store import content_hash
 
 MAX_QUEUED_PER_RUN = 4
 # Three failed or rejected runs is a company this lane cannot serve today.
@@ -69,6 +72,37 @@ DEFAULT_FORMS = ("10-K", "10-Q")
 DEFAULT_FORM_LIMITS = {"10-K": 1}
 DEFAULT_FILING_LIMIT = 1
 MAX_FAILURE_DETAIL_CHARS = 500
+STATEMENT_LANE_CONFIG = "statement-lane-config.json"
+STATEMENT_LANE_CONFIG_SCHEMA = "0.1"
+
+
+def load_statement_lane_config(path: Path) -> dict[str, Any]:
+    """Read an owner-selected scheduling target without modifying it."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"statement lane config cannot be read: {exc}") from exc
+    if not isinstance(value, dict) or set(value) != {
+            "schema_version", "forms", "filing_limits", "content_hash"}:
+        raise ValueError("statement lane config has an invalid closed shape")
+    if value["schema_version"] != STATEMENT_LANE_CONFIG_SCHEMA:
+        raise ValueError("statement lane config schema_version is unsupported")
+    forms = value["forms"]
+    limits = value["filing_limits"]
+    if (not isinstance(forms, list) or not forms
+            or any(item not in DEFAULT_FORMS for item in forms)
+            or len(set(forms)) != len(forms)):
+        raise ValueError("statement lane config forms must be unique 10-Q/10-K values")
+    if not isinstance(limits, dict) or set(limits) != set(forms):
+        raise ValueError("statement lane config needs one filing limit per selected form")
+    if any(isinstance(item, bool) or not isinstance(item, int)
+           or not 1 <= item <= MAX_STATEMENT_FILINGS for item in limits.values()):
+        raise ValueError(f"statement lane filing limits must be 1..{MAX_STATEMENT_FILINGS}")
+    body = {key: value[key] for key in ("schema_version", "forms", "filing_limits")}
+    if value["content_hash"] != content_hash(body):
+        raise ValueError("statement lane config content_hash is invalid")
+    return body
 
 
 def _is_configuration_failure(reason: Any) -> bool:
@@ -499,13 +533,24 @@ def argv_fragment(context: Any) -> list[str]:
             break
     if governance is None:
         return []
-    return [
+    config_path = context.state / STATEMENT_LANE_CONFIG
+    if config_path.exists():
+        config = load_statement_lane_config(config_path)
+        forms = tuple(config["forms"])
+        limits = dict(config["filing_limits"])
+    else:
+        forms = DEFAULT_FORMS
+        limits = DEFAULT_FORM_LIMITS
+    argv = [
         "--statement-lane-governance", str(governance),
         "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
-        "--statement-lane-form", "10-K",
-        "--statement-lane-form", "10-Q",
-        "--statement-lane-filing-limit", "10-K=1",
     ]
+    for form in forms:
+        argv += ["--statement-lane-form", form]
+    for form in forms:
+        if form in limits:
+            argv += ["--statement-lane-filing-limit", f"{form}={limits[form]}"]
+    return argv
 
 
 LANE = register_lane(LaneSpec(
@@ -534,11 +579,14 @@ __all__ = [
     "MAX_FAILURES_PER_COMPANY",
     "MAX_QUEUED_PER_RUN",
     "STATEMENT_LANE_GOVERNANCE",
+    "STATEMENT_LANE_CONFIG",
+    "STATEMENT_LANE_CONFIG_SCHEMA",
     "STATEMENT_LANE_GOVERNANCE_CANDIDATES",
     "STATEMENT_LANE_USER_AGENT",
     "MissionStatementLaneCoordinator",
     "add_arguments",
     "argv_fragment",
+    "load_statement_lane_config",
     "build_launcher",
     "dispatch",
 ]
