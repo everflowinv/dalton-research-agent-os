@@ -83,6 +83,7 @@ from tests.test_model_forecast_driver import (
 ACN = "company:sec-cik:0001467373"
 OWNER = "human:owner"
 OPERATING_CONCEPT = "us-gaap:OperatingIncomeLoss"
+PRETAX_CONCEPT = "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
 NET_CONCEPT = "us-gaap:NetIncomeLoss"
 
 
@@ -113,8 +114,21 @@ def statement_structure(*, full=False):
     formulas = [{"output_ref": "operating", "operator": "sum",
                  "terms": operating_terms, "tie_out_concept": OPERATING_CONCEPT,
                  "evidence_refs": [accession]}]
-    lines.append(filed("tax", "income_tax_expense", TAX_CONCEPT,
-                       "unavailable"))
+    lines.extend([
+        derived("pretax", "pretax_income"),
+        filed("tax", "income_tax_expense", TAX_CONCEPT,
+              "share_of_line", "pretax"),
+        derived("net", "net_income"),
+    ])
+    formulas.extend([
+        {"output_ref": "pretax", "operator": "sum", "terms": [
+            {"line_ref": "operating", "coefficient": "1"},
+        ], "tie_out_concept": PRETAX_CONCEPT, "evidence_refs": [accession]},
+        {"output_ref": "net", "operator": "sum", "terms": [
+            {"line_ref": "pretax", "coefficient": "1"},
+            {"line_ref": "tax", "coefficient": "-1"},
+        ], "tie_out_concept": NET_CONCEPT, "evidence_refs": [accession]},
+    ])
     return {"schema_version": "0.1", "lines": lines, "formulas": formulas}
 
 
@@ -254,6 +268,7 @@ class LaneStateTests(unittest.TestCase):
                 operating = [value - Decimal(sga)
                              for value, sga in zip(operating, series[SGA_CONCEPT])]
             series[OPERATING_CONCEPT] = [str(value) for value in operating]
+            series[PRETAX_CONCEPT] = [str(value) for value in operating]
             if TAX_CONCEPT in series:
                 series[NET_CONCEPT] = [str(value - Decimal(tax))
                                        for value, tax in zip(operating,
