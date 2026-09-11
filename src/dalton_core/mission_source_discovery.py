@@ -1718,6 +1718,19 @@ class MissionSourceDiscoveryCoordinator:
             self.selection_launcher.completed_empty_discoveries()
             if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF
             else ())
+        if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF:
+            completed=list(empty_discoveries)
+            for discovery_ref, selected_refs in self.selection_launcher.successful_selections().items():
+                if not selected_refs:
+                    continue
+                placeholders=','.join('?' for _ in selected_refs)
+                remaining=self.store.connection.execute(
+                    f"SELECT 1 FROM coverage_mission_discovered_documents WHERE discovery_ref=? "
+                    f"AND status='discovered' AND document_ref IN ({placeholders}) LIMIT 1",
+                    (discovery_ref,*selected_refs)).fetchone()
+                if remaining is None:
+                    completed.append(discovery_ref)
+            empty_discoveries=tuple(sorted(set(completed)))
         document = self.missions.next_discovered_document(
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts,
@@ -1731,11 +1744,15 @@ class MissionSourceDiscoveryCoordinator:
                 and self.source_ref == ALPHAENGINE_SOURCE_REF):
             if mission is None or self.spool_dir is None:
                 return {"status":"selection_pending","reason":"selection authority unavailable"}
-            ticket = self.selection_launcher.latest(document["discovery_ref"])
-            if ticket is None or ticket.get("status") in {"failed", "orphaned", "cooldown"}:
+            discovery=self.missions.discovery_record(document["discovery_ref"])
+            spec=next((item for item in self.plan["specs"]
+                       if item["spec_ref"] == discovery["spec_ref"]), None)
+            # Candidate selection currently has an earnings-call contract.
+            # Industry and sell-side discovery retain their existing governed
+            # acquisition path instead of being misclassified as calls.
+            if spec is not None and spec["document_type"] == "meeting_minutes":
                 try:
                     from .discovery_candidate_selection import candidate_view
-                    discovery=self.missions.discovery_record(document["discovery_ref"])
                     row=self.store.connection.execute("SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",(discovery["source_envelope_ref"],)).fetchone()
                     if row is None: raise ValueError("source envelope missing")
                     envelope=json.loads(row["record_json"])
@@ -1751,16 +1768,18 @@ class MissionSourceDiscoveryCoordinator:
                         mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,"ticker":member["ticker"],"aliases":[member["ticker"]]},missing_periods=list(item.get("missing_periods") or ()))
                 except Exception as exc:
                     return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
-                return {"status":"selection_pending","ticket_ref":ticket.get("id")}
-            if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
-                return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"]}
-            selected=[x["document_ref"] for x in ticket["summary"]["selection"]["selected"]]
-            if not selected:
-                return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
-            document=self.missions.next_discovered_document(source_ref=self.source_ref,
-                preferred_hosts=self.preferred_hosts,skip_hosts=tuple(dict.fromkeys((*self.skip_hosts,*cooldown_hosts))),
-                preferred_needs=needs,excluded_needs=stopped_needs,excluded_mission_version_ref=mission["id"],
-                included_document_refs=selected,included_discovery_ref=document["discovery_ref"])
+                if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
+                    return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"]}
+                selected=[x["document_ref"] for x in ticket["summary"]["selection"]["selected"]]
+                if not selected:
+                    return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
+                document=self.missions.next_discovered_document(source_ref=self.source_ref,
+                    preferred_hosts=self.preferred_hosts,skip_hosts=tuple(dict.fromkeys((*self.skip_hosts,*cooldown_hosts))),
+                    preferred_needs=needs,excluded_needs=stopped_needs,excluded_mission_version_ref=mission["id"],
+                    included_document_refs=selected,included_discovery_ref=document["discovery_ref"])
+                if document is None:
+                    return {"status":"completed_selected","ticket_ref":ticket["id"],
+                            "discovery_ref":discovery["id"]}
         if document is not None and self._document_in_authority(
             document["document_ref"], document.get("discovery_ref")
         ):

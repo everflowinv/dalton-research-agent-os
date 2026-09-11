@@ -1,12 +1,49 @@
 """Owner-only asynchronous child lifecycle for discovery candidate selection."""
 from __future__ import annotations
 import hashlib, json, os, re, subprocess, sys, threading
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from .child_tickets import adopt_finished_child
 from .lane_child_launcher import process_matches
 from .store import canonical_json, content_hash
+
+def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any]) -> bool:
+    """Verify the selection came from one exact successful Scheduler result."""
+    from .contracts import ResultEnvelope, WorkOrder
+    from .readonly_sqlite import connect_read_only
+    try:
+        with closing(connect_read_only(scheduler_db)) as connection:
+            work_row = connection.execute(
+                "SELECT work_order_json,work_order_hash FROM scheduler_work_orders WHERE work_order_id=?",
+                (selection.get("work_order_ref"),)).fetchone()
+            formal = connection.execute(
+                "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+                (selection.get("work_order_ref"),)).fetchone()
+        if work_row is None or formal is None:
+            return False
+        work = WorkOrder.from_dict(json.loads(work_row["work_order_json"])).to_dict()
+        envelope = ResultEnvelope.from_dict(json.loads(formal["result_envelope_json"])).to_dict()
+        record = {"id": formal["result_record_id"], "work_order_id": formal["work_order_id"],
+                  "attempt_number": formal["attempt_number"],
+                  "result_envelope_id": formal["result_envelope_id"],
+                  "result_envelope_hash": formal["result_envelope_hash"],
+                  "terminal_state": formal["terminal_state"], "created_at": formal["created_at"]}
+        return bool(
+            canonical_json(work) == work_row["work_order_json"]
+            and content_hash(work) == work_row["work_order_hash"]
+            and work.get("metadata", {}).get("purpose") == "discovery_selection"
+            and canonical_json(envelope) == formal["result_envelope_json"]
+            and content_hash(envelope) == formal["result_envelope_hash"]
+            and content_hash(record) == formal["content_hash"]
+            and formal["terminal_state"] == "succeeded"
+            and selection.get("result_envelope_ref") == envelope["id"]
+            and selection.get("invocation_ref") == envelope.get("invocation_ref")
+            and selection.get("route_decision_ref") == envelope.get("metadata", {}).get("route_decision_ref")
+        )
+    except (Exception,):
+        return False
 
 PREFIX="discovery-selection"; _RE=re.compile(r"discovery-selection:[0-9a-f]{24}\Z")
 def _write(path:Path,value:Any):
@@ -47,6 +84,17 @@ class DiscoverySelectionLauncher:
                     result.append(ticket['discovery_ref'])
             except (OSError,ValueError,KeyError): continue
         return sorted(set(result))
+    def successful_selections(self)->dict[str,tuple[str,...]]:
+        result={}
+        for path in self.root.glob('*/ticket.json'):
+            try:
+                ticket=self.status(json.loads(path.read_text())['id']); summary=ticket.get('summary') or {}
+                if ticket['status']=='succeeded' and summary.get('status')=='succeeded':
+                    result[ticket['discovery_ref']]=tuple(
+                        row['document_ref'] for row in summary['selection']['selected'])
+            except (OSError,ValueError,KeyError,TypeError):
+                continue
+        return result
     def start(self,*,discovery_ref:str,view:Mapping[str,Any],mission_ref:str,
               company:Mapping[str,Any],missing_periods:list[str]):
         identity={"view_hash":view['content_hash'],"mission_ref":mission_ref,"company":dict(company),
@@ -111,6 +159,7 @@ class DiscoverySelectionLauncher:
                      and isinstance(selection, Mapping)
                      and selection.get('candidate_view_hash') == source['view']['content_hash']
                      and selection.get('recovery_epoch') == row.get('recovery_epoch', 0)
+                     and _formal_selection_valid(self.scheduler, selection)
                      and selection.get('content_hash') == content_hash({
                          key: value for key, value in selection.items()
                          if key not in {'content_hash', 'work_order_ref', 'result_envelope_ref',
