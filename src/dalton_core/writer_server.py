@@ -404,6 +404,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "run_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
+    "reopen_mission_document_review",
     "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
@@ -816,6 +817,9 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "source_start", "source_end", "raw_text", "rationale", "confirm_citation", "correction_set_version_ref",
         "correction_set_version_hash", "actor_ref"}),
     "resolve_mission_document_review": frozenset({"review_id", "resolution", "candidate_claim_version_ref", "rationale", "actor_ref", "expected_review_hash"}),
+    "reopen_mission_document_review": frozenset({
+        "review_id", "expected_review_hash", "decision_ref", "failed_windows", "actor_ref",
+    }),
 
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
@@ -1024,6 +1028,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_research_playbook": "actor_ref",
     "create_coverage_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
+    "reopen_mission_document_review": "actor_ref",
     "mission_document_evidence": "actor_ref",
     "document_extraction_preflight": "actor_ref",
     "generate_document_extraction": "actor_ref",
@@ -4002,6 +4007,18 @@ class WriterServer:
             candidate_claim_version_ref=values.get("candidate_claim_version_ref"),
             rationale=values.get("rationale"),
             expected_review_hash=values.get("expected_review_hash"),
+        )
+
+    def _op_reopen_mission_document_review(self, p: Mapping[str, Any]) -> Any:
+        if self._scheduler is None:
+            raise WriterServerError("Scheduler authority is unavailable")
+        from .document_review_reopen import FailedDocumentWindowReader
+        values = dict(p)
+        return self.coverage_mission.reopen_document_review(
+            values["review_id"], expected_review_hash=values["expected_review_hash"],
+            actor_ref=values["actor_ref"], decision_ref=values["decision_ref"],
+            failed_windows=values["failed_windows"],
+            formal_reader=FailedDocumentWindowReader(self._scheduler),
         )
 
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
