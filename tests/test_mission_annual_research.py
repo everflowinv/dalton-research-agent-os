@@ -24,6 +24,7 @@ from dalton_core.mission_annual_research_executor import (
     MissionAnnualResearchExecutor, MissionAnnualResearchExecutorError,
 )
 from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_model_adapter import _WORK_ID_RE
 from dalton_core.annual_report_qualitative import (
     AnnualReportQualitativeError, RegisteredAnnualReportDraftWorker,
     RegisteredAnnualReportVerifierWorker,
@@ -408,6 +409,10 @@ class MissionAnnualResearchTests(unittest.TestCase):
         fixture = MissionAnnualFixture(self)
         admission = fixture.authority.admit(**fixture.args())
         executor, draft, verifier = self._executor(fixture)
+        self.assertTrue(all(
+            _WORK_ID_RE.fullmatch(work["id"])
+            for work in executor._blueprints(admission)
+        ))
         outcomes = [executor.run_once(admission["id"]) for _ in range(9)]
         self.assertEqual(
             [item["status"] for item in outcomes],
@@ -419,7 +424,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
         self.assertEqual((draft.calls, verifier.calls), (1, 1))
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT count(*) FROM thesis_impact_day_admissions "
-            "WHERE work_order_ref LIKE 'work:mission-annual-research:%'"
+            "WHERE work_order_ref LIKE 'work:mission-annual-research-%'"
         ).fetchone()[0], 2)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_annual_research_starts"

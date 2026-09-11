@@ -126,11 +126,13 @@ def _mission_annual_common_metadata(
 
 def _mission_annual_blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
     steps = _mission_annual_steps(admission)
-    suffix = _ref("x", admission["identity_hash"]).rsplit(":", 1)[-1]
     works: list[dict[str, Any]] = []
     for step in steps:
         ordinal = step["ordinal"]
-        work_ref = f"work:mission-annual-research:{suffix}:{ordinal}"
+        work_ref = "work:mission-annual-research-" + content_hash({
+            "admission_identity_hash": admission["identity_hash"],
+            "ordinal": ordinal,
+        })[:32]
         prior_ref = works[-1]["id"] if works else None
         model_key = "draft" if ordinal == 2 else "verifier" if ordinal == 3 else None
         execution = None if model_key is None else admission["request"]["model_execution"][model_key]
