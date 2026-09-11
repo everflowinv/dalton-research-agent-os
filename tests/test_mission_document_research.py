@@ -27,7 +27,9 @@ from dalton_core.document_research_qualitative import (
 )
 from dalton_core.mission_document_research_executor import (
     MissionDocumentResearchExecutor, MissionDocumentResearchExecutorError,
-    effective_mission_document_work_orders, read_mission_document_research_observations,
+    effective_mission_document_work_orders,
+    exact_mission_document_model_execution_authority,
+    read_mission_document_research_observations,
 )
 from dalton_core.annual_report_qualitative import AnnualReportQualitativeError
 from dalton_core.annual_report_runtime import (
@@ -503,6 +505,17 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "SELECT count(*) FROM thesis_impact_day_admissions WHERE "
             "work_order_ref LIKE 'work:mission-document-research-%'"
         ).fetchone()[0], 2)
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=executor.verifier_worker)
+        model_authority = exact_mission_document_model_execution_authority(
+            works[1], executor.scheduler.formal_result(works[1]["id"]),
+            executor.draft_worker,
+        )
+        self.assertEqual(model_authority["model_result"]["output"]["status"], "answered")
+        self.assertEqual(model_authority["execution_proof"]["cost_status"], "actual")
+        self.assertIsNotNone(
+            model_authority["execution_proof"]["budget_settlement_ref"])
 
     def test_model_worker_rejects_substituted_question_before_budget_or_adapter(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -1112,6 +1125,14 @@ class MissionDocumentResearchTests(unittest.TestCase):
             work_order_ref=draft["id"], attempt_number=1, phase="assessment")
         self.assertIsNotNone(exact)
         self.assertIsNone(exact["settlement"])
+        model_authority = exact_mission_document_model_execution_authority(
+            draft, executor.scheduler.formal_result(draft["id"]),
+            executor.draft_worker,
+        )["execution_proof"]
+        self.assertEqual(model_authority["cost_status"], "estimated")
+        self.assertIsNone(model_authority["budget_settlement_ref"])
+        self.assertEqual(model_authority["reserved_micros"],
+                         exact["admission"]["reserved_micros"])
         cost = fixture.harness.observability.connection.execute(
             "SELECT cost_status FROM observability_cost_entries c JOIN "
             "observability_usage_entries u ON u.usage_entry_id=c.usage_entry_ref "

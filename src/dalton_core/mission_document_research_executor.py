@@ -560,7 +560,7 @@ def _terminal_model_failure(scheduler: Scheduler, work: Mapping[str, Any]) -> di
     }
 
 
-def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], worker: Any):
+def _exact_model_execution(work: Mapping[str, Any], formal: Mapping[str, Any], worker: Any):
     if formal is None or formal.get("terminal_state") != "succeeded":
         raise MissionDocumentResearchExecutorError("model stage lacks succeeded formal authority")
     try:
@@ -692,7 +692,51 @@ def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], work
     elif settlement is not None:
         raise MissionDocumentResearchExecutorError(
             "estimated model cost must retain its full reservation")
-    return proof
+    execution_proof = {
+        "schema_version": SCHEMA_VERSION,
+        "work_order_ref": work["id"], "work_order_hash": content_hash(work),
+        "stage": work["metadata"]["stage"],
+        "attempt_number": formal["attempt_number"],
+        "formal_result_ref": _formal_ref(formal),
+        "formal_result_hash": _formal_hash(formal),
+        "result_envelope_ref": envelope["id"],
+        "result_envelope_hash": content_hash(envelope),
+        "model_proof_ref": proof["id"],
+        "model_proof_hash": proof["content_hash"],
+        "route_decision_ref": route["id"],
+        "route_decision_hash": route["content_hash"],
+        "model_invocation_ref": invocation["id"],
+        "model_invocation_hash": content_hash(invocation),
+        "budget_phase": phase,
+        "budget_admission_ref": exact_budget["admission"]["admission_id"],
+        "budget_admission_hash": exact_budget["admission"]["content_hash"],
+        "budget_mission_binding_hash": content_hash(exact_budget["mission_binding"]),
+        "reserved_micros": exact_budget["admission"]["reserved_micros"],
+        "usage_entry_ref": usage["id"], "usage_entry_hash": usage["content_hash"],
+        "cost_entry_ref": cost["id"], "cost_entry_hash": cost["content_hash"],
+        "cost_status": cost["cost_status"], "cost_micros": cost["amount_micros"],
+        "budget_settlement_ref": (
+            None if settlement is None else settlement["settlement_id"]),
+        "budget_settlement_hash": (
+            None if settlement is None else settlement["content_hash"]),
+        "settled_micros": (
+            None if settlement is None else settlement["actual_micros"]),
+    }
+    execution_proof["content_hash"] = content_hash(execution_proof)
+    return proof, execution_proof
+
+
+def _exact_model_result(work: Mapping[str, Any], formal: Mapping[str, Any], worker: Any):
+    return _exact_model_execution(work, formal, worker)[0]
+
+
+def exact_mission_document_model_execution_authority(
+    work: Mapping[str, Any], formal: Mapping[str, Any], worker: Any,
+) -> dict[str, Any]:
+    """Reverify and return one model result with its durable accounting chain."""
+
+    result, execution_proof = _exact_model_execution(work, formal, worker)
+    return {"model_result": result, "execution_proof": execution_proof}
 
 
 def _expected_budget_binding(authority: Any, admission: Mapping[str, Any], index: int):
@@ -1830,6 +1874,7 @@ class MissionDocumentResearchExecutor:
 
 __all__ = ["AUTHORITY_KIND", "MissionDocumentResearchExecutor",
            "MissionDocumentResearchExecutorError",
+           "exact_mission_document_model_execution_authority",
            "effective_mission_document_work_orders",
            "read_mission_document_research_observations",
            "validate_mission_document_work_authority"]
