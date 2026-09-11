@@ -83,6 +83,10 @@ def template() -> dict[str, Any]:
             "model_config_count_after": None,
             "backup_keep_latest": 3, "thesis_impact_enabled": False,
         },
+        "health_acceptance": {
+            "sample_count": None, "interval_seconds": None,
+            "minimum_duration_seconds": None,
+        },
         "boundaries": {"manifest_publication": False, "model_calls": False},
     }
 
@@ -188,6 +192,18 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
                          "backup_keep_latest": 3,
                          "thesis_impact_enabled": False},
          "successor before/after runtime inventory differs")
+    health = manifest.get("health_acceptance")
+    need(isinstance(health, Mapping)
+         and set(health) == {"sample_count", "interval_seconds",
+                             "minimum_duration_seconds"}
+         and all(isinstance(health.get(name), int)
+                 and not isinstance(health.get(name), bool)
+                 and health[name] > 0
+                 for name in health)
+         and health["sample_count"] >= 2
+         and ((health["sample_count"] - 1) * health["interval_seconds"]
+              >= health["minimum_duration_seconds"]),
+         "successor health acceptance window is invalid")
     return manifest, paths
 
 
