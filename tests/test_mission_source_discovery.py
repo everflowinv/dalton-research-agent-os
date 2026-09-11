@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.alphaengine_core_search import (
     AlphaEngineCoreSearch,
@@ -602,14 +603,31 @@ class CoordinatorTests(unittest.TestCase):
         seed_known_document(self.h)
         self.coordinator.dispatch_once()  # ACN
         self.coordinator.dispatch_once()  # settle ACN, launch CTSH
-        self.clock.advance(days=2)
         from unittest.mock import patch
         continuation = {"cursor": "ae1:next", "as_of": NOW.date().isoformat()}
         with patch.object(self.coordinator, "_continuation_page", return_value=continuation):
-            tick = self.coordinator.dispatch_once()  # settle CTSH and immediately continue
+            tick = self.coordinator.dispatch_once()  # settle CTSH and continue immediately
         self.assertEqual(tick["discovery"]["status"], "launched")
         self.assertEqual(self.search_launcher.starts[-1]["cursor"], "ae1:next")
         self.assertEqual(self.search_launcher.starts[-1]["as_of"], NOW.date())
+
+    def test_successful_search_below_floor_without_cursor_uses_retry_interval(self) -> None:
+        v1 = self.create_mission()
+        self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.coordinator.dispatch_once()  # ACN
+        self.coordinator.dispatch_once()  # settle ACN, launch CTSH
+        from unittest.mock import patch
+        with patch.object(self.coordinator, "_continuation_page", return_value=None):
+            tick = self.coordinator.dispatch_once()  # settle CTSH; both inside retry cadence
+            self.assertEqual(tick["discovery"]["status"], "idle")
+            self.assertTrue(any("shortfall retry" in row["reason"]
+                                for row in tick["discovery"]["skipped"]))
+            self.clock.advance(days=2)
+            tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["discovery"]["status"], "launched")
+        self.assertIn(tick["discovery"]["company_ref"], {ACN, CTSH})
+        self.assertIsNone(self.search_launcher.starts[-1]["cursor"])
 
     def test_continuation_rejects_plan_change_and_repeated_cursor(self) -> None:
         discovery = {

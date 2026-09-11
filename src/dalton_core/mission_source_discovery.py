@@ -1304,10 +1304,14 @@ class MissionSourceDiscoveryCoordinator:
             satisfied = self._satisfied_block(mission, company_ref, spec_ref)
             if satisfied is not None:
                 return satisfied
-        cadence = self._cadence_block(mission["id"], company_ref, spec)
+        shortfall = self._checklist_shortfall(mission, company_ref, spec_ref)
+        cadence = self._cadence_block(
+            mission["id"], company_ref, spec,
+            use_retry_interval=shortfall,
+        )
         if not cadence or cadence == "previous discovery still open":
             return cadence
-        if (self._checklist_shortfall(mission, company_ref, spec_ref)
+        if (shortfall
                 and self._continuation_page(mission["id"], company_ref, spec_ref)):
             return None
         return cadence
