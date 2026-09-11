@@ -264,7 +264,9 @@ def stage(document: Mapping[str, Any], output: Path) -> dict[str, Any]:
     try:
         copied: dict[str, dict[str, str]] = {}
         for name, source in paths.items():
-            destination = temporary / (name + source.suffix)
+            # pip validates the distribution/version/tag components in the
+            # wheel filename before opening it; "wheel.whl" is not installable.
+            destination = temporary / (source.name if name == "wheel" else name + source.suffix)
             destination.write_bytes(source.read_bytes()); os.chmod(destination, 0o600)
             copied_sha = sha(destination)
             need(copied_sha == document["artifacts"][name]["sha256"]

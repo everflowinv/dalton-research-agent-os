@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 import io
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +30,19 @@ def write_json(path: Path, value) -> None:
 
 
 class R11aOpsCandidateTests(unittest.TestCase):
+    def test_staging_preserves_installable_wheel_filename(self) -> None:
+        stage = load("stage_r11a_ops_candidate")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "dalton_core-0.1.0.dev0-py3-none-any.whl"
+            wheel.write_bytes(b"accepted wheel bytes")
+            document = {"artifacts": {"wheel": {"sha256": stage.sha(wheel)}}}
+            with patch.object(stage, "validate", return_value=({"wheel": wheel}, {})), \
+                 patch.object(stage, "HELPERS", ()):
+                manifest = stage.stage(document, root / "packet")
+            self.assertEqual(wheel.name, manifest["artifacts"]["wheel"]["file"])
+            self.assertEqual(wheel.read_bytes(), (root / "packet" / wheel.name).read_bytes())
+
     def test_shipped_inputs_are_inert_and_have_no_live_boundary(self) -> None:
         stage = load("stage_r11a_ops_candidate")
         template = json.loads((ROOT / "deploy/release/r11a-candidate/inputs.template.json").read_text())
