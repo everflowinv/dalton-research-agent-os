@@ -214,6 +214,44 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(restarted.dispatch_once()["status"], "launched")
         self.assertEqual(len(self.launcher.starts), 2)
 
+    def test_failed_views_hold_exact_unchanged_queue_but_retry_after_an_hour(self) -> None:
+        self._awaiting_review()
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+        self.launcher.finish({
+            "status": "failed", "drafted": [],
+            "stop_reason": "all_document_views_failed",
+            "failure_reason": "all queued document views failed before drafting",
+            "reviews_complete": 0,
+        }, completed_at=self.clock().isoformat())
+        self.clock.advance(minutes=5)
+        held = self.coordinator.dispatch_once()
+        self.assertEqual(held["status"], "held")
+        self.assertIn("remain unavailable", held["reason"])
+        self.assertEqual(len(self.launcher.starts), 1)
+
+        restarted = DocumentExtractionCoordinator(
+            missions=self.missions, launcher=self.launcher, clock=self.clock
+        )
+        self.assertEqual(restarted.dispatch_once()["status"], "held")
+        self.clock.advance(hours=1, minutes=1)
+        self.assertEqual(restarted.dispatch_once()["status"], "launched")
+        self.assertEqual(len(self.launcher.starts), 2)
+
+    def test_failed_view_hold_reopens_when_source_binding_changes(self) -> None:
+        self._awaiting_review()
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+        self.launcher.finish({
+            "status": "failed", "drafted": [],
+            "stop_reason": "all_document_views_failed", "reviews_complete": 0,
+        }, completed_at=self.clock().isoformat())
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET ticket_ref=?,updated_at=?",
+                ("alphaengine-acquisition:changed", "2026-09-10T12:34:56.000000+00:00"),
+            )
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
 
 class LauncherTests(unittest.TestCase):
     def test_ticket_persists_the_canonical_launch_configuration_fingerprint(self) -> None:
@@ -281,6 +319,9 @@ class _OneAwaiting:
                 @staticmethod
                 def fetchone():
                     return [1]
+                @staticmethod
+                def fetchall():
+                    return [("review:one", "then", "acquired", "ticket:one", "then")]
             return Row()
 
 
@@ -292,6 +333,10 @@ class _OneHundredOneAwaiting(_OneAwaiting):
                 @staticmethod
                 def fetchone():
                     return [101]
+                @staticmethod
+                def fetchall():
+                    return [(f"review:{index}", "then", "acquired", f"ticket:{index}", "then")
+                            for index in range(101)]
             return Row()
 
 

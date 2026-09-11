@@ -336,16 +336,24 @@ class DocumentExtractionCoordinator:
         except (OSError, ValueError):
             return None
 
-    def _awaiting(self) -> int:
-        return int(self.missions.connection.execute(
-            "SELECT COUNT(*) FROM coverage_mission_document_reviews r "
+    def _awaiting_state(self) -> tuple[int, str]:
+        """Return the exact current queue identity without claiming it was read."""
+
+        rows = self.missions.connection.execute(
+            "SELECT r.review_id,r.updated_at,d.status,d.ticket_ref,d.updated_at "
+            "FROM coverage_mission_document_reviews r "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=r.mission_version_ref "
-            "WHERE r.state='awaiting_human_extraction'"
-        ).fetchone()[0])
+            "JOIN coverage_mission_discovered_documents d "
+            "ON d.record_id=r.discovered_document_ref "
+            "WHERE r.state='awaiting_human_extraction' ORDER BY r.review_id"
+        ).fetchall()
+        wire = [tuple(row) for row in rows]
+        return len(wire), hashlib.sha256(canonical_json(wire).encode("utf-8")).hexdigest()
 
     def dispatch_once(self) -> dict[str, Any]:
         latest = self._latest()
-        result: dict[str, Any] = {"awaiting": self._awaiting()}
+        awaiting, awaiting_fingerprint = self._awaiting_state()
+        result: dict[str, Any] = {"awaiting": awaiting}
         permission_changed = False
         blocked = self.failure_budget.blocked(self._permission_item)
         if blocked is not None and blocked.action == "not_permitted":
@@ -400,13 +408,33 @@ class DocumentExtractionCoordinator:
                               "secondary_fresh": secondary,
                               "completed_at": ticket.get("completed_at"), "awaiting_at_launch": latest.get("awaiting_at_launch")}
                     _write_owner_only(self._latest_path, latest)
+        queue_unchanged = bool(
+            latest is not None
+            and latest.get("awaiting_at_launch") == result["awaiting"]
+            and (latest.get("awaiting_fingerprint_at_launch") is None
+                 or latest.get("awaiting_fingerprint_at_launch") == awaiting_fingerprint)
+        )
         if latest is not None and latest.get("settled") and latest.get("stop_reason") in ("nothing_to_draft",) \
-                and latest.get("awaiting_at_launch") == result["awaiting"] \
+                and queue_unchanged \
                 and not latest.get("secondary_fresh") \
                 and latest.get("model_config_fingerprint") == config_fingerprint:
             completed = latest.get("completed_at")
             if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
                 return {**result, "status": "held", "reason": "nothing to draft or read since the last run; queue unchanged"}
+        if (latest is not None and latest.get("settled")
+                and latest.get("stop_reason") == "all_document_views_failed"
+                and queue_unchanged
+                and not latest.get("secondary_fresh")
+                and latest.get("model_config_fingerprint") == config_fingerprint):
+            completed = latest.get("completed_at")
+            if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
+                return {
+                    **result, "status": "held",
+                    "reason": (
+                        "all queued document views remain unavailable; unchanged queue "
+                        "will retry after the idle hold"
+                    ),
+                }
         if (not permission_changed and latest is not None and latest.get("settled")
                 and str(latest.get("stop_reason", "")).startswith("gated")):
             decision = self.failure_budget.record(
@@ -433,6 +461,7 @@ class DocumentExtractionCoordinator:
             "ticket": ticket["id"],
             "settled": False,
             "awaiting_at_launch": result["awaiting"],
+            "awaiting_fingerprint_at_launch": awaiting_fingerprint,
             "model_config_fingerprint": ticket["model_config_fingerprint"],
         })
         return {**result, "status": "launched", "ticket_ref": ticket["id"],
