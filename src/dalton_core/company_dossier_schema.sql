@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS company_dossier_versions (
     -- 0.2: exact producer input; NULL means a legacy 0.1 version whose
     -- freshness cannot be reconstructed.
     input_fingerprints_json TEXT,
+    -- 0.3: exact producer and independent-verifier authorities per unit.
+    unit_provenance_json TEXT,
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     actor_ref TEXT NOT NULL,

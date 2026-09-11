@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,16 +69,21 @@ from .company_dossier_draft import (
     MAX_UNITS_PER_RUN,
     TIMEOUT_SECONDS,
     build_unit_prompt,
+    build_verifier_prompt,
+    draft_hash,
     draft_unit,
     independence,
     material_rows,
+    parse_unit_output,
     router_family_resolver,
     summarise_blocks,
     verify,
+    validate_verifier_output,
+    verifier_prompt_contract_fingerprint,
 )
 from .coverage_mission import CoverageMissionAuthority, fold_stage_status
 from .guidance_profile import build_profile, render_profile_table
-from .store import DaltonStore, canonical_json
+from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 # The two deterministic checks a draft may not fail. Everything else the rubric
@@ -612,6 +618,7 @@ def build_dossier_input(
     material: Sequence[Mapping[str, Any]], company: Mapping[str, Any],
     mission: Mapping[str, Any], constitution: Mapping[str, Any],
     policy: Mapping[str, Any], prior_body: str = "", profile_table: str = "",
+    profile: Mapping[str, Any] | None = None,
     market_view_available: bool = True, classification: str | None = None,
 ) -> dict[str, Any]:
     """Freeze the exact call input plus the governance bindings authorising it."""
@@ -622,10 +629,19 @@ def build_dossier_input(
         market_view_available=market_view_available, classification=classification)
     return {
         "unit": unit,
+        "company": {"company_ref": company.get("company_ref"),
+                    "ticker": company.get("ticker")},
         "prompt_sha": dossier_input_fingerprint({"prompt": prompt}),
         "mission": {"ref": mission["id"], "hash": mission["content_hash"]},
         "constitution": {"ref": constitution["id"], "hash": constitution["content_hash"]},
         "policy": {"ref": policy["policy_ref"], "hash": policy_hash(policy)},
+        "parse_input": {
+            "structure": list(structure), "material": list(material),
+            "prior_body": prior_body, "profile": profile,
+            "profile_table": profile_table,
+            "market_view_available": market_view_available,
+            "classification": classification,
+        },
     }
 
 
@@ -681,10 +697,26 @@ def reconstruct_dossier_input(
         (record.get("industry_classification") or {}).get("classification") or "") or None
     profile_table = render_profile_table(profile)
     rebuilt = {}
-    prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
+    provenance = record.get("unit_provenance") or {}
+    anchored_priors: dict[str | None, Mapping[str, Any] | None] = {
+        None: None,
+        prior_ref: prior,
+    }
     for unit in UNITS:
         entry = plan[unit]
-        held = prior_sections.get(unit)
+        unit_provenance = provenance.get(unit) if isinstance(provenance, Mapping) else None
+        anchor_ref = (unit_provenance.get("producer_prior_version_ref")
+                      if isinstance(unit_provenance, Mapping) else prior_ref)
+        if anchor_ref not in anchored_priors:
+            anchored_priors[anchor_ref] = _json_row(
+                connection,
+                "SELECT record_json FROM company_dossier_versions WHERE version_id=?",
+                (anchor_ref,),
+            )
+        producer_prior = anchored_priors[anchor_ref]
+        producer_sections = {item["aspect"]: item
+                             for item in (producer_prior or {}).get("sections") or []}
+        held = producer_sections.get(unit)
         material = material_rows(
             [row for row in entry.get("material", []) if "kind" not in row],
             [row for row in entry.get("material", []) if "kind" in row])
@@ -693,9 +725,14 @@ def reconstruct_dossier_input(
             company=company, mission=current_mission, constitution=constitution,
             policy=policy, prior_body="" if held is None else section_body(held),
             profile_table=profile_table if unit == "guidance_style" else "",
+            profile=profile if unit == "guidance_style" else None,
             market_view_available=any(
                 slot["slot_id"] == "market_view" for slot in entry.get("structure", [])),
-            classification=(prior_classification if unit == CLASSIFICATION_UNIT
+            classification=((unit_provenance or {}).get("resolved_classification")
+                            if unit != CLASSIFICATION_UNIT and unit_provenance is not None
+                            else str(((producer_prior or {}).get("industry_classification") or {}).get(
+                                "classification") or "") or None
+                            if unit == CLASSIFICATION_UNIT
                             else current_classification))
     return rebuilt
 
@@ -728,6 +765,154 @@ def dossier_freshness(connection: Any, record: Mapping[str, Any],
 def dossier_input_fingerprint(value: Mapping[str, Any]) -> str:
     from .store import content_hash
     return content_hash(dict(value))
+
+
+def validate_formal_unit_provenance(
+    provenance: Mapping[str, Any], *, mission_ref: str, current_prior_ref: str | None,
+    company_ref: str | None = None, current_units: set[str] | None = None,
+    current_blocks: Mapping[str, Any] | None = None,
+    scheduler_db: str | Path, router_db: str | Path,
+) -> None:
+    """Resolve every claimed producer/verifier ref against formal authorities."""
+
+    def ro(path: str | Path) -> sqlite3.Connection:
+        connection = sqlite3.connect(Path(path).expanduser().resolve().as_uri() + "?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        return connection
+
+    scheduler = ro(scheduler_db)
+    router = ro(router_db)
+    try:
+        current_draft_hash = (None if not current_blocks else draft_hash(current_blocks))
+        for unit, item in provenance.items():
+            if item is None:
+                continue
+            calls = (("producer", "dossier"), ("verifier", "dossier_verifier"))
+            producer_input = item["producer_input"]
+            bound_mission = producer_input["mission"]
+            is_current = current_units is None or unit in current_units
+            if (company_ref is not None
+                    and (producer_input.get("company") or {}).get("company_ref") != company_ref):
+                raise ValueError(f"unit_provenance.{unit} company binding drifted")
+            if (is_current and (item["producer_prior_version_ref"] != current_prior_ref
+                    or bound_mission.get("ref") != mission_ref)):
+                raise ValueError(f"unit_provenance.{unit} current producer mission drifted")
+            if is_current and current_draft_hash is not None \
+                    and item["verified_draft_hash"] != current_draft_hash:
+                raise ValueError(f"unit_provenance.{unit} verified draft binding drifted")
+            resolved: dict[str, dict[str, Any]] = {}
+            for role, purpose in calls:
+                claimed = item[role]
+                work_row = scheduler.execute(
+                    "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+                    "WHERE work_order_id=?", (claimed["work_order_ref"],)).fetchone()
+                result_row = scheduler.execute(
+                    "SELECT work_order_id,attempt_number,result_envelope_json,result_envelope_hash,"
+                    "outcome,content_hash,created_at "
+                    "FROM scheduler_result_envelopes WHERE result_envelope_id=?",
+                    (claimed["result_envelope_ref"],)).fetchone()
+                route_row = router.execute(
+                    "SELECT work_order_id,work_order_hash,outcome,decision_json,decision_hash "
+                    "FROM model_route_decisions WHERE decision_id=?",
+                    (claimed["route_decision_ref"],)).fetchone()
+                if work_row is None or result_row is None or route_row is None:
+                    raise ValueError(f"unit_provenance.{unit}.{role} does not resolve")
+                work = json.loads(work_row["work_order_json"])
+                envelope = json.loads(result_row["result_envelope_json"])
+                decision = json.loads(route_row["decision_json"])
+                decision_body = {key: value for key, value in decision.items()
+                                 if key != "content_hash"}
+                result_receipt = {
+                    "result_envelope_id": claimed["result_envelope_ref"],
+                    "work_order_id": result_row["work_order_id"],
+                    "attempt_number": result_row["attempt_number"],
+                    "result_envelope_hash": result_row["result_envelope_hash"],
+                    "outcome": result_row["outcome"], "created_at": result_row["created_at"],
+                }
+                metadata = work.get("metadata") or {}
+                if (content_hash(work) != work_row["work_order_hash"]
+                        or metadata.get("purpose") != purpose
+                        or metadata.get("mission_version_ref") != bound_mission.get("ref")
+                        or metadata.get("mission_version_hash") != bound_mission.get("hash")
+                        or metadata.get("request_id") != claimed["request_id"]
+                        or content_hash(work.get("question")) != claimed["prompt_hash"]
+                        or (role == "producer" and
+                            producer_input.get("prompt_sha") !=
+                            content_hash({"prompt": work.get("question")}))
+                        or result_row["work_order_id"] != claimed["work_order_ref"]
+                        or result_row["outcome"] != "succeeded"
+                        or content_hash(envelope) != result_row["result_envelope_hash"]
+                        or content_hash(result_receipt) != result_row["content_hash"]
+                        or envelope.get("id") != claimed["result_envelope_ref"]
+                        or envelope.get("work_order_ref") != claimed["work_order_ref"]
+                        or envelope.get("invocation_ref") != claimed["invocation_ref"]
+                        or (envelope.get("metadata") or {}).get("route_decision_ref")
+                           != claimed["route_decision_ref"]
+                        or route_row["work_order_id"] != claimed["work_order_ref"]
+                        or route_row["work_order_hash"] != work_row["work_order_hash"]
+                        or route_row["outcome"] != "selected"
+                        or decision.get("content_hash") != route_row["decision_hash"]
+                        or content_hash(decision_body) != route_row["decision_hash"]):
+                    raise ValueError(f"unit_provenance.{unit}.{role} authority binding drifted")
+                resolved[role] = {"work": work, "route": claimed["route_decision_ref"]}
+                if role == "verifier":
+                    expected_request = (f"verify-{item['verified_draft_hash'][:24]}-"
+                                        f"{verifier_prompt_contract_fingerprint()[:16]}")
+                    if claimed["request_id"] != expected_request:
+                        raise ValueError(f"unit_provenance.{unit}.verifier draft binding drifted")
+                    try:
+                        parsed = validate_verifier_output(json.loads(
+                            (envelope.get("outputs") or {}).get("text")))
+                    except Exception as exc:
+                        raise ValueError(f"unit_provenance.{unit}.verifier output is invalid") from exc
+                    if parsed != {"verdict": "pass", "findings": []}:
+                        raise ValueError(f"unit_provenance.{unit}.verifier did not pass")
+                    if is_current and current_blocks:
+                        expected_prompt = build_verifier_prompt(
+                            current_blocks, company=producer_input["company"])
+                        if work.get("question") != expected_prompt:
+                            raise ValueError(
+                                f"unit_provenance.{unit}.verifier prompt binding drifted")
+                else:
+                    expected_prompt = build_unit_prompt(
+                        unit=unit, structure=producer_input["parse_input"]["structure"],
+                        material=producer_input["parse_input"]["material"],
+                        company=producer_input["company"],
+                        prior_body=producer_input["parse_input"]["prior_body"],
+                        profile_table=producer_input["parse_input"]["profile_table"],
+                        market_view_available=producer_input["parse_input"]["market_view_available"],
+                        classification=producer_input["parse_input"]["classification"])
+                    expected_request = content_hash({
+                        "unit": unit,
+                        "company": (producer_input.get("company") or {}).get("company_ref"),
+                        "prompt_sha": claimed["prompt_hash"],
+                    })[:32]
+                    if (claimed["request_id"] != expected_request
+                            or work.get("question") != expected_prompt):
+                        raise ValueError(f"unit_provenance.{unit}.producer input binding drifted")
+                    parse_input = producer_input["parse_input"]
+                    try:
+                        produced = parse_unit_output(
+                            (envelope.get("outputs") or {}).get("text"), unit=unit,
+                            structure=parse_input["structure"], material=parse_input["material"],
+                            market_view_available=parse_input["market_view_available"],
+                            profile=parse_input["profile"],
+                            classification=parse_input["classification"])
+                    except Exception as exc:
+                        raise ValueError(
+                            f"unit_provenance.{unit}.producer output is invalid") from exc
+                    if is_current and current_blocks and produced != current_blocks[unit]:
+                        raise ValueError(
+                            f"unit_provenance.{unit}.producer output differs from the unit")
+            producer_routes = set((resolved["verifier"]["work"].get("metadata") or {}).get(
+                "producer_route_decision_refs") or [])
+            if resolved["producer"]["route"] not in producer_routes:
+                raise ValueError(f"unit_provenance.{unit} verifier did not bind its producer")
+    finally:
+        scheduler.rollback(); scheduler.close()
+        router.rollback(); router.close()
 
 
 def dossier_company_source_fingerprint(connection: Any, company_ref: str) -> str:
@@ -1012,7 +1197,17 @@ def run_dossier(
             or "") or None
         blocks: dict[str, Any] = {}
         draft_routes: list[str | None] = []
-        input_fingerprints = {unit: None for unit in UNITS}
+        unit_provenance = {
+            unit: ((prior or {}).get("unit_provenance") or {}).get(unit)
+            for unit in UNITS
+        }
+        input_fingerprints = {
+            unit: (((prior or {}).get("input_fingerprints") or {}).get(unit)
+                   if unit_provenance[unit] is not None else None)
+            for unit in UNITS
+        }
+        drafted_producers: dict[str, dict[str, Any]] = {}
+        drafted_classifications: dict[str, str | None] = {}
         spent = 0
         run_bound_blocked = False
         attempted_outcomes: list[str] = []
@@ -1042,6 +1237,7 @@ def run_dossier(
                 company=company, mission=mission, constitution=constitution,
                 policy=policy, prior_body=prior_body,
                 profile_table=unit_profile_table,
+                profile=profile if unit == "guidance_style" else None,
                 market_view_available=market_view_available,
                 classification=actual_classification,
             )
@@ -1065,6 +1261,13 @@ def run_dossier(
                 continue
             blocks[unit] = outcome["block"]
             input_fingerprints[unit] = dossier_input_fingerprint(frozen_input)
+            drafted_producers[unit] = {
+                key: (outcome.get("model") or {}).get(key)
+                for key in ("work_order_ref", "result_envelope_ref", "invocation_ref",
+                            "route_decision_ref", "request_id", "prompt_hash")
+            }
+            drafted_classifications[unit] = actual_classification
+            drafted_producers[unit]["producer_input"] = frozen_input
             draft_routes.append((outcome.get("model") or {}).get("route_decision_ref"))
         summary["cost_micros"] = spent
         summary["units_drafted"] = sorted(blocks)
@@ -1150,6 +1353,27 @@ def run_dossier(
             summary.update({"status": "succeeded", "dossier_status": "not_independent"})
             return summary
 
+        verifier_call = {
+            key: (verdict.get("model") or {}).get(key)
+            for key in ("work_order_ref", "result_envelope_ref", "invocation_ref",
+                        "route_decision_ref", "request_id", "prompt_hash")
+        }
+        producer_prior = None if prior is None else prior["id"]
+        for unit, producer_call in drafted_producers.items():
+            producer_input = producer_call.pop("producer_input")
+            if (all(isinstance(value, str) and value for value in producer_call.values())
+                    and all(isinstance(value, str) and value
+                            for value in verifier_call.values())):
+                unit_provenance[unit] = {
+                    "input_fingerprint": input_fingerprints[unit],
+                    "producer_input": producer_input,
+                    "producer_prior_version_ref": producer_prior,
+                    "resolved_classification": drafted_classifications[unit],
+                    "verified_draft_hash": verdict["verified_draft_hash"],
+                    "producer": producer_call,
+                    "verifier": verifier_call,
+                }
+
         # ADR-0008, asked before a record exists. A draft that cites nothing
         # the current version does not is not a version, and saying so here
         # costs nothing; assembling one and having the authority refuse it
@@ -1190,6 +1414,9 @@ def run_dossier(
                 return summary
             dropped = units_citing(record, broken) - set(blocks)
             summary["dropped_units"] = sorted(dropped)
+            for unit in dropped:
+                input_fingerprints[unit] = None
+                unit_provenance[unit] = None
             record = assemble(
                 company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
                 profile=profile, constitution=constitution, policy=policy,
@@ -1204,6 +1431,8 @@ def run_dossier(
                     "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
                 return summary
         record["input_fingerprints"] = input_fingerprints
+        if all(unit_provenance[unit] is not None for unit in drafted_producers):
+            record["unit_provenance"] = unit_provenance
         gate = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate["summary"]
         if gate["failed"]:
@@ -1220,10 +1449,19 @@ def run_dossier(
                                               "satisfied"})
             return summary
         summary["new_refs"] = len(new_refs(record, prior))
-        published = authority.publish(record)
+        if record.get("unit_provenance") is not None:
+            router_db = config.get("model_router_db")
+            if not isinstance(router_db, str) or not router_db:
+                raise ValueError("dossier unit provenance requires the bound model router DB")
+            published = authority.publish_verified(
+                record, scheduler_db=(scheduler_db or (state_dir / "scheduler.sqlite")),
+                router_db=router_db)
+        else:
+            published = authority.publish(record)
         summary.update({
             "status": "succeeded",
-            "dossier_status": ("published" if published["status"] == "fresh"
+            "dossier_status": (("partial_published" if not gate["summary"]["passed"]
+                                else "published") if published["status"] == "fresh"
                                else "duplicate"),
             "version_ref": published["id"],
             "version_status": published["status"],

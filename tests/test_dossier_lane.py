@@ -327,7 +327,7 @@ class PublishTests(unittest.TestCase):
 
     def test_a_run_publishes_one_version_with_the_rest_unavailable(self):
         summary = self.harness.run()
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         record = self.authority.latest(ACN)
         self.assertEqual(record["version"], 1)
         drafted = [item["aspect"] for item in record["sections"]
@@ -356,7 +356,7 @@ class PublishTests(unittest.TestCase):
 
     def test_first_partial_dossier_with_ready_undrafted_units_is_not_fresh(self):
         summary = self.harness.run(max_units=3)
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         self.assertEqual(summary["input_freshness"], "unknown")
 
     def test_reconstruction_is_select_only_on_a_read_only_database(self):
@@ -385,7 +385,7 @@ class PublishTests(unittest.TestCase):
 
     def test_the_guidance_section_carries_the_computed_table_not_a_verdict(self):
         summary = self.harness.run(max_units=12)
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         record = self.authority.latest(ACN)
         section = next(item for item in record["sections"]
                        if item["aspect"] == "guidance_style")
@@ -400,10 +400,10 @@ class PublishTests(unittest.TestCase):
         # stop at three sections for ever. Staleness is per unit: a unit
         # nobody has written is stale whatever else was published.
         first = self.harness.run(max_units=3)
-        self.assertEqual(first["dossier_status"], "published")
+        self.assertEqual(first["dossier_status"], "partial_published")
         self.assertEqual(len(first["units_drafted"]), 3)
         second = self.harness.run(max_units=3)
-        self.assertEqual(second["dossier_status"], "published")
+        self.assertEqual(second["dossier_status"], "partial_published")
         self.assertEqual(len(second["units_drafted"]), 2)
         self.assertFalse(set(first["units_drafted"]) & set(second["units_drafted"]))
         policy = json.loads(self.harness.policy_path.read_text(encoding="utf-8"))
@@ -442,7 +442,7 @@ class PublishTests(unittest.TestCase):
         self.harness.tag("d-6", "business_model",
                          statement="另一条关于商业模式的一手材料。")
         first = self.harness.run(max_units=12)
-        self.assertEqual(first["dossier_status"], "published")
+        self.assertEqual(first["dossier_status"], "partial_published")
         planned = self.harness.run(dry_run=True)["units_planned"]
         self.assertGreater(planned["business_model"]["new_refs"], 0)
         self.assertFalse(planned["business_model"]["stale"])
@@ -460,7 +460,7 @@ class PublishTests(unittest.TestCase):
         self.harness.tag("d-5", "competitive_position",
                          statement="公司在两个客户群里替换了原有供应商。")
         again = self.harness.run(max_units=12)
-        self.assertEqual(again["dossier_status"], "published")
+        self.assertEqual(again["dossier_status"], "partial_published")
         self.assertEqual(self.authority.latest(ACN)["version"], 2)
         self.assertGreaterEqual(again["new_refs"], 1)
 
@@ -524,7 +524,7 @@ class PublishTests(unittest.TestCase):
 
         summary = self.harness.run(model_factory=FirstRefusedModel, max_units=12)
         self.assertEqual(summary["status"], "succeeded")
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         self.assertTrue(summary["refused"])
         self.assertTrue(summary["units_drafted"])
 
@@ -599,7 +599,7 @@ class GuidanceThroughTheCoreTests(unittest.TestCase):
         for period, actual in self.QUARTERS:
             self.harness.add_guidance_pair(period=period, actual=actual)
         summary = self.harness.run(max_units=12)
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         record = CompanyDossierAuthority(self.harness.store).latest(ACN)
         section = next(item for item in record["sections"]
                        if item["aspect"] == "guidance_style")
@@ -618,7 +618,7 @@ class VariantViewLaneTests(unittest.TestCase):
 
     def test_sell_side_material_gets_the_variant_view_drafted_and_published(self):
         summary = self.harness.run(max_units=12)
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         self.assertIn("variant_view", summary["units_drafted"])
         record = self.authority.latest(ACN)
         block = record["variant_view"]
@@ -774,7 +774,7 @@ class GateTests(unittest.TestCase):
         # The chain moves. Refusing the version because a section written last
         # week rests on a Claim retired since would freeze the file for ever on
         # the one section nobody can fix without publishing.
-        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["dossier_status"], "partial_published")
         # The classification drew on the same Claim, so it goes too: a ref
         # that stopped resolving is a defect in every part that cites it.
         self.assertEqual(summary["dropped_units"],

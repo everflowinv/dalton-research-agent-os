@@ -68,6 +68,7 @@ from .store import (
 
 SCHEMA_VERSION = "0.1"
 SCHEMA_VERSION_INPUT_FINGERPRINT = "0.2"
+SCHEMA_VERSION_UNIT_PROVENANCE = "0.3"
 _SCHEMA_PATH = Path(__file__).with_name("company_dossier_schema.sql")
 GENERATOR_REF = "generator:company-dossier:0.1"
 WRITE_SCOPE = "dossier"
@@ -445,6 +446,7 @@ _RECORD_FIELDS = frozenset({
     "bindings", "generator_ref", "actor_ref", "body_hash", "content_hash",
 })
 _RECORD_FIELDS_V2 = _RECORD_FIELDS | frozenset({"input_fingerprints"})
+_RECORD_FIELDS_V3 = _RECORD_FIELDS_V2 | frozenset({"unit_provenance"})
 # What the chain is *about*.  Not the reason it exists, not who asked, not
 # when: two records with the same body say the same thing about the company.
 _BODY_EXCLUDED = frozenset({
@@ -457,7 +459,93 @@ _BODY_EXCLUDED = frozenset({
     "drafted_at",
     # Provenance metadata about what the producer saw, not dossier semantics.
     "input_fingerprints",
+    "unit_provenance",
 })
+
+_CALL_PROVENANCE_FIELDS = frozenset({
+    "work_order_ref", "result_envelope_ref", "invocation_ref", "route_decision_ref",
+    "request_id", "prompt_hash",
+})
+
+
+def _call_provenance(value: Any, name: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != _CALL_PROVENANCE_FIELDS:
+        raise CompanyDossierValidationError(f"{name} has an invalid closed shape")
+    out = {field: _text(value[field], f"{name}.{field}", maximum=512)
+           for field in sorted(_CALL_PROVENANCE_FIELDS)}
+    out["prompt_hash"] = _sha256(out["prompt_hash"], f"{name}.prompt_hash")
+    return out
+
+
+def _unit_provenance(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(UNITS):
+        raise CompanyDossierValidationError("unit_provenance must cover every dossier unit")
+    out: dict[str, Any] = {}
+    for unit in UNITS:
+        item = value[unit]
+        if item is None:
+            out[unit] = None
+            continue
+        expected = {"input_fingerprint", "producer_input", "producer_prior_version_ref",
+                    "resolved_classification", "verified_draft_hash", "producer", "verifier"}
+        if not isinstance(item, Mapping) or set(item) != expected:
+            raise CompanyDossierValidationError(
+                f"unit_provenance.{unit} has an invalid closed shape")
+        producer_input = item["producer_input"]
+        if (not isinstance(producer_input, Mapping)
+                or set(producer_input) != {"unit", "company", "prompt_sha", "mission", "constitution", "policy", "parse_input"}
+                or producer_input.get("unit") != unit):
+            raise CompanyDossierValidationError(
+                f"unit_provenance.{unit}.producer_input has an invalid closed shape")
+        parse_input = producer_input["parse_input"]
+        if (not isinstance(parse_input, Mapping)
+                or set(parse_input) != {"structure", "material", "prior_body", "profile",
+                                       "profile_table", "market_view_available", "classification"}
+                or not isinstance(parse_input["structure"], list)
+                or not isinstance(parse_input["material"], list)
+                or not isinstance(parse_input["prior_body"], str)
+                or not isinstance(parse_input["profile_table"], str)
+                or not isinstance(parse_input["market_view_available"], bool)):
+            raise CompanyDossierValidationError(
+                f"unit_provenance.{unit}.producer_input.parse_input has an invalid closed shape")
+        company = producer_input["company"]
+        if (not isinstance(company, Mapping)
+                or set(company) != {"company_ref", "ticker"}
+                or not isinstance(company.get("company_ref"), str)
+                or not company["company_ref"]
+                or (company.get("ticker") is not None
+                    and not isinstance(company["ticker"], str))):
+            raise CompanyDossierValidationError(
+                f"unit_provenance.{unit}.producer_input.company has an invalid closed shape")
+        for binding_name in ("mission", "constitution", "policy"):
+            binding = producer_input[binding_name]
+            if (not isinstance(binding, Mapping) or set(binding) != {"ref", "hash"}
+                    or not isinstance(binding.get("ref"), str) or not binding["ref"]):
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit}.producer_input.{binding_name} has an invalid closed shape")
+            _sha256(binding.get("hash"),
+                    f"unit_provenance.{unit}.producer_input.{binding_name}.hash")
+        _sha256(producer_input.get("prompt_sha"),
+                f"unit_provenance.{unit}.producer_input.prompt_sha")
+        out[unit] = {
+            "input_fingerprint": _sha256(
+                item["input_fingerprint"], f"unit_provenance.{unit}.input_fingerprint"),
+            "producer_input": dict(producer_input),
+            "producer_prior_version_ref": (None if item["producer_prior_version_ref"] is None
+                else _text(item["producer_prior_version_ref"],
+                           f"unit_provenance.{unit}.producer_prior_version_ref", maximum=512)),
+            "resolved_classification": (None if item["resolved_classification"] is None
+                else _one_of(item["resolved_classification"], INDUSTRY_CLASSIFICATIONS,
+                             f"unit_provenance.{unit}.resolved_classification")),
+            "verified_draft_hash": _sha256(
+                item["verified_draft_hash"], f"unit_provenance.{unit}.verified_draft_hash"),
+            "producer": _call_provenance(item["producer"], f"unit_provenance.{unit}.producer"),
+            "verifier": _call_provenance(item["verifier"], f"unit_provenance.{unit}.verifier"),
+        }
+        if content_hash(out[unit]["producer_input"]) != out[unit]["input_fingerprint"]:
+            raise CompanyDossierValidationError(
+                f"unit_provenance.{unit}.producer_input fingerprint differs")
+    return out
 
 
 def _unit_was_drafted(record: Mapping[str, Any], unit: str) -> bool:
@@ -480,7 +568,7 @@ def _unit_was_drafted(record: Mapping[str, Any], unit: str) -> bool:
 
 
 def dossier_completeness(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Describe drafted coverage only; this does not assert quality or freshness."""
+    """Closed read projection: readable partial versions are not complete."""
 
     drafted = [unit for unit in UNITS if _unit_was_drafted(record, unit)]
     unavailable = [unit for unit in UNITS if unit not in drafted]
@@ -812,10 +900,11 @@ def validate_dossier_version(value: Mapping[str, Any]) -> dict[str, Any]:
         raise CompanyDossierValidationError("dossier version must be an object")
     wire = dict(value)
     schema = wire.get("schema_version")
-    expected_fields = (_RECORD_FIELDS_V2 if schema == SCHEMA_VERSION_INPUT_FINGERPRINT
-                       else _RECORD_FIELDS)
+    expected_fields = (_RECORD_FIELDS_V3 if schema == SCHEMA_VERSION_UNIT_PROVENANCE else
+                       _RECORD_FIELDS_V2 if schema == SCHEMA_VERSION_INPUT_FINGERPRINT else
+                       _RECORD_FIELDS)
     if set(wire) != expected_fields or schema not in {
-        SCHEMA_VERSION, SCHEMA_VERSION_INPUT_FINGERPRINT,
+        SCHEMA_VERSION, SCHEMA_VERSION_INPUT_FINGERPRINT, SCHEMA_VERSION_UNIT_PROVENANCE,
     }:
         raise CompanyDossierValidationError(
             "company dossier version has an invalid closed shape; "
@@ -859,7 +948,7 @@ def validate_dossier_version(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["bindings"] = _bindings(wire["bindings"])
     wire["body_hash"] = _sha256(wire["body_hash"], "body_hash")
     wire["content_hash"] = _sha256(wire["content_hash"], "content_hash")
-    if schema == SCHEMA_VERSION_INPUT_FINGERPRINT:
+    if schema in {SCHEMA_VERSION_INPUT_FINGERPRINT, SCHEMA_VERSION_UNIT_PROVENANCE}:
         fingerprints = wire["input_fingerprints"]
         if not isinstance(fingerprints, Mapping) or set(fingerprints) != set(UNITS):
             raise CompanyDossierValidationError("input_fingerprints must cover every dossier unit")
@@ -868,6 +957,15 @@ def validate_dossier_version(value: Mapping[str, Any]) -> dict[str, Any]:
                 fingerprints[unit], f"input_fingerprints.{unit}")
             for unit in UNITS
         }
+    if schema == SCHEMA_VERSION_UNIT_PROVENANCE:
+        wire["unit_provenance"] = _unit_provenance(wire["unit_provenance"])
+        for unit, provenance in wire["unit_provenance"].items():
+            if provenance is not None and provenance["input_fingerprint"] != wire["input_fingerprints"][unit]:
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit} input fingerprint differs")
+            if provenance is not None and not _unit_was_drafted(wire, unit):
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit} cannot describe an unavailable unit")
     if body_hash(wire) != wire["body_hash"]:
         raise CompanyDossierConflict("company dossier body_hash is not its body")
     base = {key: item for key, item in wire.items() if key != "content_hash"}
@@ -881,7 +979,7 @@ def body_hash(record: Mapping[str, Any]) -> str:
 
     return content_hash({
         key: value for key, value in record.items()
-        if key in _RECORD_FIELDS_V2 and key not in _BODY_EXCLUDED
+        if key in _RECORD_FIELDS_V3 and key not in _BODY_EXCLUDED
     })
 
 
@@ -1186,6 +1284,9 @@ class CompanyDossierAuthority:
         if "input_fingerprints_json" not in columns:
             self.connection.execute(
                 "ALTER TABLE company_dossier_versions ADD COLUMN input_fingerprints_json TEXT")
+        if "unit_provenance_json" not in columns:
+            self.connection.execute(
+                "ALTER TABLE company_dossier_versions ADD COLUMN unit_provenance_json TEXT")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -1198,7 +1299,7 @@ class CompanyDossierAuthority:
         finally:
             self._authorized = False
 
-    def publish(self, body: Mapping[str, Any]) -> dict[str, Any]:
+    def publish(self, body: Mapping[str, Any], *, _provenance_verified: bool = False) -> dict[str, Any]:
         """Store one dossier version, or say why it is not one.
 
         Two ways to be a ``duplicate``, and they are different findings:
@@ -1211,7 +1312,8 @@ class CompanyDossierAuthority:
         body = dict(body)
         source = body.pop(SOURCE_VERSION_KEY, _UNSET)
         for field in _BODY_EXCLUDED - {"change_reason", "evidence_refs",
-                                       "decision", "drafted_at", "input_fingerprints"}:
+                                       "decision", "drafted_at", "input_fingerprints",
+                                       "unit_provenance"}:
             body.pop(field, None)
         company_ref = _text(body.get("company_ref"), "company_ref", maximum=512)
         dossier_ref = dossier_ref_for(company_ref)
@@ -1219,6 +1321,11 @@ class CompanyDossierAuthority:
         body.setdefault("schema_version", SCHEMA_VERSION)
         if body.get("input_fingerprints") is not None:
             body["schema_version"] = SCHEMA_VERSION_INPUT_FINGERPRINT
+        if body.get("unit_provenance") is not None:
+            if not _provenance_verified:
+                raise CompanyDossierValidationError(
+                    "unit provenance must be resolved through publish_verified")
+            body["schema_version"] = SCHEMA_VERSION_UNIT_PROVENANCE
         body.setdefault("generator_ref", GENERATOR_REF)
         change_reason = _one_of(body.get("change_reason"), CHANGE_REASONS, "change_reason")
         if not body.get("evidence_refs"):
@@ -1268,12 +1375,14 @@ class CompanyDossierAuthority:
             cur.execute(
                 "INSERT INTO company_dossier_versions"
                 "(version_id,dossier_ref,version_number,prior_version_id,company_ref,"
-                "change_reason,body_hash,evidence_scope_hash,input_fingerprints_json,record_json,content_hash,"
-                "actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "change_reason,body_hash,evidence_scope_hash,input_fingerprints_json,unit_provenance_json,record_json,content_hash,"
+                "actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     version_id, dossier_ref, version, head, company_ref, change_reason,
                     digest, scope_hash, (None if wire.get("input_fingerprints") is None
                                          else canonical_json(wire["input_fingerprints"])),
+                    (None if wire.get("unit_provenance") is None
+                     else canonical_json(wire["unit_provenance"])),
                     canonical_json(wire), wire["content_hash"],
                     wire["actor_ref"], wire["created_at"],
                 ),
@@ -1282,6 +1391,62 @@ class CompanyDossierAuthority:
         if stored["content_hash"] != wire["content_hash"]:
             raise CompanyDossierConflict("company dossier did not read back as written")
         return {**stored, "status": "fresh"}
+
+    def publish_verified(
+        self, body: Mapping[str, Any], *, scheduler_db: str | Path,
+        router_db: str | Path,
+    ) -> dict[str, Any]:
+        """Publish v0.3 only after its formal model authorities replay."""
+
+        provenance = body.get("unit_provenance")
+        if provenance is None:
+            return self.publish(body)
+        from .company_dossier_cli import validate_formal_unit_provenance
+        mission_ref = ((body.get("bindings") or {}).get("mission_version_ref"))
+        prior_ref = body.get(SOURCE_VERSION_KEY)
+        prior = None if prior_ref is None else self.dossier(prior_ref)
+
+        def unit_value(record: Mapping[str, Any], unit: str) -> Any:
+            if unit == CLASSIFICATION_UNIT:
+                return record.get("industry_classification")
+            if unit == VARIANT_UNIT:
+                return record.get("variant_view")
+            return next((row for row in record.get("sections") or []
+                         if row.get("aspect") == unit), None)
+
+        for unit in UNITS:
+            if provenance.get(unit) is not None or not _unit_was_drafted(body, unit):
+                continue
+            # A null proof is allowed only as an honest legacy carry-forward.
+            # It cannot be used for a newly drafted or changed unit.
+            if (prior is None or unit_value(body, unit) != unit_value(prior, unit)
+                    or ((prior.get("unit_provenance") or {}).get(unit) is not None)
+                    or (body.get("input_fingerprints") or {}).get(unit) is not None):
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit} is missing for a newly drafted unit")
+        changed_units = {
+            unit for unit in UNITS
+            if _unit_was_drafted(body, unit)
+            and (prior is None or unit_value(body, unit) != unit_value(prior, unit))
+        }
+        for unit in changed_units:
+            item = provenance.get(unit)
+            if item is None or item.get("producer_prior_version_ref") != prior_ref:
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit} does not bind the exact predecessor")
+        for unit in set(UNITS) - changed_units:
+            old = None if prior is None else (prior.get("unit_provenance") or {}).get(unit)
+            if provenance.get(unit) != old:
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit} changed without redrafting its unit")
+        changed_blocks = {unit: unit_value(body, unit) for unit in changed_units}
+        validate_formal_unit_provenance(
+            provenance, mission_ref=mission_ref, current_prior_ref=prior_ref,
+            company_ref=body.get("company_ref"), current_units=changed_units,
+            current_blocks=changed_blocks,
+            scheduler_db=scheduler_db, router_db=router_db,
+        )
+        return self.publish(body, _provenance_verified=True)
 
     def revise(self, body: Mapping[str, Any], **kwargs: Any) -> dict[str, Any]:
         """ADR-0008's revision entry point.  Same rules; a named door."""
@@ -1307,6 +1472,8 @@ class CompanyDossierAuthority:
             or wire["content_hash"] != row["content_hash"]
             or (None if wire.get("input_fingerprints") is None
                 else canonical_json(wire["input_fingerprints"])) != row["input_fingerprints_json"]
+            or (None if wire.get("unit_provenance") is None
+                else canonical_json(wire["unit_provenance"])) != row["unit_provenance_json"]
             or content_hash(evidence_scope(wire)) != row["evidence_scope_hash"]
         ):
             raise CompanyDossierConflict("company dossier authority drifted")

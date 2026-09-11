@@ -531,7 +531,11 @@ def draft_unit(
                 "failure_trace": model_failure_trace(exc)}
     provenance = {
         "work_order_ref": call.get("work_order_ref"),
+        "result_envelope_ref": call.get("result_envelope_ref"),
+        "invocation_ref": call.get("invocation_ref"),
         "route_decision_ref": call.get("route_decision_ref"),
+        "request_id": request_id,
+        "prompt_hash": content_hash(prompt),
         "replayed": bool(call.get("replayed")),
         "cost_micros": int(call.get("cost_micros") or 0),
     }
@@ -742,7 +746,12 @@ def verify(
                 "failure_trace": model_failure_trace(exc)}
     provenance = {
         "work_order_ref": call.get("work_order_ref"),
+        "result_envelope_ref": call.get("result_envelope_ref"),
+        "invocation_ref": call.get("invocation_ref"),
         "route_decision_ref": call.get("route_decision_ref"),
+        "request_id": (f"verify-{digest[:24]}-"
+                       f"{verifier_prompt_contract_fingerprint()[:16]}"),
+        "prompt_hash": content_hash(prompt),
         "replayed": bool(call.get("replayed")),
         "cost_micros": int(call.get("cost_micros") or 0),
     }
