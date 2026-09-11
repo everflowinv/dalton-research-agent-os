@@ -30,7 +30,12 @@ class ProviderRetryContractTests(unittest.TestCase):
                                  "max_elapsed_seconds": 600},
         })
         self.assertEqual(policy["unknown_recovery"]["max_fresh_work_orders"], 2)
-        for recovery in ({}, {"max_fresh_work_orders": 0,
+        disabled = validate_provider_retry({
+            **policy,
+            "unknown_recovery": {**policy["unknown_recovery"], "max_fresh_work_orders": 0},
+        })
+        self.assertEqual(disabled["unknown_recovery"]["max_fresh_work_orders"], 0)
+        for recovery in ({}, {"max_fresh_work_orders": -1,
                               "retry_backoff_seconds": 0,
                               "max_elapsed_seconds": 60}):
             with self.assertRaises(ProviderRetryError):

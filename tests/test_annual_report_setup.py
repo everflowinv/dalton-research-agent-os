@@ -14,6 +14,53 @@ from dalton_core.store import canonical_json
 
 
 class AnnualReportSetupTests(unittest.TestCase):
+    def test_common_role_retry_seed_keeps_annual_recovery_and_owner_overrides(self):
+        from dalton_core.provider_retry import DEFAULT_RETURNED_PROVIDER_RETRY
+        inherited_policies = (
+            dict(DEFAULT_RETURNED_PROVIDER_RETRY),
+            {"max_same_profile_retries": 5, "retry_backoff_seconds": 17},
+            {"max_same_profile_retries": 0, "retry_backoff_seconds": 0,
+             "unknown_recovery": {"max_fresh_work_orders": 0,
+                                  "retry_backoff_seconds": 5,
+                                  "max_elapsed_seconds": 3600}},
+        )
+        for inherited in inherited_policies:
+            with self.subTest(policy=inherited), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                service = state / "service.json"
+                service.write_text(json.dumps({"core_db": str(state / "core.sqlite")}))
+                common = {
+                    "credential_slot_refs": ["credential-slot:model:test"],
+                    "model_router_db": str(state / "router.sqlite"),
+                    "broker_socket": str(state / "broker.sock"),
+                    "broker_auth_key": str(state / "broker.key"),
+                    "broker_client_id": "client:dalton-core", "expected_agent_id": "chem",
+                    "budget_db": str(state / "budget.sqlite"),
+                    "budget_policy_ref": "budget-policy:test:1",
+                    "provider_retry": inherited,
+                }
+                seeds = {}
+                for name, route in (
+                    ("dossier-model-config.json", "routing-policy:draft:1"),
+                    ("company-dossier-verifier-model-config.json", "routing-policy:verifier:1"),
+                ):
+                    path = state / name
+                    path.write_text(canonical_json({**common, "routing_policy_ref": route}) + "\n")
+                    path.chmod(0o600)
+                    seeds[name] = path.read_bytes()
+                install(service)
+                for name in (DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME):
+                    target = state / name
+                    policy = json.loads(target.read_text())["provider_retry"]
+                    self.assertEqual({k: policy[k] for k in inherited}, inherited)
+                    self.assertEqual(policy["unknown_recovery"]["max_fresh_work_orders"],
+                                     0 if "unknown_recovery" in inherited else 2)
+                installed = {name: (state / name).read_bytes()
+                             for name in (DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME)}
+                self.assertEqual(install(service)["created"], [])
+                self.assertEqual({name: (state / name).read_bytes() for name in installed}, installed)
+                self.assertEqual({name: (state / name).read_bytes() for name in seeds}, seeds)
+
     def test_first_install_inherits_current_roles_and_reinstall_preserves_owner_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

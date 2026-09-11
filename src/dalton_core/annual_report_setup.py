@@ -119,8 +119,15 @@ def install(config_path: str | Path) -> dict[str, Any]:
     for target, source_config in zip(targets, configs):
         config = dict(source_config)
         if not target.exists():
-            if config.get("provider_retry") is None:
-                config["provider_retry"] = dict(DEFAULT_PROVIDER_RETRY)
+            # Generic role installation precedes annual installation and now
+            # supplies its own paid-retry policy. Preserve those owner controls
+            # while supplying this new role's bounded fresh-Work default.
+            # Existing dedicated annual files remain untouched, including an
+            # owner's deliberate omission of autonomous unknown recovery.
+            retry = dict(config.get("provider_retry") or DEFAULT_PROVIDER_RETRY)
+            if "unknown_recovery" not in retry:
+                retry["unknown_recovery"] = dict(DEFAULT_PROVIDER_RETRY["unknown_recovery"])
+            config["provider_retry"] = retry
             if config.get("transport_retry") is None:
                 config["transport_retry"] = dict(DEFAULT_TRANSPORT_RETRY)
         if target.exists():

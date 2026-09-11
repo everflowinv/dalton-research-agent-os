@@ -44,7 +44,9 @@ def validate_provider_retry(value: Any) -> dict[str, Any]:
         parsed = {}
         for key in ("max_fresh_work_orders", "retry_backoff_seconds", "max_elapsed_seconds"):
             item = recovery[key]
-            minimum = 1 if key != "retry_backoff_seconds" else 0
+            # Zero fresh WorkOrders is an explicit operator opt-out. The
+            # recovery window itself must still be a positive duration.
+            minimum = 1 if key == "max_elapsed_seconds" else 0
             if isinstance(item, bool) or not isinstance(item, int) or item < minimum:
                 raise ProviderRetryError(f"unknown_recovery.{key} is invalid")
             parsed[key] = item
