@@ -1,8 +1,15 @@
 import unittest
 import json
+from pathlib import Path
 from unittest.mock import patch
 
+import dalton_core.mission_document_research_promotion as promotion_module
 from dalton_core.mission_document_research_executor import effective_mission_document_work_orders
+from dalton_core.mission_document_research_promotion import (
+    authorize_document_candidate,
+    persist_document_promotion,
+    promote_document_candidate,
+)
 from dalton_core.research_auto_commit import ResearchAutoCommitRejected
 from tests import test_mission_document_research as fixtures
 
@@ -156,6 +163,75 @@ class DocumentPromotionTests(unittest.TestCase):
         with self.assertRaisesRegex(ResearchAutoCommitRejected, 'live executor capability'):
             fixture.store.commit_policy_candidate(**{key: bundle[key] for key in
                 ('evidence', 'claim', 'material', 'source_verification')}, idempotency_key='untrusted-json')
+
+    def test_public_persist_hook_rejects_fabricated_ledger_rows(self):
+        fixture, executor, admission, _, records, _, _, _ = self._completed()
+        fixture.store.connection.executescript(Path(
+            promotion_module.__file__).with_name(
+                'mission_document_research_promotion_schema.sql').read_text(encoding='utf-8'))
+        bundle = executor.staging.exact_candidate_bundle(
+            evidence_ref=records['candidate_evidence_ref'], claim_ref=records['candidate_claim_ref'],
+            idempotency_key=f"mission-document-research-candidate:{admission['id']}")
+        decision = authorize_document_candidate(
+            connection=fixture.store.connection, store=fixture.store, context=executor,
+            policy_version=fixture.store.active_policy(), evidence=bundle['evidence'],
+            claim=bundle['claim'], material=bundle['material'],
+            source_verification=bundle['source_verification'])
+        fake = 'f' * 64
+        with self.assertRaisesRegex(
+            ResearchAutoCommitRejected,
+            'material differs from exact staging',
+        ):
+            with fixture.store._transaction() as cursor:
+                persist_document_promotion(
+                    cursor,
+                    executor,
+                    decision,
+                    {'id': 'evidence-version:forged', 'content_hash': fake},
+                    {'id': 'claim-version:forged', 'content_hash': fake},
+                    {'normalized_payload': {
+                        'mission_document_admission': {'ref': admission['id']},
+                    }},
+                )
+        candidate_evidence = bundle['evidence']
+        forged_evidence = {
+            **{key: candidate_evidence[key] for key in (
+                'source_type', 'source_ref', 'source_envelope_ref', 'source_envelope_hash',
+                'retrieved_at', 'valid_until', 'artifact_refs', 'source_lineage',
+                'independence_group', 'source_verification_ref', 'source_verification_hash',
+            )},
+            'id': 'evidence-version:forged', 'content_hash': fake,
+            'candidate_origin_ref': candidate_evidence['id'],
+            'candidate_origin_hash': candidate_evidence['content_hash'],
+            'review_decision_ref': decision['id'],
+            'review_decision_hash': decision['content_hash'],
+        }
+        candidate_claim = bundle['claim']
+        forged_claim = {
+            **{key: candidate_claim[key] for key in (
+                'subject_ref', 'metric_or_aspect', 'period', 'basis',
+                'normalized_statement', 'claim_kind', 'value', 'unit', 'currency', 'scale',
+            )},
+            'id': 'claim-version:forged', 'content_hash': fake,
+            'candidate_origin_ref': candidate_claim['id'],
+            'candidate_origin_hash': candidate_claim['content_hash'],
+            'semantic_review_ref': decision['id'],
+            'semantic_review_hash': decision['content_hash'],
+            'producer_execution_refs': [bundle['material']['normalized_payload'][
+                'draft_proof']['model_invocation_ref']],
+        }
+        with self.assertRaisesRegex(
+            ResearchAutoCommitRejected,
+            'Evidence authority is unavailable',
+        ):
+            with fixture.store._transaction() as cursor:
+                persist_document_promotion(
+                    cursor, executor, decision, forged_evidence, forged_claim,
+                    bundle['material'])
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM mission_document_research_promotions').fetchone()[0], 0)
+        self.assertEqual(bundle['material']['normalized_payload'][
+            'mission_document_admission']['ref'], admission['id'])
 
 
 if __name__ == '__main__':

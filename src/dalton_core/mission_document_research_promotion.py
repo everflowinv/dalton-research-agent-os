@@ -136,9 +136,77 @@ def persist_document_promotion(cursor, executor, decision, evidence, claim, mate
     _need(cursor.connection is executor.connection and executor.connection.in_transaction,
           "document promotion requires the active Core Ledger transaction")
     admission_ref = material["normalized_payload"]["mission_document_admission"]["ref"]
-    admission, _works, _bundle, outcome, proof = _context_proof(
+    admission, _works, bundle, outcome, proof = _context_proof(
         executor, store=executor.authority.store, connection=executor.connection,
         admission_ref=admission_ref)
+    from .research_auto_commit import _decision, DOCUMENT_QUALITATIVE_RULE_REF
+
+    expected_decision = _decision(
+        executor.authority.store.active_policy(),
+        claim_wire=bundle["claim"], evidence_wire=bundle["evidence"],
+        rule_ref=DOCUMENT_QUALITATIVE_RULE_REF, rationale=_RATIONALE,
+    )
+    _need(canonical_json(material) == canonical_json(bundle["material"]),
+          "document promotion material differs from exact staging")
+    _need(canonical_json(decision) == canonical_json(expected_decision),
+          "document promotion decision differs from exact authorization")
+    _need(
+        evidence.get("candidate_origin_ref") == bundle["evidence"]["id"]
+        and evidence.get("candidate_origin_hash") == bundle["evidence"]["content_hash"]
+        and evidence.get("review_decision_ref") == decision["id"]
+        and evidence.get("review_decision_hash") == decision["content_hash"]
+        and all(evidence.get(key) == bundle["evidence"].get(key) for key in (
+            "source_type", "source_ref", "source_envelope_ref", "source_envelope_hash",
+            "retrieved_at", "valid_until", "artifact_refs", "source_lineage",
+            "independence_group", "source_verification_ref", "source_verification_hash",
+        )),
+        "document promotion Evidence differs from exact candidate",
+    )
+    _need(
+        claim.get("candidate_origin_ref") == bundle["claim"]["id"]
+        and claim.get("candidate_origin_hash") == bundle["claim"]["content_hash"]
+        and claim.get("semantic_review_ref") == decision["id"]
+        and claim.get("semantic_review_hash") == decision["content_hash"]
+        and claim.get("producer_execution_refs") == [
+            bundle["material"]["normalized_payload"]["draft_proof"]["model_invocation_ref"]
+        ]
+        and all(claim.get(key) == bundle["claim"].get(key) for key in (
+            "subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement",
+            "claim_kind", "value", "unit", "currency", "scale",
+        )),
+        "document promotion Claim differs from exact candidate",
+    )
+
+    stored_evidence = _record(cursor.execute(
+        "SELECT evidence_json AS record_json,content_hash FROM evidence_versions "
+        "WHERE evidence_version_id=?", (evidence["id"],),
+    ).fetchone(), "document promotion Evidence")
+    stored_claim = _record(cursor.execute(
+        "SELECT claim_json AS record_json,content_hash FROM claim_versions "
+        "WHERE claim_version_id=?", (claim["id"],),
+    ).fetchone(), "document promotion Claim")
+    receipt = cursor.execute(
+        "SELECT * FROM reviewed_candidate_commits WHERE review_decision_ref=?",
+        (decision["id"],),
+    ).fetchone()
+    _need(receipt is not None, "document promotion Ledger receipt is unavailable")
+    result = json.loads(receipt["result_json"])
+    _need(
+        canonical_json(stored_evidence) == canonical_json(evidence)
+        and canonical_json(stored_claim) == canonical_json(claim)
+        and receipt["decision_json"] == canonical_json(decision)
+        and receipt["candidate_evidence_ref"] == bundle["evidence"]["id"]
+        and receipt["candidate_claim_ref"] == bundle["claim"]["id"]
+        and receipt["request_hash"] == content_hash({
+            "decision_hash": decision["content_hash"],
+            "evidence_hash": bundle["evidence"]["content_hash"],
+            "claim_hash": bundle["claim"]["content_hash"],
+        })
+        and result.get("review_decision_ref") == decision["id"]
+        and result.get("evidence_version_ref") == evidence["id"]
+        and result.get("claim_version_ref") == claim["id"],
+        "document promotion inputs are not the exact active Ledger transaction",
+    )
     saved = {"schema_version": "0.1",
         "id": "mission-document-research-promotion:" + content_hash({
             "outcome_ref": outcome["id"], "authorization_hash": decision["content_hash"]})[:32],
