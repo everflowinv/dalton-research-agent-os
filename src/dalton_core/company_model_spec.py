@@ -48,6 +48,8 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
+from .company_model_inputs import CASH_FLOW_ROLE_CONCEPTS
+
 from .driver_template import (
     COST_REGISTRY_HASH, COST_REGISTRY_REF, cost_prompt_block, cost_slot_ids,
     REGISTRY_HASH as TEMPLATE_REGISTRY_HASH,
@@ -62,8 +64,9 @@ from .company_financial_statement_structure import (
     validate_structure_proposal,
 )
 
-SCHEMA_VERSION = "0.3"
-TASK_REF = "task:company-model-spec:0.5"
+SCHEMA_VERSION = "0.4"
+LEGACY_SCHEMA_VERSION = "0.3"
+TASK_REF = "task:company-model-spec:0.6"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -98,6 +101,10 @@ EXPENSE_BEHAVIOURS: tuple[str, ...] = (
     "one_off",
 )
 PERIODICITY: tuple[str, ...] = ("quarterly", "annual")
+CASH_FLOW_ROLES: tuple[str, ...] = (
+    "operating_cash_flow", "capital_expenditure",
+)
+CASH_FORECAST_METHODS: tuple[str, ...] = ("share_of_line", "unavailable")
 
 _REF_RE = re.compile(r"^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$")
 
@@ -129,17 +136,17 @@ _BASIS = {
 
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "CompanyModelSpecV0.3",
+    "title": "CompanyModelSpecV0.4",
     "type": "object",
     "additionalProperties": False,
     "required": [
         "schema_version", "assessment", "revenue_anchor_concept",
         "revenue_drivers", "expense_lines",
         "forecast_statements", "operating_metrics", "horizon",
-        "financial_statement_structure",
+        "financial_statement_structure", "cash_flow_companion",
     ],
     "properties": {
-        "schema_version": {"const": "0.3"},
+        "schema_version": {"const": SCHEMA_VERSION},
         "revenue_anchor_concept": {
             "type": "string", "minLength": 1, "maxLength": 160,
             "description": (
@@ -250,6 +257,44 @@ OUTPUT_SCHEMA = {
             ("historical_quarters", "forecast_quarters", "because"),
         ),
         "financial_statement_structure": STRUCTURE_PROPOSAL_SCHEMA,
+        "cash_flow_companion": _entry(
+            {
+                "schema_version": {"const": "0.1"},
+                "lines": {
+                    "type": "array", "minItems": 2, "maxItems": 2,
+                    "items": _entry(
+                        {
+                            "role": {"enum": list(CASH_FLOW_ROLES)},
+                            "concept": _BASIS,
+                            "forecast_method": {"enum": list(CASH_FORECAST_METHODS)},
+                            "forecast_base_ref": {"type": ["string", "null"],
+                                                  "maxLength": 60},
+                            "because": _BECAUSE,
+                        },
+                        ("role", "concept", "forecast_method", "forecast_base_ref",
+                         "because"),
+                    ),
+                },
+                "formula": _entry(
+                    {
+                        "output_ref": {"const": "free_cash_flow"},
+                        "operator": {"const": "sum"},
+                        "terms": {
+                            "type": "array", "minItems": 2, "maxItems": 2,
+                            "items": _entry(
+                                {
+                                    "role": {"enum": list(CASH_FLOW_ROLES)},
+                                    "coefficient": {"enum": ["1", "-1"]},
+                                },
+                                ("role", "coefficient"),
+                            ),
+                        },
+                    },
+                    ("output_ref", "operator", "terms"),
+                ),
+            },
+            ("schema_version", "lines", "formula"),
+        ),
     },
 }
 
@@ -268,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "cost_driver_template_metadata:0.1",
-    "prompt_contract": "company-model-spec-prompt:0.6",
+    "prompt_contract": "company-model-spec-prompt:0.7",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -391,6 +436,17 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "supports day_weighted_quarters and the held filed history contains four "
         "positive contiguous quarter averages that tie to a direct annual share "
         "value. quarterly_growth does not itself authorize annual weighting.\n\n"
+        "Then return cash_flow_companion separately from the income DAG. Select "
+        "this company's exact filed operating-cash-flow and capital-expenditure "
+        "concepts when they exist; capital expenditure must be the company's "
+        "positive outflow amount because the declared formula subtracts it. "
+        "For each selected line either declare "
+        "share_of_line with an exact forecastable filed "
+        "financial_statement_structure line ref as "
+        "its company-specific forecast base, or unavailable. A missing source or "
+        "unsupported forecast basis stays unavailable; never replace it with zero. "
+        "The formula must explicitly preserve free cash flow as operating cash "
+        "flow plus capital expenditure at coefficient -1.\n\n"
         "Rules:\n"
         "* Formula evidence_refs must copy exact filing accession values listed "
         "in COMPANY.filings. Do not invent a note or document ref; note evidence "
@@ -500,6 +556,113 @@ def _basis(value: Any, concepts: set[str], name: str) -> str | None:
     return concept
 
 
+def _cash_flow_companion(
+    value: Any, *, concepts: set[str], cash_lines: Mapping[str, Mapping[str, Any]],
+    structure: Mapping[str, Any],
+    cash_importance: str,
+) -> dict[str, Any]:
+    """Validate the analyst's explicit, company-specific cash forecast basis."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version", "lines", "formula",
+    }:
+        raise CompanyModelSpecError("cash_flow_companion has an invalid closed shape")
+    if value.get("schema_version") != "0.1":
+        raise CompanyModelSpecError("cash_flow_companion.schema_version is not 0.1")
+    structure_lines = {
+        str(item.get("ref")): item for item in (structure.get("lines") or [])
+        if isinstance(item, Mapping) and item.get("ref")
+    }
+    raw_lines = value.get("lines")
+    if not isinstance(raw_lines, list) or len(raw_lines) != len(CASH_FLOW_ROLES):
+        raise CompanyModelSpecError("cash_flow_companion must answer for both cash lines")
+    lines: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_lines):
+        if not isinstance(item, Mapping) or set(item) != {
+            "role", "concept", "forecast_method", "forecast_base_ref", "because",
+        }:
+            raise CompanyModelSpecError(
+                f"cash_flow_companion.lines[{index}] has an invalid closed shape")
+        role = _one_of(item.get("role"), CASH_FLOW_ROLES,
+                       f"cash_flow_companion.lines[{index}].role")
+        if role in seen:
+            raise CompanyModelSpecError(f"cash_flow_companion names {role} twice")
+        seen.add(role)
+        concept = _basis(item.get("concept"), concepts,
+                         f"cash_flow_companion.lines[{index}].concept")
+        if concept is not None and concept not in cash_lines:
+            raise CompanyModelSpecError(
+                f"cash_flow_companion {role} concept is not a consolidated cash "
+                "statement line")
+        if concept is not None and any(
+            concept in known_concepts for other_role, known_concepts in
+            CASH_FLOW_ROLE_CONCEPTS.items() if other_role != role
+        ):
+            raise CompanyModelSpecError(
+                f"cash_flow_companion {role} uses a concept with known other-role "
+                "semantics")
+        method = _one_of(
+            item.get("forecast_method"), CASH_FORECAST_METHODS,
+            f"cash_flow_companion.lines[{index}].forecast_method")
+        base_ref = item.get("forecast_base_ref")
+        if method == "share_of_line":
+            if concept is None:
+                raise CompanyModelSpecError(
+                    f"cash_flow_companion {role} needs a filed concept")
+            base_ref = _text(
+                base_ref, f"cash_flow_companion.lines[{index}].forecast_base_ref",
+                limit=60)
+            if base_ref not in structure_lines:
+                raise CompanyModelSpecError(
+                    f"cash_flow_companion {role} base names no income structure line")
+            base_line = structure_lines[base_ref]
+            if (base_line.get("kind") != "filed"
+                    or base_line.get("forecast_method") not in {
+                        "quarterly_growth", "share_of_line",
+                    }):
+                raise CompanyModelSpecError(
+                    f"cash_flow_companion {role} base is not a forecastable filed line")
+            cash_unit = str(cash_lines[concept].get("unit") or "").casefold()
+            base_unit = str(base_line.get("unit") or "").casefold()
+            if not cash_unit or cash_unit != base_unit:
+                raise CompanyModelSpecError(
+                    f"cash_flow_companion {role} source and base units differ")
+        elif base_ref is not None:
+            raise CompanyModelSpecError(
+                f"cash_flow_companion unavailable {role} cannot name a forecast base")
+        if cash_importance == "not_material" and method != "unavailable":
+            raise CompanyModelSpecError(
+                "cash_flow_companion cannot forecast a statement marked not_material")
+        lines.append({
+            "role": role, "concept": concept, "forecast_method": method,
+            "forecast_base_ref": base_ref,
+            "because": _text(
+                item.get("because"), f"cash_flow_companion.lines[{index}].because",
+                limit=400, repairable_length=True),
+        })
+    if seen != set(CASH_FLOW_ROLES):
+        raise CompanyModelSpecError("cash_flow_companion is missing a required cash line")
+    lines.sort(key=lambda item: CASH_FLOW_ROLES.index(str(item["role"])))
+    selected_concepts = [str(item["concept"]) for item in lines
+                         if item["concept"] is not None]
+    if len(selected_concepts) != len(set(selected_concepts)):
+        raise CompanyModelSpecError(
+            "cash_flow_companion cannot use one filed concept for both roles")
+    formula = value.get("formula")
+    expected_formula = {
+        "output_ref": "free_cash_flow", "operator": "sum",
+        "terms": [
+            {"role": "operating_cash_flow", "coefficient": "1"},
+            {"role": "capital_expenditure", "coefficient": "-1"},
+        ],
+    }
+    if formula != expected_formula:
+        raise CompanyModelSpecError(
+            "cash_flow_companion formula must define operating cash flow minus capex")
+    return {"schema_version": "0.1", "lines": lines, "formula": expected_formula}
+
+
 def spec_from_response(
     state: Mapping[str, Any], response: Any, *, decided_by: str,
 ) -> dict[str, Any]:
@@ -507,7 +670,7 @@ def spec_from_response(
 
     body = parse_response(response)
     if body.get("schema_version") != SCHEMA_VERSION:
-        raise CompanyModelSpecError("model specification schema_version is not 0.3")
+        raise CompanyModelSpecError("model specification schema_version is not 0.4")
     company_ref = state.get("company_ref")
     if not isinstance(company_ref, str) or not company_ref:
         raise CompanyModelSpecError("company state carries no company_ref")
@@ -702,6 +865,17 @@ def spec_from_response(
         raise CompanyModelSpecError(
             f"financial_statement_structure is invalid: {exc}"
         ) from exc
+    cash_companion = _cash_flow_companion(
+        body.get("cash_flow_companion"), concepts=concepts,
+        cash_lines={
+            str(row.get("concept")): row
+            for row in ((state.get("statements") or {}).get("cash") or [])
+            if isinstance(row, Mapping) and row.get("concept")
+            and not row.get("is_breakdown") and not row.get("dimension_axis")
+        },
+        structure=statement_structure,
+        cash_importance=statements["cash"]["importance"],
+    )
 
     spec = {
         "schema_version": SCHEMA_VERSION,
@@ -716,6 +890,7 @@ def spec_from_response(
         "operating_metrics": metrics,
         "horizon": horizon,
         "financial_statement_structure": statement_structure,
+        "cash_flow_companion": cash_companion,
         "decided_by": decided_by,
         "task_hash": TASK_HASH,
     }
@@ -768,6 +943,8 @@ def undisclosed_metrics(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "CASH_FLOW_ROLES",
+    "CASH_FORECAST_METHODS",
     "DRIVER_KINDS",
     "EXPENSE_BEHAVIOURS",
     "IMPORTANCE",
@@ -780,6 +957,7 @@ __all__ = [
     "OUTPUT_SCHEMA",
     "PERIODICITY",
     "SCHEMA_VERSION",
+    "LEGACY_SCHEMA_VERSION",
     "STATEMENTS",
     "TASK_HASH",
     "TASK_REF",

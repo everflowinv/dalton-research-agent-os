@@ -306,7 +306,7 @@ class LaneStateTests(unittest.TestCase):
     def record_spec(self) -> dict:
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
         body = {
-            "schema_version": "0.3",
+            "schema_version": "0.4",
             "revenue_anchor_concept": REVENUE_CONCEPT,
             "assessment": "Delivery revenue times realised rate, less delivery cost.",
             "revenue_drivers": [{
@@ -328,6 +328,22 @@ class LaneStateTests(unittest.TestCase):
             "horizon": {"historical_quarters": 12, "forecast_quarters": 4,
                         "because": "Three years spans the cycle."},
             "financial_statement_structure": statement_structure(full=True),
+            "cash_flow_companion": {
+                "schema_version": "0.1",
+                "lines": [
+                    {"role": "operating_cash_flow", "concept": None,
+                     "forecast_method": "unavailable", "forecast_base_ref": None,
+                     "because": "Cash is outside this fixture's model scope."},
+                    {"role": "capital_expenditure", "concept": None,
+                     "forecast_method": "unavailable", "forecast_base_ref": None,
+                     "because": "Cash is outside this fixture's model scope."},
+                ],
+                "formula": {"output_ref": "free_cash_flow", "operator": "sum",
+                            "terms": [
+                                {"role": "operating_cash_flow", "coefficient": "1"},
+                                {"role": "capital_expenditure", "coefficient": "-1"},
+                            ]},
+            },
         }
         return self.missions.record_company_model_spec(
             spec_from_response(state, body, decided_by="automation:coverage-mission"),
@@ -699,9 +715,9 @@ class LaneStateTests(unittest.TestCase):
         })
         current = self.missions.latest_company_model_spec(ACN)
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
-        body = {"schema_version": "0.3", **{key: current[key] for key in (
+        body = {"schema_version": "0.4", **{key: current[key] for key in (
             "assessment", "revenue_anchor_concept", "revenue_drivers", "expense_lines", "forecast_statements",
-            "operating_metrics", "horizon")}}
+            "operating_metrics", "horizon", "cash_flow_companion")}}
         body["expense_lines"] = [*body["expense_lines"],
             {"ref": "sga", "label": "SG&A",
              "basis_concept": "us-gaap:SellingGeneralAndAdministrativeExpense",

@@ -42,7 +42,7 @@ ACN = "company:sec-cik:0001467373"
 
 def _spec_body():
     return {
-        "schema_version": "0.3",
+        "schema_version": "0.4",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: billable heads times realised rate.",
         "revenue_drivers": [{
@@ -103,6 +103,22 @@ def _spec_body():
                 "tie_out_concept": "us-gaap:NetIncomeLoss",
                 "evidence_refs": ["0001467373-26-000031"],
             }],
+        },
+        "cash_flow_companion": {
+            "schema_version": "0.1",
+            "lines": [
+                {"role": "operating_cash_flow", "concept": None,
+                 "forecast_method": "unavailable", "forecast_base_ref": None,
+                 "because": "No exact cash source is present in this fixture."},
+                {"role": "capital_expenditure", "concept": None,
+                 "forecast_method": "unavailable", "forecast_base_ref": None,
+                 "because": "No exact cash source is present in this fixture."},
+            ],
+            "formula": {"output_ref": "free_cash_flow", "operator": "sum",
+                        "terms": [
+                            {"role": "operating_cash_flow", "coefficient": "1"},
+                            {"role": "capital_expenditure", "coefficient": "-1"},
+                        ]},
         },
     }
 

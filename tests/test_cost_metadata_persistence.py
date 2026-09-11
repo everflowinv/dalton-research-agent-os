@@ -38,6 +38,7 @@ class CostMetadataPersistenceTests(unittest.TestCase):
         legacy = self._decided(cost_bound=False)
         legacy.pop("schema_version")
         legacy.pop("financial_statement_structure")
+        legacy.pop("cash_flow_companion")
         legacy.pop("content_hash")
         legacy["content_hash"] = content_hash(legacy)
         original = authority.record_company_model_spec(

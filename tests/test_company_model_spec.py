@@ -137,7 +137,7 @@ def _statement_structure():
 
 def _spec(**overrides):
     body = {
-        "schema_version": "0.3",
+        "schema_version": "0.4",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": (
             "Accenture is a people business: revenue is billable heads times "
@@ -192,6 +192,24 @@ def _spec(**overrides):
             "because": "Three years spans the last demand cycle.",
         },
         "financial_statement_structure": _statement_structure(),
+        "cash_flow_companion": {
+            "schema_version": "0.1",
+            "lines": [
+                {"role": "operating_cash_flow", "concept": None,
+                 "forecast_method": "unavailable", "forecast_base_ref": None,
+                 "because": "This fixture supplies no exact operating cash-flow concept."},
+                {"role": "capital_expenditure", "concept": None,
+                 "forecast_method": "unavailable", "forecast_base_ref": None,
+                 "because": "This fixture supplies no exact capital-expenditure concept."},
+            ],
+            "formula": {
+                "output_ref": "free_cash_flow", "operator": "sum",
+                "terms": [
+                    {"role": "operating_cash_flow", "coefficient": "1"},
+                    {"role": "capital_expenditure", "coefficient": "-1"},
+                ],
+            },
+        },
     }
     body.update(overrides)
     return body
@@ -272,6 +290,81 @@ class CompanyModelSpecTests(unittest.TestCase):
         body["forecast_statements"][1]["importance"] = "not_material"
         spec = self.verify(body)
         self.assertEqual(forecast_statements(spec), ["income", "cash"])
+
+    def test_cash_companion_selects_company_concepts_and_exact_income_base(self):
+        state = copy.deepcopy(STATE)
+        selected = {
+            "operating_cash_flow": "acme:CashGeneratedFromOperations",
+            "capital_expenditure": "acme:PurchasesOfEquipment",
+        }
+        state["concepts"].extend(selected.values())
+        state["statements"]["cash"] = [
+            {"concept": concept, "label": role, "level": 0,
+             "parent_concept": None, "is_breakdown": False, "dimension_axis": None,
+             "unit": "USD", "period_kind": "duration"}
+            for role, concept in selected.items()
+        ]
+        body = _spec()
+        body["cash_flow_companion"]["lines"] = [
+            {"role": role, "concept": concept,
+             "forecast_method": "share_of_line", "forecast_base_ref": "revenue",
+             "because": f"{role} follows this company's revenue base."}
+            for role, concept in selected.items()
+        ]
+        verified = self.verify(body, state=state)
+        self.assertEqual(
+            {item["role"]: item["concept"]
+             for item in verified["cash_flow_companion"]["lines"]},
+            selected,
+        )
+
+    def test_cash_companion_refuses_a_source_and_base_in_different_units(self):
+        state = copy.deepcopy(STATE)
+        concept = "acme:CashGeneratedFromOperations"
+        state["concepts"].append(concept)
+        state["statements"]["cash"] = [{
+            "concept": concept, "label": "Cash generated", "level": 0,
+            "parent_concept": None, "is_breakdown": False, "dimension_axis": None,
+            "unit": "EUR", "period_kind": "duration",
+        }]
+        body = _spec()
+        body["cash_flow_companion"]["lines"][0].update(
+            concept=concept, forecast_method="share_of_line", forecast_base_ref="revenue")
+        with self.assertRaisesRegex(CompanyModelSpecError, "units differ"):
+            self.verify(body, state=state)
+
+    def test_cash_companion_refuses_one_concept_for_both_cash_roles(self):
+        state = copy.deepcopy(STATE)
+        concept = "acme:CashGeneratedFromOperations"
+        state["concepts"].append(concept)
+        state["statements"]["cash"] = [{
+            "concept": concept, "label": "Cash generated", "level": 0,
+            "parent_concept": None, "is_breakdown": False, "dimension_axis": None,
+            "unit": "USD", "period_kind": "duration",
+        }]
+        body = _spec()
+        for line in body["cash_flow_companion"]["lines"]:
+            line.update(
+                concept=concept, forecast_method="share_of_line",
+                forecast_base_ref="revenue")
+        with self.assertRaisesRegex(CompanyModelSpecError, "one filed concept"):
+            self.verify(body, state=state)
+
+    def test_cash_companion_refuses_a_known_capex_concept_as_operating_cash(self):
+        concept = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
+        state = copy.deepcopy(STATE)
+        state["concepts"].append(concept)
+        state["statements"]["cash"] = [{
+            "concept": concept, "label": "Capital expenditure", "level": 0,
+            "parent_concept": None, "is_breakdown": False, "dimension_axis": None,
+            "unit": "USD", "period_kind": "duration",
+        }]
+        body = _spec()
+        body["cash_flow_companion"]["lines"][0].update(
+            concept=concept, forecast_method="share_of_line",
+            forecast_base_ref="revenue")
+        with self.assertRaisesRegex(CompanyModelSpecError, "other-role semantics"):
+            self.verify(body, state=state)
 
     def test_every_statement_must_be_answered_for(self):
         body = _spec()
@@ -376,7 +469,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         import json
 
         fenced = "```json\n" + json.dumps(_spec()) + "\n```"
-        self.assertEqual(parse_response(fenced)["schema_version"], "0.3")
+        self.assertEqual(parse_response(fenced)["schema_version"], "0.4")
 
     def test_the_wrong_schema_version_is_refused(self):
         with self.assertRaises(CompanyModelSpecError):
@@ -464,7 +557,7 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
             [item["statement"] for item in held["forecast_statements"]],
             ["income", "balance", "cash"])
         self.assertEqual(held["model_profile_ref"], "profile:model-spec")
-        self.assertEqual(held["schema_version"], "0.3")
+        self.assertEqual(held["schema_version"], "0.4")
         self.assertEqual(
             held["financial_statement_structure"], _statement_structure())
 

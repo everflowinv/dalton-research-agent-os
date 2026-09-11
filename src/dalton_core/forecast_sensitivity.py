@@ -68,6 +68,9 @@ from .consensus_estimate import CONSENSUS_GAP_RULE_REF
 from .model_forecast_driver import (
     ForecastModelUnavailable,
     STRUCTURED_SCHEMA_VERSION,
+    STRUCTURED_CASH_SCHEMA_VERSION,
+    compute_cash_flow_companion_results,
+    is_structured_schema,
     _structure_historical_values,
     chain_base,
     company_slug,
@@ -348,6 +351,16 @@ def measure_series(
                 line_ref = driver.get("structure_line_ref")
                 line = next((item for item in (structure or {}).get("lines") or []
                              if item.get("ref") == line_ref), None)
+                if (line is None
+                        and record.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION
+                        and driver.get("kind") == "cash_flow"):
+                    companion = record.get("cash_flow_companion") or {}
+                    source = next(
+                        (item for item in companion.get("lines") or []
+                         if item.get("ref") == line_ref), None,
+                    )
+                    if source is not None:
+                        line = {"forecast_base_ref": source.get("forecast_base_ref")}
                 base_ref = None if line is None else line.get("forecast_base_ref")
                 if not isinstance(base_ref, str):
                     return {"status": "unavailable", "measure": measure, "points": [],
@@ -562,11 +575,20 @@ def recompute(
             replaced.append(str(item["ref"]))
             item = {**item, "value": _rate(value)}
         assumptions.append(item)
-    if record.get("schema_version") == STRUCTURED_SCHEMA_VERSION:
+    if is_structured_schema(record.get("schema_version")):
         structure = record.get("financial_statement_structure")
         if not isinstance(structure, Mapping):
             raise SensitivityUnavailable("structured model has no statement authority")
-        results = compute_structure_results(drivers, assumptions, periods, structure)
+        income_drivers = [item for item in drivers if item.get("kind") != "cash_flow"]
+        results = compute_structure_results(
+            income_drivers, assumptions, periods, structure)
+        if record.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+            companion = record.get("cash_flow_companion")
+            if not isinstance(companion, Mapping):
+                raise SensitivityUnavailable("structured cash model has no companion authority")
+            results.extend(compute_cash_flow_companion_results(
+                [item for item in drivers if item.get("kind") == "cash_flow"],
+                assumptions, periods, companion, results))
     else:
         base = chain_base(revenue_anchor(drivers), record, str(periods[0]["end"]))
         results = compute_results(

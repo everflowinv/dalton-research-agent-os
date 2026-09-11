@@ -64,7 +64,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .claim_index_authority import MARKET_PROXY
 from .company_model_inputs import (
-    AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, NOT_FOUND, SHARED,
+    AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, INCOMPLETE, NOT_FOUND,
+    SHARED,
 )
 from .driver_template import COST_DRIVER_TEMPLATES
 from .model_forecast import (
@@ -80,6 +81,16 @@ from .store import (
 SCHEMA_VERSION = "0.2"
 LEGACY_SCHEMA_VERSION = "0.1"
 STRUCTURED_SCHEMA_VERSION = "0.3"
+STRUCTURED_CASH_SCHEMA_VERSION = "0.4"
+STRUCTURED_SCHEMA_VERSIONS = frozenset({
+    STRUCTURED_SCHEMA_VERSION, STRUCTURED_CASH_SCHEMA_VERSION,
+})
+
+
+def is_structured_schema(value: Any) -> bool:
+    return value in STRUCTURED_SCHEMA_VERSIONS
+
+
 FORMULA_REF = DRIVER_FORMULA_REF
 FORMULA_HASH = DRIVER_FORMULA_HASH
 STRUCTURE_FORMULA_REF = "formula:company-financial-statement-dag:0.1"
@@ -90,6 +101,18 @@ STRUCTURE_EXECUTOR_CONTRACT = {
     "missing_input": "unavailable",
     "zero_denominator": "unavailable",
     "forecast_leaves": ["quarterly_growth", "share_of_line", "unavailable"],
+}
+CASH_FLOW_COMPANION_REF = "formula:cash-flow-companion:0.1"
+CASH_FLOW_COMPANION_CONTRACT = {
+    "schema_version": "cash-flow-companion-0.1",
+    "authority_ref": CASH_FLOW_COMPANION_REF,
+    "forecast_methods": ["share_of_line", "unavailable"],
+    "lines": ["operating_cash_flow", "capital_expenditure"],
+    "free_cash_flow_terms": [
+        {"role": "operating_cash_flow", "coefficient": "1"},
+        {"role": "capital_expenditure", "coefficient": "-1"},
+    ],
+    "missing_input": "unavailable",
 }
 GENERATOR_REF = "rule:trailing-carry-forward:1"
 AUTOMATION_ACTOR = "automation:driver-model"
@@ -257,6 +280,7 @@ _STRUCTURE_RECORD_FIELDS = frozenset({
     "financial_statement_structure", "financial_statement_structure_replay",
     "forecast_structure_binding",
 })
+_CASH_COMPANION_RECORD_FIELDS = frozenset({"cash_flow_companion"})
 # What the version chain is about. Two records with the same body are the same
 # model, whatever mission asked for them, whenever they were built, and
 # whatever evidence prompted the attempt -- so a tick that finds nothing new is
@@ -1913,6 +1937,482 @@ def structure_formula_hash(
     })
 
 
+def build_cash_flow_companion(
+    spec: Mapping[str, Any], table: Mapping[str, Any], structure: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the existing cash-flow foundation beside, not inside, the income DAG."""
+
+    definition = spec.get("cash_flow_companion")
+    if spec.get("schema_version") != "0.4" or not isinstance(definition, Mapping):
+        raise ForecastModelUnavailable(
+            "cash-flow companion needs a versioned company specification")
+    if definition.get("schema_version") != "0.1":
+        raise ForecastModelUnavailable("cash-flow companion specification is unsupported")
+    definition_lines = definition.get("lines")
+    if not isinstance(definition_lines, list) or len(definition_lines) != 2:
+        raise ForecastModelUnavailable("cash-flow companion specification is incomplete")
+    by_definition = {
+        str(item.get("role")): item for item in definition_lines
+        if isinstance(item, Mapping)
+    }
+    if set(by_definition) != {OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE}:
+        raise ForecastModelUnavailable("cash-flow companion specification roles differ")
+    result_refs = _structure_result_refs(structure)
+    structure_lines = {
+        str(item.get("ref")): item for item in (structure.get("lines") or [])
+        if isinstance(item, Mapping) and item.get("ref")
+    }
+    revenue_lines = [item for item in structure_lines.values()
+                     if item.get("role") == REVENUE]
+    if len(revenue_lines) != 1:
+        raise ForecastModelUnavailable(
+            "cash-flow companion needs one exact structured reporting currency")
+    reporting_unit = str(revenue_lines[0].get("unit") or "").casefold()
+    raw_inputs = list(table.get("cash_flow_inputs") or [])
+    by_role: dict[str, Mapping[str, Any]] = {}
+    for item in raw_inputs:
+        if not isinstance(item, Mapping):
+            raise ForecastModelUnavailable("cash-flow input is not an object")
+        role = str(item.get("role") or "")
+        if role not in {OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE} or role in by_role:
+            raise ForecastModelUnavailable("cash-flow inputs have invalid or duplicate roles")
+        by_role[role] = item
+    importance = statement_importances(spec).get("cash", "not_material")
+    lines: list[dict[str, Any]] = []
+    for role in (OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE):
+        declared = by_definition[role]
+        source = by_role.get(role)
+        declared_concept = declared.get("concept")
+        method = str(declared.get("forecast_method") or "")
+        base_ref = declared.get("forecast_base_ref")
+        source_bound = (
+            source is not None and source.get("status") in {FILED, INCOMPLETE}
+            and str(source.get("concept")) == str(declared_concept)
+        )
+        if source_bound:
+            source_unit = str(source.get("unit") or "").casefold()
+            base_unit = str((structure_lines.get(str(base_ref)) or {}).get("unit") or "").casefold()
+            if source_unit != reporting_unit or source_unit != base_unit:
+                raise ForecastModelUnavailable(
+                    f"cash-flow companion {role} source and base units differ")
+        forecastable = (
+            source_bound and source.get("status") == FILED
+            and method == "share_of_line" and base_ref in result_refs
+        )
+        source_status = (
+            "filed" if source_bound and source.get("status") == FILED else
+            "incomplete" if source_bound else "unavailable"
+        )
+        lines.append({
+            "ref": f"cash-flow:{role.replace('_', '-')}",
+            "result_ref": f"result:{role}",
+            "role": role,
+            "status": source_status,
+            "concept": str(declared_concept) if declared_concept is not None else None,
+            "unit": str(source["unit"]).casefold() if source_bound else None,
+            "source": dict(source) if source_bound else None,
+            "source_hash": content_hash(source) if source_bound else None,
+            "reason": (
+                None if forecastable else
+                "the specification marks the cash flow statement not_material"
+                if importance == "not_material" else
+                str(declared.get("because") or (source or {}).get("reason") or
+                    f"no supported exact {role} forecast basis is available")
+            ),
+            "forecast_method": "share_of_line" if forecastable else "unavailable",
+            "forecast_base_ref": str(base_ref) if forecastable else None,
+            "forecast_base_result_ref": (
+                result_refs.get(str(base_ref)) if forecastable else None),
+        })
+    body = {
+        "schema_version": "cash-flow-companion-0.1",
+        "authority_ref": CASH_FLOW_COMPANION_REF,
+        "company_ref": str(table.get("company_ref") or ""),
+        "spec_ref": str(table.get("spec_ref") or spec.get("spec_id") or ""),
+        "spec_hash": str(spec.get("content_hash") or ""),
+        "financial_input_hash": content_hash({"cash_flow_inputs": raw_inputs}),
+        "income_structure_hash": str(structure.get("content_hash") or ""),
+        "cash_statement_importance": importance,
+        "reporting_unit": reporting_unit,
+        "specification": json.loads(canonical_json(definition)),
+        "specification_hash": content_hash(definition),
+        "lines": lines,
+        "formula": {
+            "output_ref": "result:free_cash_flow",
+            "operator": "sum",
+            "terms": [
+                {"result_ref": "result:operating_cash_flow", "coefficient": "1"},
+                {"result_ref": "result:capital_expenditure", "coefficient": "-1"},
+            ],
+        },
+    }
+    return validate_cash_flow_companion({**body, "content_hash": content_hash(body)})
+
+
+def validate_cash_flow_companion(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {
+        "schema_version", "authority_ref", "company_ref", "spec_ref", "spec_hash",
+        "financial_input_hash", "income_structure_hash", "cash_statement_importance",
+        "reporting_unit",
+        "specification", "specification_hash", "lines", "formula", "content_hash",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ForecastModelValidationError("cash-flow companion has an invalid closed shape")
+    wire = dict(value)
+    if (wire["schema_version"] != "cash-flow-companion-0.1"
+            or wire["authority_ref"] != CASH_FLOW_COMPANION_REF):
+        raise ForecastModelValidationError("cash-flow companion contract is unsupported")
+    for field in ("company_ref", "spec_ref", "reporting_unit"):
+        wire[field] = _text(wire[field], f"cash_flow_companion.{field}")
+    for field in ("spec_hash", "financial_input_hash", "income_structure_hash",
+                  "specification_hash", "content_hash"):
+        wire[field] = _sha256(wire[field], f"cash_flow_companion.{field}")
+    wire["cash_statement_importance"] = _one_of(
+        wire["cash_statement_importance"],
+        ("required", "supporting", "not_material"),
+        "cash_flow_companion.cash_statement_importance")
+    if (not isinstance(wire["specification"], Mapping)
+            or content_hash(wire["specification"]) != wire["specification_hash"]):
+        raise ForecastModelValidationError(
+            "cash-flow companion specification hash differs")
+    wire["specification"] = dict(wire["specification"])
+    if set(wire["specification"]) != {"schema_version", "lines", "formula"} or (
+        wire["specification"].get("schema_version") != "0.1"
+    ):
+        raise ForecastModelValidationError(
+            "cash-flow companion specification has an invalid closed shape")
+    declared_lines = wire["specification"].get("lines")
+    if not isinstance(declared_lines, list) or len(declared_lines) != 2:
+        raise ForecastModelValidationError("cash-flow companion specification is incomplete")
+    if not isinstance(wire["lines"], list) or len(wire["lines"]) != 2:
+        raise ForecastModelValidationError("cash-flow companion must carry its two source lines")
+    line_fields = {
+        "ref", "result_ref", "role", "status", "concept", "unit", "source",
+        "source_hash",
+        "reason", "forecast_method", "forecast_base_ref", "forecast_base_result_ref",
+    }
+    normalized_lines = []
+    for index, item in enumerate(wire["lines"]):
+        if not isinstance(item, Mapping) or set(item) != line_fields:
+            raise ForecastModelValidationError(
+                f"cash_flow_companion.lines[{index}] has an invalid closed shape")
+        line = dict(item)
+        role = _one_of(line["role"], (OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE),
+                       f"cash_flow_companion.lines[{index}].role")
+        if (line["ref"] != f"cash-flow:{role.replace('_', '-')}"
+                or line["result_ref"] != f"result:{role}"):
+            raise ForecastModelValidationError("cash-flow companion line identity differs")
+        line["status"] = _one_of(
+            line["status"], ("filed", "incomplete", "unavailable"),
+            f"cash_flow_companion.lines[{index}].status")
+        source_bound = line["status"] in {"filed", "incomplete"}
+        if line["source"] is not None:
+            if not isinstance(line["source"], Mapping):
+                raise ForecastModelValidationError("cash-flow companion source is invalid")
+            line["source"] = dict(line["source"])
+            if line["source_hash"] != content_hash(line["source"]):
+                raise ForecastModelValidationError("cash-flow companion source hash differs")
+        elif line["source_hash"] is not None:
+            raise ForecastModelValidationError("cash-flow companion source hash lacks source")
+        if source_bound:
+            line["concept"] = _text(line["concept"], "cash-flow concept")
+            line["unit"] = _text(line["unit"], "cash-flow unit").casefold()
+            line["source_hash"] = _sha256(line["source_hash"], "cash-flow source_hash")
+            expected_source_status = FILED if line["status"] == "filed" else INCOMPLETE
+            if (line["source"] is None
+                    or line["source"].get("status") != expected_source_status
+                    or str(line["source"].get("role")) != role
+                    or str(line["source"].get("concept")) != line["concept"]
+                    or str(line["source"].get("unit")).casefold() != line["unit"]
+                    or line["unit"] != wire["reporting_unit"]):
+                raise ForecastModelValidationError("cash-flow companion source authority differs")
+            method = _one_of(
+                line["forecast_method"], ("share_of_line", "unavailable"),
+                "cash-flow forecast_method")
+            if method == "share_of_line" and line["status"] == "filed":
+                if (line["reason"] is not None
+                        or not isinstance(line["forecast_base_ref"], str)
+                        or not line["forecast_base_ref"]
+                        or not isinstance(line["forecast_base_result_ref"], str)
+                        or not line["forecast_base_result_ref"]):
+                    raise ForecastModelValidationError(
+                        "forecastable cash-flow companion line differs")
+            elif (line["reason"] is None or line["forecast_base_ref"] is not None
+                  or line["forecast_base_result_ref"] is not None):
+                raise ForecastModelValidationError(
+                    "unforecastable filed cash-flow companion line differs")
+            if line["reason"] is not None:
+                line["reason"] = _text(line["reason"], "cash-flow unavailable reason")
+        else:
+            if ((line["concept"] is not None and not isinstance(line["concept"], str))
+                    or line["unit"] is not None
+                    or line["reason"] is None or line["forecast_method"] != "unavailable"
+                    or line["forecast_base_ref"] is not None
+                    or line["forecast_base_result_ref"] is not None):
+                raise ForecastModelValidationError("unavailable cash-flow companion line differs")
+            line["reason"] = _text(line["reason"], "cash-flow unavailable reason")
+            if line["source_hash"] is not None:
+                line["source_hash"] = _sha256(
+                    line["source_hash"], "cash-flow unavailable source_hash")
+        normalized_lines.append(line)
+    if [item["role"] for item in normalized_lines] != [
+        OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE,
+    ]:
+        raise ForecastModelValidationError("cash-flow companion source line order differs")
+    declarations: dict[str, Mapping[str, Any]] = {}
+    for index, item in enumerate(declared_lines):
+        if not isinstance(item, Mapping) or set(item) != {
+            "role", "concept", "forecast_method", "forecast_base_ref", "because",
+        }:
+            raise ForecastModelValidationError(
+                f"cash-flow companion specification line {index} differs")
+        role = item.get("role")
+        if role not in {OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE} or role in declarations:
+            raise ForecastModelValidationError("cash-flow companion specification roles differ")
+        if item.get("forecast_method") not in {"share_of_line", "unavailable"}:
+            raise ForecastModelValidationError("cash-flow companion forecast method differs")
+        if not isinstance(item.get("because"), str) or not item["because"].strip():
+            raise ForecastModelValidationError("cash-flow companion reason is empty")
+        if item.get("concept") is not None and (
+            not isinstance(item["concept"], str) or not item["concept"].strip()
+        ):
+            raise ForecastModelValidationError("cash-flow companion concept differs")
+        if item["forecast_method"] == "share_of_line" and (
+            not isinstance(item.get("forecast_base_ref"), str)
+            or not item["forecast_base_ref"].strip() or item.get("concept") is None
+        ):
+            raise ForecastModelValidationError("cash-flow companion forecast base differs")
+        if item["forecast_method"] == "unavailable" and item.get("forecast_base_ref") is not None:
+            raise ForecastModelValidationError("unavailable cash-flow line has a base")
+        declarations[str(role)] = item
+    for line in normalized_lines:
+        declared = declarations[str(line["role"])]
+        if line["concept"] != declared["concept"]:
+            raise ForecastModelValidationError(
+                "cash-flow companion selected concept differs from specification")
+        if line["status"] == "filed" and declared["forecast_method"] == "share_of_line":
+            if (line["forecast_method"] != "share_of_line"
+                    or line["forecast_base_ref"] != declared["forecast_base_ref"]):
+                raise ForecastModelValidationError(
+                    "cash-flow companion forecast basis differs from specification")
+    wire["lines"] = normalized_lines
+    formula = wire["formula"]
+    if formula != {
+        "output_ref": "result:free_cash_flow", "operator": "sum",
+        "terms": [
+            {"result_ref": "result:operating_cash_flow", "coefficient": "1"},
+            {"result_ref": "result:capital_expenditure", "coefficient": "-1"},
+        ],
+    }:
+        raise ForecastModelValidationError("cash-flow companion formula differs")
+    if wire["specification"]["formula"] != {
+        "output_ref": "free_cash_flow", "operator": "sum",
+        "terms": [
+            {"role": "operating_cash_flow", "coefficient": "1"},
+            {"role": "capital_expenditure", "coefficient": "-1"},
+        ],
+    }:
+        raise ForecastModelValidationError("cash-flow companion specification formula differs")
+    base = dict(wire)
+    asserted = base.pop("content_hash")
+    if content_hash(base) != asserted:
+        raise ForecastModelValidationError("cash-flow companion content_hash is invalid")
+    return wire
+
+
+def cash_flow_formula_hash(
+    structure: Mapping[str, Any], binding: Mapping[str, Any],
+    companion: Mapping[str, Any],
+) -> str:
+    return content_hash({
+        "executor_contract": STRUCTURE_EXECUTOR_CONTRACT,
+        "cash_executor_contract": CASH_FLOW_COMPANION_CONTRACT,
+        "structure_hash": structure.get("content_hash"),
+        "binding_hash": binding.get("content_hash"),
+        "cash_flow_companion_hash": companion.get("content_hash"),
+    })
+
+
+def build_cash_flow_companion_drivers(
+    table: Mapping[str, Any], companion: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    wire = validate_cash_flow_companion(companion)
+    selected = {
+        str(item.get("role")): item for item in (table.get("cash_flow_inputs") or [])
+        if isinstance(item, Mapping)
+    }
+    drivers: list[dict[str, Any]] = []
+    for line in wire["lines"]:
+        if line["status"] not in {"filed", "incomplete"}:
+            continue
+        source = selected.get(str(line["role"]))
+        if (source is None or content_hash(source) != line["source_hash"]
+                or source.get("status") != (
+                    FILED if line["status"] == "filed" else INCOMPLETE)
+                or str(source.get("concept")) != line["concept"]
+                or str(source.get("unit")).casefold() != line["unit"]):
+            raise ForecastModelUnavailable(
+                f"cash-flow companion source {line['role']} differs from current inputs")
+        history = [{
+            "concept": str(line["concept"]),
+            "period_start": item.get("period_start"),
+            "period_end": str(item["period_end"]),
+            "value": str(item["value"]),
+            "basis": str(item["basis"]),
+            "accessions": [str(ref) for ref in item.get("source_accessions") or []],
+            "source_forms": [str(form) for form in item.get("source_forms") or []],
+            **({"derived_from": [dict(operand) for operand in item["derived_from"]]}
+               if item.get("derived_from") else {}),
+        } for item in ((source.get("series") or {}).get("quarters") or [])]
+        drivers.append({
+            "ref": f"concept:{line['concept']}", "kind": "cash_flow",
+            "label": ("Operating cash flow" if line["role"] == OPERATING_CASH_FLOW
+                      else "Capital expenditure"),
+            "concept": line["concept"], "unit": line["unit"], "statement": "cash",
+            "status": FILED, "role": line["role"], "spec_rows": [line["ref"]],
+            "note": None, "history": history,
+            "structure_line_ref": line["ref"],
+            "forecast_method": line["forecast_method"],
+            "forecast_base_ref": line["forecast_base_ref"],
+        })
+    return drivers
+
+
+def default_cash_flow_companion_assumptions(
+    income_drivers: Sequence[Mapping[str, Any]],
+    cash_drivers: Sequence[Mapping[str, Any]],
+    periods: Sequence[Mapping[str, str]], companion: Mapping[str, Any], *,
+    decided_by: str = AUTOMATION_ACTOR,
+) -> list[dict[str, Any]]:
+    wire = validate_cash_flow_companion(companion)
+    by_role = {str(item["role"]): item for item in wire["lines"]}
+    by_line = {
+        str(item.get("structure_line_ref")): item for item in income_drivers
+        if item.get("structure_line_ref")
+    }
+    assumptions: list[dict[str, Any]] = []
+    for driver in cash_drivers:
+        source = by_role[str(driver["role"])]
+        base_driver = by_line.get(str(source["forecast_base_ref"]))
+        if base_driver is None:
+            continue
+        base_cells = quarterly_history(base_driver)
+        trailing = trailing_share(quarterly_history(driver), base_cells)
+        if trailing is None:
+            continue
+        because = (
+            f"the average share of {source['forecast_base_ref']} over the "
+            f"{trailing['count']} "
+            f"quarters filed between {trailing['first_period']} and "
+            f"{trailing['last_period']} ({_percent(trailing['value'])}%), carried "
+            f"forward against {source['forecast_base_ref']} by the cash-flow companion"
+        )
+        for period in periods:
+            assumptions.append(_assumption(
+                driver_ref=str(driver["ref"]), period=period,
+                measure="share_of_line", value=trailing["value"], unit="ratio",
+                because=because, refs=trailing["refs"], decided_by=decided_by,
+            ))
+    return sorted(assumptions, key=lambda item: (
+        str(item["driver_ref"]), str(item["period"]["end"])))
+
+
+def compute_cash_flow_companion_results(
+    cash_drivers: Sequence[Mapping[str, Any]],
+    assumptions: Sequence[Mapping[str, Any]],
+    periods: Sequence[Mapping[str, str]], companion: Mapping[str, Any],
+    income_results: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Forecast the two selected cash lines and their explicitly bound FCF sum."""
+
+    wire = validate_cash_flow_companion(companion)
+    income_by_ref = {str(item.get("ref")): item for item in income_results}
+    by_driver = {str(item["ref"]): item for item in cash_drivers}
+    by_assumption = {
+        (str(item["driver_ref"]), str(item["period"]["end"])): item
+        for item in assumptions if not item.get("superseded_by")
+    }
+    results: list[dict[str, Any]] = []
+    values: dict[str, dict[str, Decimal]] = {}
+    for source in wire["lines"]:
+        role, result_ref = str(source["role"]), str(source["result_ref"])
+        driver_ref = (
+            f"concept:{source['concept']}" if source["status"] == "filed" else None)
+        result = _result(
+            result_ref, role,
+            "Operating cash flow" if role == OPERATING_CASH_FLOW else "Capital expenditure",
+            str(source.get("unit") or wire["reporting_unit"]),
+            f"{role}[k] = {source.get('forecast_base_ref')}[k] * share[k]",
+            driver_ref=driver_ref,
+        )
+        base_result = income_by_ref.get(str(source.get("forecast_base_result_ref")))
+        base_values = {
+            str(cell["period"]["end"]): _decimal(cell["value"], "cash-flow base result")
+            for cell in ((base_result or {}).get("cells") or [])
+            if cell.get("status") == "computed" and not cell.get("superseded_by")
+        }
+        values[result_ref] = {}
+        driver = None if driver_ref is None else by_driver.get(driver_ref)
+        for period in periods:
+            end = str(period["end"])
+            if source["status"] != "filed" or driver is None:
+                result["cells"].append(_unavailable_cell(
+                    result_ref, period, str(source["reason"])))
+                continue
+            assumption = by_assumption.get((driver_ref, end))
+            base = base_values.get(end)
+            if assumption is None:
+                result["cells"].append(_unavailable_cell(
+                    result_ref, period,
+                    f"no cash-flow share assumption for {source['concept']} in this quarter"))
+                continue
+            if base is None:
+                result["cells"].append(_unavailable_cell(
+                    result_ref, period,
+                    f"structured base {source.get('forecast_base_ref')} is unavailable "
+                    "for this quarter"))
+                continue
+            value = (base * _decimal(assumption["value"], "cash-flow assumption")).quantize(
+                _VALUE_QUANT, ROUND_HALF_UP)
+            if role == CAPITAL_EXPENDITURE and value < 0:
+                result["cells"].append(_unavailable_cell(
+                    result_ref, period,
+                    "the forecast base would make positive-outflow capital expenditure negative"))
+                continue
+            values[result_ref][end] = value
+            result["cells"].append(_computed_cell(
+                result_ref, period, value,
+                assumptions=[str(assumption["ref"])],
+                results=[{
+                    "ref": str(source["forecast_base_result_ref"]), "period_end": end,
+                }],
+            ))
+        results.append(_finish(result))
+    fcf = _result(
+        "result:free_cash_flow", None, "Free cash flow",
+        wire["reporting_unit"],
+        "free_cash_flow[k] = operating_cash_flow[k] - capital_expenditure[k]",
+    )
+    for period in periods:
+        end = str(period["end"])
+        ocf = values["result:operating_cash_flow"].get(end)
+        capex = values["result:capital_expenditure"].get(end)
+        if ocf is None or capex is None:
+            fcf["cells"].append(_unavailable_cell(
+                "result:free_cash_flow", period,
+                "operating cash flow or capital expenditure is unavailable for this quarter"))
+        else:
+            fcf["cells"].append(_computed_cell(
+                "result:free_cash_flow", period, ocf - capex,
+                results=[
+                    {"ref": "result:operating_cash_flow", "period_end": end},
+                    {"ref": "result:capital_expenditure", "period_end": end},
+                ],
+            ))
+    results.append(_finish(fcf))
+    return results
+
+
 def build_structured_forecast_model(
     spec: Mapping[str, Any], table: Mapping[str, Any], *,
     structure: Mapping[str, Any], replay: Mapping[str, Any],
@@ -1924,7 +2424,7 @@ def build_structured_forecast_model(
     evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     decision: str | None = None,
 ) -> dict[str, Any]:
-    """Build a v0.3 model from one revalidated company statement DAG."""
+    """Build a v0.4 model from the income DAG and source-bound cash companion."""
 
     from .company_financial_statement_structure import forecast_structure_binding
 
@@ -1944,18 +2444,73 @@ def build_structured_forecast_model(
     wanted = horizon.get("forecast_quarters")
     if isinstance(wanted, bool) or not isinstance(wanted, int) or wanted < 1:
         wanted = 4
-    drivers = build_structure_drivers(table, structure)
-    periods = forecast_periods(revenue_anchor(drivers), wanted)
+    income_drivers = build_structure_drivers(table, structure)
+    if spec.get("schema_version") != "0.4":
+        periods = forecast_periods(revenue_anchor(income_drivers), wanted)
+        if assumptions is None:
+            assumptions = default_structure_assumptions(
+                income_drivers, periods, structure, decided_by=actor_ref)
+        results = compute_structure_results(
+            income_drivers, assumptions, periods, structure)
+        anchor = revenue_anchor(income_drivers)
+        if evidence_refs is None:
+            evidence_refs = filing_refs(income_drivers, table.get("periods"))
+        return {
+            SOURCE_VERSION_KEY: None,
+            "schema_version": STRUCTURED_SCHEMA_VERSION,
+            "model_ref": f"forecast-model:{company_ref}",
+            "company_ref": company_ref,
+            "spec_ref": spec_ref,
+            "spec_hash": _sha256(spec.get("content_hash"), "spec.content_hash"),
+            "inputs_hash": content_hash(json.loads(canonical_json(table))),
+            "unit": str(anchor.get("unit") or "usd"),
+            "currency": str(anchor.get("unit") or "usd").upper(),
+            "history_periods": [str(item) for item in (table.get("periods") or [])],
+            "realised_periods": [],
+            "forecast_periods": [dict(item) for item in periods],
+            "statements": statement_importances(spec),
+            "formula_ref": STRUCTURE_FORMULA_REF,
+            "formula_hash": structure_formula_hash(structure, binding),
+            "generator_ref": generator_ref,
+            "drivers": income_drivers,
+            "assumptions": [dict(item) for item in assumptions],
+            "results": results,
+            "financial_statement_structure": dict(structure),
+            "financial_statement_structure_replay": dict(replay),
+            "forecast_structure_binding": dict(binding),
+            "change_reason": _one_of(change_reason, CHANGE_REASONS, "change_reason"),
+            "evidence_refs": [dict(item) for item in evidence_refs],
+            "decision": decision,
+            "mission_version_ref": mission_version_ref,
+            "actor_ref": actor_ref,
+        }
+    companion = build_cash_flow_companion(spec, table, structure)
+    cash_drivers = build_cash_flow_companion_drivers(table, companion)
+    drivers = [*income_drivers, *cash_drivers]
+    periods = forecast_periods(revenue_anchor(income_drivers), wanted)
     if assumptions is None:
-        assumptions = default_structure_assumptions(
-            drivers, periods, structure, decided_by=actor_ref)
-    results = compute_structure_results(drivers, assumptions, periods, structure)
-    anchor = revenue_anchor(drivers)
+        assumptions = [
+            *default_structure_assumptions(
+                income_drivers, periods, structure, decided_by=actor_ref),
+            *default_cash_flow_companion_assumptions(
+                income_drivers, cash_drivers, periods, companion,
+                decided_by=actor_ref),
+        ]
+        assumptions = sorted(assumptions, key=lambda item: (
+            str(item["driver_ref"]), str(item["period"]["end"])))
+    income_results = compute_structure_results(
+        income_drivers, assumptions, periods, structure)
+    results = [
+        *income_results,
+        *compute_cash_flow_companion_results(
+            cash_drivers, assumptions, periods, companion, income_results),
+    ]
+    anchor = revenue_anchor(income_drivers)
     if evidence_refs is None:
         evidence_refs = filing_refs(drivers, table.get("periods"))
     return {
         SOURCE_VERSION_KEY: None,
-        "schema_version": STRUCTURED_SCHEMA_VERSION,
+        "schema_version": STRUCTURED_CASH_SCHEMA_VERSION,
         "model_ref": f"forecast-model:{company_ref}",
         "company_ref": company_ref,
         "spec_ref": spec_ref,
@@ -1968,7 +2523,7 @@ def build_structured_forecast_model(
         "forecast_periods": [dict(item) for item in periods],
         "statements": statement_importances(spec),
         "formula_ref": STRUCTURE_FORMULA_REF,
-        "formula_hash": structure_formula_hash(structure, binding),
+        "formula_hash": cash_flow_formula_hash(structure, binding, companion),
         "generator_ref": generator_ref,
         "drivers": drivers,
         "assumptions": [dict(item) for item in assumptions],
@@ -1976,6 +2531,7 @@ def build_structured_forecast_model(
         "financial_statement_structure": dict(structure),
         "financial_statement_structure_replay": dict(replay),
         "forecast_structure_binding": dict(binding),
+        "cash_flow_companion": companion,
         "change_reason": _one_of(change_reason, CHANGE_REASONS, "change_reason"),
         "evidence_refs": [dict(item) for item in evidence_refs],
         "decision": decision,
@@ -2041,6 +2597,48 @@ def _structure_definition(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cash_companion_definition(value: Mapping[str, Any]) -> dict[str, Any]:
+    """The selected cash concepts/formula, excluding the newly filed bytes."""
+
+    wire = validate_cash_flow_companion(value)
+    lines = [{key: item[key] for key in item
+              if key not in {"source", "source_hash"}} for item in wire["lines"]]
+    return {
+        key: (lines if key == "lines" else wire[key])
+        for key in wire
+        if key not in {
+            "content_hash", "financial_input_hash", "income_structure_hash", "lines",
+        }
+    } | {"lines": lines}
+
+
+def _cash_historical_values(
+    drivers: Sequence[Mapping[str, Any]], companion: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Decimal]], dict[str, dict[str, list[dict[str, Any]]]]]:
+    values: dict[str, dict[str, Decimal]] = {}
+    refs: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    by_role = {str(item.get("role")): item for item in drivers
+               if item.get("kind") == "cash_flow"}
+    for line in companion.get("lines") or []:
+        result_ref = str(line["result_ref"])
+        values[result_ref], refs[result_ref] = {}, {}
+        driver = by_role.get(str(line["role"]))
+        for cell in quarterly_history(driver or {}):
+            end = str(cell["period_end"])
+            values[result_ref][end] = _decimal(cell["value"], "cash-flow history")
+            refs[result_ref][end] = [_cell_ref(cell)]
+    values["result:free_cash_flow"], refs["result:free_cash_flow"] = {}, {}
+    common = set(values["result:operating_cash_flow"]) & set(
+        values["result:capital_expenditure"])
+    for end in sorted(common):
+        values["result:free_cash_flow"][end] = (
+            values["result:operating_cash_flow"][end]
+            - values["result:capital_expenditure"][end]
+        )
+        refs["result:free_cash_flow"][end] = []
+    return values, refs
+
+
 def _actualize_structured_model(
     prior: Mapping[str, Any], table: Mapping[str, Any], *,
     structure: Mapping[str, Any] | None, replay: Mapping[str, Any] | None,
@@ -2074,13 +2672,45 @@ def _actualize_structured_model(
     periods_by_end = {
         str(item["end"]): dict(item) for item in (prior.get("forecast_periods") or [])
     }
-    drivers = build_structure_drivers(table, structure)
-    historical, historical_refs = _structure_historical_values(drivers, structure)
+    income_drivers = build_structure_drivers(table, structure)
+    current_companion = None
+    cash_drivers: list[dict[str, Any]] = []
+    if prior.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+        current_companion = build_cash_flow_companion(
+            {"schema_version": "0.4", "spec_id": prior["spec_ref"],
+             "content_hash": prior["spec_hash"],
+             "cash_flow_companion": prior["cash_flow_companion"]["specification"],
+             "forecast_statements": [
+                 {"statement": key, "importance": value}
+                 for key, value in (prior.get("statements") or {}).items()
+             ]},
+            table, structure,
+        )
+        prior_companion = prior.get("cash_flow_companion")
+        if (not isinstance(prior_companion, Mapping)
+                or _cash_companion_definition(prior_companion)
+                != _cash_companion_definition(current_companion)):
+            raise ForecastModelUnavailable(
+                "the cash-flow companion changed, so this is a new model rather than "
+                "an actualisation of the old one")
+        cash_drivers = build_cash_flow_companion_drivers(table, current_companion)
+    drivers = [*income_drivers, *cash_drivers]
+    historical, historical_refs = _structure_historical_values(
+        income_drivers, structure)
     result_refs = _structure_result_refs(structure)
     formulas = {
         str(item["output_ref"]): item for item in (structure.get("formulas") or [])
     }
     lines = {str(item["ref"]): item for item in (structure.get("lines") or [])}
+    cash_values: dict[str, dict[str, Decimal]] = {}
+    cash_refs: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    if current_companion is not None:
+        cash_values, cash_refs = _cash_historical_values(drivers, current_companion)
+        for item in current_companion["lines"]:
+            result_refs[str(item["ref"])] = str(item["result_ref"])
+            lines[str(item["ref"])] = item
+        result_refs["cash-flow:free-cash-flow"] = "result:free_cash_flow"
+        formulas["cash-flow:free-cash-flow"] = current_companion["formula"]
 
     results: list[dict[str, Any]] = []
     for prior_line in prior.get("results") or []:
@@ -2090,6 +2720,7 @@ def _actualize_structured_model(
             raise ForecastModelUnavailable(
                 f"result {ref} is outside the current statement structure")
         formula = formulas.get(line_ref)
+        is_cash = ref in cash_values
         cells: list[dict[str, Any]] = []
         for cell in prior_line.get("cells") or []:
             end = str(cell["period"]["end"])
@@ -2097,24 +2728,32 @@ def _actualize_structured_model(
                     or cell.get("superseded_by")):
                 cells.append(dict(cell))
                 continue
-            value = historical.get(line_ref, {}).get(end)
+            value = (cash_values.get(ref, {}).get(end) if is_cash
+                     else historical.get(line_ref, {}).get(end))
             if value is None:
                 cells.append(dict(cell))
                 continue
             if formula is None:
                 actual = _computed_cell(
                     ref, periods_by_end[end], value, kind="actual",
-                    inputs=historical_refs.get(line_ref, {}).get(end, []))
+                    inputs=(cash_refs.get(ref, {}).get(end, []) if is_cash else
+                            historical_refs.get(line_ref, {}).get(end, [])))
             else:
-                dependencies = (
-                    [str(item["line_ref"]) for item in formula["terms"]]
-                    if formula.get("operator") == "sum" else
-                    [str(formula["numerator_ref"]), str(formula["denominator_ref"])]
-                )
+                if is_cash:
+                    dependencies = [str(item["result_ref"])
+                                    for item in formula["terms"]]
+                    dependency_result_refs = dependencies
+                else:
+                    dependencies = (
+                        [str(item["line_ref"]) for item in formula["terms"]]
+                        if formula.get("operator") == "sum" else
+                        [str(formula["numerator_ref"]), str(formula["denominator_ref"])]
+                    )
+                    dependency_result_refs = [result_refs[item] for item in dependencies]
                 actual = _computed_cell(
                     ref, periods_by_end[end], value, kind="actual",
-                    results=[{"ref": result_refs[item], "period_end": end}
-                             for item in dependencies])
+                    results=[{"ref": item, "period_end": end}
+                             for item in dependency_result_refs])
             cells.append({**dict(cell), "superseded_by": actual["ref"]})
             cells.append(actual)
         updated = {**dict(prior_line), "cells": sorted(
@@ -2178,10 +2817,16 @@ def _actualize_structured_model(
         # now the filed actual rather than the superseded estimate. Replay the
         # remaining cells from the same immutable assumptions and company DAG
         # so their stored formulas and values continue to agree exactly.
+        income_replayed = compute_structure_results(
+            income_drivers, assumptions, forecast, structure)
+        replayed_results = list(income_replayed)
+        if current_companion is not None:
+            replayed_results.extend(compute_cash_flow_companion_results(
+                cash_drivers, assumptions, forecast, current_companion,
+                income_replayed))
         replayed = {
             str(item["ref"]): item
-            for item in compute_structure_results(
-                drivers, assumptions, forecast, structure)
+            for item in replayed_results
         }
         forecast_ends = {str(item["end"]) for item in forecast}
         reanchored: list[dict[str, Any]] = []
@@ -2207,13 +2852,18 @@ def _actualize_structured_model(
     body = {
         SOURCE_VERSION_KEY: str(prior["id"]),
         **{key: value for key, value in prior.items()
-           if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS)
+           if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
+                      | _CASH_COMPANION_RECORD_FIELDS)
            and key not in _BODY_EXCLUDED},
         "history_periods": [str(item) for item in (table.get("periods") or [])],
         "realised_periods": keep,
         "forecast_periods": forecast,
         "inputs_hash": content_hash(json.loads(canonical_json(table))),
-        "formula_hash": structure_formula_hash(structure, binding),
+        "formula_hash": (
+            cash_flow_formula_hash(structure, binding, current_companion)
+            if current_companion is not None else
+            structure_formula_hash(structure, binding)
+        ),
         "drivers": drivers,
         "assumptions": sorted(assumptions, key=lambda item: (
             item["driver_ref"], item["period"]["end"], item["kind"])),
@@ -2221,6 +2871,8 @@ def _actualize_structured_model(
         "financial_statement_structure": dict(structure),
         "financial_statement_structure_replay": dict(replay),
         "forecast_structure_binding": dict(binding),
+        **({"cash_flow_companion": current_companion}
+           if current_companion is not None else {}),
         "actor_ref": str(actor_ref or prior["actor_ref"]),
         "change_reason": "filing_actual",
         "evidence_refs": [dict(item) for item in evidence_refs],
@@ -2252,7 +2904,7 @@ def actualize_model(
     Returns ``None`` when no forecast quarter has been filed yet.
     """
 
-    if prior.get("schema_version") == STRUCTURED_SCHEMA_VERSION:
+    if is_structured_schema(prior.get("schema_version")):
         return _actualize_structured_model(
             prior, table, structure=structure, replay=replay, binding=binding,
             evidence_refs=evidence_refs, actor_ref=actor_ref)
@@ -2502,12 +3154,20 @@ def revise_assumptions(
     drivers = prior.get("drivers") or []
     live = [item for item in assumptions
             if str(item["period"]["end"]) in periods_by_end]
-    if prior.get("schema_version") == STRUCTURED_SCHEMA_VERSION:
+    if is_structured_schema(prior.get("schema_version")):
         structure = prior.get("financial_statement_structure")
         if not isinstance(structure, Mapping):
             raise ForecastModelValidationError(
                 "structured model carries no statement authority")
-        recomputed = compute_structure_results(drivers, live, forecast, structure)
+        income_drivers = [item for item in drivers if item.get("kind") != "cash_flow"]
+        income_results = compute_structure_results(
+            income_drivers, live, forecast, structure)
+        recomputed = list(income_results)
+        if prior.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+            companion = validate_cash_flow_companion(prior.get("cash_flow_companion"))
+            cash_drivers = [item for item in drivers if item.get("kind") == "cash_flow"]
+            recomputed.extend(compute_cash_flow_companion_results(
+                cash_drivers, live, forecast, companion, income_results))
     else:
         recomputed = compute_results(
             drivers, live, forecast, statements=prior.get("statements") or {},
@@ -2540,7 +3200,8 @@ def revise_assumptions(
     return {
         SOURCE_VERSION_KEY: str(prior["id"]),
         **{key: value for key, value in prior.items()
-           if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS)
+           if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
+                      | _CASH_COMPANION_RECORD_FIELDS)
            and key not in _BODY_EXCLUDED},
         "assumptions": sorted(assumptions, key=lambda item: (
             item["driver_ref"], item["period"]["end"], item["kind"])),
@@ -2629,15 +3290,15 @@ def model_readiness(record: Mapping[str, Any]) -> dict[str, Any]:
 
 def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str, Any]:
     cell_optional = (_CELL_OPTIONAL_FIELDS
-                     if schema_version in {SCHEMA_VERSION, STRUCTURED_SCHEMA_VERSION}
+                     if schema_version in {SCHEMA_VERSION, *STRUCTURED_SCHEMA_VERSIONS}
                      else frozenset())
     fields = (_DRIVER_FIELDS | _STRUCTURE_DRIVER_FIELDS
-              if schema_version == STRUCTURED_SCHEMA_VERSION else _DRIVER_FIELDS)
+              if is_structured_schema(schema_version) else _DRIVER_FIELDS)
     wire = _closed(value, fields, name, optional=_DRIVER_OPTIONAL_FIELDS)
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
     driver_kinds = (
         (*DRIVER_KINDS, "statement_line")
-        if schema_version == STRUCTURED_SCHEMA_VERSION else
+        if is_structured_schema(schema_version) else
         DRIVER_KINDS if schema_version == SCHEMA_VERSION else ("revenue", "expense")
     )
     wire["kind"] = _one_of(wire["kind"], driver_kinds, f"{name}.kind")
@@ -2648,12 +3309,15 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
     wire["status"] = _one_of(wire["status"], DRIVER_STATUSES, f"{name}.status")
     if wire["role"] is not None:
         allowed_roles = ROLES
-        if schema_version == STRUCTURED_SCHEMA_VERSION:
+        if is_structured_schema(schema_version):
             from .company_financial_statement_structure import ROLES as statement_roles
-            allowed_roles = statement_roles
+            allowed_roles = (
+                (*statement_roles, OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE)
+                if schema_version == STRUCTURED_CASH_SCHEMA_VERSION else statement_roles
+            )
         wire["role"] = _one_of(wire["role"], allowed_roles, f"{name}.role")
     wire["note"] = _optional_text(wire["note"], f"{name}.note")
-    if schema_version == STRUCTURED_SCHEMA_VERSION:
+    if is_structured_schema(schema_version):
         wire["structure_line_ref"] = _text(
             wire["structure_line_ref"], f"{name}.structure_line_ref")
         wire["forecast_method"] = _one_of(
@@ -2914,9 +3578,12 @@ def _normalize_result(value: Any, name: str, *, assumption_refs: set[str],
             f"{name}.driver_ref names no driver of this model")
     if wire["role"] is not None:
         allowed_roles = ROLES
-        if schema_version == STRUCTURED_SCHEMA_VERSION:
+        if is_structured_schema(schema_version):
             from .company_financial_statement_structure import ROLES as statement_roles
-            allowed_roles = statement_roles
+            allowed_roles = (
+                (*statement_roles, OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE)
+                if schema_version == STRUCTURED_CASH_SCHEMA_VERSION else statement_roles
+            )
         wire["role"] = _one_of(wire["role"], allowed_roles, f"{name}.role")
     wire["label"] = _text(wire["label"], f"{name}.label")
     wire["unit"] = _text(wire["unit"], f"{name}.unit")
@@ -2989,11 +3656,15 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     """The whole record, checked against its closed shape and its own hashes."""
 
     version = value.get("schema_version") if isinstance(value, Mapping) else None
-    fields = (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
-              if version == STRUCTURED_SCHEMA_VERSION else _RECORD_FIELDS)
+    fields = (
+        _RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
+        | (_CASH_COMPANION_RECORD_FIELDS
+           if version == STRUCTURED_CASH_SCHEMA_VERSION else frozenset())
+        if is_structured_schema(version) else _RECORD_FIELDS
+    )
     wire = _closed(value, fields, "forecast model")
     if wire["schema_version"] not in (
-        LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, STRUCTURED_SCHEMA_VERSION,
+        LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, *STRUCTURED_SCHEMA_VERSIONS,
     ):
         raise ForecastModelValidationError("forecast model schema_version is unsupported")
     for field in ("id", "created_at", "model_ref", "company_ref", "spec_ref",
@@ -3033,7 +3704,7 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     if not wire["actor_ref"].startswith(("human:", "automation:")):
         raise ForecastModelValidationError("actor_ref must use a principal namespace")
     wire["generator_ref"] = _optional_text(wire["generator_ref"], "generator_ref")
-    if wire["schema_version"] == STRUCTURED_SCHEMA_VERSION:
+    if is_structured_schema(wire["schema_version"]):
         structure = wire["financial_statement_structure"]
         replay = wire["financial_statement_structure_replay"]
         binding = wire["forecast_structure_binding"]
@@ -3059,10 +3730,41 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
             asserted = base.pop("content_hash", None)
             if not isinstance(asserted, str) or content_hash(base) != asserted:
                 raise ForecastModelValidationError(f"{name} content hash is invalid")
+        expected_formula_hash = (
+            cash_flow_formula_hash(
+                structure, binding,
+                validate_cash_flow_companion(wire["cash_flow_companion"]),
+            )
+            if wire["schema_version"] == STRUCTURED_CASH_SCHEMA_VERSION else
+            structure_formula_hash(structure, binding)
+        )
         if (wire["formula_ref"] != STRUCTURE_FORMULA_REF
-                or wire["formula_hash"] != structure_formula_hash(structure, binding)):
+                or wire["formula_hash"] != expected_formula_hash):
             raise ForecastModelValidationError(
                 "structured forecast model must bind its exact statement formula")
+        if wire["schema_version"] == STRUCTURED_CASH_SCHEMA_VERSION:
+            companion = validate_cash_flow_companion(wire["cash_flow_companion"])
+            if (
+                companion["company_ref"] != wire["company_ref"]
+                or companion["spec_ref"] != wire["spec_ref"]
+                or companion["spec_hash"] != wire["spec_hash"]
+                or companion["income_structure_hash"] != structure.get("content_hash")
+            ):
+                raise ForecastModelValidationError(
+                    "cash-flow companion belongs to another model authority")
+            result_refs = _structure_result_refs(structure)
+            structure_lines = {
+                str(item.get("ref")): item for item in structure.get("lines") or []
+            }
+            for line in companion["lines"]:
+                if line["forecast_method"] == "share_of_line" and (
+                    result_refs.get(str(line["forecast_base_ref"]))
+                    != line["forecast_base_result_ref"]
+                    or str((structure_lines.get(str(line["forecast_base_ref"])) or {}).get(
+                        "unit") or "").casefold() != companion["reporting_unit"]
+                ):
+                    raise ForecastModelValidationError(
+                        "cash-flow companion base result differs from income structure")
     elif wire["formula_ref"] != FORMULA_REF or wire["formula_hash"] != FORMULA_HASH:
         raise ForecastModelValidationError("forecast model must bind the frozen formula")
     wire["history_periods"] = [
@@ -3133,6 +3835,37 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     result_refs = {item["ref"] for item in wire["results"]}
     if len(result_refs) != len(wire["results"]):
         raise ForecastModelValidationError("result refs must be unique")
+    if wire["schema_version"] == STRUCTURED_CASH_SCHEMA_VERSION:
+        required_cash_results = {
+            "result:operating_cash_flow", "result:capital_expenditure",
+            "result:free_cash_flow",
+        }
+        if not required_cash_results.issubset(result_refs):
+            raise ForecastModelValidationError(
+                "cash-flow companion model is missing its result lines")
+        companion = wire["cash_flow_companion"]
+        expected_cash_drivers = {
+            (line["role"], line["concept"])
+            for line in companion["lines"]
+            if line["status"] in {"filed", "incomplete"}
+        }
+        actual_cash_drivers = {
+            (item["role"], item["concept"])
+            for item in wire["drivers"] if item["kind"] == "cash_flow"
+        }
+        if actual_cash_drivers != expected_cash_drivers:
+            raise ForecastModelValidationError(
+                "cash-flow companion drivers differ from its selected sources")
+        expected_driver_rows = build_cash_flow_companion_drivers(
+            {"cash_flow_inputs": [line["source"] for line in companion["lines"]
+                                  if line["source"] is not None]},
+            companion,
+        )
+        held_driver_rows = [item for item in wire["drivers"]
+                            if item["kind"] == "cash_flow"]
+        if held_driver_rows != expected_driver_rows:
+            raise ForecastModelValidationError(
+                "cash-flow companion driver history differs from its source bytes")
 
     body = {key: value for key, value in wire.items() if key not in _BODY_EXCLUDED}
     expected_body = content_hash(body)
@@ -3155,9 +3888,13 @@ def _statement_line_proof_row(row: Mapping[str, Any]) -> dict[str, Any]:
 def body_hash(body: Mapping[str, Any]) -> str:
     """What makes two models the same model: everything but when and who asked."""
 
-    fields = (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
-              if body.get("schema_version") == STRUCTURED_SCHEMA_VERSION
-              else _RECORD_FIELDS)
+    version = body.get("schema_version")
+    fields = (
+        _RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
+        | (_CASH_COMPANION_RECORD_FIELDS
+           if version == STRUCTURED_CASH_SCHEMA_VERSION else frozenset())
+        if is_structured_schema(version) else _RECORD_FIELDS
+    )
     return content_hash({key: value for key, value in body.items()
                          if key not in _BODY_EXCLUDED and key in fields})
 
@@ -3343,7 +4080,7 @@ class ForecastModelAuthority:
                         and (
                             str(row.get("unit")).casefold()
                             == str(driver.get("unit")).casefold()
-                            if wire.get("schema_version") == STRUCTURED_SCHEMA_VERSION
+                            if is_structured_schema(wire.get("schema_version"))
                             else str(row.get("unit")) == str(driver.get("unit"))
                         )
                         and row.get("dimension_axis") is None

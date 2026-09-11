@@ -54,6 +54,7 @@ from .model_forecast_driver import (
     ForecastModelAuthority,
     ForecastModelError,
     ForecastModelUnavailable,
+    is_structured_schema,
 )
 from .economic_invariants import (
     EconomicInvariantRefused,
@@ -141,7 +142,7 @@ def pending_companies(
         latest = models.latest(ref)
         pending = needs_model(latest, spec, table)
         if (pending is None and latest is not None
-                and latest.get("schema_version") == "0.3"
+                and is_structured_schema(latest.get("schema_version"))
                 and models.annual_projection(latest["id"]) is None
                 and any(item.get("form") == "10-K"
                         for item in missions.statement_filings(ref))):

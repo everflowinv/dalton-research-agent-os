@@ -179,11 +179,46 @@ def _series_for(missions: Any, company_ref: str, concept: str) -> dict[str, Any]
     }
 
 
-def _cash_flow_inputs(missions: Any, company_ref: str) -> list[dict[str, Any]]:
+def _cash_flow_inputs(
+    missions: Any, company_ref: str, spec: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     """Select exact filed cash-flow concepts, or retain a typed reason not to."""
 
+    definition = spec.get("cash_flow_companion")
+    selected_by_role = None
+    if spec.get("schema_version") == "0.4" and isinstance(definition, Mapping):
+        raw_lines = definition.get("lines")
+        if not isinstance(raw_lines, list):
+            raise ModelInputError("cash-flow companion has no selected lines")
+        selected_by_role = {
+            str(item.get("role")): item.get("concept")
+            for item in raw_lines if isinstance(item, Mapping)
+        }
+        if set(selected_by_role) != set(CASH_FLOW_ROLE_CONCEPTS):
+            raise ModelInputError("cash-flow companion selected roles differ")
+        for role, selected_concept in selected_by_role.items():
+            conflicting_roles = [
+                other_role for other_role, known_concepts in
+                CASH_FLOW_ROLE_CONCEPTS.items()
+                if other_role != role and selected_concept in known_concepts
+            ]
+            if conflicting_roles:
+                raise ModelInputError(
+                    f"cash-flow companion {role} uses a concept with known "
+                    f"{conflicting_roles[0]} semantics")
     selected: list[dict[str, Any]] = []
     for role, concepts in CASH_FLOW_ROLE_CONCEPTS.items():
+        if selected_by_role is not None:
+            selected_concept = selected_by_role[role]
+            if selected_concept is None:
+                selected.append({
+                    "role": role, "status": NOT_FOUND,
+                    "reason": f"the company specification marks {role} unavailable",
+                })
+                continue
+            if not isinstance(selected_concept, str) or not selected_concept:
+                raise ModelInputError(f"cash-flow companion {role} concept is invalid")
+            concepts = (selected_concept,)
         candidates: list[tuple[str, dict[str, Any]]] = []
         rejected: list[str] = []
         for concept in concepts:
@@ -347,7 +382,7 @@ def build_model_inputs(
         for item in (spec.get("forecast_statements") or [])
     )
     cash_flow_inputs = (
-        _cash_flow_inputs(missions, company_ref) if cash_required else []
+        _cash_flow_inputs(missions, company_ref, spec) if cash_required else []
     )
 
     # The columns are the periods the filings actually cover, newest last, cut

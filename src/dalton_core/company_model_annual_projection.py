@@ -23,7 +23,10 @@ from .company_financial_statement_structure import (
 )
 from .model_forecast_driver import (
     STRUCTURED_SCHEMA_VERSION,
+    STRUCTURED_CASH_SCHEMA_VERSION,
+    build_cash_flow_companion_drivers,
     build_structure_drivers,
+    is_structured_schema,
     structure_result_refs,
     structure_historical_values,
     validate_forecast_model,
@@ -520,6 +523,109 @@ def _line_outcomes(
     return projected
 
 
+def _cash_line_outcomes(
+    model: Mapping[str, Any], inputs: Mapping[str, Any], label: str,
+    group: Sequence[str], calendar: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Annualize the exact companion quarters without inventing a cash statement."""
+
+    companion = model.get("cash_flow_companion") or {}
+    try:
+        drivers = build_cash_flow_companion_drivers(inputs, companion)
+    except Exception as exc:
+        raise AnnualProjectionError("cash-flow companion inputs do not replay") from exc
+    results = {str(item.get("ref")): item for item in (model.get("results") or [])}
+    by_role = {str(item.get("role")): item for item in drivers}
+    fiscal_year = f"{calendar['calendar_ref']}:{label}"
+    quarter_cells: dict[str, list[dict[str, Any]]] = {}
+    projected: dict[str, dict[str, Any]] = {}
+    for line in companion.get("lines") or []:
+        role, result_ref = str(line["role"]), str(line["result_ref"])
+        driver = by_role.get(role)
+        result = results.get(result_ref)
+        by_end: dict[str, dict[str, Any]] = {}
+        for cell in (driver or {}).get("history") or []:
+            if cell.get("period_start") and cell.get("period_end"):
+                by_end[str(cell["period_end"])] = {
+                    "period_start": str(cell["period_start"]),
+                    "period_end": str(cell["period_end"]),
+                    "period_kind": "quarter", "value": str(cell["value"]),
+                    "unit": str(line.get("unit") or "").casefold(),
+                    "calendar": calendar["content_hash"],
+                    "definition_ref": f"{companion['content_hash']}:{line['ref']}",
+                    "fiscal_year": fiscal_year,
+                    "source_accessions": list(cell.get("accessions") or []),
+                    "source_forms": list(cell.get("source_forms") or []),
+                    "derived_from": [dict(item) for item in
+                                     (cell.get("derived_from") or [])],
+                    "input_cell_refs": [{
+                        "kind": "input_cell", "ref": None,
+                        "concept": str(cell["concept"]),
+                        "period_end": str(cell["period_end"]),
+                        "accession": str(accession),
+                    } for accession in (cell.get("accessions") or [])],
+                }
+        for cell in (result or {}).get("cells") or []:
+            period = cell.get("period") or {}
+            if (cell.get("status") == "computed" and not cell.get("superseded_by")
+                    and period.get("kind") == "quarter"):
+                by_end[str(period["end"])] = {
+                    "period_start": str(period["start"]),
+                    "period_end": str(period["end"]), "period_kind": "quarter",
+                    "value": str(cell["value"]),
+                    "unit": str(line.get("unit") or "").casefold(),
+                    "calendar": calendar["content_hash"],
+                    "definition_ref": f"{companion['content_hash']}:{line['ref']}",
+                    "fiscal_year": fiscal_year, "model_cell_ref": cell["ref"],
+                }
+        selected = [by_end[end] for end in group if end in by_end]
+        quarter_cells[result_ref] = selected
+        outcome = aggregate_fiscal_year(
+            selected, semantic="sum_quarters", fiscal_year=fiscal_year)
+        if outcome.get("status") == "unavailable" and selected:
+            # An incomplete annual result is still backed by real filed/model
+            # quarters.  Keep those exact dependencies visible while refusing
+            # to turn a partial year into a value.
+            outcome = {**outcome, "source_periods": selected}
+        projected[result_ref] = {
+            "line_ref": str(line["ref"]), "role": role,
+            "label": ("Operating cash flow" if role == "operating_cash_flow"
+                      else "Capital expenditure"),
+            **outcome,
+        }
+    fcf_cells: list[dict[str, Any]] = []
+    ocf = {item["period_end"]: item for item in
+           quarter_cells.get("result:operating_cash_flow", [])}
+    capex = {item["period_end"]: item for item in
+             quarter_cells.get("result:capital_expenditure", [])}
+    for end in group:
+        if end not in ocf or end not in capex or (
+            ocf[end].get("period_start") != capex[end].get("period_start")
+            or ocf[end].get("period_end") != capex[end].get("period_end")
+            or ocf[end].get("unit") != capex[end].get("unit")
+        ):
+            continue
+        fcf_cells.append({
+            "period_start": ocf[end]["period_start"], "period_end": end,
+            "period_kind": "quarter",
+            "value": str(Decimal(ocf[end]["value"]) - Decimal(capex[end]["value"])),
+            "unit": ocf[end]["unit"], "calendar": calendar["content_hash"],
+            "definition_ref": f"{companion['content_hash']}:result:free_cash_flow",
+            "fiscal_year": fiscal_year,
+            "result_refs": [
+                {"ref": "result:operating_cash_flow", "period_end": end},
+                {"ref": "result:capital_expenditure", "period_end": end},
+            ],
+        })
+    projected["result:free_cash_flow"] = {
+        "line_ref": "cash-flow:free-cash-flow", "role": "free_cash_flow",
+        "label": "Free cash flow",
+        **aggregate_fiscal_year(
+            fcf_cells, semantic="sum_quarters", fiscal_year=fiscal_year),
+    }
+    return projected
+
+
 def build_annual_projection(
     *, model: Mapping[str, Any], inputs: Mapping[str, Any],
     calendar_binding: Mapping[str, Any] | None,
@@ -532,7 +638,7 @@ def build_annual_projection(
         held = validate_forecast_model(model_wire)
     except Exception as exc:
         raise AnnualProjectionError("forecast model authority is invalid") from exc
-    if held.get("schema_version") != STRUCTURED_SCHEMA_VERSION:
+    if not is_structured_schema(held.get("schema_version")):
         raise AnnualProjectionError("annual projection requires a structured forecast model")
     exact_inputs_hash = content_hash(json.loads(canonical_json(inputs)))
     if (held.get("inputs_hash") != exact_inputs_hash
@@ -592,6 +698,9 @@ def build_annual_projection(
             forecast_shares=row["forecast_shares"],
             forecast_eps=row["forecast_eps"],
         )
+        if held.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+            row["line_outcomes"].update(
+                _cash_line_outcomes(held, inputs, label, group, calendar))
         rows.append(row)
     body = {
         "schema_version": SCHEMA_VERSION,

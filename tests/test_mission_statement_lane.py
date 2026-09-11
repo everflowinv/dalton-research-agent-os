@@ -38,7 +38,7 @@ def _model_spec(*, historical_quarters):
     """The smallest specification the frame accepts, with a chosen horizon."""
 
     return {
-        "schema_version": "0.3",
+        "schema_version": "0.4",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: heads times realised rate.",
         "revenue_drivers": [{
@@ -101,6 +101,22 @@ def _model_spec(*, historical_quarters):
                 "tie_out_concept": "us-gaap:NetIncomeLoss",
                 "evidence_refs": [ACCESSION],
             }],
+        },
+        "cash_flow_companion": {
+            "schema_version": "0.1",
+            "lines": [
+                {"role": "operating_cash_flow", "concept": None,
+                 "forecast_method": "unavailable", "forecast_base_ref": None,
+                 "because": "The fixture carries no cash statement line."},
+                {"role": "capital_expenditure", "concept": None,
+                 "forecast_method": "unavailable", "forecast_base_ref": None,
+                 "because": "The fixture carries no cash statement line."},
+            ],
+            "formula": {"output_ref": "free_cash_flow", "operator": "sum",
+                        "terms": [
+                            {"role": "operating_cash_flow", "coefficient": "1"},
+                            {"role": "capital_expenditure", "coefficient": "-1"},
+                        ]},
         },
     }
 

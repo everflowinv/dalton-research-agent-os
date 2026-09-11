@@ -258,9 +258,89 @@ class ModelInputTests(unittest.TestCase):
         by_role = {item["role"]: item for item in table["cash_flow_inputs"]}
         self.assertEqual(by_role["operating_cash_flow"]["status"], INCOMPLETE)
         self.assertTrue(by_role["operating_cash_flow"]["gaps"])
-        self.assertEqual(by_role["capital_expenditure"]["status"], NOT_FOUND)
-        self.assertIn("outflow sign convention",
-                      by_role["capital_expenditure"]["reason"])
+
+    def test_v04_cash_input_uses_exact_company_selected_concepts(self):
+        periods = (("2025-01-01", "2025-03-31"),
+                   ("2025-04-01", "2025-06-30"),
+                   ("2025-07-01", "2025-09-30"),
+                   ("2025-10-01", "2025-12-31"))
+        selected = {
+            "operating_cash_flow": "acme:CashGeneratedFromOperations",
+            "capital_expenditure": "acme:PurchasesOfEquipment",
+        }
+        cash = [
+            _line(concept, start, end, "100" if role == "operating_cash_flow" else "10",
+                  statement="cash")
+            for role, concept in selected.items() for start, end in periods
+        ]
+        spec = {
+            **_spec(), "schema_version": "0.4",
+            "forecast_statements": [{"statement": "cash", "importance": "required"}],
+            "cash_flow_companion": {
+                "schema_version": "0.1",
+                "lines": [
+                    {"role": role, "concept": concept,
+                     "forecast_method": "share_of_line",
+                     "forecast_base_ref": "revenue", "because": "Company selected."}
+                    for role, concept in selected.items()
+                ],
+                "formula": {"output_ref": "free_cash_flow", "operator": "sum",
+                            "terms": []},
+            },
+        }
+        table = build_model_inputs(FakeMissions(self.ledger().lines + cash), spec)
+        self.assertEqual(
+            {item["role"]: item.get("concept") for item in table["cash_flow_inputs"]},
+            selected,
+        )
+
+    def test_v04_cash_input_rejects_negative_selected_capex(self):
+        periods = (("2025-01-01", "2025-03-31"),
+                   ("2025-04-01", "2025-06-30"),
+                   ("2025-07-01", "2025-09-30"),
+                   ("2025-10-01", "2025-12-31"))
+        cash = [
+            _line("acme:CashGeneratedFromOperations", start, end, "100", statement="cash")
+            for start, end in periods
+        ] + [
+            _line("acme:PurchasesOfEquipment", start, end, "-10", statement="cash")
+            for start, end in periods
+        ]
+        spec = {
+            **_spec(), "schema_version": "0.4",
+            "forecast_statements": [{"statement": "cash", "importance": "required"}],
+            "cash_flow_companion": {
+                "schema_version": "0.1",
+                "lines": [
+                    {"role": "operating_cash_flow",
+                     "concept": "acme:CashGeneratedFromOperations"},
+                    {"role": "capital_expenditure",
+                     "concept": "acme:PurchasesOfEquipment"},
+                ],
+            },
+        }
+        table = build_model_inputs(FakeMissions(self.ledger().lines + cash), spec)
+        capex = next(item for item in table["cash_flow_inputs"]
+                     if item["role"] == "capital_expenditure")
+        self.assertEqual(capex["status"], NOT_FOUND)
+        self.assertIn("outflow sign convention", capex["reason"])
+
+    def test_v04_cash_input_refuses_a_known_concept_under_the_other_role(self):
+        spec = {
+            **_spec(), "schema_version": "0.4",
+            "forecast_statements": [{"statement": "cash", "importance": "required"}],
+            "cash_flow_companion": {
+                "schema_version": "0.1",
+                "lines": [
+                    {"role": "operating_cash_flow",
+                     "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"},
+                    {"role": "capital_expenditure",
+                     "concept": "us-gaap:NetCashProvidedByUsedInOperatingActivities"},
+                ],
+            },
+        }
+        with self.assertRaisesRegex(ModelInputError, "known capital_expenditure"):
+            build_model_inputs(self.ledger(), spec)
 
     def test_cash_input_rejects_wrong_statement_dimensions_and_mixed_units(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"

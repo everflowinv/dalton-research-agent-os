@@ -53,11 +53,14 @@ from .model_forecast_driver import (
     ForecastModelUnavailable,
     SOURCE_VERSION_KEY,
     actualize_model,
+    build_cash_flow_companion,
     build_forecast_model,
     build_structured_forecast_model,
     model_readiness,
+    is_structured_schema,
     realised_ends,
     structure_formula_hash,
+    cash_flow_formula_hash,
 )
 from .store import canonical_json, content_hash
 
@@ -116,14 +119,25 @@ def model_digest(spec: Mapping[str, Any], table: Mapping[str, Any]) -> str:
     if isinstance(spec.get("financial_statement_structure"), Mapping):
         structure, replay = materialize_financial_statement_structure(spec, table)
         statement_binding = forecast_structure_binding(structure, replay, table)
+        cash_companion = (
+            build_cash_flow_companion(spec, table, structure)
+            if spec.get("schema_version") == "0.4" else None
+        )
+    else:
+        cash_companion = None
     return content_hash({
         "spec_ref": str(spec.get("spec_id") or ""),
         "spec_hash": str(spec.get("content_hash") or ""),
         "inputs_hash": inputs_hash(table),
         "generator_ref": GENERATOR_REF,
-        "formula_hash": (DRIVER_FORMULA_HASH if statement_binding is None
-                         else structure_formula_hash(structure, statement_binding)),
+        "formula_hash": (
+            DRIVER_FORMULA_HASH if statement_binding is None else
+            cash_flow_formula_hash(structure, statement_binding, cash_companion)
+            if cash_companion is not None else
+            structure_formula_hash(structure, statement_binding)
+        ),
         "forecast_structure_binding": statement_binding,
+        "cash_flow_companion": cash_companion,
     })
 
 
@@ -186,7 +200,7 @@ def publish_forecast_lines(
     version_ref = str(record["id"])
     line_formula_ref, line_formula_hash = (
         (STRUCTURED_DRIVER_FORMULA_REF, STRUCTURED_DRIVER_FORMULA_HASH)
-        if record.get("schema_version") == "0.3" else
+        if is_structured_schema(record.get("schema_version")) else
         (DRIVER_FORMULA_REF, DRIVER_FORMULA_HASH)
     )
     ahead = {str(item["end"]) for item in (record.get("forecast_periods") or [])}
@@ -258,7 +272,7 @@ def _annual_projection(
 ) -> dict[str, Any] | None:
     """Persist the model's annual view from one exact annual filing calendar."""
 
-    if record.get("schema_version") != "0.3":
+    if not is_structured_schema(record.get("schema_version")):
         return None
     annual = [item for item in missions.statement_filings(record["company_ref"])
               if item.get("form") == "10-K"]
