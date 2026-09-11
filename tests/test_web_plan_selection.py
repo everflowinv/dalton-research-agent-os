@@ -21,6 +21,7 @@ class WebPlanSelectionTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "deploy/phase9/p9d4-us-it-services-web-search-plan-v3.json"
         self.plan = load_discovery_plan(source)
         self.plan.update(schema_version="0.5", id="discovery-plan:web:cooldown")
+        self.plan["budget"]["max_calls_24h"] = 5000
         self.plan["acquisition"]["failure_cooldown"] = {
             "minimum_distinct_urls": 3, "window_seconds": 86400,
             "cooldown_seconds": 21600,
@@ -61,6 +62,7 @@ class WebPlanSelectionTests(unittest.TestCase):
             self.assertEqual(args[args.index("--sec-filings-discovery-plan") + 1],
                              str(self.plans / "us-it-services-sec-filings-v1.json"))
         self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(load_discovery_plan(self.path)["budget"]["max_calls_24h"], 5000)
 
     def test_changed_policy_bytes_cannot_borrow_selection(self):
         self.select()

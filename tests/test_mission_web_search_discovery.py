@@ -106,8 +106,8 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
         plan = load_discovery_plan(WEB_PLAN_PATH)
         self.assertEqual((plan["schema_version"], plan["source_ref"]), ("0.3", WEB_SEARCH_SOURCE_REF))
         self.assertEqual(plan["id"], "discovery-plan:us-it-services:web-search:3")
-        # Searches and page fetches share this window (P9d-4b); the owner
-        # raised it to the contract ceiling once the provider was Gemini Flash.
+        # Searches and page fetches share this window (P9d-4b); this is the
+        # owner's selected budget, rather than a validator-imposed ceiling.
         self.assertEqual(plan["budget"], {"max_calls_24h": 1000})
         self.assertEqual(sorted(plan["companies"]), sorted(load_discovery_plan(
             ROOT / "deploy/phase9/p9d-us-it-services-discovery-plan-v1.json")["companies"]))
@@ -129,7 +129,7 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
         bad_cases = {
             "0.1 cannot name web search": {**{k: v for k, v in web.items() if k != "budget"}, "schema_version": "0.1"},
             "0.2 needs a budget": {k: v for k, v in web.items() if k != "budget"},
-            "budget above the ceiling": {**web, "budget": {"max_calls_24h": 1001}},
+            "budget outside storage range": {**web, "budget": {"max_calls_24h": 9223372036854775808}},
             "web spec cannot carry document_type": {
                 **web, "specs": [{**web["specs"][0], "document_type": "news"}],
             },
@@ -153,6 +153,15 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
                 mission_ref="coverage-mission:us-it-services", companies={ACN: "Accenture ACN"},
                 source_ref=WEB_SEARCH_SOURCE_REF, specs=web["specs"],
             )
+
+        governed = build_discovery_plan(
+            plan_id="discovery-plan:x:web:large-budget",
+            created_at=NOW.isoformat(timespec="microseconds"),
+            mission_ref="coverage-mission:us-it-services",
+            companies={ACN: "Accenture ACN"}, source_ref=WEB_SEARCH_SOURCE_REF,
+            specs=web["specs"], max_calls_24h=5000,
+        )
+        self.assertEqual(validate_discovery_plan(governed)["budget"]["max_calls_24h"], 5000)
 
     def test_parameters_compile_to_a_dated_search_web_spec(self) -> None:
         plan = web_plan_for_tests()
@@ -390,6 +399,20 @@ class WebCoordinatorTests(unittest.TestCase):
         params = mission_with_web_status(self.state, status=status, grant=grant, version=version, prior=prior)
         ref = params.pop("mission_ref")
         return self.missions.create_mission(ref, **params)
+
+    def test_explicit_plan_budget_above_old_display_ceiling_reserves_normally(self):
+        self.plan = web_plan_for_tests(max_calls_24h=5000)
+        self.launcher = FakeWebSearchLauncher(self.h, self.missions, self.plan)
+        self.coordinator = MissionSourceDiscoveryCoordinator(
+            store=self.h.core, missions=self.missions, plan=self.plan,
+            search_launcher=self.launcher, acquisition_launcher=None, clock=self.clock,
+        )
+        mission = self.publish(status="connected", grant=True)
+        launched = self.coordinator.launch_discovery()
+        self.assertEqual(launched["status"], "launched")
+        budget = self.coordinator._budget(mission["budget"]["max_alphaengine_calls_24h"])
+        self.assertEqual(budget, {"spent": 1, "cap": 5000, "remaining": 4998,
+                                  "reserved": 1})
 
     def test_documents_stranded_by_a_mission_version_change_are_carried_forward(self) -> None:
         """P9d-12: publishing a new version must not orphan the prior version's queue.

@@ -141,9 +141,10 @@ TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "alphaengine-discovery"
 WEB_SEARCH_TICKET_PREFIX = "web-search-discovery"
 LIVE_MODE_ARGS = ("--allow-network",)
-# Hard ceiling on a plan's own trailing-24h call budget; a bigger number is
-# an owner decision that belongs in governance, not in a plan file.
-MAX_PLAN_CALLS_24H = 1000
+# JSON plan values are later compared with SQLite integer aggregates.  This is
+# a representation bound, not a product budget: the signed owner plan and, for
+# AlphaEngine, the mission/owner authority determine the actual allowance.
+MAX_STORED_CALLS_24H = (1 << 63) - 1
 # An acquisition child that failed (provider error, or orphaned by a deploy
 # restart) is retried once this interval has passed; fresh documents are
 # always acquired first.
@@ -345,7 +346,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
             raise DiscoveryPlanError("discovery plan budget must have exactly max_calls_24h")
         budget = {
             "max_calls_24h": _positive_int(
-                raw_budget["max_calls_24h"], "budget.max_calls_24h", maximum=MAX_PLAN_CALLS_24H
+                raw_budget["max_calls_24h"], "budget.max_calls_24h", maximum=MAX_STORED_CALLS_24H
             ),
         }
     acquisition: dict[str, list[str]] | None = None
@@ -2228,7 +2229,7 @@ __all__ = [
     "DiscoveryPlanError",
     "DiscoveryTicketNotFound",
     "LIVE_MODE_ARGS",
-    "MAX_PLAN_CALLS_24H",
+    "MAX_STORED_CALLS_24H",
     "MissionSourceDiscoveryCoordinator",
     "WEB_SEARCH_SOURCE_REF",
     "WEB_SEARCH_TICKET_PREFIX",

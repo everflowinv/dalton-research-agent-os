@@ -247,7 +247,7 @@
         "max_calls_24h": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 1000
+          "maximum": 9223372036854775807
         }
       }
     },
