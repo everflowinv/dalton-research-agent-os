@@ -125,6 +125,36 @@ class BoundedRawSink:
                 pass
 
 
+class RawSpoolReader:
+    """Read existing content-addressed objects without creating or chmoding paths.
+
+    ``data_dir`` has the same meaning as for RawSpool, including its existing
+    connector-spool suffix. No write or reservation methods are exposed.
+    """
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self._root = Path(data_dir).resolve() / "connector-spool"
+        self._objects = self._root / "objects"
+        if (not self._objects.is_dir() or self._root.is_symlink()
+                or self._objects.is_symlink()):
+            raise RawSpoolError("existing raw object directory is unavailable")
+
+    def object_exists(self, content_hash: str) -> bool:
+        if not isinstance(content_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", content_hash):
+            raise RawSpoolError("content_hash must be lowercase SHA-256")
+        directory = self._objects / content_hash[:2]
+        path = directory / content_hash
+        return directory.is_dir() and not directory.is_symlink() and path.is_file() and not path.is_symlink()
+
+    def read_object(self, content_hash: str) -> bytes:
+        if not self.object_exists(content_hash):
+            raise RawSpoolError("raw object not found")
+        path = self._objects / content_hash[:2] / content_hash
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            return stream.read()
+
+
 class RawSpool:
     def __init__(self, data_dir: str | Path, *, max_total_bytes: int) -> None:
         if isinstance(max_total_bytes, bool) or not isinstance(max_total_bytes, int):
@@ -237,5 +267,5 @@ class RawSpool:
 
 __all__ = [
     "BoundedRawSink", "RawObject", "RawSpool", "RawSpoolCapacityError",
-    "RawSpoolError", "RawSpoolLimitExceeded",
+    "RawSpoolError", "RawSpoolLimitExceeded", "RawSpoolReader",
 ]

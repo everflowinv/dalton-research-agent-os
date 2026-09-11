@@ -87,6 +87,78 @@ class ConnectorCompletionReceiptReader:
         }
 
 
+class ReadOnlyConnectorReceiptReader:
+    """Read existing Core receipts without constructing schema-owning stores.
+
+    The connection remains owned by the caller. This port exposes SELECTs
+    only, and performs no migrations, backfills, commits or file creation.
+    Source validators still verify the returned immutable records and hashes.
+    """
+
+    __slots__ = ("_connection",)
+
+    def __init__(self, connection: Any):
+        import sqlite3
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("read-only receipt port requires a SQLite connection")
+        self._connection = connection
+
+    def _record(self, table: str, column: str, ref: str, *, required: bool = False) -> dict[str, Any] | None:
+        from .connector import ConnectorNotFound, ConnectorValidationError
+        if not isinstance(ref, str) or not ref.strip():
+            raise ConnectorValidationError("receipt reference must be non-empty text")
+        row = self._connection.execute(
+            f"SELECT record_json FROM {table} WHERE {column}=?", (ref,)
+        ).fetchone()
+        if row is None:
+            if required:
+                raise ConnectorNotFound(ref)
+            return None
+        return json.loads(row[0])
+
+    def get_profile(self, ref: str) -> dict[str, Any]:
+        return self._record("connector_profile_versions", "profile_version_id", ref, required=True)
+
+    def get_call_spec(self, ref: str) -> dict[str, Any]:
+        return self._record("connector_call_specs", "call_spec_id", ref, required=True)
+
+    def get_invocation(self, ref: str) -> dict[str, Any]:
+        return self._record("connector_invocations", "connector_invocation_id", ref, required=True)
+
+    def get_reservation(self, ref: str) -> dict[str, Any]:
+        return self._record("connector_quota_reservations", "reservation_id", ref, required=True)
+
+    def get_physical_attempt(self, ref: str) -> dict[str, Any] | None:
+        return self._record("connector_physical_attempts", "physical_attempt_id", ref)
+
+    def get_usage_entry(self, ref: str) -> dict[str, Any] | None:
+        return self._record("connector_usage_entries", "usage_entry_id", ref)
+
+    def get_cost_entry(self, ref: str) -> dict[str, Any] | None:
+        return self._record("connector_cost_entries", "cost_entry_id", ref)
+
+    def get_quota_settlement(self, ref: str) -> dict[str, Any] | None:
+        return self._record("connector_quota_settlements", "settlement_id", ref)
+
+    def get_source_envelope(self, ref: str) -> dict[str, Any] | None:
+        return self._record("connector_source_envelopes", "source_envelope_id", ref)
+
+    def get_artifact_version(self, ref: str) -> dict[str, Any]:
+        from .observability import ObservabilityNotFound
+        record = self._record("observability_artifact_versions_v2", "version_id", ref)
+        if record is None:
+            raise ObservabilityNotFound("artifact version v0.2 not found")
+        return record
+
+    def get_execution(self, ref: str) -> dict[str, Any] | None:
+        if not isinstance(ref, str) or not ref.strip():
+            raise ValueError("execution reference must be non-empty text")
+        row = self._connection.execute(
+            "SELECT execution_json,content_hash FROM execution_invocations WHERE execution_id=?", (ref,)
+        ).fetchone()
+        return None if row is None else {"execution": json.loads(row[0]), "content_hash": row[1]}
+
+
 class ConnectorAuthorityPort:
     """Expose only the seven writes needed to finish a physical attempt.
 
@@ -224,4 +296,4 @@ class ConnectorAuthorityPort:
         }
 
 
-__all__ = ["ConnectorAuthorityPort", "ConnectorCompletionReceiptReader"]
+__all__ = ["ConnectorAuthorityPort", "ConnectorCompletionReceiptReader", "ReadOnlyConnectorReceiptReader"]
