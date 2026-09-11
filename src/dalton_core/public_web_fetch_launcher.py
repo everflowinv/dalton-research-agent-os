@@ -36,6 +36,7 @@ from .public_web_core_fetch import (
     validate_public_web_fetch_manifest,
 )
 from .child_tickets import adopt_finished_child
+from .launch_drain import _ticket_process_matches
 from .store import canonical_json
 
 
@@ -83,6 +84,28 @@ def _write_owner_only(path: Path, value: Mapping[str, Any]) -> None:
     tmp.write_text(canonical_json(value) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def _read_owner_only_ticket(path: Path) -> tuple[dict[str, Any], float]:
+    """Read one bounded ticket generation without following its file symlink."""
+
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise ValueError("fetch ticket directory cannot be a symlink")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o077
+                or before.st_uid != os.getuid() or before.st_size > 100_000):
+            raise ValueError("fetch ticket must be bounded and owner-only")
+        payload = handle.read(100_001)
+        after = os.fstat(handle.fileno())
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+        raise ValueError("fetch ticket changed while it was read")
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("fetch ticket must be an object")
+    return value, after.st_mtime
 
 
 class PublicWebFetchLauncher:
@@ -139,6 +162,46 @@ class PublicWebFetchLauncher:
     def _ticket_path(self, ticket_id: str) -> Path:
         return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
 
+    def _durable_running_ticket(self) -> tuple[str, str] | None:
+        """Return an earlier live ticket, including one from a prior writer.
+
+        ``_current`` protects the one-fetch slot while this launcher instance
+        lives.  The ticket is written before the coordinator records its
+        ``acquisition_launched`` row, though, so a writer restart in that
+        interval used to forget the occupied slot and could launch the same
+        recovery probe twice.  The owner-only ticket directory is the durable
+        side of that hand-off.  Dead children are finalized here by the same
+        summary-adoption rule as :meth:`status`; a child whose pid is still
+        alive keeps the slot occupied.
+        """
+
+        for path in sorted(self.tickets_dir.glob("*/ticket.json")):
+            try:
+                record, ticket_mtime = _read_owner_only_ticket(path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if not isinstance(record, dict) or record.get("status") != "running":
+                continue
+            ticket_id = record.get("id")
+            if (not isinstance(ticket_id, str) or _TICKET_RE.fullmatch(ticket_id) is None
+                    or self._ticket_path(ticket_id) != path):
+                continue
+            if self._pid_alive(record.get("pid")):
+                identity = _ticket_process_matches(record, ticket_mtime)
+                if identity is not False:
+                    return ticket_id, ("matched" if identity is True else "identity_unknown")
+            self._finish_untracked_ticket(path, record)
+        return None
+
+    def _finish_untracked_ticket(self, path: Path, record: dict[str, Any]) -> None:
+        """Settle a ticket whose original process identity is no longer live."""
+
+        now = _wire_time(self.clock())
+        if not adopt_finished_child(record, path.with_name("summary.json"), now=now):
+            record["status"] = "orphaned"
+            record["completed_at"] = now
+        _write_owner_only(path, record)
+
     def _command(self, *, url_ref: str, requested_by: str, ticket_dir: Path) -> list[str]:
         command = [
             self.python_executable, "-m", "dalton_core.public_web_fetch_cli",
@@ -182,6 +245,12 @@ class PublicWebFetchLauncher:
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
                 raise FetchLaunchConflict(f"fetch {self._current[0]} is still running")
+            durable_ticket = self._durable_running_ticket()
+            if durable_ticket is not None:
+                ticket_id, identity = durable_ticket
+                detail = ("" if identity == "matched"
+                          else "; live pid identity is unknown and conservatively holds the slot")
+                raise FetchLaunchConflict(f"fetch {ticket_id} is still running{detail}")
             started_at = _wire_time(self.clock())
             digest = hashlib.sha256(
                 canonical_json({
@@ -216,6 +285,7 @@ class PublicWebFetchLauncher:
                 "catalog_db": str(self.catalog_db),
                 "started_at": started_at,
                 "pid": process.pid,
+                "command": command,
                 "status": "running",
                 "exit_code": None,
                 "completed_at": None,
@@ -229,9 +299,13 @@ class PublicWebFetchLauncher:
             raise FetchLaunchRejected(f"ticket_ref must be {TICKET_PREFIX}:<hex>")
         path = self._ticket_path(ticket_ref)
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            record, ticket_mtime = _read_owner_only_ticket(path)
         except FileNotFoundError as exc:
             raise FetchTicketNotFound(ticket_ref) from exc
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise FetchLaunchRejected("fetch ticket is invalid") from exc
+        process_identity = None
+        process_identity_reason = None
         with self._lock:
             process = None
             if self._current is not None and self._current[0] == ticket_ref:
@@ -244,21 +318,30 @@ class PublicWebFetchLauncher:
                         record["completed_at"] = _wire_time(self.clock())
                         record["status"] = "succeeded" if code == 0 else "failed"
                         _write_owner_only(path, record)
-                elif not self._pid_alive(record.get("pid")):
-                    # The writer restarted (or the child died) before this
-                    # ticket was settled.  If the child left its own final
-                    # summary, take that; the settle path re-verifies
-                    # authority anyway.  Otherwise it is orphaned.
-                    now = _wire_time(self.clock())
-                    if not adopt_finished_child(record, path.with_name("summary.json"), now=now):
-                        record["status"] = "orphaned"
-                        record["completed_at"] = now
-                    _write_owner_only(path, record)
+                else:
+                    alive = self._pid_alive(record.get("pid"))
+                    identity = _ticket_process_matches(record, ticket_mtime) if alive else False
+                    if alive and identity is not False:
+                        process_identity = "matched" if identity is True else "identity_unknown"
+                        if identity is None:
+                            process_identity_reason = (
+                                "live pid identity could not be proved; ticket conservatively holds slot")
+                    else:
+                        # The writer restarted (or the child died) before this
+                        # ticket was settled.  If the child left its own final
+                        # summary, take that; the settle path re-verifies
+                        # authority anyway.  Otherwise it is orphaned.
+                        self._finish_untracked_ticket(path, record)
         summary_path = path.with_name("summary.json")
         summary = None
         if record["status"] != "running" and summary_path.is_file():
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        return {**record, "summary": summary}
+        return {
+            **record, "summary": summary,
+            **({"process_identity": process_identity} if process_identity is not None else {}),
+            **({"process_identity_reason": process_identity_reason}
+               if process_identity_reason is not None else {}),
+        }
 
     @staticmethod
     def _fetched_url_ref(summary: Mapping[str, Any], document_ref: str) -> str:

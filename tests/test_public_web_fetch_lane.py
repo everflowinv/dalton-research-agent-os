@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.capability_catalog import CapabilityCatalog
 from dalton_core.connector_governance import ConnectorGovernance, WEB_FETCH_KIND, build_governance_record
@@ -51,6 +53,7 @@ from dalton_core.document_extraction import (
 from dalton_core.model_router import ModelRouter
 from dalton_core.public_web_fetch_cli import _fetch_failure_reason, fake_page_transport
 from dalton_core.public_web_fetch_launcher import (
+    FetchLaunchConflict,
     FetchLaunchRejected,
     FetchTicketNotFound,
     PublicWebFetchLauncher,
@@ -739,6 +742,75 @@ class FetchChildTests(unittest.TestCase):
         orphan = self.launcher().status(ticket["id"])
         self.assertEqual(orphan["status"], "orphaned")
         self.assertNotIn("adopted_from_summary", orphan)
+
+    def test_restart_preserves_single_slot_before_mission_row_records_ticket(self) -> None:
+        """A durable live ticket closes the launch-to-ledger restart seam.
+
+        The fetch child is started before the mission coordinator records its
+        ticket on the discovered-document row.  Recreating the launcher in
+        that narrow interval must not forget the occupied slot and start a
+        second host-recovery probe.
+        """
+
+        launcher = self.launcher()
+        launcher._command = lambda **_ignored: [
+            launcher.python_executable, "-c", "import time; time.sleep(30)",
+            "live argument under Application Support",
+        ]
+        ticket = launcher.start_bounded_probe(document_ref=URL_A, caller_ref=AUTOMATION)
+        try:
+            self.assertEqual(ticket["command"], [
+                launcher.python_executable, "-c", "import time; time.sleep(30)",
+                "live argument under Application Support",
+            ])
+            restarted = self.launcher()
+            self.assertEqual(restarted.status(ticket["id"])["process_identity"], "matched")
+            restarted._command = lambda **_ignored: (
+                _ for _ in ()).throw(AssertionError("second spawn reached"))
+            with self.assertRaisesRegex(FetchLaunchConflict, ticket["id"]):
+                restarted.start_bounded_probe(document_ref=URL_B, caller_ref=AUTOMATION)
+        finally:
+            launcher.close()
+
+    def test_reused_pid_does_not_keep_durable_slot_busy(self) -> None:
+        launcher = self.launcher()
+        launcher._command = lambda **_ignored: [
+            launcher.python_executable, "-c", "import time; time.sleep(30)",
+        ]
+        ticket = launcher.start_bounded_probe(document_ref=URL_A, caller_ref=AUTOMATION)
+        launcher.close()
+        path = launcher._ticket_path(ticket["id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["pid"] = os.getpid()  # alive, but command/start time identify another process
+        path.write_text(canonical_json(record) + "\n", encoding="utf-8")
+        path.chmod(0o600)
+
+        restarted = self.launcher()
+        self.assertEqual(restarted.status(ticket["id"])["status"], "orphaned")
+        restarted._command = lambda **_ignored: (_ for _ in ()).throw(RuntimeError("spawn reached"))
+        with self.assertRaisesRegex(RuntimeError, "spawn reached"):
+            restarted.start_bounded_probe(document_ref=URL_B, caller_ref=AUTOMATION)
+
+    def test_live_pid_with_unknown_identity_conservatively_holds_slot(self) -> None:
+        launcher = self.launcher()
+        launcher._command = lambda **_ignored: [
+            launcher.python_executable, "-c", "import time; time.sleep(30)",
+        ]
+        ticket = launcher.start_bounded_probe(document_ref=URL_A, caller_ref=AUTOMATION)
+        try:
+            restarted = self.launcher()
+            with patch("dalton_core.public_web_fetch_launcher._ticket_process_matches",
+                       return_value=None):
+                observed = restarted.status(ticket["id"])
+                self.assertEqual(observed["status"], "running")
+                self.assertEqual(observed["process_identity"], "identity_unknown")
+                self.assertIn("conservatively holds slot", observed["process_identity_reason"])
+                with self.assertRaisesRegex(
+                    FetchLaunchConflict, "identity is unknown and conservatively holds the slot"
+                ):
+                    restarted.start_bounded_probe(document_ref=URL_B, caller_ref=AUTOMATION)
+        finally:
+            launcher.close()
 
     def test_child_fetches_under_human_request_and_refuses_automation_and_unknown_refs(self) -> None:
         launcher = self.launcher()
