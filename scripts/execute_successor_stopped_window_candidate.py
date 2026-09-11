@@ -107,6 +107,27 @@ def verify_provider_plugin_for_config(snapshot_path: Path,
     return snapshot["tree_sha256"]
 
 
+def expected_preserved_service_bytes(
+    packet: Path, transition: Mapping[str, Any],
+) -> bytes:
+    """Return the exact reviewed service bytes for a preserve transition."""
+
+    before, after = expected_service_transition_state(
+        packet_root=packet, manifest=transition)
+    if transition.get("schema_version") != EXTERNAL_CAS_SCHEMA_VERSION:
+        return _json_bytes(after)
+    need(before == after, "schema 0.3 service semantics are not preserved")
+    row = transition["service_transition"]["before"]
+    relative = Path(row["file"])
+    need(not relative.is_absolute() and ".." not in relative.parts,
+         "preserved service artifact path is unsafe")
+    artifact = packet / relative
+    need(artifact.is_file() and not artifact.is_symlink()
+         and sha(artifact) == row["sha256"],
+         "preserved service artifact bytes changed")
+    return artifact.read_bytes()
+
+
 def template() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION, "release_ref": None,
@@ -482,12 +503,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 packet_root=self.packet, manifest=transition)
             need(service_before == load_json(artifacts["service_config_snapshot"]),
                  "service transition baseline differs from packet snapshot")
-            if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
-                service_artifact = (self.packet /
-                    transition["service_transition"]["before"]["file"])
-                expected_service_bytes = service_artifact.read_bytes()
-            else:
-                expected_service_bytes = _json_bytes(service_after)
+            expected_service_bytes = expected_preserved_service_bytes(
+                self.packet, transition)
         else:
             expected_service_bytes = artifacts["service_config_snapshot"].read_bytes()
         expected_openclaw_bytes = artifacts["openclaw_config_snapshot"].read_bytes()

@@ -13,8 +13,8 @@ from scripts import execute_successor_stopped_window_candidate as execute
 from scripts import finalize_successor_health_candidate as final
 from scripts import observe_successor_health_candidate as health
 from scripts.prepare_successor_config_transition import (
-    DOCUMENT_CONFIG, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
-    PRESERVE_SCHEMA_VERSION,
+    DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
+    MODEL_ADDITIONS, MODEL_REPLACEMENT, PRESERVE_SCHEMA_VERSION,
 )
 
 
@@ -23,6 +23,27 @@ def write_json(path: Path, value: object) -> None:
 
 
 class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
+    def test_schema_v03_preserves_noncanonical_service_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = Path(temporary)
+            raw = b'{"backup":{"keep_latest":3},"owner": {"signature":"x"}}\n'
+            artifact = packet / "service.before.json"
+            artifact.write_bytes(raw)
+            transition = {
+                "schema_version": EXTERNAL_CAS_SCHEMA_VERSION,
+                "transition_kind": "preserve_existing",
+                "service_transition": {
+                    "kind": "preserve_exact", "mutation_count": 0,
+                    "before": {"file": artifact.name,
+                               "sha256": execute.sha(artifact)},
+                    "after_sha256": execute.sha(artifact),
+                },
+            }
+            self.assertNotEqual(
+                execute._json_bytes(json.loads(raw)), raw)
+            self.assertEqual(
+                raw, execute.expected_preserved_service_bytes(packet, transition))
+
     def test_template_is_inert_and_does_not_guess_release_identity(self) -> None:
         candidate = execute.template()
         self.assertEqual("inputs_incomplete", candidate["status"])
