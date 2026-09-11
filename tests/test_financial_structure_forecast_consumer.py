@@ -16,6 +16,7 @@ from dalton_core.company_financial_statement_structure import (
 from dalton_core.model_forecast_driver import (
     ForecastModelAuthority,
     ForecastModelUnavailable,
+    _structure_result_refs,
     actualize_model,
     build_structured_forecast_model,
     build_structure_drivers,
@@ -732,7 +733,9 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 annual_projection=projection,
             )
             from openpyxl import load_workbook
-            driver = load_workbook(path, data_only=False)["Driver"]
+            from openpyxl.utils import get_column_letter
+            book = load_workbook(path, data_only=False)
+            driver = book["Driver"]
         self.assertEqual(exported["annual_projection_hash"], projection["content_hash"])
         # The immutable superseded estimate for the newly actual quarter stays
         # in model authority, but must not become a duplicate spreadsheet row.
@@ -742,6 +745,41 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             "Revenue — Quarterly growth (ratio)"
         ]
         self.assertEqual(len(revenue_rows), 1)
+        actual_column = next(
+            column for column in range(1, driver.max_column + 1)
+            if driver.cell(1, column).value == "1Q26"
+        )
+        forecast_column = next(
+            column for column in range(1, driver.max_column + 1)
+            if driver.cell(1, column).value == "2Q26E"
+        )
+        cost_ratio_row = next(
+            row for row in range(1, driver.max_row + 1)
+            if driver.cell(row, 3).value == "Cost — Share of line (ratio)"
+        )
+        refs_by_line = _structure_result_refs(
+            record["financial_statement_structure"])
+        result_rows = {
+            result["ref"]: 3 + index
+            for index, result in enumerate(record["results"])
+        }
+        column_letter = get_column_letter(actual_column)
+        self.assertEqual(
+            driver.cell(cost_ratio_row, actual_column).value,
+            f"='Financials'!{column_letter}{result_rows[refs_by_line['cost']]}/"
+            f"'Financials'!{column_letter}{result_rows[refs_by_line['revenue']]}",
+        )
+        self.assertEqual(
+            driver.cell(cost_ratio_row, actual_column).font.color.rgb[-6:],
+            "000000",
+        )
+        self.assertIsInstance(
+            driver.cell(cost_ratio_row, forecast_column).value, (int, float),
+        )
+        self.assertEqual(
+            driver.cell(cost_ratio_row, forecast_column).font.color.rgb[-6:],
+            "0000FF",
+        )
 
     def test_annual_calendar_requires_iso_date_and_matching_fiscal_month(self):
         for as_of, month in (("not-a-date", 12), ("2025-11-30", 12)):

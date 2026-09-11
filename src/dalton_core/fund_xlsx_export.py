@@ -498,6 +498,7 @@ def export_fund_workbook(
     period_columns = {
         period: quarter_start + index for index, period in enumerate(periods)
     }
+    result_rows = {item["ref"]: 3 + i for i, item in enumerate(model["results"])}
     cagr_column = template_plan["columns"]["annual_support"][0]["column"]
     formula_map: list[dict[str, Any]] = []
     statement_structure = (
@@ -508,6 +509,13 @@ def export_fund_workbook(
         str(line["ref"]): str(line.get("role") or "")
         for line in statement_structure.get("lines") or []
     }
+    structured_result_refs: dict[str, str] = {}
+    structured_lines_by_ref = {
+        str(line["ref"]): line for line in statement_structure.get("lines") or []
+    }
+    if statement_structure:
+        from .model_forecast_driver import _structure_result_refs
+        structured_result_refs = _structure_result_refs(statement_structure)
 
     ticker_label = (mission_binding or {}).get("ticker")
     entity_label = (mission_binding or {}).get("entity_name")
@@ -614,7 +622,34 @@ def export_fund_workbook(
             seen_periods.add(period)
             if period in periods:
                 ci = period_columns[period]
-                driver.cell(row, ci, _number(assumption["value"]))
+                actual_share_formula = None
+                if (
+                    assumption.get("kind") == "actual"
+                    and measure == "share_of_line"
+                ):
+                    driver_record = next(
+                        (item for item in model["drivers"]
+                         if item["ref"] == driver_ref), None,
+                    )
+                    line_ref = (
+                        None if driver_record is None
+                        else driver_record.get("structure_line_ref")
+                    )
+                    line = structured_lines_by_ref.get(str(line_ref))
+                    base_ref = None if line is None else line.get("forecast_base_ref")
+                    numerator_ref = structured_result_refs.get(str(line_ref))
+                    denominator_ref = structured_result_refs.get(str(base_ref))
+                    numerator_row = result_rows.get(str(numerator_ref))
+                    denominator_row = result_rows.get(str(denominator_ref))
+                    if numerator_row is not None and denominator_row is not None:
+                        actual_share_formula = (
+                            f"='Financials'!{_col(ci)}{numerator_row}/"
+                            f"'Financials'!{_col(ci)}{denominator_row}"
+                        )
+                driver.cell(
+                    row, ci,
+                    actual_share_formula or _number(assumption["value"]),
+                )
                 template_cell_styles["driver"].append({
                     "range": driver.cell(row, ci).coordinate,
                     "style": (
@@ -623,6 +658,14 @@ def export_fund_workbook(
                     ),
                     "number_kind": _template_number_kind(unit),
                 })
+                if actual_share_formula is not None:
+                    formula_map.append({
+                        "cell": f"Driver!{_col(ci)}{row}",
+                        "model_cell_ref": assumption["ref"],
+                        "formula": actual_share_formula,
+                        "model_formula": "actual share_of_line numerator / base",
+                        "model_label": label,
+                    })
                 assumption_cells[assumption["ref"]] = f"'Driver'!{_col(ci)}{row}"
                 assumption_values[assumption["ref"]] = Decimal(str(assumption["value"]))
         template_row_styles["driver"].append({
@@ -631,7 +674,6 @@ def export_fund_workbook(
         row += 1
 
     financials.cell(2, 1, "Income statement")
-    result_rows = {item["ref"]: 3 + i for i, item in enumerate(model["results"])}
     structured_lines: dict[str, Mapping[str, Any]] = {}
     structured_formulas: dict[str, Mapping[str, Any]] = {}
     if model.get("schema_version") == "0.3":
