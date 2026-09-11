@@ -1153,6 +1153,8 @@ class MissionSourceDiscoveryCoordinator:
         self.spool_dir = None if spool_dir is None else Path(spool_dir)
         self._spool: RawSpool | None = None
         self._recovery_spool: RawSpoolReader | None = None
+        self._local_recovery_cursor: tuple[str, str] | None = None
+        self._local_recovery_mission_ref: str | None = None
         policy = self.plan.get("acquisition") or {}
         self.preferred_hosts: tuple[str, ...] = tuple(policy.get("preferred_hosts", ()))
         # The provider's redirect proxies are held with the plan's skip list:
@@ -1291,6 +1293,7 @@ class MissionSourceDiscoveryCoordinator:
             not isinstance(record, Mapping)
             or record.get("id") != record_ref
             or record.get("content_hash") != row["content_hash"]
+            or canonical_json(record) != row["record_json"]
             or content_hash({key: value for key, value in record.items() if key != "content_hash"})
             != row["content_hash"]
         ):
@@ -1407,7 +1410,9 @@ class MissionSourceDiscoveryCoordinator:
             raise CoverageMissionError("successful search requires one exact runner request")
         request = validate_connector_runner_request(json.loads(journal[0]["request_json"]))
         if (
-            request["content_hash"] != journal[0]["request_hash"]
+            request["id"] != journal[0]["runner_request_ref"]
+            or request["content_hash"] != journal[0]["request_hash"]
+            or canonical_json(request) != journal[0]["request_json"]
             or request["connector_invocation_ref"] != invocation_ref
             or request["connector_invocation_hash"] != invocation["content_hash"]
             or request["call_spec_ref"] != call["id"]
@@ -1415,7 +1420,7 @@ class MissionSourceDiscoveryCoordinator:
         ):
             raise CoverageMissionError("failed child runner request binding drifted")
         event = self.store.connection.execute(
-            "SELECT state,payload_json FROM runner_attempt_journal_events "
+            "SELECT * FROM runner_attempt_journal_events "
             "WHERE runner_request_ref=? ORDER BY event_seq DESC LIMIT 1",
             (request["id"],),
         ).fetchone()
@@ -1426,6 +1431,29 @@ class MissionSourceDiscoveryCoordinator:
             response = validate_connector_runner_response(payload["response"])
         except (KeyError, TypeError, json.JSONDecodeError, RecursionError) as exc:
             raise CoverageMissionError("search runner response is unreadable") from exc
+        ordinal = int(self.store.connection.execute(
+            "SELECT COUNT(*) FROM runner_attempt_journal_events "
+            "WHERE runner_request_ref=? AND event_seq<=?",
+            (request["id"], event["event_seq"]),
+        ).fetchone()[0])
+        event_body = {
+            "runner_request_ref": request["id"], "request_ordinal": ordinal,
+            "state": event["state"], "reservation_ref": event["reservation_ref"],
+            "event_at": event["event_at"], "recorded_at": event["created_at"],
+            "payload": payload,
+        }
+        expected_event_hash = content_hash(event_body)
+        expected_event_ref = "runner-journal-event:" + content_hash({
+            "runner_request_ref": request["id"], "request_ordinal": ordinal,
+            "content_hash": expected_event_hash,
+        })
+        if (
+            canonical_json(payload) != event["payload_json"]
+            or event["runner_request_ref"] != request["id"]
+            or event["content_hash"] != expected_event_hash
+            or event["event_id"] != expected_event_ref
+        ):
+            raise CoverageMissionError("search runner response journal authority drifted")
         if (
             response["outcome"] != "succeeded"
             or response["runner_request_ref"] != request["id"]
@@ -1459,13 +1487,9 @@ class MissionSourceDiscoveryCoordinator:
         )
         if set(hosts) != set(document_refs):
             raise CoverageMissionError("raw search authority differs from the source envelope")
-        existing = next((
-            item for item in self.missions.source_discoveries(
-                dispatch["mission_version_ref"], company_ref=dispatch["company_ref"],
-                spec_ref=dispatch["spec_ref"], limit=1000,
-            )
-            if item["source_envelope_ref"] == envelope_ref
-        ), None)
+        existing = self.missions.source_discovery_for_envelope(
+            dispatch["mission_version_ref"], envelope_ref,
+        )
         if existing is not None:
             if any((
                 existing["source_ref"] != self.source_ref,
@@ -1513,14 +1537,27 @@ class MissionSourceDiscoveryCoordinator:
             mission = self.missions.active_mission(self.plan["mission_ref"])
         except CoverageMissionNotFound:
             return []
-        dispatches = self.missions.discovery_dispatches(mission["id"], limit=100)
-        candidates = [
-            item for item in dispatches
-            if item["status"] == "failed"
-            and item["source_ref"] == self.source_ref
-            and item["discovery_plan_ref"] == self.plan["id"]
-            and item["discovery_plan_hash"] == self.plan["content_hash"]
-        ][:limit]
+        if self._local_recovery_mission_ref != mission["id"]:
+            self._local_recovery_mission_ref = mission["id"]
+            self._local_recovery_cursor = None
+        candidates = self.missions.failed_discovery_dispatch_page(
+            mission["id"], source_ref=self.source_ref,
+            discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"],
+            after=self._local_recovery_cursor, limit=limit,
+        )
+        if not candidates and self._local_recovery_cursor is not None:
+            # Stable round-robin pagination: corrupt or already-recovered old
+            # tickets consume only their page and cannot starve later rows.
+            self._local_recovery_cursor = None
+            candidates = self.missions.failed_discovery_dispatch_page(
+                mission["id"], source_ref=self.source_ref,
+                discovery_plan_ref=self.plan["id"],
+                discovery_plan_hash=self.plan["content_hash"], limit=limit,
+            )
+        if candidates:
+            last = candidates[-1]
+            self._local_recovery_cursor = (last["created_at"], last["dispatch_id"])
         recovered: list[dict[str, Any]] = []
         for dispatch in candidates:
             try:

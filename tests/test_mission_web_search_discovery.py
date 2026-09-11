@@ -700,6 +700,115 @@ class WebCoordinatorTests(unittest.TestCase):
         self.assertEqual([], missions.source_discoveries(mission["id"]))
         self.assertEqual(1, len(harness.handle.calls))
 
+    def test_local_recovery_pages_past_more_than_one_hundred_bad_tickets(self) -> None:
+        root = Path(self.temp.name) / "paged-recovery"
+        root.mkdir()
+        harness = WebSearchHarness(root, FakeWebSearchHandle(CITATIONS), clock=self.clock)
+        self.addCleanup(harness.close)
+        state = bootstrap_method_authorities(harness.core)
+        missions = CoverageMissionAuthority(harness.core)
+        plan = web_plan_for_tests(max_calls_24h=200)
+        launcher = FailedAfterSuccessfulWebSearchLauncher(harness, plan)
+        coordinator = MissionSourceDiscoveryCoordinator(
+            store=harness.core, missions=missions, plan=plan,
+            search_launcher=launcher, acquisition_launcher=None, clock=self.clock,
+            spool_dir=root / "spool",
+        )
+        params = mission_with_web_status(
+            state, status="connected", grant=True, version=1, prior=None,
+        )
+        mission_ref = params.pop("mission_ref")
+        mission = missions.create_mission(mission_ref, **params)
+        authorization = missions.authorize_source_discovery(
+            company_ref=ACN, source_ref=WEB_SEARCH_SOURCE_REF, requested_by=AUTOMATION,
+        )
+        query = build_discovery_parameters(
+            plan, spec_ref="management-changes", company_ref=ACN, as_of=self.clock().date(),
+        )
+        for index in range(105):
+            ticket_ref = f"web-search-discovery:{index + 100:024x}"
+            record = missions.record_discovery_dispatch(
+                authorization=authorization, discovery_plan_ref=plan["id"],
+                discovery_plan_hash=plan["content_hash"], spec_ref="management-changes",
+                query_hash=web_search_spec_hash(query), ticket_ref=ticket_ref,
+            )
+            missions.settle_discovery_dispatch(
+                record["dispatch_id"], status="failed", reason="missing local summary",
+            )
+            launcher.tickets[ticket_ref] = {
+                "id": ticket_ref, "status": "failed", "summary": None,
+            }
+        ticket = launcher.start(
+            authorization=authorization, spec_ref="management-changes",
+            as_of=self.clock().date(),
+        )
+        valid = missions.record_discovery_dispatch(
+            authorization=authorization, discovery_plan_ref=plan["id"],
+            discovery_plan_hash=plan["content_hash"], spec_ref="management-changes",
+            query_hash=web_search_spec_hash(query), ticket_ref=ticket["id"],
+        )
+        missions.settle_discovery_dispatch(
+            valid["dispatch_id"], status="failed", reason="local write failed",
+        )
+
+        pages = [coordinator.recover_local_web_discoveries(limit=20) for _ in range(6)]
+        recovered = [item for page in pages for item in page if item["status"] == "recovered"]
+        self.assertEqual(1, len(recovered))
+        self.assertEqual(valid["dispatch_id"], recovered[0]["dispatch_ref"])
+        self.assertEqual(1, len(harness.handle.calls))
+        self.assertEqual(1, len(missions.source_discoveries(mission["id"])))
+        self.assertEqual(2, len(missions.discovered_documents(mission["id"])))
+
+    def test_local_recovery_rejects_noncanonical_runner_journal_rows(self) -> None:
+        for kind in ("request", "response_event", "response_event_hash"):
+            with self.subTest(kind=kind):
+                root = Path(self.temp.name) / f"journal-{kind}"
+                root.mkdir()
+                harness = WebSearchHarness(root, FakeWebSearchHandle(CITATIONS), clock=self.clock)
+                self.addCleanup(harness.close)
+                state = bootstrap_method_authorities(harness.core)
+                missions = CoverageMissionAuthority(harness.core)
+                plan = web_plan_for_tests(max_calls_24h=1)
+                launcher = FailedAfterSuccessfulWebSearchLauncher(harness, plan)
+                coordinator = MissionSourceDiscoveryCoordinator(
+                    store=harness.core, missions=missions, plan=plan,
+                    search_launcher=launcher, acquisition_launcher=None, clock=self.clock,
+                    spool_dir=root / "spool",
+                )
+                params = mission_with_web_status(
+                    state, status="connected", grant=True, version=1, prior=None,
+                )
+                mission_ref = params.pop("mission_ref")
+                mission = missions.create_mission(mission_ref, **params)
+                coordinator.dispatch_once()
+                coordinator.settle_dispatches()
+                connection = harness.core.connection
+                if kind == "request":
+                    connection.execute("DROP TRIGGER runner_request_journal_no_update")
+                    connection.execute(
+                        "UPDATE runner_request_journal SET request_json=request_json || ' '"
+                    )
+                    expected = "runner request binding drifted"
+                elif kind == "response_event":
+                    connection.execute("DROP TRIGGER runner_attempt_journal_no_update")
+                    connection.execute(
+                        "UPDATE runner_attempt_journal_events SET payload_json=payload_json || ' ' "
+                        "WHERE state='responded'"
+                    )
+                    expected = "response journal authority drifted"
+                else:
+                    connection.execute("DROP TRIGGER runner_attempt_journal_no_update")
+                    connection.execute(
+                        "UPDATE runner_attempt_journal_events SET content_hash=? "
+                        "WHERE state='responded'", ("0" * 64,),
+                    )
+                    expected = "response journal authority drifted"
+                refused = coordinator.recover_local_web_discoveries()
+                self.assertEqual("refused", refused[0]["status"])
+                self.assertIn(expected, refused[0]["reason"])
+                self.assertEqual([], missions.source_discoveries(mission["id"]))
+                self.assertEqual(1, len(harness.handle.calls))
+
     def test_alphaengine_coordinator_ignores_web_dispatches_and_documents(self) -> None:
         v1 = self.publish(status="not_connected", grant=False)
         self.publish(status="connected", grant=True, version=2, prior=v1)
