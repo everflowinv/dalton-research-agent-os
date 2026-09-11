@@ -10,7 +10,7 @@ from dalton_core.coverage_mission import (
     CoverageMissionAuthority,
     CoverageMissionValidationError,
 )
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 
 MISSION = "coverage-mission-version:us-it-services:12"
 
@@ -24,10 +24,9 @@ def plan(**overrides):
                         "item_ref": "quarterly_financials", "action": "acquire",
                         "reason": "three quarters short"}],
         "inquiries": [],
-        "content_hash": "b" * 64,
     }
     base.update(overrides)
-    return base
+    return {**base, "content_hash": content_hash(base)}
 
 
 class PlanStoreTests(unittest.TestCase):
@@ -80,6 +79,14 @@ class PlanStoreTests(unittest.TestCase):
             body.pop(field)
             with self.assertRaises(CoverageMissionValidationError, msg=field):
                 self.authority.record_research_plan(body, decided_by="automation:x")
+
+    def test_a_changed_plan_cannot_reuse_another_plans_hash(self):
+        original = plan()
+        original["inquiries"] = [{"question": "a different paid question"}]
+        with self.assertRaises(CoverageMissionValidationError):
+            self.authority.record_research_plan(original, decided_by="automation:coverage-mission")
+        self.assertEqual(self.store.connection.execute(
+            "SELECT count(*) FROM coverage_mission_research_plans").fetchone()[0], 0)
 
     def test_plans_are_append_only_and_authority_only(self):
         self.record()

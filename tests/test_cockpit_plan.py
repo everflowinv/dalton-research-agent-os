@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dalton_core.cockpit_plane import ITEM_LABELS, PLAN_ACTION_LABELS, CockpitPlane
 from dalton_core.coverage_mission import CoverageMissionAuthority
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 
 ACN = "company:sec-cik:0001467373"
 INDUSTRY = "industry:us-it-services"
@@ -45,10 +45,10 @@ class PlanProjectionTests(unittest.TestCase):
         self.members = {m["company_ref"]: dict(m) for m in MISSION["universe"]}
 
     def record(self, *directives, inquiries=(), assessment="ACN is one filing short."):
+        plan = {"mission_version_ref": MISSION["id"], "state_hash": "a" * 64,
+                "assessment": assessment, "directives": list(directives), "inquiries": list(inquiries)}
         self.authority.record_research_plan(
-            {"mission_version_ref": MISSION["id"], "state_hash": "a" * 64,
-             "assessment": assessment, "directives": list(directives),
-             "inquiries": list(inquiries), "content_hash": "b" * 64},
+            {**plan, "content_hash": content_hash(plan)},
             decided_by="automation:x")
 
     def project(self):
@@ -102,10 +102,10 @@ class PlanProjectionTests(unittest.TestCase):
 
     def test_the_newest_plan_is_the_one_shown(self):
         self.record(directive(reason="older"))
+        plan = {"mission_version_ref": MISSION["id"], "state_hash": "c" * 64,
+                "assessment": "newer", "directives": [directive(reason="newer")], "inquiries": []}
         self.authority.record_research_plan(
-            {"mission_version_ref": MISSION["id"], "state_hash": "c" * 64,
-             "assessment": "newer", "directives": [directive(reason="newer")],
-             "inquiries": [], "content_hash": "d" * 64},
+            {**plan, "content_hash": content_hash(plan)},
             decided_by="automation:x")
         self.assertEqual(self.project()["assessment"], "newer")
 
