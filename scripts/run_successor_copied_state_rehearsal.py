@@ -144,10 +144,12 @@ def validate_successor_snapshots(
     _need(document_path.is_file() and not document_path.is_symlink(),
           "copied-state document research config is unavailable")
     try:
-        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document_raw = json.loads(document_path.read_text(encoding="utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise RehearsalBindingError(
             "copied-state document research config is invalid") from exc
+    document = module.rewrite_paths(
+        document_raw, module.invert(rehearsal.replacements))
     _need(models == expected_models,
           "copied-state successor model configuration drifted")
     _need(document == expected_document,

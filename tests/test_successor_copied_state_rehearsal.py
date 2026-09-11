@@ -33,6 +33,10 @@ class IdentityModule:
 
 class PathModule(IdentityModule):
     @staticmethod
+    def invert(replacements):
+        return {new: old for old, new in replacements.items()}
+
+    @staticmethod
     def rewrite_paths(value, replacements):
         if isinstance(value, dict):
             return {key: PathModule.rewrite_paths(item, replacements)
@@ -110,6 +114,20 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 before = path.read_bytes(); path.write_text(json.dumps(value))
                 with self.assertRaises(RehearsalBindingError): self.validate()
                 path.write_bytes(before)
+
+    def test_document_config_is_inverse_normalized_without_changing_scratch_bytes(self):
+        expected = {"originals_root": "/live/state/originals"}
+        confined = {"originals_root": "/scratch/state/originals"}
+        path = self.state / "document-research-config.json"
+        path.write_text(json.dumps(confined))
+        self.rehearsal.replacements = {"/live": "/scratch"}
+        result = validate_successor_snapshots(
+            PathModule, self.rehearsal, expected_models=self.models,
+            expected_document=expected, expected_lane=self.lane,
+            expected_service=self.service)
+        self.assertEqual(result["document_research_config_sha256"],
+                         __import__('hashlib').sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(json.loads(path.read_text()), confined)
 
     def test_confined_transition_derives_scratch_paths_without_weakening_original(self):
         root = self.state.parent
