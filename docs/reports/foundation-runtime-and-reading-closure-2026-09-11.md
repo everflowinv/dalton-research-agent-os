@@ -161,3 +161,12 @@ Independent annual review confirmed that a single child now waits for exact Sche
 Unknown post-send completion remains fully charged and historically intact. The next recovery must create a new bounded WorkOrder and persist a versioned recovery link that downstream verification can resolve; marking the original failed Work successful or replaying its invocation is not acceptable. This work is still under development. None of these candidate changes is reported as deployed.
 
 Next: close actual child-death resume and bounded unknown-result recovery, complete exact configuration activation rehearsals, freeze the full release, and repeat full tests, wheel verification, copied-state execution and postdeployment health.
+
+
+### Actual failed-host projection and annual budget blocker — 08:01 UTC
+
+A single strictly read-only transaction over live Core projected the candidate host policy: `www.investing.com` has three distinct terminal-failure URLs, remains quarantined until `2026-09-11T12:08:56.858093+00:00`, and has ten failed document rows. No fetch or model call was made. Private receipt `web-host-recovery-review/live-ledger-projection-20260911T0757.json` SHA-256 `9fc37e86b88d2c94325a5bf3b23361f631b129c41dc33a25f0f0ee4e86993ccf`. The installed v5 initial cooldown and candidate v6 persistent quarantine remain distinct.
+
+Further independent review found a release blocker in the new annual model worker: it inherited empty budget hooks and recorded Observability costs but had no mission/day budget admission or settlement. A per-call WorkOrder cap is insufficient. This candidate has not been deployed. The repair must attach real budget authority before dispatch, settle each attempt exactly once, retain full reservations on unknown completion and release only proven not-sent capacity refusals. Any historical attempt lacking this proof remains unproven; it cannot acquire fabricated settlement history to authorize recovery. Only after this foundation is fixed may a separately bounded new Work recover an unknown result.
+
+Annual call/run defaults passed 21 focused tests. Provider host installer passed 19 private tests after stopped-process/socket proof, exact scope and dynamic configuration preservation fixes. AlphaEngine activation helper now rejects a retired mission even when the old version remains in history, binds the reviewed source commit and checks installed selection capability before activation (eight private tests). All these helpers remain inert pending final immutable release binding and acceptance.
