@@ -78,7 +78,7 @@ class AnnualReportLeasePolicyTests(unittest.TestCase):
                 execution, router=_RouteAuthority(("a", "b", "c")),
                 purpose="registered_annual_report_draft",
             ),
-            2402,
+            2432,
         )
         policy = scheduler_policy((execution, execution))
         self.assertEqual(policy["max_attempts"], 6)
@@ -93,10 +93,10 @@ class AnnualReportLeasePolicyTests(unittest.TestCase):
                 execution, router=authority,
                 purpose="registered_annual_report_draft",
             ),
-            7206,
+            7236,
         )
         execution["max_elapsed_seconds"] = 7200
-        with self.assertRaisesRegex(AnnualReportRuntimeError, "7206s.*7200s"):
+        with self.assertRaisesRegex(AnnualReportRuntimeError, "7236s.*7200s"):
             annual_attempt_lease_seconds(
                 execution, router=authority,
                 purpose="registered_annual_report_draft",
@@ -223,7 +223,7 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
             "queue_wait_seconds": 600,
             "retry_backoff_seconds": 2,
         }
-        worker._work_deadline = lambda _work: now + timedelta(seconds=1199)
+        worker._work_deadline = lambda _work: now + timedelta(seconds=1229)
         admitted = []
         worker._before_model_call = lambda *_args: admitted.append(True)
         work = SimpleNamespace(budget={"max_seconds": 600})
@@ -233,7 +233,7 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
             worker._before_transport_send(work, {}, {})
         self.assertEqual(admitted, [])
 
-        worker._work_deadline = lambda _work: now + timedelta(seconds=1200)
+        worker._work_deadline = lambda _work: now + timedelta(seconds=1230)
         worker._before_transport_send(work, {}, {})
         self.assertEqual(admitted, [True])
 
@@ -244,7 +244,19 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
         observability = ObservabilityStore(store)
         execution = _execution(provider_retry={
             "max_same_profile_retries": 1, "retry_backoff_seconds": 0,
-        }, retries=0)
+        }, retries=0, elapsed=9000)
+        execution["transport_retry"] = {
+            "max_definitely_not_sent_retries": 0,
+            "queue_wait_seconds": 7200,
+            "retry_backoff_seconds": 2,
+        }
+        self.assertEqual(
+            annual_attempt_lease_seconds(
+                execution, router=_RouteAuthority(("unused",)),
+                purpose="registered_annual_report_draft",
+            ),
+            7830,
+        )
         scheduler = Scheduler(
             connection=store.connection, clock=clock,
             **scheduler_policy((execution, execution)),
@@ -267,9 +279,9 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
         })
 
         def respond(request):
-            # The real broker response arrives after more Scheduler time than
-            # the old max_seconds-only lease (600s), but within queue+call.
-            clock.advance(601)
+            # The real broker response arrives at the full configured
+            # queue+call boundary. The completion grace remains available.
+            clock.advance(7800)
             semantic = dict(request)
             semantic.pop("queueWaitMs", None)
             return success_response(semantic, text=answer)
@@ -285,19 +297,19 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
             auth_key_provider=lambda: AUTH_SECRET,
             expected_agent_id="dalton-model-broker",
             timeout_seconds=600,
-            queue_wait_seconds=600,
+            queue_wait_seconds=7200,
             clock=clock,
         )
         wire = work_order().to_dict()
         wire["question"] = "Answer from one registered annual report excerpt."
         wire["budget"].update({
             "max_seconds": 600,
-            "max_elapsed_seconds": 7200,
+            "max_elapsed_seconds": 9000,
             "max_attempts": 6,
         })
         transport = {
             "max_definitely_not_sent_retries": 0,
-            "queue_wait_seconds": 600,
+            "queue_wait_seconds": 7200,
             "retry_backoff_seconds": 2,
         }
         wire["metadata"] = {
@@ -324,7 +336,7 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
             credential_slot_refs=["credential-slot:openai:dalton"],
             provider_retry=execution["provider_retry"],
             transport_retry=transport,
-            lease_seconds=1200,
+            lease_seconds=7830,
             clock=clock,
         )
         worker.adapter = adapter
@@ -332,6 +344,7 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
         outcome = worker.run_once(work)
         self.assertEqual(outcome["status"], "succeeded", outcome)
         self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(broker.requests[0]["queueWaitMs"], 7_200_000)
         lease = store.connection.execute(
             "SELECT issued_at,expires_at FROM scheduler_leases "
             "WHERE work_order_id=?", (work.id,),
@@ -341,7 +354,7 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
                 datetime.fromisoformat(lease["expires_at"])
                 - datetime.fromisoformat(lease["issued_at"])
             ).total_seconds(),
-            1200,
+            7830,
         )
 
 

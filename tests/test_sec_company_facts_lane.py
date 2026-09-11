@@ -235,7 +235,7 @@ class LaneTests(unittest.TestCase):
             # retry is configured: six safe transport tries each have the
             # real 600s queue plus 120s provider window, with five backoffs.
             self.assertEqual(
-                lane.executor.annual_report_draft_worker.lease_seconds, 4330
+                lane.executor.annual_report_draft_worker.lease_seconds, 4360
             )
             self.assertEqual(lane.scheduler.max_lease_seconds, 7200)
             self.assertEqual(lane.scheduler.max_total_lease_seconds, 7200)

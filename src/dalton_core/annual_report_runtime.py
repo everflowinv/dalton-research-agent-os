@@ -20,6 +20,7 @@ DRAFT_MODEL_CONFIG_NAME = register_model_config_name(
 VERIFIER_MODEL_CONFIG_NAME = register_model_config_name(
     "registered-annual-report-verifier-model-config.json"
 )
+ANNUAL_LEASE_COMPLETION_GRACE_SECONDS = 30
 
 
 class AnnualReportRuntimeError(ValueError):
@@ -39,10 +40,6 @@ def validate_annual_transport_retry(value: Any) -> dict[str, int]:
            or normalized[name] < 0 for name in fields):
         raise AnnualReportRuntimeError(
             "transport_retry values must be finite non-negative integers"
-        )
-    if normalized["queue_wait_seconds"] > 3600:
-        raise AnnualReportRuntimeError(
-            "transport_retry.queue_wait_seconds exceeds the broker maximum of 3600"
         )
     return normalized
 
@@ -162,6 +159,7 @@ def plan_model_execution(config: Mapping[str, Any], purpose: str) -> dict[str, A
         required = (
             tries * (call["timeout_seconds"] + transport["queue_wait_seconds"])
             + (tries - 1) * transport["retry_backoff_seconds"]
+            + ANNUAL_LEASE_COMPLETION_GRACE_SECONDS
         )
         if required > max_elapsed:
             raise AnnualReportRuntimeError(
@@ -239,6 +237,7 @@ def annual_attempt_lease_seconds(
         + (tries - 1) * transport["retry_backoff_seconds"]
     )
     required = candidates * per_route
+    required += ANNUAL_LEASE_COMPLETION_GRACE_SECONDS
     maximum = int(model_execution.get(
         "max_elapsed_seconds",
         int(model_execution["max_seconds"]) * int(model_execution["max_attempts"]),
@@ -279,7 +278,8 @@ def scheduler_policy(model_executions: tuple[Mapping[str, Any], Mapping[str, Any
 
 
 __all__ = [
-    "AnnualReportRuntimeError", "DRAFT_MODEL_CONFIG_NAME",
+    "ANNUAL_LEASE_COMPLETION_GRACE_SECONDS", "AnnualReportRuntimeError",
+    "DRAFT_MODEL_CONFIG_NAME",
     "VERIFIER_MODEL_CONFIG_NAME", "adapter_for_config",
     "annual_attempt_lease_seconds",
     "load_annual_report_model_config", "load_annual_report_model_configs",

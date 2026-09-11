@@ -334,7 +334,7 @@ class AnnualReportProductionBudgetTests(unittest.TestCase):
         for lease in leases:
             issued = datetime.fromisoformat(lease["issued_at"])
             expires = datetime.fromisoformat(lease["expires_at"])
-            self.assertEqual((expires - issued).total_seconds(), 1262)
+            self.assertEqual((expires - issued).total_seconds(), 1292)
 
         connection = sqlite3.connect(budget_path)
         connection.row_factory = sqlite3.Row

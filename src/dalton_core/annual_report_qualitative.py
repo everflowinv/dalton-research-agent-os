@@ -284,10 +284,18 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
 
         deadline = self._work_deadline(work)
         if deadline is not None:
+            from .annual_report_runtime import (
+                ANNUAL_LEASE_COMPLETION_GRACE_SECONDS,
+            )
+
             queue_seconds = int((self.transport_retry or {}).get(
                 "queue_wait_seconds", 0
             ))
-            required = int(work.budget["max_seconds"]) + queue_seconds
+            required = (
+                int(work.budget["max_seconds"])
+                + queue_seconds
+                + ANNUAL_LEASE_COMPLETION_GRACE_SECONDS
+            )
             if (self.clock().astimezone(timezone.utc)
                     + timedelta(seconds=required)
                     > deadline):
