@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+import re
 from typing import Any, Callable, Mapping, Sequence
 
+from .company_model_series import ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS
 from .store import content_hash
 
 
@@ -30,12 +32,18 @@ ROLES = (
     "interest_expense", "pretax_income", "income_tax_expense",
     "income_from_continuing_operations", "discontinued_operations",
     "net_income", "noncontrolling_interest", "parent_net_income",
-    "diluted_weighted_average_shares", "diluted_eps", "other",
+    "preferred_dividends", "participating_securities_allocation",
+    "dilutive_securities_adjustment", "diluted_eps_numerator",
+    "diluted_weighted_average_shares", "diluted_eps",
+    "other_operating_income_expense", "other_nonoperating_income_expense",
 )
 FORMULA_OPERATORS = ("sum", "divide")
+FORECAST_METHODS = ("quarterly_growth", "share_of_line", "formula", "unavailable")
+MAX_STRUCTURE_LINES = 48
+MAX_STRUCTURE_FORMULAS = 32
 _LINE_FIELDS = {
     "ref", "role", "label", "kind", "concept", "statement", "unit",
-    "period_kind", "annual_semantics",
+    "period_kind", "annual_semantics", "forecast_method", "forecast_base_ref",
 }
 _SUM_FIELDS = {"output_ref", "operator", "terms", "tie_out_concept", "evidence_refs"}
 _DIVIDE_FIELDS = {
@@ -44,6 +52,100 @@ _DIVIDE_FIELDS = {
 }
 _TERM_FIELDS = {"line_ref", "coefficient"}
 _NOTE_FIELDS = {"ref", "content_hash", "source_content_hash"}
+
+
+def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": list(required), "properties": dict(properties),
+    }
+
+
+_SCHEMA_TEXT = {"type": "string", "minLength": 1, "maxLength": 160}
+_SCHEMA_REF = {
+    "type": "string", "minLength": 1, "maxLength": 80,
+    "pattern": r"^[a-z][a-z0-9]*(?:[-_:][a-z0-9]+)*$",
+}
+_STRUCTURE_LINE_SCHEMA = _schema_object(
+    {
+        "ref": _SCHEMA_REF, "role": {"enum": list(ROLES)},
+        "label": _SCHEMA_TEXT, "kind": {"enum": list(LINE_KINDS)},
+        "concept": {"type": ["string", "null"], "maxLength": 200},
+        "statement": {"enum": ["income"]},
+        "unit": {"type": "string", "minLength": 3, "maxLength": 24},
+        "period_kind": {"const": "duration"},
+        "annual_semantics": {"enum": list(ANNUAL_SEMANTICS)},
+        "forecast_method": {"enum": list(FORECAST_METHODS)},
+        "forecast_base_ref": {"type": ["string", "null"], "maxLength": 80},
+    },
+    tuple(sorted(_LINE_FIELDS)),
+)
+_SUM_FORMULA_SCHEMA = _schema_object(
+    {
+        "output_ref": _SCHEMA_REF, "operator": {"const": "sum"},
+        "terms": {"type": "array", "minItems": 1, "maxItems": 24,
+                  "items": _schema_object(
+                      {"line_ref": _SCHEMA_REF,
+                       "coefficient": {"enum": ["-1", "1"]}},
+                      tuple(sorted(_TERM_FIELDS)))},
+        "tie_out_concept": {"type": ["string", "null"], "maxLength": 200},
+        "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
+                          "items": _SCHEMA_TEXT},
+    },
+    tuple(sorted(_SUM_FIELDS)),
+)
+_DIVIDE_FORMULA_SCHEMA = _schema_object(
+    {
+        "output_ref": _SCHEMA_REF, "operator": {"const": "divide"},
+        "numerator_ref": _SCHEMA_REF, "denominator_ref": _SCHEMA_REF,
+        "tie_out_concept": {"type": ["string", "null"], "maxLength": 200},
+        "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
+                          "items": _SCHEMA_TEXT},
+    },
+    tuple(sorted(_DIVIDE_FIELDS)),
+)
+STRUCTURE_PROPOSAL_SCHEMA = _schema_object(
+    {
+        "schema_version": {"const": SCHEMA_VERSION},
+        "lines": {"type": "array", "minItems": 1,
+                  "maxItems": MAX_STRUCTURE_LINES, "items": _STRUCTURE_LINE_SCHEMA},
+        "formulas": {"type": "array", "minItems": 1,
+                     "maxItems": MAX_STRUCTURE_FORMULAS,
+                     "items": {"oneOf": [_SUM_FORMULA_SCHEMA,
+                                          _DIVIDE_FORMULA_SCHEMA]}},
+    },
+    ("schema_version", "lines", "formulas"),
+)
+
+_SUM_ROLE_INPUTS: dict[str, frozenset[str]] = {
+    "cost_of_revenue": frozenset({"cost_of_revenue"}),
+    "gross_profit": frozenset({"revenue", "cost_of_revenue"}),
+    "operating_expense": frozenset({"operating_expense"}),
+    "operating_income": frozenset({
+        "revenue", "cost_of_revenue", "gross_profit", "operating_expense",
+        "other_operating_income_expense",
+    }),
+    "nonoperating_income_expense": frozenset({
+        "nonoperating_income_expense", "interest_income", "interest_expense",
+        "other_nonoperating_income_expense",
+    }),
+    "pretax_income": frozenset({
+        "operating_income", "nonoperating_income_expense", "interest_income",
+        "interest_expense", "other_nonoperating_income_expense",
+    }),
+    "income_from_continuing_operations": frozenset({
+        "pretax_income", "income_tax_expense",
+    }),
+    "net_income": frozenset({
+        "pretax_income", "income_tax_expense", "income_from_continuing_operations",
+        "discontinued_operations",
+    }),
+    "parent_net_income": frozenset({"net_income", "noncontrolling_interest"}),
+    "diluted_eps_numerator": frozenset({
+        "parent_net_income", "preferred_dividends",
+        "participating_securities_allocation", "dilutive_securities_adjustment",
+    }),
+}
 
 
 class FinancialStatementStructureError(ValueError):
@@ -111,6 +213,10 @@ def _units(line: Mapping[str, Any]) -> set[str]:
         for cell in (line.get("cells") or {}).values()
         if isinstance(cell, Mapping) and cell.get("unit")
     }
+
+
+def _is_currency_unit(value: str) -> bool:
+    return re.fullmatch(r"[a-z]{3}", value) is not None
 
 
 def _statement_refs(inputs: Mapping[str, Any]) -> set[str]:
@@ -203,7 +309,8 @@ def _validate_spec_alignment(
 
 
 def _normalize_line(
-    raw: Any, index: int, filed: Mapping[str, Mapping[str, Any]],
+    raw: Any, index: int, filed: Mapping[str, Mapping[str, Any]], *,
+    validate_values: bool = True,
 ) -> dict[str, Any]:
     wire = _closed(raw, _LINE_FIELDS, f"lines[{index}]")
     line = {
@@ -218,18 +325,35 @@ def _normalize_line(
         "annual_semantics": _text(
             wire["annual_semantics"], f"lines[{index}].annual_semantics"
         ),
+        "forecast_method": _text(
+            wire["forecast_method"], f"lines[{index}].forecast_method"
+        ),
+        "forecast_base_ref": wire["forecast_base_ref"],
     }
     for field, allowed in (
         ("role", ROLES), ("kind", LINE_KINDS), ("statement", STATEMENTS),
         ("period_kind", PERIOD_KINDS), ("annual_semantics", ANNUAL_SEMANTICS),
+        ("forecast_method", FORECAST_METHODS),
     ):
         if line[field] not in allowed:
             raise FinancialStatementStructureError(f"lines[{index}].{field} is invalid")
+    if line["statement"] != "income" or line["period_kind"] != "duration":
+        raise FinancialStatementStructureError(
+            "financial statement structure 0.1 supports duration income lines only"
+        )
     concept = line["concept"]
     if line["kind"] == "derived":
         if concept is not None:
             raise FinancialStatementStructureError("a derived line cannot claim a filed concept")
+        if line["forecast_method"] != "formula" or line["forecast_base_ref"] is not None:
+            raise FinancialStatementStructureError(
+                "a derived line must use formula forecast_method without a base"
+            )
     else:
+        if line["forecast_method"] == "formula":
+            raise FinancialStatementStructureError(
+                "a filed line cannot use formula forecast_method"
+            )
         concept = _text(concept, f"lines[{index}].concept")
         source = filed.get(concept)
         if source is None or source.get("status") != "filed":
@@ -244,10 +368,30 @@ def _normalize_line(
         if units != {line["unit"]}:
             raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
         line["concept"] = concept
+    if line["forecast_method"] == "share_of_line":
+        line["forecast_base_ref"] = _text(
+            line["forecast_base_ref"], f"lines[{index}].forecast_base_ref"
+        )
+    elif line["forecast_base_ref"] is not None:
+        raise FinancialStatementStructureError(
+            "only share_of_line may carry forecast_base_ref"
+        )
     if line["role"] == "diluted_weighted_average_shares":
-        if line["annual_semantics"] != "direct_annual" or line["unit"] != "shares":
+        if (
+            line["annual_semantics"] != "direct_annual"
+            or line["unit"] != "shares"
+            or line["period_kind"] != "duration"
+        ):
             raise FinancialStatementStructureError(
-                "diluted weighted-average shares require direct_annual shares"
+                "diluted weighted-average shares require duration direct_annual shares"
+            )
+        if validate_values and line["kind"] == "filed" and any(
+            _decimal(cell.get("value"), "diluted weighted-average shares") <= 0
+            for cell in (filed[line["concept"]].get("cells") or {}).values()
+            if isinstance(cell, Mapping)
+        ):
+            raise FinancialStatementStructureError(
+                "diluted weighted-average shares must be positive"
             )
     if line["role"] == "diluted_eps" and line["annual_semantics"] not in {
         "direct_annual", "annual_ratio",
@@ -255,6 +399,23 @@ def _normalize_line(
         raise FinancialStatementStructureError(
             "diluted EPS cannot be aggregated from quarterly EPS"
         )
+    if line["role"] == "diluted_eps":
+        if (
+            line["period_kind"] != "duration"
+            or re.fullmatch(r"[a-z]{3}_per_share", line["unit"]) is None
+        ):
+            raise FinancialStatementStructureError(
+                "diluted EPS requires a duration currency-per-share unit"
+            )
+    elif line["role"] != "diluted_weighted_average_shares":
+        if line["period_kind"] != "duration" or not _is_currency_unit(line["unit"]):
+            raise FinancialStatementStructureError(
+                "income statement amounts require a duration ISO-4217 currency unit"
+            )
+        if line["annual_semantics"] not in {"sum_quarters", "direct_annual"}:
+            raise FinancialStatementStructureError(
+                "income statement amounts require explicit amount annual semantics"
+            )
     return line
 
 
@@ -317,6 +478,14 @@ def _normalize_formula(
             normalized.append({"line_ref": ref, "coefficient": str(int(coefficient))})
         if len({term["line_ref"] for term in normalized}) != len(normalized):
             raise FinancialStatementStructureError("sum formula repeats a term")
+        allowed_roles = _SUM_ROLE_INPUTS.get(lines[output]["role"])
+        if allowed_roles is None or any(
+            lines[term["line_ref"]]["role"] not in allowed_roles
+            for term in normalized
+        ):
+            raise FinancialStatementStructureError(
+                "sum formula roles do not match its company statement output"
+            )
         result["terms"] = normalized
     elif operator == "divide":
         numerator = _text(wire["numerator_ref"], "formula numerator_ref")
@@ -325,8 +494,10 @@ def _normalize_formula(
             raise FinancialStatementStructureError("divide formula names an unknown line")
         if lines[output]["role"] != "diluted_eps":
             raise FinancialStatementStructureError("divide is reserved for diluted EPS")
-        if lines[numerator]["role"] != "parent_net_income":
-            raise FinancialStatementStructureError("EPS numerator must be parent net income")
+        if lines[numerator]["role"] != "diluted_eps_numerator":
+            raise FinancialStatementStructureError(
+                "EPS numerator must use the company-specific diluted EPS numerator role"
+            )
         if lines[denominator]["role"] != "diluted_weighted_average_shares":
             raise FinancialStatementStructureError(
                 "EPS denominator must be diluted weighted-average shares"
@@ -337,6 +508,14 @@ def _normalize_formula(
         ):
             raise FinancialStatementStructureError(
                 "EPS operands must use the output period kind"
+            )
+        if (
+            not _is_currency_unit(lines[numerator]["unit"])
+            or lines[denominator]["unit"] != "shares"
+            or lines[output]["unit"] != f"{lines[numerator]['unit']}_per_share"
+        ):
+            raise FinancialStatementStructureError(
+                "EPS requires matching currency numerator, shares denominator, and per-share output"
             )
         result.update({"numerator_ref": numerator, "denominator_ref": denominator})
     else:
@@ -532,6 +711,21 @@ def validate_financial_statement_structure(
     if len(by_ref) != len(lines):
         raise FinancialStatementStructureError("structure line ref is duplicated")
     _validate_spec_alignment(company_spec, lines)
+    for line in lines:
+        if line["forecast_method"] != "share_of_line":
+            continue
+        base = by_ref.get(line["forecast_base_ref"])
+        if base is None or base["ref"] == line["ref"]:
+            raise FinancialStatementStructureError(
+                "share_of_line forecast base must name another structure line"
+            )
+        if (
+            base["unit"] != line["unit"]
+            or base["period_kind"] != line["period_kind"]
+        ):
+            raise FinancialStatementStructureError(
+                "share_of_line forecast base must use the same unit and period kind"
+            )
     notes = _normalized_note_evidence(note_evidence, note_evidence_resolver)
     note_refs = {item["ref"] for item in notes}
     allowed_evidence = _statement_refs(financial_inputs) | note_refs
@@ -613,6 +807,11 @@ def aggregate_fiscal_year(
         annual = [cell for cell in selected if cell.get("period_kind") == "annual"]
         if (
             len(annual) != 1
+            or not isinstance(annual[0].get("period_start"), str)
+            or not isinstance(annual[0].get("period_end"), str)
+            or not NINE_MONTH_MAX_DAYS < _quarter_gap(
+                str(annual[0].get("period_start")), str(annual[0].get("period_end"))
+            ) <= ANNUAL_MAX_DAYS
             or not isinstance(annual[0].get("calendar"), str)
             or not annual[0].get("calendar")
             or not isinstance(annual[0].get("definition_ref"), str)
@@ -629,35 +828,44 @@ def aggregate_fiscal_year(
 
 
 def annual_diluted_eps(
-    *, parent_net_income_cells: Sequence[Mapping[str, Any]],
+    *, diluted_eps_numerator_cells: Sequence[Mapping[str, Any]],
     diluted_weighted_share_cells: Sequence[Mapping[str, Any]], fiscal_year: str,
 ) -> dict[str, Any]:
-    """Annual parent earnings divided by directly filed annual diluted shares."""
+    """Annual disclosed diluted-EPS numerator divided by annual diluted shares."""
 
     income = aggregate_fiscal_year(
-        parent_net_income_cells, semantic="sum_quarters", fiscal_year=fiscal_year,
+        diluted_eps_numerator_cells, semantic="sum_quarters", fiscal_year=fiscal_year,
     )
     shares = aggregate_fiscal_year(
         diluted_weighted_share_cells, semantic="direct_annual", fiscal_year=fiscal_year,
     )
     if income["status"] != "computed" or shares["status"] != "computed":
         return {"status": "unavailable", "value": None,
-                "reason": "annual diluted EPS needs complete parent income and direct annual weighted shares"}
-    if income.get("unit") not in {"usd", "eur", "gbp", "jpy", "cny"}:
+                "reason": ("annual diluted EPS needs its complete disclosed numerator "
+                           "and direct annual weighted shares")}
+    if not isinstance(income.get("unit"), str) or not _is_currency_unit(income["unit"]):
         return {"status": "unavailable", "value": None,
-                "reason": "annual parent income must use one currency unit"}
+                "reason": "annual diluted EPS numerator must use an ISO-4217 currency unit"}
     if shares.get("unit") != "shares":
         return {"status": "unavailable", "value": None,
                 "reason": "annual diluted weighted shares must use shares"}
     denominator = _decimal(shares["value"], "annual diluted weighted shares")
     income_calendars = {cell["calendar"] for cell in income["source_periods"]}
-    share_calendar = shares["source_periods"][0]["calendar"]
-    if income_calendars != {share_calendar}:
+    share_period = shares["source_periods"][0]
+    share_calendar = share_period["calendar"]
+    income_start = min(str(cell["period_start"]) for cell in income["source_periods"])
+    income_end = max(str(cell["period_end"]) for cell in income["source_periods"])
+    if (
+        income_calendars != {share_calendar}
+        or share_period["period_start"] != income_start
+        or share_period["period_end"] != income_end
+    ):
         return {"status": "unavailable", "value": None,
-                "reason": "annual parent income and weighted shares use different calendars"}
-    if denominator == 0:
+                "reason": ("annual diluted EPS numerator and weighted shares use "
+                           "different fiscal windows")}
+    if denominator <= 0:
         return {"status": "unavailable", "value": None,
-                "reason": "annual diluted weighted shares are zero"}
+                "reason": "annual diluted weighted shares are not positive"}
     return {"status": "computed",
             "value": str(_decimal(income["value"], "annual parent income") / denominator),
             "unit": f"{income['unit']}_per_share",

@@ -33,9 +33,13 @@ historical tie-out is not eligible for forecast use.
 
 Annual amount aggregation requires exactly four contiguous duration quarters
 with one fiscal calendar, definition, and unit. Diluted EPS uses four quarters
-of parent-attributable income divided by one directly filed annual diluted
-weighted-average share value. Quarterly EPS and quarterly share counts are not
-summed or averaged into annual EPS.
+of the company's disclosed diluted-EPS numerator divided by one directly filed
+annual diluted weighted-average share value over the identical fiscal window.
+The numerator may include preferred-dividend, participating-security, or
+convertible adjustments only when this company disclosed evidence for them;
+parent-attributable net income is not treated as a universal substitute.
+Quarterly EPS and quarterly share counts are not summed or averaged into annual
+EPS.
 
 The next forecast integration must consume
 `forecast_structure_binding(structure, replay, financial_inputs)`. That call
