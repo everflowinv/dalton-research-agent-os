@@ -2,7 +2,8 @@
 
 The rolling window establishes a failure pattern. Once established, quarantine
 survives that window; only a successful fetch resets it. An expired timer permits
-one low-priority probe, not the release of every queued URL on that host.
+one low-priority probe, not the release of every queued URL on that host. A failed
+probe applies the configured multiplier, which may extend or retain the interval.
 """
 from __future__ import annotations
 

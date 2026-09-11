@@ -322,7 +322,7 @@
                   "minimum": 1
                 }
               },
-              "description": "Persist host quarantine until a successful low-priority single recovery probe. Failed probes extend the delay to the configured maximum; the maximum must cover cooldown_seconds."
+              "description": "Persist host quarantine until a successful low-priority single recovery probe. Failed probes apply the configured multiplier, extending or retaining the delay up to the configured maximum; the maximum must cover cooldown_seconds."
             }
           }
         }

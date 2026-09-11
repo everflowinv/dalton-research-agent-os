@@ -14,7 +14,7 @@ from dalton_core.mission_source_discovery import (
     validate_discovery_plan,
 )
 from dalton_core.public_web_core_search import FakeWebSearchHandle
-from dalton_core.store import content_hash
+from dalton_core.store import DaltonStore, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities
 from tests.test_mission_source_discovery import ACN, CTSH, Clock, FakeAcquisitionLauncher
 from tests.test_mission_web_search_discovery import (
@@ -58,6 +58,23 @@ class HostRecoveryFoldTests(unittest.TestCase):
                    "document_ref": f"url:{i}", "outcome": "transport_retryable"} for i in range(5)]
         self.assertEqual(host_recovery_states(events, as_of=now, **POLICY), [])
 
+    def test_multiplier_one_retains_the_configured_interval_after_a_failed_probe(self):
+        now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+        events = [{"host": "fixed.example", "created_at": now.isoformat(),
+                   "document_ref": f"url:{i}", "outcome": "transport_terminal"}
+                  for i in range(3)]
+        later = now + timedelta(days=2)
+        events.append({"host": "fixed.example", "created_at": later.isoformat(),
+                       "document_ref": "url:0", "outcome": "transport_terminal"})
+        fixed_policy = {**POLICY, "recovery": {**RECOVERY, "backoff_multiplier": 1}}
+        held = host_recovery_states(events, as_of=later, **fixed_policy)[0]
+        self.assertEqual(held["state"], "quarantined")
+        self.assertEqual(held["cooldown_seconds"], POLICY["cooldown_seconds"])
+        self.assertEqual(
+            held["next_probe"],
+            (later + timedelta(seconds=POLICY["cooldown_seconds"])).isoformat(
+                timespec="microseconds"))
+
     def test_recovery_configuration_is_closed_and_preserves_legacy_plan(self):
         old = web_plan_for_tests(acquisition={"preferred_hosts": [], "skip_hosts": []})
         baseline = json.dumps(old, sort_keys=True)
@@ -70,6 +87,9 @@ class HostRecoveryFoldTests(unittest.TestCase):
             validate_recovery_policy({**RECOVERY, "max_cooldown_seconds": 5}, initial_seconds=21600)
         with self.assertRaises(ValueError):
             validate_recovery_policy({**RECOVERY, "backoff_multiplier": True}, initial_seconds=21600)
+        fixed = validate_recovery_policy(
+            {**RECOVERY, "backoff_multiplier": 1}, initial_seconds=21600)
+        self.assertEqual(fixed["backoff_multiplier"], 1)
         new["acquisition"]["failure_cooldown"] = {**POLICY, "recovery": {**RECOVERY, "extra": 1}}
         new["content_hash"] = content_hash({k: v for k, v in new.items() if k != "content_hash"})
         with self.assertRaises(DiscoveryPlanError):
@@ -153,6 +173,41 @@ class HostRecoveryCoordinatorTests(unittest.TestCase):
         self.coordinator.skip_hosts = ("blocked.example", "available.example")
         self.assertEqual(self.coordinator.launch_acquisition()["status"], "idle")
         self.assertEqual(self.fetch.calls, [])
+
+    def test_recreated_coordinator_recovers_quarantine_from_persisted_attempts(self):
+        self.clock.advance(days=2)
+        database = self.h.core.path
+        self.h.core.close()
+        self.h.core = DaltonStore(database)
+        restarted_missions = CoverageMissionAuthority(self.h.core)
+        restarted_fetch = FakeAcquisitionLauncher(self.h)
+        restarted = MissionSourceDiscoveryCoordinator(
+            store=self.h.core, missions=restarted_missions, plan=self.plan,
+            search_launcher=None, acquisition_launcher=restarted_fetch, clock=self.clock)
+        live = restarted.launch_acquisition()
+        self.assertEqual(live["status"], "launched")
+        row = self.h.core.connection.execute(
+            "SELECT host FROM coverage_mission_discovered_documents WHERE record_id=?",
+            (live["record_id"],)).fetchone()
+        self.assertEqual(row["host"], "available.example")
+        self.assertNotIn("host_recovery_probe", live)
+        restarted_missions.settle_discovered_document(live["record_id"], status="acquired")
+        probe = restarted.launch_acquisition()
+        self.assertTrue(probe["host_recovery_probe"])
+        self.assertEqual(len(restarted_fetch.calls), 2)
+        self.assertEqual(restarted.launch_acquisition()["status"], "busy")
+        self.assertEqual(len(restarted_fetch.calls), 2)
+        with patch("dalton_core.coverage_mission._now",
+                   return_value=self.clock().isoformat(timespec="microseconds")):
+            restarted_missions.settle_discovered_document(
+                probe["record_id"], status="acquisition_failed", reason="forbidden",
+                failure_retryable=False, transport_code="HTTP_403",
+                transport_evidence_ref=self.discovery["connector_invocation_ref"],
+                transport_evidence_hash=self.evidence_hash)
+        held = restarted.launch_acquisition()
+        self.assertEqual(held["status"], "idle")
+        self.assertEqual(held["cooldown_hosts"][0]["cooldown_seconds"], 43200)
+        self.assertEqual(len(restarted_fetch.calls), 2)
 
     def test_terminal_rows_reenter_only_as_an_explicit_due_single_probe(self):
         # Exhaust the two remaining new URLs on the same unreachable host.
