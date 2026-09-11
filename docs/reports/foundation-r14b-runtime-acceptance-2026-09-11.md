@@ -43,3 +43,13 @@ R14c is frozen at `ec0d9a17a02db338fec19adc1bd66ac2b02d7c75` while its full suit
 The Desktop AMZN reference remains the strict export acceptance target. The first actual rendered integration is not accepted: period headings overlap, Driver metrics repeat per period rather than across columns, Financials section fill differs, and Valuation retains a generic technical table instead of the source annual metric blocks. The author is correcting these against the original renders. Internal annual projection persistence is also under review so Excel consumes the same authoritative model values.
 
 Next: finish R14c exact-release acceptance, deploy under existing owner authorization, then verify actual document admission/read results. Complete annual financial authority and rendered/recalculated workbook parity in the separate R15 line. Keep human source signatures and research checkpoints independent.
+
+## 20:14 UTC acceptance follow-up
+
+The R14c full suite was **not accepted**: 7,488 tests, zero failures, one error and one skip. The remaining error was `tests.test_extraction_window_settings` using an obsolete query fake that provided only `fetchone()` after the real coordinator query changed to `fetchall()`. The old freeze and failed receipt remain preserved (receipt SHA `ddcd0058622e2968fc372584e4f374f92e47d7383128e9ef3ba16d89badf0f0b`). No R14c deployment occurred.
+
+A separate R14c1 freeze `5048af26554dd379a16f4ef5d595dc75d8664b1d` updates that fake with the exact five-column awaiting-review row. Its 27 focused tests and fresh 14-step / 42-tick / zero-escape copied-state v2 pass; full acceptance is still running. Rehearsal v2 binding SHA `8c3ad6fae867b0ff46b0adb55e36f450bcd4c623cd056bb6d5eb1544c54f4e64`; the initial invocation-only v1 failure is preserved and is not used as acceptance evidence.
+
+A separate small UI correction now explains that zero-base idleness applies to companies that passed Initial Screen and names the remaining company count; the live ledger still has four reviews, so the earlier universal “every company completed” wording was misleading. Seventeen focused coordinator tests pass; this correction is not included in the frozen execution release.
+
+Verified cleanup removed only 46 SQLite files from the completed older R14/R14a rehearsal scratch roots, freeing 2,455,638,016 bytes. Exact file hashes, stable identities and absence of open handles were checked before unlinking. Source/config/log/binding receipts, current R14b/candidate copies and all deployment rollback backups were preserved. Private cleanup receipt SHA `b7106064594d2372a9e21ed8d0f3ed91a0e3c1bbd5733bdfa9c9cdcdf76e4566`.
