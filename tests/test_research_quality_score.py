@@ -694,6 +694,10 @@ class QualityScoreAuthorityTests(unittest.TestCase):
         with self.assertRaises(ResearchQualityConflict) as caught:
             self.record(judge_layer=judged, verifier_layer=verifier)
         self.assertIn("verifier route", str(caught.exception))
+        for malformed in ({"route_decision_ref": " ", "purpose": "quality_verifier"},
+                          [], "not-a-model"):
+            with self.subTest(model=malformed), self.assertRaises(ResearchQualityConflict):
+                self.record(judge_layer=judged, verifier_layer={**verifier, "model": malformed})
 
     def test_a_verdict_without_a_judgement_is_refused(self):
         with self.assertRaises(ResearchQualityConflict):

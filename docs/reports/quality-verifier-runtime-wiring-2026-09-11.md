@@ -23,6 +23,6 @@ policy/config installer. Reinstall therefore preserves validated call and run
 budget overrides and the credential references required by retained Cockpit
 selection overrides.
 
-Validation covered 223 quality, routing, setup, installation, credential and
+Validation covered 226 quality, routing, setup, installation, credential and
 budget tests, plus shell syntax, Python compilation and diff checks. No live
 configuration, model call or deployment was performed.

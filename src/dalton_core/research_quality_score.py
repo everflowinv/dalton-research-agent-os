@@ -1258,7 +1258,9 @@ def scoring_fingerprint(
     """Bind verified scores to both actual routes; preserve judge-only IDs."""
 
     judge_hash = judge_fingerprint(judge_layer)
-    verifier_model = ((verifier_layer or {}).get("model") or {})
+    verifier_model = (verifier_layer or {}).get("model") or {}
+    if not isinstance(verifier_model, Mapping):
+        return judge_hash
     verifier_route = verifier_model.get("route_decision_ref")
     if not isinstance(verifier_route, str) or not verifier_route:
         return judge_hash
@@ -1598,8 +1600,10 @@ class QualityScoreAuthority:
                 raise ResearchQualityConflict(
                     "the verifier verdict is bound to different scores than the judge layer"
                 )
-            verifier_provenance = verifier_layer.get("model") or {}
-            if (not isinstance(verifier_provenance.get("route_decision_ref"), str)
+            verifier_provenance = verifier_layer.get("model")
+            if (not isinstance(verifier_provenance, Mapping)
+                    or not isinstance(verifier_provenance.get("route_decision_ref"), str)
+                    or not verifier_provenance["route_decision_ref"].strip()
                     or verifier_provenance.get("purpose") != VERIFIER_PURPOSE):
                 raise ResearchQualityConflict(
                     "a verified quality score must name its verifier route and purpose"
