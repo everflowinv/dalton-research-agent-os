@@ -31,3 +31,11 @@ The five current models remaining 0.2 is expected while R14c1 is installed. R15 
 ## Next
 
 Finish and independently review both production fixes, retain all failed-candidate evidence, freeze a successor, then repeat full-suite/wheel/copied-state acceptance on that exact source. Deploy only after it passes, perform sustained health observation, and verify actual normal-pipeline research and new-model production separately from runtime health.
+
+## R15a freeze after independent fixes
+
+Successor `34ef59cbbdc4210a58be8513c20c1b237022f822` is frozen as `foundation-r15a-financial`; full discovery and a new copied-state rehearsal are running. Its wheel matches all 606 runtime files and three embedded JavaScript blocks; wheel SHA `c568a0ecec35617169b05eaf2e84d55b554e85f03696b2e1d800cff587913184`. This is not deployment acceptance yet.
+
+The pre-persistence repair is integrated as `86f5a596`, with the enabled-format-repair semantic-refusal regression `ae5521b0`; root independently passed 121 related tests and the strengthened refusal check. The historical input repair author `fc00274176689989fd8d0667a446a8971e6f095b` is integrated as `34ef59cb`. It positively limits legacy replay to no-structure schemas absent/0.1/0.2, restores their old result shape and selection/arithmetic/window contract, and retains strict handling for structured and unknown/future schemas. Author coverage passed 321 tests; independent review passed 151 in 14.847 seconds. The combined integration path passed 85 tests in 8.008 seconds.
+
+Final five-company production CLI exports now succeed, reconstructing each stored input hash exactly. Their 484 computed model cells pass LibreOffice recalculation with maximum displayed-unit residual 5.8e-11 and no formula errors. All raw/recalculated workbooks and Formula Map hashes are bound; the 23 rehearsal SQLite/WAL/SHM content hashes are unchanged. Receipt `/private/tmp/dalton-r15-five-company-xlsx-qa-v1/legacy-input-replay-fix-receipt.json`, SHA `a41f1fd20393c26b95d4f0afdcec2edae92596e55735d4ad8c9f457ae92b68a2`, distinctly names the frozen fix and old R14c1 reference tree. These are legacy 0.2 exports with EPS/typed annual authority explicitly unavailable, not claims of new company-specific 0.4 production.
