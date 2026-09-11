@@ -51,7 +51,8 @@ def target(root: Path) -> Path:
 
 def apply(root: Path, *, check: bool) -> bool:
     path = target(root)
-    source = path.read_text(encoding="utf-8")
+    original_bytes = path.read_bytes()
+    source = original_bytes.decode("utf-8")
     original_count, patched_count = source.count(ORIGINAL), source.count(PATCHED)
     if patched_count == 1:
         if original_count:
@@ -74,6 +75,8 @@ def apply(root: Path, *, check: bool) -> bool:
                                  capture_output=True, check=False)
         if checked.returncode:
             raise ValueError("patched runtime LLM bundle failed syntax validation")
+        if path.read_bytes() != original_bytes:
+            raise ValueError("OpenClaw runtime LLM bundle changed during patch validation")
         os.chmod(candidate, path.stat().st_mode)
         os.replace(candidate, path)
     finally:

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from integrations.openclaw_host_patches.patch_provider_failure_bridge import (
     ORIGINAL, PATCHED, apply, target,
@@ -25,6 +26,12 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
         shutil.copy2(INSTALLED / "package.json", self.root / "package.json")
         source = next((INSTALLED / "dist").glob("runtime-llm.runtime-*.mjs"))
         shutil.copy2(source, self.root / "dist" / source.name)
+        # Exercise the unpatched input even after the reviewed patch is live.
+        # Never modify the installed bundle to make a fixture pass.
+        copied = self.root / "dist" / source.name
+        wire = copied.read_text(encoding="utf-8")
+        if wire.count(PATCHED) == 1 and not wire.count(ORIGINAL):
+            copied.write_text(wire.replace(PATCHED, ORIGINAL, 1), encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -48,6 +55,20 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
         (self.root / "package.json").write_text(json.dumps(package))
         with self.assertRaises(ValueError):
             target(self.root)
+
+    def test_concurrent_bundle_edit_during_syntax_check_is_preserved(self):
+        bundle = target(self.root)
+        changed = bundle.read_bytes() + b"\n// concurrent host maintenance\n"
+
+        def check(*args, **kwargs):
+            bundle.write_bytes(changed)
+            return subprocess.CompletedProcess(args[0], 0, "", "")
+
+        with patch("integrations.openclaw_host_patches.patch_provider_failure_bridge.subprocess.run", side_effect=check):
+            with self.assertRaisesRegex(ValueError, "changed during patch validation"):
+                apply(self.root, check=False)
+        self.assertEqual(bundle.read_bytes(), changed)
+        self.assertEqual(list(bundle.parent.glob(".*.mjs")), [])
 
     def test_bridge_only_accepts_exact_numeric_error_code_from_error_result(self):
         self.assertIn('result.stopReason === "error"', PATCHED)
