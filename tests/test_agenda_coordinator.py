@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -23,7 +24,11 @@ from dalton_core.contracts import InvocationGranularity, ModelInvocation, Result
 from dalton_core.governance_cli import ephemeral_call
 from dalton_core.model_deployment import install_openclaw_catalog
 from dalton_core.model_router import ModelRouter
-from dalton_core.openclaw_model_adapter import BrokerDefinitelyNotSent
+from dalton_core.openclaw_model_adapter import (
+    BrokerConnectionError,
+    BrokerDefinitelyNotSent,
+    PostSendUnknownEvidence,
+)
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import content_hash
 from dalton_core.writer_server import CORE_OPERATIONS, Principal, write_token_config
@@ -67,6 +72,226 @@ class FakeAdapter:
 
 
 class AgendaCoordinatorTests(unittest.TestCase):
+    def test_post_send_unknown_is_persisted_without_fallback_or_retry(self):
+        class PostSendUnknown(FakeAdapter):
+            calls = 0
+            evidence = None
+            work = None
+            route = None
+            profile = None
+
+            def execute(self, work, route, profile):
+                invocation, succeeded = super().execute(work, route, profile)
+                unknown = {
+                    "authority": "openclaw-model-adapter",
+                    "state": "post_send_result_unknown",
+                    "request_frame_hash": "a" * 64,
+                    "transport_error_type": "BrokerConnectionError",
+                    "version": "0.1",
+                }
+                invocation = replace(
+                    invocation,
+                    usage={
+                        "input_tokens": None,
+                        "output_tokens": None,
+                        "cache_read_tokens": None,
+                        "cache_write_tokens": None,
+                        "total_tokens": None,
+                        "raw_provider_telemetry": {
+                            "cost": {"available": False, "usd": None},
+                            "post_send_unknown": unknown,
+                        },
+                        "metering_source": "unavailable_post_send",
+                        "measurement_status": "unavailable",
+                        "authority_status": "uncommitted",
+                    },
+                )
+                failed = ResultEnvelope(
+                    schema_version=succeeded.schema_version,
+                    id=succeeded.id,
+                    created_at=succeeded.created_at,
+                    work_order_ref=work.id,
+                    invocation_ref=invocation.id,
+                    status="failed",
+                    outputs={},
+                    actual_side_effects=(),
+                    usage_refs=succeeded.usage_refs,
+                    artifact_refs=(),
+                    error={
+                        "code": "POST_SEND_RESULT_UNKNOWN",
+                        "message": "broker result unavailable after request dispatch",
+                        "source": "openclaw-model-adapter",
+                    },
+                    metadata={
+                        "route_decision_ref": route["id"],
+                        "profile_version_ref": profile["profile_version_ref"],
+                        "dispatch_proof": {
+                            "authority": "openclaw-model-adapter",
+                            "state": "post_send_result_unknown",
+                            "version": "0.1",
+                        },
+                        "post_send_unknown": unknown,
+                    },
+                )
+                error = BrokerConnectionError("fixture disconnected after send")
+                evidence = PostSendUnknownEvidence(
+                    invocation=invocation, result=failed
+                )
+                error.post_send_unknown_evidence = evidence
+                type(self).evidence = evidence
+                type(self).work = work
+                type(self).route = route
+                type(self).profile = profile
+                raise error
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"
+            scheduler = root / "scheduler.sqlite"
+            router = root / "router.sqlite"
+            socket = root / "run" / "writer.sock"
+            tokens = root / "tokens.json"
+            legacy = root / "legacy.sqlite"
+            self.legacy(legacy)
+            write_token_config(
+                tokens,
+                [Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True)],
+            )
+            install_openclaw_catalog(
+                router,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
+            with ModelRouter(router) as authority:
+                original = authority.get_policy(
+                    "model-routing-policy-version:dalton-openclaw:1"
+                )
+                chained = dict(original)
+                chained.pop("content_hash")
+                chained.update(
+                    version=2,
+                    prior_version_ref=original["policy_version_ref"],
+                    policy_version_ref=(
+                        "model-routing-policy-version:dalton-openclaw:2"
+                    ),
+                    created_at="2026-08-14T09:01:00+00:00",
+                    purpose_overrides={
+                        "agenda_planning": {
+                            "mode": "explicit",
+                            "chain": [
+                                "model-profile:deepseek-v4-flash",
+                                "model-profile:gemini-3-5-flash-lite",
+                            ],
+                        }
+                    },
+                )
+                authority.register_policy(chained)
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "dalton_core.writer_server",
+                    "--db",
+                    str(core),
+                    "--socket",
+                    str(socket),
+                    "--token-config",
+                    str(tokens),
+                ],
+                cwd=str(Path(__file__).parents[1]),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline and not socket.exists():
+                    time.sleep(0.02)
+                config = AgendaCoordinatorConfig(
+                    scheduler_db=scheduler,
+                    model_router_db=router,
+                    writer_socket=socket,
+                    core_token_config=tokens,
+                    broker_socket=root / "broker.sock",
+                    broker_auth_key=root / "broker.key",
+                    perception_source_db=legacy,
+                    perception_snapshot_path=root / "perception.json",
+                    company_ref="wanhua",
+                    routing_policy_ref=chained["policy_version_ref"],
+                    credential_slot_refs=(
+                        "credential-slot:openclaw:deepseek",
+                        "credential-slot:openclaw:openai",
+                        "credential-slot:openclaw:claude-cli",
+                    ),
+                    broker_client_id="client:dalton-core",
+                    expected_agent_id="chem",
+                    timeout_seconds=180,
+                    transport_retry={
+                        "max_definitely_not_sent_retries": 1,
+                        "queue_wait_seconds": 5,
+                        "retry_backoff_seconds": 0,
+                    },
+                )
+                self.govern(tokens, socket)
+                adapter = PostSendUnknown()
+                with patch.object(AgendaCoordinator, "_adapter", return_value=adapter):
+                    outcome = AgendaCoordinator(config).run_once(
+                        now=datetime(2026, 8, 14, 10, tzinfo=timezone.utc)
+                    )
+                self.assertEqual(outcome["status"], "failed")
+                self.assertEqual(PostSendUnknown.calls, 1)
+                with sqlite3.connect(core) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM model_invocations"
+                        ).fetchone()[0],
+                        1,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM observability_cost_entries"
+                        ).fetchone()[0],
+                        1,
+                    )
+                with Scheduler(scheduler) as authority:
+                    work_ref = authority.connection.execute(
+                        "SELECT work_order_id FROM scheduler_work_orders"
+                    ).fetchone()[0]
+                    formal = authority.formal_result(work_ref)
+                self.assertEqual(
+                    formal["result_envelope"]["error"]["code"],
+                    "POST_SEND_RESULT_UNKNOWN",
+                )
+                self.assertEqual(
+                    formal["result_envelope"]["metadata"]["dispatch_proof"]["state"],
+                    "post_send_result_unknown",
+                )
+                malformed = BrokerConnectionError("foreign evidence")
+                malformed.post_send_unknown_evidence = PostSendUnknownEvidence(
+                    invocation=PostSendUnknown.evidence.invocation,
+                    result=replace(
+                        PostSendUnknown.evidence.result,
+                        work_order_ref="work:agenda-foreign",
+                    ),
+                )
+                self.assertIsNone(AgendaCoordinator._post_send_unknown(
+                    malformed,
+                    work=PostSendUnknown.work,
+                    route=PostSendUnknown.route,
+                    profile=PostSendUnknown.profile,
+                ))
+                malformed.post_send_unknown_evidence = {"forged": True}
+                self.assertIsNone(AgendaCoordinator._post_send_unknown(
+                    malformed,
+                    work=PostSendUnknown.work,
+                    route=PostSendUnknown.route,
+                    profile=PostSendUnknown.profile,
+                ))
+            finally:
+                process.terminate()
+                process.wait(timeout=3)
+
     def test_real_unix_capacity_proof_defers_without_paid_invocation(self):
         from tests.test_openclaw_model_adapter import (
             AUTH_SECRET, FakeBroker, core_request, failure_response, seal, success_response,
@@ -142,6 +367,97 @@ class AgendaCoordinatorTests(unittest.TestCase):
             self.assertEqual(len(broker.requests), 2)
             self.assertNotEqual(broker.requests[0]["invocationId"],
                                 broker.requests[1]["invocationId"])
+
+    def test_real_unix_post_send_disconnect_returns_one_bound_unknown_result(self):
+        from tests.test_openclaw_model_adapter import AUTH_SECRET, FakeBroker
+        from tests.test_human_intent import model_policy, model_profile
+        from dalton_core.openclaw_model_adapter import canonical_hash
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router_path = root / "router.sqlite"
+            with ModelRouter(router_path) as router:
+                profile = model_profile()
+                profile["availability"] = {
+                    "state": "available",
+                    "checked_at": "2026-09-11T00:00:00+00:00",
+                    "valid_until": "2099-09-11T00:00:00+00:00",
+                }
+                router.register_profile(profile)
+                router.register_policy(model_policy())
+            broker = FakeBroker(root, lambda _request: None)
+            self.addCleanup(broker.close)
+            key = root / "broker.key"; key.write_bytes(AUTH_SECRET)
+            os.chmod(key, 0o600)
+            config = AgendaCoordinatorConfig(
+                scheduler_db=root / "scheduler.sqlite",
+                model_router_db=router_path,
+                writer_socket=root / "writer.sock",
+                core_token_config=root / "tokens.json",
+                broker_socket=broker.path,
+                broker_auth_key=key,
+                perception_source_db=root / "legacy.sqlite",
+                perception_snapshot_path=root / "perception.json",
+                company_ref="wanhua",
+                routing_policy_ref="model-routing-policy-version:intent:1",
+                credential_slot_refs=("credential-slot:openclaw:intent",),
+                broker_client_id="client:dalton-core",
+                expected_agent_id="dalton-model-broker",
+                timeout_seconds=1,
+                transport_retry={
+                    "max_definitely_not_sent_retries": 5,
+                    "queue_wait_seconds": 0,
+                    "retry_backoff_seconds": 0,
+                },
+            )
+            work = WorkOrder(
+                schema_version="0.1",
+                id="work:agenda-real-post-send-unknown",
+                created_at="2026-08-14T10:00:00+00:00",
+                updated_at="2026-08-14T10:00:00+00:00",
+                question="propose questions",
+                requested_capabilities=("extract",),
+                runtime_profile_ref=config.routing_policy_ref,
+                budget={
+                    "max_input_tokens": 8000,
+                    "max_output_tokens": 1000,
+                    "max_total_tokens": 9000,
+                    "max_cost_usd": 1,
+                    "max_seconds": 1,
+                },
+                idempotency_key="agenda-real-post-send-unknown",
+                declared_side_effects=(),
+                status="pending",
+            )
+            with ModelRouter(router_path) as router:
+                outcome = AgendaCoordinator(config)._execute_model_attempt(
+                    None,
+                    router,
+                    work,
+                    {"attempt": {"attempt_number": 1}},
+                    estimated_input=100,
+                    estimated_output=100,
+                )
+            broker.close()
+            self.assertEqual("executed", outcome["status"], outcome)
+            self.assertEqual("failed", outcome["result"].status)
+            self.assertEqual(
+                "POST_SEND_RESULT_UNKNOWN", outcome["result"].error["code"]
+            )
+            self.assertEqual(1, len(broker.requests))
+            self.assertEqual(
+                canonical_hash(broker.requests[0]),
+                outcome["result"].metadata["post_send_unknown"][
+                    "request_frame_hash"
+                ],
+            )
+            self.assertEqual(
+                outcome["route"]["id"], outcome["invocation"].parent_ref
+            )
+            self.assertEqual(
+                outcome["profile"]["profile_version_ref"],
+                outcome["invocation"].profile_ref,
+            )
 
     def test_transport_config_is_closed_and_lease_covers_exact_policy_chain(self):
         with tempfile.TemporaryDirectory() as directory:

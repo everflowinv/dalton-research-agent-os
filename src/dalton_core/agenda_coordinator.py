@@ -21,6 +21,7 @@ from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
+    PostSendUnknownEvidence,
 )
 from .perception import LegacyCoveragePerceptionAdapter
 from .provider_token_estimate import (
@@ -377,6 +378,77 @@ class AgendaCoordinator:
         raise AssertionError("Agenda transport retry loop did not return")
 
     @staticmethod
+    def _post_send_unknown(
+        exc: OpenClawModelAdapterError,
+        *,
+        work: WorkOrder,
+        route: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> tuple[ModelInvocation, ResultEnvelope] | None:
+        """Accept only the adapter's exact, route-bound unknown-result proof."""
+
+        evidence = getattr(exc, "post_send_unknown_evidence", None)
+        if not isinstance(evidence, PostSendUnknownEvidence):
+            return None
+        invocation = evidence.invocation
+        result = evidence.result
+        proof = {
+            "authority": "openclaw-model-adapter",
+            "state": "post_send_result_unknown",
+            "version": "0.1",
+        }
+        unknown = result.metadata.get("post_send_unknown")
+        raw = invocation.usage.get("raw_provider_telemetry")
+        usage_unknown = (
+            raw.get("post_send_unknown") if isinstance(raw, Mapping) else None
+        )
+        if (
+            invocation.work_order_ref != work.id
+            or invocation.parent_ref != route.get("id")
+            or invocation.profile_ref != profile.get("profile_version_ref")
+            or invocation.capability != "extract"
+            or invocation.provider != profile.get("provider")
+            or invocation.model != profile.get("model")
+            or invocation.model_family != profile.get("family")
+            or invocation.runtime_ref != profile.get("adapter_ref")
+            or invocation.input_refs != work.input_refs
+            or invocation.output_refs
+            or invocation.side_effects
+            or result.work_order_ref != work.id
+            or result.invocation_ref != invocation.id
+            or result.status != "failed"
+            or result.outputs
+            or result.actual_side_effects
+            or result.usage_refs != (f"usage:{invocation.id}",)
+            or (result.error or {}).get("code") != "POST_SEND_RESULT_UNKNOWN"
+            or (result.error or {}).get("source") != "openclaw-model-adapter"
+            or result.metadata.get("route_decision_ref") != route.get("id")
+            or result.metadata.get("profile_version_ref")
+               != profile.get("profile_version_ref")
+            or result.metadata.get("dispatch_proof") != proof
+            or not isinstance(unknown, Mapping)
+            or set(unknown) != {
+                "authority", "state", "request_frame_hash",
+                "transport_error_type", "version",
+            }
+            or unknown.get("authority") != "openclaw-model-adapter"
+            or unknown.get("state") != "post_send_result_unknown"
+            or unknown.get("version") != "0.1"
+            or not isinstance(unknown.get("request_frame_hash"), str)
+            or len(unknown["request_frame_hash"]) != 64
+            or any(char not in "0123456789abcdef"
+                   for char in unknown["request_frame_hash"])
+            or not isinstance(unknown.get("transport_error_type"), str)
+            or not unknown["transport_error_type"]
+            or usage_unknown != unknown
+            or invocation.usage.get("metering_source") != "unavailable_post_send"
+            or invocation.usage.get("measurement_status") != "unavailable"
+            or invocation.usage.get("authority_status") != "uncommitted"
+        ):
+            return None
+        return invocation, result
+
+    @staticmethod
     def _capacity_code(result: ResultEnvelope) -> str | None:
         if result.status != "failed":
             return None
@@ -439,6 +511,11 @@ class AgendaCoordinator:
             except OpenClawModelAdapterError as exc:
                 # Once dispatch is indeterminate, neither this provider nor a
                 # fallback may be called again under the same budget.
+                evidence = self._post_send_unknown(
+                    exc, work=work, route=route, profile=profile
+                )
+                if evidence is not None:
+                    return {"outcome": "served", "value": evidence}
                 return {
                     "outcome": "failed",
                     "failure_class": "unclassified_failure",
@@ -535,6 +612,24 @@ class AgendaCoordinator:
             invocation, result = self._execute_with_safe_retry(
                 adapter, work, routed, profile
             )
+        except OpenClawModelAdapterError as exc:
+            evidence = self._post_send_unknown(
+                exc, work=work, route=routed, profile=profile
+            )
+            if evidence is not None:
+                invocation, result = evidence
+                return {
+                    "status": "executed",
+                    "route": routed,
+                    "profile": profile,
+                    "invocation": invocation,
+                    "result": result,
+                }
+            return {
+                "status": "failed",
+                "route_ref": routed["id"],
+                "error_type": type(exc).__name__,
+            }
         except Exception as exc:
             return {
                 "status": "failed",
