@@ -656,9 +656,10 @@ def _apply_preserve_transition(
                 stream.write(service_after); stream.flush(); os.fsync(stream.fileno())
             os.chmod(temporary, before_mode)
             os.rename(service_config_path, held)
-            moved = held.stat()
-            if ((moved.st_dev, moved.st_ino) != before_identity
-                    or held.is_symlink() or held.read_bytes() != service_before):
+            moved = held.lstat()
+            if (held.is_symlink()
+                    or (moved.st_dev, moved.st_ino) != before_identity
+                    or held.read_bytes() != service_before):
                 if not service_config_path.exists() and not service_config_path.is_symlink():
                     os.rename(held, service_config_path)
                 raise ConfigTransitionError(
@@ -668,10 +669,12 @@ def _apply_preserve_transition(
             held.unlink()
         finally:
             temporary.unlink(missing_ok=True)
-            if (held.exists() and not service_config_path.exists()
+            if ((held.exists() or held.is_symlink())
+                    and not service_config_path.exists()
                     and not service_config_path.is_symlink()):
                 os.rename(held, service_config_path)
-            elif held.exists() and held.is_file() and not held.is_symlink():
+            elif ((held.exists() or held.is_symlink())
+                  and (held.is_symlink() or held.is_file())):
                 held.unlink()
         current = service_config_path.stat()
         owned_identity = (current.st_dev, current.st_ino)

@@ -527,6 +527,27 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                          self.service.readlink())
         self.assertFalse((self.packet / "receipt.json").exists())
 
+    def test_pre_move_dangling_symlink_replacement_is_restored_not_lost(self):
+        manifest = self.build(); self.install_before()
+        real_rename = os.rename
+        injected = False
+
+        def race_service_rename(source, target, *args, **kwargs):
+            nonlocal injected
+            if not injected and Path(source).resolve() == self.service.resolve():
+                injected = True
+                self.service.unlink()
+                self.service.symlink_to(self.root / "owner-pre-move-missing.json")
+            return real_rename(source, target, *args, **kwargs)
+
+        with patch.object(os, "rename", side_effect=race_service_rename):
+            with self.assertRaisesRegex(ConfigTransitionError, "changed during"):
+                self.apply(manifest)
+        self.assertTrue(injected)
+        self.assertTrue(self.service.is_symlink())
+        self.assertEqual(self.root / "owner-pre-move-missing.json",
+                         self.service.readlink())
+
     def test_service_delta_cannot_overwrite_existing_budget_or_other_path(self):
         manifest = self.build(); self.install_before()
         changed = json.loads(self.service.read_text())
