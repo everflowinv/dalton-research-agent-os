@@ -35,7 +35,7 @@ from .metric_discovery import (
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
-TASK_REF = "task:metric-discovery-extraction:0.1"
+TASK_REF = "task:metric-discovery-extraction:0.2"
 MAX_METRICS_PER_WINDOW = 6
 _UNITS = ("currency", "percent", "count", "ratio", "days")
 
@@ -112,7 +112,10 @@ def build_request(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def build_prompt(request: Mapping[str, Any]) -> str:
     return (
-        "You are reading one window of sell-side research or a company release. "
+        "You are reading one window from an eligible evidence source. The supplied "
+        "context does not establish whether its author is sell-side, a sales or trading "
+        "desk, the crowd, management, or a buy-side investor, so do not assign it one of "
+        "those identities. These source categories are distinct. "
         "Report which financial or operating measures this text uses to judge the company: "
         "the measures an analyst is watching, not every number that appears. "
         "Do NOT report any values. A measure counts if the text discusses it, compares it, "

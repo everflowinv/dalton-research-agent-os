@@ -67,6 +67,14 @@ class PromptTests(unittest.TestCase):
         self.assertIn("table nobody comments on", prompt)
         self.assertIn("empty metrics list", prompt)
         self.assertIn("UNTRUSTED_SOURCE_DATA", prompt)
+        self.assertIn("source categories are distinct", prompt)
+        self.assertIn("do not assign it", prompt)
+        self.assertNotIn("You are reading one window of sell-side", prompt)
+
+    def test_prompt_contract_change_has_a_new_work_identity(self) -> None:
+        work = build_work(CONTEXT)
+        self.assertEqual(work.metadata["task_ref"], "task:metric-discovery-extraction:0.2")
+        self.assertIn("source categories are distinct", work.question)
 
 
 class ResponseTests(unittest.TestCase):
