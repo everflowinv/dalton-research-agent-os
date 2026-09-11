@@ -25,6 +25,8 @@ from .document_research import (
 from .research_planner import SCHEMA_VERSION as PLANNER_SCHEMA_VERSION, TASK_REF
 from .research_question_backlog import read_exact_backlog_question_version
 from .research_task import inquiry_content_hash, inquiry_ref_for
+from .contracts import ResultEnvelope, WorkOrder
+from .research_planner import parse_response
 from .store import DaltonStore, authorization_flag, authorized_flag, canonical_json, content_hash
 
 
@@ -65,7 +67,9 @@ def _json(raw: Any, name: str) -> Any:
     return value
 
 
-def _exact_plan(connection: sqlite3.Connection, plan_ref: str) -> dict[str, Any]:
+def _exact_plan(
+    connection: sqlite3.Connection, plan_ref: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
     plan_ref = _text(plan_ref, "plan_ref")
     row = connection.execute(
         "SELECT * FROM coverage_mission_research_plans WHERE plan_id=?", (plan_ref,)
@@ -98,7 +102,7 @@ def _exact_plan(connection: sqlite3.Connection, plan_ref: str) -> dict[str, Any]
         or not isinstance(wire.get("inquiries"), list)
     ):
         raise MissionDocumentResearchError("stored planner plan authority drifted")
-    return {**dict(wire), "plan_id": row["plan_id"]}
+    return ({**dict(wire), "plan_id": row["plan_id"]}, dict(row))
 
 
 def _execution_identity(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -125,6 +129,7 @@ class MissionDocumentResearchAuthority:
         self, store: DaltonStore, *, registry: DocumentResearchRegistry,
         registration_resolver: Callable[[str], Mapping[str, Any]],
         model_execution_resolver: Callable[[], tuple[Mapping[str, Any], Mapping[str, Any]]],
+        planner_scheduler_connection: sqlite3.Connection,
         clock: Callable[[], datetime] = _now,
     ) -> None:
         if not isinstance(store, DaltonStore):
@@ -133,16 +138,120 @@ class MissionDocumentResearchAuthority:
             raise TypeError("registry must be DocumentResearchRegistry")
         if not callable(registration_resolver) or not callable(model_execution_resolver):
             raise TypeError("authority resolvers must be callable")
+        if not callable(getattr(planner_scheduler_connection, "execute", None)):
+            raise TypeError("planner_scheduler_connection must be a SQLite authority")
         self.store = store
         self.connection = store.connection
         self.registry = registry
         self.registration_resolver = registration_resolver
         self.model_execution_resolver = model_execution_resolver
+        self.planner_scheduler_connection = planner_scheduler_connection
         self.clock = clock
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_authorized"
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    def _planner_origin(
+        self, plan: Mapping[str, Any], row: Mapping[str, Any],
+        inquiry: Mapping[str, Any], mission: Mapping[str, Any],
+    ) -> None:
+        """Require the selected inquiry in the exact successful planner output."""
+
+        if (
+            row.get("decided_by") != mission["autonomy"]["automation_principal"]
+            or not isinstance(row.get("work_order_ref"), str)
+            or not row["work_order_ref"]
+        ):
+            raise MissionDocumentResearchError(
+                "planner plan lacks automation execution authority"
+            )
+        scheduler = self.planner_scheduler_connection
+        work_row = scheduler.execute(
+            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+            "WHERE work_order_id=?", (row["work_order_ref"],),
+        ).fetchone()
+        formal = scheduler.execute(
+            "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
+            (row["work_order_ref"],),
+        ).fetchone()
+        if work_row is None or formal is None:
+            raise MissionDocumentResearchError("planner Scheduler authority is unavailable")
+        try:
+            work_raw = json.loads(work_row["work_order_json"])
+            work = WorkOrder.from_dict(work_raw).to_dict()
+            envelope_raw = json.loads(formal["result_envelope_json"])
+            envelope = ResultEnvelope.from_dict(envelope_raw).to_dict()
+            parsed = parse_response(envelope["outputs"]["text"])
+        except Exception as exc:
+            raise MissionDocumentResearchError("planner Scheduler authority is invalid") from exc
+        if (
+            canonical_json(work) != work_row["work_order_json"]
+            or content_hash(work) != work_row["work_order_hash"]
+            or work["id"] != row["work_order_ref"]
+            or work["metadata"].get("control_plane") != "cockpit"
+            or work["metadata"].get("purpose") != "plan"
+            or work["metadata"].get("mission_version_ref") != mission["id"]
+            or not str(work["metadata"].get("request_id", "")).startswith(
+                plan["state_hash"][:32]
+            )
+            or formal["terminal_state"] != "succeeded"
+            or formal["result_envelope_id"] != envelope["id"]
+            or formal["result_envelope_hash"] != content_hash(envelope)
+            or canonical_json(envelope) != formal["result_envelope_json"]
+            or envelope["work_order_ref"] != work["id"]
+            or envelope["status"] != "succeeded"
+            or not isinstance(envelope.get("invocation_ref"), str)
+            or not envelope["invocation_ref"]
+            or set(envelope["outputs"]) != {"text", "content_hash"}
+        ):
+            raise MissionDocumentResearchError("planner Scheduler authority drifted")
+        import hashlib
+
+        text = envelope["outputs"]["text"]
+        if envelope["outputs"]["content_hash"] != hashlib.sha256(
+            text.encode("utf-8")
+        ).hexdigest():
+            raise MissionDocumentResearchError("planner output text binding drifted")
+        raw_matches = []
+        for candidate in parsed["inquiries"]:
+            normalized = {
+                "company_ref": candidate.get("company_ref"),
+                "question": candidate["question"].strip(),
+                "wants": candidate["wants"].strip(),
+                "because": candidate["because"].strip(),
+            }
+            if candidate.get("repair_target_ref") is not None:
+                normalized["repair_target_ref"] = candidate["repair_target_ref"]
+            if candidate.get("directed_document") is not None:
+                normalized["directed_document"] = candidate["directed_document"]
+            projected = {
+                key: value for key, value in inquiry.items()
+                if key not in {"rank", "repair_target_hash"}
+            }
+            if canonical_json(normalized) == canonical_json(projected):
+                raw_matches.append(candidate)
+        if len(raw_matches) != 1:
+            raise MissionDocumentResearchError(
+                "selected inquiry is absent or ambiguous in planner formal output"
+            )
+        invocation_row = self.connection.execute(
+            "SELECT invocation_json FROM model_invocations WHERE invocation_id=?",
+            (envelope["invocation_ref"],),
+        ).fetchone()
+        if invocation_row is None:
+            raise MissionDocumentResearchError("planner ModelInvocation is unavailable")
+        try:
+            invocation = json.loads(invocation_row["invocation_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchError("planner ModelInvocation is invalid") from exc
+        if (
+            invocation.get("id") != envelope["invocation_ref"]
+            or invocation.get("work_order_ref") != work["id"]
+            or invocation.get("parent_ref")
+            != envelope["metadata"].get("route_decision_ref")
+        ):
+            raise MissionDocumentResearchError("planner ModelInvocation drifted")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -229,7 +338,7 @@ class MissionDocumentResearchAuthority:
         self, *, plan_ref: str, inquiry_ref: str, question_version_ref: str,
         document_authority_ref: str,
     ) -> dict[str, Any]:
-        plan = _exact_plan(self.connection, plan_ref)
+        plan, plan_row = _exact_plan(self.connection, plan_ref)
         matches = []
         for ordinal, inquiry in enumerate(plan["inquiries"]):
             try:
@@ -259,6 +368,7 @@ class MissionDocumentResearchAuthority:
         mission = self._mission(
             mission_ref, mission["content_hash"], inquiry["company_ref"], registration["source_ref"]
         )
+        self._planner_origin(plan, plan_row, inquiry, mission)
         source_authority = registration["source_authority"]
         if (
             source_authority["kind"] != "coverage-mission-acquired-document"
