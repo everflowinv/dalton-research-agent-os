@@ -36,6 +36,7 @@ ROLES = (
     "dilutive_securities_adjustment", "diluted_eps_numerator",
     "diluted_weighted_average_shares", "diluted_eps",
     "other_operating_income_expense", "other_nonoperating_income_expense",
+    "company_presented_component", "company_presented_subtotal",
 )
 FORMULA_OPERATORS = ("sum", "divide")
 FORECAST_METHODS = ("quarterly_growth", "share_of_line", "formula", "unavailable")
@@ -68,7 +69,15 @@ _SCHEMA_REF = {
 }
 _STRUCTURE_LINE_SCHEMA = _schema_object(
     {
-        "ref": _SCHEMA_REF, "role": {"enum": list(ROLES)},
+        "ref": _SCHEMA_REF,
+        "role": {
+            "enum": list(ROLES),
+            "description": (
+                "Use company_presented_component for an exact filed line whose "
+                "company-specific bridge position is expressed by a tied formula; "
+                "use company_presented_subtotal only for a derived filed subtotal."
+            ),
+        },
         "label": _SCHEMA_TEXT, "kind": {"enum": list(LINE_KINDS)},
         "concept": {"type": ["string", "null"], "maxLength": 200},
         "statement": {"enum": ["income"]},
@@ -145,6 +154,11 @@ _SUM_ROLE_INPUTS: dict[str, frozenset[str]] = {
         "parent_net_income", "preferred_dividends",
         "participating_securities_allocation", "dilutive_securities_adjustment",
     }),
+}
+_COMPANY_COMPONENT_ROLE = "company_presented_component"
+_COMPANY_SUBTOTAL_ROLE = "company_presented_subtotal"
+_COMPANY_SUM_INPUT_ROLES = frozenset(ROLES) - {
+    "diluted_weighted_average_shares", "diluted_eps",
 }
 
 
@@ -341,6 +355,14 @@ def _normalize_line(
         raise FinancialStatementStructureError(
             "financial statement structure 0.1 supports duration income lines only"
         )
+    if (
+        line["role"] == _COMPANY_COMPONENT_ROLE and line["kind"] != "filed"
+    ) or (
+        line["role"] == _COMPANY_SUBTOTAL_ROLE and line["kind"] != "derived"
+    ):
+        raise FinancialStatementStructureError(
+            "company-presented components must be filed and subtotals must be derived"
+        )
     concept = line["concept"]
     if line["kind"] == "derived":
         if concept is not None:
@@ -478,13 +500,24 @@ def _normalize_formula(
             normalized.append({"line_ref": ref, "coefficient": str(int(coefficient))})
         if len({term["line_ref"] for term in normalized}) != len(normalized):
             raise FinancialStatementStructureError("sum formula repeats a term")
-        allowed_roles = _SUM_ROLE_INPUTS.get(lines[output]["role"])
+        output_role = lines[output]["role"]
+        allowed_roles = (
+            _COMPANY_SUM_INPUT_ROLES
+            if output_role == _COMPANY_SUBTOTAL_ROLE
+            else _SUM_ROLE_INPUTS.get(output_role)
+        )
         if allowed_roles is None or any(
-            lines[term["line_ref"]]["role"] not in allowed_roles
+            lines[term["line_ref"]]["role"] not in (
+                allowed_roles | {_COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE}
+            )
             for term in normalized
         ):
             raise FinancialStatementStructureError(
                 "sum formula roles do not match its company statement output"
+            )
+        if output_role == _COMPANY_SUBTOTAL_ROLE and tie is None:
+            raise FinancialStatementStructureError(
+                "a company-presented subtotal must tie to an exact filed concept"
             )
         result["terms"] = normalized
     elif operator == "divide":

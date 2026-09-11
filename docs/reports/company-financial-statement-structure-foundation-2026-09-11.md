@@ -34,6 +34,14 @@ period kind, and unit. Revenue must be the exact anchor selected by the current
 company spec; expense concepts selected by that spec cannot disappear from the
 extension.
 
+The closed common roles do not impose one universal income-statement topology.
+An exact filed line with a company-specific position uses
+`company_presented_component`; a company-specific derived subtotal uses
+`company_presented_subtotal`. Its formula says where the item belongs and must
+still match the company's historical filed subtotal. This supports, for
+example, an after-tax equity-method item in the net-income bridge without
+pretending every company has that line or moving it into operating income.
+
 Historical replay intersects the periods available for every operand. A
 missing item therefore makes that period unavailable rather than becoming
 zero. Sum tie-outs are exact. EPS division is compared at the precision the
@@ -60,7 +68,12 @@ legacy fixed formula and must be described that way. No note-document authority
 is currently loaded by `company_model_inputs`; callers must supply a real held
 note resolver or omit note evidence.
 
-The representative ACN test request is 15,089 prompt characters plus an 8,929
+The representative ACN test request is 15,588 prompt characters plus a 9,201
 character provider schema. Its complete 0.3 response is 3,505 characters,
 inside the existing 120,000 input / 6,000 output-token model-spec limits. No
 budget or timeout was increased for this contract.
+
+This first structure contract covers duration income-statement arithmetic. It
+does not yet claim company-specific balance-sheet, cash-flow, or operating-driver
+forecast coverage; those remain explicit downstream gaps rather than inferred
+relationships.

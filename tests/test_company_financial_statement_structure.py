@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 import unittest
 
 from dalton_core.company_financial_statement_structure import (
@@ -202,6 +203,83 @@ class FinancialStatementStructureTests(unittest.TestCase):
             candidate, company_spec(), inputs)
         pretax = next(row for row in replay["formulas"] if row["output_ref"] == "pretax")
         self.assertEqual(len(pretax["tested_periods"]), 3)
+
+    def test_company_presented_after_tax_equity_method_enters_net_income_bridge(self):
+        inputs = financial_inputs()
+        inputs["filed_lines"].append(input_line("equity_method_after_tax", (5, 5, 5, 5)))
+        for concept in ("net", "parent"):
+            line = next(item for item in inputs["filed_lines"]
+                        if item["concept"] == concept)
+            for cell in line["cells"].values():
+                cell["value"] = str(Decimal(cell["value"]) + Decimal(5))
+        candidate = proposal(inputs)
+        candidate["lines"].append(filed(
+            "equity-method", "company_presented_component",
+            "equity_method_after_tax", forecast="unavailable",
+        ))
+        net = next(formula for formula in candidate["formulas"]
+                   if formula["output_ref"] == "net")
+        net["terms"].append({"line_ref": "equity-method", "coefficient": "1"})
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        self.assertTrue(replay["ready_for_forecast"])
+        self.assertEqual(
+            next(line for line in structure["lines"]
+                 if line["ref"] == "equity-method")["role"],
+            "company_presented_component",
+        )
+
+    def test_company_component_formula_places_it_before_or_after_operating_income(self):
+        for output_ref, adjusted in (
+            ("operating", ("operating", "pretax", "net", "parent")),
+            ("pretax", ("pretax", "net", "parent")),
+        ):
+            with self.subTest(output_ref=output_ref):
+                inputs = financial_inputs()
+                inputs["filed_lines"].append(input_line(
+                    "company_other_income_expense", (5, 5, 5, 5)))
+                for concept in adjusted:
+                    line = next(item for item in inputs["filed_lines"]
+                                if item["concept"] == concept)
+                    for cell in line["cells"].values():
+                        cell["value"] = str(Decimal(cell["value"]) + Decimal(5))
+                candidate = proposal(inputs)
+                candidate["lines"].append(filed(
+                    "company-other", "company_presented_component",
+                    "company_other_income_expense", forecast="unavailable",
+                ))
+                formula = next(item for item in candidate["formulas"]
+                               if item["output_ref"] == output_ref)
+                formula["terms"].append(
+                    {"line_ref": "company-other", "coefficient": "1"})
+                structure, replay = validate_financial_statement_structure(
+                    candidate, company_spec(), inputs)
+                self.assertTrue(replay["ready_for_forecast"])
+                held = next(item for item in structure["formulas"]
+                            if item["output_ref"] == output_ref)
+                self.assertIn("company-other",
+                              {term["line_ref"] for term in held["terms"]})
+
+    def test_company_presented_roles_cannot_bypass_filed_or_tied_subtotal_authority(self):
+        inputs = financial_inputs()
+        candidate = proposal(inputs)
+        operating = next(line for line in candidate["lines"]
+                         if line["ref"] == "operating")
+        operating["role"] = "company_presented_component"
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "components must be filed"):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
+
+        candidate = proposal(inputs)
+        operating = next(line for line in candidate["lines"]
+                         if line["ref"] == "operating")
+        operating["role"] = "company_presented_subtotal"
+        formula = next(item for item in candidate["formulas"]
+                       if item["output_ref"] == "operating")
+        formula["tie_out_concept"] = None
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "must tie to an exact filed concept"):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
 
     def test_historical_mismatch_refuses_the_structure(self):
         inputs = financial_inputs()
