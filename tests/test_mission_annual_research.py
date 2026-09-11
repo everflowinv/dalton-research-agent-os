@@ -38,7 +38,8 @@ NOW = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
 
 class MissionAnnualFixture:
     def __init__(self, case: unittest.TestCase, *, mission_calls: int = 10,
-                 same_family: bool = False, sec_connected: bool = True) -> None:
+                 same_family: bool = False, sec_connected: bool = True,
+                 unusable_route: bool = False) -> None:
         self.case = case
         self.harness = PlanExecutorHarness(suffix="mission-annual-admission")
         case.addCleanup(self.harness.close)
@@ -125,6 +126,8 @@ class MissionAnnualFixture:
         self.verifier_policy["filters"]["family_independence_capabilities"] = [
             "capability:dalton:model:qualitative-verifier"
         ]
+        if unusable_route:
+            self.draft_policy["filters"]["allowed_providers"] = ["other"]
         self.router_path = self.state / "model-router.sqlite"
         self.router = ModelRouter(self.router_path, clock=self.harness.clock)
         case.addCleanup(self.router.close)
@@ -210,8 +213,25 @@ class MissionAnnualFixture:
             "repair_feedback_ref": feedback["id"],
             "repair_feedback_hash": feedback["content_hash"],
             "repair_target_ref": target["id"], "repair_target_hash": target["content_hash"],
+            "inquiry": {
+                "rank": 0, "company_ref": COMPANY,
+                "question": "How is 客户留存 defined and calculated?",
+                "wants": "Find the accounting definition and numerator/denominator",
+                "because": "The Dossier KPI dictionary lacks cited provenance",
+                "repair_target_ref": target["id"],
+                "repair_target_hash": target["content_hash"],
+            },
+            "query_rationale": (
+                "Translate the Chinese retention gap into the filing's English accounting terms"
+            ),
             "review_ref": self.registration["review_ref"], "issuer_cik": CIK,
-            "accession": ACCESSION, "query_terms": ["retention"],
+            "accession": ACCESSION,
+            "query_terms": ["customer segments", "outsourcing partners"],
+            "limits": {
+                "max_query_terms": 8, "max_results": 12,
+                "max_source_bytes": 4 * 1024 * 1024,
+                "context_before_chars": 180, "context_after_chars": 520,
+            },
             # Targeted search proves the complete, readable acquired rendering
             # itself. It need not pretend every broad-reading window finished.
             "document_read_proof_ref": None,
@@ -233,6 +253,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
         self.assertEqual(admitted["status_marker"], "fresh")
         self.assertEqual(duplicate["status_marker"], "duplicate")
         self.assertEqual(resolved["id"], admitted["id"])
+        self.assertEqual(admitted["request"]["limits"]["max_results"], 12)
         self.assertEqual(
             fixture.store.connection.execute(
                 "SELECT count(*) FROM mission_annual_research_admissions"
@@ -253,6 +274,9 @@ class MissionAnnualResearchTests(unittest.TestCase):
             {"company_ref": "company:other"},
             {"mission_version_hash": "0" * 64},
             {"repair_target_hash": "0" * 64},
+            {"inquiry": {
+                **fixture.args()["inquiry"], "repair_target_ref": "dossier-repair-target:other",
+            }},
             {"accession": "0000320193-25-000080"},
             {"workflow_contract_ref": "workflow:unsupported"},
             {"actor_ref": "human:owner"},
@@ -273,6 +297,10 @@ class MissionAnnualResearchTests(unittest.TestCase):
             fixture = MissionAnnualFixture(self, same_family=True)
             with self.assertRaisesRegex(MissionAnnualResearchError, "independent"):
                 fixture.authority.admit(**fixture.args())
+        with self.subTest("policy-filter"):
+            fixture = MissionAnnualFixture(self, unusable_route=True)
+            with self.assertRaisesRegex(MissionAnnualResearchError, "no eligible model"):
+                fixture.authority.admit(**fixture.args())
 
     def test_budget_refusal_and_stale_feedback_have_no_model_side_effect(self):
         fixture = MissionAnnualFixture(self, mission_calls=1)
@@ -290,10 +318,14 @@ class MissionAnnualResearchTests(unittest.TestCase):
         with self.assertRaisesRegex(MissionAnnualResearchError, "stale"):
             healthy.authority.resolve_for_execution(admitted["id"])
 
-    def test_query_terms_must_be_grounded_in_exact_repair_target(self):
+    def test_translated_query_terms_are_bound_without_literal_target_matching(self):
         fixture = MissionAnnualFixture(self)
-        with self.assertRaisesRegex(MissionAnnualResearchError, "query term"):
-            fixture.authority.admit(**fixture.args(query_terms=["unrelated acquisition rumor"]))
+        admitted = fixture.authority.admit(**fixture.args())
+        self.assertIn("客户留存", admitted["planner_inquiry"]["question"])
+        self.assertEqual(
+            admitted["request"]["query_terms"],
+            ["customer segments", "outsourcing partners"],
+        )
 
 
 if __name__ == "__main__":

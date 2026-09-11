@@ -12,6 +12,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -22,7 +23,9 @@ from .annual_report_runtime import (
 from .agenda import read_exact_mandate_version
 from .dossier_repair_feedback import read_dossier_repair_feedback
 from .model_fallback_chain import tier_for
-from .model_router import canonical_hash as router_hash, resolve_chain
+from .model_router import (
+    canonical_hash as router_hash, independent_families, resolve_chain,
+)
 from .registered_annual_report import OPERATION, RegisteredAnnualReportRegistry
 from .sec_company_facts_lane import read_active_annual_budget_mission
 from .store import (
@@ -170,17 +173,89 @@ class MissionAnnualResearchAuthority:
         return feedback, target
 
     @staticmethod
-    def _ground_terms(target: Mapping[str, Any], query_terms: list[str]) -> None:
-        material = " ".join(
-            str(value) for key, value in target.items()
-            if key not in {"id", "content_hash"}
-        ).casefold()
-        for term in query_terms:
-            normalized = " ".join(str(term).casefold().split())
-            if normalized not in material:
-                raise MissionAnnualResearchError(
-                    "every annual-report query term must occur in the exact repair target"
-                )
+    def _inquiry(
+        value: Any, *, company_ref: str, target_ref: str, target_hash: str
+    ) -> dict[str, Any]:
+        fields = {
+            "rank", "company_ref", "question", "wants", "because",
+            "repair_target_ref", "repair_target_hash",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise MissionAnnualResearchError("planner inquiry has an invalid closed shape")
+        inquiry = dict(value)
+        if (
+            isinstance(inquiry["rank"], bool) or not isinstance(inquiry["rank"], int)
+            or inquiry["rank"] < 0
+            or inquiry["company_ref"] != company_ref
+            or inquiry["repair_target_ref"] != target_ref
+            or inquiry["repair_target_hash"] != target_hash
+        ):
+            raise MissionAnnualResearchError(
+                "planner inquiry does not bind the exact company repair target"
+            )
+        for field in ("question", "wants", "because"):
+            inquiry[field] = _text(inquiry[field], f"inquiry.{field}")
+        return inquiry
+
+    def _profile_reasons(
+        self, profile: Mapping[str, Any], policy: Mapping[str, Any],
+        execution: Mapping[str, Any], capability: str, *, chain: list[str],
+    ) -> list[str]:
+        reasons: list[str] = []
+        filters = policy["filters"]
+        checks = (
+            ("allowed_profile_ids", "id", "profile_not_allowed"),
+            ("allowed_providers", "provider", "provider_not_allowed"),
+            ("allowed_families", "family", "family_not_allowed"),
+            ("allowed_adapter_refs", "adapter_ref", "adapter_not_allowed"),
+        )
+        for filter_name, profile_name, reason in checks:
+            allowed = set(filters[filter_name])
+            if allowed and profile[profile_name] not in allowed:
+                reasons.append(reason)
+        if capability not in set(profile["capabilities"]):
+            reasons.append("capability_not_supported")
+        if not set(filters["required_modalities"]).issubset(set(profile["modalities"])):
+            reasons.append("modality_not_supported")
+        if profile["credential_slot_ref"] not in set(execution["credential_slot_refs"]):
+            reasons.append("credential_slot_unavailable")
+        availability = profile["availability"]
+        now = self.clock().astimezone(timezone.utc)
+        checked = datetime.fromisoformat(availability["checked_at"].replace("Z", "+00:00"))
+        valid = datetime.fromisoformat(availability["valid_until"].replace("Z", "+00:00"))
+        if availability["state"] != "available":
+            reasons.append("profile_not_available")
+        if checked > now:
+            reasons.append("availability_check_in_future")
+        if valid <= now:
+            reasons.append("availability_expired")
+        max_input = execution["max_input_tokens"]
+        max_output = execution["max_output_tokens"]
+        if max_input > profile["context"]["max_context_tokens"]:
+            reasons.append("context_window_insufficient")
+        if max_output > profile["context"]["max_output_tokens"]:
+            reasons.append("model_output_limit_insufficient")
+        limits = profile["limits"]
+        if max_input > limits["max_input_tokens"]:
+            reasons.append("profile_input_limit_exceeded")
+        if max_output > limits["max_output_tokens"]:
+            reasons.append("profile_output_limit_exceeded")
+        if max_input + max_output > limits["max_total_tokens"]:
+            reasons.append("profile_total_limit_exceeded")
+        estimated = (
+            Decimal(str(profile["cost"]["input_per_million_usd"]))
+            * Decimal(max_input) / Decimal(1_000_000)
+            + Decimal(str(profile["cost"]["output_per_million_usd"]))
+            * Decimal(max_output) / Decimal(1_000_000)
+        )
+        if estimated > Decimal(str(limits["max_cost_usd"])):
+            reasons.append("profile_cost_limit_exceeded")
+        if estimated > Decimal(str(execution["max_cost_usd"])):
+            reasons.append("work_order_cost_budget_exceeded")
+        live_chain = [item for item in chain if item]
+        if profile.get("unpriced") and (not live_chain or profile["id"] != live_chain[-1]):
+            reasons.append("unpriced_model_not_last_link")
+        return sorted(set(reasons))
 
     def _router_record(self, table: str, ref_column: str, ref: str, hash_column: str,
                        json_column: str) -> dict[str, Any]:
@@ -231,8 +306,7 @@ class MissionAnnualResearchAuthority:
             chain = [] if resolved is None else list(resolved["chain"])
             if not chain:
                 chain = list(policy["filters"]["allowed_profile_ids"])
-            eligible = []
-            allowed_slots = set(executions[stage]["credential_slot_refs"])
+            candidates = []
             for profile_id in chain:
                 profile = profiles.get(profile_id)
                 if profile is None or profile.get("status") == "retired":
@@ -241,18 +315,17 @@ class MissionAnnualResearchAuthority:
                     "model_endpoint_profile_versions", "profile_version_ref",
                     profile["profile_version_ref"], "profile_hash", "profile_json",
                 )
-                if (
-                    exact["credential_slot_ref"] in allowed_slots
-                    and capabilities[stage] in set(exact["capabilities"])
-                    and exact["availability"]["state"] == "available"
-                ):
-                    eligible.append({
-                        "profile_ref": exact["id"],
-                        "profile_version_ref": exact["profile_version_ref"],
-                        "profile_hash": exact["content_hash"],
-                        "family": exact["family"],
-                    })
-            if not eligible:
+                reasons = self._profile_reasons(
+                    exact, policy, executions[stage], capabilities[stage], chain=chain
+                )
+                candidates.append({
+                    "profile_ref": exact["id"],
+                    "profile_version_ref": exact["profile_version_ref"],
+                    "profile_hash": exact["content_hash"],
+                    "family": exact["family"], "preflight_reasons": reasons,
+                })
+            usable = [item for item in candidates if not item["preflight_reasons"]]
+            if not usable:
                 raise MissionAnnualResearchError(
                     f"installed annual-report {stage} route has no eligible model"
                 )
@@ -262,13 +335,15 @@ class MissionAnnualResearchAuthority:
                 raise MissionAnnualResearchError(
                     "annual-report verifier policy does not require family independence"
                 )
-            families[stage] = {item["family"] for item in eligible}
+            families[stage] = {item["family"] for item in usable}
             proof[stage] = {
                 "purpose": purposes[stage],
                 "config_hash": content_hash(configs[stage]),
                 "routing_policy_ref": policy_ref,
                 "routing_policy_hash": policy["content_hash"],
-                "eligible_profiles": eligible,
+                # This is a read-only preflight over current Router authority.
+                # The real route decision repeats the same filters at call time.
+                "configured_candidate_profiles": candidates,
             }
             try:
                 with ThesisImpactBudgetStore(
@@ -286,12 +361,18 @@ class MissionAnnualResearchAuthority:
                 raise MissionAnnualResearchError(
                     f"installed annual-report {stage} budget cannot admit one call"
                 )
-            proof[stage]["budget_policy"] = {
+            # This proves the immutable ceiling exists and can fit one call;
+            # it is not a balance reservation. The model worker performs the
+            # atomic day/mission/pool admission immediately before send.
+            proof[stage]["budget_policy_ceiling"] = {
                 "policy_version_ref": budget_policy["policy_version_id"],
                 "policy_hash": budget_policy["content_hash"],
                 "day_cap_micros": budget_policy["day_cap_micros"],
             }
-        if any(not (families["verifier"] - {family}) for family in families["draft"]):
+        if any(not any(
+            independent_families(verifier, producer)
+            for verifier in families["verifier"]
+        ) for producer in families["draft"]):
             raise MissionAnnualResearchError(
                 "installed verifier cannot remain independent of every producer family"
             )
@@ -302,7 +383,9 @@ class MissionAnnualResearchAuthority:
         mission_version_ref: str, mission_version_hash: str,
         company_ref: str, actor_ref: str, repair_feedback_ref: str,
         repair_feedback_hash: str, repair_target_ref: str, repair_target_hash: str,
+        inquiry: Mapping[str, Any], query_rationale: str,
         review_ref: str, issuer_cik: str, accession: str, query_terms: list[str],
+        limits: Mapping[str, Any],
         document_read_proof_ref: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
@@ -322,7 +405,11 @@ class MissionAnnualResearchAuthority:
             company_ref, repair_feedback_ref, repair_feedback_hash,
             repair_target_ref, repair_target_hash,
         )
-        self._ground_terms(target, query_terms)
+        inquiry = self._inquiry(
+            inquiry, company_ref=company_ref, target_ref=target["id"],
+            target_hash=target["content_hash"],
+        )
+        query_rationale = _text(query_rationale, "query_rationale")
         executions, model_authority = self._model_authority()
         request = self.registry.bind_request(
             mission_version_ref=mission_version_ref,
@@ -331,11 +418,7 @@ class MissionAnnualResearchAuthority:
             issuer_cik=issuer_cik,
             accession=accession,
             query_terms=query_terms,
-            limits={
-                "max_query_terms": 12, "max_results": 20,
-                "max_source_bytes": 8 * 1024 * 1024,
-                "context_before_chars": 240, "context_after_chars": 480,
-            },
+            limits=dict(limits),
             model_execution=executions,
             document_read_proof_ref=document_read_proof_ref,
         )
@@ -354,6 +437,9 @@ class MissionAnnualResearchAuthority:
             "repair_feedback_hash": feedback["content_hash"],
             "repair_target_ref": target["id"],
             "repair_target_hash": target["content_hash"],
+            "planner_inquiry": inquiry,
+            "planner_inquiry_hash": content_hash(inquiry),
+            "query_rationale": query_rationale,
             "request": request,
             "model_authority": model_authority,
         }
@@ -406,6 +492,7 @@ class MissionAnnualResearchAuthority:
             "mission_version_hash", "mission_ref", "company_ref", "actor_ref",
             "mandate_binding", "outer_budget", "repair_feedback_ref",
             "repair_feedback_hash", "repair_target_ref", "repair_target_hash",
+            "planner_inquiry", "planner_inquiry_hash", "query_rationale",
             "request", "model_authority", "content_hash",
         }
         body = dict(wire)
@@ -467,10 +554,13 @@ class MissionAnnualResearchAuthority:
             repair_feedback_hash=wire["repair_feedback_hash"],
             repair_target_ref=wire["repair_target_ref"],
             repair_target_hash=wire["repair_target_hash"],
+            inquiry=wire["planner_inquiry"],
+            query_rationale=wire["query_rationale"],
             review_ref=wire["request"]["review_ref"],
             issuer_cik=wire["request"]["issuer_cik"],
             accession=wire["request"]["accession"],
             query_terms=list(wire["request"]["query_terms"]),
+            limits=dict(wire["request"]["limits"]),
             document_read_proof_ref=wire["request"]["document_read_proof_ref"],
         )
         if content_hash(identity) != wire["identity_hash"] or request != wire["request"]:
