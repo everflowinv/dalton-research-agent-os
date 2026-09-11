@@ -237,6 +237,33 @@ class FundXlsxExportTests(unittest.TestCase):
                     for row in range(5, formula_map.max_row + 1)]
         self.assertTrue(any(str(value).startswith("'=") for value in formulas))
 
+    def test_audit_sheets_wrap_complete_references_hashes_and_formulas(self):
+        from openpyxl import load_workbook
+
+        self.export()
+        book = load_workbook(self.path, data_only=False)
+        sources = book["Sources"]
+        formula_map = book["Formula Map"]
+        self.assertGreaterEqual(sources.column_dimensions["B"].width, 56)
+        self.assertGreaterEqual(sources.column_dimensions["C"].width, 68)
+        self.assertGreaterEqual(formula_map.column_dimensions["C"].width, 62)
+        self.assertGreaterEqual(formula_map.column_dimensions["D"].width, 62)
+        source_row = next(
+            row for row in range(5, sources.max_row + 1)
+            if sources.cell(row, 1).value == "ForecastModel"
+        )
+        formula_row = next(
+            row for row in range(5, formula_map.max_row + 1)
+            if str(formula_map.cell(row, 3).value).startswith("'=")
+        )
+        for sheet, row in ((sources, source_row), (formula_map, formula_row)):
+            self.assertTrue(sheet.cell(row, 2).alignment.wrap_text)
+            self.assertEqual(sheet.cell(row, 2).alignment.vertical, "top")
+        self.assertTrue(any(
+            (formula_map.row_dimensions[row].height or 0) >= 42
+            for row in range(5, formula_map.max_row + 1)
+        ))
+
     def test_without_calendar_binding_does_not_guess_annual_columns(self):
         from openpyxl import load_workbook
 

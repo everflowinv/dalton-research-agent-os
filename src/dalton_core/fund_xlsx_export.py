@@ -681,6 +681,23 @@ def export_fund_workbook(
             for cell in row_cells:
                 if cell.row not in {1, 4} and cell.font.name != "Arial":
                     cell.font = Font(name="Arial", size=10, color=cell.font.color)
+    # Audit sheets contain long immutable references, hashes, and formula text.
+    # Wrap them at readable widths so printed/PDF copies retain the full value.
+    from openpyxl.styles import Alignment
+    audit_widths = {
+        sources: {"A": 24, "B": 56, "C": 68, "D": 24},
+        manifest: {"A": 26, "B": 54, "C": 62, "D": 62, "E": 42},
+    }
+    for ws, widths in audit_widths.items():
+        for column, width in widths.items():
+            ws.column_dimensions[column].width = width
+        for row_cells in ws.iter_rows(min_row=4):
+            has_long_value = False
+            for cell in row_cells:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                has_long_value = has_long_value or len(str(cell.value or "")) > 45
+            if has_long_value:
+                ws.row_dimensions[row_cells[0].row].height = 42
     output = Path(output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
