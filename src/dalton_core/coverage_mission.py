@@ -3921,9 +3921,9 @@ class CoverageMissionAuthority:
         # everyone once the fault was fixed.
         failures = [
             {"reason": row["failure_reason"], "at": row["updated_at"],
-             "status": row["status"]}
+             "status": row["status"], "form": row["form"]}
             for row in self.connection.execute(
-                "SELECT status,failure_reason,updated_at "
+                "SELECT status,failure_reason,updated_at,form "
                 "FROM coverage_mission_statement_dispatches "
                 "WHERE company_ref=? AND status IN ('failed','rejected') "
                 "ORDER BY updated_at,dispatch_id", (company_ref,),

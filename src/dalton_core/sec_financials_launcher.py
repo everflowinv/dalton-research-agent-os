@@ -41,6 +41,8 @@ class SecFinancialsLauncher(LaneChildLauncher):
         governance_path: str | Path,
         mode_args: Sequence[str] = LIVE_MODE_ARGS,
         user_agent: str | None = None,
+        scheduling_forms: Sequence[str] = ("10-K", "10-Q"),
+        scheduling_limits: dict[str, int] | None = None,
         governance_loader: Callable[[Path], Any] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -48,6 +50,10 @@ class SecFinancialsLauncher(LaneChildLauncher):
         self.governance_path = Path(governance_path).expanduser().resolve()
         self.mode_args = tuple(str(item) for item in mode_args)
         self.user_agent = user_agent
+        self.scheduling_forms = tuple(scheduling_forms)
+        self.scheduling_limits = dict(
+            {"10-K": 1} if scheduling_limits is None else scheduling_limits
+        )
         self._governance_loader = governance_loader
 
     @property

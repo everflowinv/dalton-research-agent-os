@@ -65,6 +65,8 @@ MAX_ATTEMPTS_PER_COMPANY = 8
 # holds instead of asking SEC the same doomed question once a tick.
 CONFIGURATION_HOLD_SECONDS = 1800
 DEFAULT_FORM = "10-Q"
+DEFAULT_FORMS = ("10-K", "10-Q")
+DEFAULT_FORM_LIMITS = {"10-K": 1}
 DEFAULT_FILING_LIMIT = 1
 MAX_FAILURE_DETAIL_CHARS = 500
 
@@ -104,17 +106,30 @@ class MissionStatementLaneCoordinator:
         launcher: Any,
         checklist: Callable[[], Sequence[Mapping[str, Any]]],
         form: str = DEFAULT_FORM,
+        forms: Sequence[str] | None = None,
         filing_limit: int = DEFAULT_FILING_LIMIT,
+        filing_limits: Mapping[str, int] | None = None,
         actor_ref: str = "automation:coverage-mission",
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.missions = missions
         self.launcher = launcher
         self.checklist = checklist
-        self.form = form
+        self.forms = tuple(forms) if forms is not None else (form,)
+        if (not self.forms or len(set(self.forms)) != len(self.forms)
+                or any(item not in ("10-Q", "10-K") for item in self.forms)):
+            raise ValueError("forms must be a unique nonempty selection of 10-Q and 10-K")
+        self.form = self.forms[0]
         if not 1 <= int(filing_limit) <= MAX_STATEMENT_FILINGS:
             raise ValueError(f"filing_limit must be 1..{MAX_STATEMENT_FILINGS}")
         self.filing_limit = int(filing_limit)
+        self.filing_limits: dict[str, int] = {}
+        for item, limit in (filing_limits or {}).items():
+            if item not in self.forms:
+                raise ValueError("filing limit form must be selected")
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_STATEMENT_FILINGS:
+                raise ValueError(f"filing limit must be 1..{MAX_STATEMENT_FILINGS}")
+            self.filing_limits[item] = limit
         self.actor_ref = actor_ref
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -214,7 +229,7 @@ class MissionStatementLaneCoordinator:
 
     # -- depth -------------------------------------------------------------
 
-    def _wanted_filings(self, company_ref: str) -> int:
+    def _wanted_filings(self, company_ref: str, form: str) -> int:
         """How many filings of this form this company's model rests on.
 
         The specification says how many quarters of history it needs; this lane
@@ -226,17 +241,19 @@ class MissionStatementLaneCoordinator:
         try:
             spec = self.missions.latest_company_model_spec(company_ref)
         except Exception:  # noqa: BLE001 - the floor is always safe
-            return self.filing_limit
+            return self.filing_limits.get(form, self.filing_limit)
         if not spec:
-            return self.filing_limit
+            return self.filing_limits.get(form, self.filing_limit)
         horizon = spec.get("horizon") or {}
         quarters = horizon.get("historical_quarters")
         if isinstance(quarters, bool) or not isinstance(quarters, int) or quarters < 1:
-            return self.filing_limit
+            return self.filing_limits.get(form, self.filing_limit)
+        if form in self.filing_limits:
+            return self.filing_limits[form]
         # A 10-K covers a year, so asking for twenty quarters of annual reports
         # would be asking for twenty years. Quarters are quarters; anything
         # else is scaled to what the form actually reports.
-        if self.form == "10-K":
+        if form == "10-K":
             quarters = max(1, (quarters + 3) // 4)
         return max(self.filing_limit, min(quarters, MAX_STATEMENT_FILINGS))
 
@@ -261,55 +278,65 @@ class MissionStatementLaneCoordinator:
                 continue
             if coverage["open_dispatches"]:
                 continue
-            failures = coverage.get("failures") or []
+            for form in self.forms:
+                outcome = self._queue_company_form(
+                    company_ref=company_ref, ticker=ticker, form=form,
+                    coverage=coverage,
+                )
+                if outcome is not None:
+                    queued.append(outcome)
+                    if outcome["status"] == "queued":
+                        break
+        return queued
+
+    def _queue_company_form(self, *, company_ref: str, ticker: str, form: str,
+                            coverage: Mapping[str, Any]) -> dict[str, Any] | None:
+        failures = [item for item in (coverage.get("failures") or [])
+                    if item.get("form") == form]
             # Only the failures this company is actually responsible for spend
             # its budget, and only those number its attempts.
-            charged = [item for item in failures
-                       if not _is_configuration_failure(item.get("reason"))]
-            if len(charged) >= MAX_FAILURES_PER_COMPANY:
-                continue
-            if len(failures) >= MAX_ATTEMPTS_PER_COMPANY:
-                queued.append({
-                    "company_ref": company_ref, "status": "held",
-                    "reason": f"{len(failures)} runs have failed for this company; "
-                              "not trying again without a change",
-                })
-                continue
-            retry_salt = None
-            if failures and _is_configuration_failure(failures[-1].get("reason")):
-                held_for = self._seconds_since(failures[-1].get("at"))
-                if held_for is not None and held_for < CONFIGURATION_HOLD_SECONDS:
-                    queued.append({
-                        "company_ref": company_ref, "status": "held",
-                        "reason": "this Core's own configuration failed the last "
-                                  "run; holding rather than asking SEC again",
-                    })
-                    continue
-                retry_salt = self._retry_salt()
+        charged = [item for item in failures
+                   if not _is_configuration_failure(item.get("reason"))]
+        if len(charged) >= MAX_FAILURES_PER_COMPANY:
+            return None
+        if len(failures) >= MAX_ATTEMPTS_PER_COMPANY:
+            return {
+                "company_ref": company_ref, "status": "held", "form": form,
+                "reason": f"{len(failures)} {form} runs have failed for this company; "
+                          "not trying again without a change",
+            }
+        retry_salt = None
+        if failures and _is_configuration_failure(failures[-1].get("reason")):
+            held_for = self._seconds_since(failures[-1].get("at"))
+            if held_for is not None and held_for < CONFIGURATION_HOLD_SECONDS:
+                return {
+                    "company_ref": company_ref, "status": "held", "form": form,
+                    "reason": "this Core's own configuration failed the last "
+                              "run; holding rather than asking SEC again",
+                }
+            retry_salt = self._retry_salt()
             # P13am: how much history this company needs is its own model's
             # answer, not a constant. IBM's specification asked for twenty
             # quarters to separate mainframe launch cycles from the underlying
             # business; a consultancy with a steady book needs far less. Until
             # a specification exists, one quarter is the floor that keeps the
             # lane moving and gives the model something to reason over.
-            wanted = self._wanted_filings(company_ref)
-            if coverage.get("held_by_form", {}).get(self.form, 0) >= wanted:
-                continue
-            try:
-                authorization = self.missions.sec_lane_authorization_for_company(company_ref)
-                dispatch = self.missions.queue_statement_dispatch(
-                    authorization=authorization, form=self.form,
-                    filing_limit=wanted, attempt=len(charged),
-                    retry_salt=retry_salt,
-                )
-            except CoverageMissionError as exc:
-                queued.append({"company_ref": company_ref, "status": "refused",
-                               "reason": f"{type(exc).__name__}: {exc}"})
-                continue
-            if dispatch["status_marker"] == "fresh":
-                queued.append({"company_ref": company_ref, "status": "queued",
-                               "dispatch_ref": dispatch["dispatch_id"]})
-        return queued
+        wanted = self._wanted_filings(company_ref, form)
+        if coverage.get("held_by_form", {}).get(form, 0) >= wanted:
+            return None
+        try:
+            authorization = self.missions.sec_lane_authorization_for_company(company_ref)
+            dispatch = self.missions.queue_statement_dispatch(
+                authorization=authorization, form=form,
+                filing_limit=wanted, attempt=len(charged), retry_salt=retry_salt,
+            )
+        except CoverageMissionError as exc:
+            return {"company_ref": company_ref, "form": form, "status": "refused",
+                    "reason": f"{type(exc).__name__}: {exc}"}
+        if dispatch["status_marker"] == "fresh":
+            return {"company_ref": company_ref, "form": form, "status": "queued",
+                    "dispatch_ref": dispatch["dispatch_id"]}
+        return None
 
     # -- launching ---------------------------------------------------------
 
@@ -387,6 +414,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         missions=server.coverage_mission,
         launcher=launcher,
         checklist=server.lane_company_checklist(),
+        forms=getattr(launcher, "scheduling_forms", DEFAULT_FORMS),
+        filing_limits=getattr(launcher, "scheduling_limits", None),
     ).dispatch_once()
 
 
@@ -402,6 +431,9 @@ def add_arguments(parser: Any) -> None:
         help="rehearsal only: replay a captured parse instead of reaching SEC",
     )
     parser.add_argument("--statement-lane-user-agent", default=None)
+    parser.add_argument("--statement-lane-form", action="append", choices=DEFAULT_FORMS)
+    parser.add_argument("--statement-lane-filing-limit", action="append", default=[],
+                        metavar="FORM=N")
 
 
 def build_launcher(args: Any) -> Any | None:
@@ -415,11 +447,30 @@ def build_launcher(args: Any) -> Any | None:
         ("--fixture-file", args.statement_lane_fixture)
         if args.statement_lane_fixture is not None else ("--allow-network",)
     )
+    forms = tuple(getattr(args, "statement_lane_form", None) or DEFAULT_FORMS)
+    limits: dict[str, int] = {
+        form: limit for form, limit in DEFAULT_FORM_LIMITS.items() if form in forms
+    }
+    explicitly_limited: set[str] = set()
+    for value in getattr(args, "statement_lane_filing_limit", ()):
+        try:
+            form, raw_limit = value.split("=", 1)
+            limit = int(raw_limit)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("statement filing limit must be FORM=N") from exc
+        if form not in forms or not 1 <= limit <= MAX_STATEMENT_FILINGS:
+            raise ValueError("statement filing limit must select a configured form and be 1..8")
+        if form in explicitly_limited:
+            raise ValueError("statement filing limit form must be unique")
+        limits[form] = limit
+        explicitly_limited.add(form)
     return SecFinancialsLauncher(
         state_dir=_Path(args.db).expanduser().resolve().parent,
         governance_path=args.statement_lane_governance,
         mode_args=mode_args,
         user_agent=args.statement_lane_user_agent,
+        scheduling_forms=forms,
+        scheduling_limits=limits,
     )
 
 
@@ -451,6 +502,9 @@ def argv_fragment(context: Any) -> list[str]:
     return [
         "--statement-lane-governance", str(governance),
         "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
+        "--statement-lane-form", "10-K",
+        "--statement-lane-form", "10-Q",
+        "--statement-lane-filing-limit", "10-K=1",
     ]
 
 
@@ -472,6 +526,8 @@ __all__ = [
     "COMPANY_FAILURE_MARKERS",
     "DEFAULT_FILING_LIMIT",
     "DEFAULT_FORM",
+    "DEFAULT_FORMS",
+    "DEFAULT_FORM_LIMITS",
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_ATTEMPTS_PER_COMPANY",

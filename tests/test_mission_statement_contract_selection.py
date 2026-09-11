@@ -39,6 +39,17 @@ class StatementContractSelectionTests(unittest.TestCase):
         v3 = self.write(3, "approved")
         self.assertEqual(self.selected(), str(v3))
 
+    def test_installed_lane_requests_annual_and_quarterly_coverage(self):
+        self.write(2, "approved")
+        argv = argv_fragment(self.context)
+        self.assertEqual(
+            [argv[index + 1] for index, item in enumerate(argv)
+             if item == "--statement-lane-form"],
+            ["10-K", "10-Q"],
+        )
+        limit = argv.index("--statement-lane-filing-limit")
+        self.assertEqual(argv[limit + 1], "10-K=1")
+
     def test_fresh_proposed_records_do_not_advertise_a_connected_lane(self):
         self.write(2, "proposed")
         self.write(3, "proposed")

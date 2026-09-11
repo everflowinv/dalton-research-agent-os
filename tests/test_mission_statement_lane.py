@@ -68,12 +68,12 @@ def _model_spec(*, historical_quarters):
     }
 
 
-def _observation(accession=ACCESSION):
+def _observation(accession=ACCESSION, *, form="10-Q", report_date="2026-06-30"):
     return {
         "schema_version": "0.1", "cik": "0001467373", "entity_name": "Accenture plc",
         "filings": [{
-            "accession": accession, "form": "10-Q", "filed": "2026-06-25",
-            "report_date": "2026-06-30",
+            "accession": accession, "form": form, "filed": "2026-06-25",
+            "report_date": report_date,
             "lines": [{
                 "statement": "income", "concept": "us-gaap:Revenues",
                 "label": "Revenues", "level": 0, "parent_concept": None,
@@ -356,6 +356,66 @@ class StatementLaneTests(unittest.TestCase):
     def test_a_company_without_a_ticker_is_skipped(self):
         self.companies = [{"company_ref": ACN}, {"ticker": "ACN"}]
         self.assertEqual(self.lane.dispatch_once()["queued"], [])
+
+    def test_production_forms_backfill_annual_before_covered_quarterly(self):
+        lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, forms=("10-K", "10-Q"),
+            clock=lambda: self.now,
+        )
+        launched = lane.dispatch_once()
+        self.assertEqual(launched["status"], "launched")
+        self.assertEqual(self.launcher.started[-1]["form"], "10-K")
+        annual = _observation(
+            "0001467373-25-000099", form="10-K", report_date="2025-08-31")
+        self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary(annual))
+        following = lane.dispatch_once()
+        self.assertEqual(following["settled"][0]["outcome"], "succeeded")
+        self.assertEqual(self.launcher.started[-1]["form"], "10-Q")
+
+    def test_annual_failures_do_not_spend_quarterly_attempts(self):
+        lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, forms=("10-K", "10-Q"),
+            clock=lambda: self.now,
+        )
+        launched = lane.dispatch_once()
+        for _ in range(MAX_FAILURES_PER_COMPANY):
+            self.assertEqual(self.launcher.started[-1]["form"], "10-K")
+            self.launcher.finish(launched["ticket_ref"], status="failed", summary={
+                "failure_reason":
+                    "SecFinancialsRunError: the parser returned no filing with XBRL"})
+            launched = lane.dispatch_once()
+        self.assertEqual(self.launcher.started[-1]["form"], "10-Q")
+
+    def test_annual_configuration_hold_does_not_block_quarterly(self):
+        lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, forms=("10-K", "10-Q"),
+            filing_limits={"10-K": 1}, clock=lambda: self.now,
+        )
+        launched = lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], status="failed", summary={
+            "failure_reason": "OSError: temporary parser configuration failure"})
+        following = lane.dispatch_once()
+        self.assertEqual(following["status"], "launched")
+        self.assertEqual(self.launcher.started[-1]["form"], "10-Q")
+        self.assertTrue(any(
+            item.get("form") == "10-K" and item["status"] == "held"
+            for item in following["queued"]
+        ))
+
+    def test_per_form_floor_is_configurable(self):
+        lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, forms=("10-K",),
+            filing_limits={"10-K": 2}, clock=lambda: self.now,
+        )
+        lane.dispatch_once()
+        self.assertEqual(self.launcher.started[-1], {
+            "ticker": "ACN", "form": "10-K", "limit": 2,
+            "actor_ref": "automation:coverage-mission",
+        })
 
 
 if __name__ == "__main__":
