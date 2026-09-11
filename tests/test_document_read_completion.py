@@ -129,6 +129,19 @@ class DocumentReadCompletionTests(StageHarness):
         saved = self.store.connection.execute(
             "SELECT record_json FROM coverage_mission_document_review_reopens").fetchone()[0]
         self.assertEqual(__import__("json").loads(saved)["prior_review"], dismissed)
+        self.assertEqual(self.item(self.evaluate(), ACN, "broker_research")["read"], 0)
+        open_review = self.missions.document_review(self.review["review_id"])
+        open_hash = content_hash(open_review)
+        receipt = {**self.window(), "source_review_hash": open_hash}
+        class ReceiptReader:
+            def read_completion_receipt(_self, **_kwargs): return dict(receipt)
+        DocumentReadCompletionAuthority(self.store.connection).record(
+            review_id=self.review["review_id"], source_review_hash=open_hash,
+            actor_ref=AUTOMATION, windows=[receipt], receipt_reader=ReceiptReader())
+        self.missions.resolve_document_review(
+            self.review["review_id"], resolution="dismissed", actor_ref=AUTOMATION,
+            rationale="supplemental read complete", expected_review_hash=open_hash)
+        self.assertEqual(self.item(self.evaluate(), ACN, "broker_research")["read"], 1)
 
     def test_supplement_rejects_drifted_formal_failure_without_writes(self):
         self.missions.resolve_document_review(
