@@ -141,6 +141,54 @@ class StageHarness(unittest.TestCase):
 
 
 class SourceBaseTests(StageHarness):
+    def test_historical_extraction_stays_visible_without_whole_read_proof(self) -> None:
+        for quarter in range(1, 5):
+            document_ref = self.document(
+                ACN, TRANSCRIPTS, "acquired",
+                title=f"Accenture Q{quarter} 2026 Earnings Call",
+            )
+            with self.missions._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO coverage_mission_document_reviews("
+                    "review_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                    "discovered_document_ref,state,registered_by,created_at,updated_at) "
+                    "SELECT 'mission-document-review:legacy-' || record_id,"
+                    "mission_version_ref,company_ref,source_ref,document_ref,record_id,"
+                    "'extraction_staged',?,created_at,updated_at "
+                    "FROM coverage_mission_discovered_documents WHERE document_ref=?",
+                    (AUTOMATION, document_ref),
+                )
+        item = self.item(self.evaluate(), ACN, "earnings_calls")
+        self.assertEqual((item["have"], item["read"], item["legacy_extracted"]), (4, 0, 4))
+        self.assertEqual(item["status"], "complete")
+        # A later verified copy of the same quarter supersedes that quarter's
+        # historical display; it does not double count progress.
+        self.document(ACN, TRANSCRIPTS, "acquired", read=True,
+                      title="Accenture Q4 2026 Earnings Call")
+        item = self.item(self.evaluate(), ACN, "earnings_calls")
+        self.assertEqual((item["have"], item["read"], item["legacy_extracted"]), (4, 1, 3))
+
+    def test_legacy_extraction_does_not_override_issuer_or_quarter_checks(self) -> None:
+        for title, named in (("Remitly Q2 2026 Earnings Call", ["Remitly"]),
+                             ("Accenture Q2 2024 Earnings Call", ["Accenture"]),
+                             ("Accenture Investor Day", ["Accenture"])):
+            doc = self.document(ACN, TRANSCRIPTS, "acquired", title=title,
+                                named_companies=named)
+            with self.missions._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO coverage_mission_document_reviews("
+                    "review_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                    "discovered_document_ref,state,registered_by,created_at,updated_at) "
+                    "SELECT 'mission-document-review:legacy-' || record_id,"
+                    "mission_version_ref,company_ref,source_ref,document_ref,record_id,"
+                    "'extraction_staged',?,created_at,updated_at "
+                    "FROM coverage_mission_discovered_documents WHERE document_ref=?",
+                    (AUTOMATION, doc),
+                )
+        self.document(ACN, TRANSCRIPTS, "acquired", title="Accenture Q2 2026 Earnings Call")
+        item = self.item(self.evaluate(), ACN, "earnings_calls")
+        self.assertEqual((item["have"], item["read"], item["legacy_extracted"]), (1, 0, 0))
+
     def test_successful_read_proof_does_not_override_wrong_issuer_resolution(self) -> None:
         document_ref = self.document(ACN, TRANSCRIPTS, "acquired", read=True)
         with self.missions._transaction() as cur:

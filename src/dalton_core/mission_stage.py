@@ -247,7 +247,7 @@ def _document_counts(
     def bucket(company: str, spec: str) -> dict[str, int]:
         return counts.setdefault(
             (company, spec), {"acquired": 0, "pending": 0, "failed": 0,
-                              "read": 0, "periods": [], "required_periods": [],
+                              "read": 0, "legacy_extracted": 0, "periods": [], "required_periods": [],
                               "missing_periods": [], "unclassified": 0,
                               "not_attributed": 0}
         )
@@ -415,6 +415,7 @@ def _document_counts(
             entry_counts["failed"] += 1
 
     read_docs: set[tuple[str, str, str]] = set()
+    legacy_extracted_docs: set[tuple[str, str, str]] = set()
     for entry in connection.execute(
         "SELECT d.document_ref AS document_ref, d.company_ref AS company_ref, "
         "s.spec_ref AS spec_ref FROM coverage_mission_document_reviews r "
@@ -428,6 +429,11 @@ def _document_counts(
                 and not (latest[0] == "dismissed" and isinstance(latest[2], str)
                          and latest[2].startswith("P13i:"))):
             read_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
+        elif latest is not None and latest[0] == "extraction_staged":
+            # A historical extraction is evidence of work already performed,
+            # not proof that every source window was read successfully. Keep
+            # it visible without manufacturing a new completion receipt.
+            legacy_extracted_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
     read_periods: dict[tuple[str, str], set[str]] = {}
     for company_ref, spec_ref, _document_ref in read_docs:
         if spec_ref == "earnings-call-transcripts":
@@ -440,6 +446,14 @@ def _document_counts(
             periods.add(period)
         else:
             bucket(company_ref, spec_ref)["read"] += 1
+    legacy_periods: dict[tuple[str, str], set[str]] = {}
+    for company_ref, spec_ref, document_ref in legacy_extracted_docs:
+        if spec_ref == "earnings-call-transcripts":
+            period = document_period.get((company_ref, document_ref))
+            if period is not None:
+                legacy_periods.setdefault((company_ref, spec_ref), set()).add(period)
+        elif (company_ref, spec_ref, document_ref) in best:
+            bucket(company_ref, spec_ref)["legacy_extracted"] += 1
     for key, periods in earnings_periods.items():
         entry_counts = bucket(*key)
         required = _required_quarters(max(periods, key=_quarter_ordinal))
@@ -449,6 +463,11 @@ def _document_counts(
         entry_counts["acquired"] = sum(period in periods for period in required)
         entry_counts["read"] = sum(period in read_periods.get(key, set())
                                    for period in required)
+        entry_counts["legacy_extracted"] = sum(
+            period in legacy_periods.get(key, set())
+            and period not in read_periods.get(key, set())
+            for period in required
+        )
     return counts
 
 
@@ -579,9 +598,9 @@ def evaluate_mission(
             if item["counted_by"] == "quantitative_claim_periods":
                 have = len(periods.get(company_ref, set()))
                 read = have
-                pending = failed = 0
+                pending = failed = legacy_extracted = 0
             else:
-                have = read = pending = failed = unclassified = not_attributed = 0
+                have = read = pending = failed = legacy_extracted = unclassified = not_attributed = 0
                 classified_periods: set[str] = set()
                 required_periods: set[str] = set()
                 missing_periods: set[str] = set()
@@ -591,6 +610,7 @@ def evaluate_mission(
                         continue
                     have += entry["acquired"]
                     read += entry["read"]
+                    legacy_extracted += entry.get("legacy_extracted", 0)
                     pending += entry["pending"]
                     failed += entry["failed"]
                     unclassified += int(entry.get("unclassified") or 0)
@@ -609,6 +629,7 @@ def evaluate_mission(
             items.append({
                 "item_ref": item["item_ref"], "label": item["label"], "reading": item["reading"],
                 "required": int(item["required"]), "have": have, "read": read, "pending": pending,
+                "legacy_extracted": legacy_extracted,
                 "failed": failed, "status": item_status, "note": note,
                 "source_ref": item["source_ref"], "spec_refs": list(item["spec_refs"]),
                 **({"classified_periods": sorted(classified_periods),
