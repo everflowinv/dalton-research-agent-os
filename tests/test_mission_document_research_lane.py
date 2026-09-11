@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.lane_registry import lane_for_operation, registered_lanes
@@ -147,6 +148,56 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         self.assertEqual(holds["holds"][first["id"]]["reason"], "failed")
         self.assertEqual(len(self.launcher.started), 1)
 
+    def test_timed_recovery_wait_does_not_block_an_independent_admission(self) -> None:
+        first = self.store.add(1)
+        second = self.store.add(2)
+        ticket_ref = "mission-document-research:" + "e" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+        }
+        self.store.started(first["id"])
+        _write_latest(self.lane.latest_path, first, ticket_ref)
+        retry_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self.lane._execution_state = lambda _admission: {
+            "action": "waiting", "reason": "fresh_work_recovery_backoff",
+            "retry_at": retry_at, "work_order_ref": "work:waiting",
+        }
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(result["admission_ref"], second["id"])
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertEqual(holds["holds"][first["id"]]["disposition"], "recovery_wait")
+        self.assertEqual(holds["holds"][first["id"]]["retry_at"], retry_at)
+
+    def test_due_recovery_wait_reenters_and_clears_its_hold(self) -> None:
+        admission = self.store.add(1)
+        ticket_ref = "mission-document-research:" + "f" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+        }
+        self.store.started(admission["id"])
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        retry_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self.lane._execution_state = lambda _admission: {
+            "action": "waiting", "reason": "fresh_work_recovery_backoff",
+            "retry_at": retry_at, "work_order_ref": "work:waiting",
+        }
+        self.assertEqual(self.lane.dispatch_once()["status"], "waiting")
+        self.lane._execution_state = lambda _admission: {
+            "action": "resume", "reason": "typed_recovery_due",
+            "work_order_ref": "work:waiting",
+        }
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertNotIn(admission["id"], holds["holds"])
+
     def test_started_without_owned_ticket_is_not_blindly_replayed(self) -> None:
         first = self.store.add(1)
         second = self.store.add(2)
@@ -258,7 +309,7 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         self.assertEqual(authorization["kind"], "exact_scheduler_replay")
         self.assertEqual(authorization["work_order_ref"], result["last"]["recovery"]["work_order_ref"])
 
-    def test_proved_capacity_terminal_is_visible_as_recovery_required(self) -> None:
+    def test_unclassified_terminal_gets_one_executor_classification_reentry(self) -> None:
         admission = self.store.add(1)
         self.store.started(admission["id"])
         scheduler, work = self._scheduler_work(admission)
@@ -287,11 +338,11 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         _write_latest(self.lane.latest_path, admission, ticket_ref)
 
         dispatched = self.lane.dispatch_once()
-        self.assertEqual(dispatched["status"], "recovery_required")
-        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
-        held = holds["holds"][admission["id"]]
-        self.assertEqual(held["disposition"], "recovery_required")
-        self.assertEqual(held["reason"], "proved_capacity_not_sent_exhausted")
+        self.assertEqual(dispatched["status"], "resumed")
+        authorization = json.loads(self.launcher.resumed[0]["authorization"])
+        self.assertEqual(
+            authorization["reason"], "recovery_classification_not_yet_recorded"
+        )
 
     def test_lane_is_opt_in_and_registered_once(self) -> None:
         self.assertIs(

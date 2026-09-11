@@ -605,7 +605,12 @@ class LaneRegistrationTests(unittest.TestCase):
         not_evidence = {"dispatch_research_task", "dispatch_mission_reflection",
                         "dispatch_conviction_call", "dispatch_zero_base_review",
                         # These consume existing evidence; neither acquires it.
-                        "dispatch_model_stage_bridge", "dispatch_investment_memo"}
+                        "dispatch_model_stage_bridge", "dispatch_investment_memo",
+                        # Directed research reads already-acquired registered
+                        # originals and stages a derived candidate. Source
+                        # acquisition happened in an earlier lane.
+                        "dispatch_mission_annual_research",
+                        "dispatch_mission_document_research"}
         evidence_lanes = [
             spec.operation for spec in self.registry.tick_lanes()
             if spec.operation not in not_evidence

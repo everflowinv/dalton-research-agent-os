@@ -243,7 +243,16 @@ class MissionDocumentResearchRuntime:
 
     def transition_budget(self, admission: Mapping[str, Any]) -> int:
         steps = _steps(admission)
-        return len(steps) + sum(int(step["max_attempts"]) for step in steps)
+        transitions = len(steps) + sum(int(step["max_attempts"]) for step in steps)
+        for index, stage in ((1, "draft"), (2, "verifier")):
+            retry = admission["model_execution"][stage].get("provider_retry") or {}
+            recovery = retry.get("unknown_recovery") or {}
+            fresh = int(recovery.get("max_fresh_work_orders", 0))
+            # Each fresh Work needs an enqueue transition and its own bounded
+            # Scheduler attempts. One final transition records waiting/stopped
+            # recovery authority even when fresh recovery is disabled.
+            transitions += fresh * (1 + int(steps[index]["max_attempts"])) + 1
+        return transitions
 
     def wait_until_claimable(self, work_order_ref: str) -> bool:
         status = self.scheduler.status(work_order_ref)

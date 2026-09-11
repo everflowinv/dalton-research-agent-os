@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,9 @@ from dalton_core.research_question_backlog import ResearchQuestionBacklog
 from dalton_core.research_verification import CandidateStagingStore
 from dalton_core.store import canonical_json, content_hash
 from tests.test_mission_annual_research import COMPANY, MissionAnnualFixture
-from tests.test_openclaw_model_adapter import FakeBroker, seal, success_response
+from tests.test_openclaw_model_adapter import (
+    FakeBroker, failure_response, seal, success_response,
+)
 
 
 class MissionDocumentResearchProductionTests(unittest.TestCase):
@@ -58,7 +61,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
         fixture.harness.clock.value = datetime.now(timezone.utc)
         return fixture
 
-    def _install_runtime_authorities(self, fixture, broker):
+    def _install_runtime_authorities(self, fixture, broker, *, recovery=None):
         ticket_dir = fixture.state / "fetches" / fixture.source.ticket_ref.split(":", 1)[1]
         ticket_dir.mkdir(parents=True)
         document_ref = fixture.source.manifest["url_ref"]
@@ -103,6 +106,12 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
                     "retry_backoff_seconds": 0,
                 },
             })
+            if recovery is not None:
+                value["provider_retry"] = {
+                    "max_same_profile_retries": 0,
+                    "retry_backoff_seconds": 0,
+                    "unknown_recovery": dict(recovery),
+                }
             path = fixture.state / target
             path.write_text(canonical_json(value) + "\n", encoding="utf-8")
             os.chmod(path, 0o600)
@@ -329,15 +338,122 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
             launched = coordinator.dispatch_once()
             self.assertEqual(launched["status"], "launched")
-            self.assertEqual(launcher.wait(timeout=60), 1)
+            self.assertEqual(launcher.wait(timeout=60), 0)
         result = coordinator.dispatch_once()
         self.assertEqual(result["status"], "recovery_required")
-        self.assertTrue(
-            result["last"]["recovery"]["reason"].startswith(
-                "budget_or_pool_refused:"
-            ), result,
+        self.assertEqual(
+            result["last"]["recovery"]["reason"],
+            "fresh_work_recovery_disabled",
         )
         self.assertEqual(broker.requests, [])
+
+    def test_real_busy_wait_reenters_with_fresh_work_and_finishes(self):
+        fixture = self._public_fixture()
+        statement = (
+            "The company serves varied customers and depends on outsourcing partners."
+        )
+        served = iter((
+            (fixture.draft_profile, canonical_json({
+                "schema_version": "0.1", "status": "answered", "answer": statement,
+                "candidate": {
+                    "normalized_statement": statement,
+                    "metric_or_aspect": "customer and operating dependencies",
+                    "period": "FY2025 annual report", "basis": "reported",
+                    "cited_match_indexes": [0],
+                }, "missing": [],
+            })),
+            (fixture.verifier_profile, canonical_json({
+                "schema_version": "0.1", "verdict": "pass",
+                "verified_statement": statement, "findings": [],
+            })),
+        ))
+
+        failed_work = []
+
+        def respond(request):
+            semantic = dict(request)
+            semantic.pop("queueWaitMs", None)
+            if not failed_work:
+                failed_work.append(request["workOrderId"])
+            if request["workOrderId"] == failed_work[0]:
+                return failure_response(
+                    semantic,
+                    dispatch_proof={
+                        "authority": "openclaw-model-broker",
+                        "state": "definitely_not_sent", "version": "0.1",
+                    },
+                )
+            profile, text = next(served)
+            response = success_response(semantic, text=text)
+            response.pop("contentHash")
+            response["provider"] = profile["provider"]
+            response["model"] = profile["model"]
+            response["canonicalModel"] = f"{profile['provider']}/{profile['model']}"
+            return seal(response)
+
+        broker = FakeBroker(fixture.state, respond, connections=5)
+        self.addCleanup(broker.close)
+        document_config = self._install_runtime_authorities(
+            fixture,
+            broker,
+            recovery={
+                "max_fresh_work_orders": 1,
+                "retry_backoff_seconds": 1,
+                "max_elapsed_seconds": 300,
+            },
+        )
+        admission = self._admit(fixture, document_config)
+        staging_path = fixture.state / "mission-document-busy-staging.sqlite"
+        CandidateStagingStore(staging_path).close()
+        launcher = MissionDocumentResearchLauncher(
+            state_dir=fixture.state,
+            staging_path=staging_path,
+            planner_scheduler_db=fixture.state / "core.sqlite",
+            planner_model_config_path=(
+                fixture.state / "registered-annual-report-draft-model-config.json"
+            ),
+            document_config_path=document_config,
+            python_executable=sys.executable,
+        )
+        self.addCleanup(launcher.close)
+        coordinator = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=launcher,
+        )
+        python_path = os.pathsep.join((
+            str(Path(__file__).parents[1] / "src"), str(Path(__file__).parents[1]),
+        ))
+        with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
+            first = coordinator.dispatch_once()
+            self.assertEqual(first["status"], "launched")
+            self.assertEqual(launcher.wait(timeout=60), 1)
+            waiting = coordinator.dispatch_once()
+            self.assertEqual(waiting["status"], "waiting", waiting)
+            retry_at = datetime.fromisoformat(
+                waiting["last"]["recovery"]["retry_at"]
+            ).timestamp()
+            time.sleep(max(0.0, retry_at - time.time()) + 0.05)
+            resumed = coordinator.dispatch_once()
+            self.assertEqual(resumed["status"], "resumed", resumed)
+            self.assertEqual(launcher.wait(timeout=60), 0)
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        self.assertEqual(len(broker.requests), 5)
+        self.assertEqual(
+            {item["workOrderId"] for item in broker.requests[:3]},
+            {broker.requests[0]["workOrderId"]},
+        )
+        self.assertNotEqual(
+            broker.requests[0]["workOrderId"], broker.requests[3]["workOrderId"]
+        )
+        with sqlite3.connect(fixture.state / "budget.sqlite") as budget:
+            settlements = budget.execute(
+                "SELECT s.actual_micros FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s "
+                "ON s.admission_id=a.admission_id WHERE "
+                "a.work_order_ref LIKE 'work:mission-document-%'"
+            ).fetchall()
+        self.assertEqual(
+            sorted(row[0] for row in settlements), [0, 0, 0, 10_000, 10_000]
+        )
 
 
 if __name__ == "__main__":

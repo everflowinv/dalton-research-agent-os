@@ -217,6 +217,8 @@ REGISTRY_LANE_LABELS = {
     "company_wiki_feed": "读公司维基与访谈纪要",
     "prior_research": "读我们自己以前写过的东西",
     "research_task": "做专项研究",
+    "mission_annual_research": "在已取得的年报里做定向研究",
+    "mission_document_research": "在已取得的原文里做定向研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
     "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",

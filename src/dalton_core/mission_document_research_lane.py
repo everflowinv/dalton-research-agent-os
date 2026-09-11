@@ -2,8 +2,9 @@
 
 The planner/research-task producer writes the immutable admission.  This lane
 only selects an unstarted admission and launches its admission-ref-only child.
-An orphaned or failed child is held and skipped so the lane never guesses that
-another paid call is safe, while later independent admissions can still run.
+An orphaned or failed child is re-entered only from persisted Scheduler and
+typed recovery authority.  Timed safe recovery does not block later independent
+admissions; unproved send state remains held.
 """
 
 from __future__ import annotations
@@ -81,13 +82,34 @@ def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
             or not isinstance(value.get("reason"), str)
             or not value["reason"]
             or value.get("disposition") not in {
-                "terminal_hold", "recovery_required",
+                "terminal_hold", "recovery_required", "recovery_wait",
             }
-            or value.get("retry_at") is not None
+            or (
+                value.get("disposition") == "recovery_wait"
+                and (
+                    not isinstance(value.get("retry_at"), str)
+                    or not value["retry_at"]
+                )
+            )
+            or (
+                value.get("disposition") != "recovery_wait"
+                and value.get("retry_at") is not None
+            )
         ):
             raise MissionDocumentResearchLaneError(
                 "document research hold ledger has an invalid entry"
             )
+        if value["disposition"] == "recovery_wait":
+            try:
+                parsed = datetime.fromisoformat(value["retry_at"])
+            except ValueError as exc:
+                raise MissionDocumentResearchLaneError(
+                    "document research hold ledger has an invalid retry_at"
+                ) from exc
+            if parsed.tzinfo is None:
+                raise MissionDocumentResearchLaneError(
+                    "document research hold ledger retry_at lacks timezone"
+                )
         holds[admission_ref] = dict(value)
     return holds
 
@@ -207,15 +229,144 @@ class MissionDocumentResearchCoordinator:
         self, holds: dict[str, dict[str, Any]], admission: Mapping[str, Any],
         *, reason: str, ticket_ref: str | None,
         disposition: str = "terminal_hold",
+        retry_at: str | None = None,
     ) -> None:
         holds[admission["id"]] = {
             "admission_hash": admission["content_hash"],
             "ticket_ref": ticket_ref,
             "reason": reason,
             "disposition": disposition,
-            "retry_at": None,
+            "retry_at": retry_at,
         }
         _write_holds(self.holds_path, holds)
+
+    def _effective_work_hints(
+        self, admission: Mapping[str, Any],
+    ) -> list[str]:
+        """Read recovery replacements only as relaunch hints.
+
+        The child executor revalidates the complete admission, route, budget,
+        no-send proof, and recovery chain before it can claim or send.  This
+        read prevents the Writer from permanently watching a superseded Work;
+        it does not itself authorize a provider call.
+        """
+
+        refs = [
+            "work:mission-document-research-" + content_hash({
+                "admission_identity_hash": admission["identity_hash"],
+                "ordinal": ordinal,
+            })[:32]
+            for ordinal in range(1, 5)
+        ]
+        try:
+            rows = self.store.connection.execute(
+                "SELECT * FROM mission_document_research_recovery_links "
+                "WHERE admission_ref=? ORDER BY stage_ordinal,recovery_number",
+                (admission["id"],),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return refs
+            raise
+        next_number = {2: 1, 3: 1}
+        for row in rows:
+            try:
+                wire = json.loads(row["record_json"])
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise MissionDocumentResearchLaneError(
+                    "document research recovery hint is invalid"
+                ) from exc
+            body = dict(wire) if isinstance(wire, Mapping) else {}
+            asserted = body.pop("content_hash", None)
+            stage = wire.get("stage_ordinal") if isinstance(wire, Mapping) else None
+            if (
+                not isinstance(wire, Mapping)
+                or canonical_json(wire) != row["record_json"]
+                or asserted != row["content_hash"]
+                or asserted != content_hash(body)
+                or wire.get("id") != row["recovery_link_id"]
+                or wire.get("admission_ref") != admission["id"]
+                or wire.get("admission_hash") != admission["content_hash"]
+                or stage not in {2, 3}
+                or row["stage_ordinal"] != stage
+                or wire.get("recovery_number") != next_number[stage]
+                or row["recovery_number"] != next_number[stage]
+                or wire.get("failed_work_order_ref") != refs[stage - 1]
+                or row["failed_work_order_ref"] != refs[stage - 1]
+                or wire.get("recovery_work_order_ref")
+                != row["recovery_work_order_ref"]
+            ):
+                raise MissionDocumentResearchLaneError(
+                    "document research recovery hint drifted"
+                )
+            refs[stage - 1] = wire["recovery_work_order_ref"]
+            next_number[stage] += 1
+        return refs
+
+    def _typed_recovery_state(
+        self, admission: Mapping[str, Any], work_ref: str,
+    ) -> dict[str, Any] | None:
+        mission_ref = admission.get("mission_version_ref")
+        if not isinstance(mission_ref, str):
+            return None
+        from .mission_document_research_executor import (
+            read_mission_document_research_observations,
+        )
+
+        observations = [
+            item for item in read_mission_document_research_observations(
+                self.store.connection, mission_version_ref=mission_ref,
+            )
+            if item["admission_ref"] == admission["id"]
+            and item["work_order_ref"] == work_ref
+            and item["outcome"] == "recovery_required"
+        ]
+        if not observations:
+            return None
+        by_status = {
+            item["recovery"]["status"]: item for item in observations
+            if isinstance(item.get("recovery"), Mapping)
+        }
+        selected = next(
+            (by_status[key] for key in ("stopped", "eligible", "waiting")
+             if key in by_status),
+            None,
+        )
+        if selected is None:
+            raise MissionDocumentResearchLaneError(
+                "document research recovery observation has an invalid state"
+            )
+        recovery = selected["recovery"]
+        if recovery["status"] == "stopped":
+            return {
+                "action": "recovery_required", "reason": recovery["reason"],
+                "work_order_ref": work_ref,
+            }
+        retry_at = recovery.get("retry_at")
+        if not isinstance(retry_at, str) or not retry_at:
+            raise MissionDocumentResearchLaneError(
+                "document research recovery observation lacks retry_at"
+            )
+        try:
+            parsed = datetime.fromisoformat(retry_at)
+        except ValueError as exc:
+            raise MissionDocumentResearchLaneError(
+                "document research recovery retry_at is invalid"
+            ) from exc
+        if parsed.tzinfo is None:
+            raise MissionDocumentResearchLaneError(
+                "document research recovery retry_at lacks timezone"
+            )
+        due = parsed.astimezone(timezone.utc)
+        if self.clock().astimezone(timezone.utc) < due:
+            return {
+                "action": "waiting", "reason": recovery["reason"],
+                "retry_at": retry_at, "work_order_ref": work_ref,
+            }
+        return {
+            "action": "resume", "reason": "typed_recovery_due",
+            "work_order_ref": work_ref,
+        }
 
     def _execution_state(self, admission: Mapping[str, Any]) -> dict[str, Any]:
         """Classify only authority already persisted for this admission.
@@ -229,11 +380,7 @@ class MissionDocumentResearchCoordinator:
 
         from .contracts import ResultEnvelope, WorkOrder
 
-        for ordinal in range(1, 5):
-            work_ref = "work:mission-document-research-" + content_hash({
-                "admission_identity_hash": admission["identity_hash"],
-                "ordinal": ordinal,
-            })[:32]
+        for work_ref in self._effective_work_hints(admission):
             row = self.store.connection.execute(
                 "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
                 "WHERE work_order_id=?", (work_ref,),
@@ -298,33 +445,10 @@ class MissionDocumentResearchCoordinator:
                     )
                 if formal["terminal_state"] == "succeeded":
                     continue
-                refusal = self._budget_refusal(
-                    work, int(formal["attempt_number"])
-                )
-                if refusal is not None:
-                    return {
-                        "action": "recovery_required", "reason": refusal,
-                        "work_order_ref": work_ref,
-                    }
-                code = str((envelope.get("error") or {}).get("code", ""))
-                capacity = {
-                    "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
-                    "QUEUE_TIMEOUT", "BROKER_CLOSED",
-                }
-                if (
-                    code in capacity
-                    and envelope.get("metadata", {}).get(
-                        "control_plane_failure"
-                    ) is True
-                ):
-                    return {
-                        "action": "recovery_required",
-                        "reason": "proved_capacity_not_sent_exhausted",
-                        "work_order_ref": work_ref,
-                    }
-                return {
-                    "action": "recovery_required",
-                    "reason": "terminal_model_or_post_send_result",
+                typed = self._typed_recovery_state(admission, work_ref)
+                return typed or {
+                    "action": "resume",
+                    "reason": "recovery_classification_not_yet_recorded",
                     "work_order_ref": work_ref,
                 }
             event = self.store.connection.execute(
@@ -376,9 +500,10 @@ class MissionDocumentResearchCoordinator:
                     "action": "resume", "reason": "expired_lease_replay",
                     "work_order_ref": work_ref,
                 }
-            return {
-                "action": "recovery_required",
-                "reason": "scheduler_terminal_without_formal_result",
+            typed = self._typed_recovery_state(admission, work_ref)
+            return typed or {
+                "action": "resume",
+                "reason": "recovery_classification_not_yet_recorded",
                 "work_order_ref": work_ref,
             }
         return {
@@ -453,6 +578,39 @@ class MissionDocumentResearchCoordinator:
         finally:
             connection.close()
 
+    def _resume(
+        self, admission: Mapping[str, Any], *, ticket_ref: str,
+        recovery: Mapping[str, Any], settled: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        authorization = canonical_json({
+            "schema_version": "0.1",
+            "kind": "exact_scheduler_replay",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "prior_ticket_ref": ticket_ref,
+            "work_order_ref": recovery.get("work_order_ref"),
+            "reason": recovery["reason"],
+        })
+        resumed = self.launcher.resume(
+            admission_ref=admission["id"],
+            admission_hash=admission["content_hash"],
+            prior_ticket_ref=ticket_ref,
+            authorization=authorization,
+        )
+        pointer = {
+            "ticket_ref": resumed["id"],
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        write_owner_only(
+            self.latest_path,
+            {**pointer, "content_hash": content_hash(pointer)},
+        )
+        return {
+            "status": "resumed", "ticket_ref": resumed["id"],
+            "admission_ref": admission["id"], "last": settled,
+        }
+
     def dispatch_once(self) -> dict[str, Any]:
         if self.launcher is None:
             return {"status": "unconfigured", "reason": "document research lane is absent"}
@@ -488,27 +646,17 @@ class MissionDocumentResearchCoordinator:
                 )
                 settled["recovery"] = recovery
                 if recovery["action"] == "waiting":
-                    return {
-                        "status": "waiting", "ticket_ref": ticket["id"],
-                        "admission_ref": admission["id"],
-                        "retry_at": recovery["retry_at"], "last": settled,
-                    }
-                if recovery["action"] == "resume":
-                    authorization = canonical_json({
-                        "schema_version": "0.1",
-                        "kind": "exact_scheduler_replay",
-                        "admission_ref": admission["id"],
-                        "admission_hash": admission["content_hash"],
-                        "prior_ticket_ref": ticket["id"],
-                        "work_order_ref": recovery["work_order_ref"],
-                        "reason": recovery["reason"],
-                    })
+                    self._hold(
+                        holds, admission, reason=recovery["reason"],
+                        ticket_ref=ticket["id"], disposition="recovery_wait",
+                        retry_at=recovery["retry_at"],
+                    )
+                    recovery = None
+                elif recovery["action"] == "resume":
                     try:
-                        resumed = self.launcher.resume(
-                            admission_ref=admission["id"],
-                            admission_hash=admission["content_hash"],
-                            prior_ticket_ref=ticket["id"],
-                            authorization=authorization,
+                        result = self._resume(
+                            admission, ticket_ref=ticket["id"],
+                            recovery=recovery, settled=settled,
                         )
                     except LaneChildConflict as exc:
                         return {"status": "busy", "reason": str(exc), "last": settled}
@@ -525,19 +673,74 @@ class MissionDocumentResearchCoordinator:
                         }
                         recovery = settled["recovery"]
                     else:
-                        return {
-                            "status": "resumed", "ticket_ref": resumed["id"],
-                            "admission_ref": admission["id"], "last": settled,
-                        }
-                disposition = (
-                    "recovery_required"
-                    if recovery["action"] == "recovery_required"
-                    else "terminal_hold"
+                        if holds.pop(admission["id"], None) is not None:
+                            _write_holds(self.holds_path, holds)
+                        return result
+                if recovery is not None:
+                    disposition = (
+                        "recovery_required"
+                        if recovery["action"] == "recovery_required"
+                        else "terminal_hold"
+                    )
+                    self._hold(
+                        holds, admission, reason=recovery["reason"],
+                        ticket_ref=ticket["id"], disposition=disposition,
+                    )
+
+        now = self.clock().astimezone(timezone.utc)
+        for admission in admissions:
+            held = holds.get(admission["id"])
+            if held is None or held["disposition"] != "recovery_wait":
+                continue
+            if held["admission_hash"] != admission["content_hash"]:
+                raise MissionDocumentResearchLaneError(
+                    "document research hold admission hash drifted"
                 )
+            try:
+                retry_at = datetime.fromisoformat(held["retry_at"]).astimezone(
+                    timezone.utc
+                )
+            except ValueError as exc:
+                raise MissionDocumentResearchLaneError(
+                    "document research hold retry_at is invalid"
+                ) from exc
+            if now < retry_at:
+                continue
+            recovery = self._execution_state(admission)
+            if recovery["action"] == "waiting":
                 self._hold(
                     holds, admission, reason=recovery["reason"],
-                    ticket_ref=ticket["id"], disposition=disposition,
+                    ticket_ref=held["ticket_ref"], disposition="recovery_wait",
+                    retry_at=recovery["retry_at"],
                 )
+                continue
+            if recovery["action"] != "resume":
+                self._hold(
+                    holds, admission, reason=recovery["reason"],
+                    ticket_ref=held["ticket_ref"],
+                    disposition=("recovery_required"
+                                 if recovery["action"] == "recovery_required"
+                                 else "terminal_hold"),
+                )
+                continue
+            try:
+                result = self._resume(
+                    admission, ticket_ref=held["ticket_ref"],
+                    recovery=recovery, settled=settled,
+                )
+            except LaneChildConflict as exc:
+                return {"status": "busy", "reason": str(exc), "last": settled}
+            except LaneChildRejected as exc:
+                self._hold(
+                    holds, admission,
+                    reason="controlled_reentry_unavailable:" + str(exc),
+                    ticket_ref=held["ticket_ref"],
+                    disposition="recovery_required",
+                )
+                continue
+            holds.pop(admission["id"], None)
+            _write_holds(self.holds_path, holds)
+            return result
 
         for admission in admissions:
             held = holds.get(admission["id"])
@@ -583,6 +786,9 @@ class MissionDocumentResearchCoordinator:
             "status": (
                 "recovery_required"
                 if any(item["disposition"] == "recovery_required"
+                       for item in holds.values())
+                else "waiting"
+                if any(item["disposition"] == "recovery_wait"
                        for item in holds.values())
                 else "idle"
             ),
@@ -667,7 +873,7 @@ LANE = register_lane(LaneSpec(
     launcher_factory=build_launcher,
     argv_fragment=argv_fragment,
     note="Execute exact source-neutral directed-document admissions out of process; "
-         "orphaned or failed admissions remain held without blind paid retry.",
+         "only typed Scheduler recovery can re-enter an orphaned or failed child.",
 ))
 
 

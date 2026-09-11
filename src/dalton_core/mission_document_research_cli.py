@@ -80,12 +80,20 @@ def run_admission(
             outcome = runtime.executor.run_once(admission_ref)
             outcomes.append(outcome)
             status = outcome.get("status")
-            if status in {"complete", "blocked", "failed"}:
+            if status in {"complete", "blocked"}:
                 return _summary(
                     admission_ref=admission_ref,
                     admission_hash=expected_admission_hash,
                     status=status,
                     outcomes=outcomes,
+                )
+            if status == "stopped":
+                return _summary(
+                    admission_ref=admission_ref,
+                    admission_hash=expected_admission_hash,
+                    status="blocked",
+                    outcomes=outcomes,
+                    error=outcome.get("reason"),
                 )
             if status in {"retryable", "pending", "waiting"}:
                 work_ref = outcome.get("work_order_ref")
