@@ -606,6 +606,9 @@ CREATE TABLE IF NOT EXISTS coverage_mission_research_plans (
     -- existed made no such judgement, and inventing one for them would be
     -- worse than the gap.
     sufficiency_json TEXT,
+    -- Exact verified planner output. Rows written before this column remain
+    -- NULL and cannot authorize directed-document execution.
+    plan_json TEXT,
     model_profile_ref TEXT,
     work_order_ref TEXT,
     decided_by TEXT NOT NULL,

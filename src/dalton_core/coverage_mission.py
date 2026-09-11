@@ -859,6 +859,7 @@ class CoverageMissionAuthority:
         self._migrate_acquisition_attempts()
         self._migrate_settlement_failure_reason()
         self._migrate_plan_sufficiency()
+        self._migrate_plan_json()
         self._migrate_statement_dimension_count()
 
     def _migrate_statement_dimension_count(self) -> None:
@@ -979,6 +980,22 @@ class CoverageMissionAuthority:
             raise RuntimeError("plan sufficiency migration requires no open transaction")
         self.connection.execute(
             "ALTER TABLE coverage_mission_research_plans ADD COLUMN sufficiency_json TEXT"
+        )
+
+    def _migrate_plan_json(self) -> None:
+        """Retain exact new planner outputs; legacy rows stay unproven."""
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(coverage_mission_research_plans)"
+            ).fetchall()
+        }
+        if "plan_json" in columns:
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("plan record migration requires no open transaction")
+        self.connection.execute(
+            "ALTER TABLE coverage_mission_research_plans ADD COLUMN plan_json TEXT"
         )
 
     def _migrate_settlement_failure_reason(self) -> None:
@@ -2133,6 +2150,11 @@ class CoverageMissionAuthority:
         for field in ("state_hash", "assessment", "directives", "inquiries", "content_hash"):
             if field not in plan:
                 raise CoverageMissionValidationError(f"plan is missing {field}")
+        exact_plan = dict(plan)
+        asserted_plan_hash = exact_plan.pop("content_hash")
+        if asserted_plan_hash != content_hash(exact_plan):
+            raise CoverageMissionValidationError("plan content_hash does not match its exact record")
+        exact_plan["content_hash"] = asserted_plan_hash
         mission_version_ref = _text(
             plan.get("mission_version_ref") or "", "mission_version_ref")
         state_hash = _text(plan["state_hash"], "state_hash")
@@ -2150,11 +2172,12 @@ class CoverageMissionAuthority:
             cur.execute(
                 "INSERT INTO coverage_mission_research_plans("
                 "plan_id,mission_version_ref,state_hash,assessment,directives_json,"
-                "inquiries_json,sufficiency_json,model_profile_ref,work_order_ref,"
-                "decided_by,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "inquiries_json,sufficiency_json,plan_json,model_profile_ref,work_order_ref,"
+                "decided_by,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (plan_id, mission_version_ref, state_hash, plan["assessment"],
                  canonical_json(plan["directives"]), canonical_json(plan["inquiries"]),
                  canonical_json(plan.get("sufficiency") or []),
+                 canonical_json(exact_plan),
                  model_profile_ref, work_order_ref, decided_by, now, plan["content_hash"]),
             )
             row = cur.execute(
@@ -2168,6 +2191,7 @@ class CoverageMissionAuthority:
         wire["directives"] = json.loads(wire.pop("directives_json"))
         wire["inquiries"] = json.loads(wire.pop("inquiries_json"))
         raw = wire.pop("sufficiency_json", None)
+        wire.pop("plan_json", None)
         # A plan written before judgements existed made none; an empty list is
         # "said nothing", which is what the lane treats as silence anyway.
         wire["sufficiency"] = json.loads(raw) if raw else []

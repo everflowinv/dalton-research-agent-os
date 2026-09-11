@@ -73,6 +73,7 @@ def bootstrap_method_authorities(
     industry_ref: str = INDUSTRY,
     mandate_ref: str = "mandate:us-it-services-constitution-p8a",
     mandate_constraints: dict | None = None,
+    mandate_scope_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create mandate, driver pack, constitution and playbook in one Core."""
 
@@ -85,7 +86,7 @@ def bootstrap_method_authorities(
         mandate_ref,
         actor_ref=actor_ref,
         objective="Establish US IT Services coverage.",
-        scope_refs=[industry_ref],
+        scope_refs=mandate_scope_refs or [industry_ref],
         constraints=mandate_constraints or {},
         success_criteria={},
         effective_from="2026-08-23T00:00:00+00:00",

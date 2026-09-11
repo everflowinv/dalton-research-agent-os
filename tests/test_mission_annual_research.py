@@ -38,6 +38,7 @@ from dalton_core.sec_company_facts_lane import read_active_annual_budget_mission
 from dalton_core.store import canonical_json, content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
+from tests.p9a_fixtures import INDUSTRY
 from tests.test_research_plan_annual_report import (
     ACCESSION, CIK, AnnualSourceHarness,
     seed_core_registration,
@@ -66,7 +67,9 @@ class MissionAnnualFixture:
     def __init__(self, case: unittest.TestCase, *, mission_calls: int = 10,
                  same_family: bool = False, sec_connected: bool = True,
                  unusable_route: bool = False, auto_commit: bool = False,
-                 canonical_writes: bool = True) -> None:
+                 canonical_writes: bool = True,
+                 additional_connected_source: str | None = None,
+                 company_in_mandate: bool = False) -> None:
         self.case = case
         self.harness = PlanExecutorHarness(suffix="mission-annual-admission")
         case.addCleanup(self.harness.close)
@@ -97,6 +100,7 @@ class MissionAnnualFixture:
         method = bootstrap_method_authorities(
             self.store, mandate_ref="mandate:mission-annual-test",
             mandate_constraints={"research_budget": outer},
+            mandate_scope_refs=([INDUSTRY, COMPANY] if company_in_mandate else None),
         )
         params = mission_params(method)
         params.update({
@@ -125,6 +129,19 @@ class MissionAnnualFixture:
             for source in params["source_plan"]:
                 if source["source_ref"] == "source:sec-edgar":
                     source["status"] = "not_connected"
+        if additional_connected_source is not None:
+            existing_source = next((
+                source for source in params["source_plan"]
+                if source["source_ref"] == additional_connected_source
+            ), None)
+            if existing_source is None:
+                params["source_plan"].append({
+                    "source_ref": additional_connected_source,
+                    "role": "directed document research",
+                    "status": "connected",
+                })
+            else:
+                existing_source["status"] = "connected"
         for key in ("playbook_ref", "constitution_ref", "mandate_ref"):
             params.pop(key, None)
         self.mission = CoverageMissionAuthority(self.store).create_mission(
