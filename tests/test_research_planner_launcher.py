@@ -104,8 +104,10 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(
             set(signature),
             {"documents", "reviews_open", "claims", "figures", "metrics",
-             "mission_versions"})
-        self.assertTrue(all(isinstance(v, int) for v in signature.values()))
+             "mission_versions", "dossier_feedback"})
+        self.assertTrue(all(isinstance(v, int) for key, v in signature.items()
+                            if key != "dossier_feedback"))
+        self.assertEqual(len(signature["dossier_feedback"]), 64)
 
     def test_a_retracted_figure_does_not_count_as_movement(self):
         # Otherwise withdrawing a bad figure would look like new evidence.

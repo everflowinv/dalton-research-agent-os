@@ -47,6 +47,7 @@ def company_state(
     metrics: Sequence[Mapping[str, Any]] = (),
     contested: Sequence[Mapping[str, Any]] = (),
     acquisition: Mapping[str, Any] | None = None,
+    dossier_feedback: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One company's position, as a planner needs to see it.
 
@@ -119,6 +120,16 @@ def company_state(
             "unsuccessful": _int((acquisition or {}).get("unsuccessful")),
             "last_failure": (acquisition or {}).get("last_failure_detail"),
         },
+        # Attention feedback, not Evidence: the exact latest successfully
+        # completed Dossier child and the bounded missing-evidence findings it
+        # could not turn into supported prose.
+        "dossier_feedback": None if dossier_feedback is None else {
+            "feedback_ref": dossier_feedback.get("id"),
+            "feedback_hash": dossier_feedback.get("content_hash"),
+            "dossier_status": dossier_feedback.get("dossier_status"),
+            "source_ticket_ref": dossier_feedback.get("source_ticket_ref"),
+            "repair_targets": list(dossier_feedback.get("repair_targets") or ()),
+        },
     }
 
 
@@ -170,6 +181,7 @@ def build_research_state(
     metrics_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     contested_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     acquisition_by_company: Mapping[str, Mapping[str, Any]] | None = None,
+    dossier_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     budget: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     as_of: str,
@@ -185,6 +197,7 @@ def build_research_state(
     metrics_by_company = metrics_by_company or {}
     contested_by_company = contested_by_company or {}
     acquisition_by_company = acquisition_by_company or {}
+    dossier_feedback_by_company = dossier_feedback_by_company or {}
     companies = [
         company_state(
             entry,
@@ -192,6 +205,7 @@ def build_research_state(
             metrics=metrics_by_company.get(entry.get("company_ref"), ()),
             contested=contested_by_company.get(entry.get("company_ref"), ()),
             acquisition=acquisition_by_company.get(entry.get("company_ref")),
+            dossier_feedback=dossier_feedback_by_company.get(entry.get("company_ref")),
         )
         for entry in checklist
     ]

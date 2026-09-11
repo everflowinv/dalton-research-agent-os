@@ -202,7 +202,7 @@ class ResearchPlannerCoordinator:
         except (OSError, ValueError):
             return None
 
-    def _signature(self) -> dict[str, int]:
+    def _signature(self) -> dict[str, Any]:
         """A cheap proxy for "has the research state moved".
 
         Not the state itself: building that reads the whole checklist, and the
@@ -216,6 +216,8 @@ class ResearchPlannerCoordinator:
                 return int(self.store.connection.execute(sql).fetchone()[0])
             except Exception:  # noqa: BLE001 - an absent table means zero
                 return 0
+
+        from .dossier_repair_feedback import dossier_repair_feedback_signature
 
         return {
             # What is held, and what has been read out of it.
@@ -237,6 +239,11 @@ class ResearchPlannerCoordinator:
                 "ON r.observation_id=o.observation_id WHERE r.observation_id IS NULL"),
             # A new mission version is a new goal, which is always worth a plan.
             "mission_versions": count("SELECT COUNT(*) FROM coverage_mission_versions"),
+            # Dossier gaps are owner-only child feedback rather than Core
+            # Evidence, so no SQL count can see them. Bind the exact verified
+            # latest-ticket projection instead.
+            "dossier_feedback": dossier_repair_feedback_signature(
+                Path(self.store.path).parent),
         }
 
     def dispatch_once(self) -> dict[str, Any]:

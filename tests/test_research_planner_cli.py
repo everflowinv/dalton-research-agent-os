@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
-from dalton_core.research_planner_cli import MAX_COST_USD, run_planner
+from dalton_core.company_dossier_launcher import run_digest
+from dalton_core.research_planner_cli import MAX_COST_USD, build_state, run_planner
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
@@ -64,6 +65,49 @@ class PlannerChildTests(unittest.TestCase):
         self.assertIsNotNone(summary["state_hash"])
         self.assertEqual(summary["cost_micros"], 0)
         self.assertGreater(summary["prompt_bytes"], 0)
+
+    def test_state_includes_exact_completed_dossier_feedback(self):
+        mission = self.publish_mission()
+        company_ref = mission["universe"][0]["company_ref"]
+        signature = "ledger:exact"
+        suffix = run_digest(company_ref, signature)
+        directory = self.state / "company-dossier-runs" / suffix
+        directory.mkdir(mode=0o700, parents=True)
+        for name, value in {
+            "ticket.json": {
+                "id": f"company-dossier-run:{suffix}",
+                "company_ref": company_ref,
+                "signature": signature,
+                "run_digest": suffix,
+                "status": "succeeded",
+                "exit_code": 0,
+                "completed_at": "2026-09-11T12:00:00+00:00",
+            },
+            "summary.json": {
+                "status": "succeeded", "company_ref": company_ref,
+                "dossier_status": "insufficient_evidence",
+                "repair_targets": [{
+                    "unit": "kpi_dictionary", "code": "missing_evidence",
+                    "detail": "missing exact numerator and denominator",
+                }],
+            },
+        }.items():
+            path = directory / name
+            path.write_text(json.dumps(value), encoding="utf-8")
+            path.chmod(0o600)
+        state = build_state(
+            self.store, self.missions, mission,
+            plans_dir=self.state / "discovery-plans",
+            as_of="2026-09-11T12:01:00+00:00",
+        )
+        company = next(item for item in state["companies"]
+                       if item["company_ref"] == company_ref)
+        feedback = company["dossier_feedback"]
+        self.assertEqual(feedback["source_ticket_ref"],
+                         f"company-dossier-run:{suffix}")
+        self.assertEqual(feedback["repair_targets"][0]["unit"],
+                         "kpi_dictionary")
+        self.assertEqual(len(feedback["feedback_hash"]), 64)
 
     def test_no_model_configured_is_gated_and_says_so(self):
         self.publish_mission()

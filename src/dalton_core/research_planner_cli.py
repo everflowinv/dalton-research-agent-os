@@ -173,10 +173,14 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         metrics[company_ref] = (establish_requirements(observations)
                                 + uncorroborated(observations))
         disputed[company_ref] = contested(observations)
+    from .dossier_repair_feedback import read_dossier_repair_feedback
+
     return build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, metrics_by_company=metrics,
         contested_by_company=disputed, acquisition_by_company=acquisition,
+        dossier_feedback_by_company=read_dossier_repair_feedback(
+            Path(store.path).parent),
         budget=mission["budget"],
         spend=read_spend(store, mission, budget_db=budget_db,
                          as_of=datetime.fromisoformat(as_of)),
