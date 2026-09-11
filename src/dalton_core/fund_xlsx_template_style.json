@@ -14,12 +14,12 @@
   "model_grid": {
     "period_row": 1,
     "first_annual_column": 5,
-    "hierarchy_gutter_columns": [
+    "hierarchy_label_columns": [
       1,
       2,
-      3
+      3,
+      4
     ],
-    "label_column": 4,
     "period_column_width": 7.125,
     "annual_support": {
       "default_headers": [
@@ -58,8 +58,8 @@
       "A": 14.625,
       "B": 14.375,
       "C": 9.125,
-      "D": 14.625,
-      "E": 14.375
+      "D": 9.125,
+      "E": 9.125
     }
   },
   "styles": {
@@ -144,8 +144,10 @@
       },
       "fill": "FFFFFFC8",
       "border": {
-        "style": "hair",
-        "color": "FF000000"
+        "top": {"style": "hair", "color": "FF000000"},
+        "bottom": {"style": "hair", "color": "FF000000"},
+        "left": {"style": "hair", "color": "FF000000"},
+        "right": {"style": "hair", "color": "FF000000"}
       }
     },
     "valuation_section": {

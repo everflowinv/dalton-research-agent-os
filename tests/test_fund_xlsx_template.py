@@ -45,6 +45,8 @@ class FundXlsxTemplateTests(unittest.TestCase):
                      "number_kind": "amount"},
                     {"range": "J3:L3", "style": "local_formula",
                      "number_kind": "amount_one_decimal"},
+                    {"range": "J4:L4", "style": "local_formula",
+                     "number_kind": "amount"},
                 ],
                 "driver": [
                     {"range": "F3:F3", "style": "hardcoded_input",
@@ -64,8 +66,7 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertEqual(style["source_proof"]["workbook_sha256"],
                          "545709e06eb0c1452cf74224d92e8ecb70bef4764f316e74595b2f41f87567b0")
         self.assertEqual(style["sheet_order"], ["valuation", "financials", "driver"])
-        self.assertEqual(style["model_grid"]["hierarchy_gutter_columns"], [1, 2, 3])
-        self.assertEqual(style["model_grid"]["label_column"], 4)
+        self.assertEqual(style["model_grid"]["hierarchy_label_columns"], [1, 2, 3, 4])
         wire = json.dumps(style)
         for source_value in ("Online stores", "Retail & Subscription", "2798509", "AMZN"):
             self.assertNotIn(source_value, wire)
@@ -102,16 +103,19 @@ class FundXlsxTemplateTests(unittest.TestCase):
         financials = book.create_sheet("Financials - DXC")
         valuation = book.create_sheet("Valuation - DXC")
 
-        financials["D2"] = "Income statement"
-        financials["D3"] = "Subscription revenue"
-        financials["D4"] = "Revenue"
+        financials["A2"] = "Income statement"
+        financials["B3"] = "Subscription revenue"
+        financials["A4"] = "Revenue"
         financials["E3"] = "='Driver - DXC'!E3"
         financials["F3"] = "='Driver - DXC'!F3"
         financials["J3"] = "=E3+1"
         financials["K3"] = "=F3+1"
         financials["L3"] = "=K3+1"
-        driver["D2"] = "Operating drivers"
-        driver["D3"] = "Subscription growth"
+        financials["J4"] = "=SUM(J3:J3)"
+        financials["K4"] = "=SUM(K3:K3)"
+        financials["L4"] = "=SUM(L3:L3)"
+        driver["A2"] = "Operating drivers"
+        driver["C3"] = "Subscription growth"
         driver["F3"] = 0.08
         driver["J3"] = 0.09
         driver["K3"] = 0.10
@@ -156,20 +160,27 @@ class FundXlsxTemplateTests(unittest.TestCase):
         self.assertTrue(financials.column_dimensions["E"].hidden)
         self.assertEqual(financials.row_dimensions[3].outlineLevel, 1)
         self.assertEqual(driver.row_dimensions[3].outlineLevel, 2)
-        self.assertEqual(financials["D3"].value, "Subscription revenue")
-        self.assertTrue(all(financials.cell(3, column).value is None for column in range(1, 4)))
+        self.assertEqual(financials["B3"].value, "Subscription revenue")
+        self.assertIsNone(financials["D3"].value)
+        self.assertEqual(self.plan()["row_styles"]["financials"][1]["label_column"], 2)
+        self.assertEqual(self.plan()["row_styles"]["driver"][1]["label_column"], 3)
 
         self.assertEqual(financials["A1"].fill.fgColor.rgb, "FF3366FF")
         self.assertEqual(financials["E1"].font.color.rgb, "FFFFFFFF")
         self.assertEqual(financials["E3"].font.color.rgb, "FF008000")
         self.assertEqual(financials["J3"].font.color.rgb, "FF000000")
+        self.assertTrue(financials["J4"].font.bold)
         self.assertEqual(driver["F3"].font.color.rgb, "FF0000FF")
+        self.assertTrue(driver["F3"].font.italic)
         self.assertEqual(driver["J3"].fill.fgColor.rgb, "FFFFFFC8")
         self.assertEqual(driver["J3"].border.top.style, "hair")
         self.assertEqual(driver["J3"].number_format, "0.0%")
         self.assertEqual(financials["E3"].number_format,
                          "_(#,##0_);\\(#,##0\\);_(?\\-?_);@")
         self.assertEqual(valuation.column_dimensions["A"].width, 14.625)
+        self.assertEqual(valuation.column_dimensions["B"].width, 14.375)
+        self.assertEqual(valuation.column_dimensions["D"].width, 9.125)
+        self.assertEqual(valuation.column_dimensions["E"].width, 9.125)
         self.assertEqual(valuation["A2"].fill.fgColor.rgb, "FF99CCFF")
         self.assertEqual(valuation["B3"].font.color.rgb, "FF0000FF")
 
@@ -205,7 +216,7 @@ class FundXlsxTemplateTests(unittest.TestCase):
         book.create_sheet("Financials - DXC")
         book.create_sheet("Driver - DXC")
         tampered = self.plan()
-        tampered["columns"]["label_column"] = 3
+        tampered["columns"]["hierarchy_label_columns"] = [1, 2, 3]
         with self.assertRaisesRegex(FundXlsxTemplateError, "plan hash"):
             apply_fund_xlsx_template(book, tampered)
 

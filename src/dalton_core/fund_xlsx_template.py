@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import copy
 from importlib.resources import files
 from typing import Any, Mapping, Sequence
 
@@ -16,7 +17,7 @@ STYLE_SCHEMA_VERSION = "fund-xlsx-template-style-0.1"
 PLAN_SCHEMA_VERSION = "fund-xlsx-template-apply-plan-0.1"
 STYLE_RESOURCE = "fund_xlsx_template_style.json"
 # Updated only when a new source-reviewed style contract is versioned.
-STYLE_RESOURCE_SHA256 = "9b1bdbb11320c1766f6e3dce870260f9cb7b29e4b2e009e6437ce84e4097690c"
+STYLE_RESOURCE_SHA256 = "13054dc88ccab6f572c4c4882ef9d16a4e850053d0d0a4b2c8dc6849b545922a"
 
 _SHEET_ROLES = ("valuation", "financials", "driver")
 _MODEL_ROLES = frozenset({"financials", "driver"})
@@ -118,7 +119,8 @@ def _row_plan(value: Mapping[str, Sequence[Mapping[str, Any]]] | None,
             _need(role != "valuation" or level == 0,
                   "valuation rows cannot use the model hierarchy gutter")
             seen.add(number)
-            normalized.append({"row": number, "style": style, "level": level})
+            normalized.append({"row": number, "style": style, "level": level,
+                               "label_column": level + 1})
         result[role] = sorted(normalized, key=lambda item: item["row"])
     return result
 
@@ -161,7 +163,8 @@ def build_fund_xlsx_template_plan(
 
     ``row_styles`` contains row numbers, presentation roles, and outline levels;
     it never contains line-item labels.  The consumer writes its own company
-    specification labels in column D before applying the plan.
+    specification labels in the returned per-row ``label_column`` before
+    applying the plan.
     """
 
     _need(isinstance(sheet_names, Mapping) and set(sheet_names) == set(_SHEET_ROLES),
@@ -190,7 +193,7 @@ def build_fund_xlsx_template_plan(
     first_quarter = second_support_gutter + 1
     columns = {
         "period_row": 1,
-        "label_column": 4,
+        "hierarchy_label_columns": [1, 2, 3, 4],
         "annual": [{"label": label, "column": first_annual + index}
                    for index, label in enumerate(annual)],
         "annual_support_gutter_before": first_support_gutter,
@@ -228,14 +231,19 @@ def _font(Font: Any, value: Mapping[str, Any]) -> Any:
 def _apply_style(target: Any, style: Mapping[str, Any], *,
                  Font: Any, PatternFill: Any, Border: Any, Side: Any,
                  Alignment: Any) -> None:
-    target.font = _font(Font, style["font"])
+    font = copy(target.font)
+    for name, value in style["font"].items():
+        setattr(font, name, value)
+    target.font = font
     if "fill" in style:
         target.fill = PatternFill("solid", fgColor=style["fill"])
     if "horizontal" in style:
         target.alignment = Alignment(horizontal=style["horizontal"])
     if "border" in style:
-        side = Side(style=style["border"]["style"], color=style["border"]["color"])
-        target.border = Border(left=side, right=side, top=side, bottom=side)
+        target.border = Border(**{
+            edge: Side(style=value["style"], color=value["color"])
+            for edge, value in style["border"].items()
+        })
 
 
 def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:

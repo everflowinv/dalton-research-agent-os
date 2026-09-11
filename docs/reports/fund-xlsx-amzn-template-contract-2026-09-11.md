@@ -18,7 +18,8 @@ roles. `build_fund_xlsx_template_plan` converts those inputs into a closed plan.
 - puts periods on row 1, with annual columns beginning at E, then a gutter,
   explicit annual-support columns such as CAGR, a second gutter, and the
   quarterly block; support labels and period counts remain company inputs;
-- reserves A:C for hierarchy, D for company-specific labels, and binds outline
+- maps hierarchy levels to label columns A/B/C/D, using the source's narrow
+  leading columns and wide D column for readable overflow, and binds outline
   levels to caller-selected rows;
 - applies the source Arial 8 typography, blue/brown section fills, blue inputs,
   green cross-sheet formulas, black local formulas, yellow hair-border
