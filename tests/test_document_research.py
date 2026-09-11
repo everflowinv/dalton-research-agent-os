@@ -131,10 +131,16 @@ class FakeLauncher:
 
 
 class FakeCoreRows:
-    def __init__(self, *rows: dict, discoveries: tuple[dict, ...] = ()):
+    def __init__(
+        self, *rows: dict, discoveries: tuple[dict, ...] = (),
+        mission_versions: tuple[dict, ...] = (),
+    ):
         self.rows = {row["record_id"]: dict(row) for row in rows}
         self.discoveries = {
             row["record_id"]: dict(row) for row in discoveries
+        }
+        self.mission_versions = {
+            row["mission_version_id"]: dict(row) for row in mission_versions
         }
         self.connection = self
 
@@ -145,6 +151,8 @@ class FakeCoreRows:
             row = self.rows.get(params[0])
         elif "coverage_mission_source_discoveries" in query:
             row = self.discoveries.get(params[0])
+        elif "coverage_mission_versions" in query:
+            row = self.mission_versions.get(params[0])
         else:
             raise AssertionError("unexpected Core acquired-document query")
 
@@ -841,7 +849,8 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(len(proof["matches"]), 1)
         self.assertIn("effective immediately", proof["matches"][0]["excerpt"])
         acquired_ref = "mission-discovered-document:web-alias-fixture"
-        mission_ref = "coverage-mission-version:web-alias-fixture"
+        mission_ref = "coverage-mission-version:web-alias-fixture:2"
+        discovery_mission_ref = "coverage-mission-version:web-alias-fixture:1"
         company_ref = "company:web-alias-fixture"
         discovery_ref = "mission-source-discovery:web-alias-fixture"
         acquired_core = FakeCoreRows(
@@ -857,12 +866,21 @@ class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
             },
             discoveries=({
                 "record_id": discovery_ref,
-                "mission_version_ref": mission_ref,
+                "mission_version_ref": discovery_mission_ref,
                 "company_ref": company_ref,
                 "source_ref": "source:web-search",
                 "source_envelope_ref": discovery["id"],
                 "source_envelope_hash": discovery["content_hash"],
             },),
+            mission_versions=({
+                "mission_version_id": discovery_mission_ref,
+                "mission_ref": "coverage-mission:web-alias-fixture",
+                "prior_version_id": None,
+            }, {
+                "mission_version_id": mission_ref,
+                "mission_ref": "coverage-mission:web-alias-fixture",
+                "prior_version_id": discovery_mission_ref,
+            }),
         )
         acquired_registry = DocumentResearchRegistry(
             adapters={"source:public-web": adapter},

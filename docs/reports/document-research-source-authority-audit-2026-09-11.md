@@ -124,14 +124,19 @@ policy outside that configured grant is refused.
    discovery/acquired rows retain logical `source:web-search`, while the actual
    connector SourceEnvelope is `source:public-web`. DocumentResearch accepts
    that translation only through the Core-acquired path, when the exact source
-   discovery row has the same mission, company and logical source and binds the
-   exact SourceEnvelope ref/hash returned by the physical adapter. The alias
+   discovery row has the same company and logical source, belongs to the exact
+   current mission or one of its immutable ancestors, and binds the exact
+   SourceEnvelope ref/hash returned by the physical adapter. This ancestry
+   check matters because `carry_forward_superseded_documents` deliberately
+   keeps the original discovery ref while re-registering a document under the
+   new mission version. The alias
    binding has its own 0.2 authority identity including the discovery ref,
    resolved source and envelope ref/hash; changing any one makes replay fail.
    Direct caller-selected source aliases remain insufficient. A read-only
-   audit found this exact planned relationship in all eight readable active
-   `source:web-search` manifests; the ninth active ticket had no completed
-   manifest and remains unavailable.
+   registry audit found six readable active `source:web-search` documents with
+   this exact relationship. Two additional bodies remain unavailable because
+   their deterministic reader rejects invalid UTF-8, one completed-ticket
+   directory is incomplete, and one row has no completed acquisition ticket.
 
    The production factory consumes injected, already-open
    Core/spool/receipt/launcher authorities and verifies every launcher belongs

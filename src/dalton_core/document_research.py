@@ -700,6 +700,9 @@ class CoreAcquiredDocumentSourceAdapter:
                 ),
                 "resolved_source_ref": resolved_source_ref,
                 "discovery_ref": row.get("discovery_ref"),
+                "discovery_mission_version_ref": discovery.get(
+                    "mission_version_ref"
+                ),
                 "discovery_source_envelope_ref": discovery.get(
                     "source_envelope_ref"
                 ),
@@ -708,6 +711,33 @@ class CoreAcquiredDocumentSourceAdapter:
                 ),
             })
         return _record(body)
+
+    def _mission_lineage_contains(
+        self, *, current_ref: str, ancestor_ref: str,
+    ) -> bool:
+        """Prove a carried row still descends from its discovery mission."""
+
+        cursor: str | None = current_ref
+        mission_ref: str | None = None
+        seen: set[str] = set()
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            rows = self.core.connection.execute(
+                "SELECT mission_ref,prior_version_id FROM "
+                "coverage_mission_versions WHERE mission_version_id=?",
+                (cursor,),
+            ).fetchall()
+            if len(rows) != 1:
+                return False
+            version = dict(rows[0])
+            if mission_ref is None:
+                mission_ref = version.get("mission_ref")
+            elif version.get("mission_ref") != mission_ref:
+                return False
+            if cursor == ancestor_ref:
+                return True
+            cursor = version.get("prior_version_id")
+        return False
 
     def materialize_record(
         self, *, record_id: str,
@@ -781,7 +811,10 @@ class CoreAcquiredDocumentSourceAdapter:
             discovery = dict(discovery_rows[0])
             source_authority = registration.get("source_authority", {})
             if (
-                discovery.get("mission_version_ref") != row["mission_version_ref"]
+                not self._mission_lineage_contains(
+                    current_ref=row["mission_version_ref"],
+                    ancestor_ref=discovery.get("mission_version_ref"),
+                )
                 or discovery.get("company_ref") != row["company_ref"]
                 or discovery.get("source_ref") != row["source_ref"]
                 or discovery.get("source_envelope_ref") != source_authority.get("ref")
