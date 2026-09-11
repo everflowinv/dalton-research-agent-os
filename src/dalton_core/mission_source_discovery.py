@@ -73,13 +73,18 @@ from .public_web_core_fetch import (
     url_authority_from_discovery,
     count_recent_public_web_fetch_calls,
 )
-from .raw_spool import RawSpool
+from .raw_spool import RawSpool, RawSpoolReader
 from .public_web_core_search import (
+    OPERATION as WEB_SEARCH_OPERATION,
     WebSearchConnectorGovernance,
     count_recent_web_search_calls,
     public_web_urls_in_authority,
     validate_web_search_spec,
     web_search_spec_hash,
+)
+from .connector_runner import (
+    validate_connector_runner_request,
+    validate_connector_runner_response,
 )
 from .child_tickets import adopt_finished_child
 from .store import DaltonStore, canonical_json, content_hash
@@ -1147,6 +1152,7 @@ class MissionSourceDiscoveryCoordinator:
         # carried one.  Optional: without it the backfill reports "no_spool".
         self.spool_dir = None if spool_dir is None else Path(spool_dir)
         self._spool: RawSpool | None = None
+        self._recovery_spool: RawSpoolReader | None = None
         policy = self.plan.get("acquisition") or {}
         self.preferred_hosts: tuple[str, ...] = tuple(policy.get("preferred_hosts", ()))
         # The provider's redirect proxies are held with the plan's skip list:
@@ -1266,6 +1272,267 @@ class MissionSourceDiscoveryCoordinator:
                 "new_document_count": summary.get("new_document_count"),
             })
         return settled
+
+    @staticmethod
+    def _core_record(connection: Any, table: str, id_column: str, record_ref: str) -> dict[str, Any]:
+        """Read one immutable Core record and prove its SQL/hash projection."""
+
+        row = connection.execute(
+            f"SELECT record_json,content_hash FROM {table} WHERE {id_column}=?",
+            (record_ref,),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionError(f"{table} authority was not found")
+        try:
+            record = json.loads(row["record_json"])
+        except (json.JSONDecodeError, TypeError, RecursionError) as exc:
+            raise CoverageMissionError(f"{table} authority is unreadable") from exc
+        if (
+            not isinstance(record, Mapping)
+            or record.get("id") != record_ref
+            or record.get("content_hash") != row["content_hash"]
+            or content_hash({key: value for key, value in record.items() if key != "content_hash"})
+            != row["content_hash"]
+        ):
+            raise CoverageMissionError(f"{table} authority hash drifted")
+        return dict(record)
+
+    def _recover_web_dispatch(
+        self, dispatch: Mapping[str, Any], ticket: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Finish only the local ledger write of a proved successful web search.
+
+        The child and dispatch remain failed history.  This method replays no
+        transport: it reconstructs the exact persisted call, successful runner
+        response, source envelope and raw-spool URL authorities before invoking
+        the existing idempotent mission discovery write.
+        """
+
+        if self.source_ref != WEB_SEARCH_SOURCE_REF:
+            raise CoverageMissionError("local discovery recovery is only defined for web search")
+        if self.spool_dir is None:
+            raise CoverageMissionError("local discovery recovery requires the connector spool")
+        if dispatch.get("status") != "failed":
+            raise CoverageMissionError("local discovery recovery requires a failed dispatch")
+        if (
+            dispatch.get("discovery_plan_ref") != self.plan["id"]
+            or dispatch.get("discovery_plan_hash") != self.plan["content_hash"]
+            or dispatch.get("source_ref") != self.source_ref
+        ):
+            raise CoverageMissionError("failed dispatch does not bind this discovery plan")
+        if ticket.get("id") != dispatch.get("ticket_ref") or ticket.get("status") != "failed":
+            raise CoverageMissionError("local recovery requires the exact failed child ticket")
+        summary = ticket.get("summary")
+        if not isinstance(summary, Mapping) or summary.get("status") != "failed":
+            raise CoverageMissionError("failed child has no terminal failure summary")
+        if any(summary.get(name) not in (None, 0, [], {}) for name in (
+            "discovery_ref", "discovery_hash", "document_count", "new_document_count",
+            "in_authority_document_count", "discovered_urls", "formal_authority_writes",
+        )):
+            raise CoverageMissionError("failed child already claims local discovery writes")
+
+        authorization = dispatch.get("authorization")
+        if not isinstance(authorization, Mapping) or summary.get("authorization") != authorization:
+            raise CoverageMissionError("child summary authorization differs from its dispatch")
+        exact_authorization = self.missions.authorize_source_discovery(
+            company_ref=dispatch["company_ref"], source_ref=self.source_ref,
+            requested_by=dispatch["requested_by"],
+            mission_version_ref=dispatch["mission_version_ref"],
+            mission_version_hash=dispatch["mission_version_hash"],
+        )
+        if dict(authorization) != exact_authorization:
+            raise CoverageMissionError("failed dispatch authorization is no longer current")
+        for field in ("company_ref", "spec_ref", "requested_by", "plan_ref", "plan_hash"):
+            expected = {
+                "plan_ref": dispatch["discovery_plan_ref"],
+                "plan_hash": dispatch["discovery_plan_hash"],
+            }.get(field, dispatch.get(field))
+            if ticket.get(field) != expected or summary.get(field) != expected:
+                raise CoverageMissionError(f"failed child {field} binding drifted")
+        for field in ("mission_version_ref", "mission_version_hash"):
+            if ticket.get(field) != dispatch.get(field):
+                raise CoverageMissionError(f"failed child {field} binding drifted")
+        for field in ("governance_ref", "governance_hash", "as_of"):
+            if not isinstance(ticket.get(field), str) or summary.get(field) != ticket.get(field):
+                raise CoverageMissionError(f"failed child {field} binding drifted")
+        if summary.get("source_ref") != self.source_ref:
+            raise CoverageMissionError("failed child source binding drifted")
+
+        try:
+            as_of = date.fromisoformat(ticket["as_of"])
+        except (TypeError, ValueError) as exc:
+            raise CoverageMissionError("failed child as_of is invalid") from exc
+        parameters = build_discovery_parameters(
+            self.plan, spec_ref=dispatch["spec_ref"], company_ref=dispatch["company_ref"],
+            as_of=as_of,
+        )
+        query_hash = web_search_spec_hash(parameters)
+        if (
+            summary.get("parameters") != parameters
+            or summary.get("query_hash") != query_hash
+            or dispatch.get("query_hash") != query_hash
+        ):
+            raise CoverageMissionError("failed child query binding drifted")
+
+        search = summary.get("search")
+        if not isinstance(search, Mapping) or search.get("outcome") != "succeeded":
+            raise CoverageMissionError("failed child does not prove a successful search")
+        if search.get("source_status") not in {"complete", "partial"}:
+            raise CoverageMissionError("failed child search is not a usable ranked response")
+        invocation_ref = search.get("connector_invocation_ref")
+        envelope_ref = search.get("source_envelope_ref")
+        if not isinstance(invocation_ref, str) or not isinstance(envelope_ref, str):
+            raise CoverageMissionError("failed child search lacks persisted authority refs")
+        invocation = self._core_record(
+            self.store.connection, "connector_invocations", "connector_invocation_id", invocation_ref,
+        )
+        call = self._core_record(
+            self.store.connection, "connector_call_specs", "call_spec_id", invocation["call_spec_ref"],
+        )
+        if (
+            search.get("connector_invocation_hash") != invocation["content_hash"]
+            or invocation.get("call_spec_hash") != call["content_hash"]
+            or call.get("operation") != WEB_SEARCH_OPERATION
+            or call.get("parameters") != parameters
+            or call.get("query_hash") != query_hash
+        ):
+            raise CoverageMissionError("failed child connector call binding drifted")
+
+        journal = self.store.connection.execute(
+            "SELECT runner_request_ref,request_hash,request_json FROM runner_request_journal "
+            "WHERE connector_invocation_ref=?",
+            (invocation_ref,),
+        ).fetchall()
+        if len(journal) != 1:
+            raise CoverageMissionError("successful search requires one exact runner request")
+        request = validate_connector_runner_request(json.loads(journal[0]["request_json"]))
+        if (
+            request["content_hash"] != journal[0]["request_hash"]
+            or request["connector_invocation_ref"] != invocation_ref
+            or request["connector_invocation_hash"] != invocation["content_hash"]
+            or request["call_spec_ref"] != call["id"]
+            or request["call_spec_hash"] != call["content_hash"]
+        ):
+            raise CoverageMissionError("failed child runner request binding drifted")
+        event = self.store.connection.execute(
+            "SELECT state,payload_json FROM runner_attempt_journal_events "
+            "WHERE runner_request_ref=? ORDER BY event_seq DESC LIMIT 1",
+            (request["id"],),
+        ).fetchone()
+        if event is None or event["state"] != "responded":
+            raise CoverageMissionError("search transport has no durable successful response")
+        try:
+            payload = json.loads(event["payload_json"])
+            response = validate_connector_runner_response(payload["response"])
+        except (KeyError, TypeError, json.JSONDecodeError, RecursionError) as exc:
+            raise CoverageMissionError("search runner response is unreadable") from exc
+        if (
+            response["outcome"] != "succeeded"
+            or response["runner_request_ref"] != request["id"]
+            or response["runner_request_hash"] != request["content_hash"]
+            or response["connector_invocation_ref"] != invocation_ref
+            or response["connector_invocation_hash"] != invocation["content_hash"]
+            or response["id"] != search.get("runner_response_ref")
+            or response["source_envelope_ref"] != envelope_ref
+            or response["source_envelope_hash"] != search.get("source_envelope_hash")
+            or response["raw_artifact_version_ref"] != search.get("raw_artifact_version_ref")
+        ):
+            raise CoverageMissionError("failed child successful response binding drifted")
+        envelope = self._core_record(
+            self.store.connection, "connector_source_envelopes", "source_envelope_id", envelope_ref,
+        )
+        document_refs = list(envelope.get("source_record_refs") or [])
+        if (
+            envelope["content_hash"] != search.get("source_envelope_hash")
+            or envelope.get("connector_invocation_ref") != invocation_ref
+            or envelope.get("operation") != WEB_SEARCH_OPERATION
+            or envelope.get("status") != search.get("source_status")
+            or document_refs != search.get("document_refs")
+            or not document_refs
+        ):
+            raise CoverageMissionError("failed child source envelope binding drifted")
+
+        if self._recovery_spool is None:
+            self._recovery_spool = RawSpoolReader(str(self.spool_dir))
+        hosts = cited_hosts_from_discovery(
+            self.store.connection, self._recovery_spool, source_envelope_ref=envelope_ref,
+        )
+        if set(hosts) != set(document_refs):
+            raise CoverageMissionError("raw search authority differs from the source envelope")
+        existing = next((
+            item for item in self.missions.source_discoveries(
+                dispatch["mission_version_ref"], company_ref=dispatch["company_ref"],
+                spec_ref=dispatch["spec_ref"], limit=1000,
+            )
+            if item["source_envelope_ref"] == envelope_ref
+        ), None)
+        if existing is not None:
+            if any((
+                existing["source_ref"] != self.source_ref,
+                existing["discovery_plan_ref"] != self.plan["id"],
+                existing["discovery_plan_hash"] != self.plan["content_hash"],
+                existing["query_hash"] != query_hash,
+                existing["parameters"] != parameters,
+                existing["connector_invocation_ref"] != invocation_ref,
+                existing["connector_invocation_hash"] != invocation["content_hash"],
+                existing["source_envelope_hash"] != envelope["content_hash"],
+                existing["document_refs"] != document_refs,
+            )):
+                raise CoverageMissionError("existing recovery discovery authority drifted")
+            return {
+                "dispatch_ref": dispatch["dispatch_id"],
+                "ticket_ref": dispatch["ticket_ref"], "status": "already_recovered",
+                "discovery_ref": existing["id"], "discovery_hash": existing["content_hash"],
+                "new_document_count": 0, "provider_calls": 0,
+            }
+        present = public_web_urls_in_authority(self.store.connection, document_refs)
+        record = self.missions.record_source_discovery(
+            authorization=exact_authorization,
+            discovery_plan_ref=self.plan["id"], discovery_plan_hash=self.plan["content_hash"],
+            spec_ref=dispatch["spec_ref"], query_hash=query_hash, parameters=parameters,
+            connector_invocation_ref=invocation_ref,
+            connector_invocation_hash=invocation["content_hash"],
+            source_envelope_ref=envelope_ref, source_envelope_hash=envelope["content_hash"],
+            document_refs=document_refs, in_authority_document_refs=present,
+            document_hosts=hosts,
+        )
+        return {
+            "dispatch_ref": dispatch["dispatch_id"], "ticket_ref": dispatch["ticket_ref"],
+            "status": "recovered" if record["status"] == "fresh" else "already_recovered",
+            "discovery_ref": record["id"], "discovery_hash": record["content_hash"],
+            "new_document_count": len(record["new_document_refs"]),
+            "provider_calls": 0,
+        }
+
+    def recover_local_web_discoveries(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Recover paid successful searches whose child failed during local registration."""
+
+        if self.source_ref != WEB_SEARCH_SOURCE_REF or self.search_launcher is None:
+            return []
+        try:
+            mission = self.missions.active_mission(self.plan["mission_ref"])
+        except CoverageMissionNotFound:
+            return []
+        dispatches = self.missions.discovery_dispatches(mission["id"], limit=100)
+        candidates = [
+            item for item in dispatches
+            if item["status"] == "failed"
+            and item["source_ref"] == self.source_ref
+            and item["discovery_plan_ref"] == self.plan["id"]
+            and item["discovery_plan_hash"] == self.plan["content_hash"]
+        ][:limit]
+        recovered: list[dict[str, Any]] = []
+        for dispatch in candidates:
+            try:
+                ticket = self.search_launcher.status(dispatch["ticket_ref"])
+                recovered.append(self._recover_web_dispatch(dispatch, ticket))
+            except Exception as exc:  # one corrupt historical ticket cannot stall this lane
+                recovered.append({
+                    "dispatch_ref": dispatch["dispatch_id"], "ticket_ref": dispatch["ticket_ref"],
+                    "status": "refused", "reason": f"{type(exc).__name__}: {exc}",
+                    "provider_calls": 0,
+                })
+        return recovered
 
     def settle_documents(self) -> list[dict[str, Any]]:
         settled: list[dict[str, Any]] = []
@@ -2164,6 +2431,7 @@ class MissionSourceDiscoveryCoordinator:
 
         retried_after_restart = self._retry_failures_now
         settled_dispatches = self.settle_dispatches()
+        recovered_dispatches = self.recover_local_web_discoveries()
         settled_documents = self.settle_documents()
         # P9d-12/13 maintenance, all before any new spend: documents stranded
         # by a mission version change come back under the current grant,
@@ -2209,6 +2477,7 @@ class MissionSourceDiscoveryCoordinator:
             "plan_ref": self.plan["id"],
             "plan_hash": self.plan["content_hash"],
             "settled_dispatches": settled_dispatches,
+            "recovered_dispatches": recovered_dispatches,
             "settled_documents": settled_documents,
             "carried_forward": carried_forward,
             "host_backfill": host_backfill,
