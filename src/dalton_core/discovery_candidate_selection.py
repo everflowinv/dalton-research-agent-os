@@ -1,0 +1,93 @@
+"""Closed model selection of ranked discovery candidates before acquisition."""
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from typing import Any
+
+from .store import canonical_json, content_hash
+
+CONTRACT_REF = "discovery-candidate-selection-contract:0.1"
+_TEXT_FIELDS = ("title", "snippet", "date", "document_type", "company")
+
+
+class CandidateSelectionError(ValueError):
+    pass
+
+
+def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only bounded search metadata from exact raw JSON-RPC bytes."""
+    import hashlib
+    if hashlib.sha256(raw_response).hexdigest() != envelope.get("raw_response_hash"):
+        raise CandidateSelectionError("candidate raw response hash drifted")
+    try:
+        rpc = json.loads(raw_response.decode("utf-8"))
+        blocks = rpc["result"]["content"]
+        texts = [row["text"] for row in blocks if isinstance(row, Mapping)
+                 and row.get("type") == "text"]
+        payload = json.loads(texts[0]) if len(texts) == 1 else None
+        results = payload["results"]
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateSelectionError("candidate raw response is invalid") from exc
+    if not isinstance(results, list) or len(results) > 20:
+        raise CandidateSelectionError("candidate results are invalid")
+    expected = list(envelope.get("source_record_refs") or ())
+    candidates = []
+    for rank, raw in enumerate(results):
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("doc_id"), str):
+            raise CandidateSelectionError("candidate result is invalid")
+        ref = f"alphaengine-doc:{raw['doc_id']}"
+        if rank >= len(expected) or expected[rank] != ref:
+            raise CandidateSelectionError("candidate order differs from source authority")
+        item: dict[str, Any] = {"document_ref": ref, "rank": rank + 1}
+        for field in _TEXT_FIELDS:
+            value = raw.get(field)
+            if value is not None:
+                if not isinstance(value, str) or len(value) > (800 if field == "snippet" else 240):
+                    raise CandidateSelectionError(f"candidate {field} is invalid")
+                item[field] = value
+        tags = raw.get("tags")
+        if tags is not None:
+            if (not isinstance(tags, list) or len(tags) > 20
+                    or not all(isinstance(x, str) and len(x) <= 80 for x in tags)):
+                raise CandidateSelectionError("candidate tags are invalid")
+            item["tags"] = tags
+        candidates.append(item)
+    if len(candidates) != len(expected):
+        raise CandidateSelectionError("candidate count differs from source authority")
+    base = {"schema_version": "0.1", "contract_ref": CONTRACT_REF,
+            "source_envelope_ref": envelope["id"],
+            "source_envelope_hash": envelope["content_hash"], "candidates": candidates}
+    return {**base, "content_hash": content_hash(base)}
+
+
+def selection_prompt(view: Mapping[str, Any], *, company_ref: str,
+                     missing_periods: list[str]) -> str:
+    return ("Select only documents likely to be quarterly earnings-call transcripts for the "
+            "specified company and missing periods. Tags are hints, not authority. Do not select "
+            "another issuer. Return strict JSON {selected:[{document_ref,reason}]}.\nINPUT="
+            + canonical_json({"company_ref": company_ref, "missing_periods": missing_periods,
+                              "candidate_view": dict(view)}))
+
+
+def validate_selection(text: str, view: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CandidateSelectionError("selection is not JSON") from exc
+    if not isinstance(raw, Mapping) or set(raw) != {"selected"} or not isinstance(raw["selected"], list):
+        raise CandidateSelectionError("selection has an invalid closed shape")
+    allowed = {row["document_ref"] for row in view["candidates"]}
+    selected = []
+    seen = set()
+    for row in raw["selected"]:
+        if (not isinstance(row, Mapping) or set(row) != {"document_ref", "reason"}
+                or row.get("document_ref") not in allowed or row["document_ref"] in seen
+                or not isinstance(row.get("reason"), str) or not row["reason"].strip()
+                or len(row["reason"]) > 300):
+            raise CandidateSelectionError("selection item is invalid")
+        seen.add(row["document_ref"])
+        selected.append({"document_ref": row["document_ref"], "reason": row["reason"].strip()})
+    base = {"schema_version": "0.1", "contract_ref": CONTRACT_REF,
+            "candidate_view_hash": view["content_hash"], "selected": selected}
+    return {**base, "content_hash": content_hash(base)}
