@@ -88,8 +88,10 @@ def presentation_state(inputs=None):
     inputs = financial_inputs() if inputs is None else inputs
     return {
         "company_ref": "company:test",
-        "filings": [{"accession": ACCESSION, "form": "10-Q",
-                     "report_date": "2025-12-31"}],
+        "filings": [{"accession": ACCESSION, "form": "10-K",
+                     "report_date": "2025-12-31",
+                     "ingest_id": "statement-ingest:test",
+                     "content_hash": "d" * 64}],
         "statements": {"income": [
             {"concept": line["concept"], "label": line["label"],
              "level": 0, "parent_concept": None, "is_breakdown": False,
@@ -266,6 +268,25 @@ class FinancialStatementStructureTests(unittest.TestCase):
         numerator = next(item for item in replay["formulas"]
                          if item["output_ref"] == "eps-numerator")
         self.assertEqual(numerator["status"], "unavailable")
+
+        definition = validate_structure_proposal(
+            {key: candidate[key] for key in ("schema_version", "lines", "formulas")},
+            presentation_state(inputs),
+            revenue_anchor_concept="revenue",
+            expense_lines=company_spec()["expense_lines"],
+            note_evidence=[note],
+            note_evidence_resolver=lambda _ref: note,
+        )
+        self.assertEqual(definition["note_evidence"], [note])
+        spec = {
+            **company_spec(), "financial_statement_structure": definition,
+            "decided_by": "automation:test",
+        }
+        rematerialized, replayed = materialize_financial_statement_structure(
+            spec, inputs, note_evidence_resolver=lambda _ref: note,
+        )
+        self.assertEqual(rematerialized["note_evidence"], [note])
+        self.assertEqual(replayed["note_formula_periods"], replay["note_formula_periods"])
 
     def test_note_backed_numerator_refuses_other_nci_sign_and_missing_period(self):
         inputs, candidate = note_backed_eps_inputs_and_proposal()

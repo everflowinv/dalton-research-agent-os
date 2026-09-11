@@ -669,7 +669,6 @@ def _normalize_formula(
                 raise FinancialStatementStructureError(
                     "note-backed diluted EPS numerator terms must be exact filed lines"
                 )
-            result["note_evidence_refs"] = sorted(cited_notes)
         result["terms"] = normalized
     elif operator == "divide":
         numerator = _text(wire["numerator_ref"], "formula numerator_ref")
@@ -772,7 +771,9 @@ def _note_backed_eps_replay(
             )
         eps_line = filed[divide["tie_out_concept"]]
         formula_reports: list[dict[str, Any]] = []
-        for evidence_ref in formula.get("note_evidence_refs") or []:
+        for evidence_ref in sorted(
+            ref for ref in formula["evidence_refs"] if ref in notes
+        ):
             evidence = notes[evidence_ref]
             accession = evidence["accession"]
             form = evidence["form"]
@@ -1064,6 +1065,24 @@ def validate_structure_proposal(
         raise FinancialStatementStructureError(
             "note evidence company differs from company presentation"
         )
+    if schema_version == SCHEMA_VERSION:
+        filings = state.get("filings") or []
+        for note in notes:
+            matches = [
+                item for item in filings
+                if isinstance(item, Mapping) and item.get("accession") == note["accession"]
+            ]
+            if len(matches) != 1 or any(
+                matches[0].get(field) != note[note_field]
+                for field, note_field in (
+                    ("ingest_id", "statement_ingest_ref"),
+                    ("content_hash", "statement_filing_hash"),
+                    ("form", "form"),
+                )
+            ):
+                raise FinancialStatementStructureError(
+                    "note evidence statement filing differs from company presentation"
+                )
     note_by_ref = {item["ref"]: item for item in notes}
     formulas = [
         _normalize_formula(
@@ -1087,7 +1106,10 @@ def validate_structure_proposal(
         )
     _validate_formula_evidence(formulas, by_ref, filed, set(note_by_ref))
     _validate_typed_note_use(formulas, by_ref, note_by_ref)
-    return {"schema_version": schema_version, "lines": lines, "formulas": formulas}
+    result = {"schema_version": schema_version, "lines": lines, "formulas": formulas}
+    if schema_version == SCHEMA_VERSION and notes:
+        result["note_evidence"] = notes
+    return result
 
 
 def replay_historical_structure(
@@ -1408,6 +1430,20 @@ def materialize_financial_statement_structure(
         raise FinancialStatementStructureError(
             "company spec has an unsupported statement structure definition"
         )
+    effective_note_evidence = list(note_evidence)
+    if schema_version == SCHEMA_VERSION:
+        held_notes = definition.get("note_evidence")
+        if held_notes is None:
+            held_notes = []
+        if not isinstance(held_notes, list):
+            raise FinancialStatementStructureError(
+                "statement structure 0.3 typed note evidence must be a list"
+            )
+        if effective_note_evidence and effective_note_evidence != held_notes:
+            raise FinancialStatementStructureError(
+                "caller note evidence differs from the persisted structure definition"
+            )
+        effective_note_evidence = list(held_notes)
     identity = {
         "schema_version": schema_version,
         "spec_ref": company_spec.get("spec_id"),
@@ -1428,7 +1464,7 @@ def materialize_financial_statement_structure(
     }
     return validate_financial_statement_structure(
         proposal, company_spec, financial_inputs,
-        note_evidence=note_evidence,
+        note_evidence=effective_note_evidence,
         note_evidence_resolver=note_evidence_resolver,
     )
 
