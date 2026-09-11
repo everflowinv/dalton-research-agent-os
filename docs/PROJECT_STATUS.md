@@ -1,6 +1,6 @@
 # Dalton 项目进度
 
-Current checkpoint (2026-09-11 07:01 UTC): R9c `c29b3e22808cb900b458eeb00d9e5447b72f5db6` passed 6,960 tests (one skip), wheel comparison and 68-schema/40-entry/zero-escape rehearsal, then deployed at 06:59:07 UTC. All 561 runtime files and twelve model configurations verified; controller PID 18253 started 06:56:41 UTC. Continuous 45-sample health observation is running, and actual Dossier 0.3 product acceptance remains pending. Failed R9a health and failed R9b full-suite evidence remain explicitly bound. AlphaEngine async candidate selection is integrated for the next release but not activated; its query reformulation and remaining runtime setup are in progress.
+Current checkpoint (2026-09-11 07:12 UTC): R9c `c29b3e22808cb900b458eeb00d9e5447b72f5db6` is deployed and verified: 6,960 tests (one skip), exact wheel/runtime comparison, 68-schema/40-entry/zero-escape rehearsal, all twelve model configurations preserved, and 45/45 healthy samples spanning 676.57 seconds on the new controller. Actual ACN Dossier 0.3 publication passed independent persisted-proof verification for three newly generated units; inherited units retain their legacy evidence status. AlphaEngine selection-before-download and directed annual/provider retry changes are integrated for the next release, not yet live. Failed-host cooldown activation is under final operations review.
 
 更新日期：2026-09-11（基础执行、年报阅读和模型调用真实路径验收；以下历史记录保留）
 
