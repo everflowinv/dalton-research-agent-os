@@ -15,7 +15,11 @@ from dalton_core.document_research import (
     CoreAcquiredDocumentSourceAdapter, DocumentResearchRegistry, FeedDocumentSourceAdapter,
     build_document_research_policy,
 )
-from dalton_core.document_research_strategy import STRATEGY_VERSION
+from dalton_core.document_research_strategy import (
+    FINANCIAL_NOTE_TARGET_REF,
+    FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+    STRATEGY_VERSION,
+)
 from dalton_core.feed_acquisition import (
     COMPANY_WIKI_SOURCE_REF, build_feed_acquisition_manifest,
 )
@@ -117,6 +121,20 @@ class EstimatedCostAdapter(RouteBoundCountingFakeAdapter):
 
 
 class MissionDocumentResearchTests(unittest.TestCase):
+    @staticmethod
+    def _financial_note_target(**overrides):
+        return {
+            "schema_version": FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+            "target_ref": FINANCIAL_NOTE_TARGET_REF,
+            "kind": "diluted_eps_numerator",
+            "statement_ingest_ref": "statement-ingest:" + "a" * 32,
+            "statement_filing_hash": "b" * 64,
+            "accession": "0001467373-25-000217", "form": "10-K",
+            "applicability_kind": "annual",
+            "periods": [{"period_start": "2024-09-01", "period_end": "2025-08-31"}],
+            **overrides,
+        }
+
     def _executor(self, fixture, authority, *, draft_adapter=None,
                   verifier_adapter=None, fault_injector=None):
         statement = "Managed services revenue is recognized over time."
@@ -379,6 +397,52 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_admissions"
         ).fetchone()[0], 1)
+
+    def test_typed_target_is_replayed_and_never_retags_legacy_admission(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        legacy = authority.admit_from_plan(**args)
+        old_plan = json.loads(fixture.store.connection.execute(
+            "SELECT plan_json FROM coverage_mission_research_plans WHERE plan_id=?",
+            (args["plan_ref"],),
+        ).fetchone()[0])
+        plan = {key: value for key, value in old_plan.items() if key != "content_hash"}
+        plan["state_hash"] = "7" * 64
+        target = self._financial_note_target()
+        plan["inquiries"][0]["directed_document"]["evidence_target"] = target
+        plan["content_hash"] = content_hash(plan)
+        stored = self._record_plan(fixture, plan)
+        inquiry = plan["inquiries"][0]
+        target_args = {
+            **args, "plan_ref": stored["plan_id"],
+            "inquiry_ref": inquiry_ref_for(inquiry_content_hash(inquiry)),
+        }
+        with patch(
+            "dalton_core.mission_document_research."
+            "financial_note_targets_for_registration",
+            return_value=[target],
+        ):
+            admitted = authority.admit_from_plan(**target_args)
+            self.assertEqual(admitted["status_marker"], "fresh")
+            self.assertNotEqual(admitted["id"], legacy["id"])
+            self.assertEqual(
+                admitted["planner_inquiry"]["directed_document"]["evidence_target"],
+                target,
+            )
+            self.assertEqual(
+                authority.admit_from_plan(**target_args)["status_marker"], "duplicate")
+
+        with patch(
+            "dalton_core.mission_document_research."
+            "financial_note_targets_for_registration",
+            return_value=[],
+        ):
+            with self.assertRaisesRegex(
+                MissionDocumentResearchError, "differs from current filing authority"
+            ):
+                authority.resolve_for_execution(admitted["id"])
+            # A target cannot retroactively alter or invalidate the old generic
+            # qualitative admission, whose exact identity omitted it.
+            self.assertEqual(authority.resolve_for_execution(legacy["id"])["id"], legacy["id"])
 
     def test_projected_cli_prompt_records_full_state_plan_that_generic_admission_accepts(self):
         fixture, authority, args, registration, _launcher = self._fixture()

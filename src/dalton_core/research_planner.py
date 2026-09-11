@@ -185,6 +185,39 @@ OUTPUT_SCHEMA = {
                             "query_terms": {"type": "array", "minItems": 1,
                                             "items": {"type": "string", "minLength": 1}},
                             "query_rationale": {"type": "string", "minLength": 1},
+                            "evidence_target": {
+                                "type": "object", "additionalProperties": False,
+                                "required": [
+                                    "schema_version", "target_ref", "kind",
+                                    "statement_ingest_ref", "statement_filing_hash",
+                                    "accession", "form", "applicability_kind", "periods",
+                                ],
+                                "properties": {
+                                    "schema_version": {"const": "financial-note-target-0.1"},
+                                    "target_ref": {
+                                        "const": "financial_note:diluted_eps_numerator:0.1",
+                                    },
+                                    "kind": {"const": "diluted_eps_numerator"},
+                                    "statement_ingest_ref": {"type": "string", "minLength": 1},
+                                    "statement_filing_hash": {
+                                        "type": "string", "pattern": "^[0-9a-f]{64}$",
+                                    },
+                                    "accession": {"type": "string", "minLength": 1},
+                                    "form": {"const": "10-K"},
+                                    "applicability_kind": {"enum": ["annual", "quarter"]},
+                                    "periods": {
+                                        "type": "array", "minItems": 1,
+                                        "items": {
+                                            "type": "object", "additionalProperties": False,
+                                            "required": ["period_start", "period_end"],
+                                            "properties": {
+                                                "period_start": {"type": "string", "format": "date"},
+                                                "period_end": {"type": "string", "format": "date"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
                         },
                     },
                 },
@@ -523,7 +556,12 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "when useful, and explain how they test the question in query_rationale. Follow "
         "document_research_policy's query bounds. Never invent a document, version, "
         "path or model route. A retrieval miss means the query found no match, not that "
-        "the document contains no answer; expand context or revise the strategy when warranted.\n\n"
+        "the document contains no answer; expand context or revise the strategy when warranted. "
+        "When a readable document lists evidence_targets, you may copy one exact target object "
+        "into directed_document.evidence_target. The only current target asks for cited 10-K note "
+        "text explaining the diluted-EPS numerator for the exact stated period. It is not numeric "
+        "authority, does not create a formula, and must not be retagged to another period, filing, "
+        "document, or company. Omit evidence_target for ordinary qualitative research.\n\n"
         "Each company's document_research_feedback records what earlier directed reads actually "
         "tried. A query_miss or no_verified_claim is an unresolved research question, not a "
         "finding that the source contains nothing. Use the tried terms and missing evidence "

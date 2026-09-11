@@ -8,14 +8,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
+import re
 from typing import Any
 
 from .document_research import (
     READ_OPERATION, READ_REQUEST_SCHEMA_VERSION,
     build_document_research_registry, validate_document_research_policy,
 )
-from .document_research_strategy import inventory_document
+from .company_model_annual_projection import AnnualProjectionError, verify_statement_filing
+from .document_research_strategy import (
+    FINANCIAL_NOTE_TARGET_REF,
+    FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+    inventory_document,
+    normalize_evidence_target,
+)
 from .store import content_hash
 
 CONFIG_FILENAME = "document-research-config.json"
@@ -25,6 +33,112 @@ _SOURCES = frozenset({"source:alphaengine", "source:public-web", "source:web-sea
                       "source:prior-research"})
 _LIMITS = frozenset({"alphaengine_max_document_chars", "public_web_max_source_chars",
                      "public_web_max_pdf_pages", "public_web_max_decompressed_bytes"})
+_DILUTED_EPS_CONCEPT = "us-gaap:EarningsPerShareDiluted"
+_DILUTED_SHARES_CONCEPT = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+
+
+def financial_note_targets_for_registration(
+    *, connection: Any, mission: Mapping[str, Any], company_ref: str,
+    registration: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Derive typed note targets from one exact acquired 10-K and statement filing.
+
+    The statement rows establish only the filing and period to investigate. They
+    do not establish the diluted-EPS numerator or turn later note prose into a
+    numeric fact.
+    """
+
+    authority = registration.get("source_authority", {})
+    if (registration.get("source_ref") != "source:sec-edgar"
+            or authority.get("kind") != "coverage-mission-acquired-document"
+            or authority.get("mission_version_ref") != mission.get("id")
+            or authority.get("company_ref") != company_ref):
+        return []
+    document_ref = registration.get("document_ref")
+    prefix = "sec:filing:"
+    if not isinstance(document_ref, str) or not document_ref.startswith(prefix):
+        return []
+    accession = document_ref[len(prefix):]
+    if not accession:
+        return []
+    tables = {row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_statement_filings','coverage_mission_statement_dispatches',"
+        "'coverage_mission_statement_lines')"
+    )}
+    if tables != {
+        "coverage_mission_statement_filings", "coverage_mission_statement_dispatches",
+        "coverage_mission_statement_lines",
+    }:
+        return []
+    rows = connection.execute(
+        "SELECT f.*,d.mission_version_ref AS dispatch_mission_version_ref,"
+        "d.mission_version_hash AS dispatch_mission_version_hash,"
+        "d.company_ref AS dispatch_company_ref,d.form AS dispatch_form,"
+        "d.status AS dispatch_status FROM coverage_mission_statement_filings f "
+        "JOIN coverage_mission_statement_dispatches d ON d.dispatch_id=f.dispatch_id "
+        "WHERE f.company_ref=? AND f.accession=? AND f.form='10-K'",
+        (company_ref, accession),
+    ).fetchall()
+    if len(rows) != 1:
+        return []
+    filing = dict(rows[0])
+    if (filing["dispatch_mission_version_ref"] != mission.get("id")
+            or filing["dispatch_mission_version_hash"] != mission.get("content_hash")
+            or filing["dispatch_company_ref"] != company_ref
+            or filing["dispatch_form"] != "10-K"
+            or filing["dispatch_status"] != "succeeded"):
+        return []
+    try:
+        verify_statement_filing(connection, filing)
+    except (AnnualProjectionError, KeyError, TypeError, ValueError):
+        # A broken optional statement authority cannot advertise this target,
+        # but it must not disable ordinary qualitative reading of the acquired
+        # original.
+        return []
+    concepts_by_period: dict[tuple[str, str], set[str]] = {}
+    for row in connection.execute(
+        "SELECT concept,period_start,period_end,unit,is_breakdown,dimension_axis,"
+        "dimension_member,dimension_count FROM coverage_mission_statement_lines "
+        "WHERE ingest_id=? AND statement='income' AND period_start IS NOT NULL "
+        "AND period_end=? AND value IS NOT NULL AND concept IN (?,?)",
+        (filing["ingest_id"], filing["report_date"],
+         _DILUTED_EPS_CONCEPT, _DILUTED_SHARES_CONCEPT),
+    ):
+        unit = row["unit"]
+        if (bool(row["is_breakdown"])
+                or row["dimension_axis"] is not None
+                or row["dimension_member"] is not None
+                or row["dimension_count"] not in (None, 0)):
+            continue
+        if ((row["concept"] == _DILUTED_EPS_CONCEPT
+             and isinstance(unit, str)
+             and re.fullmatch(r"[a-z]{3}PerShare", unit, re.IGNORECASE))
+                or (row["concept"] == _DILUTED_SHARES_CONCEPT
+                    and isinstance(unit, str) and unit.casefold() == "shares")):
+            concepts_by_period.setdefault(
+                (row["period_start"], row["period_end"]), set()).add(row["concept"])
+    annual_periods = []
+    for (start, end), concepts in concepts_by_period.items():
+        try:
+            elapsed = (date.fromisoformat(end) - date.fromisoformat(start)).days
+        except (TypeError, ValueError):
+            return []
+        if concepts == {_DILUTED_EPS_CONCEPT, _DILUTED_SHARES_CONCEPT} \
+                and 290 < elapsed <= 380:
+            annual_periods.append({"period_start": start, "period_end": end})
+    if len(annual_periods) != 1:
+        return []
+    target = {
+        "schema_version": FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+        "target_ref": FINANCIAL_NOTE_TARGET_REF,
+        "kind": "diluted_eps_numerator",
+        "statement_ingest_ref": filing["ingest_id"],
+        "statement_filing_hash": filing["content_hash"],
+        "accession": filing["accession"], "form": "10-K",
+        "applicability_kind": "annual", "periods": annual_periods,
+    }
+    return [normalize_evidence_target(target)]
 
 
 def validate_inventory_config(value: Any) -> dict[str, Any]:
@@ -97,6 +211,12 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"],
                           "doc_date": registration["doc_date"]})
+        evidence_targets = financial_note_targets_for_registration(
+            connection=core.connection, mission=mission, company_ref=company,
+            registration=registration,
+        )
+        if evidence_targets:
+            projected["evidence_targets"] = evidence_targets
         if preview_chars:
             end = min(preview_chars, registration["normalized_text"]["characters"])
             if end:
@@ -200,4 +320,18 @@ def document_inventory_signature(core: Any, state_dir: Path) -> str:
         "d.status,d.ticket_ref FROM coverage_mission_discovered_documents d "
         "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
         "ORDER BY d.record_id")
-    return content_hash({"config": config, "acquisitions": [dict(row) for row in rows]})
+    tables = {row[0] for row in core.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_statement_filings','coverage_mission_statement_dispatches')"
+    )}
+    statement_filings = []
+    if tables == {"coverage_mission_statement_filings", "coverage_mission_statement_dispatches"}:
+        statement_filings = [dict(row) for row in core.connection.execute(
+            "SELECT f.ingest_id,f.company_ref,f.accession,f.form,f.report_date,f.content_hash,"
+            "d.mission_version_ref,d.mission_version_hash,d.status FROM "
+            "coverage_mission_statement_filings f JOIN coverage_mission_statement_dispatches d "
+            "ON d.dispatch_id=f.dispatch_id JOIN coverage_mission_pointer p "
+            "ON p.mission_version_id=d.mission_version_ref ORDER BY f.ingest_id"
+        )]
+    return content_hash({"config": config, "acquisitions": [dict(row) for row in rows],
+                         "statement_filings": statement_filings})

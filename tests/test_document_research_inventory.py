@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from dalton_core.document_research_inventory import (
-    document_inventory_signature, inventory_with_registry, load_document_inventory,
+    document_inventory_signature, financial_note_targets_for_registration,
+    inventory_with_registry, load_document_inventory,
     validate_inventory_config,
 )
 from dalton_core.document_research import build_document_research_policy
@@ -101,6 +102,21 @@ class DocumentInventoryTests(unittest.TestCase):
         (self.state / "document-research-config.json").write_text("{}")
         self.assertNotEqual(after, document_inventory_signature(self.core, self.state))
 
+    def test_new_statement_filing_wakes_target_planning(self):
+        before = document_inventory_signature(self.core, self.state)
+        self.db.execute("CREATE TABLE coverage_mission_statement_dispatches ("
+                        "dispatch_id TEXT,mission_version_ref TEXT,mission_version_hash TEXT,"
+                        "company_ref TEXT,form TEXT,status TEXT)")
+        self.db.execute("CREATE TABLE coverage_mission_statement_filings ("
+                        "ingest_id TEXT,dispatch_id TEXT,company_ref TEXT,accession TEXT,"
+                        "form TEXT,report_date TEXT,content_hash TEXT)")
+        self.db.execute("INSERT INTO coverage_mission_statement_dispatches VALUES (?,?,?,?,?,?)",
+                        ("dispatch:1", "mission:1", "a" * 64, "company:A", "10-K", "succeeded"))
+        self.db.execute("INSERT INTO coverage_mission_statement_filings VALUES (?,?,?,?,?,?,?)",
+                        ("statement-ingest:" + "b" * 32, "dispatch:1", "company:A",
+                         "0000000001-25-000001", "10-K", "2024-12-31", "c" * 64))
+        self.assertNotEqual(before, document_inventory_signature(self.core, self.state))
+
     def test_absent_config_does_not_create_sources_or_authority(self):
         before = list(self.state.iterdir())
         result = load_document_inventory(core=self.core, mission=self.mission, state_dir=self.state)
@@ -118,3 +134,114 @@ class DocumentInventoryTests(unittest.TestCase):
         value["source_reading_limits"].pop("public_web_max_pdf_pages")
         with self.assertRaises(ValueError):
             validate_inventory_config(value)
+
+    def test_sec_10k_target_requires_exact_annual_diluted_eps_and_share_lines(self):
+        mission_hash = "9" * 64
+        self.mission["content_hash"] = mission_hash
+        self.db.executescript("""
+            CREATE TABLE coverage_mission_statement_dispatches (
+                dispatch_id TEXT, mission_version_ref TEXT, mission_version_hash TEXT,
+                company_ref TEXT, form TEXT, status TEXT);
+            CREATE TABLE coverage_mission_statement_filings (
+                ingest_id TEXT, dispatch_id TEXT, company_ref TEXT, cik TEXT,
+                entity_name TEXT, accession TEXT, form TEXT, filed TEXT,
+                report_date TEXT, line_count INTEGER, source_record_refs_json TEXT,
+                governance_ref TEXT, governance_hash TEXT, recorded_at TEXT,
+                content_hash TEXT);
+            CREATE TABLE coverage_mission_statement_lines (
+                line_id TEXT, ingest_id TEXT, statement TEXT, ordinal INTEGER,
+                concept TEXT, label TEXT, level INTEGER, parent_concept TEXT,
+                is_breakdown INTEGER, dimension_axis TEXT, dimension_member TEXT,
+                dimension_count INTEGER, period_start TEXT, period_end TEXT,
+                value TEXT, unit TEXT, balance TEXT);
+        """)
+        accession = "0000000001-25-000001"
+        identity = {"company_ref": "company:A", "cik": "0000000001",
+                    "accession": accession, "form": "10-K", "line_count": 2}
+        ingest = "statement-ingest:" + content_hash(identity)[:32]
+        lines = [
+            {"statement": "income", "concept": "us-gaap:EarningsPerShareDiluted",
+             "label": "Diluted earnings per share", "level": 0,
+             "parent_concept": None, "is_breakdown": False,
+             "dimension_axis": None, "dimension_member": None, "dimension_count": 0,
+             "period_start": "2024-01-01", "period_end": "2024-12-31",
+             "value": "4.25", "unit": "usdPerShare", "balance": None},
+            {"statement": "income",
+             "concept": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+             "label": "Diluted weighted average shares", "level": 0,
+             "parent_concept": None, "is_breakdown": False,
+             "dimension_axis": None, "dimension_member": None, "dimension_count": 0,
+             "period_start": "2024-01-01", "period_end": "2024-12-31",
+             "value": "100", "unit": "shares", "balance": None},
+        ]
+        source_refs = ["source-record:fixture"]
+        body = {**identity, "entity_name": "Fixture", "filed": "2025-02-01",
+                "report_date": "2024-12-31", "source_record_refs": source_refs,
+                "governance_ref": "governance:fixture", "governance_hash": "8" * 64,
+                "statement_lines_hash": content_hash(lines)}
+        filing_hash = content_hash(body)
+        self.db.execute("INSERT INTO coverage_mission_statement_dispatches VALUES (?,?,?,?,?,?)",
+                        ("dispatch:1", "mission:1", mission_hash, "company:A", "10-K", "succeeded"))
+        self.db.execute("INSERT INTO coverage_mission_statement_filings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (ingest, "dispatch:1", "company:A", "0000000001", "Fixture", accession,
+                         "10-K", "2025-02-01", "2024-12-31", 2,
+                         '[\"source-record:fixture\"]', "governance:fixture", "8" * 64,
+                         "2025-02-01T00:00:00+00:00", filing_hash))
+        for ordinal, line in enumerate(lines):
+            self.db.execute(
+                "INSERT INTO coverage_mission_statement_lines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{ingest}#{ordinal}", ingest, line["statement"], ordinal,
+                 line["concept"], line["label"], line["level"], line["parent_concept"],
+                 int(line["is_breakdown"]), line["dimension_axis"], line["dimension_member"],
+                 line["dimension_count"], line["period_start"], line["period_end"],
+                 line["value"], line["unit"], line["balance"]),
+            )
+        registration = {
+            "id": "registered-document:fixture", "document_ref": f"sec:filing:{accession}",
+            "source_ref": "source:sec-edgar", "acquisition_ticket_ref": "ticket:1",
+            "doc_kind": "sec_filing", "doc_date": "2025-02-01",
+            "source_authority": {"kind": "coverage-mission-acquired-document",
+                "ref": "record:1", "company_ref": "company:A", "mission_version_ref": "mission:1"},
+            "normalized_text": {"status": "complete", "truncated": False,
+                                "text_sha256": "a" * 64},
+        }
+        registration["content_hash"] = content_hash(registration)
+        targets = financial_note_targets_for_registration(
+            connection=self.db, mission=self.mission, company_ref="company:A",
+            registration=registration,
+        )
+        self.assertEqual(targets, [{
+            "schema_version": "financial-note-target-0.1",
+            "target_ref": "financial_note:diluted_eps_numerator:0.1",
+            "kind": "diluted_eps_numerator", "statement_ingest_ref": ingest,
+            "statement_filing_hash": filing_hash, "accession": accession,
+            "form": "10-K", "applicability_kind": "annual",
+            "periods": [{"period_start": "2024-01-01", "period_end": "2024-12-31"}],
+        }])
+        self.db.execute(
+            "INSERT INTO coverage_mission_discovered_documents VALUES (?,?,?,?,?,?,?)",
+            ("record:1", "mission:1", "company:A", "source:sec-edgar",
+             f"sec:filing:{accession}", "acquired", "ticket:1"),
+        )
+        registry = SimpleNamespace(
+            policy=policy(), inspect_acquired_document=Mock(return_value={
+                "available": True, "registration": registration,
+            }),
+        )
+        inventory = inventory_with_registry(
+            core=self.core, mission=self.mission, registry=registry,
+            purpose="directed_research",
+        )
+        self.assertEqual(
+            inventory["readable_documents_by_company"]["company:A"][0]["evidence_targets"],
+            targets,
+        )
+        # A later attempt to remove the filed share authority is statement
+        # tampering, not a reason to keep projecting the old target.
+        self.db.execute(
+            "UPDATE coverage_mission_statement_lines SET concept='us-gaap:CommonStockSharesOutstanding' "
+            "WHERE ordinal=1")
+        self.assertEqual(financial_note_targets_for_registration(
+            connection=self.db, mission=self.mission, company_ref="company:A",
+            registration=registration,
+        ), [])

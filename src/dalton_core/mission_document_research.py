@@ -22,6 +22,8 @@ from .document_research import (
     DocumentResearchRegistry, SEARCH_OPERATION, SEARCH_REQUEST_SCHEMA_VERSION,
     validate_registration,
 )
+from .document_research_inventory import financial_note_targets_for_registration
+from .document_research_strategy import normalize_evidence_target
 from .research_planner import SCHEMA_VERSION as PLANNER_SCHEMA_VERSION, TASK_REF
 from .research_question_backlog import read_exact_backlog_question_version
 from .research_task import inquiry_content_hash, inquiry_ref_for
@@ -397,6 +399,20 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError(
                 "document registration belongs to another mission or company"
             )
+        evidence_target = strategy.get("evidence_target")
+        if evidence_target is not None:
+            try:
+                evidence_target = normalize_evidence_target(evidence_target)
+                targets = financial_note_targets_for_registration(
+                    connection=self.connection, mission=mission,
+                    company_ref=inquiry["company_ref"], registration=registration,
+                )
+            except Exception as exc:
+                raise MissionDocumentResearchError(
+                    "financial note target authority is unavailable") from exc
+            if sum(target == evidence_target for target in targets) != 1:
+                raise MissionDocumentResearchError(
+                    "financial note target differs from current filing authority")
         return {
             "plan": plan, "plan_row": plan_row, "ordinal": ordinal,
             "inquiry": inquiry, "inquiry_hash": inquiry_hash, "strategy": strategy,
