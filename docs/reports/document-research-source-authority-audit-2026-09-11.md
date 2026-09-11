@@ -31,9 +31,9 @@ PDF and a connector response is not automatically the document it describes.
 
 | Source / document family | Original bytes retained | Normalized readable text | Exact authority and location | Current retrieval surface | Boundary / gap |
 | --- | --- | --- | --- | --- | --- |
-| AlphaEngine sell-side reports, call transcripts and other `get_document` records | Yes: every raw page response is an `ArtifactVersion` in `RawSpool` | Yes: complete contiguous page text plus an assembled UTF-8 object | `alphaengine-document-acquisition` manifest binds document ref, declared full-content hash/characters, page offsets, nine Core receipt refs/hashes, and assembled object | Fixed-window document extraction; generic `DocumentIndex` may index raw connector JSON if pointed at the response artifact | No generic question/search/read surface. Only manifests with `status=complete`, terminal pagination, and a full assembled hash are text authority. Search-library rows that were not acquired remain metadata. |
-| SEC filings fetched through public web, including annual reports and other filing forms | Yes: raw HTTP response body is a content-addressed `ArtifactVersion` | Yes when the versioned renderer accepts the media type and does not truncate | `public-web-fetch-manifest` → invocation/profile/call/attempt/usage/cost/settlement/SourceEnvelope/ArtifactVersion → raw body; rendering carries renderer, media type, text hash, offsets and truncation | Annual reports have `RegisteredAnnualReportRegistry.search`; other fetched filings only have extraction windows | `list_filings` rows alone are filing metadata. A filing is readable only after `fetch_get`. The annual registry is form/issuer specific and cannot serve another filing type. |
-| Ordinary fetched web pages and fetched earnings-call transcript pages | Yes: raw HTTP body | Yes when deterministic HTML/text/PDF/gzip rendering succeeds without truncation | Same public-web manifest and Core chain; earnings-call projection additionally proves issuer, fiscal period, document markers and raw-body hash | Fixed-window extraction; no generic re-read | Search result URLs/snippets are not page bodies. Unsupported charset/media, malformed PDF, or truncated rendering must remain unavailable rather than masquerade as full text. |
+| AlphaEngine sell-side reports, call transcripts and other `get_document` records | Yes: every raw page response is an `ArtifactVersion` in `RawSpool` | Yes: complete contiguous page text plus an assembled UTF-8 object | `alphaengine-document-acquisition` manifest binds document ref, declared full-content hash/characters, page offsets, nine Core receipt refs/hashes, and assembled object | Fixed-window extraction and the adapter in this branch; generic `DocumentIndex` may index raw connector JSON if pointed at the response artifact | Only manifests with `status=complete`, terminal pagination, and a full assembled hash are text authority. Search-library rows that were not acquired remain metadata. |
+| SEC filings fetched through public web, including annual reports and other filing forms | Yes: raw HTTP response body is a content-addressed `ArtifactVersion` | Yes when the versioned renderer accepts the media type and does not truncate | `public-web-fetch-manifest` → invocation/profile/call/attempt/usage/cost/settlement/SourceEnvelope/ArtifactVersion → raw body; rendering carries renderer, media type, text hash, offsets and truncation | Annual reports have `RegisteredAnnualReportRegistry.search`; this branch adds source-neutral search/read for any complete acquired filing | `list_filings` rows alone are filing metadata. A filing is readable only after `fetch_get`. The annual registry retains its additional form/issuer rules; the generic adapter derives SEC identity only from the acquired Core row. |
+| Ordinary fetched web pages and fetched earnings-call transcript pages | Yes: raw HTTP body | Yes when deterministic HTML/text/PDF/gzip rendering succeeds without truncation | Same public-web manifest and Core chain; earnings-call projection additionally proves issuer, fiscal period, document markers and raw-body hash | Fixed-window extraction plus the fetched-document search/read adapter in this branch | Search result URLs/snippets are not page bodies. Unsupported charset/media, malformed PDF, or truncated rendering remains explicitly unavailable. |
 | Sales notes | The normalized note body is retained; a separate original digest/mail-container object is not bound by the feed manifest | Yes: complete assembled UTF-8 note body | Completed owner-only ticket + summary + `feed-document-acquisition` manifest + connector invocation/profile + spool object hash/size/text hash | Source-specific extraction and, in this slice, `DocumentResearch` search/read | Connector raw artifact is the child JSON response, not the original digest. Registration therefore reports `raw_source.status=not_bound`. |
 | Company wiki | The normalized whole file text is retained; no separate original-file artifact is bound | Yes: assembled UTF-8 text including frontmatter | Same completed feed ticket/manifest/invocation/profile/spool chain | Source-specific extraction and, in this slice, `DocumentResearch` search/read | The current reader uses UTF-8 replacement on invalid bytes. The normalized text is authoritative for reading; it is not proof that every original byte is preserved. |
 | Prior research (`md`, `txt`, `pdf`, `docx`, `xlsx`) | Yes in the GET child: `source_artifact` and `artifact-manifest.json` archive the source container | A rendered assembled UTF-8 projection is retained | Feed manifest binds normalized text. Summary separately names source artifact and artifact-manifest hash | Fixed-window extraction | **Authority gap:** the feed acquisition manifest does not bind the raw source artifact/bundle. Text may also be truncated at 600k characters and workbook sheets have bounds. Do not register as complete until the raw bundle is joined into the acquisition authority and loss/truncation is explicit. |
@@ -69,7 +69,7 @@ returns record metadata. It is suitable as a recall accelerator only after an
 exact registration exists; every hit must be rematerialized through its source
 adapter before text is returned.
 
-## DocumentResearch 0.1 contract
+## DocumentResearch 0.2 registration contract
 
 The new `document_research.py` slice establishes the shared shape without
 changing a planner or execution graph:
@@ -83,7 +83,9 @@ changing a planner or execution graph:
 3. A deterministic registration separately describes `raw_source` and
    `normalized_text`. For sales notes and wiki, the former explicitly says
    `not_bound`; the latter binds object hash, byte count, text hash, character
-   count, completeness, and truncation.
+   count, completeness, and truncation. The registration also separates the
+   logical `document_ref` selected by research from `content_document_ref`,
+   the exact body-version ref stored in the acquisition manifest.
 4. Search binds the full research question, exact query terms, registration,
    configured policy hash, and per-request bounds. Version 0.1 uses literal,
    case-insensitive lexical matching (spaces may match source whitespace).
@@ -105,22 +107,30 @@ policy outside that configured grant is refused.
 
 ## Parallel implementation slices
 
-1. **Landed in this branch:** sales-note and company-wiki adapters plus generic
-   versioned registration/search/read/replay contracts and non-annual tests.
-2. **Next, source adapters only:** AlphaEngine complete manifests and
-   non-truncated public-web/SEC manifests. Reuse the same result contract; do
-   not touch ResearchPlan execution or promotion.
-3. **Prior research authority closure:** version the feed manifest so it binds
+1. **Landed in this branch:** sales-note, company-wiki, complete AlphaEngine,
+   and non-truncated fetched-document adapters plus generic versioned
+   registration/search/read/replay/availability contracts. The
+   `register_acquired_document(record_id=...)` path first reads the exact
+   `coverage_mission_discovered_documents` row and pins its mission, company,
+   source, logical document ref, and acquisition ticket. Thus an acquired SEC
+   8-K stays `source:sec-edgar` because Core says so; the public-web profile
+   proves only how the body was fetched and cannot relabel an arbitrary URL as
+   SEC. Ordinary web registrations retain the source from their actual
+   discovery envelope. The production factory consumes injected, already-open
+   Core/spool/receipt/launcher authorities and verifies every launcher belongs
+   to one state directory; it does not open or migrate authority on a read
+   path. This lets a planner use read-only spool and receipt-reader ports.
+2. **Prior research authority closure:** version the feed manifest so it binds
    `source_artifact` and `artifact-manifest.json`, records renderer/loss and
    truncation explicitly, and proves the normalized projection came from that
    original object. Only then add the adapter.
-4. **Guidepoint adapter:** preserve excerpt document identity and quote policy;
+3. **Guidepoint adapter:** preserve excerpt document identity and quote policy;
    expose no transcript-level completeness claim.
-5. **Recall and context:** project registrations into `DocumentIndex`, then
+4. **Recall and context:** project registrations into `DocumentIndex`, then
    build question-specific ContextPack materialization from replayed search/read
    proofs. Claims may nominate documents/terms, but source text supplies the
    context.
-6. **Planning:** add a general qualitative DocumentResearch operation with
+5. **Planning:** add a general qualitative DocumentResearch operation with
    query-strategy identity and source selection after the read authority is
    stable. Keep staging/promotion separate and require downstream independent
    verification before any candidate Claim is admitted.
@@ -144,4 +154,3 @@ policy outside that configured grant is refused.
   `company_research_view.py`
 - Core schemas for connectors, observability, coverage missions, document read
   completion, Claims, Evidence, and candidate staging.
-

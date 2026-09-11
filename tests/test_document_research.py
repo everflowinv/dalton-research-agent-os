@@ -11,12 +11,15 @@ from dalton_core.document_research import (
     DocumentResearchConflict,
     DocumentResearchError,
     DocumentResearchRegistry,
+    AlphaEngineDocumentSourceAdapter,
     FeedDocumentSourceAdapter,
+    PublicWebDocumentSourceAdapter,
     READ_OPERATION,
     READ_REQUEST_SCHEMA_VERSION,
     SEARCH_OPERATION,
     SEARCH_REQUEST_SCHEMA_VERSION,
     build_document_research_policy,
+    build_document_research_registry,
 )
 from dalton_core.feed_acquisition import (
     COMPANY_WIKI_SOURCE_REF,
@@ -30,6 +33,24 @@ from dalton_core.host_tool_runner import (
 )
 from dalton_core.raw_spool import RawSpool
 from dalton_core.store import content_hash
+from tests.test_document_extraction import (
+    ExtractionHarness, NEW_DOC, ORIGINAL, TICKET as ALPHA_TICKET,
+)
+from dalton_core.public_web_fetch_launcher import PublicWebFetchLauncher
+from dalton_core.capability_catalog import CapabilityCatalog
+from dalton_core.connector_authority_port import ConnectorCompletionReceiptReader
+from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.public_http_transport import PublicHttpTransport
+from dalton_core.public_web_core_fetch import (
+    PublicWebCoreFetch,
+    WebFetchConnectorGovernance,
+    build_web_fetch_governance_record,
+    url_authority_from_discovery,
+)
+from tests.test_research_plan_annual_report import _Response
+from tests.test_sec_filings_index_core import Harness as SecIndexHarness, SPEC as SEC_SPEC
+from tests.test_public_web_extraction_source import PAGE
+from tests.test_public_web_fetch_lane import FetchHarness, URL_A, transport_for
 
 
 def record(body: dict) -> dict:
@@ -65,9 +86,14 @@ class FakeReceiptReader:
 
 
 class FakeLauncher:
-    def __init__(self, manifest: dict, ticket_ref: str):
+    def __init__(
+        self, manifest: dict, ticket_ref: str, *, lookup_ref: str | None = None,
+        state_dir: str | Path | None = None,
+    ):
         self.ticket_ref = ticket_ref
         self.manifests = {ticket_ref: manifest}
+        self.lookup_refs = {ticket_ref: lookup_ref or manifest["document_ref"]}
+        self.state_dir = Path(state_dir or "/fixture-state").resolve()
 
     @property
     def manifest(self):
@@ -77,18 +103,19 @@ class FakeLauncher:
     def manifest(self, value):
         self.manifests[self.ticket_ref] = value
 
-    def add_version(self, ticket_ref: str, manifest: dict):
+    def add_version(self, ticket_ref: str, manifest: dict, *, lookup_ref: str | None = None):
         self.ticket_ref = ticket_ref
         self.manifests[ticket_ref] = manifest
+        self.lookup_refs[ticket_ref] = lookup_ref or manifest["document_ref"]
 
     def read_completed_manifest(self, ticket_ref: str, document_ref: str):
         manifest = self.manifests.get(ticket_ref)
-        if manifest is None or document_ref != manifest["document_ref"]:
+        if manifest is None or document_ref != self.lookup_refs[ticket_ref]:
             raise DocumentResearchConflict("ticket does not bind document")
         return manifest
 
     def locate_completed_manifest(self, document_ref: str):
-        if document_ref != self.manifest["document_ref"]:
+        if document_ref != self.lookup_refs[self.ticket_ref]:
             raise DocumentResearchConflict("document has no complete acquisition")
         return self.manifest
 
@@ -277,6 +304,13 @@ class DocumentResearchTests(unittest.TestCase):
                 document_ref="claim:anything",
                 purpose="qualitative_research",
             )
+        unavailable = registry.inspect(
+            source_ref="source:claims",
+            document_ref="claim:anything",
+            purpose="qualitative_research",
+        )
+        self.assertFalse(unavailable["available"])
+        self.assertEqual(unavailable["reason"], "source_not_readable")
 
     def test_source_bytes_are_reverified_for_every_search(self):
         document_ref = "sales-note:fixture-tamper"
@@ -474,6 +508,400 @@ class DocumentResearchTests(unittest.TestCase):
                 purpose="qualitative_research",
                 acquisition_ticket_ref="feed-run:profile",
             )
+
+    def test_factory_binds_launchers_to_one_state_without_opening_new_authority(self):
+        document_ref = "sales-note:fixture-factory"
+        adapter, launcher, receipts = self._source(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            text="Factory source text.",
+            ticket_ref="feed-run:factory",
+            doc_kind="broker_note",
+        )
+        del adapter
+        launcher.state_dir = Path(self.temp.name).resolve()
+        registry = build_document_research_registry(
+            core=object(),
+            state_dir=self.temp.name,
+            spool=self.spool,
+            receipt_reader=receipts,
+            policy=self.policy,
+            feed_launchers={SALES_NOTES_SOURCE_REF: launcher},
+            alphaengine_launcher=None,
+            public_web_launcher=None,
+            public_web_source_refs=[],
+            source_reading_limits={
+                "alphaengine_max_document_chars": 100_000,
+                "public_web_max_source_chars": 100_000,
+                "public_web_max_pdf_pages": 20,
+                "public_web_max_decompressed_bytes": 1_000_000,
+            },
+        )
+        self.assertTrue(registry.inspect(
+            source_ref=SALES_NOTES_SOURCE_REF,
+            document_ref=document_ref,
+            purpose="qualitative_research",
+            acquisition_ticket_ref="feed-run:factory",
+        )["available"])
+        launcher.state_dir = Path(self.temp.name, "other")
+        with self.assertRaisesRegex(DocumentResearchConflict, "different state"):
+            build_document_research_registry(
+                core=object(), state_dir=self.temp.name, spool=self.spool,
+                receipt_reader=receipts, policy=self.policy,
+                feed_launchers={SALES_NOTES_SOURCE_REF: launcher},
+                alphaengine_launcher=None, public_web_launcher=None,
+                public_web_source_refs=[],
+                source_reading_limits={
+                    "alphaengine_max_document_chars": 100_000,
+                    "public_web_max_source_chars": 100_000,
+                    "public_web_max_pdf_pages": 20,
+                    "public_web_max_decompressed_bytes": 1_000_000,
+                },
+            )
+
+
+class NetworkAcquisitionDocumentResearchTests(unittest.TestCase):
+    @staticmethod
+    def policy(access_policy_ref: str, *, max_read_chars: int = 100_000):
+        return build_document_research_policy(
+            policy_ref="policy:document-research:network-fixture:0.1",
+            allowed_purposes=["qualitative_research"],
+            allowed_access_policy_refs=[access_policy_ref],
+            max_question_chars=2_000,
+            max_query_terms=12,
+            max_query_term_chars=200,
+            max_results=10,
+            max_context_before_chars=100,
+            max_context_after_chars=200,
+            max_read_chars=max_read_chars,
+        )
+
+    def test_public_web_adapter_replays_raw_body_renderer_and_discovery_source(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        harness = FetchHarness(Path(temp.name), transport=transport_for(PAGE))
+        self.addCleanup(harness.close)
+        discovery_receipt = harness.discover()
+        fetched = harness.fetch.fetch(
+            harness.fetch.build_request(harness.authority(discovery_receipt, URL_A))
+        )
+        manifest = harness.fetch.manifest(fetched)
+        discovery = harness.fetch.receipts.get_source_envelope(
+            manifest["discovery_source_envelope_ref"]
+        )
+        profile = harness.fetch.receipts.get_profile(manifest["connector_profile_ref"])
+        ticket = "public-web-fetch:" + "8" * 24
+        launcher = PublicWebFetchLauncher(
+            state_dir=Path(temp.name), governance_path=Path(temp.name) / "unused.json"
+        )
+        self.addCleanup(launcher.close)
+        directory = Path(temp.name) / "fetches" / ("8" * 24)
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        files = {
+            "ticket.json": {"id": ticket, "status": "succeeded", "document_ref": URL_A,
+                            "started_at": "2026-09-11T12:00:00.000000+00:00"},
+            "summary.json": {"url_ref": URL_A, "canonical_url": manifest["canonical_url"],
+                             "manifest_ref": manifest["id"],
+                             "manifest_hash": manifest["content_hash"],
+                             "status": "succeeded"},
+            "manifest.json": manifest,
+        }
+        for name, value in files.items():
+            path = directory / name
+            path.write_text(__import__("json").dumps(value), encoding="utf-8")
+            path.chmod(0o600)
+        self.assertEqual(
+            launcher.locate_completed_manifest_binding(URL_A)["ticket_ref"], ticket
+        )
+        adapter = PublicWebDocumentSourceAdapter(
+            source_ref=discovery["source"],
+            launcher=launcher,
+            core=harness.core,
+            spool=harness.spool,
+            receipt_reader=harness.fetch.receipts,
+            max_source_chars=20_000,
+            max_pdf_pages=20,
+            max_decompressed_bytes=100_000,
+        )
+        policy = self.policy(profile["access_policy_ref"])
+        registry = DocumentResearchRegistry(
+            adapters={discovery["source"]: adapter}, policy=policy
+        )
+        registration = registry.register(
+            source_ref=discovery["source"],
+            document_ref=URL_A,
+            purpose="qualitative_research",
+            acquisition_ticket_ref=ticket,
+        )
+        self.assertEqual(registration["document_ref"], URL_A)
+        self.assertEqual(registration["content_document_ref"], manifest["document_ref"])
+        self.assertEqual(
+            registration["raw_source"]["content_hashes"], [manifest["body_sha256"]]
+        )
+        self.assertEqual(
+            registration["normalized_text"]["renderer_ref"],
+            "html-visible-blocks:0.1",
+        )
+        proof = registry.search({
+            "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
+            "operation": SEARCH_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "When is the leadership change effective?",
+            "registration": registration,
+            "query_terms": ["effective immediately"],
+            "limits": {
+                "max_results": 1,
+                "context_before_chars": 20,
+                "context_after_chars": 20,
+            },
+            "policy_ref": policy["policy_ref"],
+            "policy_hash": policy["content_hash"],
+        })
+        self.assertEqual(len(proof["matches"]), 1)
+        self.assertIn("effective immediately", proof["matches"][0]["excerpt"])
+
+    def test_public_web_adapter_rejects_a_truncated_rendering(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        body = b"<p>" + b"long source " * 200 + b"</p>"
+        harness = FetchHarness(Path(temp.name), transport=transport_for(body))
+        self.addCleanup(harness.close)
+        receipt = harness.discover()
+        fetched = harness.fetch.fetch(
+            harness.fetch.build_request(harness.authority(receipt, URL_A))
+        )
+        manifest = harness.fetch.manifest(fetched)
+        discovery = harness.fetch.receipts.get_source_envelope(
+            manifest["discovery_source_envelope_ref"]
+        )
+        adapter = PublicWebDocumentSourceAdapter(
+            source_ref=discovery["source"],
+            launcher=FakeLauncher(
+                manifest, "public-web-fetch:truncated", lookup_ref=URL_A
+            ),
+            core=harness.core,
+            spool=harness.spool,
+            receipt_reader=harness.fetch.receipts,
+            max_source_chars=100,
+            max_pdf_pages=20,
+            max_decompressed_bytes=100_000,
+        )
+        profile = harness.fetch.receipts.get_profile(manifest["connector_profile_ref"])
+        registry = DocumentResearchRegistry(
+            adapters={discovery["source"]: adapter},
+            policy=self.policy(profile["access_policy_ref"]),
+        )
+        with self.assertRaisesRegex(DocumentResearchConflict, "non-truncated"):
+            registry.register(
+                source_ref=discovery["source"],
+                document_ref=URL_A,
+                purpose="qualitative_research",
+                acquisition_ticket_ref="public-web-fetch:truncated",
+            )
+
+    def test_alphaengine_adapter_replays_all_pages_and_assembled_text(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        harness = ExtractionHarness(Path(temp.name))
+        self.addCleanup(harness.close)
+        launcher = harness.writer.acquisition_launcher
+        self.assertEqual(
+            launcher.locate_completed_manifest_binding(NEW_DOC)["ticket_ref"],
+            ALPHA_TICKET,
+        )
+        first_page = harness.manifest["pages"][0]
+        profile = harness.h.acquisition.receipts.get_profile(
+            first_page["connector_profile_ref"]
+        )
+        adapter = AlphaEngineDocumentSourceAdapter(
+            launcher=launcher,
+            core=harness.h.core,
+            spool=harness.h.spool,
+            receipt_reader=harness.h.acquisition.receipts,
+            max_document_chars=100_000,
+        )
+        policy = self.policy(profile["access_policy_ref"], max_read_chars=100_000)
+        registry = DocumentResearchRegistry(
+            adapters={"source:alphaengine": adapter}, policy=policy
+        )
+        registration = registry.register(
+            source_ref="source:alphaengine",
+            document_ref=NEW_DOC,
+            purpose="qualitative_research",
+            acquisition_ticket_ref=ALPHA_TICKET,
+        )
+        self.assertGreater(len(registration["raw_source"]["artifact_refs"]), 1)
+        self.assertEqual(
+            registration["normalized_text"]["text_sha256"],
+            hashlib.sha256(ORIGINAL.encode("utf-8")).hexdigest(),
+        )
+        proof = registry.search({
+            "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
+            "operation": SEARCH_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "What did management say about client decisions?",
+            "registration": registration,
+            "query_terms": ["client decisions remain cautious"],
+            "limits": {
+                "max_results": 2,
+                "context_before_chars": 25,
+                "context_after_chars": 25,
+            },
+            "policy_ref": policy["policy_ref"],
+            "policy_hash": policy["content_hash"],
+        })
+        self.assertEqual(len(proof["matches"]), 2)
+        self.assertEqual(registry.verify_search_proof(proof), proof)
+
+    def test_core_acquired_nonannual_sec_filing_keeps_core_source_and_body_version(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        harness = SecIndexHarness(root)
+        self.addCleanup(harness.close)
+        spec = {**SEC_SPEC, "form": "8-K"}
+        index_receipt = harness.index.list_filings(harness.index.build_request(spec))
+        filing_ref = "sec:filing:0001467373-25-000100"
+        self.assertIn(filing_ref, index_receipt["source_record_refs"])
+        authority = url_authority_from_discovery(
+            harness.core.connection,
+            harness.spool,
+            url_ref=filing_ref,
+            source_envelope_ref=index_receipt["source_envelope_ref"],
+        )
+        governance = WebFetchConnectorGovernance(
+            build_web_fetch_governance_record(
+                approved_by="human:test-owner", status="approved"
+            )
+        )
+        fetch_catalog = CapabilityCatalog(
+            root / "fetch-catalog.sqlite",
+            approval_resolver=governance.approval,
+            policy_resolver=governance.policy,
+            clock=harness.clock,
+        )
+        self.addCleanup(fetch_catalog.close)
+        body = (
+            b"<html><body><h1>Current report</h1><p>The board appointed a new "
+            b"chief operating officer effective immediately.</p></body></html>"
+        )
+        fetch = PublicWebCoreFetch(
+            store=harness.core,
+            connectors=harness.connectors,
+            observability=harness.observability,
+            journal=harness.journal,
+            scheduler=harness.scheduler,
+            catalog=fetch_catalog,
+            spool=harness.spool,
+            governance=governance,
+            transport=PublicHttpTransport(
+                resolver=lambda _host, _port: ("23.33.29.153",),
+                exchange=lambda *_args: _Response(body),
+            ),
+            clock=harness.clock,
+        )
+        manifest = fetch.manifest(fetch.fetch(fetch.build_request(authority)))
+        ticket = "public-web-fetch:" + "9" * 24
+        launcher = PublicWebFetchLauncher(
+            state_dir=root, governance_path=root / "unused.json"
+        )
+        self.addCleanup(launcher.close)
+        directory = root / "fetches" / ("9" * 24)
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        for name, value in {
+            "ticket.json": {
+                "id": ticket, "status": "succeeded", "document_ref": filing_ref,
+                "started_at": "2026-09-11T12:00:00.000000+00:00",
+            },
+            "summary.json": {
+                "url_ref": filing_ref, "canonical_url": manifest["canonical_url"],
+                "manifest_ref": manifest["id"], "manifest_hash": manifest["content_hash"],
+                "status": "succeeded",
+            },
+            "manifest.json": manifest,
+        }.items():
+            path = directory / name
+            path.write_text(__import__("json").dumps(value), encoding="utf-8")
+            path.chmod(0o600)
+        connection = harness.core.connection
+        coverage_authority = CoverageMissionAuthority(harness.core)
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys=OFF")
+        acquired_ref = "mission-discovered-document:sec-8k-fixture"
+        with coverage_authority._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_discovered_documents"
+                "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                "discovery_ref,status,ticket_ref,failure_reason,failure_retryable,"
+                "created_at,updated_at,host) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    acquired_ref, "coverage-mission-version:fixture",
+                    "company:sec-cik:0001467373", "source:sec-edgar", filing_ref,
+                    "mission-source-discovery:fixture", "acquired", ticket, None, None,
+                    "2026-09-11T12:00:00.000000+00:00",
+                    "2026-09-11T12:00:00.000000+00:00", "www.sec.gov",
+                ),
+            )
+        reader = ConnectorCompletionReceiptReader(
+            connectors=harness.connectors, observability=harness.observability
+        )
+        profile = reader.get_profile(manifest["connector_profile_ref"])
+        policy = self.policy(profile["access_policy_ref"])
+        registry = build_document_research_registry(
+            core=harness.core, state_dir=root, spool=harness.spool,
+            receipt_reader=reader, policy=policy, feed_launchers={},
+            alphaengine_launcher=None, public_web_launcher=launcher,
+            public_web_source_refs=[],
+            source_reading_limits={
+                "alphaengine_max_document_chars": 20_000,
+                "public_web_max_source_chars": 20_000,
+                "public_web_max_pdf_pages": 20,
+                "public_web_max_decompressed_bytes": 100_000,
+            },
+        )
+        unavailable = registry.inspect_acquired_document(
+            record_id="mission-discovered-document:missing",
+            purpose="qualitative_research",
+        )
+        self.assertFalse(unavailable["available"])
+        self.assertEqual(unavailable["reason"], "source_not_readable")
+        registration = registry.register_acquired_document(
+            record_id=acquired_ref, purpose="qualitative_research"
+        )
+        self.assertEqual(registration["source_ref"], "source:sec-edgar")
+        self.assertEqual(registration["document_ref"], filing_ref)
+        self.assertEqual(registration["content_document_ref"], manifest["document_ref"])
+        self.assertEqual(
+            registration["source_authority"]["company_ref"],
+            "company:sec-cik:0001467373",
+        )
+        available = registry.inspect_acquired_document(
+            record_id=acquired_ref, purpose="qualitative_research"
+        )
+        self.assertTrue(available["available"])
+        self.assertEqual(available["registration"], registration)
+        with coverage_authority._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET updated_at=? "
+                "WHERE record_id=?",
+                ("2026-09-11T13:00:00.000000+00:00", acquired_ref),
+            )
+        proof = registry.search({
+            "schema_version": SEARCH_REQUEST_SCHEMA_VERSION,
+            "operation": SEARCH_OPERATION,
+            "purpose": "qualitative_research",
+            "research_question": "Which executive did the board appoint?",
+            "registration": registration,
+            "query_terms": ["chief operating officer"],
+            "limits": {
+                "max_results": 1, "context_before_chars": 20,
+                "context_after_chars": 30,
+            },
+            "policy_ref": policy["policy_ref"],
+            "policy_hash": policy["content_hash"],
+        })
+        self.assertEqual(len(proof["matches"]), 1)
+        self.assertEqual(registry.verify_search_proof(proof), proof)
 
 
 if __name__ == "__main__":

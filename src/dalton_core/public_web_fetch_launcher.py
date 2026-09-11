@@ -410,6 +410,11 @@ class PublicWebFetchLauncher:
         the manifest is then read through the same verified path.
         """
 
+        return self.locate_completed_manifest_binding(document_ref)["manifest"]
+
+    def locate_completed_manifest_binding(self, document_ref: str) -> dict[str, Any]:
+        """Return the selected durable ticket together with its manifest."""
+
         if not isinstance(document_ref, str) or not document_ref:
             raise FetchLaunchRejected("document_ref is required")
         best: tuple[str, str] | None = None
@@ -426,7 +431,10 @@ class PublicWebFetchLauncher:
                 best = key
         if best is None:
             raise FetchLaunchRejected("no completed acquisition ticket for this document")
-        return self.read_completed_manifest(best[1], document_ref)
+        return {
+            "ticket_ref": best[1],
+            "manifest": self.read_completed_manifest(best[1], document_ref),
+        }
 
     @staticmethod
     def _pid_alive(pid: Any) -> bool:
