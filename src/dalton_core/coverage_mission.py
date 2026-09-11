@@ -3196,6 +3196,14 @@ class CoverageMissionAuthority:
         reader = getattr(formal_reader, "read_failed_window", None)
         if not callable(reader):
             raise CoverageMissionValidationError("authoritative failed-window reader is required")
+        prior_row = self.connection.execute(
+            "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+        ).fetchone()
+        if prior_row is None:
+            raise CoverageMissionNotFound("document review was not found")
+        prior_snapshot = self._review_row(prior_row)
+        if hasattr(formal_reader, "prior_review"):
+            formal_reader.prior_review = prior_snapshot
         for index, claimed in enumerate(failed_windows):
             if not isinstance(claimed, Mapping) or set(claimed) != fields:
                 raise CoverageMissionValidationError(f"failed_windows[{index}] has invalid shape")
@@ -3219,6 +3227,18 @@ class CoverageMissionAuthority:
             ).fetchone()
             if row is None:
                 raise CoverageMissionNotFound("document review was not found")
+            existing = cur.execute(
+                "SELECT record_json FROM coverage_mission_document_review_reopens "
+                "WHERE review_id=? AND prior_review_hash=?", (review_id, expected_review_hash)
+            ).fetchone()
+            if existing is not None:
+                saved = _canonical_record(existing["record_json"], "document review reopen")
+                if (saved.get("actor_ref") != actor_ref or saved.get("decision_ref") != decision_ref
+                        or saved.get("failed_windows") != verified):
+                    raise CoverageMissionConflict("document review reopen payload changed")
+                if row["state"] != "awaiting_human_extraction":
+                    raise CoverageMissionConflict("duplicate reopen no longer names an open review")
+                return {"status": "duplicate", **saved}
             prior = self._review_row(row)
             if content_hash(prior) != expected_review_hash:
                 raise CoverageMissionConflict("document review changed; reload before reopening")
@@ -3249,15 +3269,6 @@ class CoverageMissionAuthority:
                     "actor_ref": actor_ref, "created_at": now}
             record = {**body, "reopen_id": _ref("mission-document-review-reopen", body)}
             record["content_hash"] = content_hash(record)
-            existing = cur.execute(
-                "SELECT record_json FROM coverage_mission_document_review_reopens "
-                "WHERE review_id=? AND prior_review_hash=?", (review_id, expected_review_hash)
-            ).fetchone()
-            if existing is not None:
-                saved = _canonical_record(existing["record_json"], "document review reopen")
-                if saved != record:
-                    raise CoverageMissionConflict("document review reopen payload changed")
-                return {"status": "duplicate", **saved}
             cur.execute(
                 "INSERT INTO coverage_mission_document_review_reopens"
                 "(reopen_id,review_id,prior_review_hash,record_json,content_hash,actor_ref,created_at) "
