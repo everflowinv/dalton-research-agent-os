@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import plistlib
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -40,6 +41,62 @@ def _sha(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def stage_preserved_runtime_configs(
+    module: Any, rehearsal: Any, *, packet_root: Path,
+    manifest: Mapping[str, Any],
+) -> dict[str, str]:
+    """Copy the two v0.2 preserved configs into the confined state copy."""
+
+    _need(manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION,
+          "preserved runtime config staging requires a 0.2 transition")
+    rows = {row.get("name"): row for row in manifest.get("targets", [])
+            if isinstance(row, Mapping)}
+    _need(set((DOCUMENT_CONFIG, LANE_CONFIG)).issubset(rows),
+          "preserved runtime config targets are absent")
+    live_state = rehearsal.live_root / module.STATE_SUBDIR
+    _need(live_state.is_dir() and not live_state.is_symlink(),
+          "live state root for preserved configs is unsafe")
+    staged = {}
+    for name in (DOCUMENT_CONFIG, LANE_CONFIG):
+        row = rows[name]
+        _need(row.get("kind") == "preserve_existing",
+              f"preserved runtime config operation differs: {name}")
+        reviewed_path = packet_root / row["before"]["file"]
+        reviewed = _artifact(
+            reviewed_path, row["before"]["sha256"],
+            f"reviewed preserved runtime config {name}")
+        source = live_state / name
+        before = source.lstat()
+        _need(stat.S_ISREG(before.st_mode) and not source.is_symlink(),
+              f"live preserved runtime config is unsafe: {name}")
+        source_bytes = source.read_bytes()
+        after = source.lstat()
+        _need((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+              == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+              and source_bytes == reviewed
+              and row.get("after_sha256") == _sha(reviewed_path),
+              f"live preserved runtime config differs from review: {name}")
+        target = rehearsal.temp_state / name
+        _need(not target.exists() and not target.is_symlink(),
+              f"copied preserved runtime config target is occupied: {name}")
+        if name == DOCUMENT_CONFIG:
+            try:
+                value = json.loads(source_bytes.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise RehearsalBindingError(
+                    "live preserved document config is invalid JSON") from exc
+            _need(isinstance(value, dict),
+                  "live preserved document config is not an object")
+            installed = _json_bytes(
+                module.rewrite_paths(value, rehearsal.replacements))
+        else:
+            installed = source_bytes
+        _write_exclusive(target, installed)
+        staged[name] = _sha(target)
+    rehearsal.confine_to_temp_root()
+    return staged
 
 
 def _json(path: Path, expected: str, label: str) -> dict[str, Any]:
@@ -369,6 +426,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return replay_preserved_production_setup(module, self)
 
         def _apply_successor(self):
+            if manifest.get("schema_version") == PRESERVE_SCHEMA_VERSION:
+                stage_preserved_runtime_configs(
+                    module, self, packet_root=packet_root, manifest=manifest)
             baseline_row = manifest["supporting_evidence"]["baseline_model_snapshot"]
             baseline_path = packet_root / baseline_row["file"]
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))

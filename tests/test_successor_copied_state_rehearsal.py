@@ -12,7 +12,7 @@ from unittest.mock import patch
 from scripts.run_release_copied_state_rehearsal import RehearsalBindingError
 from scripts.run_successor_copied_state_rehearsal import (
     derive_confined_transition, replay_preserved_production_setup,
-    validate_successor_snapshots,
+    stage_preserved_runtime_configs, validate_successor_snapshots,
 )
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
@@ -35,6 +35,8 @@ class IdentityModule:
 
 
 class PathModule(IdentityModule):
+    STATE_SUBDIR = Path("state/dalton-core")
+
     @staticmethod
     def invert(replacements):
         return {new: old for old, new in replacements.items()}
@@ -272,6 +274,78 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             receipt_path=scratch / "transition-receipt.json")
         self.assertEqual(receipt["status"], "scratch_configuration_applied")
         self.assertEqual(len(PathModule.model_config_inventory(scratch_state)), 3)
+
+    def test_v02_stages_exact_live_document_and_lane_into_scratch(self):
+        root = self.state.parent
+        packet = root / "stage-packet"; packet.mkdir()
+        live = root / "live"
+        live_state = live / PathModule.STATE_SUBDIR
+        live_state.mkdir(parents=True)
+        scratch = root / "stage-scratch"; scratch.mkdir()
+        scratch_state = scratch / PathModule.STATE_SUBDIR
+        scratch_state.mkdir(parents=True)
+        document = {"spool_dir": "/live/state/transcript-spool", "enabled": True}
+        lane = {"schema_version": "0.1", "enabled": True}
+        digest = lambda path: __import__('hashlib').sha256(path.read_bytes()).hexdigest()
+        rows = []
+        for name, value in (("document-research-config.json", document),
+                            ("mission-document-research-lane.json", lane)):
+            reviewed = packet / name
+            reviewed.write_text(json.dumps(value))
+            (live_state / name).write_bytes(reviewed.read_bytes())
+            rows.append({"name": name, "kind": "preserve_existing",
+                         "before": {"file": name, "sha256": digest(reviewed)},
+                         "after_sha256": digest(reviewed)})
+        confined = []
+        rehearsal = SimpleNamespace(
+            live_root=live, temp_root=scratch, temp_state=scratch_state,
+            replacements={"/live": str(scratch)},
+            confine_to_temp_root=lambda: confined.append(True),
+        )
+        staged = stage_preserved_runtime_configs(
+            PathModule, rehearsal, packet_root=packet,
+            manifest={"schema_version": "successor-config-transition-0.2",
+                      "targets": rows})
+        self.assertEqual(set(staged), {
+            "document-research-config.json",
+            "mission-document-research-lane.json"})
+        self.assertEqual(str(scratch / "state/transcript-spool"), json.loads(
+            (scratch_state / "document-research-config.json").read_text())["spool_dir"])
+        self.assertEqual((packet / "mission-document-research-lane.json").read_bytes(),
+                         (scratch_state / "mission-document-research-lane.json").read_bytes())
+        self.assertEqual([True], confined)
+
+    def test_v02_refuses_live_preserved_config_drift_before_scratch_write(self):
+        root = self.state.parent
+        packet = root / "drift-packet"; packet.mkdir()
+        live = root / "drift-live"
+        live_state = live / PathModule.STATE_SUBDIR
+        live_state.mkdir(parents=True)
+        scratch = root / "drift-scratch"; scratch.mkdir()
+        scratch_state = scratch / PathModule.STATE_SUBDIR
+        scratch_state.mkdir(parents=True)
+        rows = []
+        digest = lambda path: __import__('hashlib').sha256(path.read_bytes()).hexdigest()
+        for name in ("document-research-config.json",
+                     "mission-document-research-lane.json"):
+            reviewed = packet / name
+            reviewed.write_text(json.dumps({"name": name}))
+            (live_state / name).write_bytes(reviewed.read_bytes())
+            rows.append({"name": name, "kind": "preserve_existing",
+                         "before": {"file": name, "sha256": digest(reviewed)},
+                         "after_sha256": digest(reviewed)})
+        (live_state / "document-research-config.json").write_text(
+            json.dumps({"owner": "changed"}))
+        rehearsal = SimpleNamespace(
+            live_root=live, temp_root=scratch, temp_state=scratch_state,
+            replacements={}, confine_to_temp_root=lambda: None)
+        with self.assertRaisesRegex(RehearsalBindingError,
+                                    "differs from review"):
+            stage_preserved_runtime_configs(
+                PathModule, rehearsal, packet_root=packet,
+                manifest={"schema_version": "successor-config-transition-0.2",
+                          "targets": rows})
+        self.assertEqual([], list(scratch_state.iterdir()))
 
     def test_preserve_existing_derivation_normalizes_scratch_and_only_patches_service(self):
         root = self.state.parent
