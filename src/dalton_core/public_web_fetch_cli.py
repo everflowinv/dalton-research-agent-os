@@ -57,7 +57,7 @@ from .store import DaltonStore, canonical_json
 
 
 DEFAULT_CATALOG_NAME = "catalog-web-fetch.sqlite"
-SUMMARY_SCHEMA_VERSION = "0.1"
+SUMMARY_SCHEMA_VERSION = "0.2"
 
 
 def secure_dir(path: Path) -> Path:
@@ -182,6 +182,7 @@ def run_fetch(
         "requested_by": requested_by,
         "status": "failed",
         "failure_reason": None,
+        "failure_retryable": None,
         "authorization": None,
         "discovery_ref": None,
         "canonical_url": None,
@@ -236,6 +237,9 @@ def run_fetch(
         summary["provider_calls"] = receipt["provider_calls"]
         if receipt["outcome"] != "succeeded" or receipt["document_ref"] is None:
             summary["failure_reason"] = _fetch_failure_reason(receipt)
+            error = receipt.get("error")
+            if isinstance(error, Mapping) and type(error.get("retryable")) is bool:
+                summary["failure_retryable"] = error["retryable"]
             return summary
         manifest = fetch.manifest(receipt)
         _write_owner_only(out / "manifest.json", manifest)

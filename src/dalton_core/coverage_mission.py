@@ -855,6 +855,7 @@ class CoverageMissionAuthority:
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_company_model_spec_contract()
         self._migrate_discovered_document_host()
+        self._migrate_discovered_document_retryability()
         self._migrate_settlement_failure_reason()
         self._migrate_plan_sufficiency()
         self._migrate_statement_dimension_count()
@@ -1020,6 +1021,23 @@ class CoverageMissionAuthority:
             raise RuntimeError("discovered document host migration requires no open transaction")
         self.connection.execute(
             "ALTER TABLE coverage_mission_discovered_documents ADD COLUMN host TEXT"
+        )
+
+    def _migrate_discovered_document_retryability(self) -> None:
+        """Add typed failure disposition without interpreting legacy prose."""
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(coverage_mission_discovered_documents)"
+            ).fetchall()
+        }
+        if "failure_retryable" in columns:
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("document retryability migration requires no open transaction")
+        self.connection.execute(
+            "ALTER TABLE coverage_mission_discovered_documents ADD COLUMN failure_retryable "
+            "INTEGER CHECK(failure_retryable IS NULL OR failure_retryable IN (0,1))"
         )
 
     @contextmanager
@@ -1939,6 +1957,9 @@ class CoverageMissionAuthority:
             "status": row["status"],
             "ticket_ref": row["ticket_ref"],
             "failure_reason": row["failure_reason"],
+            "failure_retryable": (
+                None if row["failure_retryable"] is None else bool(row["failure_retryable"])
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "host": row["host"],
@@ -2570,7 +2591,8 @@ class CoverageMissionAuthority:
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
-            "WHERE d.status='acquisition_failed' AND d.updated_at<?"
+            "WHERE d.status='acquisition_failed' AND d.updated_at<? "
+            "AND d.failure_retryable IS NOT 0"
         )
         params: list[Any] = [cutoff]
         if source_ref is not None:
@@ -2644,7 +2666,7 @@ class CoverageMissionAuthority:
             now = _now()
             cur.execute(
                 "UPDATE coverage_mission_discovered_documents SET status='acquisition_launched',"
-                "ticket_ref=?,failure_reason=NULL,updated_at=? "
+                "ticket_ref=?,failure_reason=NULL,failure_retryable=NULL,updated_at=? "
                 "WHERE record_id=? AND status='acquisition_failed'",
                 (ticket_ref, now, record_id),
             )
@@ -2681,7 +2703,7 @@ class CoverageMissionAuthority:
             now = _now()
             cur.execute(
                 "UPDATE coverage_mission_discovered_documents SET status='acquired',"
-                "failure_reason=NULL,updated_at=? WHERE record_id=? "
+                "failure_reason=NULL,failure_retryable=NULL,updated_at=? WHERE record_id=? "
                 "AND status IN ('discovered','already_in_authority')",
                 (now, record_id),
             )
@@ -2693,14 +2715,19 @@ class CoverageMissionAuthority:
         return self._document_row(row)
 
     def settle_discovered_document(
-        self, record_id: str, *, status: str, reason: str | None = None
+        self, record_id: str, *, status: str, reason: str | None = None,
+        failure_retryable: bool | None = None,
     ) -> dict[str, Any]:
         record_id = _text(record_id, "record_id")
         status = _vocabulary(status, ("acquired", "acquisition_failed"), "status")
         if status == "acquisition_failed":
             reason = _text(reason, "reason")
+            if failure_retryable is not None and type(failure_retryable) is not bool:
+                raise CoverageMissionValidationError("failure_retryable must be boolean or null")
         elif reason is not None:
             raise CoverageMissionValidationError("an acquired document carries no failure reason")
+        elif failure_retryable is not None:
+            raise CoverageMissionValidationError("an acquired document carries no failure retryability")
         with self._transaction() as cur:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
@@ -2708,14 +2735,15 @@ class CoverageMissionAuthority:
             if row is None:
                 raise CoverageMissionNotFound("discovered document was not found")
             if row["status"] != "acquisition_launched":
-                if row["status"] == status and row["failure_reason"] == reason:
+                if (row["status"] == status and row["failure_reason"] == reason
+                        and row["failure_retryable"] == failure_retryable):
                     return self._document_row(row)
                 raise CoverageMissionConflict("discovered document is not in a launched acquisition")
             now = _now()
             cur.execute(
-                "UPDATE coverage_mission_discovered_documents SET status=?,failure_reason=?,"
+                "UPDATE coverage_mission_discovered_documents SET status=?,failure_reason=?,failure_retryable=?,"
                 "updated_at=? WHERE record_id=? AND status='acquisition_launched'",
-                (status, reason, now, record_id),
+                (status, reason, failure_retryable, now, record_id),
             )
             if cur.rowcount != 1:
                 raise CoverageMissionConflict("discovered document state changed concurrently")
@@ -2821,6 +2849,7 @@ class CoverageMissionAuthority:
                 continue
             status = "discovered" if row["status"] == "acquisition_launched" else row["status"]
             reason = row["failure_reason"] if status == "acquisition_failed" else None
+            failure_retryable = row["failure_retryable"] if status == "acquisition_failed" else None
             # An acquired row's ticket is how the review plane finds its
             # manifest; a failed row's ticket is its evidence.  Only a row that
             # is back to discovered starts without one.
@@ -2833,11 +2862,12 @@ class CoverageMissionAuthority:
                 cur.execute(
                     "INSERT INTO coverage_mission_discovered_documents"
                     "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
-                    "discovery_ref,status,ticket_ref,failure_reason,created_at,updated_at,host) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "discovery_ref,status,ticket_ref,failure_reason,failure_retryable,created_at,updated_at,host) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record_id, current_ref, row["company_ref"], row["source_ref"],
                         row["document_ref"], row["discovery_ref"], status, ticket_ref, reason,
+                        failure_retryable,
                         row["created_at"], row["updated_at"], row["host"],
                     ),
                 )

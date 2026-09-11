@@ -519,6 +519,67 @@ class FetchCoordinatorTests(unittest.TestCase):
         self.assertIsNone(self.missions.next_discovered_document(source_ref=ALPHAENGINE_SOURCE_REF))
         self.assertEqual(self.missions.launched_discovered_documents(source_ref=ALPHAENGINE_SOURCE_REF), [])
 
+    def test_typed_terminal_fetch_failure_is_never_automatically_retried(self) -> None:
+        """A provider's explicit terminal result survives settlement and restart."""
+
+        self.fetch_launcher.fail = True
+        self.fetch_launcher.fail_summary = {
+            "failure_reason": "fetch outcome failed; public web fetch returned HTTP 403; not retryable",
+            "failure_retryable": False,
+        }
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        failed = self.missions.discovered_documents(
+            self.mission["id"], status="acquisition_failed"
+        )
+        self.assertTrue(failed)
+        self.assertTrue(all(row["failure_retryable"] is False for row in failed))
+
+        self.clock.advance(days=2)
+        before = len(self.fetch_launcher.calls)
+        restarted = MissionSourceDiscoveryCoordinator(
+            store=self.h.core, missions=self.missions, plan=self.plan,
+            search_launcher=self.search_launcher,
+            acquisition_launcher=self.fetch_launcher, clock=self.clock,
+        )
+        tick = restarted.dispatch_once()
+        self.assertEqual(tick["acquisition"]["status"], "idle")
+        self.assertEqual(len(self.fetch_launcher.calls), before)
+
+    def test_only_typed_terminal_failure_is_excluded_from_bounded_recovery(self) -> None:
+        """Transient and legacy/orphan failures retain the existing recovery path."""
+
+        self.fetch_launcher.fail = True
+        self.fetch_launcher.fail_summary = {
+            "failure_reason": "fetch outcome retryable; upstream unavailable",
+            "failure_retryable": True,
+        }
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        failed = self.missions.discovered_documents(
+            self.mission["id"], status="acquisition_failed"
+        )
+        self.assertTrue(any(row["failure_retryable"] is True for row in failed))
+        # Reproduce an additive migration row: prior ledgers gain NULL and are
+        # not reclassified by looking at their diagnostic prose.
+        legacy_id = failed[0]["record_id"]
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents "
+                "SET failure_retryable=NULL WHERE record_id=?", (legacy_id,),
+            )
+        unknown = self.missions.discovered_documents(
+            self.mission["id"], status="acquisition_failed"
+        )
+        self.assertTrue(any(row["failure_retryable"] is None for row in unknown))
+        self.clock.advance(days=2)
+        self.assertIsNotNone(self.missions.retryable_failed_document(
+            older_than=timedelta(days=1), as_of=self.clock(),
+            source_ref=WEB_SEARCH_SOURCE_REF,
+        ))
+
 
     def test_a_restart_retries_earlier_failures_without_waiting_the_interval(self) -> None:
         """P11b: a restart means new code, so retry what failed under the old.

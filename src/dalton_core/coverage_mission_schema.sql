@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS coverage_mission_sec_dispatches (
     status TEXT NOT NULL CHECK(status IN ('pending','launched','rejected')),
     ticket_ref TEXT,
     failure_reason TEXT,
+    -- NULL means the child did not leave a typed outcome (legacy rows and
+    -- missing tickets).  Those remain eligible for bounded recovery.  False
+    -- is an explicit terminal provider/adapter result and is never selected
+    -- for automatic retry.
+    failure_retryable INTEGER CHECK(failure_retryable IS NULL OR failure_retryable IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

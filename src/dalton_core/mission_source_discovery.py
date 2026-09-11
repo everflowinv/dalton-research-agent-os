@@ -1187,7 +1187,11 @@ class MissionSourceDiscoveryCoordinator:
                     )
                 )
                 result = self.missions.settle_discovered_document(
-                    document["record_id"], status="acquisition_failed", reason=str(reason)[:500]
+                    document["record_id"], status="acquisition_failed", reason=str(reason)[:500],
+                    failure_retryable=(
+                        summary.get("failure_retryable")
+                        if type(summary.get("failure_retryable")) is bool else None
+                    ),
                 )
             entry = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
