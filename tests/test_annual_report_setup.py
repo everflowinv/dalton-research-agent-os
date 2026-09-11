@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.annual_report_runtime import (
     DRAFT_MODEL_CONFIG_NAME,
@@ -57,6 +58,22 @@ class AnnualReportSetupTests(unittest.TestCase):
                 json.loads(verifier_target.read_text())["routing_policy_ref"],
                 "routing-policy:verifier:1",
             )
+            for target in (draft_target, verifier_target):
+                installed = json.loads(target.read_text())
+                self.assertEqual(installed["provider_retry"], {
+                    "max_same_profile_retries": 1,
+                    "retry_backoff_seconds": 2,
+                    "unknown_recovery": {
+                        "max_fresh_work_orders": 2,
+                        "retry_backoff_seconds": 30,
+                        "max_elapsed_seconds": 7200,
+                    },
+                })
+                self.assertEqual(installed["transport_retry"], {
+                    "max_definitely_not_sent_retries": 1,
+                    "queue_wait_seconds": 600,
+                    "retry_backoff_seconds": 2,
+                })
 
             owner_config = json.loads(draft_target.read_text())
             owner_config["provider_retry"] = {
@@ -70,6 +87,59 @@ class AnnualReportSetupTests(unittest.TestCase):
             self.assertEqual(second["status"], "preserved")
             self.assertEqual(draft_target.read_bytes(), before)
             self.assertEqual(len(second["preserved"]), 2)
+
+    def test_exclusive_publish_preserves_and_validates_racing_owner_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            service = root / "service.json"
+            service.write_text(json.dumps({"core_db": str(state / "core.sqlite")}), encoding="utf-8")
+            common = {
+                "credential_slot_refs": ["credential-slot:model:test"],
+                "model_router_db": str(state / "router.sqlite"),
+                "broker_socket": str(state / "broker.sock"),
+                "broker_auth_key": str(state / "broker.key"),
+                "broker_client_id": "client:dalton-core", "expected_agent_id": "chem",
+                "budget_db": str(state / "budget.sqlite"),
+                "budget_policy_ref": "budget-policy:test:1",
+                "call_budget": {"max_input_tokens": 2000, "max_output_tokens": 200,
+                                "max_cost_usd": 2.0, "timeout_seconds": 40},
+                "run_budget": {"max_units": 2, "max_seconds": 90},
+            }
+            for name, route in (
+                ("dossier-model-config.json", "routing-policy:draft:1"),
+                ("company-dossier-verifier-model-config.json", "routing-policy:verifier:1"),
+            ):
+                path = state / name
+                path.write_text(canonical_json({**common, "routing_policy_ref": route}) + "\n")
+                os.chmod(path, 0o600)
+
+            target = state / DRAFT_MODEL_CONFIG_NAME
+            real_link = os.link
+            won = False
+
+            def racing_link(source, destination):
+                nonlocal won
+                if Path(destination).name == target.name and not won:
+                    won = True
+                    owner = json.loads(Path(source).read_text())
+                    owner["provider_retry"] = {
+                        "max_same_profile_retries": 9,
+                        "retry_backoff_seconds": 17,
+                    }
+                    target.write_text(canonical_json(owner) + "\n", encoding="utf-8")
+                    os.chmod(target, 0o600)
+                    raise FileExistsError(destination)
+                return real_link(source, destination)
+
+            with patch("dalton_core.annual_report_setup.os.link", side_effect=racing_link):
+                result = install(service)
+            self.assertIn(str(target.resolve()), result["preserved"])
+            self.assertEqual(
+                json.loads(target.read_text())["provider_retry"]["max_same_profile_retries"],
+                9,
+            )
 
 
 if __name__ == "__main__":

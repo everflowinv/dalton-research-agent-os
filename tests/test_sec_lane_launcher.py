@@ -145,7 +145,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             unconfigured = self._launcher(root)
             with self.assertRaisesRegex(LaneLaunchRejected, "not configured"):
                 unconfigured.start_registered_annual_report(
-                    plan_version_ref="research-plan-version:" + "a" * 32,
+                    plan_version_ref="research-plan:" + "a" * 32,
                     actor_ref=OWNER,
                 )
 
@@ -183,7 +183,7 @@ class SecLaneLauncherTests(unittest.TestCase):
                 annual_report_verifier_model_config_path=paths[1],
             )
             ticket = launcher.start_registered_annual_report(
-                plan_version_ref="research-plan-version:" + "b" * 32,
+                plan_version_ref="research-plan:" + "b" * 32,
                 actor_ref=OWNER,
             )
             self.assertEqual(ticket["operation"], "registered_annual_report")

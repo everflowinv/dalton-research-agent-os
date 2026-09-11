@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +39,7 @@ from dalton_core.registered_annual_report import (
     source_bytes_hash,
 )
 from dalton_core.runner_journal import RunnerJournal
+from dalton_core.sec_lane_launcher import SecLaneLauncher
 from dalton_core.public_http_transport import PublicHttpTransport
 from dalton_core.research_plan import (
     REGISTERED_ANNUAL_REPORT_OPERATION,
@@ -199,6 +199,13 @@ def seed_core_registration(fixture, source, *, accession=ACCESSION, cik=CIK):
             (MISSION, "coverage-mission:annual-test", 1, None, "industry:test", "playbook:test",
              "constitution:test", "mandate:test", canonical_json(mission_record),
              content_hash(mission_record), "human:test", now),
+        )
+        cur.execute(
+            "INSERT OR IGNORE INTO coverage_mission_pointer("
+            "mission_ref,mission_version_id,version_number,content_hash,updated_at) "
+            "VALUES(?,?,?,?,?)",
+            ("coverage-mission:annual-test", MISSION, 1,
+             content_hash(mission_record), now),
         )
         cur.execute(
             "INSERT INTO coverage_mission_discovered_documents("
@@ -874,7 +881,6 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
         os.chmod(web_governance, 0o600)
         staging = state / "review" / "candidate-staging.sqlite"
         staging.parent.mkdir()
-        output = state / "annual-cli-output"
         draft_fixture = state / "annual-draft.json"
         verifier_fixture = state / "annual-verifier.json"
         statement = "The company serves varied customers and depends on outsourcing partners."
@@ -892,26 +898,111 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             "schema_version": "0.1", "verdict": "pass",
             "verified_statement": statement, "findings": [],
         }), encoding="utf-8")
-        env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
-        completed = subprocess.run([
-            sys.executable, "-m", "dalton_core.sec_lane_cli",
-            "--state-dir", str(state), "--staging", str(staging),
-            "--governance", str(web_governance),
-            "--rehearsal-approved-by", "human:test-owner",
-            "--actor", "human:test-owner", "--annual-plan-ref", created["plan_version_ref"],
-            "--web-fetch-governance", str(web_governance),
-            "--annual-draft-model-config", str(state / DRAFT_MODEL_CONFIG_NAME),
-            "--annual-verifier-model-config", str(state / VERIFIER_MODEL_CONFIG_NAME),
-            "--annual-draft-fixture", str(draft_fixture),
-            "--annual-verifier-fixture", str(verifier_fixture),
-            "--spool-dir", str(source.root / "spool"),
-            "--summary-dir", str(output), "--quiet",
-        ], env=env, cwd=state, capture_output=True, text=True, timeout=60)
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        result = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+        governance = type("Governance", (), {
+            "id": "connector-governance:annual-test:v1",
+            "content_hash": "f" * 64,
+            "approved": True,
+            "approved_by": "human:test-owner",
+        })()
+        launcher_kwargs = {
+            "state_dir": state, "governance_path": web_governance,
+            "staging_path": staging,
+            "mode_args": ("--rehearsal-approved-by", "human:test-owner"),
+            "spool_dir": source.root / "spool",
+            "web_fetch_governance_path": web_governance,
+            "annual_report_draft_model_config_path": state / DRAFT_MODEL_CONFIG_NAME,
+            "annual_report_verifier_model_config_path": state / VERIFIER_MODEL_CONFIG_NAME,
+            "annual_report_draft_fixture_path": draft_fixture,
+            "annual_report_verifier_fixture_path": verifier_fixture,
+            "governance_loader": lambda _path: governance,
+        }
+        old_pythonpath = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+        self.addCleanup(
+            lambda: (
+                os.environ.pop("PYTHONPATH", None)
+                if old_pythonpath is None
+                else os.environ.__setitem__("PYTHONPATH", old_pythonpath)
+            )
+        )
+        launcher = SecLaneLauncher(**launcher_kwargs)
+        ticket = launcher.start_registered_annual_report(
+            plan_version_ref=created["plan_version_ref"],
+            actor_ref="human:test-owner",
+        )
+        ticket_path = state / "sec-lane-runs" / ticket["id"].split(":", 1)[1]
+        wait_until = time.monotonic() + 30
+        while (time.monotonic() < wait_until
+               and not (ticket_path / "backoff-wait.json").is_file()):
+            time.sleep(0.05)
+        if not (ticket_path / "backoff-wait.json").is_file():
+            self.fail(
+                "annual child did not enter its provider retry backoff: "
+                + json.dumps({
+                    "ticket": launcher.status(ticket["id"]),
+                    "works": [dict(row) for row in harness.core.connection.execute(
+                        "SELECT work_order_id FROM scheduler_work_orders"
+                    ).fetchall()],
+                    "log": (ticket_path / "run.log").read_text(encoding="utf-8"),
+                }, sort_keys=True)
+            )
+
+        first_pid = ticket["pid"]
+        launcher.close()  # Writer shutdown terminates the real child in backoff.
+        self.assertFalse(SecLaneLauncher._pid_alive(first_pid))
+
+        mission_record_v2 = {
+            "autonomy": {"automation_principal": "automation:test"},
+            "budget": {"max_daily_paid_calls": 100, "max_daily_cost_usd": 1000.0,
+                       "max_alphaengine_calls_24h": 0},
+        }
+        mission_v2 = MISSION + ":2"
+        mission_authority = CoverageMissionAuthority(harness.core)
+        with mission_authority._transaction() as cursor:
+            cursor.execute(
+                "INSERT INTO coverage_mission_versions("
+                "mission_version_id,mission_ref,version_number,prior_version_id,industry_ref,"
+                "playbook_version_ref,constitution_version_ref,mandate_version_ref,record_json,"
+                "content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (mission_v2, "coverage-mission:annual-test", 2, MISSION, "industry:test",
+                 "playbook:test", "constitution:test", "mandate:test",
+                 canonical_json(mission_record_v2), content_hash(mission_record_v2),
+                 "human:test", "2026-09-11T10:01:00.000000+00:00"),
+            )
+            cursor.execute(
+                "UPDATE coverage_mission_pointer SET mission_version_id=?,version_number=?,"
+                "content_hash=?,updated_at=? WHERE mission_ref=?",
+                (mission_v2, 2, content_hash(mission_record_v2),
+                 "2026-09-11T10:01:00.000000+00:00", "coverage-mission:annual-test"),
+            )
+        superseded = SecLaneLauncher(**launcher_kwargs)
+        self.assertIsNone(superseded.wait(timeout=1))
+        self.assertEqual(
+            json.loads((ticket_path / "ticket.json").read_text())["resume_count"], 0
+        )
+        superseded.close()
+        with mission_authority._transaction() as cursor:
+            cursor.execute(
+                "UPDATE coverage_mission_pointer SET mission_version_id=?,version_number=?,"
+                "content_hash=?,updated_at=? WHERE mission_ref=?",
+                (MISSION, 1, content_hash({
+                     "autonomy": {"automation_principal": "automation:test"},
+                     "budget": {"max_daily_paid_calls": 100,
+                                "max_daily_cost_usd": 1000.0,
+                                "max_alphaengine_calls_24h": 0},
+                 }), "2026-09-11T10:02:00.000000+00:00",
+                 "coverage-mission:annual-test"),
+            )
+        fresh = SecLaneLauncher(**launcher_kwargs)  # Writer restart auto-consumes the orphan.
+        self.addCleanup(fresh.close)
+        self.assertEqual(fresh.wait(timeout=60), 0)
+        recovered = fresh.status(ticket["id"])
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertGreaterEqual(recovered["resume_count"], 1)
+        self.assertNotEqual(recovered["pid"], first_pid)
+        result = recovered["summary"]
         self.assertTrue(result["ok"])
         self.assertEqual(result["outcomes"][-1]["status"], "complete")
-        self.assertIn("retryable", [item["status"] for item in result["outcomes"]])
         draft_work = _resolved_plan_work_orders(
             harness.planner.plans.plan_version(created["plan_version_ref"]),
             harness.core.connection,
@@ -931,6 +1022,27 @@ class RegisteredAnnualReportExecutorTests(unittest.TestCase):
             self.assertEqual(staged.counts()["candidate_evidence_versions"], 1)
         finally:
             staged.close()
+
+        pending_decision, pending_records = harness.planner._selected_questions([(
+            "Which supplier risks are disclosed?", "Use the registered annual report",
+        )])
+        pending = harness.planner.plans.create_registered_annual_report_plan(
+            question_ref=pending_records[0]["question_ref"],
+            question_version_ref=pending_records[0]["question_version_ref"],
+            decision_ref=pending_decision["id"], **registration,
+            query_terms=["suppliers"],
+            draft_model_execution=plan_model_execution(
+                configs[0], "registered_annual_report_draft"
+            ),
+            verifier_model_execution=plan_model_execution(
+                configs[1], "registered_annual_report_verifier"
+            ),
+            actor_ref="core:planner",
+        )
+        probe = {"plan_version_ref": pending["plan_version_ref"]}
+        self.assertEqual(fresh._annual_resume_state(probe), (False, False))
+        harness.planner._approve(pending, suffix="annual-pending-only")
+        self.assertEqual(fresh._annual_resume_state(probe), (False, False))
     def test_review_progress_does_not_invalidate_append_only_source_proof(self) -> None:
         fixture = planner_test_support.ResearchPlanTests(
             methodName="test_create_plan_is_exact_closed_four_step_tree"

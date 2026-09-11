@@ -29,6 +29,20 @@ VERIFIER_SOURCE_NAMES = (
     "company-dossier-verifier-model-config.json",
     "dossier-verifier-model-config.json",
 )
+DEFAULT_PROVIDER_RETRY = {
+    "max_same_profile_retries": 1,
+    "retry_backoff_seconds": 2,
+    "unknown_recovery": {
+        "max_fresh_work_orders": 2,
+        "retry_backoff_seconds": 30,
+        "max_elapsed_seconds": 7200,
+    },
+}
+DEFAULT_TRANSPORT_RETRY = {
+    "max_definitely_not_sent_retries": 1,
+    "queue_wait_seconds": 600,
+    "retry_backoff_seconds": 2,
+}
 
 
 class AnnualReportSetupError(RuntimeError):
@@ -45,7 +59,7 @@ def _first_existing(state_dir: Path, names: Sequence[str], label: str) -> Path:
     )
 
 
-def _write_new(path: Path, value: Any) -> None:
+def _write_new(path: Path, value: Any) -> bool:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -53,8 +67,17 @@ def _write_new(path: Path, value: Any) -> None:
             handle.write(canonical_json(value) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
         os.chmod(path, 0o600)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return True
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -93,12 +116,21 @@ def install(config_path: str | Path) -> dict[str, Any]:
 
     changed: list[str] = []
     preserved: list[str] = []
-    for target, config in zip(targets, configs):
+    for target, source_config in zip(targets, configs):
+        config = dict(source_config)
+        if not target.exists():
+            if config.get("provider_retry") is None:
+                config["provider_retry"] = dict(DEFAULT_PROVIDER_RETRY)
+            if config.get("transport_retry") is None:
+                config["transport_retry"] = dict(DEFAULT_TRANSPORT_RETRY)
         if target.exists():
             preserved.append(str(target))
-        else:
-            _write_new(target, config)
+        elif _write_new(target, config):
             changed.append(str(target))
+        else:
+            # Another owner process won the exclusive publication race. Its
+            # file is authority; the pair validation below must accept it.
+            preserved.append(str(target))
     # Re-read the installed pair, including owner-only mode and shared Router.
     try:
         load_annual_report_model_configs(state_dir)

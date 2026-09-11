@@ -45,7 +45,6 @@ class _FixtureModelAdapter:
         self.outputs = list(output) if isinstance(output, list) else [output]
         if not self.outputs:
             raise ValueError("annual fixture output sequence must not be empty")
-        self.calls = 0
         self.clock = clock
 
     def replay(self, *_args):
@@ -73,8 +72,11 @@ class _FixtureModelAdapter:
             actor_ref="broker:annual-fixture", parent_ref=route["id"],
             environment_hash="environment:annual-fixture",
         )
-        output = self.outputs[min(self.calls, len(self.outputs) - 1)]
-        self.calls += 1
+        # Bind sequence selection to the formal Scheduler attempt so a killed
+        # rehearsal child and its replacement observe the same deterministic
+        # provider transcript instead of restarting the fixture at element 0.
+        index = max(0, int(route["attempt_number"]) - 1)
+        output = self.outputs[min(index, len(self.outputs) - 1)]
         failure_code = (
             output.get("fixture_provider_failure_code")
             if isinstance(output, dict) else None
@@ -134,7 +136,10 @@ def _fixture_adapter(payload: bytes, clock):
     )
 
 
-def _wait_for_annual_work(lane: Any, work_order_ref: str, *, realtime: bool) -> bool:
+def _wait_for_annual_work(
+    lane: Any, work_order_ref: str, *, realtime: bool,
+    wait_marker: Path | None = None,
+) -> bool:
     """Wait/advance to the exact Scheduler eligibility time for one plan node."""
 
     status = lane.scheduler.status(work_order_ref)
@@ -160,6 +165,11 @@ def _wait_for_annual_work(lane: Any, work_order_ref: str, *, realtime: bool) -> 
             return False
     delay = max(0.0, (target - lane.clock()).total_seconds())
     if realtime and delay > 0:
+        if wait_marker is not None:
+            _write_owner_only(wait_marker, {
+                "work_order_ref": work_order_ref,
+                "claimable_at": claimable_at,
+            })
         time.sleep(delay)
         lane.clock.value = datetime.now(timezone.utc)
     elif delay > 0:
@@ -227,6 +237,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--annual-verifier-model-config", type=Path)
     parser.add_argument("--annual-draft-fixture", type=Path)
     parser.add_argument("--annual-verifier-fixture", type=Path)
+    parser.add_argument("--annual-fixture-real-wait", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--annual-fixture-wait-marker", type=Path,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--stack-dump-seconds", type=int, default=0,
@@ -380,7 +394,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 outcomes = []
                 transitions = 0
-                realtime = args.annual_draft_fixture is None
+                realtime = (
+                    args.annual_draft_fixture is None
+                    or args.annual_fixture_real_wait
+                )
                 while transitions < transition_budget:
                     if realtime:
                         lane.clock.value = datetime.now(timezone.utc)
@@ -393,7 +410,8 @@ def main(argv: list[str] | None = None) -> int:
                     if outcome.get("status") in {"retryable", "pending", "waiting"}:
                         work_ref = outcome.get("work_order_ref")
                         if not isinstance(work_ref, str) or not _wait_for_annual_work(
-                            lane, work_ref, realtime=realtime
+                            lane, work_ref, realtime=realtime,
+                            wait_marker=args.annual_fixture_wait_marker,
                         ):
                             break
                 summary = {

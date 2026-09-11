@@ -31,10 +31,11 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -137,6 +138,8 @@ class SecLaneLauncher:
         web_fetch_governance_path: str | Path | None = None,
         annual_report_draft_model_config_path: str | Path | None = None,
         annual_report_verifier_model_config_path: str | Path | None = None,
+        annual_report_draft_fixture_path: str | Path | None = None,
+        annual_report_verifier_fixture_path: str | Path | None = None,
         governance_loader: Callable[[Path], Any] | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser().resolve()
@@ -160,13 +163,27 @@ class SecLaneLauncher:
             None if annual_report_verifier_model_config_path is None
             else Path(annual_report_verifier_model_config_path).expanduser().resolve()
         )
+        self.annual_report_draft_fixture_path = (
+            None if annual_report_draft_fixture_path is None
+            else Path(annual_report_draft_fixture_path).expanduser().resolve()
+        )
+        self.annual_report_verifier_fixture_path = (
+            None if annual_report_verifier_fixture_path is None
+            else Path(annual_report_verifier_fixture_path).expanduser().resolve()
+        )
+        if ((self.annual_report_draft_fixture_path is None)
+                != (self.annual_report_verifier_fixture_path is None)):
+            raise LaneLaunchError("annual-report rehearsal fixtures must be configured as a pair")
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._governance_loader = governance_loader or _default_governance_loader
         self._lock = threading.Lock()
         self._current: tuple[str, subprocess.Popen[bytes]] | None = None
+        self._stop = threading.Event()
+        self._monitor: threading.Thread | None = None
         if not self.state_dir.is_dir():
             raise LaneLaunchError("lane state directory is missing")
         self.tickets_dir = _secure_dir(self.state_dir / "sec-lane-runs")
+        self._recover_annual_ticket()
 
     # ------------------------------------------------------------------
     @property
@@ -382,16 +399,10 @@ class SecLaneLauncher:
         if not isinstance(actor_ref, str) or _HUMAN_RE.fullmatch(actor_ref) is None:
             raise LaneLaunchRejected("annual-report lane run actor must be a human principal")
         if not isinstance(plan_version_ref, str) or not plan_version_ref.startswith(
-            "research-plan-version:"
+            "research-plan:"
         ):
             raise LaneLaunchRejected("plan_version_ref must be a research plan version")
-        required = {
-            "connector spool": self.spool_dir,
-            "public-web fetch governance": self.web_fetch_governance_path,
-            "annual-report draft model configuration": self.annual_report_draft_model_config_path,
-            "annual-report verifier model configuration": self.annual_report_verifier_model_config_path,
-        }
-        missing = [name for name, path in required.items() if path is None or not path.exists()]
+        missing = self._annual_configuration_errors()
         if missing:
             raise LaneLaunchRejected(
                 "registered annual-report execution is not configured: " + ", ".join(missing)
@@ -421,7 +432,45 @@ class SecLaneLauncher:
             }).encode("utf-8")).hexdigest()[:24]
             ticket_id = f"{TICKET_PREFIX}:{digest}"
             ticket_dir = _secure_dir(self.tickets_dir / digest)
-            command = [
+            command = self._annual_command(
+                plan_version_ref=plan_version_ref, actor_ref=actor_ref,
+                ticket_dir=ticket_dir,
+            )
+            process = self._spawn(command, ticket_dir, append=False)
+            record = {
+                "schema_version": TICKET_SCHEMA_VERSION, "id": ticket_id,
+                "operation": "registered_annual_report",
+                "plan_version_ref": plan_version_ref, "actor_ref": actor_ref,
+                "governance_ref": governance.id, "governance_hash": governance.content_hash,
+                "transport": "local-registered-sec-source",
+                "staging_path": str(self.staging_path), "started_at": started_at,
+                "pid": process.pid, "status": "running", "exit_code": None,
+                "completed_at": None, "resume_count": 0,
+                "deadline_resume_attempted": False,
+            }
+            _write_owner_only(self._ticket_path(ticket_id), record)
+            self._current = (ticket_id, process)
+            self._start_monitor(ticket_id, process)
+            return dict(record)
+
+    def _annual_configuration_errors(self) -> list[str]:
+        required = {
+            "connector spool": self.spool_dir,
+            "public-web fetch governance": self.web_fetch_governance_path,
+            "annual-report draft model configuration": self.annual_report_draft_model_config_path,
+            "annual-report verifier model configuration": self.annual_report_verifier_model_config_path,
+        }
+        if self.annual_report_draft_fixture_path is not None:
+            required.update({
+                "annual-report draft fixture": self.annual_report_draft_fixture_path,
+                "annual-report verifier fixture": self.annual_report_verifier_fixture_path,
+            })
+        return [name for name, path in required.items() if path is None or not path.exists()]
+
+    def _annual_command(
+        self, *, plan_version_ref: str, actor_ref: str, ticket_dir: Path
+    ) -> list[str]:
+        command = [
                 self.python_executable, "-m", CLI_MODULE,
                 "--state-dir", str(self.state_dir),
                 "--staging", str(self.staging_path),
@@ -436,29 +485,222 @@ class SecLaneLauncher:
                 "--quiet", "--stack-dump-seconds", str(STACK_DUMP_SECONDS),
                 *self.mode_args,
             ]
-            log_path = ticket_dir / "run.log"
-            log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if self.annual_report_draft_fixture_path is not None:
+            command += [
+                "--annual-draft-fixture", str(self.annual_report_draft_fixture_path),
+                "--annual-verifier-fixture", str(self.annual_report_verifier_fixture_path),
+                "--annual-fixture-real-wait",
+                "--annual-fixture-wait-marker", str(ticket_dir / "backoff-wait.json"),
+            ]
+        return command
+
+    def _spawn(
+        self, command: Sequence[str], ticket_dir: Path, *, append: bool
+    ) -> subprocess.Popen[bytes]:
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+        log_fd = os.open(str(ticket_dir / "run.log"), flags, 0o600)
+        try:
+            return subprocess.Popen(
+                list(command), cwd=str(self.state_dir), stdin=subprocess.DEVNULL,
+                stdout=log_fd, stderr=subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+        finally:
+            os.close(log_fd)
+
+    def _annual_resume_state(self, record: Mapping[str, Any]) -> tuple[bool, bool]:
+        """Return (resumable, deadline_expired) from exact Core plan/Scheduler rows."""
+
+        try:
+            from .research_plan import (
+                _resolved_plan_work_orders, plan_start_ref_for,
+                read_exact_research_plan_start, read_exact_research_plan_version,
+            )
+
+            uri = f"file:{self.state_dir / 'core.sqlite'}?mode=ro"
+            connection = sqlite3.connect(uri, uri=True)
+            connection.row_factory = sqlite3.Row
             try:
-                process = subprocess.Popen(
-                    command, cwd=str(self.state_dir), stdin=subprocess.DEVNULL,
-                    stdout=log_fd, stderr=subprocess.STDOUT,
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                cursor = connection.cursor()
+                plan = read_exact_research_plan_version(
+                    cursor, record["plan_version_ref"]
                 )
+                read_exact_research_plan_start(
+                    cursor, plan_start_ref_for(plan["id"])
+                )
+                if (plan["schema_version"] != "0.2"
+                        or plan["execution_scope"]["operation"]
+                        != "search_registered_annual_report"):
+                    return False, False
+                mission_version_ref = plan["execution_scope"]["parameters"][
+                    "mission_version_ref"
+                ]
+                active = cursor.execute(
+                    "SELECT p.mission_version_id,p.version_number AS pointer_version,"
+                    "p.content_hash AS pointer_hash,v.version_number,v.content_hash "
+                    "FROM coverage_mission_versions v "
+                    "JOIN coverage_mission_pointer p ON p.mission_ref=v.mission_ref "
+                    "WHERE v.mission_version_id=?",
+                    (mission_version_ref,),
+                ).fetchone()
+                if (active is None
+                        or active["mission_version_id"] != mission_version_ref
+                        or active["pointer_version"] != active["version_number"]
+                        or active["pointer_hash"] != active["content_hash"]):
+                    # Revoked (no pointer) and superseded mission versions never
+                    # gain new execution merely because an old child died.
+                    return False, False
+                for work in _resolved_plan_work_orders(plan, cursor):
+                    formal = cursor.execute(
+                        "SELECT terminal_state FROM scheduler_formal_results "
+                        "WHERE work_order_id=?", (work["id"],)
+                    ).fetchone()
+                    if formal is not None:
+                        if formal["terminal_state"] != "succeeded":
+                            return False, False
+                        continue
+                    admitted = cursor.execute(
+                        "SELECT created_at FROM scheduler_attempt_events "
+                        "WHERE work_order_id=? ORDER BY event_seq LIMIT 1", (work["id"],)
+                    ).fetchone()
+                    if admitted is None:
+                        # The prior completion can be replayed to admit this node.
+                        return True, False
+                    maximum = work.get("budget", {}).get("max_elapsed_seconds")
+                    if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0:
+                        deadline = datetime.fromisoformat(admitted["created_at"]) + timedelta(
+                            seconds=maximum
+                        )
+                        return True, self.clock() >= deadline
+                    return False, False
+                return True, False
             finally:
-                os.close(log_fd)
-            record = {
-                "schema_version": TICKET_SCHEMA_VERSION, "id": ticket_id,
-                "operation": "registered_annual_report",
-                "plan_version_ref": plan_version_ref, "actor_ref": actor_ref,
-                "governance_ref": governance.id, "governance_hash": governance.content_hash,
-                "transport": "local-registered-sec-source",
-                "staging_path": str(self.staging_path), "started_at": started_at,
-                "pid": process.pid, "status": "running", "exit_code": None,
-                "completed_at": None,
-            }
-            _write_owner_only(self._ticket_path(ticket_id), record)
-            self._current = (ticket_id, process)
-            return dict(record)
+                connection.close()
+        except Exception:
+            return False, False
+
+    def _resume_annual_locked(self, ticket_id: str, record: dict[str, Any]) -> bool:
+        if (record.get("id") != ticket_id
+                or _TICKET_RE.fullmatch(ticket_id) is None
+                or not isinstance(record.get("plan_version_ref"), str)
+                or not record["plan_version_ref"].startswith("research-plan:")
+                or not isinstance(record.get("actor_ref"), str)
+                or _HUMAN_RE.fullmatch(record["actor_ref"]) is None
+                or record.get("staging_path") != str(self.staging_path)):
+            return False
+        if self._annual_configuration_errors():
+            return False
+        try:
+            from .annual_report_runtime import load_annual_report_model_configs
+
+            load_annual_report_model_configs(
+                self.state_dir,
+                draft_path=self.annual_report_draft_model_config_path,
+                verifier_path=self.annual_report_verifier_model_config_path,
+            )
+            governance = self.load_governance()
+        except Exception:
+            return False
+        if (governance.id != record.get("governance_ref")
+                or governance.content_hash != record.get("governance_hash")):
+            return False
+        resumable, expired = self._annual_resume_state(record)
+        if not resumable or (expired and record.get("deadline_resume_attempted")):
+            return False
+        ticket_dir = self._ticket_path(ticket_id).parent
+        (ticket_dir / "summary.json").unlink(missing_ok=True)
+        command = self._annual_command(
+            plan_version_ref=record["plan_version_ref"],
+            actor_ref=record["actor_ref"], ticket_dir=ticket_dir,
+        )
+        process = self._spawn(command, ticket_dir, append=True)
+        record["pid"] = process.pid
+        record["status"] = "running"
+        record["exit_code"] = None
+        record["completed_at"] = None
+        record["resume_count"] = int(record.get("resume_count", 0)) + 1
+        if expired:
+            record["deadline_resume_attempted"] = True
+        _write_owner_only(self._ticket_path(ticket_id), record)
+        self._current = (ticket_id, process)
+        return True
+
+    def _start_monitor(self, ticket_id: str, process: subprocess.Popen[bytes]) -> None:
+        def monitor() -> None:
+            current = process
+            while not self._stop.is_set():
+                code = current.wait()
+                if self._stop.is_set():
+                    return
+                with self._lock:
+                    path = self._ticket_path(ticket_id)
+                    try:
+                        record = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        return
+                    summary_exists = path.with_name("summary.json").is_file()
+                    if code != 0 and not summary_exists and self._resume_annual_locked(
+                        ticket_id, record
+                    ):
+                        current = self._current[1]
+                        continue
+                    record["exit_code"] = code
+                    record["completed_at"] = _wire_time(self.clock())
+                    record["status"] = "succeeded" if code == 0 else "failed"
+                    _write_owner_only(path, record)
+                    return
+
+        self._monitor = threading.Thread(
+            target=monitor, name=f"annual-resume-{ticket_id[-8:]}", daemon=True
+        )
+        self._monitor.start()
+
+    def _recover_annual_ticket(self) -> None:
+        if self._annual_configuration_errors():
+            return
+        candidates = sorted(self.tickets_dir.glob("*/ticket.json"), reverse=True)
+        for path in candidates:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (record.get("operation") != "registered_annual_report"
+                    or record.get("status") not in {"running", "orphaned"}
+                    or path.with_name("summary.json").is_file()):
+                continue
+            if self._pid_alive(record.get("pid")):
+                self._start_orphan_monitor(record["id"], int(record["pid"]))
+                return
+            with self._lock:
+                if self._resume_annual_locked(record["id"], record):
+                    self._start_monitor(record["id"], self._current[1])
+            return
+
+    def _start_orphan_monitor(self, ticket_id: str, pid: int) -> None:
+        """Watch a child inherited from the prior Writer and resume on death."""
+
+        def monitor() -> None:
+            while not self._stop.wait(0.25):
+                if self._pid_alive(pid):
+                    continue
+                with self._lock:
+                    path = self._ticket_path(ticket_id)
+                    try:
+                        record = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        return
+                    if (record.get("status") not in {"running", "orphaned"}
+                            or record.get("pid") != pid
+                            or path.with_name("summary.json").is_file()):
+                        return
+                    if self._resume_annual_locked(ticket_id, record):
+                        self._start_monitor(ticket_id, self._current[1])
+                return
+
+        self._monitor = threading.Thread(
+            target=monitor, name=f"annual-orphan-{ticket_id[-8:]}", daemon=True
+        )
+        self._monitor.start()
 
     def status(self, ticket_ref: str) -> dict[str, Any]:
         if not isinstance(ticket_ref, str) or _TICKET_RE.fullmatch(ticket_ref) is None:
@@ -475,7 +717,8 @@ class SecLaneLauncher:
             if record["status"] == "running":
                 if process is not None:
                     code = process.poll()
-                    if code is not None:
+                    if (code is not None
+                            and (self._monitor is None or not self._monitor.is_alive())):
                         record["exit_code"] = code
                         record["completed_at"] = _wire_time(self.clock())
                         record["status"] = "succeeded" if code == 0 else "failed"
@@ -505,15 +748,33 @@ class SecLaneLauncher:
         return True
 
     def wait(self, timeout: float | None = None) -> int | None:
-        """Test hook: wait for the current child to finish."""
+        """Test hook: follow automatic annual resumes through terminal exit."""
 
-        with self._lock:
-            current = self._current
-        if current is None:
-            return None
-        return current[1].wait(timeout=timeout)
+        deadline = None if timeout is None else datetime.now().timestamp() + timeout
+        seen = False
+        while True:
+            with self._lock:
+                current = self._current
+                monitor = self._monitor
+            if current is None:
+                return None if not seen else 0
+            seen = True
+            remaining = None if deadline is None else max(0.0, deadline - datetime.now().timestamp())
+            try:
+                code = current[1].wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                raise
+            if monitor is not None:
+                remaining = None if deadline is None else max(0.0, deadline - datetime.now().timestamp())
+                monitor.join(timeout=remaining)
+                if monitor.is_alive():
+                    raise subprocess.TimeoutExpired(current[1].args, timeout)
+            with self._lock:
+                if self._current is current:
+                    return code
 
     def close(self) -> None:
+        self._stop.set()
         with self._lock:
             current, self._current = self._current, None
         if current is not None and current[1].poll() is None:
@@ -522,6 +783,8 @@ class SecLaneLauncher:
                 current[1].wait(timeout=5)
             except subprocess.TimeoutExpired:
                 current[1].kill()
+        if self._monitor is not None and self._monitor is not threading.current_thread():
+            self._monitor.join(timeout=5)
 
 
 __all__ = [
