@@ -123,6 +123,7 @@ class RecoveryFixture:
                 {**active.policy, "research_budget": outer},
                 policy_version_id="governance-policy-version:recovery:2",
                 version_number=2, prior_version_ref=active.id,
+                effective_from=self.harness.clock().isoformat(),
                 actor_ref="human:test-owner",
                 change_reason="authorize bounded annual recovery",
                 activate=True,
