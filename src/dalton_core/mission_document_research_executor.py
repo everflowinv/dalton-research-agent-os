@@ -1407,6 +1407,126 @@ class MissionDocumentResearchExecutor:
             "refusal_day": refusal["day"],
         }
 
+    def _paid_contract_failure_proof(self, work, formal, index):
+        """Prove a terminal contract rejection was sent and actually settled.
+
+        This proof is diagnostic only.  It never makes the Work eligible for a
+        fresh recovery; the provider request already happened.
+        """
+
+        try:
+            if formal["terminal_state"] != "failed":
+                return None
+            envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+            if ((envelope.get("error") or {}).get("code")
+                    != "MODEL_OUTPUT_CONTRACT_REJECTED"):
+                return None
+            if (envelope.get("id") != formal.get("result_envelope_id")
+                    or envelope.get("work_order_ref") != work["id"]
+                    or content_hash(envelope) != formal.get("result_envelope_hash")):
+                return None
+            invocation_ref = envelope.get("invocation_ref")
+            row = self.authority.store.connection.execute(
+                "SELECT * FROM model_invocations WHERE invocation_id=?",
+                (invocation_ref,),
+            ).fetchone()
+            if row is None:
+                return None
+            saved = json.loads(row["invocation_json"])
+            alias = saved.pop("invocation_id", None)
+            invocation = ModelInvocation.from_dict(saved).to_dict()
+            columns = {
+                "profile_ref": row["profile_ref"], "provider": row["provider"],
+                "model": row["model"], "capability": row["capability"],
+                "runtime_ref": row["runtime_ref"], "actor_ref": row["actor_ref"],
+                "environment_hash": row["environment_hash"],
+                "granularity": row["granularity"],
+                "work_order_ref": row["work_order_ref"],
+                "model_family": row["model_family"],
+            }
+            route_ref = envelope.get("metadata", {}).get("route_decision_ref")
+            worker = self.draft_worker if index == 1 else self.verifier_worker
+            route = worker.router.get_decision(route_ref)
+            endpoint = route.get("selected_endpoint") if isinstance(route, Mapping) else None
+            if (alias != invocation_ref
+                    or canonical_json({**invocation, "invocation_id": alias})
+                    != row["invocation_json"]
+                    or any(invocation.get(key) != value for key, value in columns.items())
+                    or invocation.get("id") != invocation_ref
+                    or invocation.get("work_order_ref") != work["id"]
+                    or invocation.get("completed_at") is None
+                    or invocation.get("parent_ref") != route_ref
+                    or route.get("id") != route_ref
+                    or route.get("work_order_ref") != work["id"]
+                    or route.get("work_order_hash") != content_hash(work)
+                    or route.get("attempt_number") != formal["attempt_number"]
+                    or route.get("outcome") != "selected"
+                    or not isinstance(endpoint, Mapping)
+                    or invocation.get("profile_ref")
+                    != route.get("selected_profile_version_ref")
+                    or invocation.get("provider") != endpoint.get("provider")
+                    or invocation.get("model") != endpoint.get("model")
+                    or invocation.get("model_family") != endpoint.get("family")
+                    or invocation.get("runtime_ref") != endpoint.get("adapter_ref")
+                    or invocation.get("capability") != route.get("capability")):
+                return None
+            budget_store = worker.budget_store
+            if budget_store is None:
+                return None
+            exact = budget_store.admission(
+                work_order_ref=work["id"], attempt_number=formal["attempt_number"],
+                phase=self._phase(index),
+            )
+            if not isinstance(exact, Mapping):
+                return None
+            settlement = exact.get("settlement")
+            usage = worker.observability.latest_usage(invocation_ref)
+            cost_row = worker.observability.connection.execute(
+                "SELECT cost_entry_id FROM observability_cost_entries "
+                "WHERE usage_entry_ref=? ORDER BY revision_number DESC LIMIT 1",
+                (usage["id"],),
+            ).fetchone()
+            cost = (None if cost_row is None else
+                    worker.observability.get_cost(cost_row["cost_entry_id"]))
+            if (exact.get("admission", {}).get("route_decision_ref") != route_ref
+                    or usage.get("invocation_ref") != invocation_ref
+                    or usage.get("work_order_ref") != work["id"]
+                    or usage.get("profile_ref") != invocation["profile_ref"]
+                    or usage.get("provider") != invocation["provider"]
+                    or usage.get("model") != invocation["model"]
+                    or usage.get("model_family") != invocation["model_family"]
+                    or usage.get("runtime_ref") != invocation["runtime_ref"]
+                    or usage.get("capability") != invocation["capability"]
+                    or not isinstance(cost, Mapping)
+                    or cost.get("usage_entry_ref") != usage["id"]
+                    or cost.get("cost_status") != "actual"
+                    or not isinstance(cost.get("amount_micros"), int)
+                    or cost["amount_micros"] <= 0
+                    or not isinstance(settlement, Mapping)
+                    or settlement.get("usage_entry_ref") != usage["id"]
+                    or settlement.get("actual_micros") != cost["amount_micros"]):
+                return None
+            return {
+                "classification": "proved_paid_output_contract_failure",
+                "failed_at": formal["created_at"],
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "result_envelope_ref": envelope["id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "invocation_ref": invocation_ref,
+                "invocation_hash": content_hash(invocation),
+                "budget_settlement_ref": settlement["settlement_id"],
+                "budget_settlement_hash": settlement["content_hash"],
+                "usage_entry_ref": usage["id"],
+                "usage_entry_hash": usage["content_hash"],
+                "cost_entry_ref": cost["id"], "cost_entry_hash": cost["content_hash"],
+                "actual_micros": settlement["actual_micros"],
+            }
+        except Exception:
+            # Diagnostic drift must preserve the old conservative terminal
+            # barrier; it must never disrupt recovery control flow.
+            return None
+
     def _start(self, admission, root):
         start_id = _ref("mission-document-research-start", self._run_id(admission))
         body = {"schema_version": SCHEMA_VERSION, "id": start_id,
@@ -1519,6 +1639,9 @@ class MissionDocumentResearchExecutor:
             "recovery": dict(recovery),
             "tried_query_terms": list(admission["request"]["query_terms"]),
             "meaning": (
+                "The terminal provider request and actual charge are proved, but its "
+                "output failed the contract. No fresh automatic recovery is allowed."
+                if reason == "paid_send_output_contract_failed" else
                 "The model stage failed without authority for a safe replay; its send and "
                 "charging state remains frozen for review."
                 if reason == "send_state_unproved" else
@@ -1543,11 +1666,20 @@ class MissionDocumentResearchExecutor:
                    else _parse_time(links[0]["window_started_at"], "recovery window start"))
         deadline = started + timedelta(seconds=policy["max_elapsed_seconds"])
         if proof is None:
+            paid_contract_proof = self._paid_contract_failure_proof(
+                work, formal, index,
+            )
             recovery = {
-                "status": "stopped", "reason": "send_state_unproved", "eligible": False,
+                "status": "stopped",
+                "reason": (
+                    "paid_send_output_contract_failed"
+                    if paid_contract_proof is not None else "send_state_unproved"
+                ),
+                "eligible": False,
                 "used_fresh_work_orders": len(links),
                 "max_fresh_work_orders": policy["max_fresh_work_orders"],
-                "retry_at": None, "deadline": _time(deadline), "proof": None,
+                "retry_at": None, "deadline": _time(deadline),
+                "proof": paid_contract_proof,
             }
         else:
             deadline = _day_budget_recovery_deadline(

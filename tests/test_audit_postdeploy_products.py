@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
@@ -102,6 +103,31 @@ class ResearchPlanAuditTests(unittest.TestCase):
         self.assertEqual(
             audit.planner_classification(None, [{"terminal_state": "failed"}]),
             "planner_terminal_failed")
+
+    def test_completed_historical_reentry_precedes_stale_due_marker(self):
+        classification = audit.directed_classification(
+            promotion=None, outcome=None, fresh_links=[], fresh_tickets=[],
+            controlled_reentry_markers=[{"record": {"kind": "exact_scheduler_replay"}}],
+            completed_controlled_reentry=True,
+            latest_recovery={"retry_at": "2026-09-12T00:00:00+00:00"},
+            works=[{"work_order_ref": "work:test"}],
+            now=datetime(2026, 9, 12, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(classification,
+                         "controlled_reentry_completed_without_candidate")
+
+    def test_paid_contract_barrier_is_not_unknown_send_state(self):
+        classification = audit.directed_classification(
+            promotion=None, outcome=None, fresh_links=[], fresh_tickets=[],
+            controlled_reentry_markers=[], completed_controlled_reentry=False,
+            latest_recovery={
+                "reason": "paid_send_output_contract_failed", "retry_at": None,
+            },
+            works=[{"work_order_ref": "work:test"}],
+            now=datetime(2026, 9, 12, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(classification,
+                         "proved_paid_output_contract_terminal_barrier")
 
 
 if __name__ == "__main__":

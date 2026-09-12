@@ -543,6 +543,35 @@ def run_files(state: Path, admission_ref: str) -> list[dict[str, Any]]:
     return sorted(result, key=lambda item: (str(item["started_at"]), str(item["ticket_ref"])))
 
 
+def directed_classification(*, promotion: Any, outcome: Any, fresh_links: Sequence[Any],
+                            fresh_tickets: Sequence[Mapping[str, Any]],
+                            controlled_reentry_markers: Sequence[Any],
+                            completed_controlled_reentry: bool,
+                            latest_recovery: Any, works: Sequence[Any],
+                            now: datetime) -> str:
+    if promotion is not None:
+        return "canonical_promotion_observed"
+    if outcome is not None:
+        return "candidate_outcome_waiting_for_promotion"
+    if fresh_links or (fresh_tickets and controlled_reentry_markers):
+        return "legacy_or_current_recovery_reentered_and_advancing"
+    if completed_controlled_reentry:
+        return "controlled_reentry_completed_without_candidate"
+    if fresh_tickets:
+        return "fresh_ticket_without_controlled_reentry_proof"
+    if isinstance(latest_recovery, Mapping) and latest_recovery.get("retry_at"):
+        due = parse_time(latest_recovery["retry_at"], "recovery retry_at")
+        return ("utc_budget_wait_not_due" if now < due
+                else "utc_budget_reentry_due_not_yet_observed")
+    if (isinstance(latest_recovery, Mapping)
+            and latest_recovery.get("reason") == "send_state_unproved"):
+        return "unknown_send_state_terminal_barrier"
+    if (isinstance(latest_recovery, Mapping)
+            and latest_recovery.get("reason") == "paid_send_output_contract_failed"):
+        return "proved_paid_output_contract_terminal_barrier"
+    return "execution_incomplete" if works else "admitted_without_work"
+
+
 def directed_lifecycle(connections: Mapping[str, sqlite3.Connection], state: Path,
                        admission_ref: str, cutoff: datetime,
                        baseline_ids: Mapping[str, Sequence[str]]) -> dict[str, Any]:
@@ -647,24 +676,18 @@ def directed_lifecycle(connections: Mapping[str, sqlite3.Connection], state: Pat
                             if item.get("outcome") == "recovery_required"), None)
     now = datetime.now(timezone.utc)
     fresh_links = [item for item in links if item["fresh_since_cutoff"]]
-    if promotion is not None:
-        classification = "canonical_promotion_observed"
-    elif outcome is not None:
-        classification = "candidate_outcome_waiting_for_promotion"
-    elif fresh_links or (fresh_tickets and controlled_reentry_markers):
-        classification = "legacy_or_current_recovery_reentered_and_advancing"
-    elif fresh_tickets:
-        classification = "fresh_ticket_without_controlled_reentry_proof"
-    elif isinstance(latest_recovery, Mapping) and latest_recovery.get("retry_at"):
-        due = parse_time(latest_recovery["retry_at"], "recovery retry_at")
-        classification = ("utc_budget_wait_not_due" if now < due
-                          else "utc_budget_reentry_due_not_yet_observed")
-    elif isinstance(latest_recovery, Mapping) and latest_recovery.get("reason") == "send_state_unproved":
-        classification = "unknown_send_state_terminal_barrier"
-    elif works:
-        classification = "execution_incomplete"
-    else:
-        classification = "admitted_without_work"
+    completed_controlled_reentry = any(
+        (ticket.get("summary") or {}).get("status") == "complete"
+        and ticket.get("controlled_reentry_markers")
+        for ticket in tickets
+    )
+    classification = directed_classification(
+        promotion=promotion, outcome=outcome, fresh_links=fresh_links,
+        fresh_tickets=fresh_tickets,
+        controlled_reentry_markers=controlled_reentry_markers,
+        completed_controlled_reentry=completed_controlled_reentry,
+        latest_recovery=latest_recovery, works=works, now=now,
+    )
     return {
         "admission_ref": admission_ref, "admission_hash": row["content_hash"],
         "admitted_at": row["created_at"], "company_ref": row["company_ref"],

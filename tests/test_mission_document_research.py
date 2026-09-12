@@ -1028,6 +1028,55 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 self.assertEqual(read_mission_document_research_observations(
                     fixture.store.connection)[0]["outcome"], "recovery_required")
 
+    def test_paid_contract_exhaustion_is_distinct_from_unknown_send_state(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter,
+        )
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        result = executor.run_once(admission["id"])
+        self.assertEqual(result["reason"], "paid_send_output_contract_failed")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 0)
+        observation = read_mission_document_research_observations(
+            fixture.store.connection)[0]
+        proof = observation["recovery"]["proof"]
+        self.assertEqual(proof["classification"],
+                         "proved_paid_output_contract_failure")
+        self.assertGreater(proof["actual_micros"], 0)
+        self.assertIsNotNone(proof["usage_entry_ref"])
+
+    def test_paid_contract_diagnostic_usage_mismatch_degrades_to_unknown_send(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter,
+        )
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        observability = executor.draft_worker.observability
+        latest_usage = observability.latest_usage
+
+        def mismatched(invocation_ref):
+            return {**latest_usage(invocation_ref), "work_order_ref": "work:foreign"}
+
+        with patch.object(observability, "latest_usage", side_effect=mismatched):
+            result = executor.run_once(admission["id"])
+        self.assertEqual(result["reason"], "send_state_unproved")
+        self.assertIsNone(read_mission_document_research_observations(
+            fixture.store.connection)[0]["recovery"]["proof"])
+
     def test_foreign_self_consistent_model_proof_is_not_formal_model_authority(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
