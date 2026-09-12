@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import plistlib
 import tempfile
@@ -20,7 +21,9 @@ from scripts.run_successor_copied_state_rehearsal import (
 )
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
+    expected_openclaw_frame_transition_state,
 )
+from tests.test_successor_config_transition import PreserveExistingTransitionTests
 
 
 class IdentityModule:
@@ -677,6 +680,75 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         self.assertNotIn("/live", json.dumps(installed))
         self.assertEqual(derived["model_inventory"]["before_count"],
                          derived["model_inventory"]["after_count"])
+
+    def test_r18_external_derivation_confines_model_broker_and_host_artifacts(self):
+        fixture = PreserveExistingTransitionTests(methodName="runTest")
+        fixture.setUp()
+        try:
+            manifest = fixture.build_external(
+                managed_model_broker=True, already_target=True)
+            before_host = fixture.packet / "runtime.before.mjs"
+            after_host = fixture.packet / "runtime.after.mjs"
+            before_host.write_text("const old = true;\n")
+            after_host.write_text("const guarded = true;\n")
+            external = manifest["external_config_transitions"][0]
+            external["managed_host_patch"] = {
+                "source_commit": manifest["source_commit"],
+                "helper_relative_path": (
+                    "integrations/openclaw_host_patches/"
+                    "patch_provider_output_control_endpoint.py"),
+                "helper_sha256": "d" * 64,
+                "target_relative_path": "dist/runtime-llm.runtime-test.mjs",
+                "before": before_host.name, "before_sha256": hashlib.sha256(before_host.read_bytes()).hexdigest(),
+                "after": after_host.name, "after_sha256": hashlib.sha256(after_host.read_bytes()).hexdigest(),
+                "capability_check": "repo_helper_check_no_call",
+            }
+            manifest["content_hash"] = canonical_hash({
+                key: value for key, value in manifest.items()
+                if key != "content_hash"})
+            scratch = fixture.root / "r18-scratch"; scratch.mkdir()
+            scratch_state = scratch / PathModule.STATE_SUBDIR
+            scratch_state.mkdir(parents=True)
+            for name in fixture.models:
+                (scratch_state / name).write_bytes((fixture.packet / name).read_bytes())
+            for name, path in fixture.preserved.items():
+                (scratch_state / name).write_bytes(path.read_bytes())
+            authority = scratch_state / "connector-governance/yfinance-analyst-estimates-v1.json"
+            authority.parent.mkdir(); authority.write_bytes(
+                (fixture.packet / "yfinance-approved.json").read_bytes())
+            scratch_config = scratch / "service.json"
+            scratch_config.write_bytes(
+                (fixture.packet / "service.installed.json").read_bytes())
+            scratch_openclaw = scratch / "openclaw/openclaw.json"
+            scratch_openclaw.parent.mkdir(); scratch_openclaw.write_bytes(
+                (fixture.packet / "openclaw.before.json").read_bytes())
+            rehearsal = SimpleNamespace(
+                temp_root=scratch, temp_state=scratch_state,
+                temp_config=scratch_config, replacements={})
+            derived_path, _proof_path, proof = derive_confined_transition(
+                PathModule, rehearsal, packet_root=fixture.packet,
+                manifest=manifest, original_manifest_sha256="e" * 64)
+            derived = json.loads(derived_path.read_text())
+            _before, _after, row = expected_openclaw_frame_transition_state(
+                packet_root=derived_path.parent, manifest=derived)
+            plugin = row["managed_plugins"][0]
+            self.assertTrue(Path(plugin["destination"]).resolve().is_relative_to(
+                derived_path.parent.resolve()))
+            self.assertTrue(plugin["replaces"].endswith(
+                "/old/openclaw-model-broker"))
+            host = row["managed_host_patch"]
+            self.assertEqual(manifest["source_commit"], host["source_commit"])
+            self.assertEqual(
+                {"status": "artifacts_confined_not_executed", "model_calls": 0,
+                 "before_sha256": host["before_sha256"],
+                 "after_sha256": host["after_sha256"]},
+                proof["managed_host_patch"])
+            for name in ("before", "after"):
+                self.assertTrue((derived_path.parent / host[name]).is_file())
+                self.assertTrue((derived_path.parent / host[name]).resolve().is_relative_to(
+                    derived_path.parent.resolve()))
+        finally:
+            fixture.doCleanups()
 
 
 if __name__ == "__main__":

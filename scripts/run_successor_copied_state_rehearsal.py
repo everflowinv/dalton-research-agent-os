@@ -465,12 +465,10 @@ def derive_confined_transition(
             confined_before = derived_root / "openclaw-config.before.json"
             _write_exclusive(confined_before, scratch_openclaw.read_bytes())
             before_value = json.loads(confined_before.read_text())
-            after_value = _set_leaf(
-                before_value, OPENCLAW_FRAME_PATH,
-                OPENCLAW_TARGET_MAX_FRAME_BYTES)
+            after_value = json.loads(json.dumps(before_value))
             external = derived["external_config_transitions"][0]
-            if external["managed_plugins"]:
-                plugin = external["managed_plugins"][0]
+            destination_rewrites = {}
+            for plugin in external["managed_plugins"]:
                 original_destination = Path(plugin["destination"])
                 _need(original_destination.is_dir()
                       and not original_destination.is_symlink(),
@@ -480,13 +478,36 @@ def derive_confined_transition(
                 shutil.copytree(original_destination, confined_destination,
                                 symlinks=False)
                 plugin["destination"] = str(confined_destination.resolve())
-                paths = after_value["plugins"]["load"]["paths"]
-                old_path = external["semantic_mutations"][1]["before_value"]
-                _need(paths.count(old_path) == 1,
-                      "confined OpenClaw plugin baseline differs")
-                paths[paths.index(old_path)] = plugin["destination"]
-                external["semantic_mutations"][1]["after_value"] = plugin[
-                    "destination"]
+                destination_rewrites[str(original_destination)] = plugin["destination"]
+            for mutation in external["semantic_mutations"]:
+                if mutation["kind"] == "json_leaf_compare_and_patch":
+                    after_value = _set_leaf(
+                        after_value, tuple(mutation["json_path"]),
+                        mutation["after_value"])
+                elif mutation["kind"] == "json_array_unique_replace":
+                    paths = after_value["plugins"]["load"]["paths"]
+                    old_path = mutation["before_value"]
+                    replacement = destination_rewrites.get(mutation["after_value"])
+                    _need(paths.count(old_path) == 1 and replacement is not None,
+                          "confined OpenClaw plugin baseline differs")
+                    paths[paths.index(old_path)] = replacement
+                    mutation["after_value"] = replacement
+                else:
+                    raise RehearsalBindingError(
+                        "unsupported confined OpenClaw semantic mutation")
+            host_patch = external.get("managed_host_patch")
+            if host_patch is not None:
+                host_root = derived_root / "managed-host-patch"
+                host_root.mkdir(mode=0o700)
+                for name in ("before", "after"):
+                    original_host = packet_root / host_patch[name]
+                    _artifact(original_host, host_patch[f"{name}_sha256"],
+                              f"original model broker host patch {name}")
+                    confined_host = host_root / f"runtime-llm.{name}.mjs"
+                    _write_exclusive(confined_host, original_host.read_bytes())
+                    host_patch[name] = confined_host.relative_to(
+                        derived_root).as_posix()
+                    host_patch[f"{name}_sha256"] = _sha(confined_host)
             confined_after = derived_root / "openclaw-config.after.json"
             _write_json(confined_after, after_value)
             external["before"] = {
@@ -540,6 +561,14 @@ def derive_confined_transition(
         "confined_semantics_sha256": derived["model_inventory"][
             "after_semantic_sha256"],
     }
+    if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+        host_patch = derived["external_config_transitions"][0].get(
+            "managed_host_patch")
+        proof["managed_host_patch"] = (
+            {"status": "artifacts_confined_not_executed", "model_calls": 0,
+             "before_sha256": host_patch["before_sha256"],
+             "after_sha256": host_patch["after_sha256"]}
+            if host_patch is not None else None)
     proof["content_hash"] = canonical_hash(proof)
     proof_path = derived_root / "derivation-proof.json"
     _write_json(proof_path, proof)
@@ -821,17 +850,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         actual_openclaw = json.loads(rehearsal.successor_openclaw.read_text())
         expected_value = json.loads(expected_openclaw)
         if _row["managed_plugins"]:
-            production_path = _row["managed_plugins"][0]["destination"]
             paths = actual_openclaw["plugins"]["load"]["paths"]
-            confined_path = next(
-                mutation["after_value"] for mutation in
-                json.loads((Path(rehearsal.successor_derivation["proof_path"]).parent /
-                            "successor-config-transition.confined.json").read_text())
-                ["external_config_transitions"][0]["semantic_mutations"]
-                if mutation["kind"] == "json_array_unique_replace")
-            _need(paths.count(confined_path) == 1,
-                  "confined managed plugin path is not unique")
-            paths[paths.index(confined_path)] = production_path
+            confined_row = json.loads((
+                Path(rehearsal.successor_derivation["proof_path"]).parent /
+                "successor-config-transition.confined.json").read_text())[
+                    "external_config_transitions"][0]
+            confined_by_id = {plugin["plugin_id"]: plugin
+                              for plugin in confined_row["managed_plugins"]}
+            for plugin in _row["managed_plugins"]:
+                confined_path = confined_by_id[plugin["plugin_id"]]["destination"]
+                _need(paths.count(confined_path) == 1,
+                      "confined managed plugin path is not unique")
+                paths[paths.index(confined_path)] = plugin["destination"]
         _need(actual_openclaw == expected_value,
               "confined OpenClaw result changes more than reviewed paths")
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
