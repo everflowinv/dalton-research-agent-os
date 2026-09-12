@@ -25,9 +25,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.company_model_cli import (
-    _validated_spec_with_repair, choose_company, filed_classifications,
+    _scheduler_failure_codes, _validated_spec_with_repair,
+    choose_company, filed_classifications,
     model_spec_request_id, run_model_spec, structured_output_repair_config,
 )
+from dalton_core.cockpit_model import CockpitModelError
 from dalton_core.company_model_forecast_cli import run_model_forecast
 from dalton_core.company_model_spec import TASK_HASH, spec_from_response
 from dalton_core.company_dossier import CompanyDossierAuthority
@@ -39,6 +41,52 @@ from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_company_dossier import body as dossier_body, classification
 
 ACN = "company:sec-cik:0001467373"
+
+
+class SchedulerFailureCodeProjectionTests(unittest.TestCase):
+    def test_only_exact_failed_work_projects_bounded_chain_codes(self):
+        work_ref = "work:cockpit-model_spec-" + "1" * 32
+        envelope = {
+            "status": "failed", "work_order_ref": work_ref,
+            "error": {"code": "MODEL_CHAIN_EXHAUSTED"},
+            "metadata": {"chain_failures": [
+                {"code": "PROVIDER_BUDGET_EXCEEDED"},
+                {"code": "PROVIDER_BUDGET_EXCEEDED"},
+            ]},
+        }
+        trace = {
+            "schema_version": "0.1", "purpose": "model_spec",
+            "base_request_id": "request", "work_request_id": "request",
+            "work_order_ref": work_ref, "work_order_hash": "2" * 64,
+            "formal_result_envelope_hash": content_hash(envelope),
+        }
+        error = CockpitModelError("MODEL_CHAIN_EXHAUSTED", failure_trace=trace)
+
+        class Connection:
+            row_factory = None
+            def close(self):
+                pass
+
+        class ExactScheduler:
+            def work_order_authority(self, _ref):
+                return {"work_order_hash": "2" * 64}
+            def formal_result(self, _ref):
+                return {
+                    "terminal_state": "failed", "work_order_id": work_ref,
+                    "result_envelope_hash": content_hash(envelope),
+                    "result_envelope": envelope,
+                }
+
+        with patch("dalton_core.readonly_sqlite.connect_read_only",
+                   return_value=Connection()), patch(
+                       "dalton_core.scheduler.Scheduler", ExactScheduler):
+            self.assertEqual(_scheduler_failure_codes(error, "/readonly"), [
+                "MODEL_CHAIN_EXHAUSTED", "PROVIDER_BUDGET_EXCEEDED",
+            ])
+            trace["formal_result_envelope_hash"] = "3" * 64
+            drifted = CockpitModelError(
+                "MODEL_CHAIN_EXHAUSTED", failure_trace=trace)
+            self.assertEqual(_scheduler_failure_codes(drifted, "/readonly"), [])
 
 
 def _spec_body():

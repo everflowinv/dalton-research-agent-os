@@ -31,6 +31,7 @@ class FakeLauncher:
             "max_periods_per_series": 8, "max_total_cells": 300,
         }
         self.prompt_byte_limit = 120_000
+        self.permission_control_version = "runtime:1"
 
     def repair_policy_hash(self):
         return content_hash(self.repair_config)
@@ -41,6 +42,9 @@ class FakeLauncher:
     def state_projection_config(self):
         return {"numeric_context_policy": dict(self.numeric_policy),
                 "prompt_byte_limit": self.prompt_byte_limit}
+
+    def permission_control_projection(self):
+        return {"runtime": self.permission_control_version}
 
     def start(self, *, company_ref, state_hash, task_hash=None,
               repair_policy_hash=None):
@@ -340,15 +344,80 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertEqual(busy["status"], "busy")
         self.assertEqual(busy["settled"]["status"], "running")
 
-    def test_dependency_failure_retries_same_state_as_probe(self):
+    def test_budget_refusal_yields_to_next_company_without_a_blind_probe(self):
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "spec_status": "model_unavailable",
+            "failure_reason": "CockpitModelError: BUDGET_REFUSED"})
+        next_company = self.lane.dispatch_once()
+        self.assertEqual(next_company["status"], "launched")
+        self.assertEqual(next_company["company_ref"], IBM)
+        self.assertEqual(next_company["settled"]["failure"]["failure_class"],
+                         "not_permitted")
+
+    def test_non_budget_dependency_failure_keeps_the_generic_probe(self):
         first = self.lane.dispatch_once()
         self.launcher.finish(first["ticket_ref"], summary={
             "spec_status": "model_unavailable", "failure_reason": "model_unavailable"})
         probe = self.lane.dispatch_once()
         self.assertEqual(probe["status"], "launched")
         self.assertEqual(probe["state_hash"], first["state_hash"])
-        self.assertEqual(probe["settled"]["failure"]["failure_class"],
-                         "dependency_unavailable")
+
+    def test_budget_refusal_stays_held_after_time_and_restart(self):
+        from datetime import datetime, timedelta, timezone
+        from dalton_core.lane_failure_class import PARK_PROBE_INTERVAL_SECONDS
+
+        missions = FakeMissions([ACN])
+        now = datetime(2026, 9, 12, 9, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as name:
+            lane = MissionModelSpecLaneCoordinator(
+                missions=missions, launcher=self.launcher,
+                mission=lambda: self.mission, failure_ledger_dir=name)
+            lane.budget.clock = lambda: now
+            first = lane.dispatch_once()
+            self.launcher.finish(first["ticket_ref"], summary={
+                "spec_status": "model_unavailable",
+                "failure_reason": "CockpitModelError: BUDGET_REFUSED"})
+            self.assertEqual(lane.dispatch_once()["status"], "held")
+
+            now += timedelta(seconds=PARK_PROBE_INTERVAL_SECONDS * 2)
+            restarted = MissionModelSpecLaneCoordinator(
+                missions=missions, launcher=self.launcher,
+                mission=lambda: self.mission, failure_ledger_dir=name)
+            restarted.budget.clock = lambda: now
+            held = restarted.dispatch_once()
+
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(len(self.launcher.started), 1)
+
+    def test_provider_output_budget_releases_only_after_config_change(self):
+        missions = FakeMissions([ACN])
+        with tempfile.TemporaryDirectory() as name:
+            config = Path(name) / "model-config.json"
+            config.write_text(
+                '{"routing_policy_ref":"routing-policy:test:1",'
+                '"max_output_tokens":6000}', encoding="utf-8")
+            self.launcher.model_config_path = config
+            lane = MissionModelSpecLaneCoordinator(
+                missions=missions, launcher=self.launcher,
+                mission=lambda: self.mission, failure_ledger_dir=name)
+            first = lane.dispatch_once()
+            self.launcher.finish(first["ticket_ref"], summary={
+                "spec_status": "model_unavailable",
+                "failure_reason": "CockpitModelError: MODEL_CHAIN_EXHAUSTED",
+                "failure_codes": [
+                    "MODEL_CHAIN_EXHAUSTED", "PROVIDER_BUDGET_EXCEEDED",
+                ],
+            })
+            self.assertEqual(lane.dispatch_once()["status"], "held")
+            self.assertEqual(len(self.launcher.started), 1)
+
+            self.launcher.permission_control_version = "runtime:2"
+            resumed = lane.dispatch_once()
+
+        self.assertEqual(resumed["status"], "launched")
+        self.assertEqual(resumed["company_ref"], ACN)
+        self.assertEqual(len(self.launcher.started), 2)
 
     def test_no_mission_is_reported_not_crashed(self):
         lane = MissionModelSpecLaneCoordinator(

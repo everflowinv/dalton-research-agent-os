@@ -32,12 +32,15 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
+from .cockpit_model import (
+    CockpitModel, CockpitModelError, lane_status_for, model_failure_trace,
+)
 from .company_model_spec import (
     TASK_HASH,
     CompanyModelSpecError,
@@ -90,6 +93,52 @@ _REPAIR_AUTHORITY_KEYS = {
     "work_order_ref", "work_order_hash", "result_envelope_ref",
     "result_envelope_hash", "invocation_ref", "route_decision_ref",
 }
+
+
+def _scheduler_failure_codes(
+    exc: BaseException, scheduler_db: str | Path,
+) -> list[str]:
+    """Project error codes only from the exact failed Scheduler authority."""
+
+    trace = model_failure_trace(exc)
+    if trace is None:
+        return []
+    from .readonly_sqlite import connect_read_only
+    from .scheduler import Scheduler
+
+    connection = connect_read_only(scheduler_db)
+    connection.row_factory = sqlite3.Row
+    scheduler = object.__new__(Scheduler)
+    scheduler.connection = connection
+    try:
+        authority = scheduler.work_order_authority(trace["work_order_ref"])
+        formal = scheduler.formal_result(trace["work_order_ref"])
+        if authority is None or formal is None:
+            return []
+        envelope = formal["result_envelope"]
+        if (
+            authority["work_order_hash"] != trace["work_order_hash"]
+            or formal["terminal_state"] != "failed"
+            or formal["work_order_id"] != trace["work_order_ref"]
+            or formal["result_envelope_hash"] != trace["formal_result_envelope_hash"]
+            or content_hash(envelope) != trace["formal_result_envelope_hash"]
+            or envelope.get("status") != "failed"
+            or envelope.get("work_order_ref") != trace["work_order_ref"]
+        ):
+            return []
+        candidates = [((envelope.get("error") or {}).get("code"))]
+        failures = (envelope.get("metadata") or {}).get("chain_failures") or []
+        if isinstance(failures, list):
+            candidates.extend(
+                item.get("code") for item in failures[:12]
+                if isinstance(item, Mapping)
+            )
+        return sorted({code for code in candidates
+                       if isinstance(code, str) and 1 <= len(code) <= 80})
+    except Exception:  # noqa: BLE001 - absent/drifted proof authorizes nothing
+        return []
+    finally:
+        connection.close()
 
 
 def model_spec_request_identity(
@@ -669,11 +718,13 @@ def run_model_spec(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
+            failure_codes = _scheduler_failure_codes(exc, model.scheduler_db)
             summary.update({
                 "status": "succeeded",
                 # C2: a spent pool is a budget decision, not an outage.
                 "spec_status": lane_status_for(exc, "model_unavailable"),
-                "failure_reason": f"{type(exc).__name__}: {exc}"})
+                "failure_reason": f"{type(exc).__name__}: {exc}",
+                "failure_codes": failure_codes})
             return summary
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)

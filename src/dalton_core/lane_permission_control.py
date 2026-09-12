@@ -50,6 +50,12 @@ def permission_key(business_key: str, mission: Mapping[str, Any], launcher: Any,
             controls.append(f"{name}:{hashlib.sha256(path.read_bytes()).hexdigest()}")
         except (OSError, TypeError, ValueError):
             controls.append(f"{name}:missing")
+    projection = getattr(launcher, "permission_control_projection", None)
+    if callable(projection):
+        try:
+            controls.append("runtime:" + canonical_json(projection()))
+        except Exception:  # noqa: BLE001 - unreadable control cannot grant reentry
+            controls.append("runtime:unavailable")
     digest = hashlib.sha256("|".join(controls).encode("utf-8")).hexdigest()[:16]
     return f"{business_key}|permission:{digest}"
 

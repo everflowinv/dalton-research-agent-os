@@ -158,6 +158,21 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(found.failure_class, TRANSIENT)
         self.assertTrue(found.rule.startswith("mission_statements:"))
 
+    def test_model_spec_provider_output_budget_waits_for_changed_control(self) -> None:
+        found = classify(
+            "CockpitModelError: PROVIDER_BUDGET_EXCEEDED",
+            status="model_unavailable", lane="mission_model_spec",
+        )
+        self.assertEqual(found.failure_class, NOT_PERMITTED)
+        self.assertEqual(found.rule, "mission_model_spec:provider_output_budget")
+
+    def test_model_spec_legacy_budget_refusal_is_not_a_timed_probe(self) -> None:
+        found = classify(
+            "CockpitModelError: BUDGET_REFUSED",
+            status="model_unavailable", lane="mission_model_spec",
+        )
+        self.assertEqual(found.failure_class, NOT_PERMITTED)
+        self.assertEqual(found.rule, "mission_model_spec:legacy_budget_refusal")
 
 class LaneVocabularyMigrationTests(unittest.TestCase):
     """The reason strings the existing lanes emit, and where each one lands.
@@ -247,6 +262,7 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(budget.permission_items()[0]["item_key"], "doc:permission")
         budget.clear("doc:permission")
         self.assertIsNone(budget.blocked("doc:permission"))
+
 
     def setUp(self) -> None:
         self.now = NOW

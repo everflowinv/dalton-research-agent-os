@@ -278,6 +278,13 @@ LANE_RULES: dict[str, tuple[Rule, ...]] = {
     "mission_statements": (
         Rule("statements_no_lane_ticket", "carries no lane ticket", TRANSIENT),
     ),
+    # The provider answered, but its output exceeded the immutable Work
+    # authority.  Retrying the same Work is not a dependency probe; only a
+    # changed control projection may authorize a new request.
+    "mission_model_spec": (
+        Rule("provider_output_budget", "provider_budget_exceeded", NOT_PERMITTED),
+        Rule("legacy_budget_refusal", "budget_refused", NOT_PERMITTED),
+    ),
 }
 
 # A lane that talks to exactly one outside source, so an anonymous outage in it
@@ -605,6 +612,15 @@ class LaneFailureBudget:
                 count,
             )
         return None
+
+    def parked(self, item_key: str) -> BudgetDecision | None:
+        """Return an item's park without spending a time-based probe."""
+
+        item = str(item_key)
+        found = self._parked.get(item)
+        if found is None:
+            return None
+        return BudgetDecision("parked", found, self._failures.get(item, 0))
 
     def _probe_due(self, dependency: str) -> bool:
         """Whether this dependency may be asked again, and spend the answer."""

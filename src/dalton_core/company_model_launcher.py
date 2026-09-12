@@ -59,6 +59,14 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         config = self._validated_model_config()
         return content_hash(structured_output_repair_config(config))
 
+    def permission_control_projection(self) -> dict[str, str]:
+        """Runtime code whose change can authorize a held model Work anew."""
+
+        from . import cockpit_model
+
+        path = Path(cockpit_model.__file__).resolve()
+        return {"cockpit_model_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
     def numeric_context_policy(self) -> dict[str, int]:
         from .company_model_state import model_spec_numeric_context_config
 

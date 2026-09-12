@@ -75,6 +75,12 @@ class MissionModelSpecLaneCoordinator:
         if ticket.get("status") == "running":
             return {"status": "running", "ticket_ref": ticket_ref}
         summary = ticket.get("summary") or {}
+        raw_codes = summary.get("failure_codes")
+        failure_codes = (
+            sorted({code for code in raw_codes
+                    if isinstance(code, str) and 1 <= len(code) <= 80})
+            if isinstance(raw_codes, list) else []
+        )
         settled = {
             "status": ticket.get("status"),
             "ticket_ref": ticket_ref,
@@ -88,6 +94,7 @@ class MissionModelSpecLaneCoordinator:
             "spec_status": summary.get("spec_status"),
             "spec_ref": summary.get("spec_ref"),
             "cost_micros": summary.get("cost_micros"),
+            "failure_codes": failure_codes,
             "revenue_drivers": summary.get("revenue_drivers"),
         }
         reason = summary.get("failure_reason")
@@ -122,6 +129,8 @@ class MissionModelSpecLaneCoordinator:
             key = f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}"
             spec_status = settled.get("spec_status")
             reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
+            if "PROVIDER_BUDGET_EXCEEDED" in (settled.get("failure_codes") or []):
+                reason += " [PROVIDER_BUDGET_EXCEEDED]"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
                 reason=reason, connection=authority_connection(
@@ -219,7 +228,21 @@ class MissionModelSpecLaneCoordinator:
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)))
 
-            held = self.budget.blocked(permission) or self.budget.blocked(business_key)
+            held = self.budget.blocked(permission)
+            budget_park = self.budget.parked(business_key)
+            if (
+                held is None and budget_park is not None
+                and budget_park.classification.dependency == "model_budget"
+            ):
+                # A terminal Scheduler result has no retry authority.  In
+                # particular, a legacy BUDGET_REFUSED may represent either a
+                # proved no-send admission refusal or a provider response
+                # rejected for exceeding the Work's output-token authority. Neither
+                # becomes safe merely because the generic dependency-probe
+                # interval elapsed (or the writer restarted).
+                held = budget_park
+            if held is None:
+                held = self.budget.blocked(business_key)
             if held is None:
                 break
             held_companies[company_ref] = held.as_wire()
