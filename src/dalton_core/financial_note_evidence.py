@@ -166,13 +166,14 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
           and len({item.get("work_order_ref") for item in accounting_proofs}) == 2,
           "promotion accounting checkpoints are invalid")
     model_by_work = {item.get("work_order_ref"): item for item in accounting_proofs}
+    _need(all(isinstance(stage, Mapping) for stage in stages),
+          "promotion execution stage is invalid")
     _need(len({stage.get("work_ref") for stage in stages}) == 4
           and len({stage.get("formal_ref") for stage in stages}) == 4
           and len({stage.get("result_ref") for stage in stages}) == 4,
           "promotion execution stages are not unique")
     checked = []
     for index, stage in enumerate(stages):
-        _need(isinstance(stage, Mapping), "promotion execution stage is invalid")
         work_row = core.execute(
             "SELECT * FROM scheduler_work_orders WHERE work_order_id=?",
             (stage.get("work_ref"),),

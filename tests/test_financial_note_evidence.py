@@ -224,6 +224,36 @@ class FinancialNoteExecutionCheckpointTests(unittest.TestCase):
         finally:
             case.doCleanups()
 
+    def test_non_object_execution_stage_is_a_typed_refusal(self):
+        case = promotion_fixtures.DocumentPromotionTests()
+        try:
+            fixture, executor, _admission, _works, _records, _outcome, *_ = (
+                case._completed())
+            promotion = json.loads(fixture.store.connection.execute(
+                "SELECT record_json FROM mission_document_research_promotions"
+            ).fetchone()[0])
+            receipt = fixture.store.connection.execute(
+                "SELECT candidate_evidence_ref,candidate_claim_ref "
+                "FROM reviewed_candidate_commits"
+            ).fetchone()
+            bundle = executor.staging.exact_candidate_bundle(
+                evidence_ref=receipt["candidate_evidence_ref"],
+                claim_ref=receipt["candidate_claim_ref"],
+                idempotency_key=("mission-document-research-candidate:"
+                                 + promotion["admission_ref"]),
+            )
+            forged = copy.deepcopy(promotion["execution_proof"])
+            forged["stages"][0] = "not-an-execution-stage"
+            proof_body = dict(forged); proof_body.pop("content_hash")
+            forged["content_hash"] = content_hash(proof_body)
+            with self.assertRaisesRegex(FinancialNoteEvidenceError,
+                                        "execution stage is invalid"):
+                _execution_checkpoint(
+                    fixture.store.connection, fixture.router.connection, forged,
+                    material=bundle["material"])
+        finally:
+            case.doCleanups()
+
 
 class FinancialNoteResolverTests(unittest.TestCase):
     @staticmethod
