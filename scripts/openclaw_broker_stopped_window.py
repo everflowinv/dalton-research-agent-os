@@ -9,6 +9,7 @@ one gateway stop/config CAS/start.  It never replays or refunds a journal row.
 from __future__ import annotations
 
 import datetime
+import ast
 import json
 import os
 import re
@@ -381,13 +382,34 @@ def _host_patch_artifacts(*, packet_root: Path, source_root: Path,
         "runtime-llm.runtime-*.mjs"))
     before = packet_root / Path(str(row["before"]))
     after = packet_root / Path(str(row["after"]))
-    _need(len(runtime_targets) == 1 and target == runtime_targets[0]
+    source_resolved = source_root.resolve(strict=True)
+    packet_resolved = packet_root.resolve(strict=True)
+    openclaw_resolved = openclaw_root.resolve(strict=True)
+    _need(not (openclaw_root / "dist").is_symlink()
+          and helper.resolve(strict=True).is_relative_to(source_resolved)
+          and before.resolve(strict=True).is_relative_to(packet_resolved)
+          and after.resolve(strict=True).is_relative_to(packet_resolved)
+          and target.resolve(strict=True).is_relative_to(openclaw_resolved)
+          and len(runtime_targets) == 1 and target == runtime_targets[0]
           and all(path.is_file() and not path.is_symlink()
               for path in (helper, target, before, after))
           and sha256_bytes(helper.read_bytes()) == row["helper_sha256"]
           and sha256_bytes(before.read_bytes()) == row["before_sha256"]
           and sha256_bytes(after.read_bytes()) == row["after_sha256"],
           "model broker host patch artifacts differ")
+    assignments = {}
+    for statement in ast.parse(helper.read_text(encoding="utf-8")).body:
+        if isinstance(statement, ast.Assign):
+            for name in statement.targets:
+                if isinstance(name, ast.Name) and name.id in {"ORIGINAL", "PATCHED"}:
+                    assignments[name.id] = ast.literal_eval(statement.value)
+    original, patched = assignments.get("ORIGINAL"), assignments.get("PATCHED")
+    before_text = before.read_text(encoding="utf-8")
+    _need(isinstance(original, str) and isinstance(patched, str)
+          and before_text.count(original) == 1 and before_text.count(patched) == 0
+          and after.read_text(encoding="utf-8")
+              == before_text.replace(original, patched, 1),
+          "model broker host patch after artifact is not the exact helper transform")
     return helper, target, before.read_bytes(), after.read_bytes()
 
 

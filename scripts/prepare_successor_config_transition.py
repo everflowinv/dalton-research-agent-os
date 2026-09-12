@@ -18,6 +18,7 @@ install code, call a model, or publish a release.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -483,6 +484,8 @@ def build_model_broker_host_patch_artifact(
     helper_rel = Path(
         "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py")
     helper = source_root / helper_rel
+    source_resolved = source_root.resolve(strict=True)
+    packet_resolved = packet_root.resolve(strict=True)
     _need(HEX40.fullmatch(source_commit) is not None
           and subprocess.check_output(
               ["git", "-C", str(source_root), "rev-parse", "HEAD"],
@@ -490,8 +493,24 @@ def build_model_broker_host_patch_artifact(
           and not subprocess.check_output(
               ["git", "-C", str(source_root), "status", "--porcelain",
                "--untracked-files=all"], text=True)
-          and helper.is_file() and not helper.is_symlink(),
+          and helper.is_file() and not helper.is_symlink()
+          and helper.resolve(strict=True).is_relative_to(source_resolved)
+          and before_path.resolve(strict=True).is_relative_to(packet_resolved)
+          and after_path.resolve(strict=True).is_relative_to(packet_resolved),
           "model broker host patch source is not frozen")
+    assignments = {}
+    for statement in ast.parse(helper.read_text(encoding="utf-8")).body:
+        if isinstance(statement, ast.Assign):
+            for name in statement.targets:
+                if isinstance(name, ast.Name) and name.id in {"ORIGINAL", "PATCHED"}:
+                    assignments[name.id] = ast.literal_eval(statement.value)
+    original, patched = assignments.get("ORIGINAL"), assignments.get("PATCHED")
+    before_text = before_path.read_text(encoding="utf-8")
+    _need(isinstance(original, str) and isinstance(patched, str)
+          and before_text.count(original) == 1 and before_text.count(patched) == 0
+          and after_path.read_text(encoding="utf-8")
+              == before_text.replace(original, patched, 1),
+          "model broker host patch after artifact is not the exact helper transform")
     row = {
         "source_commit": source_commit,
         "helper_relative_path": helper_rel.as_posix(),

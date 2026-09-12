@@ -79,7 +79,7 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
         helper = (source / "integrations/openclaw_host_patches" /
                   "patch_provider_output_control_endpoint.py")
         helper.parent.mkdir(parents=True)
-        helper.write_text("# reviewed helper\n")
+        helper.write_text("ORIGINAL = \"original host bytes\\n\"\nPATCHED = \"patched host bytes\\n\"\n")
         target = self.openclaw_root / "dist/runtime-llm.runtime-test.mjs"
         target.parent.mkdir(parents=True, exist_ok=True)
         before = b"original host bytes\n"; after = b"patched host bytes\n"
@@ -116,7 +116,7 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
         source = self.root / "source"
         helper = (source / "integrations/openclaw_host_patches" /
                   "patch_provider_output_control_endpoint.py")
-        helper.parent.mkdir(parents=True); helper.write_text("# helper\n")
+        helper.parent.mkdir(parents=True); helper.write_text("ORIGINAL = \"before\\n\"\nPATCHED = \"after\\n\"\n")
         target = self.openclaw_root / "dist/runtime-llm.runtime-test.mjs"
         target.parent.mkdir(parents=True, exist_ok=True)
         before = b"before\n"; after = b"after\n"
@@ -140,6 +140,32 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
                     receipt_path=self.root / "missing.json",
                     run=lambda *_a, **_k: failed)
         self.assertEqual(before, target.read_bytes())
+
+    def test_host_patch_rejects_hashed_after_with_extra_code(self):
+        source = self.root / "source"
+        helper = (source / "integrations/openclaw_host_patches" /
+                  "patch_provider_output_control_endpoint.py")
+        helper.parent.mkdir(parents=True)
+        helper.write_text('ORIGINAL = "before\\n"\nPATCHED = "after\\n"\n')
+        target = self.openclaw_root / "dist/runtime-llm.runtime-test.mjs"
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_text("before\n")
+        (self.packet / "before.bin").write_text("before\n")
+        (self.packet / "after.bin").write_text("after\nextra();\n")
+        row = {"source_commit": "c" * 40,
+               "helper_relative_path": str(helper.relative_to(source)),
+               "helper_sha256": stopped.sha256_bytes(helper.read_bytes()),
+               "target_relative_path": str(target.relative_to(self.openclaw_root)),
+               "before": "before.bin", "before_sha256": stopped.sha256_bytes((self.packet / "before.bin").read_bytes()),
+               "after": "after.bin", "after_sha256": stopped.sha256_bytes((self.packet / "after.bin").read_bytes()),
+               "capability_check": "repo_helper_check_no_call"}
+        with patch.object(stopped.subprocess, "check_output", return_value="c" * 40 + "\n"):
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
+                                        "exact helper transform"):
+                stopped.apply_reviewed_host_patch(
+                    packet_root=self.packet, source_root=source,
+                    openclaw_root=self.openclaw_root, row=row,
+                    receipt_path=self.root / "receipt.json")
+        self.assertEqual("before\n", target.read_text())
 
     def test_active_owned_child_refuses_before_config_or_gateway_mutation(self):
         before = self.config.read_bytes()
