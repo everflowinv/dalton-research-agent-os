@@ -240,6 +240,26 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertIn("not a concept", held["reason"])
         self.assertEqual(len(self.launcher.started), 2)
 
+    def test_settlement_poll_harvests_terminal_child_without_launching(self):
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary={
+            "spec_status": "refused", "failure_reason": "bad structure",
+        })
+        settled = self.lane.settle_only()
+        self.assertEqual(settled["status"], "settled")
+        self.assertEqual(settled["settled"]["spec_status"], "refused")
+        self.assertEqual(len(self.launcher.started), 1)
+        self.assertEqual(self.lane.settle_only(), {"status": "idle", "settled": None})
+
+    def test_settlement_poll_leaves_running_child_open(self):
+        launched = self.lane.dispatch_once()
+        polled = self.lane.settle_only()
+        self.assertEqual(polled, {
+            "status": "running",
+            "settled": {"status": "running", "ticket_ref": launched["ticket_ref"]},
+        })
+        self.assertEqual(len(self.launcher.started), 1)
+
     def test_all_pending_companies_held_is_finite_and_reports_each(self):
         first = self.lane.dispatch_once()
         self.launcher.finish(first["ticket_ref"], summary={

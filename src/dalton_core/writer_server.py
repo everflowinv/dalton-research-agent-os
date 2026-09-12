@@ -618,6 +618,7 @@ CORE_OPERATION_LITERALS = frozenset({
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
     "publish_answer_sufficiency_policy", "answer_subjects", "route_answer",
     "dispatch_answer_refresh",
+    "settle_company_model_spec",
 })
 CORE_OPERATIONS = CORE_OPERATION_LITERALS
 
@@ -625,6 +626,7 @@ CORE_OPERATIONS = CORE_OPERATION_LITERALS
 # Explicit operation parameter contracts.  The server must reject unknown
 # fields before they reach a method accepting **kwargs.
 OPERATION_FIELDS: dict[str, frozenset[str]] = {
+    "settle_company_model_spec": frozenset(),
     "register_invocation": frozenset({"invocation"}),
     "stage_change": frozenset({"change", "change_id", "thesis_id", "content", "payload", "producer_invocation", "producer_invocation_id", "actor_id"}),
     "verify_change": frozenset({"change_id", "verification", "verification_id", "verifier_invocation", "verifier_invocation_id", "verdict", "findings", "actor_id"}),
@@ -4290,6 +4292,11 @@ class WriterServer:
     # dispatch_initial_screen used to live here as five near-identical
     # methods.  Each now lives in its own lane module and reaches this server
     # through the lane registry; ``_handle`` falls through to it.
+
+    def _op_settle_company_model_spec(self, p: Mapping[str, Any]) -> Any:
+        from .mission_model_spec_lane import settle
+
+        return settle(self, p)
 
     def _op_mission_deliverables(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)

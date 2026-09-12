@@ -151,6 +151,21 @@ class MissionModelSpecLaneCoordinator:
                 f"financial-validation:{validation_hash}")
         return settled
 
+    def settle_only(self) -> dict[str, Any]:
+        """Harvest the current child without selecting or launching another."""
+
+        if self._open is None:
+            return {"status": "idle", "settled": None}
+        settled = self._settle_open()
+        return {
+            "status": (
+                "unavailable" if settled is None
+                else "running" if settled.get("status") == "running"
+                else "settled"
+            ),
+            "settled": settled,
+        }
+
     def dispatch_once(self) -> dict[str, Any]:
         settled = self._settle_open()
         mission = self.mission()
@@ -287,18 +302,10 @@ MODEL_SPEC_MODEL_CONFIG = "initial-screen-model-config.json"
 LAUNCHER_KWARG = "model_spec_launcher"
 
 
-def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
-    """Controller tick (P13am).
-
-    One company's model specification at a time.  The lane has no queue: what
-    needs deciding is derived from the ledger every tick, so its resting state
-    is silence and there is nothing to leave stuck.
-    """
-
+def _coordinator(server: Any) -> MissionModelSpecLaneCoordinator | None:
     launcher = server.lane_launcher(LAUNCHER_KWARG)
     if launcher is None:
-        return {"status": "unconfigured",
-                "reason": "no company model lane on this writer"}
+        return None
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         def mission() -> Any:
@@ -316,7 +323,31 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             failure_ledger_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P13am).
+
+    One company's model specification at a time.  The lane has no queue: what
+    needs deciding is derived from the ledger every tick, so its resting state
+    is silence and there is nothing to leave stuck.
+    """
+
+    coordinator = _coordinator(server)
+    if coordinator is None:
+        return {"status": "unconfigured",
+                "reason": "no company model lane on this writer"}
     return coordinator.dispatch_once()
+
+
+def settle(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Lightweight child harvest; it never selects or launches work."""
+
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        return {"status": "idle", "settled": None}
+    return coordinator.settle_only()
 
 
 def add_arguments(parser: Any) -> None:
@@ -361,7 +392,7 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
-    "LANE",
+    "LANE", "settle",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
     "MODEL_SPEC_MODEL_CONFIG",

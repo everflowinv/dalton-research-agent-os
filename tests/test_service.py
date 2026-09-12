@@ -892,6 +892,88 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("outbox failed", service._outbox_state["last_error"])
         service._outbox_executor.submit.assert_not_called()
 
+    def test_light_settlement_uses_planner_executor_without_delaying_full_tick(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = mock.Mock()
+        service._bounded_planner = mock.Mock()
+        service.config = mock.Mock(
+            outbox_interval_seconds=60, bounded_planner_interval_seconds=300,
+        )
+        now = time.monotonic()
+        service._outbox_last_launch_monotonic = now
+        service._bounded_planner_last_launch_monotonic = now
+        service._child_settlement_last_launch_monotonic = 0.0
+        service._outbox_future = None
+        service._bounded_planner_future = None
+        service._outbox_executor = mock.Mock()
+        service._bounded_planner_executor = mock.Mock()
+        service._outbox_state = {"state": "ready"}
+        service._bounded_planner_state = {"state": "completed"}
+        service._child_settlement_state = {"state": "pending"}
+
+        service._poll_bounded_planner()
+        service._bounded_planner_executor.submit.assert_called_once_with(
+            service._bounded_planner.settle_children_once)
+        self.assertEqual(service._bounded_planner_future_kind, "settlement")
+        self.assertEqual(service._bounded_planner_last_launch_monotonic, now)
+
+        service._bounded_planner_executor.reset_mock()
+        service._bounded_planner_future = None
+        service._bounded_planner_last_launch_monotonic = 0.0
+        service._outbox_last_launch_monotonic = time.monotonic()
+        service._poll_bounded_planner()
+        service._bounded_planner_executor.submit.assert_called_once_with(
+            service._bounded_planner.run_once)
+        self.assertEqual(service._bounded_planner_future_kind, "full")
+
+    def test_light_settlement_result_does_not_replace_full_tick_result(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = None
+        service._bounded_planner = mock.Mock()
+        service.config = mock.Mock(
+            outbox_interval_seconds=None, bounded_planner_interval_seconds=300,
+        )
+        service._outbox_last_launch_monotonic = 0.0
+        service._bounded_planner_last_launch_monotonic = time.monotonic()
+        service._child_settlement_last_launch_monotonic = time.monotonic()
+        service._outbox_future = None
+        settled = concurrent.futures.Future()
+        settled.set_result({"status": "settled", "settled": {"ticket_ref": "ticket:1"}})
+        service._bounded_planner_future = settled
+        service._bounded_planner_future_kind = "settlement"
+        service._outbox_executor = None
+        service._bounded_planner_executor = mock.Mock()
+        service._bounded_planner_state = {
+            "state": "completed", "last_result": {"tick": "full"},
+        }
+        service._child_settlement_state = {"state": "running"}
+
+        service._poll_bounded_planner()
+
+        self.assertEqual(service._bounded_planner_state["last_result"], {"tick": "full"})
+        self.assertEqual(
+            service._child_settlement_state["last_result"],
+            {"status": "settled", "settled": {"ticket_ref": "ticket:1"}},
+        )
+        service._bounded_planner_executor.submit.assert_not_called()
+
+    def test_disabled_full_planner_interval_also_disables_settlement(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = None
+        service._bounded_planner = mock.Mock()
+        service.config = mock.Mock(
+            outbox_interval_seconds=None, bounded_planner_interval_seconds=None,
+        )
+        service._bounded_planner_future = None
+        service._bounded_planner_executor = mock.Mock()
+        service._bounded_planner_last_launch_monotonic = 0.0
+        service._child_settlement_last_launch_monotonic = 0.0
+        service._outbox_future = None
+
+        service._poll_bounded_planner()
+
+        service._bounded_planner_executor.submit.assert_not_called()
+
     @staticmethod
     def _maintenance_config(root: Path) -> ServiceConfig:
         core = root / "core.sqlite"
@@ -2031,6 +2113,38 @@ class ServiceTests(unittest.TestCase):
             result = check(config, max_age_seconds=10**9)
             self.assertFalse(result["ok"])
             self.assertFalse(result["checks"]["controller_state_running"])
+
+    def test_health_reports_child_settlement_states(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            heartbeat = root / "heartbeat.json"
+            fake_config = mock.Mock(
+                heartbeat_path=heartbeat, tick_seconds=1,
+                writer_socket=root / "writer.sock", control=None,
+                core_db=root / "core.sqlite", scheduler_db=root / "scheduler.sqlite",
+                projection_db=root / "projection.sqlite", bounded_planner=mock.Mock(),
+            )
+            for state, expected in (
+                ("pending", True), ("idle", True), ("running", True),
+                ("settled", True), ("unavailable", False), ("error", False),
+            ):
+                with self.subTest(state=state):
+                    heartbeat.write_text(json.dumps({
+                        "state": "running",
+                        "pid": 99999999,
+                        "last_tick_at": "2026-09-12T00:00:00+00:00",
+                        "plugins": {},
+                        "bounded_planner": {
+                            "child_settlement": {"state": state},
+                        },
+                    }))
+                    with mock.patch(
+                        "dalton_core.health.ServiceConfig.from_file",
+                        return_value=fake_config,
+                    ):
+                        result = check(root / "service.json", max_age_seconds=10**9)
+                    self.assertIs(
+                        result["checks"]["child_settlement_healthy"], expected)
 
 
 if __name__ == "__main__":

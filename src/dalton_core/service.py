@@ -45,6 +45,7 @@ from .workspace_runtime import WorkspaceRuntimeError, validate_runtime_context
 
 
 SCHEMA_VERSION = "0.1"
+CHILD_SETTLEMENT_INTERVAL_SECONDS = 15.0
 
 
 class ServiceConfigError(RuntimeError):
@@ -585,8 +586,15 @@ class DaltonService:
         )
         self._bounded_planner_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._bounded_planner_future: concurrent.futures.Future[dict[str, Any]] | None = None
+        self._bounded_planner_future_kind: str | None = None
         self._bounded_planner_last_launch_monotonic = 0.0
+        self._child_settlement_last_launch_monotonic = 0.0
         self._bounded_planner_state: dict[str, Any] = {
+            "state": "disabled" if self._bounded_planner is None else "pending",
+            "last_started_at": None, "last_completed_at": None,
+            "last_result": None, "last_error": None,
+        }
+        self._child_settlement_state: dict[str, Any] = {
             "state": "disabled" if self._bounded_planner is None else "pending",
             "last_started_at": None, "last_completed_at": None,
             "last_result": None, "last_error": None,
@@ -865,16 +873,22 @@ class DaltonService:
         future = self._bounded_planner_future
         if future is not None and future.done():
             self._bounded_planner_future = None
-            self._bounded_planner_state["last_completed_at"] = _utc_now()
+            kind, self._bounded_planner_future_kind = (
+                getattr(self, "_bounded_planner_future_kind", "full"), None)
+            state = (
+                getattr(self, "_child_settlement_state", self._bounded_planner_state)
+                if kind == "settlement" else self._bounded_planner_state
+            )
+            state["last_completed_at"] = _utc_now()
             try:
                 result = future.result()
             except Exception as exc:
-                self._bounded_planner_state.update(
+                state.update(
                     state="error", last_error=f"{type(exc).__name__}: {exc}",
                     last_result=None,
                 )
             else:
-                self._bounded_planner_state.update(
+                state.update(
                     state=str(result.get("status", "completed")),
                     last_error=None, last_result=result,
                 )
@@ -920,9 +934,42 @@ class DaltonService:
                 self._bounded_planner_state.update(
                     state="running", last_started_at=_utc_now(), last_error=None
                 )
+                self._bounded_planner_future_kind = "full"
                 self._bounded_planner_future = executor.submit(
                     self._bounded_planner.run_once
                 )
+                return
+        # Use the same one-worker executor as the full planner tick.  This
+        # makes settlement mutually exclusive with all 39 lane calls.  An
+        # overdue outbox also goes first, preserving the existing writer-user
+        # fairness rule.  The operation itself only polls an already-open
+        # child; it cannot select or launch provider work.
+        settlement_elapsed = (
+            time.monotonic()
+            - getattr(self, "_child_settlement_last_launch_monotonic", 0.0))
+        if (
+            self._bounded_planner_future is None
+            and interval is not None
+            and executor is not None
+            and not outbox_running
+            and not outbox_due
+            and settlement_elapsed >= CHILD_SETTLEMENT_INTERVAL_SECONDS
+        ):
+            self._child_settlement_last_launch_monotonic = time.monotonic()
+            settlement_state = getattr(self, "_child_settlement_state", None)
+            if settlement_state is None:
+                settlement_state = self._child_settlement_state = {
+                    "state": "pending", "last_started_at": None,
+                    "last_completed_at": None, "last_result": None,
+                    "last_error": None,
+                }
+            settlement_state.update(
+                state="running", last_started_at=_utc_now(), last_error=None
+            )
+            self._bounded_planner_future_kind = "settlement"
+            self._bounded_planner_future = executor.submit(
+                self._bounded_planner.settle_children_once
+            )
 
     def _perform_backup(self) -> dict[str, Any]:
         """Run one snapshot and its ordered retention pass off the tick thread."""
@@ -1166,7 +1213,15 @@ class DaltonService:
             "plugins": plugin_states,
             "agenda": dict(self._agenda_state),
             "weekly_brief": dict(self._weekly_brief_state),
-            "bounded_planner": dict(self._bounded_planner_state),
+            "bounded_planner": {
+                **self._bounded_planner_state,
+                "child_settlement": dict(getattr(
+                    self, "_child_settlement_state", {
+                        "state": "disabled", "last_started_at": None,
+                        "last_completed_at": None, "last_result": None,
+                        "last_error": None,
+                    })),
+            },
             "outbox": dict(self._outbox_state),
             "backup": dict(self._backup_state),
             "last_error": self._last_error,

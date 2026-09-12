@@ -749,6 +749,11 @@ class BoundedPlannerDriver:
         summary["tick_ledger"] = self._record_tick(summary, started_at=started_at)
         return summary
 
+    def settle_children_once(self) -> dict[str, Any]:
+        """Harvest completed child work without running the full lane registry."""
+
+        return self.client.call("settle_company_model_spec", {})
+
     def _record_tick(
         self, summary: Mapping[str, Any], *, started_at: datetime,
     ) -> dict[str, Any]:

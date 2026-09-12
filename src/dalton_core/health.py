@@ -80,10 +80,22 @@ def check(config_path: str | Path, *, max_age_seconds: float | None = None) -> d
         item.get("state") == "ready" for item in heartbeat.get("plugins", {}).values()
     )
     checks["plugins_ready"] = plugin_ok
+    settlement = (
+        (heartbeat.get("bounded_planner") or {}).get("child_settlement")
+        if isinstance(heartbeat, dict) else None
+    )
+    checks["child_settlement_healthy"] = (
+        config.bounded_planner is None
+        or (
+            isinstance(settlement, dict)
+            and settlement.get("state") in {"pending", "idle", "running", "settled"}
+        )
+    )
     required = (
         "heartbeat_present", "controller_state_running", "controller_pid_alive", "heartbeat_fresh",
         "writer_socket_ready", "core_db_present", "scheduler_db_present",
         "projection_present", "plugins_ready", "control_socket_ready",
+        "child_settlement_healthy",
     )
     return {
         "ok": all(checks[name] for name in required),

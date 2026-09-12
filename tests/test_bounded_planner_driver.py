@@ -287,6 +287,20 @@ class MissionObservationDispatchTests(unittest.TestCase):
 
 
 class BoundedPlannerDriverTests(unittest.TestCase):
+    def test_child_settlement_calls_only_the_lightweight_writer_operation(self) -> None:
+        calls = []
+
+        class Client:
+            def call(self, operation, params):
+                calls.append((operation, params))
+                return {"status": "idle", "settled": None}
+
+        driver = BoundedPlannerDriver.__new__(BoundedPlannerDriver)
+        driver.client = Client()
+        self.assertEqual(driver.settle_children_once(),
+                         {"status": "idle", "settled": None})
+        self.assertEqual(calls, [("settle_company_model_spec", {})])
+
     def setUp(self) -> None:
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
@@ -399,6 +413,14 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             planner_expected_agent_id="chem",
             planner_max_cost_usd=0.5,
         )
+
+    def test_writer_accepts_light_settlement_without_creating_coordinator(self) -> None:
+        before = dict(self.server.lane_state)
+        self.assertEqual(
+            self.core.call("settle_company_model_spec", {}),
+            {"status": "idle", "settled": None},
+        )
+        self.assertEqual(self.server.lane_state, before)
 
     def _driver(self, transport) -> BoundedPlannerDriver:
         return BoundedPlannerDriver(
