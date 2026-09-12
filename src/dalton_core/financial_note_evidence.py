@@ -21,6 +21,7 @@ from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF, FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
     validate_financial_note_target as _validate_financial_note_target,
 )
+from .research_auto_commit import validate_policy_commit_decision
 from .research_verification import CandidateStagingStore
 from .store import canonical_json, content_hash
 
@@ -153,14 +154,24 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
     stages = proof.get("stages")
     _need(isinstance(stages, list) and len(stages) == 4,
           "promotion execution stages are invalid")
+    expected_stages = [
+        "registered_document_retrieval", "qualitative_model_draft",
+        "independent_qualitative_verifier", "qualitative_candidate_staging",
+    ]
+    admission_ref = material.get("normalized_payload", {}).get(
+        "mission_document_admission", {}).get("ref")
     accounting_proofs = proof.get("accounting_proofs")
     _need(isinstance(accounting_proofs, list) and len(accounting_proofs) == 2
           and all(isinstance(item, Mapping) for item in accounting_proofs)
           and len({item.get("work_order_ref") for item in accounting_proofs}) == 2,
           "promotion accounting checkpoints are invalid")
     model_by_work = {item.get("work_order_ref"): item for item in accounting_proofs}
+    _need(len({stage.get("work_ref") for stage in stages}) == 4
+          and len({stage.get("formal_ref") for stage in stages}) == 4
+          and len({stage.get("result_ref") for stage in stages}) == 4,
+          "promotion execution stages are not unique")
     checked = []
-    for stage in stages:
+    for index, stage in enumerate(stages):
         _need(isinstance(stage, Mapping), "promotion execution stage is invalid")
         work_row = core.execute(
             "SELECT * FROM scheduler_work_orders WHERE work_order_id=?",
@@ -214,7 +225,18 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
               and canonical_json(envelope) == result_row["result_envelope_json"]
               and result_row["result_envelope_hash"] == content_hash(envelope)
               and stage.get("result_hash") == content_hash(envelope)
-              and envelope["work_order_ref"] == work["id"],
+              and envelope["work_order_ref"] == work["id"]
+              and work["metadata"].get("authority_kind")
+                  == "mission_document_research_admission"
+              and work["metadata"].get("mission_document_research_admission_ref")
+                  == admission_ref
+              and work["metadata"].get("stage") == expected_stages[index]
+              and (index == 0 or work["metadata"].get("upstream_work_order_ref")
+                   == checked[index - 1]["work_ref"])
+              and (index == 0 or work["metadata"].get("upstream_result_ref")
+                   == checked[index - 1]["result_ref"])
+              and (index == 0 or work["metadata"].get("upstream_result_hash")
+                   == checked[index - 1]["result_hash"]),
               "promotion execution stage drifted")
         accounting = model_by_work.get(work["id"])
         is_model_stage = work["metadata"].get("stage") in {
@@ -264,12 +286,16 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
                 "work_order_ref": invocation_row["work_order_ref"],
                 "model_family": invocation_row["model_family"],
             }
+            endpoint = route.get("selected_endpoint")
+            expected_capability = "research" if index == 1 else "verify"
             _need(canonical_json(route) == route_row["decision_json"]
                   and route.get("content_hash") == route_row["decision_hash"]
                   and content_hash({key: item for key, item in route.items()
                                     if key != "content_hash"}) == route_row["decision_hash"]
                   and route.get("work_order_ref") == work["id"]
                   and route.get("work_order_hash") == content_hash(work)
+                  and route.get("outcome") == "selected"
+                  and route.get("attempt_number") == formal_row["attempt_number"]
                   and route.get("id") == accounting.get("route_decision_ref")
                   and route.get("content_hash") == accounting.get("route_decision_hash")
                   and alias == invocation["id"] == accounting.get("model_invocation_ref")
@@ -283,7 +309,14 @@ def _execution_checkpoint(core: Any, router: Any, proof: Mapping[str, Any],
                   and invocation["profile_ref"] == route.get(
                       "selected_profile_version_ref")
                   and invocation["completed_at"] is not None
-                  and envelope["invocation_ref"] == invocation["id"],
+                  and envelope["invocation_ref"] == invocation["id"]
+                  and isinstance(endpoint, Mapping)
+                  and invocation["provider"] == endpoint.get("provider")
+                  and invocation["model"] == endpoint.get("model")
+                  and invocation["model_family"] == endpoint.get("family")
+                  and invocation["runtime_ref"] == endpoint.get("adapter_ref")
+                  and invocation["capability"] == route.get("capability")
+                  and invocation["capability"] == expected_capability,
                   "promotion model execution identity drifted")
         checked.append({"work_ref": work["id"], "work_hash": content_hash(work),
                         "formal_ref": formal_row["result_record_id"],
@@ -359,8 +392,19 @@ def resolve_financial_note_evidence(
     ).fetchone()
     promotion = _record(promotion_row, json_column="record_json",
                         hash_column="content_hash", label="directed promotion")
-    _need(promotion_row["promotion_id"] == promotion["id"]
+    _need(set(promotion) == {
+              "schema_version", "id", "admission_ref", "outcome_ref",
+              "research_status", "execution_proof", "evidence_version_ref",
+              "evidence_version_hash", "claim_version_ref", "claim_version_hash",
+              "policy_authorization_ref", "policy_authorization_hash", "created_at",
+              "content_hash",
+          }
+          and promotion["schema_version"] == "0.1"
+          and promotion_row["promotion_id"] == promotion["id"]
+          and promotion_row["admission_ref"] == promotion["admission_ref"]
           and promotion_row["outcome_ref"] == promotion["outcome_ref"]
+          and promotion_row["created_at"] == promotion["created_at"]
+          and promotion["admission_ref"] == admission["id"]
           and promotion["research_status"] == "canonical_claim_promoted"
           and promotion["execution_proof"]["admission_ref"] == admission["id"]
           and promotion["execution_proof"]["admission_hash"] == admission["content_hash"]
@@ -395,17 +439,30 @@ def resolve_financial_note_evidence(
               == f"policy-ledger:mission-document-research:{admission['id']}",
           "directed promotion Ledger receipt is unavailable")
     try:
-        decision = json.loads(receipt["decision_json"])
+        decision = validate_policy_commit_decision(json.loads(receipt["decision_json"]))
         result = json.loads(receipt["result_json"])
-    except (TypeError, ValueError, RecursionError) as exc:
+    except Exception as exc:
         raise FinancialNoteEvidenceError(
             "directed promotion Ledger receipt is invalid") from exc
     _need(canonical_json(decision) == receipt["decision_json"]
           and decision.get("id") == promotion["policy_authorization_ref"]
           and decision.get("content_hash") == promotion["policy_authorization_hash"]
-          and content_hash({key: item for key, item in decision.items()
-                            if key != "content_hash"}) == decision.get("content_hash")
+          and decision.get("candidate_evidence_ref") == receipt["candidate_evidence_ref"]
+          and decision.get("candidate_claim_ref") == receipt["candidate_claim_ref"]
+          and receipt["created_at"] == decision["created_at"] == promotion["created_at"]
+          and receipt["request_hash"] == content_hash({
+              "decision_hash": decision["content_hash"],
+              "evidence_hash": decision["candidate_evidence_hash"],
+              "claim_hash": decision["candidate_claim_hash"],
+          })
           and canonical_json(result) == receipt["result_json"]
+          and set(result) == {
+              "status", "idempotency_key", "review_decision_ref",
+              "evidence_version_ref", "claim_version_ref", "relation_ref",
+              "claim_status", "event_refs",
+          }
+          and result.get("idempotency_key") == receipt["idempotency_key"]
+          and result.get("review_decision_ref") == decision["id"]
           and result.get("evidence_version_ref") == evidence["id"]
           and result.get("claim_version_ref") == claim["id"],
           "directed promotion Ledger receipt drifted")
@@ -417,11 +474,34 @@ def resolve_financial_note_evidence(
     hashes = promotion["execution_proof"]["bundle_hashes"]
     _need(all(bundle[key]["content_hash"] == hashes[key]
               for key in ("evidence", "claim", "material", "source_verification"))
+          and receipt["candidate_evidence_ref"] == bundle["evidence"]["id"]
+          and receipt["candidate_claim_ref"] == bundle["claim"]["id"]
+          and decision["candidate_evidence_hash"] == bundle["evidence"]["content_hash"]
+          and decision["candidate_claim_hash"] == bundle["claim"]["content_hash"]
           and evidence.get("candidate_origin_ref") == bundle["evidence"]["id"]
           and evidence.get("candidate_origin_hash") == bundle["evidence"]["content_hash"]
           and claim.get("candidate_origin_ref") == bundle["claim"]["id"]
           and claim.get("candidate_origin_hash") == bundle["claim"]["content_hash"],
           "canonical result differs from staged directed candidate")
+    relation_row = core_connection.execute(
+        "SELECT * FROM evidence_relations WHERE relation_id=?",
+        (result["relation_ref"],)).fetchone()
+    relation = _record(relation_row, json_column="relation_json",
+                       hash_column="content_hash", label="canonical directed relation")
+    _need(relation_row["relation_id"] == relation.get("id") == result["relation_ref"]
+          and relation_row["evidence_ref"] == relation.get("evidence_ref")
+          and relation_row["evidence_version_id"] == relation.get("evidence_version_ref")
+          and relation_row["claim_ref"] == relation.get("claim_ref")
+          and relation_row["claim_version_id"] == relation.get("claim_version_ref")
+          and relation_row["relation"] == relation.get("relation")
+          and relation_row["created_at"] == relation.get("created_at")
+          and relation.get("relation") == "supports"
+          and relation.get("evidence_ref") == evidence["evidence_ref"]
+          and relation.get("evidence_version_ref") == evidence["id"]
+          and relation.get("claim_ref") == claim["claim_ref"]
+          and relation.get("claim_version_ref") == claim["id"]
+          and relation.get("actor_ref") == decision["reviewer_ref"],
+          "canonical directed relation differs from Ledger receipt")
     payload = bundle["material"]["normalized_payload"]
     _need(payload["mission_document_admission"] == {
         "ref": admission["id"], "hash": admission["content_hash"],

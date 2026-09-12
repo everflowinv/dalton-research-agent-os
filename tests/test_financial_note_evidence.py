@@ -193,6 +193,37 @@ class FinancialNoteExecutionCheckpointTests(unittest.TestCase):
         finally:
             case.doCleanups()
 
+    def test_reordered_execution_stages_are_rejected(self):
+        case = promotion_fixtures.DocumentPromotionTests()
+        try:
+            fixture, executor, _admission, _works, _records, _outcome, *_ = (
+                case._completed())
+            promotion = json.loads(fixture.store.connection.execute(
+                "SELECT record_json FROM mission_document_research_promotions"
+            ).fetchone()[0])
+            receipt = fixture.store.connection.execute(
+                "SELECT candidate_evidence_ref,candidate_claim_ref "
+                "FROM reviewed_candidate_commits"
+            ).fetchone()
+            bundle = executor.staging.exact_candidate_bundle(
+                evidence_ref=receipt["candidate_evidence_ref"],
+                claim_ref=receipt["candidate_claim_ref"],
+                idempotency_key=("mission-document-research-candidate:"
+                                 + promotion["admission_ref"]),
+            )
+            forged = copy.deepcopy(promotion["execution_proof"])
+            forged["stages"][0], forged["stages"][3] = (
+                forged["stages"][3], forged["stages"][0])
+            proof_body = dict(forged); proof_body.pop("content_hash")
+            forged["content_hash"] = content_hash(proof_body)
+            with self.assertRaisesRegex(FinancialNoteEvidenceError,
+                                        "execution stage drifted"):
+                _execution_checkpoint(
+                    fixture.store.connection, fixture.router.connection, forged,
+                    material=bundle["material"])
+        finally:
+            case.doCleanups()
+
 
 class FinancialNoteResolverTests(unittest.TestCase):
     @staticmethod
@@ -395,6 +426,9 @@ class FinancialNoteResolverTests(unittest.TestCase):
 
     def test_exact_typed_promoted_note_resolves_without_numeric_invention(self):
         fixture, executor, admission, target = self._completed_typed()
+        core_changes = fixture.store.connection.total_changes
+        router_changes = fixture.router.connection.total_changes
+        staging_changes = executor.staging.connection.total_changes
         result = resolve_financial_note_evidence(
             core_connection=fixture.store.connection,
             router_connection=fixture.router.connection,
@@ -405,6 +439,9 @@ class FinancialNoteResolverTests(unittest.TestCase):
         self.assertEqual(result["applicability_kind"], "annual")
         self.assertEqual(len(result["passages"]), 1)
         self.assertNotIn("amount", result)
+        self.assertEqual(fixture.store.connection.total_changes, core_changes)
+        self.assertEqual(fixture.router.connection.total_changes, router_changes)
+        self.assertEqual(executor.staging.connection.total_changes, staging_changes)
         self.assertEqual(financial_note_evidence_binding(result)["content_hash"],
                          result["content_hash"])
         self.assertEqual(resolve_financial_note_evidence_ref(
@@ -423,6 +460,34 @@ class FinancialNoteResolverTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
                 FinancialNoteEvidenceError, "filing authority|current filing authority"):
+            resolve_financial_note_evidence(
+                core_connection=connection,
+                router_connection=fixture.router.connection,
+                staging_connection=executor.staging.connection,
+                registry=executor.registry, admission_ref=admission["id"])
+
+    def test_ledger_request_hash_tamper_invalidates_promoted_note_authority(self):
+        fixture, executor, admission, _target = self._completed_typed()
+        connection = fixture.store.connection
+        connection.execute("DROP TRIGGER reviewed_candidate_commits_no_update")
+        connection.execute(
+            "UPDATE reviewed_candidate_commits SET request_hash=?",
+            ("f" * 64,),
+        )
+        with self.assertRaisesRegex(FinancialNoteEvidenceError, "Ledger receipt drifted"):
+            resolve_financial_note_evidence(
+                core_connection=connection,
+                router_connection=fixture.router.connection,
+                staging_connection=executor.staging.connection,
+                registry=executor.registry, admission_ref=admission["id"])
+
+    def test_missing_supports_relation_invalidates_promoted_note_authority(self):
+        fixture, executor, admission, _target = self._completed_typed()
+        connection = fixture.store.connection
+        connection.execute("DROP TRIGGER evidence_relations_no_delete")
+        connection.execute("DELETE FROM evidence_relations")
+        with self.assertRaisesRegex(FinancialNoteEvidenceError,
+                                    "canonical directed relation is unavailable"):
             resolve_financial_note_evidence(
                 core_connection=connection,
                 router_connection=fixture.router.connection,
