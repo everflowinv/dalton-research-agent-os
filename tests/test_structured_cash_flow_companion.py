@@ -20,6 +20,7 @@ from dalton_core.model_forecast_driver import (
     ForecastModelUnavailable,
     ForecastModelValidationError,
     actualize_model,
+    build_cash_flow_companion,
     build_cash_flow_companion_drivers,
     build_structured_forecast_model,
     compute_cash_flow_companion_results,
@@ -200,6 +201,44 @@ class StructuredCashFlowCompanionTests(unittest.TestCase):
             result = next(item for item in held["results"] if item["ref"] == ref)
             self.assertEqual(result["status"], "unavailable")
             self.assertTrue(all(cell["value"] is None for cell in result["cells"]))
+
+    def test_filed_cash_source_with_unavailable_method_keeps_its_evidence(self):
+        inputs, spec, structure, _replay, _binding = authorities()
+        declared = spec["cash_flow_companion"]["lines"][0]
+        declared["forecast_method"] = "unavailable"
+        declared["forecast_base_ref"] = None
+
+        companion = build_cash_flow_companion(spec, inputs, structure)
+        operating = companion["lines"][0]
+        self.assertEqual(operating["status"], "filed")
+        self.assertEqual(operating["forecast_method"], "unavailable")
+        self.assertIsNone(operating["forecast_base_ref"])
+        self.assertEqual(operating["source"], inputs["cash_flow_inputs"][0])
+        self.assertEqual(
+            operating["source_hash"], content_hash(inputs["cash_flow_inputs"][0]))
+
+    def test_unavailable_method_does_not_relax_source_reporting_currency(self):
+        inputs, spec, structure, _replay, _binding = authorities()
+        declared = spec["cash_flow_companion"]["lines"][0]
+        declared["forecast_method"] = "unavailable"
+        declared["forecast_base_ref"] = None
+        source = inputs["cash_flow_inputs"][0]
+        source["unit"] = "eur"
+        for cell in source["series"]["quarters"]:
+            cell["unit"] = "eur"
+
+        with self.assertRaisesRegex(
+                ForecastModelUnavailable, "source and reporting units differ"):
+            build_cash_flow_companion(spec, inputs, structure)
+
+    def test_share_of_line_still_requires_the_base_unit_to_match(self):
+        inputs, spec, structure, _replay, _binding = authorities()
+        capex = spec["cash_flow_companion"]["lines"][1]
+        capex["forecast_base_ref"] = "shares"
+
+        with self.assertRaisesRegex(
+                ForecastModelUnavailable, "source and base units differ"):
+            build_cash_flow_companion(spec, inputs, structure)
 
     def test_incomplete_cash_source_keeps_exact_filed_history_but_does_not_forecast(self):
         inputs, spec, _structure, _replay, _binding = authorities()

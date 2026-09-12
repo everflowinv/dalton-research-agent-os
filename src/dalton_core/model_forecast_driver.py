@@ -1995,10 +1995,16 @@ def build_cash_flow_companion(
                 raise ForecastModelUnavailable(
                     f"cash-flow companion {role} has duplicate or overlapping quarters")
             source_unit = str(source.get("unit") or "").casefold()
-            base_unit = str((structure_lines.get(str(base_ref)) or {}).get("unit") or "").casefold()
-            if source_unit != reporting_unit or source_unit != base_unit:
+            if source_unit != reporting_unit:
                 raise ForecastModelUnavailable(
-                    f"cash-flow companion {role} source and base units differ")
+                    f"cash-flow companion {role} source and reporting units differ")
+            if method == "share_of_line":
+                base_unit = str(
+                    (structure_lines.get(str(base_ref)) or {}).get("unit") or ""
+                ).casefold()
+                if source_unit != base_unit:
+                    raise ForecastModelUnavailable(
+                        f"cash-flow companion {role} source and base units differ")
         forecastable = (
             source_bound and source.get("status") == FILED
             and method == "share_of_line" and base_ref in result_refs
