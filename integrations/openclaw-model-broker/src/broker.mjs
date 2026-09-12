@@ -41,6 +41,10 @@ const THINKING_LEVELS = new Set([
 const CONTROLLED_THINKING_LEVELS = new Set(["low"]);
 const SAFE_HOST_FAILURES = new Map([
   [
+    "Plugin LLM completion failed: selected endpoint cannot enforce provider max_output_tokens.",
+    ["REQUIRED_CONTROLS_UNAVAILABLE", "selected host endpoint cannot enforce the required provider output limit"],
+  ],
+  [
     "Plugin LLM completion failed: provider controls were not enforced by the selected transport.",
     ["HOST_CONTROL_PROOF_MISSING", "host transport returned no provider-control proof"],
   ],
@@ -426,6 +430,7 @@ export class ModelBroker {
           "fresh",
           "REQUIRED_CONTROLS_UNAVAILABLE",
           `host runtime or selected profile cannot enforce the required provider controls: ${gaps.join("; ")}`,
+          true,
         );
       }
       if (
@@ -438,6 +443,7 @@ export class ModelBroker {
           "fresh",
           "REQUIRED_CONTROLS_UNAVAILABLE",
           "profile is not configured to enforce the required thinking level",
+          true,
         );
       }
       // The host's Google provider-control admission validates a closed
@@ -488,8 +494,12 @@ export class ModelBroker {
       if (result?.failure !== undefined) return this.#providerFailure(request, requestHash, result);
       return this.#success(request, requestHash, result);
     } catch (error) {
-      const safeHostFailure = error instanceof Error
+      const mappedHostFailure = error instanceof Error
         ? SAFE_HOST_FAILURES.get(error.message)
+        : undefined;
+      const safeHostFailure = mappedHostFailure?.[0] !== "REQUIRED_CONTROLS_UNAVAILABLE"
+        || error?.code === "REQUIRED_CONTROLS_UNAVAILABLE"
+        ? mappedHostFailure
         : undefined;
       const code = error instanceof ProtocolError
         ? error.code
@@ -497,7 +507,14 @@ export class ModelBroker {
       const message = error instanceof ProtocolError
         ? error.message
         : safeHostFailure?.[1] ?? "host completion failed";
-      return this.#failure(request, requestHash, "fresh", code, message);
+      return this.#failure(
+        request,
+        requestHash,
+        "fresh",
+        code,
+        message,
+        code === "REQUIRED_CONTROLS_UNAVAILABLE",
+      );
     } finally {
       if (timer) clearTimeout(timer);
       this.active -= 1;

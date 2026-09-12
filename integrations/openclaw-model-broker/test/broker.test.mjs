@@ -453,6 +453,7 @@ test("required provider controls fail before any host completion", async () => {
   const response = await broker.handle(controlled);
   assert.equal(response.ok, false);
   assert.equal(response.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+  assert.equal(response.dispatchProof.state, "definitely_not_sent");
   assert.equal(calls, 0);
   verifyHash(response);
 
@@ -469,6 +470,35 @@ test("required provider controls fail before any host completion", async () => {
     () => validateRequest({ ...controlled, requiredControls: badSchema }, 4096),
     (error) => error instanceof ProtocolError && error.code === "INVALID_REQUEST",
   );
+});
+
+test("resolved endpoint control rejection is a typed local no-send failure", async () => {
+  let calls = 0;
+  const error = new Error(
+    "Plugin LLM completion failed: selected endpoint cannot enforce provider max_output_tokens.",
+  );
+  error.code = "REQUIRED_CONTROLS_UNAVAILABLE";
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    calls += 1;
+    throw error;
+  }, { controlled: true }), controlledConfig());
+  const response = await broker.handle(request({
+    invocationId: "invocation:unsupported-endpoint",
+    requiredControls: requiredControls(),
+  }));
+  assert.equal(calls, 1);
+  assert.equal(response.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+  assert.equal(response.dispatchProof.state, "definitely_not_sent");
+
+  const untyped = new ModelBroker(fakeRuntime(async () => {
+    throw new Error(error.message);
+  }, { controlled: true }), controlledConfig());
+  const untypedResponse = await untyped.handle(request({
+    invocationId: "invocation:untyped-similar-message",
+    requiredControls: requiredControls(),
+  }));
+  assert.equal(untypedResponse.error.code, "HOST_COMPLETION_FAILED");
+  assert.equal(untypedResponse.dispatchProof, null);
 });
 
 test("controlled completion requires host capability and binds the trusted profile rate card", async () => {

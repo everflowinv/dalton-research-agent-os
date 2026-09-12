@@ -75,7 +75,7 @@ the matching `openai-responses-input-count-v1` or
 exact-model, default-tier, expiring rate card; the client cannot supply or
 override prices.
 
-The matching OpenClaw 2026.7.1 host patches enforce the contract inside either
+The matching OpenClaw host integration enforces the contract inside either
 the native OpenAI Responses transport or native Google Generative AI. OpenAI
 uses strict `text.format` plus `/responses/input_tokens`; Google uses
 `responseJsonSchema` plus `countTokens`. Both paths reserve the full output
@@ -84,12 +84,15 @@ generation. Google rejects schema keywords outside its documented portable
 subset before making any provider request. The broker requires a hash-bound
 host proof and complete provider usage/cost telemetry before returning success.
 
-The host patches are maintained in the OpenClaw workspace patch runner, not in
-this repository. A stock host, a missing/expired profile rate card, or any
-unsupported transport returns `REQUIRED_CONTROLS_UNAVAILABLE` or fails the host
-request. ChatGPT Responses, DeepSeek, Claude CLI, and other unimplemented
-routes remain fail closed. The broker never silently downgrades controlled
-calls to prompt-only JSON or post-hoc budget checking.
+The exact-version endpoint guard is maintained in this repository under
+`integrations/openclaw_host_patches`. It admits the OpenAI control mode only
+after resolving native Responses at `https://api.openai.com`; the
+Codex/ChatGPT backend removes `max_output_tokens`, so it is rejected before
+transport dispatch. Missing, proxy, Azure, and other unknown endpoints fail
+closed. A stock host, a missing/expired profile rate card, or any unsupported
+transport returns `REQUIRED_CONTROLS_UNAVAILABLE` or fails the host request.
+The broker never silently downgrades controlled calls to prompt-only JSON or
+post-hoc budget checking.
 
 General completion requests without `requiredControls` keep the existing
 bounded broker path. Unit and transport tests use fake runtimes/providers and
