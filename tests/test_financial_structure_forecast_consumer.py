@@ -666,6 +666,31 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         with self.assertRaisesRegex(AnnualProjectionError, "authority differs"):
             validate_projection_record(identity_tampered, model=record)
 
+        # Self-consistent replacement hashes do not make a changed historical
+        # replay authoritative for the exact bound financial inputs.
+        forged_model = copy.deepcopy(record)
+        forged_model["financial_statement_structure_replay"]["formulas"][0][
+            "reason"
+        ] = "forged replay"
+        forged_binding = forged_model["forecast_structure_binding"]
+        forged_binding["historical_replay_hash"] = content_hash(
+            forged_model["financial_statement_structure_replay"])
+        forged_binding["content_hash"] = content_hash({
+            key: value for key, value in forged_binding.items()
+            if key != "content_hash"
+        })
+        from dalton_core.model_forecast_driver import body_hash, structure_formula_hash
+        forged_model["formula_hash"] = structure_formula_hash(
+            forged_model["financial_statement_structure"], forged_binding)
+        forged_model["body_hash"] = body_hash(forged_model)
+        forged_model["content_hash"] = content_hash({
+            key: value for key, value in forged_model.items()
+            if key not in {"content_hash", "status"}
+        })
+        with self.assertRaisesRegex(AnnualProjectionError, "does not replay"):
+            build_annual_projection(
+                model=forged_model, inputs=inputs, calendar_binding=calendar)
+
     def test_annual_projection_combines_filed_and_forecast_quarters(self):
         inputs = annual_authority_inputs()
         candidate = annual_forecastable_proposal(inputs)

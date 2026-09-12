@@ -1197,6 +1197,14 @@ def replay_historical_structure(
                 if item["applicability_kind"] == "quarter"
                 and item["status"] == "validated"
             }
+            candidate_quarters = {
+                period for period in candidate_periods
+                if period[0] is not None
+                and QUARTER_MIN_DAYS <= (
+                    date.fromisoformat(period[1])
+                    - date.fromisoformat(period[0])
+                ).days + 1 <= QUARTER_MAX_DAYS
+            }
             if formula.get("tie_out_concept") is None:
                 # An annual note may prove the annual numerator, but it does
                 # not authorize applying that relationship to a quarter.  A
@@ -1211,8 +1219,8 @@ def replay_historical_structure(
             tied = {} if tie is None else _period_cells(filed[tie])
             tested = sorted(set(calculated) & set(tied), key=lambda item: item[1])
             note_validated = (
-                bool(candidate_periods)
-                and candidate_periods == note_quarters
+                bool(candidate_quarters)
+                and candidate_quarters == note_quarters
                 and set(calculated) == note_quarters
             )
             def matches(period: tuple[str | None, str]) -> bool:

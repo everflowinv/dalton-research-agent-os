@@ -379,6 +379,89 @@ class FinancialStatementStructureTests(unittest.TestCase):
         }])
         self.assertFalse(replay["ready_for_forecast"])
 
+    def test_annual_note_period_does_not_block_complete_quarter_authority(self):
+        inputs, candidate = note_backed_eps_inputs_and_proposal()
+        for concept in ("parent", "canada-nci", "shares", "eps"):
+            line = next(item for item in inputs["filed_lines"]
+                        if item["concept"] == concept)
+            values = {
+                "parent": (145, 160, 175, 190),
+                "canada-nci": (0, 0, 0, 0),
+                "shares": (100, 100, 100, 100),
+                "eps": ("1.45", "1.60", "1.75", "1.90"),
+            }[concept]
+            unit = ("shares" if concept == "shares" else
+                    "usd_per_share" if concept == "eps" else "usd")
+            quarter_facts = [
+                {"period_start": start, "period_end": end,
+                 "period_kind": "quarter", "value": str(value), "unit": unit,
+                 "source_accessions": [ACCESSION], "source_forms": ["10-Q"]}
+                for (start, end), value in zip(QUARTERS, values)
+            ]
+            line["duration_facts"].extend(quarter_facts)
+            line["cells"].update({
+                item["period_end"]: {
+                    key: value for key, value in item.items()
+                    if key not in {"period_end", "period_kind", "source_forms"}
+                }
+                for item in quarter_facts
+            })
+        for concept, value, unit in (
+            ("parent", "670", "usd"), ("canada-nci", "0", "usd"),
+            ("shares", "100", "shares"), ("eps", "6.70", "usd_per_share"),
+        ):
+            line = next(item for item in inputs["filed_lines"]
+                        if item["concept"] == concept)
+            line["duration_facts"].append({
+                "period_start": "2025-01-01", "period_end": "2025-12-31",
+                "period_kind": "cumulative", "value": value, "unit": unit,
+                "source_accessions": [ACCESSION], "source_forms": ["10-K"],
+            })
+        annual_note = typed_note(periods=[{
+            "period_start": "2025-01-01", "period_end": "2025-12-31",
+        }])
+        quarter_note = typed_note(
+            kind="quarter", form="10-Q",
+            periods=[{"period_start": start, "period_end": end}
+                     for start, end in QUARTERS],
+        )
+        quarter_note["ref"] = "financial-note-evidence:acn-eps-quarters"
+        quarter_note["content_hash"] = "e" * 64
+        numerator = next(item for item in candidate["formulas"]
+                         if item["output_ref"] == "eps-numerator")
+        numerator["evidence_refs"].append(quarter_note["ref"])
+        candidate["financial_input_hash"] = financial_input_authority(inputs)["content_hash"]
+
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs,
+            note_evidence=[annual_note, quarter_note],
+            note_evidence_resolver=lambda ref: {
+                annual_note["ref"]: annual_note, quarter_note["ref"]: quarter_note,
+            }.get(ref),
+        )
+
+        self.assertTrue(replay["ready_for_forecast"])
+        numerator_report = next(item for item in replay["formulas"]
+                                if item["output_ref"] == "eps-numerator")
+        self.assertEqual(len(numerator_report["tested_periods"]), 4)
+        note_periods = replay["note_formula_periods"][0]["periods"]
+        self.assertEqual(
+            {item["applicability_kind"] for item in note_periods},
+            {"annual", "quarter"},
+        )
+        from dalton_core.company_model_annual_projection import _historical_eps
+        calendar = {
+            "calendar_ref": "statement-ingest:test",
+            "content_hash": "f" * 64,
+        }
+        historical = _historical_eps(
+            inputs, structure, replay, "FY2025A", [end for _start, end in QUARTERS],
+            calendar,
+        )
+        self.assertEqual(historical["status"], "computed")
+        self.assertEqual(Decimal(historical["value"]), Decimal("6.70"))
+        self.assertEqual(historical["direct_numerator"]["status"], "computed")
+
     def test_typed_note_binding_refuses_foreign_company_period_and_resolver_drift(self):
         inputs, candidate = note_backed_eps_inputs_and_proposal()
         note = typed_note()

@@ -20,6 +20,7 @@ from .company_financial_statement_structure import (
     aggregate_fiscal_year,
     annual_diluted_eps,
     day_weighted_annual_shares,
+    forecast_structure_binding,
 )
 from .model_forecast_driver import (
     STRUCTURED_SCHEMA_VERSION,
@@ -274,7 +275,8 @@ def _structure_facts(
 
 def _historical_eps(
     inputs: Mapping[str, Any], structure: Mapping[str, Any],
-    label: str, group: Sequence[str], calendar: Mapping[str, Any],
+    replay: Mapping[str, Any], label: str, group: Sequence[str],
+    calendar: Mapping[str, Any],
 ) -> dict[str, Any]:
     lines = {str(item["ref"]): item for item in (structure.get("lines") or [])}
     formulas = {str(item["output_ref"]): item
@@ -291,6 +293,32 @@ def _historical_eps(
         inputs, structure, numerator, group, label, calendar,
         formulas.get(str(numerator["ref"])),
     )
+    numerator_formula = formulas.get(str(numerator["ref"]))
+    if not numerator_cells and isinstance(numerator_formula, Mapping) and (
+        numerator_formula.get("tie_out_concept") is None
+    ):
+        annual_note_periods = [
+            dict(period)
+            for report in (replay.get("note_formula_periods") or [])
+            if report.get("output_ref") == numerator.get("ref")
+            for period in (report.get("periods") or [])
+            if period.get("applicability_kind") == "annual"
+            and period.get("status") == "validated"
+            and period.get("period_end") == group[-1]
+        ]
+        if len(annual_note_periods) == 1:
+            period = annual_note_periods[0]
+            numerator_cells = [{
+                "fiscal_year": fiscal_year, "period_kind": "annual",
+                "period_start": period["period_start"],
+                "period_end": period["period_end"],
+                "value": period["value"], "unit": period["unit"],
+                "calendar": calendar["content_hash"],
+                "definition_ref": _line_definition_ref(
+                    structure, numerator, None),
+                "source_accessions": list(period.get("source_accessions") or []),
+                "evidence_ref": period["evidence_ref"],
+            }]
     share_cells = _structure_facts(
         inputs, structure, shares, group, label, calendar,
         formulas.get(str(shares["ref"])),
@@ -650,6 +678,14 @@ def build_annual_projection(
     structure = held["financial_statement_structure"]
     replay = held["financial_statement_structure_replay"]
     binding = held["forecast_structure_binding"]
+    try:
+        exact_binding = forecast_structure_binding(structure, replay, inputs)
+    except Exception as exc:
+        raise AnnualProjectionError(
+            "forecast statement structure authority does not replay"
+        ) from exc
+    if binding != exact_binding:
+        raise AnnualProjectionError("forecast statement structure binding differs")
     periods = list(dict.fromkeys([
         *held["history_periods"],
         *[item["end"] for item in held["realised_periods"] + held["forecast_periods"]],
@@ -679,7 +715,7 @@ def build_annual_projection(
         }
         if kind == "historical":
             row["historical_eps"] = _historical_eps(
-                inputs, structure, label, group, calendar)
+                inputs, structure, replay, label, group, calendar)
         elif kind in {"forecast", "mixed"}:
             shares, eps = _forecast_outcomes(
                 held, structure, label, group, calendar,
