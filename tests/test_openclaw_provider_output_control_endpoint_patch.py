@@ -89,6 +89,11 @@ process.stdout.write(JSON.stringify(out));
         self.assertEqual(observed[-1], "dispatched")
         for item in observed[1:-1]:
             self.assertEqual(item["code"], "REQUIRED_CONTROLS_UNAVAILABLE")
+            self.assertEqual(
+                item["message"],
+                "Plugin LLM completion failed: selected endpoint cannot enforce "
+                "provider max_output_tokens.",
+            )
 
 
 if __name__ == "__main__":

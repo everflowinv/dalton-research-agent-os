@@ -9,6 +9,9 @@ import unittest
 from integrations.openclaw_host_patches.patch_controlled_completion_transport import (
     ORIGINAL, ORIGINAL_BIND, PATCHED, PATCHED_BIND, SUPPORTED_VERSION, apply,
 )
+from integrations.openclaw_host_patches.patch_provider_output_control_endpoint import (
+    apply as check_provider_output_endpoint,
+)
 
 
 MODULE = r'''
@@ -207,15 +210,22 @@ console.log(JSON.stringify({{...observed,proof}}));
             self.assertEqual(observed["proof"]["mode"],
                              "google-generative-ai-count-tokens-v1")
 
-    def test_installed_google_lifecycle_passes_local_provider_suite(self):
-        runner = Path.home() / ".openclaw/workspace/patch/test_openclaw_llm_provider_controls.mjs"
+    def test_installed_control_patches_match_repo_owned_contracts(self):
         roots = sorted(Path.home().glob(
             ".openclaw/tools/node-*/lib/node_modules/openclaw/package.json"))
-        if not runner.is_file() or not roots:
-            self.skipTest("installed OpenClaw local-provider suite unavailable")
+        if not roots:
+            self.skipTest("installed OpenClaw unavailable")
+        root = roots[-1].parent
+        # Both installed bytes and behavior are checked against repository-owned
+        # contracts.  The behavioral harness uses only loopback mock transports;
+        # it performs no paid or external provider call.
+        self.assertFalse(apply(root, check=True))
+        self.assertFalse(check_provider_output_endpoint(root, check=True))
+        runner = Path(__file__).parent / "fixtures" / (
+            "openclaw_llm_provider_controls.mjs")
         result = subprocess.run(
-            ["node", str(runner), str(roots[-1].parent)],
-            text=True, capture_output=True, check=False,
+            ["node", str(runner), str(root)], text=True,
+            capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout.strip().splitlines()[-1])
