@@ -41,6 +41,7 @@ from dalton_core.model_forecast_driver import (
     draft_assumptions,
     forecast_periods,
     ForecastModelConflict,
+    _filing_units_match,
     model_readiness,
     replay_cell,
     revenue_anchor,
@@ -71,6 +72,24 @@ SERIES = {
     SGA_CONCEPT: ("100000000", "110000000", "121000000", "133100000"),
     TAX_CONCEPT: ("25000000", "27500000", "30250000", "33275000"),
 }
+
+
+class FilingProofUnitTests(unittest.TestCase):
+    def test_structured_sec_per_share_unit_matches_model_projection(self):
+        self.assertTrue(_filing_units_match(
+            "usdPerShare", "usd_per_share", structured=True))
+        self.assertTrue(_filing_units_match("USD", "usd", structured=True))
+        self.assertFalse(_filing_units_match(
+            "usd/share", "usd_per_share", structured=True))
+        self.assertFalse(_filing_units_match(
+            "usdPerUnit", "usd_per_share", structured=True))
+        self.assertFalse(_filing_units_match(
+            "eurPerShare", "usd_per_share", structured=True))
+
+    def test_legacy_filing_unit_replay_remains_exact(self):
+        self.assertFalse(_filing_units_match(
+            "usdPerShare", "usd_per_share", structured=False))
+        self.assertFalse(_filing_units_match("USD", "usd", structured=False))
 
 
 def ledger(series=None):

@@ -117,8 +117,11 @@ ADDITIVE_SEGMENT_AXES = frozenset({
 # refusal. Version 2 distinguishes proven one-dimensional additive segment
 # axes from lossy legacy/multi-dimensional XBRL projections. Derive the wire
 # list from the evaluator's actual allowlist so the declaration cannot drift.
-# Version 3 also admits the strictly validated cost-slot driver wire.
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:4"
+# Version 3 also admits the strictly validated cost-slot driver wire. Version
+# 5 binds the structured filing-proof unit projection: SEC currency-per-share
+# spellings are normalized exactly as model inputs are, while legacy replay
+# retains its byte-exact unit comparison.
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:5"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
@@ -138,6 +141,7 @@ FORECAST_INVARIANT_CONTRACT = {
     "cash_flow_companion_validation": (
         "cash-flow-companion-pre-persistence-validation:0.2"
     ),
+    "filing_proof_units": "structured-sec-per-share-normalization:v1",
 }
 FORECAST_INVARIANT_CONTRACT_HASH = content_hash(FORECAST_INVARIANT_CONTRACT)
 PERIOD_BASIS = "period_basis"

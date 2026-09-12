@@ -65,7 +65,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .claim_index_authority import MARKET_PROXY
 from .company_model_inputs import (
     AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, INCOMPLETE, NOT_FOUND,
-    SHARED, cash_quarter_windows_are_unique,
+    SHARED, _model_unit, cash_quarter_windows_are_unique,
 )
 from .driver_template import COST_DRIVER_TEMPLATES
 from .model_forecast import (
@@ -92,6 +92,14 @@ STRUCTURED_SCHEMA_VERSIONS = frozenset({
 
 def is_structured_schema(value: Any) -> bool:
     return value in STRUCTURED_SCHEMA_VERSIONS
+
+
+def _filing_units_match(source: Any, model: Any, *, structured: bool) -> bool:
+    """Compare the stored SEC unit with the unit carried by model history."""
+
+    if not structured:
+        return str(source) == str(model)
+    return _model_unit(source).casefold() == _model_unit(model).casefold()
 
 
 FORMULA_REF = DRIVER_FORMULA_REF
@@ -4098,11 +4106,9 @@ class ForecastModelAuthority:
                         row for row in matches
                         if str(row.get("concept")) == str(cell.get("concept"))
                         and str(row.get("statement")) == str(driver.get("statement"))
-                        and (
-                            str(row.get("unit")).casefold()
-                            == str(driver.get("unit")).casefold()
-                            if is_structured_schema(wire.get("schema_version"))
-                            else str(row.get("unit")) == str(driver.get("unit"))
+                        and _filing_units_match(
+                            row.get("unit"), driver.get("unit"),
+                            structured=is_structured_schema(wire.get("schema_version")),
                         )
                         and row.get("dimension_axis") is None
                         and row.get("dimension_member") is None

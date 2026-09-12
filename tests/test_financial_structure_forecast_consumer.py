@@ -28,6 +28,7 @@ from dalton_core.model_forecast_driver import (
 )
 from dalton_core.forecast_sensitivity import build_projection, measure_series, recompute
 from dalton_core.company_model_forecast import publish_forecast_lines
+from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.company_model_annual_projection import (
     AnnualProjectionError,
     build_annual_projection,
@@ -258,6 +259,62 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertEqual(record["schema_version"], "0.3")
         self.assertEqual(record["forecast_structure_binding"], binding)
         self.assertEqual(record["financial_statement_structure"], structure)
+
+    def test_v03_filing_proof_accepts_exact_sec_per_share_unit(self):
+        inputs, structure = self.authority()
+        candidate = forecastable_proposal(inputs)
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        binding = forecast_structure_binding(structure, replay, inputs)
+        body = build_structured_forecast_model(
+            company_spec(), inputs, structure=structure, replay=replay,
+            binding=binding)
+        statement_rows = []
+        for ordinal, driver in enumerate(body["drivers"]):
+            for cell_index, cell in enumerate(driver["history"]):
+                statement_rows.append({
+                    "line_id": f"line:{ordinal}:{cell_index}",
+                    "ingest_id": "statement-ingest:fixture",
+                    "statement": driver["statement"], "ordinal": ordinal * 10 + cell_index,
+                    "concept": driver["concept"], "label": driver["label"],
+                    "level": 0, "parent_concept": None, "is_breakdown": False,
+                    "dimension_axis": None, "dimension_member": None,
+                    "period_start": cell["period_start"],
+                    "period_end": cell["period_end"], "value": cell["value"],
+                    "unit": ("usdPerShare" if driver["role"] == "diluted_eps"
+                             else driver["unit"]),
+                    "balance": None, "dimension_count": 0,
+                })
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DaltonStore(str(Path(temporary) / "core.sqlite"))
+            self.addCleanup(store.close)
+            CoverageMissionAuthority(store)
+            connection = store.connection
+            for trigger in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN "
+                "('coverage_mission_statement_filings',"
+                "'coverage_mission_statement_lines')"
+            ).fetchall():
+                connection.execute(f"DROP TRIGGER {trigger['name']}")
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "INSERT INTO coverage_mission_statement_filings VALUES"
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("statement-ingest:fixture", "dispatch:fixture", "company:test",
+                 "0000000000", "Fixture", ACCESSION, "10-Q", "2026-01-01",
+                 "2025-12-31", len(statement_rows), "[]", "governance:test",
+                 "a" * 64, "2026-01-01T00:00:00+00:00", "b" * 64))
+            columns = tuple(statement_rows[0])
+            connection.executemany(
+                "INSERT INTO coverage_mission_statement_lines(" + ",".join(columns)
+                + ") VALUES(" + ",".join("?" for _ in columns) + ")",
+                [tuple(row[key] for key in columns) for row in statement_rows])
+            connection.commit()
+
+            record = ForecastModelAuthority(store).publish(
+                body, statement_rows=statement_rows)
+
+        self.assertEqual(record["status"], "fresh")
 
     def test_v03_actualization_replays_exact_dag_and_eps_inputs(self):
         inputs, structure = self.authority()
