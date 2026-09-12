@@ -170,6 +170,7 @@ CASH_FLOW_COMPANION_CONTRACT = {
     "missing_input": "unavailable",
 }
 GENERATOR_REF = "rule:trailing-carry-forward:1"
+STRUCTURE_GENERATOR_REF = "rule:structured-positive-trailing-carry-forward:2"
 AUTOMATION_ACTOR = "automation:driver-model"
 
 # How many trailing quarters the default generator averages. Four, so a full
@@ -832,7 +833,7 @@ def default_structure_assumptions(
         rate: dict[str, Any] | None = None
         measure = method
         if method == "quarterly_growth":
-            rate = trailing_growth(quarterly_history(driver))
+            rate = positive_trailing_growth(quarterly_history(driver))
         elif method == "share_of_line":
             base_ref = str(line.get("forecast_base_ref"))
             samples: list[tuple[Decimal, str]] = []
@@ -978,6 +979,30 @@ def trailing_growth(cells: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None
         "last_period": str(used[-1][2]["period_end"]),
         "refs": refs,
     }
+
+
+def positive_trailing_growth(
+    cells: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Structured multiplicative growth, only over a positive trailing window."""
+
+    # Keep only the latest contiguous suffix.  A gap closes the historical
+    # window; it must not cause an older pair to be pulled in as a substitute.
+    window: list[Mapping[str, Any]] = []
+    for prior, current in zip(cells, cells[1:]):
+        gap = _days(str(prior["period_end"]), str(current["period_end"]))
+        if QUARTER_GAP_MIN_DAYS <= gap <= QUARTER_GAP_MAX_DAYS:
+            if not window:
+                window.append(prior)
+            window.append(current)
+        else:
+            window = []
+    window = window[-(TRAILING_QUARTERS + 1):]
+    if len(window) < 2 or any(
+        _decimal(cell["value"], "history value") <= 0 for cell in window
+    ):
+        return None
+    return trailing_growth(window)
 
 
 def trailing_share(
@@ -2487,7 +2512,7 @@ def build_structured_forecast_model(
     binding: Mapping[str, Any], actor_ref: str = AUTOMATION_ACTOR,
     mission_version_ref: str | None = None,
     assumptions: Sequence[Mapping[str, Any]] | None = None,
-    generator_ref: str | None = GENERATOR_REF,
+    generator_ref: str | None = STRUCTURE_GENERATOR_REF,
     change_reason: str = "evidence_thicker",
     evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     decision: str | None = None,

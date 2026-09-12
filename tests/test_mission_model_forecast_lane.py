@@ -320,6 +320,33 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(self.lane.dispatch_once()["status"], "held")
         self.assertEqual(len(self.launcher.started), 2)
 
+    def test_structured_generator_change_releases_old_digest_hold_once(self):
+        old_digest = "0" * 64
+        with patch(
+            "dalton_core.mission_model_forecast_lane.model_digest",
+            return_value=old_digest,
+        ):
+            first = self.lane.dispatch_once()
+        self.assertEqual(first["model_digest"], old_digest)
+        self.launcher.finish(first["ticket_ref"], summary={
+            "forecast_status": "unavailable:economic_invariants",
+            "failure_reason": "rate_domain: signed amount cannot be a growth rate",
+        })
+
+        resumed = self.lane.dispatch_once()
+        self.assertEqual(resumed["status"], "launched")
+        self.assertNotEqual(resumed["model_digest"], first["model_digest"])
+        self.assertEqual(
+            resumed["validator_contract_hash"],
+            first["validator_contract_hash"],
+        )
+        self.launcher.finish(resumed["ticket_ref"], summary={
+            "forecast_status": "unavailable:economic_invariants",
+            "failure_reason": "a refusal under the new generator identity",
+        })
+        self.assertEqual(self.lane.dispatch_once()["status"], "held")
+        self.assertEqual(len(self.launcher.started), 2)
+
     def test_a_refused_old_spec_does_not_hold_a_new_spec_identity(self):
         first = self.lane.dispatch_once()
         self.launcher.finish(first["ticket_ref"], summary={

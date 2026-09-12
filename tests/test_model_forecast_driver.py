@@ -27,6 +27,7 @@ from dalton_core.model_forecast_driver import (
     CHANGE_REASONS,
     CONCEPT_ROLES,
     GENERATOR_REF,
+    STRUCTURE_GENERATOR_REF,
     MAX_REALISED_PERIODS,
     SOURCE_VERSION_KEY,
     AssumptionRefused,
@@ -44,6 +45,8 @@ from dalton_core.model_forecast_driver import (
     _cumulative_source_pair_matches,
     _filing_units_match,
     model_readiness,
+    positive_trailing_growth,
+    trailing_growth,
     replay_cell,
     revenue_anchor,
     revise_assumptions,
@@ -91,6 +94,60 @@ class FilingProofUnitTests(unittest.TestCase):
         self.assertFalse(_filing_units_match(
             "usdPerShare", "usd_per_share", structured=False))
         self.assertFalse(_filing_units_match("USD", "usd", structured=False))
+
+
+class StructuredGrowthDomainTests(unittest.TestCase):
+    @staticmethod
+    def cells(values):
+        ends = ("2025-05-31", "2025-08-31", "2025-11-30",
+                "2026-02-28", "2026-05-31")
+        return [{"concept": "us-gaap:OtherNonoperatingIncomeExpense",
+                 "period_end": end, "value": value, "accessions": ["a"]}
+                for end, value in zip(ends, values)]
+
+    def test_signed_or_zero_trailing_window_is_unavailable(self):
+        for values in (
+            ("-43029000", "-13410000", "53114000", "-51863000", "-29894000"),
+            ("10", "20", "0", "30", "40"),
+        ):
+            with self.subTest(values=values):
+                self.assertIsNone(positive_trailing_growth(self.cells(values)))
+
+    def test_positive_trailing_window_retains_exact_growth(self):
+        cells = self.cells(("10", "11", "12", "13", "14"))
+        self.assertEqual(positive_trailing_growth(cells), trailing_growth(cells))
+
+    def test_older_nonpositive_value_outside_trailing_window_is_not_used(self):
+        cells = [
+            {"concept": "x", "period_end": end, "value": value,
+             "accessions": ["a"]}
+            for end, value in zip(
+                ("2025-02-28", "2025-05-31", "2025-08-31",
+                 "2025-11-30", "2026-02-28", "2026-05-31"),
+                ("-100", "10", "11", "12", "13", "14"),
+            )
+        ]
+        expected = trailing_growth(cells[-5:])
+        self.assertEqual(positive_trailing_growth(cells), expected)
+
+    def test_gap_starts_a_new_window_without_pulling_an_older_pair(self):
+        cells = [
+            {"concept": "x", "period_end": end, "value": value,
+             "accessions": ["a"]}
+            for end, value in (
+                ("2024-12-31", "10"), ("2025-03-31", "11"),
+                ("2025-09-30", "12"), ("2025-12-31", "13"),
+            )
+        ]
+        self.assertEqual(
+            positive_trailing_growth(cells), trailing_growth(cells[-2:]))
+
+    def test_legacy_generator_identity_is_unchanged(self):
+        self.assertEqual(GENERATOR_REF, "rule:trailing-carry-forward:1")
+        self.assertEqual(
+            STRUCTURE_GENERATOR_REF,
+            "rule:structured-positive-trailing-carry-forward:2",
+        )
 
 
 class CumulativeFilingPairTests(unittest.TestCase):

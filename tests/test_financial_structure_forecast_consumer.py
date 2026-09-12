@@ -189,6 +189,34 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertEqual(by_cell[("net_income", end)]["status"], "unavailable")
         self.assertEqual(by_cell[("diluted_eps", end)]["status"], "unavailable")
 
+    def test_signed_growth_leaf_and_dependent_formula_are_unavailable(self):
+        inputs, structure = self.authority()
+        interest_line = next(
+            line for line in structure["lines"] if line["ref"] == "interest-income")
+        interest_line.update(
+            forecast_method="quarterly_growth", forecast_base_ref=None)
+        drivers = build_structure_drivers(inputs, structure)
+        interest = next(
+            item for item in drivers
+            if item["structure_line_ref"] == "interest-income")
+        for cell, value in zip(
+            interest["history"], ("-43", "-13", "53", "-51", "-29")
+        ):
+            cell["value"] = value
+        periods = forecast_periods(revenue_anchor(drivers), 2)
+        assumptions = default_structure_assumptions(drivers, periods, structure)
+        self.assertFalse(any(
+            item["driver_ref"] == interest["ref"] for item in assumptions))
+        output = cells(compute_structure_results(
+            drivers, assumptions, periods, structure))
+        for end in (period["end"] for period in periods):
+            leaf = output[("interest_income", end)]
+            self.assertEqual(leaf["status"], "unavailable")
+            self.assertIsNone(leaf["value"])
+            pretax = output[("pretax_income", end)]
+            self.assertEqual(pretax["status"], "unavailable")
+            self.assertIsNone(pretax["value"])
+
     def test_growth_does_not_jump_a_missing_or_stale_quarter(self):
         inputs, structure = self.authority()
         drivers = build_structure_drivers(inputs, structure)

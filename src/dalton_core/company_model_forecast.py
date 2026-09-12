@@ -48,6 +48,7 @@ from .model_forecast import (
 from .model_forecast_driver import (
     AUTOMATION_ACTOR,
     GENERATOR_REF,
+    STRUCTURE_GENERATOR_REF,
     REVENUE,
     ForecastModelAuthority,
     ForecastModelUnavailable,
@@ -155,7 +156,9 @@ def model_digest(
         "spec_ref": str(spec.get("spec_id") or ""),
         "spec_hash": str(spec.get("content_hash") or ""),
         "inputs_hash": inputs_hash(table),
-        "generator_ref": GENERATOR_REF,
+        "generator_ref": (
+            STRUCTURE_GENERATOR_REF if statement_binding is not None else GENERATOR_REF
+        ),
         "formula_hash": (
             DRIVER_FORMULA_HASH if statement_binding is None else
             cash_flow_formula_hash(structure, statement_binding, cash_companion)

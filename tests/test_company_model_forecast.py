@@ -25,6 +25,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from dalton_core.company_model_forecast import (
     PUBLISHED_METRICS,
     ForecastPublishRefused,
     missing_write_scope,
+    model_digest,
     pending_action,
     publish_forecast_lines,
     run_company_forecast,
@@ -54,6 +56,8 @@ from dalton_core.model_forecast_driver import (
     ForecastModelAuthority,
     ForecastModelConflict,
     ForecastModelValidationError,
+    GENERATOR_REF,
+    STRUCTURE_GENERATOR_REF,
     actualize_model,
     build_forecast_model,
 )
@@ -381,6 +385,20 @@ class LaneStateTests(unittest.TestCase):
         written = json.loads(
             (self.state_dir / "summary" / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(written["model_version_ref"], summary["model_version_ref"])
+
+    def test_structured_generator_changes_digest_without_changing_legacy_identity(self):
+        specification = self.missions.latest_company_model_spec(ACN)
+        table = build_model_inputs(self.missions, specification)
+        current = model_digest(specification, table)
+        with mock.patch(
+            "dalton_core.company_model_forecast.STRUCTURE_GENERATOR_REF",
+            GENERATOR_REF,
+        ):
+            prior = model_digest(specification, table)
+        self.assertNotEqual(current, prior)
+        self.child()
+        record = ForecastModelAuthority(self.store).latest(ACN)
+        self.assertEqual(record["generator_ref"], STRUCTURE_GENERATOR_REF)
 
     def test_runtime_persists_annual_projection_beside_exact_model(self):
         summary = self.child()
