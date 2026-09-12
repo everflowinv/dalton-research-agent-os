@@ -19,6 +19,7 @@ from dalton_core.lane_child_launcher import LaneChildRejected
 ACN = "company:sec-cik:0001467373"
 HASH = "a" * 64
 REPAIR_HASH = "c" * 64
+VALIDATION_HASH = "d" * 64
 
 
 class CompanyModelSpecLauncherTests(unittest.TestCase):
@@ -40,7 +41,8 @@ class CompanyModelSpecLauncherTests(unittest.TestCase):
         command = launcher._command(
             ticket_dir=self.state, company_ref=ACN,
             expected_state_hash=HASH, expected_task_hash="b" * 64,
-            expected_repair_policy_hash=REPAIR_HASH)
+            expected_repair_policy_hash=REPAIR_HASH,
+            expected_financial_validation_contract_hash=VALIDATION_HASH)
         self.assertIn("dalton_core.company_model_cli", command)
         self.assertIn(ACN, command)
         self.assertIn("--model-config", command)
@@ -49,6 +51,11 @@ class CompanyModelSpecLauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--expected-task-hash") + 1], "b" * 64)
         self.assertEqual(command[command.index("--expected-repair-policy-hash") + 1],
                          REPAIR_HASH)
+        self.assertEqual(
+            command[command.index(
+                "--expected-financial-validation-contract-hash") + 1],
+            VALIDATION_HASH,
+        )
         self.assertTrue(launcher.configured)
 
     def test_without_a_model_the_lane_says_so_rather_than_pretending(self):
@@ -58,7 +65,8 @@ class CompanyModelSpecLauncherTests(unittest.TestCase):
                          launcher._command(
                              ticket_dir=self.state, company_ref=ACN,
                              expected_state_hash=HASH, expected_task_hash="b" * 64,
-                             expected_repair_policy_hash=REPAIR_HASH))
+                             expected_repair_policy_hash=REPAIR_HASH,
+                             expected_financial_validation_contract_hash=VALIDATION_HASH))
 
     def test_the_same_company_and_disclosure_is_the_same_ticket(self):
         launcher = self.launcher()

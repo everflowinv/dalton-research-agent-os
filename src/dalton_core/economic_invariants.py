@@ -118,7 +118,7 @@ ADDITIVE_SEGMENT_AXES = frozenset({
 # axes from lossy legacy/multi-dimensional XBRL projections. Derive the wire
 # list from the evaluator's actual allowlist so the declaration cannot drift.
 # Version 3 also admits the strictly validated cost-slot driver wire.
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:3"
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:4"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
@@ -135,6 +135,9 @@ FORECAST_INVARIANT_CONTRACT = {
         "cost_driver_slots": "optional_nonempty_unique_frozen_registry_slots:v1",
         "cost_registry_hash": COST_REGISTRY_HASH,
     },
+    "cash_flow_companion_validation": (
+        "cash-flow-companion-pre-persistence-validation:0.2"
+    ),
 }
 FORECAST_INVARIANT_CONTRACT_HASH = content_hash(FORECAST_INVARIANT_CONTRACT)
 PERIOD_BASIS = "period_basis"

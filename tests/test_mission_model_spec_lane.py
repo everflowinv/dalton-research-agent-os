@@ -32,9 +32,13 @@ class FakeLauncher:
         }
         self.prompt_byte_limit = 120_000
         self.permission_control_version = "runtime:1"
+        self.financial_validation_version = "financial-validation:1"
 
     def repair_policy_hash(self):
         return content_hash(self.repair_config)
+
+    def financial_validation_contract_hash(self):
+        return content_hash(self.financial_validation_version)
 
     def numeric_context_policy(self):
         return dict(self.numeric_policy)
@@ -52,13 +56,17 @@ class FakeLauncher:
             raise self.raise_on_start
         self.started.append({"company_ref": company_ref, "state_hash": state_hash,
                              "task_hash": task_hash,
-                             "repair_policy_hash": repair_policy_hash})
+                             "repair_policy_hash": repair_policy_hash,
+                             "financial_validation_contract_hash": (
+                                 self.financial_validation_contract_hash())})
         ticket_id = f"company-model-spec-run:{len(self.started):024d}"
         self.tickets[ticket_id] = {
             "id": ticket_id, "status": "running", "summary": None,
             "company_ref": company_ref, "state_hash": state_hash,
             "task_hash": task_hash,
             "repair_policy_hash": repair_policy_hash,
+            "financial_validation_contract_hash": (
+                self.financial_validation_contract_hash()),
         }
         return {"id": ticket_id}
 
@@ -292,6 +300,27 @@ class ModelSpecLaneTests(unittest.TestCase):
         resumed = lane.dispatch_once()
         self.assertEqual(resumed["status"], "launched")
         self.assertEqual(self.launcher.started[-1]["task_hash"], "f" * 64)
+
+    def test_financial_validation_change_releases_content_refusal_once(self):
+        missions = FakeMissions([ACN])
+        lane = MissionModelSpecLaneCoordinator(
+            missions=missions, launcher=self.launcher,
+            mission=lambda: self.mission)
+        first = lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "spec_status": "refused",
+            "failure_reason": "pre-persistence cash validation refused",
+        })
+        self.assertEqual(lane.dispatch_once()["status"], "held")
+
+        self.launcher.financial_validation_version = "financial-validation:2"
+        resumed = lane.dispatch_once()
+        self.assertEqual(resumed["status"], "launched")
+        self.assertEqual(len(self.launcher.started), 2)
+        self.launcher.finish(resumed["ticket_ref"], summary={
+            "spec_status": "refused", "failure_reason": "still refused",
+        })
+        self.assertEqual(lane.dispatch_once()["status"], "held")
 
     def test_a_new_filed_classification_is_a_new_key_not_the_old_hold(self):
         missions = FakeMissions([ACN])

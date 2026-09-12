@@ -91,6 +91,8 @@ class MissionModelSpecLaneCoordinator:
             "state_hash": ticket.get("state_hash"),
             "task_hash": ticket.get("task_hash"),
             "repair_policy_hash": ticket.get("repair_policy_hash"),
+            "financial_validation_contract_hash": ticket.get(
+                "financial_validation_contract_hash"),
             "spec_status": summary.get("spec_status"),
             "spec_ref": summary.get("spec_ref"),
             "cost_micros": summary.get("cost_micros"),
@@ -125,8 +127,13 @@ class MissionModelSpecLaneCoordinator:
         state_hash = settled.get("state_hash")
         task_hash = settled.get("task_hash")
         repair_policy_hash = settled.get("repair_policy_hash")
-        if failed and company_ref and state_hash and task_hash and repair_policy_hash:
-            key = f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}"
+        validation_hash = settled.get("financial_validation_contract_hash")
+        if (failed and company_ref and state_hash and task_hash
+                and repair_policy_hash and validation_hash):
+            key = (
+                f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}|"
+                f"financial-validation:{validation_hash}"
+            )
             spec_status = settled.get("spec_status")
             reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
             if "PROVIDER_BUDGET_EXCEEDED" in (settled.get("failure_codes") or []):
@@ -137,9 +144,11 @@ class MissionModelSpecLaneCoordinator:
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(spec_status or settled.get("status")),
             ).as_wire()
-        elif company_ref and state_hash and task_hash and repair_policy_hash:
+        elif (company_ref and state_hash and task_hash and repair_policy_hash
+              and validation_hash):
             settled["resumed"] = self.budget.clear(
-                f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}")
+                f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}|"
+                f"financial-validation:{validation_hash}")
         return settled
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -219,7 +228,9 @@ class MissionModelSpecLaneCoordinator:
             # first candidate be skipped without rebuilding a different one.
             state_hash = state["state_hash"]
             business_key = (
-                f"{company_ref}|{state_hash}|{TASK_HASH}|{repair_policy_hash}"
+                f"{company_ref}|{state_hash}|{TASK_HASH}|{repair_policy_hash}|"
+                f"financial-validation:"
+                f"{self.launcher.financial_validation_contract_hash()}"
             )
 
             permission = current_permission(

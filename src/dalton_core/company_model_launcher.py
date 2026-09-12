@@ -59,6 +59,12 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         config = self._validated_model_config()
         return content_hash(structured_output_repair_config(config))
 
+    def financial_validation_contract_hash(self) -> str:
+        from .model_forecast_driver import (
+            CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+        )
+        return CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH
+
     def permission_control_projection(self) -> dict[str, str]:
         """Runtime code whose change can authorize a held model Work anew."""
 
@@ -96,7 +102,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
     def _command(self, *, ticket_dir: Path, company_ref: str,
                  expected_state_hash: str, expected_task_hash: str,
-                 expected_repair_policy_hash: str) -> list[str]:
+                 expected_repair_policy_hash: str,
+                 expected_financial_validation_contract_hash: str) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
@@ -104,6 +111,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             "--expected-state-hash", expected_state_hash,
             "--expected-task-hash", expected_task_hash,
             "--expected-repair-policy-hash", expected_repair_policy_hash,
+            "--expected-financial-validation-contract-hash",
+            expected_financial_validation_contract_hash,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
         if self.model_config_path is not None:
@@ -137,6 +146,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         ):
             raise LaneChildRejected("repair policy hash changed before launch")
         identity += f"|repair:{repair_policy_hash}"
+        validation_hash = self.financial_validation_contract_hash()
+        identity += f"|financial-validation:{validation_hash}"
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         return self.spawn(
             digest=digest,
@@ -144,11 +155,13 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
                 "company_ref": company_ref, "state_hash": state_hash,
                 "task_hash": task_hash,
                 "repair_policy_hash": repair_policy_hash,
+                "financial_validation_contract_hash": validation_hash,
                 "model_configured": self.configured,
             },
             company_ref=company_ref, expected_state_hash=state_hash,
             expected_task_hash=task_hash,
             expected_repair_policy_hash=repair_policy_hash,
+            expected_financial_validation_contract_hash=validation_hash,
         )
 
 

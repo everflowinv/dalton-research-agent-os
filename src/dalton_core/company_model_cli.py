@@ -554,6 +554,7 @@ def run_model_spec(
     expected_state_hash: str | None = None,
     expected_task_hash: str | None = None,
     expected_repair_policy_hash: str | None = None,
+    expected_financial_validation_contract_hash: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state_dir = state_dir.expanduser().resolve()
@@ -584,6 +585,7 @@ def run_model_spec(
         "failure_reason": None,
         "repair_attempts": [],
         "repair_policy_hash": None,
+        "financial_validation_contract_hash": None,
         "pre_persistence_validation": None,
         "financial_input_hash": None,
         "financial_structure_ref": None,
@@ -671,12 +673,20 @@ def run_model_spec(
         repair_config = structured_output_repair_config(raw_model_config)
         repair_policy_hash = content_hash(repair_config)
         summary["repair_policy_hash"] = repair_policy_hash
+        from .model_forecast_driver import (
+            CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+        )
+        summary["financial_validation_contract_hash"] = (
+            CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH)
         if ((expected_state_hash is not None
              and expected_state_hash != state["state_hash"])
                 or (expected_task_hash is not None
                     and expected_task_hash != TASK_HASH)
                 or (expected_repair_policy_hash is not None
-                    and expected_repair_policy_hash != repair_policy_hash)):
+                    and expected_repair_policy_hash != repair_policy_hash)
+                or (expected_financial_validation_contract_hash is not None
+                    and expected_financial_validation_contract_hash
+                    != CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH)):
             summary.update({
                 "status": "succeeded", "spec_status": "stale_input",
                 "failure_reason": (
@@ -828,6 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-state-hash")
     parser.add_argument("--expected-task-hash")
     parser.add_argument("--expected-repair-policy-hash")
+    parser.add_argument("--expected-financial-validation-contract-hash")
     parser.add_argument("--dry-run", action="store_true",
                         help="assemble the state and stop; no model call, no writes")
     parser.add_argument("--quiet", action="store_true")
@@ -843,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
         expected_state_hash=args.expected_state_hash,
         expected_task_hash=args.expected_task_hash,
         expected_repair_policy_hash=args.expected_repair_policy_hash,
+        expected_financial_validation_contract_hash=(
+            args.expected_financial_validation_contract_hash),
         dry_run=args.dry_run,
     )
     if not args.quiet:
