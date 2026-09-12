@@ -24,11 +24,13 @@ from .store import content_hash
 
 LEGACY_SCHEMA_VERSION = "0.1"
 ANNUAL_SCHEMA_VERSION = "0.2"
-SCHEMA_VERSION = "0.3"
-STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.3"
+TYPED_NOTE_SCHEMA_VERSION = "0.3"
+SCHEMA_VERSION = "0.4"
+STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.4"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
     ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
+    TYPED_NOTE_SCHEMA_VERSION: "company-financial-statement-structure:0.3",
     SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
 }
 
@@ -75,7 +77,10 @@ _TYPED_NOTE_FIELDS = {
 _NOTE_PERIOD_FIELDS = {"period_start", "period_end"}
 FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION = "financial-note-evidence-binding-0.1"
 DILUTED_EPS_NUMERATOR_NOTE_TARGET = "financial_note:diluted_eps_numerator:0.1"
-_ANNUAL_STRUCTURE_VERSIONS = {ANNUAL_SCHEMA_VERSION, SCHEMA_VERSION}
+_ANNUAL_STRUCTURE_VERSIONS = {
+    ANNUAL_SCHEMA_VERSION, TYPED_NOTE_SCHEMA_VERSION, SCHEMA_VERSION,
+}
+_TYPED_NOTE_STRUCTURE_VERSIONS = {TYPED_NOTE_SCHEMA_VERSION, SCHEMA_VERSION}
 
 
 def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
@@ -148,6 +153,12 @@ _SUM_FORMULA_SCHEMA = _schema_object(
     {
         "output_ref": _SCHEMA_REF, "operator": {"const": "sum"},
         "terms": {"type": "array", "minItems": 1, "maxItems": 24,
+                  "description": (
+                      "Use the statement bridge roles accepted for the output. A direct "
+                      "company presentation may derive pretax_income from exactly one "
+                      "gross_profit term at coefficient 1 plus one or more "
+                      "company_presented_component or company_presented_subtotal terms."
+                  ),
                   "items": _schema_object(
                       {"line_ref": _SCHEMA_REF,
                        "coefficient": {"enum": ["-1", "1"]}},
@@ -340,7 +351,7 @@ def _digest(value: Any, name: str) -> str:
 
 def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
                schema_version: str) -> set[str]:
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS:
         # Kept lazy to avoid the evidence -> inventory -> annual projection ->
         # structure import cycle while still refusing a contract split.
         from .financial_note_evidence import BINDING_SCHEMA_VERSION, TARGET_REF
@@ -353,11 +364,11 @@ def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
             )
     refs: set[str] = set()
     for index, raw in enumerate(note_evidence):
-        fields = _TYPED_NOTE_FIELDS if schema_version == SCHEMA_VERSION else _NOTE_FIELDS
+        fields = _TYPED_NOTE_FIELDS if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS else _NOTE_FIELDS
         wire = _closed(raw, fields, f"note_evidence[{index}]")
         ref = _text(wire["ref"], f"note_evidence[{index}].ref")
         _digest(wire["content_hash"], f"note_evidence[{index}].content_hash")
-        if schema_version == SCHEMA_VERSION:
+        if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS:
             if wire["schema_version"] != FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION:
                 raise FinancialStatementStructureError("note evidence schema_version is invalid")
             if wire["target_ref"] != DILUTED_EPS_NUMERATOR_NOTE_TARGET:
@@ -548,7 +559,7 @@ def _normalize_line(
             raise FinancialStatementStructureError("filed line statement differs from authority")
         if source.get("period_basis") != line["period_kind"]:
             raise FinancialStatementStructureError("filed line period kind differs from authority")
-        units = _units(source, include_duration=schema_version == SCHEMA_VERSION)
+        units = _units(source, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS)
         if units != {line["unit"]}:
             raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
         line["concept"] = concept
@@ -665,13 +676,13 @@ def _normalize_formula(
         if target.get("statement") != lines[output]["statement"]:
             raise FinancialStatementStructureError("formula tie-out statement differs")
         if _units(
-            target, include_duration=schema_version == SCHEMA_VERSION,
+            target, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS,
         ) != {lines[output]["unit"]}:
             raise FinancialStatementStructureError("formula tie-out unit differs")
         if target.get("period_basis") != lines[output]["period_kind"]:
             raise FinancialStatementStructureError("formula tie-out period kind differs")
     elif not (
-        schema_version == SCHEMA_VERSION
+        schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS
         and operator == "sum"
         and lines[output]["role"] == "diluted_eps_numerator"
         and note_evidence
@@ -712,12 +723,31 @@ def _normalize_formula(
             if output_role == _COMPANY_SUBTOTAL_ROLE
             else _SUM_ROLE_INPUTS.get(output_role)
         )
-        if allowed_roles is None or any(
+        direct_pretax_presentation = (
+            schema_version == SCHEMA_VERSION
+            and output_role == "pretax_income"
+            and len([
+                term for term in normalized
+                if lines[term["line_ref"]]["role"] == "gross_profit"
+            ]) == 1
+            and next(
+                term for term in normalized
+                if lines[term["line_ref"]]["role"] == "gross_profit"
+            )["coefficient"] == "1"
+            and len(normalized) >= 2
+            and all(
+                lines[term["line_ref"]]["role"] in {
+                    "gross_profit", _COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE,
+                }
+                for term in normalized
+            )
+        )
+        if not direct_pretax_presentation and (allowed_roles is None or any(
             lines[term["line_ref"]]["role"] not in (
                 allowed_roles | {_COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE}
             )
             for term in normalized
-        ):
+        )):
             raise FinancialStatementStructureError(
                 "sum formula roles do not match its company statement output"
             )
@@ -802,7 +832,7 @@ def _note_backed_eps_replay(
 ) -> list[dict[str, Any]]:
     """Validate exact note-scoped numerator periods through filed diluted EPS."""
 
-    if structure.get("schema_version") != SCHEMA_VERSION:
+    if structure.get("schema_version") not in _TYPED_NOTE_STRUCTURE_VERSIONS:
         return []
     lines = {line["ref"]: line for line in structure["lines"]}
     formulas = list(structure["formulas"])
@@ -1121,13 +1151,13 @@ def validate_structure_proposal(
     notes = _normalized_note_evidence(
         note_evidence, note_evidence_resolver, schema_version=schema_version,
     )
-    if schema_version == SCHEMA_VERSION and any(
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS and any(
         item["company_ref"] != state.get("company_ref") for item in notes
     ):
         raise FinancialStatementStructureError(
             "note evidence company differs from company presentation"
         )
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS:
         numeric = state.get("numeric_context")
         filings = (
             numeric.get("filing_authorities")
@@ -1175,7 +1205,7 @@ def validate_structure_proposal(
     _validate_formula_evidence(formulas, by_ref, filed, set(note_by_ref))
     _validate_typed_note_use(formulas, by_ref, note_by_ref)
     result = {"schema_version": schema_version, "lines": lines, "formulas": formulas}
-    if schema_version == SCHEMA_VERSION and notes:
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS and notes:
         result["note_evidence"] = notes
     return result
 
@@ -1376,8 +1406,10 @@ def replay_historical_structure(
                 annual_ready = annual_report["status"] == "validated"
     result = {
         "schema_version": (
-            "financial-statement-structure-replay-0.3"
+            "financial-statement-structure-replay-0.4"
             if structure.get("schema_version") == SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.3"
+            if structure.get("schema_version") == TYPED_NOTE_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.2"
             if structure.get("schema_version") == ANNUAL_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.1"
@@ -1389,7 +1421,7 @@ def replay_historical_structure(
             report["status"] == "validated" for report in reports
         ),
     }
-    if structure.get("schema_version") == SCHEMA_VERSION:
+    if structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS:
         result["note_formula_periods"] = note_formula_reports
     return result
 
@@ -1444,7 +1476,7 @@ def validate_financial_statement_structure(
     notes = _normalized_note_evidence(
         note_evidence, note_evidence_resolver, schema_version=schema_version,
     )
-    if schema_version == SCHEMA_VERSION and any(
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS and any(
         item["company_ref"] != body["company_ref"] for item in notes
     ):
         raise FinancialStatementStructureError(
@@ -1453,7 +1485,7 @@ def validate_financial_statement_structure(
     note_refs = {item["ref"] for item in notes}
     note_by_ref = {item["ref"]: item for item in notes}
     allowed_evidence = _statement_refs(
-        financial_inputs, include_duration=schema_version == SCHEMA_VERSION,
+        financial_inputs, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS,
     ) | note_refs
     raw_formulas = body["formulas"]
     if not isinstance(raw_formulas, list) or not raw_formulas:
@@ -1482,9 +1514,9 @@ def validate_financial_statement_structure(
         )
     _validate_formula_evidence(
         formulas, by_ref, filed, note_refs,
-        include_duration=schema_version == SCHEMA_VERSION,
+        include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS,
     )
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS:
         _validate_typed_note_use(formulas, by_ref, note_by_ref)
     normalized = {
         "schema_version": schema_version,
@@ -1523,13 +1555,13 @@ def materialize_financial_statement_structure(
             "company spec has an unsupported statement structure definition"
         )
     effective_note_evidence = list(note_evidence)
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS:
         held_notes = definition.get("note_evidence")
         if held_notes is None:
             held_notes = []
         if not isinstance(held_notes, list):
             raise FinancialStatementStructureError(
-                "statement structure 0.3 typed note evidence must be a list"
+                "typed-note statement structure evidence must be a list"
             )
         if effective_note_evidence and effective_note_evidence != held_notes:
             raise FinancialStatementStructureError(
@@ -1872,8 +1904,10 @@ def forecast_structure_binding(
         raise FinancialStatementStructureError("statement structure is not ready for forecast")
     projection = {
         "schema_version": (
-            "forecast-statement-structure-binding-0.3"
+            "forecast-statement-structure-binding-0.4"
             if structure.get("schema_version") == SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.3"
+            if structure.get("schema_version") == TYPED_NOTE_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.2"
             if structure.get("schema_version") == ANNUAL_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.1"
@@ -1895,6 +1929,7 @@ def forecast_structure_binding(
 __all__ = [
     "ANNUAL_FORECAST_METHODS", "ANNUAL_SEMANTICS", "FORECAST_METHODS",
     "FinancialStatementStructureError", "LEGACY_SCHEMA_VERSION",
+    "TYPED_NOTE_SCHEMA_VERSION",
     "LINE_KINDS", "MAX_STRUCTURE_FORMULAS", "MAX_STRUCTURE_LINES", "ROLES",
     "SCHEMA_VERSION", "STRUCTURE_AUTHORITY_REF", "STRUCTURE_PROPOSAL_SCHEMA",
     "aggregate_fiscal_year", "annual_diluted_eps", "day_weighted_annual_shares",

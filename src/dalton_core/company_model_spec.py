@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.3",
-    "prompt_contract": "company-model-spec-prompt:0.10",
+    "prompt_contract": "company-model-spec-prompt:0.11",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -512,7 +512,16 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "operating income, pretax income, net income, attribution totals, and EPS "
         "are historical/tie authorities: mark the filed copies unavailable and "
         "forecast their derived formula lines. Do not assign independent growth "
-        "or shares to those totals as a substitute for the bridge. Every line "
+        "or shares to those totals as a substitute for the bridge. "
+        "When the company directly presents pretax income as gross profit less "
+        "company-specific expense totals, the pretax sum may contain exactly one "
+        "gross_profit term with coefficient 1 and one or more "
+        "company_presented_component or company_presented_subtotal terms. Do not "
+        "mix that direct bridge with operating_income or other standard roles, "
+        "relabel a standard filed fact as company-presented, or invent an untied "
+        "subtotal. Each derived subtotal and the pretax result still needs its own "
+        "exact filed tie. "
+        "Every line "
         "also returns annual_forecast_method. It is null except for diluted "
         "weighted-average shares. Use unavailable there unless this exact company "
         "supports day_weighted_quarters and NUMERIC_PERIODS contains four "
