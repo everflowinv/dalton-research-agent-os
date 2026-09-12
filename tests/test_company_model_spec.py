@@ -249,7 +249,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "1d54be178b43a71f7ccc520a1b8887a5acac927a1dc7a53901216fcd1cece8f0",
+            "9b23af19d037a586ec0ce30fdbf688e9f9cf63a9317a4f63640635fd1cc3c43b",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -577,13 +577,25 @@ class CompanyModelSpecTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "Presentation rounding does not permit tie tolerance, rewriting a "
-            "filed amount, or inventing a balancing term",
+            "Presentation rounding does not permit arbitrary or global tie "
+            "tolerance, rewriting a filed amount, or inventing a balancing term",
+            prompt,
+        )
+        self.assertIn(
+            "per-share division uses each period's disclosed filed precision",
             prompt,
         )
         self.assertIn(
             "Prefer filed when an exact standard subtotal such as GrossProfit is "
             "available, except where the contract requires a final earnings formula.",
+            prompt,
+        )
+        self.assertIn(
+            "A derived sum must tie exactly in every applicable source period",
+            prompt,
+        )
+        self.assertIn(
+            "A per-share divide ties using each source period's disclosed filed precision",
             prompt,
         )
 

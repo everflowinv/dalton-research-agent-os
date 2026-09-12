@@ -176,9 +176,9 @@ _SUM_FORMULA_SCHEMA = _schema_object(
             "type": ["string", "null"], "maxLength": 200,
             "description": (
                 "Exact filed historical result tied by this formula; do not copy "
-                "it into the derived output line's concept field. A derived result "
+                "it into the derived output line's concept field. A derived sum "
                 "must tie exactly in every applicable source period; presentation "
-                "rounding does not permit tolerance or a balancing term."
+                "rounding does not permit arbitrary tolerance or a balancing term."
             ),
         },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
@@ -194,9 +194,9 @@ _DIVIDE_FORMULA_SCHEMA = _schema_object(
             "type": ["string", "null"], "maxLength": 200,
             "description": (
                 "Exact filed historical result tied by this formula; do not copy "
-                "it into the derived output line's concept field. A derived result "
-                "must tie exactly in every applicable source period; presentation "
-                "rounding does not permit tolerance or a balancing term."
+                "it into the derived output line's concept field. A per-share divide "
+                "ties using each source period's disclosed filed precision; do not "
+                "invent an arbitrary or global tolerance."
             ),
         },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
