@@ -264,6 +264,30 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
                          self.config.read_bytes())
         self.assertTrue((self.receipts / "rollback.json").is_file())
 
+    def test_outer_receipt_rejects_forged_gateway_identity_proofs(self):
+        self._apply()
+        receipt_path = self.receipts / "receipt.json"
+        original = json.loads(receipt_path.read_text())
+        before, after, row = stopped.expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=self.manifest)
+        for mutation in ("empty", "wrong_time", "identical"):
+            forged = json.loads(json.dumps(original))
+            if mutation == "empty":
+                forged["after_gateway"] = {}
+            elif mutation == "wrong_time":
+                forged["after_gateway"]["started_at"] = (
+                    "1970-01-01T00:00:09.999Z")
+            else:
+                forged["after_gateway"] = dict(forged["before_gateway"])
+            forged["content_hash"] = stopped.canonical_hash({
+                key: value for key, value in forged.items()
+                if key != "content_hash"})
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(stopped.BrokerStoppedWindowError):
+                    stopped.validate_transition_receipt(
+                        receipt=forged, transition=self.manifest, row=row,
+                        before=before, after=after, receipt_dir=self.receipts)
+
     def test_owned_cas_never_overwrites_racing_regular_file(self):
         before = self.config.read_bytes()
         after = (self.packet / "openclaw.after.json").read_bytes()

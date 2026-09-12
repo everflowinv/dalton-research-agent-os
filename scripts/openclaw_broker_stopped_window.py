@@ -519,6 +519,31 @@ def validate_transition_receipt(*, receipt: Mapping[str, Any],
                                  == expected
                              for actual, expected in zip(
                                  receipt_plugins, expected_plugins)))
+    gateway_identities = []
+    for name in ("before_gateway", "after_gateway"):
+        identity = receipt.get(name)
+        valid = (isinstance(identity, Mapping)
+                 and set(identity) == {"pid", "started_at", "started_at_ms"}
+                 and isinstance(identity.get("pid"), int)
+                 and not isinstance(identity.get("pid"), bool)
+                 and identity["pid"] > 0
+                 and isinstance(identity.get("started_at_ms"), int)
+                 and not isinstance(identity.get("started_at_ms"), bool)
+                 and identity["started_at_ms"] >= 0
+                 and isinstance(identity.get("started_at"), str))
+        parsed = None
+        if valid:
+            try:
+                parsed = datetime.datetime.fromisoformat(
+                    identity["started_at"].replace("Z", "+00:00"))
+            except ValueError:
+                valid = False
+        valid = (valid and parsed is not None and parsed.tzinfo is not None
+                 and parsed.utcoffset() == datetime.timedelta(0)
+                 and int(parsed.timestamp() * 1000) == identity["started_at_ms"])
+        _need(valid, "broker gateway identity proof differs")
+        gateway_identities.append(dict(identity))
+    before_gateway, after_gateway = gateway_identities
     _need(set(receipt) == keys
           and receipt.get("schema_version")
               == "openclaw-broker-stopped-window-receipt-0.1"
@@ -536,8 +561,8 @@ def validate_transition_receipt(*, receipt: Mapping[str, Any],
           and receipt.get("model_calls") == 0
           and receipt.get("managed_host_patch") == expected_host
           and plugins_match
-          and isinstance(receipt.get("before_gateway"), Mapping)
-          and isinstance(receipt.get("after_gateway"), Mapping)
+          and before_gateway != after_gateway
+          and after_gateway["started_at_ms"] >= before_gateway["started_at_ms"]
           and receipt.get("content_hash") == canonical_hash(unsigned),
           "broker transition receipt does not bind this transition")
     return dict(receipt)
