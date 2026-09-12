@@ -178,6 +178,7 @@ def _statement_structure_concepts(spec: Mapping[str, Any]) -> set[str]:
 
 def _series_for(
     missions: Any, company_ref: str, concept: str, *, legacy_replay: bool = False,
+    non_additive_duration_policy: bool = True,
 ) -> dict[str, Any]:
     """The filed series for one concept, and which statement it came from.
 
@@ -202,7 +203,10 @@ def _series_for(
     unit_for_model = str if legacy_replay else _model_unit
     source_units = sorted({unit_for_model(row.get("unit"))
                            for row in reported if row.get("unit")})
-    series = quarterly_series(lines, legacy_replay=legacy_replay)
+    series = quarterly_series(
+        lines, legacy_replay=legacy_replay,
+        non_additive_duration_policy=non_additive_duration_policy,
+    )
     if not legacy_replay:
         for kind in ("quarters", "instants", "durations"):
             for cell in series.get(kind) or []:
@@ -427,6 +431,10 @@ def build_model_inputs(
         filed[concept] = _series_for(
             missions, company_ref, concept,
             legacy_replay=legacy_series,
+            # Structured 0.3 inputs predate the non-additive duration policy.
+            # Preserve their byte-identical numeric replay while 0.4 and later
+            # specifications bind the corrected series contract.
+            non_additive_duration_policy=(spec.get("schema_version") != "0.3"),
         )
 
     cash_required = any(

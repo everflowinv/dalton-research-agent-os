@@ -114,6 +114,7 @@ class ModelInputTests(unittest.TestCase):
     def test_built_inputs_materialize_the_persisted_statement_definition(self):
         spec = {
             **_spec(),
+            "schema_version": "0.3",
             "revenue_anchor_concept": "us-gaap:Revenues",
             "decided_by": "automation:test",
             "financial_statement_structure": {
@@ -362,6 +363,24 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(structured["source_units"], ["usd_per_share"])
         self.assertEqual(structured["series"]["quarters"][0]["unit"],
                          "usd_per_share")
+
+    def test_structured_0_3_weighted_share_replay_keeps_prior_series_projection(self):
+        concept = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+        ledger = FakeMissions([
+            _line(concept, "2025-01-01", "2025-09-30", "105", unit="shares"),
+            _line(concept, "2025-01-01", "2025-12-31", "104", unit="shares"),
+        ])
+        prior = _series_for(
+            ledger, ACN, concept,
+            non_additive_duration_policy=False,
+        )
+        self.assertEqual(prior["source_units"], ["shares"])
+        self.assertEqual(prior["series"]["quarters"][0]["value"], "-1")
+        self.assertEqual(len(prior["series"]["durations"]), 2)
+
+        current = _series_for(ledger, ACN, concept)
+        self.assertEqual(current["series"]["quarters"], [])
+        self.assertEqual(len(current["series"]["durations"]), 2)
 
     def test_cash_input_keeps_missing_quarter_and_wrong_sign_as_gaps(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"

@@ -141,6 +141,18 @@ class QuarterlySeriesTests(unittest.TestCase):
         self.assertEqual(series["quarters"][0]["value"], "-1")
         self.assertEqual(series["quarters"][0]["basis"], DERIVED)
 
+    def test_non_additive_policy_requires_every_row_to_name_the_exact_concept(self):
+        concept = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+        for adversarial in (None, "", "example:OtherConcept"):
+            with self.subTest(adversarial=adversarial):
+                series = quarterly_series([
+                    _row("2025-01-01", "2025-09-30", "105", concept=concept),
+                    _row("2025-01-01", "2025-12-31", "110",
+                         concept=adversarial),
+                ])
+                self.assertEqual(series["derived_count"], 1)
+                self.assertEqual(series["quarters"][0]["value"], "5")
+
     def test_the_quarter_is_kept_and_the_year_to_date_is_not_added_to_it(self):
         # The live trap, exactly as filed.
         series = quarterly_series([

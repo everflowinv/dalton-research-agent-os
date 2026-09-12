@@ -254,6 +254,7 @@ def _derive_quarters(
 
 def quarterly_series(
     rows: Iterable[Mapping[str, Any]], *, legacy_replay: bool = False,
+    non_additive_duration_policy: bool = True,
 ) -> dict[str, Any]:
     """A quarterly series for one concept, and an account of how it was built.
 
@@ -266,6 +267,8 @@ def quarterly_series(
     filing-date-only tie selection, cross-unit cumulative arithmetic, and the
     smaller returned shape.  Those choices are unsafe for new models but are
     part of the immutable input hash carried by already-filed model versions.
+    ``non_additive_duration_policy=False`` retains the structured 0.3 series
+    projection while keeping its later unit, ambiguity and duration behavior.
     """
 
     rows = list(rows)
@@ -289,14 +292,12 @@ def quarterly_series(
             unknown += 1
 
     held = {(str(item["period_start"]), str(item["period_end"])) for item in quarters}
-    concepts = {
-        str(row.get("concept")) for row in rows
-        if isinstance(row.get("concept"), str) and row.get("concept")
-    }
+    concept = rows[0].get("concept") if rows else None
     non_additive = (
         not legacy_replay
-        and len(concepts) == 1
-        and next(iter(concepts)) in NON_ADDITIVE_DURATION_CONCEPTS
+        and non_additive_duration_policy
+        and concept in NON_ADDITIVE_DURATION_CONCEPTS
+        and all(row.get("concept") == concept for row in rows)
     )
     derived = [] if non_additive else _derive_quarters(
         durations, held, legacy_replay=legacy_replay,
