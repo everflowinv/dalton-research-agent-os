@@ -102,6 +102,50 @@ def _filing_units_match(source: Any, model: Any, *, structured: bool) -> bool:
     return _model_unit(source).casefold() == _model_unit(model).casefold()
 
 
+def _cumulative_source_pair_matches(
+    candidates: Sequence[Mapping[str, Any]],
+    filings: Mapping[str, Mapping[str, Any]],
+    cell: Mapping[str, Any],
+) -> bool:
+    """Find an exact cumulative pair without depending on statement-row order."""
+
+    try:
+        cell_start = date.fromisoformat(str(cell["period_start"]))
+        cell_end = str(cell["period_end"])
+        cell_value = _decimal(cell.get("value"), "derived cumulative value")
+    except (KeyError, TypeError, ValueError, ForecastModelValidationError):
+        return False
+    cell_accessions = set(map(str, cell.get("accessions") or []))
+    for earlier in candidates:
+        for later in candidates:
+            if earlier is later:
+                continue
+            try:
+                adjacent = (
+                    date.fromisoformat(str(earlier["period_end"]))
+                    + timedelta(days=1) == cell_start
+                )
+                earlier_value = _decimal(
+                    earlier.get("value"), "earlier cumulative value")
+                later_value = _decimal(
+                    later.get("value"), "later cumulative value")
+                pair_accessions = {
+                    str(filings[str(row["ingest_id"])]["accession"])
+                    for row in (earlier, later)
+                }
+            except (KeyError, TypeError, ValueError, ForecastModelValidationError):
+                continue
+            if (
+                adjacent
+                and earlier.get("period_start") == later.get("period_start")
+                and str(later.get("period_end")) == cell_end
+                and pair_accessions == cell_accessions
+                and later_value - earlier_value == cell_value
+            ):
+                return True
+    return False
+
+
 FORMULA_REF = DRIVER_FORMULA_REF
 FORMULA_HASH = DRIVER_FORMULA_HASH
 STRUCTURE_FORMULA_REF = "formula:company-financial-statement-dag:0.1"
@@ -4134,38 +4178,8 @@ class ForecastModelAuthority:
                                 and all(len(items) == 1 for items in operand_matches)
                             )
                         else:
-                            source_rows = []
-                            for earlier in candidates:
-                                for later in candidates:
-                                    try:
-                                        adjacent = (
-                                            date.fromisoformat(str(earlier["period_end"]))
-                                            + timedelta(days=1)
-                                            == date.fromisoformat(str(cell["period_start"]))
-                                        )
-                                    except (KeyError, TypeError, ValueError):
-                                        adjacent = False
-                                    if (earlier is not later and adjacent
-                                            and earlier.get("period_start")
-                                            == later.get("period_start")
-                                            and later.get("period_end")
-                                            == cell.get("period_end")):
-                                        source_rows = [earlier, later]
-                                        break
-                                if source_rows:
-                                    break
-                            exact = False
-                            if len(source_rows) == 2:
-                                try:
-                                    exact = (
-                                        {str(found[str(row["ingest_id"])]["accession"])
-                                         for row in source_rows} == cell_accessions
-                                        and Decimal(str(source_rows[1]["value"]))
-                                        - Decimal(str(source_rows[0]["value"]))
-                                        == Decimal(str(cell.get("value")))
-                                    )
-                                except (InvalidOperation, ValueError):
-                                    exact = False
+                            exact = _cumulative_source_pair_matches(
+                                candidates, found, cell)
                     else:
                         exact = any(
                             row.get("period_start") == cell.get("period_start")

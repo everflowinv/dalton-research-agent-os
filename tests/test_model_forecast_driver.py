@@ -41,6 +41,7 @@ from dalton_core.model_forecast_driver import (
     draft_assumptions,
     forecast_periods,
     ForecastModelConflict,
+    _cumulative_source_pair_matches,
     _filing_units_match,
     model_readiness,
     replay_cell,
@@ -90,6 +91,76 @@ class FilingProofUnitTests(unittest.TestCase):
         self.assertFalse(_filing_units_match(
             "usdPerShare", "usd_per_share", structured=False))
         self.assertFalse(_filing_units_match("USD", "usd", structured=False))
+
+
+class CumulativeFilingPairTests(unittest.TestCase):
+    @staticmethod
+    def _row(ingest, start, end, value):
+        return {
+            "ingest_id": ingest, "period_start": start,
+            "period_end": end, "value": value,
+        }
+
+    def setUp(self):
+        self.filings = {
+            "wrong-early": {"accession": "wrong-a"},
+            "wrong-late": {"accession": "wrong-b"},
+            "right-early": {"accession": "right-a"},
+            "right-late": {"accession": "right-b"},
+        }
+        self.wrong = [
+            self._row("wrong-early", "2024-01-01", "2024-06-30", "2"),
+            self._row("wrong-late", "2024-01-01", "2024-09-30", "9"),
+        ]
+        self.right = [
+            self._row("right-early", "2024-01-01", "2024-06-30", "3"),
+            self._row("right-late", "2024-01-01", "2024-09-30", "8"),
+        ]
+        self.cell = {
+            "period_start": "2024-07-01", "period_end": "2024-09-30",
+            "value": "5", "accessions": ["right-a", "right-b"],
+        }
+
+    def test_exact_pair_is_found_after_an_earlier_wrong_pair_in_either_order(self):
+        for rows in (
+            self.wrong + self.right,
+            self.right + self.wrong,
+            list(reversed(self.wrong + self.right)),
+        ):
+            with self.subTest(order=[row["ingest_id"] for row in rows]):
+                self.assertTrue(_cumulative_source_pair_matches(
+                    rows, self.filings, self.cell))
+
+    def test_wrong_value_or_accession_does_not_prove_the_pair(self):
+        self.assertFalse(_cumulative_source_pair_matches(
+            self.wrong, self.filings, self.cell))
+        wrong_accession = {**self.cell, "accessions": ["right-a", "wrong-b"]}
+        self.assertFalse(_cumulative_source_pair_matches(
+            self.right, self.filings, wrong_accession))
+
+    def test_wrong_window_does_not_prove_the_pair(self):
+        wrong_start = [dict(row) for row in self.right]
+        wrong_start[1]["period_start"] = "2024-04-01"
+        self.assertFalse(_cumulative_source_pair_matches(
+            wrong_start, self.filings, self.cell))
+        nonadjacent = [dict(row) for row in self.right]
+        nonadjacent[0]["period_end"] = "2024-06-29"
+        self.assertFalse(_cumulative_source_pair_matches(
+            nonadjacent, self.filings, self.cell))
+
+    def test_nonfinite_values_do_not_prove_the_pair(self):
+        for target in ("cell", "earlier", "later"):
+            with self.subTest(target=target):
+                rows = [dict(row) for row in self.right]
+                cell = dict(self.cell)
+                if target == "cell":
+                    cell["value"] = "NaN"
+                elif target == "earlier":
+                    rows[0]["value"] = "Infinity"
+                else:
+                    rows[1]["value"] = "-Infinity"
+                self.assertFalse(_cumulative_source_pair_matches(
+                    rows, self.filings, cell))
 
 
 def ledger(series=None):
