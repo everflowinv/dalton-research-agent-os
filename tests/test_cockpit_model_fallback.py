@@ -116,7 +116,11 @@ class ChainAdapter:
             actual_side_effects=(),
             usage_refs=(),
             artifact_refs=(),
-            error=scripted if failed else None,
+            error=(
+                {key: value for key, value in scripted.items()
+                 if key != "proved_local_not_sent"}
+                if failed else None
+            ),
             metadata=metadata,
         )
 
@@ -1573,6 +1577,126 @@ class CockpitChainTests(unittest.TestCase):
                 "ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
         self.assertEqual(settlement["actual_micros"], result["cost_micros"])
+
+    def test_all_proved_local_control_gaps_exhaust_chain_without_spend(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="plan", request_id="controls-all-local-producer",
+               prompt="draft", mission=self.mission)
+
+        class EveryControlUnavailable(ChainAdapter):
+            def execute(self, work, route, profile):
+                self.script[profile["id"]] = {
+                    "code": "REQUIRED_CONTROLS_UNAVAILABLE",
+                    "message": "selected endpoint cannot enforce output limit",
+                    "proved_local_not_sent": True,
+                }
+                return super().execute(work, route, profile)
+
+        adapter = EveryControlUnavailable({})
+        with self.assertRaisesRegex(CockpitModelError, "every model.*failed") as raised:
+            self._model(
+                adapter, policy_version_ref=self.verifier_policy,
+                slots=self.verifier_slots,
+            ).call(
+                purpose="p14m_route_verify", request_id="controls-all-local",
+                prompt="verify", mission=self.mission,
+                producer_route_decision_refs=[producer["route_decision_ref"]],
+            )
+        self.assertGreaterEqual(len(adapter.served), 2)
+        trace = raised.exception.failure_trace
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            formal = scheduler.formal_result(trace["work_order_ref"])
+        self.assertEqual(formal["result_envelope"]["error"]["code"],
+                         "MODEL_CHAIN_EXHAUSTED")
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = ledger.admission(
+                work_order_ref=trace["work_order_ref"], attempt_number=1,
+                phase="assessment",
+            )
+        self.assertGreater(admission["admission"]["reserved_micros"], 0)
+        self.assertEqual(admission["settlement"]["actual_micros"], 0)
+
+    def test_unproved_control_gap_halts_first_link_and_retains_reservation(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="plan", request_id="controls-unproved-producer",
+               prompt="draft", mission=self.mission)
+        variants = [
+            None,
+            {"authority": "wrong", "state": "definitely_not_sent", "version": "0.1"},
+            {"authority": "openclaw-model-adapter", "state": "unknown", "version": "0.1"},
+            {"authority": "openclaw-model-adapter", "state": "definitely_not_sent", "version": "9"},
+        ]
+
+        for index, proof in enumerate(variants):
+            class UnprovedControlUnavailable(ChainAdapter):
+                def execute(inner, work, route, profile):
+                    invocation, envelope = super().execute(work, route, profile)
+                    metadata = dict(envelope.metadata)
+                    if proof is not None:
+                        metadata["dispatch_proof"] = proof
+                    return invocation, replace(envelope, metadata=metadata)
+
+            adapter = UnprovedControlUnavailable({
+                profile: {"code": "REQUIRED_CONTROLS_UNAVAILABLE", "message": "gap"}
+                for profile in tier_chain("verifier")
+            })
+            with self.subTest(proof=proof), self.assertRaises(CockpitModelError) as raised:
+                self._model(
+                    adapter, policy_version_ref=self.verifier_policy,
+                    slots=self.verifier_slots,
+                ).call(
+                    purpose="p14m_route_verify",
+                    request_id=f"controls-unproved-{index}", prompt="verify",
+                    mission=self.mission,
+                    producer_route_decision_refs=[producer["route_decision_ref"]],
+                )
+            self.assertEqual(len(adapter.served), 1)
+            trace = raised.exception.failure_trace
+            with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+                admission = ledger.admission(
+                    work_order_ref=trace["work_order_ref"], attempt_number=1,
+                    phase="assessment",
+                )
+            self.assertEqual(admission["settlement"]["actual_micros"],
+                             admission["admission"]["reserved_micros"])
+
+    def test_local_control_gap_then_unknown_failure_retains_full_reservation(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="plan", request_id="controls-mixed-producer",
+               prompt="draft", mission=self.mission)
+
+        class LocalThenUnknown(ChainAdapter):
+            def execute(self, work, route, profile):
+                self.script[profile["id"]] = (
+                    {"code": "REQUIRED_CONTROLS_UNAVAILABLE", "message": "gap",
+                     "proved_local_not_sent": True}
+                    if not self.served else
+                    {"code": "HOST_COMPLETION_FAILED", "message": "unknown dispatch"}
+                )
+                return super().execute(work, route, profile)
+
+        adapter = LocalThenUnknown({})
+        with self.assertRaises(CockpitModelError) as raised:
+            self._model(
+                adapter, policy_version_ref=self.verifier_policy,
+                slots=self.verifier_slots,
+            ).call(
+                purpose="p14m_route_verify", request_id="controls-mixed",
+                prompt="verify", mission=self.mission,
+                producer_route_decision_refs=[producer["route_decision_ref"]],
+            )
+        self.assertEqual(len(adapter.served), 2)
+        trace = raised.exception.failure_trace
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = ledger.admission(
+                work_order_ref=trace["work_order_ref"], attempt_number=1,
+                phase="assessment",
+            )
+        self.assertEqual(admission["settlement"]["actual_micros"],
+                         admission["admission"]["reserved_micros"])
 
     def test_dossier_provenance_reads_real_producer_and_verifier_authorities(self) -> None:
         from dalton_core.company_dossier_cli import (
