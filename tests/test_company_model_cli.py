@@ -34,6 +34,9 @@ from dalton_core.company_model_forecast_cli import run_model_forecast
 from dalton_core.company_model_spec import TASK_HASH, spec_from_response
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.company_model_state import build_company_model_state
+from dalton_core.model_forecast_driver import (
+    CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+)
 from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
 from dalton_core.store import DaltonStore
 from dalton_core.store import canonical_json, content_hash
@@ -380,6 +383,79 @@ class ChooseCompanyTests(unittest.TestCase):
             expected_task_hash=TASK_HASH, dry_run=True,
         )
         self.assertEqual(summary["spec_status"], "gated")
+
+    def test_wrong_financial_validation_contract_stops_before_model_or_persistence(self):
+        _, state = choose_company(self.missions, self.mission)
+        config = self.state_dir / "model.json"
+        config.write_text("{}", encoding="utf-8")
+
+        class Model:
+            def __init__(inner, *args, **kwargs):
+                raise AssertionError("stale validation identity reached Cockpit")
+
+        with patch("dalton_core.company_model_cli.CockpitModel", Model):
+            summary = run_model_spec(
+                state_dir=self.state_dir, model_config_path=config,
+                summary_dir=self.state_dir / "stale-validation-summary",
+                scheduler_db=None, company_ref=ACN,
+                expected_state_hash=state["state_hash"],
+                expected_task_hash=TASK_HASH,
+                expected_repair_policy_hash=content_hash({"max_attempts": 0}),
+                expected_financial_validation_contract_hash="f" * 64,
+            )
+        self.assertEqual(summary["spec_status"], "stale_input")
+        self.assertEqual(summary["cost_micros"], 0)
+        self.assertEqual(summary["formal_authority_writes"], 0)
+        self.assertEqual(self.missions.company_model_specs(ACN), [])
+
+    def test_exact_financial_validation_contract_reuses_formal_response(self):
+        _, state = choose_company(self.missions, self.mission)
+        calls = []
+        held = {
+            "text": json.dumps(_spec_body()),
+            "work_order_ref": "work:existing-formal",
+            "work_order_hash": "1" * 64,
+            "result_envelope_ref": "result:existing-formal",
+            "result_envelope_hash": "2" * 64,
+            "invocation_ref": "invocation:existing-formal",
+            "route_decision_ref": "route:existing-formal",
+            "cost_micros": 0,
+            "replayed": True,
+        }
+
+        class Model:
+            def __init__(inner, config, **kwargs):
+                inner.config = config
+
+            def call(inner, **kwargs):
+                calls.append(kwargs)
+                return held
+
+        config = self.state_dir / "model.json"
+        config.write_text("{}", encoding="utf-8")
+        with patch("dalton_core.company_model_cli.CockpitModel", Model):
+            summary = run_model_spec(
+                state_dir=self.state_dir, model_config_path=config,
+                summary_dir=self.state_dir / "replayed-validation-summary",
+                scheduler_db=self.state_dir / "scheduler.sqlite",
+                company_ref=ACN, expected_state_hash=state["state_hash"],
+                expected_task_hash=TASK_HASH,
+                expected_repair_policy_hash=content_hash({"max_attempts": 0}),
+                expected_financial_validation_contract_hash=(
+                    CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH),
+            )
+        self.assertEqual(summary["spec_status"], "fresh")
+        self.assertTrue(summary["replayed"])
+        self.assertEqual(summary["cost_micros"], 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            model_spec_request_id(state["state_hash"]),
+            model_spec_request_id(state["state_hash"], TASK_HASH),
+        )
+        self.assertEqual(
+            self.missions.company_model_specs(ACN)[-1]["work_order_ref"],
+            "work:existing-formal",
+        )
 
     def test_an_overbudget_fixed_prompt_is_reported_without_being_skipped(self):
         config = self.state_dir / "too-small-model.json"
