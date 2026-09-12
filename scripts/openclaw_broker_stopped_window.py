@@ -497,12 +497,21 @@ def verify_reviewed_host_patch(*, packet_root: Path, source_root: Path,
     unsigned = {key: value for key, value in receipt.items()
                 if key != "content_hash"}
     current = target.lstat()
-    _need(receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
+    _need(set(receipt) == {"schema_version", "status", "source_commit",
+                           "helper_sha256", "target_relative_path",
+                           "before_sha256", "after_sha256",
+                           "installed_identity", "model_calls", "content_hash"}
+          and receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
           and receipt.get("status") == "installed_checked_no_call"
           and receipt.get("content_hash") == canonical_hash(unsigned)
           and receipt.get("source_commit") == row["source_commit"]
           and receipt.get("helper_sha256") == row["helper_sha256"]
+          and receipt.get("target_relative_path") == row["target_relative_path"]
+          and receipt.get("before_sha256") == row["before_sha256"]
           and receipt.get("after_sha256") == row["after_sha256"]
+          and isinstance(receipt.get("installed_identity"), list)
+          and len(receipt["installed_identity"]) == 2
+          and all(isinstance(value, int) for value in receipt["installed_identity"])
           and receipt.get("installed_identity") == [current.st_dev, current.st_ino]
           and target.read_bytes() == after and receipt.get("model_calls") == 0,
           "installed model broker host patch differs")

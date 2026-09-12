@@ -105,6 +105,20 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
                 receipt_path=receipt, run=lambda *_a, **_k: completed)
             self.assertEqual("installed_checked_no_call", result["status"])
             self.assertEqual(after, target.read_bytes())
+            original_receipt = receipt.read_bytes()
+            tampered = json.loads(original_receipt)
+            tampered["foreign"] = True
+            unsigned = {key: value for key, value in tampered.items()
+                        if key != "content_hash"}
+            tampered["content_hash"] = stopped.canonical_hash(unsigned)
+            receipt.write_text(json.dumps(tampered) + "\n")
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
+                                        "installed model broker host patch differs"):
+                stopped.verify_reviewed_host_patch(
+                    packet_root=self.packet, source_root=source,
+                    openclaw_root=self.openclaw_root, row=row,
+                    receipt_path=receipt, run=lambda *_a, **_k: completed)
+            receipt.write_bytes(original_receipt)
             rolled = stopped.rollback_reviewed_host_patch(
                 packet_root=self.packet, source_root=source,
                 openclaw_root=self.openclaw_root, row=row,
