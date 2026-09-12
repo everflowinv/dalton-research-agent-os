@@ -23,6 +23,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -61,6 +62,8 @@ OPENCLAW_JOURNAL_SCHEMA_VERSION = "0.1"
 OPENCLAW_JOURNAL_MAX_BYTES = 8_388_608
 OPENCLAW_WEB_SEARCH_PLUGIN_ID = "dalton-openclaw-web-search-broker"
 OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE = "integrations/openclaw-web-search-broker"
+OPENCLAW_MODEL_PLUGIN_ID = "dalton-openclaw-model-broker"
+OPENCLAW_MODEL_SOURCE_RELATIVE = "integrations/openclaw-model-broker"
 OPENCLAW_WEB_SEARCH_LEGACY_PATH = (
     "/Users/everflow/Projects/dalton-research-agent-os/"
     "integrations/openclaw-web-search-broker"
@@ -441,9 +444,74 @@ def _validate_historical_unresolved(value: Any) -> dict[str, Any]:
     }
 
 
+def _validate_model_broker_host_patch(value: Any, *, packet_root: Path,
+                                      source_commit: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    keys = {"source_commit", "helper_relative_path", "helper_sha256",
+            "target_relative_path", "before", "before_sha256", "after",
+            "after_sha256", "capability_check"}
+    _need(isinstance(value, Mapping) and set(value) == keys
+          and value.get("source_commit") == source_commit
+          and value.get("capability_check") == "repo_helper_check_no_call",
+          "model broker host patch authority differs")
+    helper = Path(str(value["helper_relative_path"]))
+    target = Path(str(value["target_relative_path"]))
+    _need(helper.as_posix()
+          == "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py"
+          and not target.is_absolute() and ".." not in target.parts
+          and target.parts and target.parts[0] == "dist",
+          "model broker host patch path is outside reviewed scope")
+    result = dict(value)
+    for name in ("before", "after"):
+        rel = Path(str(value[name]))
+        path = packet_root / rel
+        _need(not rel.is_absolute() and ".." not in rel.parts
+              and path.is_file() and not path.is_symlink()
+              and sha256_bytes(path.read_bytes()) == value[f"{name}_sha256"],
+              "model broker host patch artifact differs")
+    _need(HEX64.fullmatch(str(value["helper_sha256"])) is not None,
+          "model broker host patch helper hash differs")
+    return result
+
+
+def build_model_broker_host_patch_artifact(
+    *, packet_root: Path, source_root: Path, source_commit: str,
+    target_relative_path: str, before_path: Path, after_path: Path,
+) -> dict[str, Any]:
+    """Stage the closed metadata for the repo-owned, no-call host guard."""
+    helper_rel = Path(
+        "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py")
+    helper = source_root / helper_rel
+    _need(HEX40.fullmatch(source_commit) is not None
+          and subprocess.check_output(
+              ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+              text=True).strip() == source_commit
+          and not subprocess.check_output(
+              ["git", "-C", str(source_root), "status", "--porcelain",
+               "--untracked-files=all"], text=True)
+          and helper.is_file() and not helper.is_symlink(),
+          "model broker host patch source is not frozen")
+    row = {
+        "source_commit": source_commit,
+        "helper_relative_path": helper_rel.as_posix(),
+        "helper_sha256": sha256_bytes(helper.read_bytes()),
+        "target_relative_path": target_relative_path,
+        "before": _artifact(before_path, packet_root)["file"],
+        "before_sha256": sha256_bytes(before_path.read_bytes()),
+        "after": _artifact(after_path, packet_root)["file"],
+        "after_sha256": sha256_bytes(after_path.read_bytes()),
+        "capability_check": "repo_helper_check_no_call",
+    }
+    return _validate_model_broker_host_patch(
+        row, packet_root=packet_root, source_commit=source_commit)
+
+
 def _validated_openclaw_frame_transition(
     *, before_path: Path, after_path: Path, packet_root: Path,
     web_search_plugin: Mapping[str, Any] | None = None,
+    model_broker_plugin: Mapping[str, Any] | None = None,
+    model_broker_host_patch: Mapping[str, Any] | None = None,
     historical_unresolved: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     packet_root = packet_root.resolve()
@@ -463,27 +531,40 @@ def _validated_openclaw_frame_transition(
         "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
     }]
     managed_plugins: list[dict[str, Any]] = []
-    if web_search_plugin is not None:
-        plugin = dict(web_search_plugin)
-        _need(set(plugin) == {
+    for plugin_input, expected_id, expected_source, default_before in (
+        (model_broker_plugin, OPENCLAW_MODEL_PLUGIN_ID,
+         OPENCLAW_MODEL_SOURCE_RELATIVE, None),
+        (web_search_plugin, OPENCLAW_WEB_SEARCH_PLUGIN_ID,
+         OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE, OPENCLAW_WEB_SEARCH_LEGACY_PATH),
+    ):
+        if plugin_input is None:
+            continue
+        plugin = dict(plugin_input)
+        expected_keys = {
             "plugin_id", "source_relative_path", "destination",
             "source_tree", "source_commit",
-        } and plugin.get("plugin_id") == OPENCLAW_WEB_SEARCH_PLUGIN_ID
-          and plugin.get("source_relative_path") == OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE
+        }
+        if expected_id == OPENCLAW_MODEL_PLUGIN_ID:
+            expected_keys.add("replaces")
+        _need(set(plugin) == expected_keys
+          and plugin.get("plugin_id") == expected_id
+          and plugin.get("source_relative_path") == expected_source
           and HEX40.fullmatch(str(plugin.get("source_commit", ""))) is not None,
-          "managed web-search plugin authority differs")
+          "managed plugin authority differs")
         plugin["source_tree"] = _validate_plugin_tree_manifest(
             plugin["source_tree"])
         paths = expected.get("plugins", {}).get("load", {}).get("paths")
+        before_destination = plugin.get("replaces", default_before)
         _need(isinstance(paths, list)
-              and paths.count(OPENCLAW_WEB_SEARCH_LEGACY_PATH) == 1
+              and isinstance(before_destination, str)
+              and paths.count(before_destination) == 1
               and plugin["destination"] not in paths,
-              "OpenClaw web-search plugin path baseline differs")
-        paths[paths.index(OPENCLAW_WEB_SEARCH_LEGACY_PATH)] = plugin["destination"]
+              "OpenClaw managed plugin path baseline differs")
+        paths[paths.index(before_destination)] = plugin["destination"]
         semantic_mutations.append({
             "kind": "json_array_unique_replace",
             "json_path": ["plugins", "load", "paths"],
-            "before_value": OPENCLAW_WEB_SEARCH_LEGACY_PATH,
+            "before_value": before_destination,
             "after_value": plugin["destination"],
         })
         managed_plugins.append(plugin)
@@ -501,6 +582,9 @@ def _validated_openclaw_frame_transition(
         "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
         "semantic_mutations": semantic_mutations,
         "managed_plugins": managed_plugins,
+        "managed_host_patch": _validate_model_broker_host_patch(
+            model_broker_host_patch, packet_root=packet_root,
+            source_commit=(model_broker_host_patch or {}).get("source_commit", "")),
         "historical_unresolved": _validate_historical_unresolved(
             historical_unresolved),
         "before": _artifact(before_path, packet_root),
@@ -525,6 +609,10 @@ def build_preserve_existing_transition(
     openclaw_config_after_path: Path | None = None,
     web_search_plugin_source_path: Path | None = None,
     web_search_plugin_destination_path: Path | None = None,
+    model_broker_plugin_source_path: Path | None = None,
+    model_broker_plugin_destination_path: Path | None = None,
+    model_broker_plugin_before_path: Path | None = None,
+    model_broker_host_patch: Mapping[str, Any] | None = None,
     openclaw_broker_journal_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build a 0.2 service delta, 0.3 external CAS, or 0.4 pure preserve.
@@ -621,6 +709,10 @@ def build_preserve_existing_transition(
         and openclaw_config_after_path is None
         and web_search_plugin_source_path is None
         and web_search_plugin_destination_path is None
+        and model_broker_plugin_source_path is None
+        and model_broker_plugin_destination_path is None
+        and model_broker_plugin_before_path is None
+        and model_broker_host_patch is None
         and openclaw_broker_journal_path is None
     )
     external_cas = service_delta_path is None and not pure_preserve
@@ -656,6 +748,9 @@ def build_preserve_existing_transition(
               or all(path is not None for path in plugin_inputs),
               "managed web-search plugin inputs are incomplete")
         managed_plugin = None
+        _need(model_broker_host_patch is None
+              or model_broker_host_patch.get("source_commit") == source_commit,
+              "model broker host patch source commit differs")
         if web_search_plugin_source_path is not None:
             source = web_search_plugin_source_path.resolve()
             destination = web_search_plugin_destination_path.resolve()
@@ -674,11 +769,39 @@ def build_preserve_existing_transition(
                 "source_tree": source_tree,
                 "source_commit": source_commit,
             }
+        model_inputs = (model_broker_plugin_source_path,
+                        model_broker_plugin_destination_path,
+                        model_broker_plugin_before_path)
+        _need(all(path is None for path in model_inputs)
+              or all(path is not None for path in model_inputs),
+              "managed model broker plugin inputs are incomplete")
+        managed_model_plugin = None
+        if model_broker_plugin_source_path is not None:
+            source = model_broker_plugin_source_path.resolve()
+            destination = model_broker_plugin_destination_path.resolve()
+            before_destination = model_broker_plugin_before_path.resolve()
+            _need(source.as_posix().endswith(OPENCLAW_MODEL_SOURCE_RELATIVE)
+                  and destination.is_relative_to(
+                      (packet_root / "managed-plugins").resolve())
+                  and source_commit in destination.name
+                  and before_destination != destination,
+                  "managed model broker plugin paths are outside reviewed scope")
+            source_tree = _plugin_tree(source)
+            _need(_plugin_tree(destination) == source_tree,
+                  "managed model broker plugin copy differs from frozen source")
+            managed_model_plugin = {
+                "plugin_id": OPENCLAW_MODEL_PLUGIN_ID,
+                "source_relative_path": OPENCLAW_MODEL_SOURCE_RELATIVE,
+                "destination": str(destination), "replaces": str(before_destination),
+                "source_tree": source_tree, "source_commit": source_commit,
+            }
         openclaw_transition = _validated_openclaw_frame_transition(
             before_path=openclaw_config_before_path,
             after_path=openclaw_config_after_path,
             packet_root=packet_root,
             web_search_plugin=managed_plugin,
+            model_broker_plugin=managed_model_plugin,
+            model_broker_host_patch=model_broker_host_patch,
             historical_unresolved=_reviewed_historical_unresolved(
                 openclaw_broker_journal_path),
         )
@@ -699,6 +822,10 @@ def build_preserve_existing_transition(
               and openclaw_config_after_path is None
               and web_search_plugin_source_path is None
               and web_search_plugin_destination_path is None
+              and model_broker_plugin_source_path is None
+              and model_broker_plugin_destination_path is None
+              and model_broker_plugin_before_path is None
+              and model_broker_host_patch is None
               and openclaw_broker_journal_path is None,
               "0.2 cannot carry an external config transition")
         delta_value, _ = _read_json(
@@ -900,6 +1027,7 @@ def expected_openclaw_frame_transition_state(
         "before_presence", "after_value", "before", "after",
         "before_sha256", "after_sha256", "semantic_mutations",
         "managed_plugins", "historical_unresolved",
+        "managed_host_patch",
     }
     _need(set(row) == expected_keys
           and row.get("name") == "openclaw_model_broker_max_frame"
@@ -912,22 +1040,31 @@ def expected_openclaw_frame_transition_state(
     before_path, before_bytes = _resolve_artifact(packet_root, row["before"])
     after_path, after_bytes = _resolve_artifact(packet_root, row["after"])
     managed_plugins = row.get("managed_plugins")
-    _need(isinstance(managed_plugins, list) and len(managed_plugins) <= 1,
+    _need(isinstance(managed_plugins, list) and len(managed_plugins) <= 2
+          and len({row.get("plugin_id") for row in managed_plugins
+                   if isinstance(row, Mapping)}) == len(managed_plugins),
           "managed plugin transition inventory differs")
-    if managed_plugins:
-        plugin = managed_plugins[0]
+    for plugin in managed_plugins:
         destination = Path(str(plugin.get("destination", "")))
         _need(destination.is_absolute()
               and destination.is_relative_to(
                   (packet_root / "managed-plugins").resolve())
               and plugin.get("source_commit") == manifest.get("source_commit")
               and manifest["source_commit"] in destination.name,
-              "managed web-search plugin destination authority differs")
+              "managed plugin destination authority differs")
     unresolved = _validate_historical_unresolved(
         row.get("historical_unresolved"))
+    _need(row.get("managed_host_patch") is None
+          or row["managed_host_patch"].get("source_commit")
+          == manifest.get("source_commit"),
+          "model broker host patch source commit differs")
     validated = _validated_openclaw_frame_transition(
         before_path=before_path, after_path=after_path, packet_root=packet_root,
-        web_search_plugin=(managed_plugins[0] if managed_plugins else None),
+        web_search_plugin=next((p for p in managed_plugins if p.get("plugin_id")
+                                == OPENCLAW_WEB_SEARCH_PLUGIN_ID), None),
+        model_broker_plugin=next((p for p in managed_plugins if p.get("plugin_id")
+                                  == OPENCLAW_MODEL_PLUGIN_ID), None),
+        model_broker_host_patch=row.get("managed_host_patch"),
         historical_unresolved=unresolved)
     _need(row == validated
           and row["before_sha256"] == sha256_bytes(before_bytes)

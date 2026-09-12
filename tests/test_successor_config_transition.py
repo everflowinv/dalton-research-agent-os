@@ -374,7 +374,8 @@ class PreserveExistingTransitionTests(unittest.TestCase):
 
     def build_external(self, *, present: bool = True,
                        change_owner_signature: bool = False,
-                       managed_web_search: bool = False):
+                       managed_web_search: bool = False,
+                       managed_model_broker: bool = False):
         service = json.loads(json.dumps(self.service_before))
         service["bounded_planner"]["config"]["planner_call_budget"] = self.budget
         write(self.packet / "service.installed.json", service)
@@ -392,6 +393,25 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         after["plugins"]["entries"]["dalton-openclaw-model-broker"][
             "config"]["maxFrameBytes"] = OPENCLAW_TARGET_MAX_FRAME_BYTES
         plugin_args = {}
+        if managed_model_broker:
+            old = self.root / "old/openclaw-model-broker"
+            source = self.root / "source/integrations/openclaw-model-broker"
+            source.mkdir(parents=True)
+            (source / "index.mjs").write_text("export const version = 2;\n")
+            write(source / "openclaw.plugin.json", {
+                "id": "dalton-openclaw-model-broker", "version": "0.1.0-spike.5"})
+            destination = (self.packet / "managed-plugins" /
+                           ("openclaw-model-broker-" + "c" * 40))
+            destination.mkdir(parents=True)
+            for item in source.iterdir():
+                (destination / item.name).write_bytes(item.read_bytes())
+            before["plugins"]["load"]["paths"].append(str(old.resolve()))
+            after["plugins"]["load"]["paths"].append(str(destination.resolve()))
+            plugin_args.update({
+                "model_broker_plugin_source_path": source,
+                "model_broker_plugin_destination_path": destination,
+                "model_broker_plugin_before_path": old,
+            })
         if managed_web_search:
             legacy = ("/Users/everflow/Projects/dalton-research-agent-os/"
                       "integrations/openclaw-web-search-broker")
@@ -407,12 +427,12 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             destination.mkdir(parents=True)
             for item in source.iterdir():
                 (destination / item.name).write_bytes(item.read_bytes())
-            before["plugins"]["load"]["paths"] = [legacy]
-            after["plugins"]["load"]["paths"] = [str(destination.resolve())]
-            plugin_args = {
+            before["plugins"]["load"]["paths"].append(legacy)
+            after["plugins"]["load"]["paths"].append(str(destination.resolve()))
+            plugin_args.update({
                 "web_search_plugin_source_path": source,
                 "web_search_plugin_destination_path": destination,
-            }
+            })
         if change_owner_signature:
             after["owner"]["signature"] = "changed"
         write(self.packet / "openclaw.before.json", before)
@@ -586,6 +606,18 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         self.assertEqual("dalton-openclaw-web-search-broker", plugin["plugin_id"])
         self.assertEqual("c" * 40, plugin["source_commit"])
         self.assertEqual(2, len(plugin["source_tree"]["files"]))
+
+    def test_external_frame_transition_binds_both_managed_brokers(self):
+        manifest = self.build_external(
+            managed_web_search=True, managed_model_broker=True)
+        _before, _after, row = expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(3, len(row["semantic_mutations"]))
+        self.assertEqual(
+            ["dalton-openclaw-model-broker", "dalton-openclaw-web-search-broker"],
+            [plugin["plugin_id"] for plugin in row["managed_plugins"]])
+        self.assertTrue(row["managed_plugins"][0]["replaces"].endswith(
+            "/old/openclaw-model-broker"))
 
     def test_external_transition_rejects_rehashed_invalid_pending_record(self):
         manifest = self.build_external()

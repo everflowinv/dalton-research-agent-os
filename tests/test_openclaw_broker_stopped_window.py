@@ -74,6 +74,73 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
                          ["historical_unresolved"]["records"])
         self.assertTrue((self.receipts / "receipt.json").is_file())
 
+    def test_host_patch_is_exact_checked_and_hash_cas_rollback(self):
+        source = self.root / "source"
+        helper = (source / "integrations/openclaw_host_patches" /
+                  "patch_provider_output_control_endpoint.py")
+        helper.parent.mkdir(parents=True)
+        helper.write_text("# reviewed helper\n")
+        target = self.openclaw_root / "dist/runtime-llm.runtime-test.mjs"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        before = b"original host bytes\n"; after = b"patched host bytes\n"
+        target.write_bytes(before)
+        (self.packet / "host.before").write_bytes(before)
+        (self.packet / "host.after").write_bytes(after)
+        row = {
+            "source_commit": "c" * 40,
+            "helper_relative_path": str(helper.relative_to(source)),
+            "helper_sha256": stopped.sha256_bytes(helper.read_bytes()),
+            "target_relative_path": str(target.relative_to(self.openclaw_root)),
+            "before": "host.before", "before_sha256": stopped.sha256_bytes(before),
+            "after": "host.after", "after_sha256": stopped.sha256_bytes(after),
+            "capability_check": "repo_helper_check_no_call",
+        }
+        completed = subprocess.CompletedProcess(
+            [], 0, "OK provider output control endpoint\n", "")
+        receipt = self.root / "host-patch-receipt.json"
+        with patch.object(stopped.subprocess, "check_output", return_value="c" * 40 + "\n"):
+            result = stopped.apply_reviewed_host_patch(
+                packet_root=self.packet, source_root=source,
+                openclaw_root=self.openclaw_root, row=row,
+                receipt_path=receipt, run=lambda *_a, **_k: completed)
+            self.assertEqual("installed_checked_no_call", result["status"])
+            self.assertEqual(after, target.read_bytes())
+            rolled = stopped.rollback_reviewed_host_patch(
+                packet_root=self.packet, source_root=source,
+                openclaw_root=self.openclaw_root, row=row,
+                receipt_path=receipt)
+        self.assertEqual("rolled_back", rolled["status"])
+        self.assertEqual(before, target.read_bytes())
+
+    def test_host_patch_failed_check_restores_before_bytes(self):
+        source = self.root / "source"
+        helper = (source / "integrations/openclaw_host_patches" /
+                  "patch_provider_output_control_endpoint.py")
+        helper.parent.mkdir(parents=True); helper.write_text("# helper\n")
+        target = self.openclaw_root / "dist/runtime-llm.runtime-test.mjs"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        before = b"before\n"; after = b"after\n"
+        target.write_bytes(before)
+        (self.packet / "before.bin").write_bytes(before)
+        (self.packet / "after.bin").write_bytes(after)
+        row = {"source_commit": "c" * 40,
+               "helper_relative_path": str(helper.relative_to(source)),
+               "helper_sha256": stopped.sha256_bytes(helper.read_bytes()),
+               "target_relative_path": str(target.relative_to(self.openclaw_root)),
+               "before": "before.bin", "before_sha256": stopped.sha256_bytes(before),
+               "after": "after.bin", "after_sha256": stopped.sha256_bytes(after),
+               "capability_check": "repo_helper_check_no_call"}
+        failed = subprocess.CompletedProcess([], 1, "ERROR missing\n", "")
+        with patch.object(stopped.subprocess, "check_output", return_value="c" * 40 + "\n"):
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
+                                        "capability check failed"):
+                stopped.apply_reviewed_host_patch(
+                    packet_root=self.packet, source_root=source,
+                    openclaw_root=self.openclaw_root, row=row,
+                    receipt_path=self.root / "missing.json",
+                    run=lambda *_a, **_k: failed)
+        self.assertEqual(before, target.read_bytes())
+
     def test_active_owned_child_refuses_before_config_or_gateway_mutation(self):
         before = self.config.read_bytes()
         with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,

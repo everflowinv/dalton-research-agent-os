@@ -355,6 +355,99 @@ def _verify_loaded_plugins(openclaw_root: Path, reviewed: list[dict[str, Any]],
               "managed web-search plugin is not loaded from reviewed bytes")
 
 
+def _host_patch_artifacts(*, packet_root: Path, source_root: Path,
+                          openclaw_root: Path, row: Mapping[str, Any]):
+    """Resolve one exact repo-owned host patch without reading credentials."""
+    required = {"source_commit", "helper_relative_path", "helper_sha256",
+                "target_relative_path", "before", "before_sha256", "after",
+                "after_sha256", "capability_check"}
+    _need(set(row) == required and row.get("source_commit")
+          == subprocess.check_output(
+              ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+              text=True).strip()
+          and row.get("capability_check") == "repo_helper_check_no_call",
+          "model broker host patch authority differs")
+    helper_rel = Path(str(row["helper_relative_path"]))
+    target_rel = Path(str(row["target_relative_path"]))
+    _need(not helper_rel.is_absolute() and ".." not in helper_rel.parts
+          and helper_rel.as_posix()
+          == "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py"
+          and not target_rel.is_absolute() and ".." not in target_rel.parts
+          and target_rel.parts and target_rel.parts[0] == "dist",
+          "model broker host patch path is outside reviewed scope")
+    helper = source_root / helper_rel
+    target = openclaw_root / target_rel
+    before = packet_root / Path(str(row["before"]))
+    after = packet_root / Path(str(row["after"]))
+    _need(all(path.is_file() and not path.is_symlink()
+              for path in (helper, target, before, after))
+          and sha256_bytes(helper.read_bytes()) == row["helper_sha256"]
+          and sha256_bytes(before.read_bytes()) == row["before_sha256"]
+          and sha256_bytes(after.read_bytes()) == row["after_sha256"],
+          "model broker host patch artifacts differ")
+    return helper, target, before.read_bytes(), after.read_bytes()
+
+
+def apply_reviewed_host_patch(*, packet_root: Path, source_root: Path,
+                              openclaw_root: Path, row: Mapping[str, Any],
+                              receipt_path: Path,
+                              run=subprocess.run) -> dict[str, Any]:
+    """Install exact reviewed host bytes and prove capability without a call."""
+    helper, target, before, after = _host_patch_artifacts(
+        packet_root=packet_root, source_root=source_root,
+        openclaw_root=openclaw_root, row=row)
+    identity = _compare_and_install(target, before, after)
+    try:
+        checked = run([sys.executable, str(helper), "--openclaw-root",
+                       str(openclaw_root), "--check"], text=True,
+                      capture_output=True)
+        _need(checked.returncode == 0
+              and "OK provider output control endpoint" in checked.stdout,
+              "model broker host capability check failed")
+        result = {"schema_version": "openclaw-model-host-patch-receipt-0.1",
+                  "status": "installed_checked_no_call",
+                  "source_commit": row["source_commit"],
+                  "helper_sha256": row["helper_sha256"],
+                  "target_relative_path": row["target_relative_path"],
+                  "before_sha256": row["before_sha256"],
+                  "after_sha256": row["after_sha256"],
+                  "installed_identity": list(identity), "model_calls": 0}
+        result["content_hash"] = canonical_hash(result)
+        _write_exclusive(receipt_path, result)
+        return result
+    except Exception:
+        current = target.lstat() if target.is_file() and not target.is_symlink() else None
+        if current is not None and (current.st_dev, current.st_ino) == identity:
+            _compare_and_install(target, after, before, expected_identity=identity)
+        raise
+
+
+def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
+                                 openclaw_root: Path, row: Mapping[str, Any],
+                                 receipt_path: Path) -> dict[str, Any]:
+    helper, target, before, after = _host_patch_artifacts(
+        packet_root=packet_root, source_root=source_root,
+        openclaw_root=openclaw_root, row=row)
+    del helper
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    unsigned = {key: value for key, value in receipt.items()
+                if key != "content_hash"}
+    _need(receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
+          and receipt.get("status") == "installed_checked_no_call"
+          and receipt.get("content_hash") == canonical_hash(unsigned)
+          and receipt.get("source_commit") == row["source_commit"]
+          and receipt.get("after_sha256") == row["after_sha256"],
+          "model broker host patch receipt differs")
+    identity = tuple(receipt["installed_identity"])
+    _compare_and_install(target, after, before, expected_identity=identity)
+    result = {"schema_version": "openclaw-model-host-patch-rollback-0.1",
+              "status": "rolled_back", "restored_sha256": row["before_sha256"],
+              "model_calls": 0}
+    result["content_hash"] = canonical_hash(result)
+    _write_exclusive(receipt_path.with_name("host-patch-rollback.json"), result)
+    return result
+
+
 @contextmanager
 def operation_lock(config_path: Path, operation: str):
     path = config_path.with_name(config_path.name + ".dalton-broker-config.lock")
@@ -413,6 +506,12 @@ def apply_reviewed_transition(
             _stopped_checks(state_dir=state_dir, source_root=source_root,
                             journal_path=journal_path, reviewed=reviewed,
                             run=run)
+            host_patch = row.get("managed_host_patch")
+            if host_patch is not None:
+                apply_reviewed_host_patch(
+                    packet_root=packet_root, source_root=source_root,
+                    openclaw_root=openclaw_root, row=host_patch,
+                    receipt_path=receipt_dir / "host-patch-receipt.json", run=run)
             owned_identity = _compare_and_install(config_path, before, after)
             new_identity = start_gateway(openclaw_root, run=run)
             _verify_loaded_plugins(openclaw_root, verified_plugins, run=run)
@@ -441,9 +540,9 @@ def apply_reviewed_transition(
             current = (config_path.read_bytes()
                        if config_path.is_file() and not config_path.is_symlink()
                        else None)
+            if loaded(GATEWAY_LABEL, run=run):
+                stop_gateway(openclaw_root, run=run)
             if current == after:
-                if loaded(GATEWAY_LABEL, run=run):
-                    stop_gateway(openclaw_root, run=run)
                 _need(_reviewed_historical_unresolved(journal_path) == dict(reviewed),
                       "failure recovery refused changed broker uncertainty")
                 _need(owned_identity is not None,
@@ -451,12 +550,13 @@ def apply_reviewed_transition(
                 _compare_and_install(
                     config_path, after, before,
                     expected_identity=owned_identity)
-                start_gateway(openclaw_root, run=run)
-            elif current == before and not loaded(GATEWAY_LABEL, run=run):
-                start_gateway(openclaw_root, run=run)
-            elif current not in {before, after} and not loaded(
-                    GATEWAY_LABEL, run=run):
-                start_gateway(openclaw_root, run=run)
+            host_receipt = receipt_dir / "host-patch-receipt.json"
+            if host_receipt.is_file() and not host_receipt.is_symlink():
+                rollback_reviewed_host_patch(
+                    packet_root=packet_root, source_root=source_root,
+                    openclaw_root=openclaw_root,
+                    row=row["managed_host_patch"], receipt_path=host_receipt)
+            start_gateway(openclaw_root, run=run)
             raise
         return receipt
 
@@ -514,6 +614,14 @@ def rollback_reviewed_transition(
         _compare_and_install(
             config_path, after, before,
             expected_identity=initial_config_identity)
+        host_receipt = receipt_path.parent / "host-patch-receipt.json"
+        if row.get("managed_host_patch") is not None:
+            _need(host_receipt.is_file() and not host_receipt.is_symlink(),
+                  "model broker host patch receipt is unavailable")
+            rollback_reviewed_host_patch(
+                packet_root=packet_root, source_root=source_root,
+                openclaw_root=openclaw_root, row=row["managed_host_patch"],
+                receipt_path=host_receipt)
         restored_identity = start_gateway(openclaw_root, run=run)
         _need(config_path.read_bytes() == before
               and _reviewed_historical_unresolved(journal_path) == dict(reviewed),

@@ -117,3 +117,22 @@ receipt; successor transition receipt; installed-byte verification; gateway and
 broker socket/plugin/capability proof; preserved authority hashes; health
 samples; and product acceptance. Every broker receipt should continue to state
 zero model calls and no retry/refund authorization.
+
+## Implemented contract fields
+
+The external `0.3` transition now accepts up to one entry for each broker in
+`managed_plugins`. The model entry binds its fixed id and repo source path,
+source commit, closed tree, packet-owned destination, and exact absolute
+`replaces` load path. The existing web-search entry retains its prior shape and
+legacy-path behavior. OpenClaw before/after documents may contain only these
+declared unique replacements plus the existing max-frame leaf.
+
+An optional `managed_host_patch` binds the source commit, fixed repo helper path
+and hash, OpenClaw `dist/` target-relative path, packet-relative exact
+before/after artifacts and hashes, and
+`capability_check=repo_helper_check_no_call`. The staging helper
+`build_model_broker_host_patch_artifact` requires a clean exact source checkout.
+While the gateway is down, deployment uses inode-and-byte CAS, runs the helper's
+static `--check`, and writes a content-hashed zero-call receipt. Failed checking
+restores the original bytes. Normal rollback restores config and then host
+target under exact receipt/identity/hash preconditions before gateway restart.
