@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import io
 import json
 import plistlib
@@ -737,6 +738,160 @@ class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    def test_outbox_waits_for_writer_bearing_planner_without_hiding_prior_result(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = mock.Mock()
+        service._outbox.run_once.return_value = {"status": "ready"}
+        service._outbox_executor = mock.Mock()
+        service._outbox_future = None
+        service._outbox_last_launch_monotonic = 0.0
+        service._outbox_state = {
+            "state": "pending", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+        service.config = mock.Mock(outbox_interval_seconds=60)
+        service._bounded_planner_future = mock.Mock()
+
+        service._poll_outbox()
+        service._outbox_executor.submit.assert_not_called()
+        self.assertEqual("pending", service._outbox_state["state"])
+
+        # Completion is still observed while the planner is busy; only a new
+        # writer RPC is deferred.
+        completed = mock.Mock()
+        completed.done.return_value = True
+        completed.result.return_value = {"status": "ready", "claimed": 0}
+        service._outbox_future = completed
+        service._poll_outbox()
+        self.assertEqual("ready", service._outbox_state["state"])
+        self.assertIsNone(service._outbox_state["last_error"])
+        service._outbox_executor.submit.assert_not_called()
+
+        service._bounded_planner_future = None
+        service._poll_outbox()
+        service._outbox_executor.submit.assert_called_once_with(service._outbox.run_once)
+        self.assertEqual("running", service._outbox_state["state"])
+
+    def test_planner_and_outbox_take_the_single_writer_in_due_order(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = mock.Mock()
+        service._bounded_planner = mock.Mock()
+        service.config = mock.Mock(
+            outbox_interval_seconds=60, bounded_planner_interval_seconds=60,
+        )
+        service._outbox_last_launch_monotonic = 0.0
+        service._bounded_planner_last_launch_monotonic = 0.0
+        service._outbox_future = None
+        service._bounded_planner_future = None
+        service._outbox_state = {
+            "state": "pending", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+        service._bounded_planner_state = {
+            "state": "pending", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+        outbox_release = threading.Event()
+        planner_release = threading.Event()
+        service._outbox.run_once.side_effect = lambda: (
+            outbox_release.wait(5), {"status": "ready"}
+        )[1]
+        service._bounded_planner.run_once.side_effect = lambda: (
+            planner_release.wait(5), {"status": "completed"}
+        )[1]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as outbox_executor, \
+                concurrent.futures.ThreadPoolExecutor(max_workers=1) as planner_executor:
+            service._outbox_executor = outbox_executor
+            service._bounded_planner_executor = planner_executor
+            # Both are initially due. The earlier poll cannot let the planner
+            # immediately occupy the writer and starve the outbox.
+            service._poll_bounded_planner()
+            self.assertIsNone(service._bounded_planner_future)
+            service._poll_outbox()
+            self.assertIsNotNone(service._outbox_future)
+            service._poll_bounded_planner()
+            self.assertIsNone(service._bounded_planner_future)
+
+            outbox_release.set()
+            service._outbox_future.result(timeout=1)
+            service._poll_outbox()
+            # Make only the planner due now; it starts after the outbox result
+            # has been harvested and no writer-bearing outbox remains.
+            service._outbox_last_launch_monotonic = time.monotonic()
+            service._poll_bounded_planner()
+            self.assertIsNotNone(service._bounded_planner_future)
+            service._poll_outbox()
+            self.assertIsNone(service._outbox_future)
+            planner_release.set()
+            service._bounded_planner_future.result(timeout=1)
+
+    def test_due_outbox_gets_turn_after_long_planner_and_planner_error_is_preserved(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = mock.Mock()
+        service._bounded_planner = mock.Mock()
+        service.config = mock.Mock(
+            outbox_interval_seconds=60, bounded_planner_interval_seconds=60,
+        )
+        service._outbox_last_launch_monotonic = 0.0
+        service._bounded_planner_last_launch_monotonic = 0.0
+        service._outbox_future = None
+        failed = concurrent.futures.Future()
+        failed.set_exception(RuntimeError("planner failed"))
+        service._bounded_planner_future = failed
+        service._outbox_executor = mock.Mock()
+        service._bounded_planner_executor = mock.Mock()
+        service._outbox_state = {
+            "state": "pending", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+        service._bounded_planner_state = {
+            "state": "running", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+
+        service._poll_bounded_planner()
+        self.assertIn("planner failed", service._bounded_planner_state["last_error"])
+        service._bounded_planner_executor.submit.assert_not_called()
+        service._poll_outbox()
+        service._outbox_executor.submit.assert_called_once_with(service._outbox.run_once)
+
+    def test_due_planner_gets_turn_after_long_failed_outbox_and_error_is_harvested(self) -> None:
+        service = DaltonService.__new__(DaltonService)
+        service._outbox = mock.Mock()
+        service._bounded_planner = mock.Mock()
+        service.config = mock.Mock(
+            outbox_interval_seconds=60, bounded_planner_interval_seconds=60,
+        )
+        # The outbox launched after the planner and ran longer than its own
+        # interval. Both are due, but planner has waited longer.
+        service._bounded_planner_last_launch_monotonic = 1.0
+        service._outbox_last_launch_monotonic = 2.0
+        failed = concurrent.futures.Future()
+        failed.set_exception(RuntimeError("outbox failed"))
+        service._outbox_future = failed
+        service._bounded_planner_future = None
+        service._outbox_executor = mock.Mock()
+        service._bounded_planner_executor = mock.Mock()
+        service._outbox_state = {
+            "state": "running", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+        service._bounded_planner_state = {
+            "state": "pending", "last_started_at": None,
+            "last_completed_at": None, "last_error": None, "last_result": None,
+        }
+
+        service._poll_bounded_planner()
+        service._bounded_planner_executor.submit.assert_called_once_with(
+            service._bounded_planner.run_once
+        )
+        self.assertEqual("running", service._bounded_planner_state["state"])
+        # run_once calls this next in the same frame: it harvests the completed
+        # outbox error but cannot immediately re-launch over the new planner.
+        service._poll_outbox()
+        self.assertIn("outbox failed", service._outbox_state["last_error"])
+        service._outbox_executor.submit.assert_not_called()
+
     @staticmethod
     def _maintenance_config(root: Path) -> ServiceConfig:
         core = root / "core.sqlite"

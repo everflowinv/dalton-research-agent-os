@@ -806,7 +806,17 @@ class DaltonService:
                 )
         interval = self.config.outbox_interval_seconds
         executor = self._outbox_executor
-        if self._outbox_future is None and interval is not None and executor is not None:
+        # The bounded planner owns the single writer RPC service for an entire
+        # tick, which can legitimately exceed the outbox client's deadline.
+        # Starting delivery concurrently turns that known occupancy into a
+        # false transport outage.  Poll an already-started delivery above, but
+        # defer new delivery until the writer-bearing planner call completes.
+        if (
+            self._outbox_future is None
+            and interval is not None
+            and executor is not None
+            and self._bounded_planner_future is None
+        ):
             elapsed = time.monotonic() - self._outbox_last_launch_monotonic
             if self._outbox_last_launch_monotonic == 0.0 or elapsed >= interval:
                 self._outbox_last_launch_monotonic = time.monotonic()
@@ -870,10 +880,39 @@ class DaltonService:
                 )
         interval = self.config.bounded_planner_interval_seconds
         executor = self._bounded_planner_executor
+        outbox_interval = self.config.outbox_interval_seconds
+        outbox_available = (
+            self._outbox is not None
+            and outbox_interval is not None
+            and self._outbox_executor is not None
+        )
+        outbox_due = (
+            outbox_available
+            and (
+                self._outbox_last_launch_monotonic == 0.0
+                or time.monotonic() - self._outbox_last_launch_monotonic
+                >= outbox_interval
+            )
+        )
+        outbox_running = (
+            self._outbox_future is not None
+            and not self._outbox_future.done()
+        )
+        # When both are due, the writer user that launched less recently gets
+        # the next turn.  Equal zero timestamps are startup, where outbox goes
+        # first; after either has run, strict ordering prevents a long task
+        # from repeatedly winning merely because it is still overdue.
+        planner_preferred = (
+            not outbox_due
+            or self._bounded_planner_last_launch_monotonic
+            < self._outbox_last_launch_monotonic
+        )
         if (
             self._bounded_planner_future is None
             and interval is not None
             and executor is not None
+            and not outbox_running
+            and planner_preferred
         ):
             elapsed = time.monotonic() - self._bounded_planner_last_launch_monotonic
             if self._bounded_planner_last_launch_monotonic == 0.0 or elapsed >= interval:
