@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Mapping
 import json
+import re
 
 from .company_model_series import period_kind
 from .store import content_hash
@@ -42,6 +43,12 @@ NUMERIC_CONTEXT_SCHEMA_VERSION = "company-model-numeric-context-0.2"
 
 class CompanyModelStateError(RuntimeError):
     """The company has nothing to model against."""
+
+
+def _model_unit(value: Any) -> str:
+    unit = str(value)
+    match = re.fullmatch(r"([A-Za-z]{3})PerShare", unit)
+    return f"{match.group(1).lower()}_per_share" if match else unit
 
 
 class CompanyModelPromptBudgetError(CompanyModelStateError):
@@ -105,7 +112,7 @@ def _line(row: Mapping[str, Any]) -> dict[str, Any]:
         "parent_concept": row["parent_concept"],
         "is_breakdown": bool(row["is_breakdown"]),
         "dimension_axis": row["dimension_axis"],
-        "unit": str(row["unit"]),
+        "unit": _model_unit(row["unit"]),
         "period_kind": "duration" if row["period_start"] else "instant",
     }
 

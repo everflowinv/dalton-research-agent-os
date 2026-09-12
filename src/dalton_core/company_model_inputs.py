@@ -36,6 +36,7 @@ drift from what it was derived from.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Any, Mapping, Sequence
 
 from .company_model_series import quarterly_series, series_gaps
@@ -69,6 +70,14 @@ MIN_CASH_FLOW_QUARTERS = 4
 
 class ModelInputError(ValueError):
     """The specification cannot be joined to this company's filings."""
+
+
+def _model_unit(value: Any) -> str:
+    """Normalize the SEC currency-per-share spelling used by model formulas."""
+
+    unit = str(value)
+    match = re.fullmatch(r"([A-Za-z]{3})PerShare", unit)
+    return f"{match.group(1).lower()}_per_share" if match else unit
 
 
 def cash_quarter_windows_are_unique(quarters: Sequence[Mapping[str, Any]]) -> bool:
@@ -190,11 +199,17 @@ def _series_for(
     # unlabelled row because a reader has no reason to doubt it.
     reported = [row for row in lines
                 if not row.get("is_breakdown") and not row.get("dimension_axis")]
-    source_units = sorted({str(row.get("unit")) for row in reported if row.get("unit")})
+    source_units = sorted({_model_unit(row.get("unit"))
+                           for row in reported if row.get("unit")})
+    series = quarterly_series(lines, legacy_replay=legacy_replay)
+    for kind in ("quarters", "instants", "durations"):
+        for cell in series.get(kind) or []:
+            if cell.get("unit") is not None:
+                cell["unit"] = _model_unit(cell["unit"])
     return {
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
-        "series": quarterly_series(lines, legacy_replay=legacy_replay),
+        "series": series,
         "source_units": source_units,
     }
 

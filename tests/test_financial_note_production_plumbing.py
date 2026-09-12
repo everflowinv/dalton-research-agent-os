@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.company_financial_statement_structure import (
@@ -11,6 +14,7 @@ from dalton_core.company_financial_statement_structure import (
 from dalton_core.company_model_spec import (
     CompanyModelSpecError, build_prompt, spec_from_response,
 )
+from dalton_core.company_model_cli import run_model_spec
 from dalton_core.company_model_state import build_company_model_state
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.financial_note_context import (
@@ -139,6 +143,126 @@ class FinancialNoteContextFactoryTests(unittest.TestCase):
 
 
 class FinancialNoteModelPlumbingTests(unittest.TestCase):
+    def _completed_typed_with_model_lines(self):
+        """One promoted note whose exact 10-K also carries model operands."""
+
+        original = FinancialNoteResolverTests._replace_statement_filing
+
+        def expanded(fixture):
+            ingest, _old_hash = original(fixture)
+            connection = fixture.store.connection
+            filing = connection.execute(
+                "SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?",
+                (ingest,),
+            ).fetchone()
+            additions = [
+                ("us-gaap:Revenues", "Revenue", "8000000000", "usd"),
+                ("cost", "Cost", "4800000000", "usd"),
+                ("opex", "Operating expense", "1600000000", "usd"),
+                ("operating", "Operating income", "1600000000", "usd"),
+                ("interest_income", "Interest income", "10", "usd"),
+                ("interest_expense", "Interest expense", "20", "usd"),
+                ("pretax", "Pretax income", "1599999990", "usd"),
+                ("tax", "Income tax expense", "1599998885", "usd"),
+                ("net", "Net income", "1105", "usd"),
+                ("nci", "Noncontrolling interest", "1005", "usd"),
+                ("parent", "Net income attributable to parent", "100", "usd"),
+                ("canada-nci", "Exchangeable NCI adjustment", "5", "usd"),
+                ("other-nci", "Other NCI", "7", "usd"),
+            ]
+            existing = connection.execute(
+                "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=? "
+                "ORDER BY ordinal", (ingest,),
+            ).fetchall()
+            rows = [{
+                "statement": row["statement"], "concept": row["concept"],
+                "label": row["label"], "level": row["level"],
+                "parent_concept": row["parent_concept"],
+                "is_breakdown": bool(row["is_breakdown"]),
+                "dimension_axis": row["dimension_axis"],
+                "dimension_member": row["dimension_member"],
+                "dimension_count": row["dimension_count"],
+                "period_start": row["period_start"], "period_end": row["period_end"],
+                "value": row["value"], "unit": row["unit"], "balance": row["balance"],
+            } for row in existing]
+            next(row for row in rows if row["concept"] ==
+                 "us-gaap:EarningsPerShareDiluted")["unit"] = "USDPerShare"
+            for concept, label, value, unit in additions:
+                rows.append({
+                    "statement": "income", "concept": concept, "label": label,
+                    "level": 0, "parent_concept": None, "is_breakdown": False,
+                    "dimension_axis": None, "dimension_member": None,
+                    "dimension_count": 0, "period_start": "2024-09-01",
+                    "period_end": "2025-08-31", "value": value,
+                    "unit": unit, "balance": None,
+                })
+            body = {
+                "company_ref": filing["company_ref"], "cik": filing["cik"],
+                "entity_name": filing["entity_name"], "accession": filing["accession"],
+                "form": filing["form"], "filed": filing["filed"],
+                "report_date": filing["report_date"], "line_count": len(rows),
+                "source_record_refs": json.loads(filing["source_record_refs_json"]),
+                "governance_ref": filing["governance_ref"],
+                "governance_hash": filing["governance_hash"],
+            }
+            identity = {
+                "company_ref": filing["company_ref"], "cik": filing["cik"],
+                "accession": filing["accession"], "form": filing["form"],
+                "line_count": len(rows),
+            }
+            new_ingest = "statement-ingest:" + content_hash(identity)[:32]
+            hash_rows = [{key: value for key, value in row.items()
+                          if key != "dimension_count"} for row in rows]
+            filing_hash = content_hash({
+                **body, "statement_lines_hash": content_hash(hash_rows),
+            })
+            authority = CoverageMissionAuthority(fixture.store)
+            connection.execute(
+                "DROP TRIGGER coverage_mission_statement_lines_no_delete"
+            )
+            connection.execute(
+                "DROP TRIGGER coverage_mission_statement_filings_no_delete"
+            )
+            with authority._transaction() as cursor:
+                cursor.execute(
+                    "DELETE FROM coverage_mission_statement_lines WHERE ingest_id=?", (ingest,),
+                )
+                cursor.execute(
+                    "DELETE FROM coverage_mission_statement_filings WHERE ingest_id=?", (ingest,),
+                )
+                cursor.execute(
+                    "INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (new_ingest, filing["dispatch_id"], filing["company_ref"], filing["cik"],
+                     filing["entity_name"], filing["accession"], filing["form"],
+                     filing["filed"], filing["report_date"], len(rows),
+                     filing["source_record_refs_json"], filing["governance_ref"],
+                     filing["governance_hash"], filing["recorded_at"], filing_hash),
+                )
+                for ordinal, line in enumerate(rows):
+                    cursor.execute(
+                        "INSERT INTO coverage_mission_statement_lines("
+                        "line_id,ingest_id,statement,ordinal,concept,label,level,parent_concept,"
+                        "is_breakdown,dimension_axis,dimension_member,dimension_count,period_start,"
+                        "period_end,value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (f"{new_ingest}#{ordinal}", new_ingest, line["statement"], ordinal,
+                         line["concept"], line["label"], line["level"],
+                         line["parent_concept"], int(line["is_breakdown"]),
+                         line["dimension_axis"], line["dimension_member"],
+                         line["dimension_count"], line["period_start"], line["period_end"],
+                         line["value"], line["unit"], line["balance"]),
+                    )
+            return new_ingest, filing_hash
+
+        helper = FinancialNoteResolverTests(
+            "test_exact_typed_promoted_note_resolves_without_numeric_invention"
+        )
+        self.addCleanup(helper.doCleanups)
+        with patch.object(
+            FinancialNoteResolverTests, "_replace_statement_filing",
+            staticmethod(expanded),
+        ):
+            return helper._completed_typed()
+
     def _filed_mission(self, inputs):
         import tempfile
         from pathlib import Path
@@ -400,6 +524,132 @@ class FinancialNoteModelPlumbingTests(unittest.TestCase):
                 mission_version_ref=mission["id"],
                 note_evidence_resolver=resolver,
             )
+
+    def test_offline_promoted_note_runs_through_cli_persistence_and_actual_calculation(self):
+        fixture, executor, admission, _target = self._completed_typed_with_model_lines()
+        full = __import__(
+            "dalton_core.financial_note_evidence",
+            fromlist=["resolve_financial_note_evidence"],
+        ).resolve_financial_note_evidence(
+            core_connection=fixture.store.connection,
+            router_connection=fixture.router.connection,
+            staging_connection=executor.staging.connection,
+            registry=executor.registry,
+            admission_ref=admission["id"],
+        )
+        binding = financial_note_evidence_binding(full)
+        context = _context(binding)
+        inputs, proposal = note_backed_eps_inputs_and_proposal()
+        next(item for item in proposal["lines"]
+             if item["concept"] == "revenue")["concept"] = "us-gaap:Revenues"
+        next(item for item in proposal["lines"]
+             if item["concept"] == "shares")["concept"] = (
+                 "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+             )
+        next(item for item in proposal["formulas"]
+             if item["output_ref"] == "eps")["tie_out_concept"] = (
+                 "us-gaap:EarningsPerShareDiluted"
+             )
+        next(item for item in proposal["lines"]
+             if item["ref"] == "eps")["unit"] = "usd_per_share"
+        note_formula = next(item for item in proposal["formulas"]
+                            if item["output_ref"] == "eps-numerator")
+        note_formula["evidence_refs"] = [binding["accession"], binding["ref"]]
+        for formula in proposal["formulas"]:
+            formula["evidence_refs"] = [
+                binding["accession"] if ref == "0000000001-26-000001" else ref
+                for ref in formula["evidence_refs"]
+            ]
+        response = _spec_body()
+        response["revenue_anchor_concept"] = "us-gaap:Revenues"
+        response["expense_lines"] = [{
+            "ref": "cost", "label": "Cost", "basis_concept": "cost",
+            "behaviour": "variable_with_revenue", "driver_ref": "heads",
+            "because": "The issuer's filed cost follows revenue.",
+        }, {
+            "ref": "opex", "label": "Operating expense", "basis_concept": "opex",
+            "behaviour": "fixed", "driver_ref": None,
+            "because": "The issuer files this operating cost separately.",
+        }]
+        response["financial_statement_structure"] = {
+            key: copy.deepcopy(proposal[key])
+            for key in ("schema_version", "lines", "formulas")
+        }
+
+        class NoteContext:
+            def projection(self, company_ref):
+                self.assert_company = company_ref
+                return context
+
+            def resolver(self, ref, *, expected_context=None):
+                if expected_context != context or ref != binding["ref"]:
+                    raise FinancialNoteContextError("foreign note replay")
+                return binding
+
+            def close(self):
+                return None
+
+        class FakeModel:
+            def __init__(self, config, **_kwargs):
+                self.config = config
+
+            def call(self, *, prompt, **_kwargs):
+                self.__class__.prompt = prompt
+                return {
+                    "text": json.dumps(response), "replayed": False,
+                    "cost_micros": 0, "work_order_ref": "work:test",
+                    "work_order_hash": "1" * 64,
+                    "result_envelope_ref": "result:test",
+                    "result_envelope_hash": "2" * 64,
+                    "invocation_ref": "invocation:test",
+                    "route_decision_ref": "route:test",
+                }
+
+        state_dir = Path(fixture.store.connection.execute(
+            "PRAGMA database_list"
+        ).fetchone()[2]).parent
+        with tempfile.TemporaryDirectory() as output:
+            model_config = Path(output) / "model.json"
+            model_config.write_text(json.dumps({
+                "structured_output_repair": {"max_attempts": 0},
+            }), encoding="utf-8")
+            with patch(
+                "dalton_core.financial_note_context.FinancialNoteReadContext",
+                return_value=NoteContext(),
+            ), patch("dalton_core.company_model_cli.CockpitModel", FakeModel):
+                summary = run_model_spec(
+                    state_dir=state_dir, model_config_path=model_config,
+                    summary_dir=Path(output) / "summary", scheduler_db=None,
+                    company_ref=admission["company_ref"],
+                )
+        self.assertEqual(summary["spec_status"], "fresh", summary)
+        self.assertIn(binding["ref"], FakeModel.prompt)
+        stored = CoverageMissionAuthority(fixture.store).latest_company_model_spec(
+            admission["company_ref"]
+        )
+        self.assertEqual(
+            stored["financial_statement_structure"]["note_evidence"], [binding],
+        )
+        actuals = summary["pre_persistence_validation"]
+        self.assertEqual(actuals, "unavailable")
+        structure, replay = materialize_financial_statement_structure(
+            stored,
+            __import__("dalton_core.company_model_inputs", fromlist=[
+                "build_model_inputs"
+            ]).build_model_inputs(
+                CoverageMissionAuthority(fixture.store), stored,
+            ),
+            note_evidence_resolver=lambda ref: binding if ref == binding["ref"] else None,
+        )
+        numerator = next(item for item in replay["formulas"]
+                         if item["output_ref"] == "eps-numerator")
+        annual = next(item for item in replay["note_formula_periods"]
+                      if item["output_ref"] == "eps-numerator")
+        self.assertEqual(annual["periods"][0]["value"], "105", annual)
+        self.assertEqual(annual["periods"][0]["status"], "validated")
+        self.assertEqual(numerator["status"], "unavailable")
+        self.assertEqual(numerator["tested_periods"], [])
+        self.assertFalse(replay["ready_for_forecast"])
 
 
 if __name__ == "__main__":

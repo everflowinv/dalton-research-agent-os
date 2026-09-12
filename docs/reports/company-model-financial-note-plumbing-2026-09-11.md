@@ -89,3 +89,13 @@ materialization, an honest not-ready forecast result without a child launch,
 and parent/child forecast digest binding.  Existing company
 state/specification, input, specification lane, forecast lane, model forecast,
 statement structure, and financial-note authority suites remain green.
+
+The final production review adds one offline `run_model_spec` happy path over a
+single Core mission and exact 10-K: planner target, four-stage promotion,
+prompt projection, model output validation, governed persistence, and annual
+numerator calculation all replay the same binding.  That test exposed SEC's
+`USDPerShare` spelling crossing into model structure unchanged.  The company
+state and derived model inputs now normalize that source unit to
+`usd_per_share` while the immutable numeric authority retains its filed bytes.
+The annual numerator validates to 105; the quarterly formula remains explicitly
+unavailable because the annual note supplies no quarterly authority.
