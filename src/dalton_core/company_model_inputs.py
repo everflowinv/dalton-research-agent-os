@@ -423,6 +423,11 @@ def build_model_inputs(
         and spec.get("schema_version") in {None, "0.1", "0.2"}
     )
     statement_structure_concepts = _statement_structure_concepts(spec)
+    structure_definition = spec.get("financial_statement_structure")
+    non_additive_duration_policy = (
+        isinstance(structure_definition, Mapping)
+        and structure_definition.get("schema_version") == "0.4"
+    )
     for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
 
@@ -431,10 +436,10 @@ def build_model_inputs(
         filed[concept] = _series_for(
             missions, company_ref, concept,
             legacy_replay=legacy_series,
-            # Structured 0.3 inputs predate the non-additive duration policy.
-            # Preserve their byte-identical numeric replay while 0.4 and later
-            # specifications bind the corrected series contract.
-            non_additive_duration_policy=(spec.get("schema_version") != "0.3"),
+            # The inner structure is the persisted numeric replay contract.
+            # Outer company specs already reached 0.4 while their structures
+            # were still 0.3, so only inner 0.4 opts into this correction.
+            non_additive_duration_policy=non_additive_duration_policy,
         )
 
     cash_required = any(

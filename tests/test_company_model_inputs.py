@@ -382,6 +382,49 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(current["series"]["quarters"], [])
         self.assertEqual(len(current["series"]["durations"]), 2)
 
+    def test_inner_structure_version_selects_weighted_share_normalization(self):
+        concept = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+        ledger = FakeMissions([
+            _line(concept, "2025-01-01", "2025-09-30", "105", unit="shares"),
+            _line(concept, "2025-01-01", "2025-12-31", "104", unit="shares"),
+        ])
+        structure = {
+            "schema_version": "0.3",
+            "lines": [{"kind": "filed", "concept": concept}],
+            "formulas": [],
+        }
+        deployed = {
+            **_spec(drivers=[{
+                "ref": "diluted-shares", "label": "Diluted shares",
+                "kind": "volume", "basis_concept": concept, "unit": "shares",
+                "because": "Filed weighted-average shares.",
+            }]),
+            # R18b already had outer 0.4 while its inner numeric contract was 0.3.
+            "schema_version": "0.4",
+            "financial_statement_structure": structure,
+        }
+        prior = build_model_inputs(ledger, deployed)
+        prior_line = next(
+            item for item in prior["filed_lines"] if item["concept"] == concept)
+        self.assertEqual(prior_line["cells"]["2025-12-31"]["value"], "-1")
+        self.assertEqual(prior_line["derived_count"], 1)
+        prior_hash = content_hash(prior)
+        self.assertEqual(
+            prior_hash,
+            "01f2a6f084592bac207ef3d7ac005efcea843e091a0ccc623d6384cec3cf7bde",
+        )
+
+        current = build_model_inputs(ledger, {
+            **deployed,
+            "financial_statement_structure": {**structure, "schema_version": "0.4"},
+        })
+        current_line = next(
+            item for item in current["filed_lines"] if item["concept"] == concept)
+        self.assertEqual(current_line["cells"], {})
+        self.assertEqual(current_line["derived_count"], 0)
+        self.assertEqual(len(current_line["duration_facts"]), 2)
+        self.assertNotEqual(content_hash(current), prior_hash)
+
     def test_cash_input_keeps_missing_quarter_and_wrong_sign_as_gaps(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
         capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
