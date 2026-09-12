@@ -25,11 +25,11 @@ from dalton_core.company_model_series import (
 
 
 def _row(start, end, value, *, filed="2026-07-01", accession="0001352010-26-000046",
-         breakdown=False, axis=None, unit="USD"):
+         breakdown=False, axis=None, unit="USD", concept=None):
     return {
         "period_start": start, "period_end": end, "value": value,
         "filed": filed, "accession": accession, "unit": unit,
-        "is_breakdown": breakdown, "dimension_axis": axis,
+        "is_breakdown": breakdown, "dimension_axis": axis, "concept": concept,
     }
 
 
@@ -59,6 +59,88 @@ class PeriodKindTests(unittest.TestCase):
 
 
 class QuarterlySeriesTests(unittest.TestCase):
+    def test_weighted_average_shares_keep_filed_durations_without_subtracting_them(self):
+        concept = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+        series = quarterly_series([
+            _row("2025-01-01", "2025-03-31", "100", concept=concept),
+            _row("2025-04-01", "2025-06-30", "104", concept=concept,
+                 accession="0000000000-25-000002"),
+            _row("2025-07-01", "2025-09-30", "106", concept=concept,
+                 accession="0000000000-25-000003"),
+            _row("2025-01-01", "2025-09-30", "105", concept=concept,
+                 accession="0000000000-25-000003"),
+            # Subtraction would invent a negative Q4 even though both filed
+            # weighted averages are positive.
+            _row("2025-01-01", "2025-12-31", "104", concept=concept,
+                 accession="0000000000-26-000001"),
+            _row("2026-01-01", "2026-03-31", "103", concept=concept,
+                 accession="0000000000-26-000002"),
+        ])
+        self.assertEqual(
+            [(item["period_end"], item["value"], item["basis"])
+             for item in series["quarters"]],
+            [("2025-03-31", "100", REPORTED),
+             ("2025-06-30", "104", REPORTED),
+             ("2025-09-30", "106", REPORTED),
+             ("2026-03-31", "103", REPORTED)],
+        )
+        self.assertEqual(series["derived_count"], 0)
+        self.assertEqual(
+            [(item["period_end"], item["value"], item["period_kind"])
+             for item in series["durations"]],
+            [("2025-03-31", "100", QUARTER),
+             ("2025-06-30", "104", QUARTER),
+             ("2025-09-30", "105", CUMULATIVE),
+             ("2025-09-30", "106", QUARTER),
+             ("2025-12-31", "104", CUMULATIVE),
+             ("2026-03-31", "103", QUARTER)],
+        )
+        self.assertEqual(series_gaps(series), [{
+            "after": "2025-09-30",
+            "before": "2026-01-01",
+            "missing_from": "2025-10-01",
+            "missing_to": "2025-12-31",
+            "days": 92,
+        }])
+
+    def test_basic_weighted_average_shares_also_keep_exact_reported_quarters(self):
+        concept = "us-gaap:WeightedAverageNumberOfSharesOutstandingBasic"
+        series = quarterly_series([
+            _row("2026-01-01", "2026-03-31", "90", concept=concept),
+            _row("2026-04-01", "2026-06-30", "91", concept=concept),
+            _row("2026-01-01", "2026-06-30", "90.5", concept=concept),
+        ])
+        self.assertEqual(
+            [(item["period_end"], item["value"], item["basis"])
+             for item in series["quarters"]],
+            [("2026-03-31", "90", REPORTED),
+             ("2026-06-30", "91", REPORTED)],
+        )
+        self.assertEqual(series["derived_count"], 0)
+
+    def test_additive_flow_with_a_shares_unit_still_derives_missing_quarter(self):
+        series = quarterly_series([
+            _row("2026-01-01", "2026-03-31", "100", unit="shares",
+                 concept="example:SharesIssued"),
+            _row("2026-01-01", "2026-06-30", "250", unit="shares",
+                 concept="example:SharesIssued"),
+        ])
+        self.assertEqual(
+            [(item["period_end"], item["value"], item["basis"])
+             for item in series["quarters"]],
+            [("2026-03-31", "100", REPORTED),
+             ("2026-06-30", "150", DERIVED)],
+        )
+
+    def test_weighted_average_legacy_replay_keeps_prior_derivation(self):
+        concept = "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+        series = quarterly_series([
+            _row("2025-01-01", "2025-09-30", "105", concept=concept),
+            _row("2025-01-01", "2025-12-31", "104", concept=concept),
+        ], legacy_replay=True)
+        self.assertEqual(series["quarters"][0]["value"], "-1")
+        self.assertEqual(series["quarters"][0]["basis"], DERIVED)
+
     def test_the_quarter_is_kept_and_the_year_to_date_is_not_added_to_it(self):
         # The live trap, exactly as filed.
         series = quarterly_series([

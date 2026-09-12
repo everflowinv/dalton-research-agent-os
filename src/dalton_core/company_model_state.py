@@ -489,6 +489,7 @@ def build_company_model_state(
         policy=policy,
     )
     body = {
+        "series_normalization_contract": "company-model-series:0.2",
         "company_ref": company_ref,
         "ticker": ticker,
         "entity_name": filings[-1]["entity_name"],

@@ -312,7 +312,7 @@ TASK_HASH = content_hash({
     "cost_driver_template_registry": {
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
-    "authority_projection": "company-model-state-with-financial-notes:0.3",
+    "authority_projection": "company-model-state-with-financial-notes:0.4",
     "prompt_contract": "company-model-spec-prompt:0.11",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })

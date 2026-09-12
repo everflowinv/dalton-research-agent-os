@@ -22,7 +22,7 @@ from dalton_core.company_model_state import (
 from dalton_core.company_model_spec import build_prompt
 from dalton_core.company_model_cli import MAX_INPUT_TOKENS
 from dalton_core.coverage_mission import CoverageMissionAuthority
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
 ACN = "company:sec-cik:0001467373"
@@ -99,6 +99,13 @@ class CompanyModelStateTests(unittest.TestCase):
         self.assertNotIn("value", income[0])
         self.assertNotIn("period_end", income[0])
         self.assertEqual(len(state["state_hash"]), 64)
+        self.assertEqual(
+            state["series_normalization_contract"], "company-model-series:0.2")
+        prior_contract_body = {
+            key: value for key, value in state.items()
+            if key not in {"state_hash", "series_normalization_contract"}
+        }
+        self.assertNotEqual(state["state_hash"], content_hash(prior_contract_body))
         numeric = state["numeric_context"]
         self.assertEqual(numeric["policy"], DEFAULT_NUMERIC_CONTEXT_POLICY)
         self.assertEqual(numeric["included_cells"], 3)

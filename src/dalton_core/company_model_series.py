@@ -51,6 +51,15 @@ UNKNOWN = "unknown"
 REPORTED = "reported"
 DERIVED = "derived_from_cumulative"
 
+# These duration facts are averages over their disclosed windows.  A fiscal
+# year average minus a nine-month average is not the fourth-quarter average.
+# Keep the closed list at the concept boundary: a blanket ``shares`` rule
+# would also disable legitimate additive share-flow concepts.
+NON_ADDITIVE_DURATION_CONCEPTS = frozenset({
+    "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+    "us-gaap:WeightedAverageNumberOfSharesOutstandingBasic",
+})
+
 
 class SeriesError(ValueError):
     """The lines cannot be read as a series."""
@@ -280,7 +289,16 @@ def quarterly_series(
             unknown += 1
 
     held = {(str(item["period_start"]), str(item["period_end"])) for item in quarters}
-    derived = _derive_quarters(
+    concepts = {
+        str(row.get("concept")) for row in rows
+        if isinstance(row.get("concept"), str) and row.get("concept")
+    }
+    non_additive = (
+        not legacy_replay
+        and len(concepts) == 1
+        and next(iter(concepts)) in NON_ADDITIVE_DURATION_CONCEPTS
+    )
+    derived = [] if non_additive else _derive_quarters(
         durations, held, legacy_replay=legacy_replay,
     )
     combined = sorted(
