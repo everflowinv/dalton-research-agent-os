@@ -447,14 +447,22 @@ def apply_reviewed_host_patch(*, packet_root: Path, source_root: Path,
         raise
 
 
-def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
-                                 openclaw_root: Path, row: Mapping[str, Any],
-                                 receipt_path: Path) -> dict[str, Any]:
-    helper, target, before, after = _host_patch_artifacts(
+def preflight_reviewed_host_patch(*, packet_root: Path, source_root: Path,
+                                  openclaw_root: Path,
+                                  row: Mapping[str, Any]) -> dict[str, Any]:
+    """Prove the exact live-before host target before entering the window."""
+    _helper, target, before, _after = _host_patch_artifacts(
         packet_root=packet_root, source_root=source_root,
         openclaw_root=openclaw_root, row=row)
-    del helper
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    _need(target.read_bytes() == before,
+          "live model broker host target differs from reviewed before bytes")
+    current = target.lstat()
+    return {"status": "reviewed_before_verified", "target_sha256": row["before_sha256"],
+            "target_identity": [current.st_dev, current.st_ino], "model_calls": 0}
+
+
+def _validated_host_patch_receipt(receipt: Mapping[str, Any],
+                                  row: Mapping[str, Any]) -> tuple[int, int]:
     unsigned = {key: value for key, value in receipt.items()
                 if key != "content_hash"}
     _need(set(receipt) == {"schema_version", "status", "source_commit",
@@ -468,14 +476,24 @@ def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
           and receipt.get("helper_sha256") == row["helper_sha256"]
           and receipt.get("target_relative_path") == row["target_relative_path"]
           and receipt.get("before_sha256") == row["before_sha256"]
-          and receipt.get("after_sha256") == row["after_sha256"],
-          "model broker host patch receipt differs")
-    _need(isinstance(receipt.get("installed_identity"), list)
+          and receipt.get("after_sha256") == row["after_sha256"]
+          and isinstance(receipt.get("installed_identity"), list)
           and len(receipt["installed_identity"]) == 2
           and all(isinstance(value, int) for value in receipt["installed_identity"])
           and receipt.get("model_calls") == 0,
-          "model broker host patch receipt identity differs")
-    identity = tuple(receipt["installed_identity"])
+          "model broker host patch receipt differs")
+    return tuple(receipt["installed_identity"])
+
+
+def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
+                                 openclaw_root: Path, row: Mapping[str, Any],
+                                 receipt_path: Path) -> dict[str, Any]:
+    helper, target, before, after = _host_patch_artifacts(
+        packet_root=packet_root, source_root=source_root,
+        openclaw_root=openclaw_root, row=row)
+    del helper
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    identity = _validated_host_patch_receipt(receipt, row)
     _compare_and_install(target, after, before, expected_identity=identity)
     result = {"schema_version": "openclaw-model-host-patch-rollback-0.1",
               "status": "rolled_back", "restored_sha256": row["before_sha256"],
@@ -494,26 +512,10 @@ def verify_reviewed_host_patch(*, packet_root: Path, source_root: Path,
         packet_root=packet_root, source_root=source_root,
         openclaw_root=openclaw_root, row=row)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    unsigned = {key: value for key, value in receipt.items()
-                if key != "content_hash"}
     current = target.lstat()
-    _need(set(receipt) == {"schema_version", "status", "source_commit",
-                           "helper_sha256", "target_relative_path",
-                           "before_sha256", "after_sha256",
-                           "installed_identity", "model_calls", "content_hash"}
-          and receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
-          and receipt.get("status") == "installed_checked_no_call"
-          and receipt.get("content_hash") == canonical_hash(unsigned)
-          and receipt.get("source_commit") == row["source_commit"]
-          and receipt.get("helper_sha256") == row["helper_sha256"]
-          and receipt.get("target_relative_path") == row["target_relative_path"]
-          and receipt.get("before_sha256") == row["before_sha256"]
-          and receipt.get("after_sha256") == row["after_sha256"]
-          and isinstance(receipt.get("installed_identity"), list)
-          and len(receipt["installed_identity"]) == 2
-          and all(isinstance(value, int) for value in receipt["installed_identity"])
-          and receipt.get("installed_identity") == [current.st_dev, current.st_ino]
-          and target.read_bytes() == after and receipt.get("model_calls") == 0,
+    identity = _validated_host_patch_receipt(receipt, row)
+    _need(identity == (current.st_dev, current.st_ino)
+          and target.read_bytes() == after,
           "installed model broker host patch differs")
     checked = run([sys.executable, str(helper), "--openclaw-root",
                    str(openclaw_root), "--check"], text=True,

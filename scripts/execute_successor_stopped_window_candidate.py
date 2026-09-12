@@ -385,11 +385,16 @@ class SuccessorOrchestrator(r11.Orchestrator):
         authority_artifacts["service_config_before"] = artifacts["service_config_snapshot"]
         authority = r11.verify_runtime_authorities(authority_artifacts)
         if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
-            _before_bytes, after_bytes, _row = expected_openclaw_frame_transition_state(
+            _before_bytes, after_bytes, broker_row = expected_openclaw_frame_transition_state(
                 packet_root=self.packet, manifest=transition)
             plugin = verify_provider_plugin_for_config(
                 artifacts["provider_plugin_snapshot"],
                 hashlib.sha256(after_bytes).hexdigest())
+            if broker_row.get("managed_host_patch") is not None:
+                broker_window.preflight_reviewed_host_patch(
+                    packet_root=self.packet, source_root=source,
+                    openclaw_root=broker_window.managed_openclaw_root(),
+                    row=broker_row["managed_host_patch"])
         else:
             plugin = r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"])
         if transition.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
@@ -600,6 +605,17 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     receipt_path=(self.rollback_root /
                                   "openclaw-broker-transition" /
                                   "host-patch-receipt.json"))
+                broker_receipt = load_json(
+                    self.rollback_root / "openclaw-broker-transition" /
+                    "receipt.json")
+                need(broker_receipt.get("source_commit")
+                     == manifest["source"]["commit"]
+                     and broker_receipt.get("transition_content_hash")
+                     == transition["content_hash"]
+                     and broker_receipt.get("managed_host_patch") == {
+                         "receipt_sha256": host_verified["receipt_sha256"],
+                         "status": "installed_checked_no_call"},
+                     "outer broker receipt does not bind installed host patch")
         else:
             need(r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"]),
                  "provider plugin authority differs")

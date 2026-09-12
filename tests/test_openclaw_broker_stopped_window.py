@@ -99,6 +99,10 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
             [], 0, "OK provider output control endpoint\n", "")
         receipt = self.root / "host-patch-receipt.json"
         with patch.object(stopped.subprocess, "check_output", return_value="c" * 40 + "\n"):
+            preflight = stopped.preflight_reviewed_host_patch(
+                packet_root=self.packet, source_root=source,
+                openclaw_root=self.openclaw_root, row=row)
+            self.assertEqual("reviewed_before_verified", preflight["status"])
             result = stopped.apply_reviewed_host_patch(
                 packet_root=self.packet, source_root=source,
                 openclaw_root=self.openclaw_root, row=row,
@@ -113,7 +117,7 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
             tampered["content_hash"] = stopped.canonical_hash(unsigned)
             receipt.write_text(json.dumps(tampered) + "\n")
             with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
-                                        "installed model broker host patch differs"):
+                                        "host patch receipt differs"):
                 stopped.verify_reviewed_host_patch(
                     packet_root=self.packet, source_root=source,
                     openclaw_root=self.openclaw_root, row=row,
@@ -164,7 +168,7 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
         target = self.openclaw_root / "dist/runtime-llm.runtime-test.mjs"
         target.parent.mkdir(parents=True, exist_ok=True); target.write_text("before\n")
         (self.packet / "before.bin").write_text("before\n")
-        (self.packet / "after.bin").write_text("after\nextra();\n")
+        (self.packet / "after.bin").write_text("after\n")
         row = {"source_commit": "c" * 40,
                "helper_relative_path": str(helper.relative_to(source)),
                "helper_sha256": stopped.sha256_bytes(helper.read_bytes()),
@@ -173,6 +177,16 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
                "after": "after.bin", "after_sha256": stopped.sha256_bytes((self.packet / "after.bin").read_bytes()),
                "capability_check": "repo_helper_check_no_call"}
         with patch.object(stopped.subprocess, "check_output", return_value="c" * 40 + "\n"):
+            target.write_text("live drift\n")
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
+                                        "live model broker host target differs"):
+                stopped.preflight_reviewed_host_patch(
+                    packet_root=self.packet, source_root=source,
+                    openclaw_root=self.openclaw_root, row=row)
+            target.write_text("before\n")
+            (self.packet / "after.bin").write_text("after\nextra();\n")
+            row["after_sha256"] = stopped.sha256_bytes(
+                (self.packet / "after.bin").read_bytes())
             with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
                                         "exact helper transform"):
                 stopped.apply_reviewed_host_patch(
