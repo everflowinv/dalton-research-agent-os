@@ -277,6 +277,8 @@ def scheduler_bundle(
             "model_spec_request_identity": metadata.get("model_spec_request_identity"),
             "structured_output_repair_present": "structured_output_repair" in metadata,
             "structured_output_repair": metadata.get("structured_output_repair"),
+            "transport_retry_present": "transport_retry" in metadata,
+            "transport_retry": metadata.get("transport_retry"),
             "producer_route_decision_refs": metadata.get("producer_route_decision_refs", []),
             "work_authority_verified": True,
         } if include_request_identity else {}),
@@ -812,6 +814,14 @@ def model_spec_task_contract(
         not isinstance(ref, str) or not ref for ref in producer_refs
     ) or producer_refs != sorted(set(producer_refs)):
         raise RuntimeError("model spec Work producer route refs are invalid")
+    transport_present = formal_authority.get("transport_retry_present")
+    if type(transport_present) is not bool:
+        raise RuntimeError("model spec Work transport retry presence proof is invalid")
+    transport_retry = formal_authority.get("transport_retry")
+    if transport_present:
+        _validate_transport_retry(transport_retry)
+    elif transport_retry is not None:
+        raise RuntimeError("model spec Work transport retry presence proof differs")
     identity_present = formal_authority.get("model_spec_request_identity_present")
     if type(identity_present) is not bool:
         raise RuntimeError("model spec Work identity presence proof is invalid")
@@ -821,12 +831,16 @@ def model_spec_task_contract(
         if type(repair_present) is not bool:
             raise RuntimeError("model spec Work repair presence proof is invalid")
         if repair_present:
-            _validate_repair_task_binding(
+            repair_base = _validate_repair_task_binding(
                 formal_authority.get("structured_output_repair"),
-                request_id=formal_authority.get("request_id"),
                 state_hash=state_hash, task_hash=task_hash,
             )
-            status = "unknown_repair_work_missing_root_identity"
+            status = _validate_model_spec_request_id(
+                formal_authority.get("request_id"), base=repair_base,
+                transport_present=transport_present,
+                transport_retry=transport_retry, producer_refs=producer_refs,
+                verified_status="unknown_repair_work_missing_root_identity",
+            )
         else:
             status = "unknown_legacy_missing_request_identity"
         return {**base, "status": status}
@@ -851,21 +865,68 @@ def model_spec_task_contract(
     if identity["state_hash"] != state_hash or identity["task_hash"] != task_hash:
         raise RuntimeError("company model spec and Work task identities differ")
     request_id = formal_authority.get("request_id")
-    expected_request_id = content_hash(identity)[:32]
-    if producer_refs:
-        expected_request_id += ":producer:" + content_hash(producer_refs)[:16]
-    if request_id != expected_request_id:
-        raise RuntimeError("model spec Work request_id differs from request identity")
+    status = _validate_model_spec_request_id(
+        request_id, base=content_hash(identity)[:32],
+        transport_present=transport_present, transport_retry=transport_retry,
+        producer_refs=producer_refs, verified_status="verified_exact_work_identity",
+    )
     return {
-        **base, "status": "verified_exact_work_identity",
+        **base, "status": status,
         "request_identity_hash": content_hash(identity),
         "request_id": request_id,
     }
 
 
+def _validate_transport_retry(value: Any) -> None:
+    fields = {
+        "max_definitely_not_sent_retries", "queue_wait_seconds",
+        "retry_backoff_seconds",
+    }
+    if (
+        not isinstance(value, Mapping) or set(value) != fields
+        or any(isinstance(value[name], bool) or not isinstance(value[name], int)
+               or value[name] < 0 for name in fields)
+    ):
+        raise RuntimeError("model spec Work transport retry policy is invalid")
+
+
+def _validate_model_spec_request_id(
+    request_id: Any, *, base: str, transport_present: bool,
+    transport_retry: Any, producer_refs: list[str], verified_status: str,
+) -> str:
+    producer_suffix = (
+        ":producer:" + content_hash(producer_refs)[:16] if producer_refs else ""
+    )
+    if transport_present:
+        expected = (
+            base + ":transport-policy:" + content_hash(transport_retry)[:16]
+            + producer_suffix
+        )
+        if request_id != expected:
+            raise RuntimeError("model spec Work request_id differs from request identity")
+        return verified_status
+    if request_id == base + producer_suffix:
+        return verified_status
+    # R18b persisted the policy-derived suffix but not its source policy.  Its
+    # exact 16-hex shape is recognizable, but the digest cannot be replayed.
+    # Preserve that distinction instead of either rejecting history or
+    # upgrading an unproved suffix to verified authority.
+    prefix = base + ":transport-policy:"
+    if isinstance(request_id, str) and request_id.startswith(prefix):
+        digest_and_tail = request_id[len(prefix):]
+        digest = digest_and_tail[:16]
+        if (
+            len(digest) == 16
+            and all(character in "0123456789abcdef" for character in digest)
+            and digest_and_tail[16:] == producer_suffix
+        ):
+            return "unknown_legacy_missing_transport_retry_authority"
+    raise RuntimeError("model spec Work request_id differs from request identity")
+
+
 def _validate_repair_task_binding(
-    value: Any, *, request_id: Any, state_hash: str, task_hash: str,
-) -> None:
+    value: Any, *, state_hash: str, task_hash: str,
+) -> str:
     expected = {
         "schema_version", "root_original", "repair_parent",
         "original_text_sha256", "parent_text_sha256", "state_hash",
@@ -909,9 +970,9 @@ def _validate_repair_task_binding(
         or config["max_attempts"] < 1
         or isinstance(number, bool) or not isinstance(number, int)
         or not 1 <= number <= config["max_attempts"]
-        or request_id != "model-spec-repair:" + content_hash(value)[:32]
     ):
         raise RuntimeError("model spec Work repair binding is invalid")
+    return "model-spec-repair:" + content_hash(value)[:32]
 
 
 def model_evidence(connections: Mapping[str, sqlite3.Connection], cutoff: datetime,

@@ -161,6 +161,7 @@ class ModelSpecTaskContractAuditTests(unittest.TestCase):
             "model_spec_request_identity": identity,
             "structured_output_repair_present": False,
             "structured_output_repair": None,
+            "transport_retry_present": False, "transport_retry": None,
             "producer_route_decision_refs": [],
             "work_authority_verified": True,
         }
@@ -186,6 +187,7 @@ class ModelSpecTaskContractAuditTests(unittest.TestCase):
             "model_spec_request_identity": None,
             "structured_output_repair_present": True,
             "structured_output_repair": binding,
+            "transport_retry_present": False, "transport_retry": None,
             "request_id": "model-spec-repair:" + content_hash(binding)[:32],
             "producer_route_decision_refs": [], "work_authority_verified": True,
         }
@@ -213,6 +215,7 @@ class ModelSpecTaskContractAuditTests(unittest.TestCase):
                 "model_spec_request_identity": None,
                 "structured_output_repair_present": False,
                 "structured_output_repair": None,
+                "transport_retry_present": False, "transport_retry": None,
                 "work_authority_verified": True,
             })["status"],
             "unknown_legacy_missing_request_identity",
@@ -263,6 +266,7 @@ class ModelSpecTaskContractAuditTests(unittest.TestCase):
         spec = self.spec()
         for field in (
             "model_spec_request_identity_present", "structured_output_repair_present",
+            "transport_retry_present",
         ):
             authority = self.repair_authority(spec)
             authority[field] = 1
@@ -296,6 +300,152 @@ class ModelSpecTaskContractAuditTests(unittest.TestCase):
                 RuntimeError, "producer route refs are invalid"
             ):
                 audit.model_spec_task_contract(spec, authority)
+
+    def test_transport_policy_suffix_is_replayed_from_exact_metadata(self):
+        spec = self.spec()
+        authority = self.authority(spec)
+        policy = {
+            "max_definitely_not_sent_retries": 2,
+            "queue_wait_seconds": 31,
+            "retry_backoff_seconds": 7,
+        }
+        refs = ["route-decision:a", "route-decision:b"]
+        authority.update({
+            "transport_retry_present": True, "transport_retry": policy,
+            "producer_route_decision_refs": refs,
+        })
+        base = content_hash(authority["model_spec_request_identity"])[:32]
+        authority["request_id"] = (
+            base + ":transport-policy:" + content_hash(policy)[:16]
+            + ":producer:" + content_hash(refs)[:16]
+        )
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, authority)["status"],
+            "verified_exact_work_identity",
+        )
+        for request_id in (
+            base + ":transport-policy:" + "0" * 16
+                 + ":producer:" + content_hash(refs)[:16],
+            base + ":producer:" + content_hash(refs)[:16]
+                 + ":transport-policy:" + content_hash(policy)[:16],
+            base + ":transport-policy:" + content_hash(policy)[:16],
+        ):
+            drifted = dict(authority)
+            drifted["request_id"] = request_id
+            with self.subTest(request_id=request_id), self.assertRaisesRegex(
+                RuntimeError, "request_id differs"
+            ):
+                audit.model_spec_task_contract(spec, drifted)
+
+    def test_transport_policy_metadata_has_a_closed_canonical_shape(self):
+        spec = self.spec()
+        for malformed in (
+            None, False, 0, "retry", [], {},
+            {"max_definitely_not_sent_retries": 1,
+             "queue_wait_seconds": 0, "retry_backoff_seconds": 0, "extra": 0},
+            {"max_definitely_not_sent_retries": True,
+             "queue_wait_seconds": 0, "retry_backoff_seconds": 0},
+        ):
+            authority = self.authority(spec)
+            authority["transport_retry_present"] = True
+            authority["transport_retry"] = malformed
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                RuntimeError, "transport retry policy is invalid"
+            ):
+                audit.model_spec_task_contract(spec, authority)
+        authority = self.authority(spec)
+        authority["transport_retry"] = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 0,
+            "retry_backoff_seconds": 0,
+        }
+        with self.assertRaisesRegex(RuntimeError, "presence proof differs"):
+            audit.model_spec_task_contract(spec, authority)
+
+    def test_real_r18b_shape_remains_unknown_without_policy_authority(self):
+        spec = self.spec()
+        authority = self.authority(spec)
+        base = authority["request_id"]
+        unpersisted_policy = {
+            "max_definitely_not_sent_retries": 2,
+            "queue_wait_seconds": 30,
+            "retry_backoff_seconds": 2,
+        }
+        suffix = content_hash(unpersisted_policy)[:16]
+        authority["request_id"] = base + ":transport-policy:" + suffix
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, authority)["status"],
+            "unknown_legacy_missing_transport_retry_authority",
+        )
+        for malformed in (suffix[:-1], "g" * 16, suffix + ":extra"):
+            authority["request_id"] = base + ":transport-policy:" + malformed
+            with self.subTest(suffix=malformed), self.assertRaisesRegex(
+                RuntimeError, "request_id differs"
+            ):
+                audit.model_spec_task_contract(spec, authority)
+
+    def test_repair_transport_suffix_uses_the_same_policy_authority_boundary(self):
+        spec = self.spec()
+        authority = self.repair_authority(spec)
+        base = authority["request_id"]
+        policy = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 5,
+            "retry_backoff_seconds": 1,
+        }
+        authority.update({
+            "transport_retry_present": True, "transport_retry": policy,
+            "request_id": base + ":transport-policy:" + content_hash(policy)[:16],
+        })
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, authority)["status"],
+            "unknown_repair_work_missing_root_identity",
+        )
+        authority.update({
+            "transport_retry_present": False, "transport_retry": None,
+        })
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, authority)["status"],
+            "unknown_legacy_missing_transport_retry_authority",
+        )
+
+    def test_scheduler_bundle_preserves_transport_policy_presence_and_value(self):
+        spec = self.spec()
+        authority = self.authority(spec)
+        policy = {
+            "max_definitely_not_sent_retries": 1,
+            "queue_wait_seconds": 30,
+            "retry_backoff_seconds": 2,
+        }
+        request_id = (
+            authority["request_id"] + ":transport-policy:"
+            + content_hash(policy)[:16]
+        )
+        scheduler = Scheduler(":memory:")
+        self.addCleanup(scheduler.close)
+        work = {
+            "schema_version": "0.1", "id": "work:model-spec:transport",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00", "question": "model",
+            "requested_capabilities": ["research"], "runtime_profile_ref": "runtime:test",
+            "budget": {"max_seconds": 60}, "idempotency_key": "model-spec:transport",
+            "declared_side_effects": [], "status": "ready", "input_refs": [],
+            "metadata": {
+                "purpose": "model_spec", "request_id": request_id,
+                "model_spec_request_identity": authority["model_spec_request_identity"],
+                "transport_retry": policy,
+            },
+        }
+        self.assertEqual(scheduler.enqueue(work)["status"], "fresh")
+        bundle = audit.scheduler_bundle(
+            scheduler.connection, work["id"], include_request_identity=True,
+        )
+        self.assertTrue(bundle["transport_retry_present"])
+        self.assertEqual(bundle["transport_retry"], policy)
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, bundle)["status"],
+            "verified_exact_work_identity",
+        )
 
     def test_scheduler_bundle_replays_work_before_exposing_identity(self):
         spec = self.spec()
