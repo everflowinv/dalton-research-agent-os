@@ -421,6 +421,7 @@ def build_company_model_state(
     industry_classification: str | None = None,
     numeric_context_policy: Mapping[str, Any] | None = None,
     prompt_byte_limit: int = DEFAULT_MODEL_SPEC_PROMPT_BYTES,
+    financial_note_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project one company's filed statements down to the structure of them.
 
@@ -496,6 +497,12 @@ def build_company_model_state(
     }
     if industry_classification:
         body["industry_classification"] = str(industry_classification)
+    if financial_note_context is not None:
+        from .financial_note_context import validate_financial_note_context
+
+        body["financial_note_context"] = validate_financial_note_context(
+            financial_note_context, company_ref=company_ref,
+        )
     # F10: proxy evidence is a separate authority and never enters statement
     # rows. Carry its current, explicitly mapped records into the hashed model
     # state so a new source-series version causes a fresh specification.

@@ -468,7 +468,9 @@ def build_model_inputs(
             quarters = {str(item["period_end"]): item for item in series["quarters"]}
             instants = {str(item["period_end"]): item for item in series["instants"]}
             kept = quarters or instants
-            line["period_basis"] = "duration" if quarters else (
+            line["period_basis"] = "duration" if (
+                quarters or (statement_structure_bound and series.get("durations"))
+            ) else (
                 "instant" if instants else None)
             line["cells"] = {
                 end: {

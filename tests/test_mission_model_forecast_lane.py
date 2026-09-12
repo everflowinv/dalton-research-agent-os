@@ -15,6 +15,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from dalton_core.company_financial_statement_structure import (
+    FinancialStatementStructureError,
+)
 from dalton_core.company_model_forecast import model_digest
 from dalton_core.company_model_forecast_cli import main as forecast_cli_main
 from dalton_core.economic_invariants import (
@@ -144,6 +147,12 @@ class LaneTests(unittest.TestCase):
         return model_digest(self.spec, build_model_inputs(self.missions, self.spec))
 
     def test_a_company_with_no_model_is_launched_and_named_by_what_it_is_about(self):
+        # Adding the note-backed digest authority must not rename historical
+        # 0.1/0.2 forecast work.
+        self.assertEqual(
+            self.digest(),
+            "05f1058cb7f373a89a2c038accb55f86448d730537240ed87d1a284bba395047",
+        )
         outcome = self.lane.dispatch_once()
         self.assertEqual(outcome["status"], "launched")
         self.assertEqual(outcome["company_ref"], ACN)
@@ -180,6 +189,22 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "unavailable")
         self.assertIn(ACN, outcome["reason"])
         self.assertIn("cost template metadata", outcome["reason"])
+
+    def test_unready_statement_structure_is_reported_without_launching(self):
+        with patch(
+            "dalton_core.mission_model_forecast_lane.model_digest",
+            side_effect=FinancialStatementStructureError(
+                "statement structure is not ready for forecast"
+            ),
+        ):
+            outcome = self.lane.dispatch_once()
+        self.assertEqual(outcome["status"], "unavailable")
+        self.assertIn("not ready for forecast", outcome["reason"])
+        self.assertEqual(outcome["unavailable"], {
+            ACN: "FinancialStatementStructureError: "
+                 "statement structure is not ready for forecast",
+        })
+        self.assertEqual(self.launcher.started, [])
 
     def test_a_child_still_running_is_reported_and_not_replaced(self):
         first = self.lane.dispatch_once()
@@ -358,11 +383,14 @@ class LauncherTests(unittest.TestCase):
 
     def test_the_command_carries_the_company_and_no_model_configuration(self):
         launcher = self.launcher()
-        command = launcher._command(ticket_dir=self.state, company_ref=ACN)
+        command = launcher._command(
+            ticket_dir=self.state, company_ref=ACN, model_digest=DIGEST,
+        )
         self.assertIn("dalton_core.company_model_forecast_cli", command)
         self.assertIn(ACN, command)
         self.assertIn("--validator-contract-hash", command)
         self.assertIn(FORECAST_INVARIANT_CONTRACT_HASH, command)
+        self.assertEqual(command[command.index("--expected-model-digest") + 1], DIGEST)
         self.assertNotIn("--model-config", command)
         # Nothing to configure, so nothing to be gated on.
         self.assertTrue(launcher.configured)
@@ -427,6 +455,19 @@ class LauncherTests(unittest.TestCase):
                 ])
         run.assert_not_called()
         self.assertFalse(missing_state.exists())
+
+    def test_the_child_receives_the_parent_model_digest(self):
+        with patch(
+            "dalton_core.company_model_forecast_cli.run_model_forecast",
+            return_value={"status": "idle"},
+        ) as run:
+            self.assertEqual(forecast_cli_main([
+                "--state-dir", str(self.state),
+                "--validator-contract-hash", FORECAST_INVARIANT_CONTRACT_HASH,
+                "--expected-model-digest", DIGEST,
+                "--quiet",
+            ]), 0)
+        self.assertEqual(run.call_args.kwargs["expected_model_digest"], DIGEST)
 
 
 class RegistrationTests(unittest.TestCase):

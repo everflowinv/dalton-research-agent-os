@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .company_financial_statement_structure import FinancialStatementStructureError
 from .company_model_forecast import model_digest
 from .company_model_forecast_cli import pending_companies
 from .economic_invariants import FORECAST_INVARIANT_CONTRACT_HASH
@@ -151,27 +152,74 @@ class MissionModelForecastLaneCoordinator:
         # other four. IBM's specification binds no filed revenue concept at
         # all; without this the lane would hand IBM back every tick forever.
         held: dict[str, str] = {}
+        unavailable: dict[str, str] = {}
         company_ref = spec = table = digest = None
-        for candidate, candidate_spec, candidate_table in pending:
-            candidate_digest = model_digest(candidate_spec, candidate_table)
-            business_key = (
-                f"{candidate}|{candidate_digest}|"
-                f"{FORECAST_INVARIANT_CONTRACT_HASH}"
+        note_context = None
+        try:
+            from .financial_note_context import (
+                FinancialNoteContextError, FinancialNoteReadContext,
             )
-            permission = current_permission(
-                self.budget, business_key, mission, self.launcher,
-                connection=authority_connection(
-                    getattr(self, "store", None), getattr(self, "missions", None),
-                    getattr(self, "models", None)))
-            decision = (self.budget.blocked(permission)
-                        or self.budget.blocked(business_key))
-            if decision is not None:
-                held[candidate] = decision.classification.reason
-                continue
-            company_ref, spec, table = candidate, candidate_spec, candidate_table
-            digest = candidate_digest
-            break
+            if (getattr(self.missions, "store", None) is not None
+                    and getattr(self.launcher, "state_dir", None) is not None):
+                note_context = FinancialNoteReadContext(
+                    store=self.missions.store, state_dir=self.launcher.state_dir,
+                )
+            for candidate, candidate_spec, candidate_table in pending:
+                try:
+                    definition = candidate_spec.get("financial_statement_structure")
+                    needs_note = (
+                        isinstance(definition, dict)
+                        and bool(definition.get("note_evidence"))
+                    )
+                    candidate_context = (
+                        note_context.projection(candidate)
+                        if needs_note and note_context is not None else None
+                    )
+                    candidate_resolver = (
+                        None if candidate_context is None else
+                        lambda ref, held=candidate_context: note_context.resolver(
+                            ref, expected_context=held,
+                        )
+                    )
+                    candidate_digest = model_digest(
+                        candidate_spec, candidate_table,
+                        note_evidence_resolver=candidate_resolver,
+                        financial_note_context=candidate_context,
+                    )
+                except (FinancialStatementStructureError,
+                        FinancialNoteContextError) as exc:
+                    unavailable[candidate] = f"{type(exc).__name__}: {exc}"
+                    continue
+                business_key = (
+                    f"{candidate}|{candidate_digest}|"
+                    f"{FORECAST_INVARIANT_CONTRACT_HASH}"
+                )
+                permission = current_permission(
+                    self.budget, business_key, mission, self.launcher,
+                    connection=authority_connection(
+                        getattr(self, "store", None), getattr(self, "missions", None),
+                        getattr(self, "models", None)))
+                decision = (self.budget.blocked(permission)
+                            or self.budget.blocked(business_key))
+                if decision is not None:
+                    held[candidate] = decision.classification.reason
+                    continue
+                company_ref, spec, table = candidate, candidate_spec, candidate_table
+                digest = candidate_digest
+                break
+        finally:
+            if note_context is not None:
+                note_context.close()
         if company_ref is None:
+            if unavailable:
+                reasons = {**held, **unavailable}
+                return {
+                    "status": "unavailable", "settled": settled,
+                    "held": held, "unavailable": unavailable,
+                    "reason": "; ".join(
+                        f"{ref}: {why}" for ref, why in sorted(reasons.items())
+                    ),
+                }
             return {"status": "held", "settled": settled, "held": held,
                     "reason": "; ".join(f"{ref}: {why}" for ref, why in held.items())}
         try:
@@ -189,7 +237,7 @@ class MissionModelForecastLaneCoordinator:
             "status": "launched", "company_ref": company_ref,
             "model_digest": digest, "ticket_ref": ticket["id"],
             "validator_contract_hash": FORECAST_INVARIANT_CONTRACT_HASH,
-            "held": held, "settled": settled,
+            "held": held, "unavailable": unavailable, "settled": settled,
         }
 
 

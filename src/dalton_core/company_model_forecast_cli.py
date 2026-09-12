@@ -173,6 +173,7 @@ def run_model_forecast(
     summary_dir: Path,
     company_ref: str | None = None,
     dry_run: bool = False,
+    expected_model_digest: str | None = None,
 ) -> dict[str, Any]:
     state_dir = Path(state_dir).expanduser().resolve()
     summary_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -206,6 +207,8 @@ def run_model_forecast(
         "formal_authority_writes": 0,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
+    from .financial_note_context import FinancialNoteReadContext
+    note_context = FinancialNoteReadContext(store=store, state_dir=state_dir)
     try:
         missions = CoverageMissionAuthority(store)
         models = ForecastModelAuthority(store)
@@ -230,7 +233,32 @@ def run_model_forecast(
             return summary
         summary["company_ref"] = chosen
         summary["spec_ref"] = spec.get("spec_id")
-        summary["digest"] = model_digest(spec, table)
+
+        definition = spec.get("financial_statement_structure")
+        needs_note = (
+            isinstance(definition, dict) and bool(definition.get("note_evidence"))
+        )
+        held_note_context = (
+            note_context.projection(chosen) if needs_note else None
+        )
+
+        def note_resolver(ref: str) -> dict[str, Any]:
+            return note_context.resolver(ref, expected_context=held_note_context)
+
+        summary["digest"] = model_digest(
+            spec, table, note_evidence_resolver=note_resolver,
+            financial_note_context=held_note_context,
+        )
+        if (expected_model_digest is not None
+                and summary["digest"] != expected_model_digest):
+            summary.update({
+                "status": "succeeded",
+                "forecast_status": "refused:parent model digest drifted",
+                "failure_reason": (
+                    "parent model digest differs from the child authority state"
+                ),
+            })
+            return summary
         refusal = missing_write_scope(mission)
         if refusal is not None and not dry_run:
             summary.update({"status": "succeeded",
@@ -246,6 +274,7 @@ def run_model_forecast(
                 missions, spec, models=models, lines=lines,
                 mission_version_ref=mission["id"],
                 actor_ref=mission["autonomy"]["automation_principal"],
+                note_evidence_resolver=note_resolver,
             )
         except EconomicInvariantRefused as exc:
             # P17b. Not a lane failure: the gate did its job, the refusal is
@@ -300,8 +329,11 @@ def run_model_forecast(
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
-        _write_owner_only(summary_dir / "summary.json", summary)
-        store.close()
+        try:
+            _write_owner_only(summary_dir / "summary.json", summary)
+        finally:
+            note_context.close()
+            store.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -311,6 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--company-ref", help="model this company rather than the next")
     parser.add_argument("--validator-contract-hash", required=True,
                         help="exact installed economic-invariant contract hash")
+    parser.add_argument("--expected-model-digest",
+                        help="parent's exact model/input/note authority digest")
     parser.add_argument("--dry-run", action="store_true",
                         help="choose and stop; no writes")
     parser.add_argument("--quiet", action="store_true")
@@ -326,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=args.state_dir,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         company_ref=args.company_ref, dry_run=args.dry_run,
+        expected_model_digest=args.expected_model_digest,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))

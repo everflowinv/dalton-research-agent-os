@@ -3846,7 +3846,8 @@ class CoverageMissionAuthority:
     # -- company model specifications (P13al) --------------------------------
 
     def validate_company_model_spec_financials(
-        self, spec: Mapping[str, Any],
+        self, spec: Mapping[str, Any], *,
+        note_evidence_resolver: Any | None = None,
     ) -> dict[str, Any]:
         """Materialize one candidate against its immutable filed authority.
 
@@ -3872,7 +3873,7 @@ class CoverageMissionAuthority:
         }
         inputs = build_model_inputs(self, candidate)
         structure, replay = materialize_financial_statement_structure(
-            candidate, inputs,
+            candidate, inputs, note_evidence_resolver=note_evidence_resolver,
         )
         if candidate.get("schema_version") == "0.4":
             build_cash_flow_companion(candidate, inputs, structure)
@@ -3887,6 +3888,7 @@ class CoverageMissionAuthority:
     def record_validated_company_model_spec(
         self, spec: Mapping[str, Any], *, mission_version_ref: str,
         model_profile_ref: str | None = None, work_order_ref: str | None = None,
+        note_evidence_resolver: Any | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Replay real values and then persist that exact candidate.
 
@@ -3895,7 +3897,9 @@ class CoverageMissionAuthority:
         method and cannot attach a mutable "validated" marker in its place.
         """
 
-        proof = self.validate_company_model_spec_financials(spec)
+        proof = self.validate_company_model_spec_financials(
+            spec, note_evidence_resolver=note_evidence_resolver,
+        )
         stored = self.record_company_model_spec(
             spec, mission_version_ref=mission_version_ref,
             model_profile_ref=model_profile_ref, work_order_ref=work_order_ref,

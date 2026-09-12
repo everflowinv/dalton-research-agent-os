@@ -305,6 +305,17 @@ def _digest(value: Any, name: str) -> str:
 
 def _note_refs(note_evidence: Sequence[Mapping[str, Any]], *,
                schema_version: str) -> set[str]:
+    if schema_version == SCHEMA_VERSION:
+        # Kept lazy to avoid the evidence -> inventory -> annual projection ->
+        # structure import cycle while still refusing a contract split.
+        from .financial_note_evidence import BINDING_SCHEMA_VERSION, TARGET_REF
+        if (
+            BINDING_SCHEMA_VERSION != FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION
+            or TARGET_REF != DILUTED_EPS_NUMERATOR_NOTE_TARGET
+        ):
+            raise FinancialStatementStructureError(
+                "financial note evidence contract constants drifted"
+            )
     refs: set[str] = set()
     for index, raw in enumerate(note_evidence):
         fields = _TYPED_NOTE_FIELDS if schema_version == SCHEMA_VERSION else _NOTE_FIELDS
@@ -1082,7 +1093,13 @@ def validate_structure_proposal(
             "note evidence company differs from company presentation"
         )
     if schema_version == SCHEMA_VERSION:
-        filings = state.get("filings") or []
+        numeric = state.get("numeric_context")
+        filings = (
+            numeric.get("filing_authorities")
+            if isinstance(numeric, Mapping)
+            and isinstance(numeric.get("filing_authorities"), list)
+            else state.get("filings") or []
+        )
         for note in notes:
             matches = [
                 item for item in filings

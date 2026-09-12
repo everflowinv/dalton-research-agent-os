@@ -165,12 +165,25 @@ class MissionModelSpecLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         while True:
             try:
-                company_ref, state = choose_company(
-                    self.missions, mission,
-                    classifications=classifications,
-                    numeric_context_policy=numeric_context_policy,
-                    prompt_byte_limit=prompt_byte_limit,
-                    exclude_company_refs=frozenset(excluded))
+                from .financial_note_context import FinancialNoteReadContext
+                note_context = None
+                if (getattr(self.missions, "store", None) is not None
+                        and getattr(self.launcher, "state_dir", None) is not None):
+                    note_context = FinancialNoteReadContext(
+                        store=self.missions.store,
+                        state_dir=self.launcher.state_dir,
+                    )
+                try:
+                    company_ref, state = choose_company(
+                        self.missions, mission,
+                        classifications=classifications,
+                        numeric_context_policy=numeric_context_policy,
+                        prompt_byte_limit=prompt_byte_limit,
+                        exclude_company_refs=frozenset(excluded),
+                        financial_note_context=note_context)
+                finally:
+                    if note_context is not None:
+                        note_context.close()
             except CompanyModelPromptBudgetError as exc:
                 return {
                     "status": "unavailable", "settled": settled,

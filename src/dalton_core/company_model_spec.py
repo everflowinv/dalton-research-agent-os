@@ -58,7 +58,7 @@ from .driver_template import (
     spec_gaps,
     template_for,
 )
-from .store import content_hash
+from .store import canonical_json, content_hash
 from .company_financial_statement_structure import (
     FinancialStatementStructureError, STRUCTURE_PROPOSAL_SCHEMA,
     validate_structure_proposal,
@@ -66,7 +66,7 @@ from .company_financial_statement_structure import (
 
 SCHEMA_VERSION = "0.4"
 LEGACY_SCHEMA_VERSION = "0.3"
-TASK_REF = "task:company-model-spec:0.8"
+TASK_REF = "task:company-model-spec:0.9"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -312,7 +312,7 @@ TASK_HASH = content_hash({
     "cost_driver_template_registry": {
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
-    "authority_projection": "company-model-state-with-numeric-periods:0.2",
+    "authority_projection": "company-model-state-with-financial-notes:0.3",
     "prompt_contract": "company-model-spec-prompt:0.9",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
@@ -403,6 +403,18 @@ def _numeric_period_table(state: Mapping[str, Any]) -> str:
     for cell in context.get("cells") or []:
         lines.append(_numeric_period_cell_line(cell))
     return "\n".join(lines)
+
+
+def _financial_note_table(state: Mapping[str, Any]) -> str:
+    context = state.get("financial_note_context")
+    if not isinstance(context, Mapping):
+        return "FINANCIAL NOTE EVIDENCE UNAVAILABLE"
+    from .financial_note_context import validate_financial_note_context
+
+    held = validate_financial_note_context(
+        context, company_ref=str(state.get("company_ref") or ""),
+    )
+    return canonical_json(held)
 
 
 def build_prompt(state: Mapping[str, Any]) -> str:
@@ -506,8 +518,9 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "flow plus capital expenditure at coefficient -1.\n\n"
         "Rules:\n"
         "* Formula evidence_refs must copy exact filing accession values listed "
-        "in COMPANY.filings. Do not invent a note or document ref; note evidence "
-        "is unavailable in this call.\n"
+        "in COMPANY.filings. A financial-note ref may be copied only from the "
+        "FINANCIAL_NOTE_EVIDENCE block and only when its cited passages support "
+        "that formula for its exact applicability periods. Never invent one.\n"
         "* ``basis_concept`` must be a concept that appears in the statements "
         "below, copied exactly, or null. Do not invent one, and do not adapt "
         "a name to look right. A line with no filed counterpart uses null.\n"
@@ -532,6 +545,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         f"{json.dumps(state.get('market_proxies') or [], ensure_ascii=False, sort_keys=True)}\n\n"
         f"STATEMENTS:\n{_statement_table(state)}\n"
         f"\nNUMERIC_PERIODS:\n{_numeric_period_table(state)}\n"
+        f"\nFINANCIAL_NOTE_EVIDENCE:\n{_financial_note_table(state)}\n"
     )
 
 
@@ -723,6 +737,7 @@ def _cash_flow_companion(
 
 def spec_from_response(
     state: Mapping[str, Any], response: Any, *, decided_by: str,
+    note_evidence_resolver: Any | None = None,
 ) -> dict[str, Any]:
     """Verify one model specification against the company it claims to describe."""
 
@@ -914,12 +929,39 @@ def spec_from_response(
         raise CompanyModelSpecError(
             "decided_by must use the human: or automation: namespace")
 
+    from .financial_note_context import (
+        FinancialNoteContextError, validate_financial_note_context,
+    )
     try:
+        note_evidence = []
+        context = state.get("financial_note_context")
+        if isinstance(context, Mapping):
+            held_context = validate_financial_note_context(
+                context, company_ref=company_ref,
+            )
+            known = {
+                item["binding"]["ref"]: item["binding"]
+                for item in held_context["records"]
+            }
+            raw_structure = body.get("financial_statement_structure")
+            cited = {
+                ref
+                for formula in (
+                    raw_structure.get("formulas", [])
+                    if isinstance(raw_structure, Mapping) else []
+                )
+                if isinstance(formula, Mapping)
+                for ref in (formula.get("evidence_refs") or [])
+                if isinstance(ref, str) and ref in known
+            }
+            note_evidence = [known[ref] for ref in sorted(cited)]
         statement_structure = validate_structure_proposal(
             body.get("financial_statement_structure"), state,
             revenue_anchor_concept=revenue_anchor, expense_lines=expenses,
+            note_evidence=note_evidence,
+            note_evidence_resolver=note_evidence_resolver,
         )
-    except FinancialStatementStructureError as exc:
+    except (FinancialStatementStructureError, FinancialNoteContextError) as exc:
         raise CompanyModelSpecError(
             f"financial_statement_structure is invalid: {exc}"
         ) from exc

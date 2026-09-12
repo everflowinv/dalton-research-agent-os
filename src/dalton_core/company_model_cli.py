@@ -296,13 +296,17 @@ def _validated_spec_with_repair(
     *, model: CockpitModel, state: Mapping[str, Any], mission: Mapping[str, Any],
     original_call: Mapping[str, Any], repair_config: Mapping[str, int], decided_by: str,
     repair_attempts: list[dict[str, Any]] | None = None,
+    note_evidence_resolver: Any | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     root_call = dict(original_call)
     current_call = dict(original_call)
     repairs = [] if repair_attempts is None else repair_attempts
     for repair_number in range(repair_config["max_attempts"] + 1):
         try:
-            spec = spec_from_response(state, current_call["text"], decided_by=decided_by)
+            spec = spec_from_response(
+                state, current_call["text"], decided_by=decided_by,
+                note_evidence_resolver=note_evidence_resolver,
+            )
             return spec, repairs, current_call
         except CompanyModelSpecError as error:
             if (
@@ -427,6 +431,7 @@ def choose_company(
     numeric_context_policy: Mapping[str, Any] | None = None,
     prompt_byte_limit: int = MAX_INPUT_TOKENS,
     exclude_company_refs: frozenset[str] = frozenset(),
+    financial_note_context: Any | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The company to decide about, and the disclosure to decide from.
 
@@ -472,6 +477,10 @@ def choose_company(
                 industry_classification=(classifications or {}).get(held),
                 numeric_context_policy=numeric_context_policy,
                 prompt_byte_limit=prompt_byte_limit,
+                financial_note_context=(
+                    None if financial_note_context is None
+                    else financial_note_context.projection(held)
+                ),
             )
         except CompanyModelPromptBudgetError:
             raise
@@ -512,6 +521,8 @@ def run_model_spec(
         "numeric_context_policy": None,
         "numeric_context_cells": 0,
         "numeric_context_omitted_cells": 0,
+        "financial_note_context_hash": None,
+        "financial_note_authorities": 0,
         "prompt_byte_limit": None,
         "prompt_bytes": None,
         "spec_status": None,
@@ -531,6 +542,8 @@ def run_model_spec(
         "formal_authority_writes": 0,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
+    from .financial_note_context import FinancialNoteReadContext
+    note_context = FinancialNoteReadContext(store=store, state_dir=state_dir)
     try:
         missions = CoverageMissionAuthority(store)
         pointer = store.connection.execute(
@@ -557,6 +570,7 @@ def run_model_spec(
                 classifications=filed_classifications(store),
                 numeric_context_policy=numeric_policy,
                 prompt_byte_limit=prompt_byte_limit,
+                financial_note_context=note_context,
             )
         except CompanyModelPromptBudgetError as exc:
             summary.update({
@@ -592,6 +606,13 @@ def run_model_spec(
         summary["prompt_byte_limit"] = numeric_context["prompt_byte_limit"]
         summary["prompt_bytes"] = numeric_context["prompt_bytes"]
         summary["concepts"] = len(state["concepts"])
+        held_note_context = state.get("financial_note_context")
+        if isinstance(held_note_context, Mapping):
+            summary["financial_note_context_hash"] = held_note_context["content_hash"]
+            summary["financial_note_authorities"] = len(held_note_context["records"])
+
+        def note_resolver(ref: str) -> dict[str, Any]:
+            return note_context.resolver(ref, expected_context=held_note_context)
         template = template_for(state.get("industry_classification"))
         summary["driver_template"] = {
             "classification": template["classification"],
@@ -666,6 +687,7 @@ def run_model_spec(
                 repair_config=repair_config,
                 decided_by=mission["autonomy"]["automation_principal"],
                 repair_attempts=repairs,
+                note_evidence_resolver=note_resolver,
             )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "spec_status": "busy",
@@ -694,6 +716,7 @@ def run_model_spec(
                 missions.record_validated_company_model_spec(
                     spec, mission_version_ref=mission["id"],
                     work_order_ref=accepted_call.get("work_order_ref"),
+                    note_evidence_resolver=note_resolver,
                 )
             )
         except (ModelInputError, FinancialStatementStructureError,
@@ -737,8 +760,11 @@ def run_model_spec(
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
-        _write_owner_only(summary_dir / "summary.json", summary)
-        store.close()
+        try:
+            _write_owner_only(summary_dir / "summary.json", summary)
+        finally:
+            note_context.close()
+            store.close()
 
 
 def build_parser() -> argparse.ArgumentParser:

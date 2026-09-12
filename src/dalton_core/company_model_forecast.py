@@ -108,7 +108,11 @@ def inputs_hash(table: Mapping[str, Any]) -> str:
     return content_hash(json.loads(canonical_json(table)))
 
 
-def model_digest(spec: Mapping[str, Any], table: Mapping[str, Any]) -> str:
+def model_digest(
+    spec: Mapping[str, Any], table: Mapping[str, Any], *,
+    note_evidence_resolver: Any | None = None,
+    financial_note_context: Mapping[str, Any] | None = None,
+) -> str:
     """What a model run is *about*: this specification over these filings.
 
     The lane names its child by this, so a tick that fires while nothing has
@@ -116,8 +120,30 @@ def model_digest(spec: Mapping[str, Any], table: Mapping[str, Any]) -> str:
     """
 
     statement_binding = None
+    note_context_binding = None
     if isinstance(spec.get("financial_statement_structure"), Mapping):
-        structure, replay = materialize_financial_statement_structure(spec, table)
+        held_notes = spec["financial_statement_structure"].get("note_evidence") or []
+        if held_notes:
+            if financial_note_context is None:
+                raise FinancialStatementStructureError(
+                    "forecast financial note context is unavailable"
+                )
+            from .financial_note_context import (
+                FinancialNoteContextError,
+                forecast_financial_note_context_binding,
+            )
+            try:
+                note_context_binding = forecast_financial_note_context_binding(
+                    financial_note_context,
+                    company_ref=str(spec.get("company_ref") or ""),
+                    evidence_refs=sorted(str(item.get("ref") or "")
+                                         for item in held_notes),
+                )
+            except FinancialNoteContextError as exc:
+                raise FinancialStatementStructureError(str(exc)) from exc
+        structure, replay = materialize_financial_statement_structure(
+            spec, table, note_evidence_resolver=note_evidence_resolver,
+        )
         statement_binding = forecast_structure_binding(structure, replay, table)
         cash_companion = (
             build_cash_flow_companion(spec, table, structure)
@@ -125,7 +151,7 @@ def model_digest(spec: Mapping[str, Any], table: Mapping[str, Any]) -> str:
         )
     else:
         cash_companion = None
-    return content_hash({
+    digest_body = {
         "spec_ref": str(spec.get("spec_id") or ""),
         "spec_hash": str(spec.get("content_hash") or ""),
         "inputs_hash": inputs_hash(table),
@@ -138,7 +164,12 @@ def model_digest(spec: Mapping[str, Any], table: Mapping[str, Any]) -> str:
         ),
         "forecast_structure_binding": statement_binding,
         "cash_flow_companion": cash_companion,
-    })
+    }
+    # Historical model identities remain byte-for-byte stable.  Only the new
+    # note-backed structure adds this authority to its digest.
+    if note_context_binding is not None:
+        digest_body["financial_note_context_binding"] = note_context_binding
+    return content_hash(digest_body)
 
 
 def pending_action(
@@ -305,6 +336,7 @@ def run_company_forecast(
     lines: ModelForecastAuthority | None = None,
     mission_version_ref: str | None = None,
     actor_ref: str = AUTOMATION_ACTOR,
+    note_evidence_resolver: Any | None = None,
 ) -> dict[str, Any]:
     """Do the one thing this company needs, or say there is nothing to do.
 
@@ -316,7 +348,9 @@ def run_company_forecast(
     table = build_model_inputs(missions, spec)
     structure = replay = binding = None
     if isinstance(spec.get("financial_statement_structure"), Mapping):
-        structure, replay = materialize_financial_statement_structure(spec, table)
+        structure, replay = materialize_financial_statement_structure(
+            spec, table, note_evidence_resolver=note_evidence_resolver,
+        )
         binding = forecast_structure_binding(structure, replay, table)
     prior = models.latest(company_ref)
     action = pending_action(prior, spec, table)

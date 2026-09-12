@@ -37,12 +37,15 @@ class ModelForecastLauncher(LaneChildLauncher):
 
         return True
 
-    def _command(self, *, ticket_dir: Path, company_ref: str) -> list[str]:
+    def _command(
+        self, *, ticket_dir: Path, company_ref: str, model_digest: str,
+    ) -> list[str]:
         return [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--company-ref", company_ref,
             "--validator-contract-hash", FORECAST_INVARIANT_CONTRACT_HASH,
+            "--expected-model-digest", model_digest,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
 
@@ -73,7 +76,7 @@ class ModelForecastLauncher(LaneChildLauncher):
                 "model_digest": model_digest,
                 "validator_contract_hash": validator_contract_hash,
             },
-            company_ref=company_ref,
+            company_ref=company_ref, model_digest=model_digest,
         )
 
 
