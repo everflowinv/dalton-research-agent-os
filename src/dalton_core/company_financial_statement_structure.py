@@ -117,7 +117,9 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
             "enum": list(LINE_KINDS),
             "description": (
                 "filed requires an exact filed concept; derived requires concept "
-                "null and an associated formula"
+                "null and an associated formula. Prefer filed when an exact standard "
+                "subtotal such as GrossProfit is available, except where the contract "
+                "requires a final earnings formula."
             ),
         },
         "concept": {
@@ -174,7 +176,9 @@ _SUM_FORMULA_SCHEMA = _schema_object(
             "type": ["string", "null"], "maxLength": 200,
             "description": (
                 "Exact filed historical result tied by this formula; do not copy "
-                "it into the derived output line's concept field."
+                "it into the derived output line's concept field. A derived result "
+                "must tie exactly in every applicable source period; presentation "
+                "rounding does not permit tolerance or a balancing term."
             ),
         },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
@@ -190,7 +194,9 @@ _DIVIDE_FORMULA_SCHEMA = _schema_object(
             "type": ["string", "null"], "maxLength": 200,
             "description": (
                 "Exact filed historical result tied by this formula; do not copy "
-                "it into the derived output line's concept field."
+                "it into the derived output line's concept field. A derived result "
+                "must tie exactly in every applicable source period; presentation "
+                "rounding does not permit tolerance or a balancing term."
             ),
         },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,

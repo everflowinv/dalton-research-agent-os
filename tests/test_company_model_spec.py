@@ -249,7 +249,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "d2cc4afb06cecdc3bf3e26e33813952988d2b4548e26d57ae761476811015f73",
+            "1d54be178b43a71f7ccc520a1b8887a5acac927a1dc7a53901216fcd1cece8f0",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -561,6 +561,29 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertIn(
             "A derived line's historical filed tie belongs only in its "
             "formula.tie_out_concept.",
+            prompt,
+        )
+
+    def test_prompt_prefers_filed_subtotals_and_requires_exact_derived_ties(self):
+        prompt = build_prompt(STATE)
+        self.assertIn(
+            "Prefer an exact filed line when GrossProfit or another standard "
+            "subtotal is available",
+            prompt,
+        )
+        self.assertIn(
+            "Derive a subtotal only when its formula ties exactly in every "
+            "applicable source period",
+            prompt,
+        )
+        self.assertIn(
+            "Presentation rounding does not permit tie tolerance, rewriting a "
+            "filed amount, or inventing a balancing term",
+            prompt,
+        )
+        self.assertIn(
+            "Prefer filed when an exact standard subtotal such as GrossProfit is "
+            "available, except where the contract requires a final earnings formula.",
             prompt,
         )
 

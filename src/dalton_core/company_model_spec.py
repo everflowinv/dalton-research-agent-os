@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.4",
-    "prompt_contract": "company-model-spec-prompt:0.12",
+    "prompt_contract": "company-model-spec-prompt:0.13",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -508,11 +508,13 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "income calculation structure as company_presented_component or change "
         "their units to make them fit. At least one final earnings line -- continuing income, "
         "net income, or parent net income as this company presents it -- must be "
-        "formula-derived and tied to that exact filed result. Filed gross profit, "
-        "operating income, pretax income, net income, attribution totals, and EPS "
-        "are historical/tie authorities: mark the filed copies unavailable and "
-        "forecast their derived formula lines. Do not assign independent growth "
-        "or shares to those totals as a substitute for the bridge. "
+        "formula-derived and tied to that exact filed result. Prefer an exact filed "
+        "line when GrossProfit or another standard subtotal is available; do not "
+        "duplicate it as a derived line merely to forecast a bridge. Derive a "
+        "subtotal only when its formula ties exactly in every applicable source "
+        "period. Presentation rounding does not permit tie tolerance, rewriting a "
+        "filed amount, or inventing a balancing term. Do not assign independent "
+        "growth or shares to formula-derived totals as a substitute for the bridge. "
         "When the company directly presents pretax income as gross profit less "
         "company-specific expense totals, the pretax sum may contain exactly one "
         "gross_profit term with coefficient 1 and one or more "

@@ -197,6 +197,8 @@ class CompanyModelStateTests(unittest.TestCase):
         self.ingest("0001467373-26-000031", lines)
         state = build_company_model_state(self.missions, ACN)
         self.assertEqual(state["numeric_context"]["included_cells"], 300)
+        self.assertEqual(state["numeric_context"]["omitted_by_prompt_limit"], 0)
+        self.assertIn("acn:Concept149", build_prompt(state))
         self.assertLess(len(build_prompt(state).encode("utf-8")), MAX_INPUT_TOKENS)
 
     def test_numeric_context_preserves_quarter_and_annual_windows_without_fiscal_inference(self):
