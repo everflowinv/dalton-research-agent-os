@@ -183,6 +183,16 @@ class BudgetNoSendAuditTests(unittest.TestCase):
         self.assertEqual(proof["classification"], "atomic_budget_refusal_no_send")
         self.assertFalse(proof["provider_send_proven"])
 
+    def test_legacy_adapter_label_requires_the_same_exact_local_rejection(self):
+        error = {"code": "MODEL_ADAPTER_REJECTED"}
+        self.assertNotEqual(self.proof(error=error)["classification"],
+                            "atomic_budget_refusal_no_send")
+        self.reject()
+        self.assertEqual(self.proof(error=error)["classification"],
+                         "atomic_budget_refusal_no_send")
+        self.assertNotEqual(self.proof(error=error, attempt_number=2)["classification"],
+                            "atomic_budget_refusal_no_send")
+
     def test_synthetic_not_started_after_admission_does_not_prove_no_send(self):
         admission = self.admit(50_000)
         self.budget.settle(admission["admission_id"], actual_micros=50_000)

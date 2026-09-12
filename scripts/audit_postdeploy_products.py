@@ -385,7 +385,12 @@ def provider_send_proof(core: sqlite3.Connection, router: sqlite3.Connection,
                       and item["route_decision_ref"] == route_ref]
         no_send = (
             formal.get("terminal_state") == "failed"
-            and (formal.get("error") or {}).get("code") == "BUDGET_REFUSED"
+            # Directed-model workers historically used the generic adapter
+            # rejection code for a local day-ledger refusal. The exact local
+            # rejection below, not either error label, supplies the proof.
+            and (formal.get("error") or {}).get("code") in {
+                "BUDGET_REFUSED", "MODEL_ADAPTER_REJECTED",
+            }
             and isinstance(invocation_ref, str)
             and invocation_ref.startswith("invocation:not-started:")
             and formal.get("usage_refs") == []
