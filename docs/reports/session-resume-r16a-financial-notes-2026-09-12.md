@@ -24,3 +24,13 @@ Three new GPT-5.6 Sol agents independently review evidence replay, period/formul
 4. Keep annual note semantics restricted to exact supported periods. Quarterly evidence, DXC diluted shares and full financial-statement/Category/Street breadth remain explicit gaps.
 
 Retain strict AMZN workbook presentation and the current Cockpit visual style. Do not replace missing source evidence or human research decisions with deployment authority.
+
+## Installation and review checkpoint
+
+R16a installation finished `2026-09-12T03:00:57.739411+00:00`, exit 0; runtime606/config17 are exact, with zero configuration mutations. Controller PID 99648 started `2026-09-12T02:58:22.984013+00:00`. Deployment receipt SHA `ae6adc01add3d2b85bfaadf0a9231ce892e7930a1c1a36e1ec2ff8b1a6f0c5be`; installed receipt SHA `0aab0313899e994ffd9142df6922fa6c45b58041d3dd28c7cc7802697df9dbac`. Observation `health-resumed-v1` is running; no verified R16a publication yet.
+
+After exact verification of 90 files in the newest three rollback snapshots, the obsolete R14c1 rollback was removed (13,947 files; 2,918,013,030 logical bytes). The plan and receipt are retained in the R16a packet. Free disk recovered to approximately 5 GiB; no new large copy is admitted until its own space guard passes.
+
+Integrated evidence correction `917b1d5a` replays promotion columns, Ledger request identity, supports relations, ordered admission-bound execution and route identity; author checks passed 26 tests. Integrated structure correction `b9adfeae` separates annual/quarter applicability, makes validated annual note numerators available to the annual EPS consumer, and recomputes replay from inputs before annual export; author checks passed 102 tests. Initial recovered integration passed 179 tests before those corrections. Combined independent review and the actual model-spec entrypoint regression are still running.
+
+The first postdeployment product audit failed inside the audit helper: `plan_json` is valid and self-hashed but intentionally does not contain the separately derived database `plan_id`. The corrected version will derive that ID from mission/state and compare all denormalized columns, schema and task identity. This is a verification-tool false negative, not evidence of damaged live planner authority. No product acceptance is recorded from the failed attempt.
