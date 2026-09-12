@@ -330,12 +330,16 @@ def count_recent_web_search_calls(connection: Any, *, as_of: datetime | None = N
     """Trailing-24h ``search_web`` invocations recorded against the Core profile."""
 
     now = as_of or datetime.now(timezone.utc)
-    window_start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
+    if now.tzinfo is None:
+        raise PublicWebCoreSearchError("as_of must include a timezone")
+    now_wire = _wire_time(now)
+    window_start = _wire_time(now.astimezone(timezone.utc) - TRAILING_WINDOW)
     row = connection.execute(
         "SELECT COUNT(*) FROM connector_invocations "
         "WHERE (connector_profile_ref=? OR connector_profile_ref LIKE ?) "
-        "AND created_at >= ?",
-        (SEARCH_PROFILE_REF, "connector-profile:gemini-web-search:provider-%", window_start),
+        "AND created_at >= ? AND created_at <= ?",
+        (SEARCH_PROFILE_REF, "connector-profile:gemini-web-search:provider-%",
+         window_start, now_wire),
     ).fetchone()
     return int(row[0])
 
@@ -998,6 +1002,21 @@ class PublicWebCoreSearch:
             replayed = True
             response = executor.execute(stored, scheduler_lease_token="replay")
         else:
+            existing_invocation = self.store.connection.execute(
+                "SELECT content_hash FROM connector_invocations "
+                "WHERE connector_invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if existing_invocation is not None:
+                raise PublicWebCoreSearchError(
+                    f"web search runner request {request_id} is incomplete: its canonical "
+                    f"invocation {invocation_id} already exists without a durable runner "
+                    "request; hold for operator recovery"
+                )
+            # Request creation is immutable logical identity. Operational
+            # invocation timestamps record when this process actually begins
+            # the one provider-bearing execution, which may be much later.
+            execution_at = _wire_time(self.clock())
             call = self.connectors.register_call_spec(
                 {
                     "schema_version": "0.1",
@@ -1015,14 +1034,14 @@ class PublicWebCoreSearch:
             execution = ExecutionInvocation(
                 schema_version="0.1",
                 id=invocation_id,
-                created_at=created_at,
+                created_at=execution_at,
                 kind=ExecutionKind.CONNECTOR,
                 work_order_ref=work.id,
                 profile_ref=profile["id"],
                 capability=SEARCH_CAPABILITY_ID,
                 input_refs=(call["id"],),
                 output_refs=(artifact_ref,),
-                started_at=created_at,
+                started_at=execution_at,
                 completed_at=None,
                 side_effects=(),
                 runtime_ref=profile["runner_runtime_ref"],
@@ -1047,7 +1066,7 @@ class PublicWebCoreSearch:
                 {
                     "schema_version": "0.1",
                     "id": invocation_id,
-                    "created_at": created_at,
+                    "created_at": execution_at,
                     "work_order_ref": work.id,
                     "work_order_hash": work_hash,
                     "connector_profile_ref": profile["id"],
@@ -1110,7 +1129,7 @@ class PublicWebCoreSearch:
                 {
                     "schema_version": "0.2",
                     "id": request_id,
-                    "created_at": created_at,
+                    "created_at": execution_at,
                     "connector_invocation_ref": invocation["id"],
                     "connector_invocation_hash": invocation["content_hash"],
                     "execution_ref": invocation["execution_ref"],

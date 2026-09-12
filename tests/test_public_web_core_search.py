@@ -48,7 +48,7 @@ from dalton_core.public_web_core_search import (
     write_web_search_governance_proposal,
 )
 from dalton_core.raw_spool import RawSpool
-from dalton_core.runner_journal import RunnerJournal
+from dalton_core.runner_journal import RunnerJournal, RunnerJournalNotFound
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, canonical_json, content_hash
 
@@ -63,8 +63,8 @@ SPEC = {"query": "Accenture AI demand", "date_after": "2026-08-01", "date_before
 
 
 class Clock:
-    def __init__(self) -> None:
-        self.value = datetime.now(timezone.utc)
+    def __init__(self, value: datetime | None = None) -> None:
+        self.value = value or datetime.now(timezone.utc)
 
     def __call__(self) -> datetime:
         return self.value
@@ -208,7 +208,10 @@ class ExecutorTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_search_leaves_url_refs_raw_artifact_and_free_replay(self) -> None:
-        h = WebSearchHarness(self.root, FakeWebSearchHandle(CITATIONS))
+        executed_at = datetime(2026, 9, 12, 20, 0, tzinfo=timezone.utc)
+        h = WebSearchHarness(
+            self.root, FakeWebSearchHandle(CITATIONS), clock=Clock(executed_at)
+        )
         self.addCleanup(h.close)
         request = h.search.build_request(
             SPEC, created_at="2026-09-11T12:00:00.000000+00:00"
@@ -263,6 +266,17 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(replay["provider_calls"], 0)
         self.assertEqual(len(h.handle.calls), 1)
         self.assertEqual(count_recent_web_search_calls(h.core.connection, as_of=h.clock()), 1)
+        invocation_times = h.core.connection.execute(
+            "SELECT created_at FROM connector_invocations WHERE connector_profile_ref=?",
+            (SEARCH_PROFILE_REF,),
+        ).fetchall()
+        self.assertEqual([h.clock().isoformat(timespec="microseconds")],
+                         [row[0] for row in invocation_times])
+        self.assertNotEqual(request["created_at"], invocation_times[0][0])
+        # A future-dated operational record is not charged to an earlier
+        # trailing window, even if it is within 24 hours after that as_of.
+        self.assertEqual(count_recent_web_search_calls(
+            h.core.connection, as_of=h.clock() - timedelta(microseconds=1)), 0)
         # Nothing has been fetched, so no discovered URL is in authority yet.
         self.assertEqual(public_web_urls_in_authority(h.core.connection, expected_refs), [])
         with self.assertRaises(PublicWebCoreSearchError):
@@ -272,9 +286,63 @@ class ExecutorTests(unittest.TestCase):
         ).fetchone()[0], 1)
         for table in ("evidence_versions", "claim_versions"):
             self.assertEqual(h.core.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
-        # Trailing window: 25 hours later the call no longer counts.
-        h.clock.advance(hours=25)
+        # The exact 24-hour boundary is inclusive. One microsecond later it
+        # expires, and durable replay neither calls the provider nor refreshes
+        # the immutable invocation timestamp/hash.
+        h.clock.advance(hours=24)
+        self.assertEqual(count_recent_web_search_calls(h.core.connection, as_of=h.clock()), 1)
+        invocation_hash = h.core.connection.execute(
+            "SELECT content_hash FROM connector_invocations WHERE connector_profile_ref=?",
+            (SEARCH_PROFILE_REF,),
+        ).fetchone()[0]
+        h.clock.advance(microseconds=1)
         self.assertEqual(count_recent_web_search_calls(h.core.connection, as_of=h.clock()), 0)
+        expired_replay = h.search.search(request)
+        self.assertTrue(expired_replay["replayed"])
+        self.assertEqual(expired_replay["provider_calls"], 0)
+        self.assertEqual(len(h.handle.calls), 1)
+        self.assertEqual(invocation_hash, h.core.connection.execute(
+            "SELECT content_hash FROM connector_invocations WHERE connector_profile_ref=?",
+            (SEARCH_PROFILE_REF,),
+        ).fetchone()[0])
+
+        # SQL timestamps are canonical UTC strings, so equivalent offsets have
+        # exactly the same trailing-window result.
+        equivalent = h.clock().astimezone(timezone(timedelta(hours=-4)))
+        self.assertEqual(
+            count_recent_web_search_calls(h.core.connection, as_of=equivalent), 0
+        )
+        with self.assertRaisesRegex(PublicWebCoreSearchError, "as_of must include"):
+            count_recent_web_search_calls(
+                h.core.connection, as_of=datetime(2026, 9, 13, 20, 0)
+            )
+
+    def test_existing_invocation_without_runner_request_holds_without_reexecution(self) -> None:
+        clock = Clock(datetime(2026, 9, 12, 20, 0, tzinfo=timezone.utc))
+        handle = FakeWebSearchHandle(CITATIONS)
+        h = WebSearchHarness(self.root, handle, clock=clock)
+        self.addCleanup(h.close)
+        request = h.search.build_request(
+            SPEC, created_at="2026-09-11T12:00:00.000000+00:00"
+        )
+        receipt = h.search.search(request)
+        invocation_ref = receipt["connector_invocation_ref"]
+        invocation_hash = receipt["connector_invocation_hash"]
+
+        original_request = h.journal.request
+        h.journal.request = lambda _request_id: (_ for _ in ()).throw(RunnerJournalNotFound())
+        clock.advance(hours=25)
+        with self.assertRaisesRegex(
+            PublicWebCoreSearchError, "already exists without a durable runner request"
+        ):
+            h.search.search(request)
+        h.journal.request = original_request
+        self.assertEqual(len(handle.calls), 1)
+        rows = h.core.connection.execute(
+            "SELECT connector_invocation_id,content_hash FROM connector_invocations "
+            "WHERE connector_invocation_id=?", (invocation_ref,),
+        ).fetchall()
+        self.assertEqual([(invocation_ref, invocation_hash)], [tuple(row) for row in rows])
 
     def test_antigravity_contract_versions_identity_profile_and_raw_reverification(self) -> None:
         provider = "antigravity"
