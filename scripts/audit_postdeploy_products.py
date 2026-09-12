@@ -368,7 +368,8 @@ def exact_route(router: sqlite3.Connection, route_ref: str, *, work_ref: str,
 
 def provider_send_proof(core: sqlite3.Connection, router: sqlite3.Connection,
                         budget: sqlite3.Connection, *, work_ref: str,
-                        work_hash: str, formal: Mapping[str, Any]) -> dict[str, Any]:
+                        work_hash: str, formal: Mapping[str, Any],
+                        expected_phase: str | None = None) -> dict[str, Any]:
     budget_evidence = budget_bundle(budget, work_ref)
     invocation_ref = formal.get("invocation_ref")
     if formal.get("terminal_state") != "succeeded" or not isinstance(
@@ -379,6 +380,8 @@ def provider_send_proof(core: sqlite3.Connection, router: sqlite3.Connection,
         route_ref = (formal.get("metadata") or {}).get("route_decision_ref")
         rejections = [item for item in budget_evidence["rejections"]
                       if item["attempt_number"] == formal.get("attempt_number")
+                      and expected_phase in {"assessment", "verification"}
+                      and item["phase"] == expected_phase
                       and item["route_decision_ref"] == route_ref]
         no_send = (
             formal.get("terminal_state") == "failed"
@@ -630,6 +633,10 @@ def directed_lifecycle(connections: Mapping[str, sqlite3.Connection], state: Pat
         send_proofs = [provider_send_proof(
             core, router, budget, work_ref=work_row["work_order_id"],
             work_hash=work_row["work_order_hash"], formal=formal,
+            expected_phase={
+                "qualitative_model_draft": "assessment",
+                "independent_qualitative_verifier": "verification",
+            }.get((work.get("metadata") or {}).get("stage")),
         ) for formal in bundle["formals"]]
         works.append({
             **bundle,

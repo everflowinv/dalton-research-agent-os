@@ -158,10 +158,10 @@ class BudgetNoSendAuditTests(unittest.TestCase):
             "metadata": {"route_decision_ref": self.route["id"]},
         }
 
-    def admit(self, reserved):
+    def admit(self, reserved, *, phase="assessment"):
         return self.budget.admit(
             policy_version_id="budget:audit:1", day="2026-08-14",
-            work_order_ref=self.work["id"], attempt_number=1, phase="assessment",
+            work_order_ref=self.work["id"], attempt_number=1, phase=phase,
             route_decision_ref=self.route["id"], reserved_micros=reserved,
         )
 
@@ -169,11 +169,12 @@ class BudgetNoSendAuditTests(unittest.TestCase):
         with self.assertRaises(ThesisImpactDayBudgetExceeded):
             self.admit(200_000)
 
-    def proof(self, **updates):
+    def proof(self, *, expected_phase="assessment", **updates):
         return audit.provider_send_proof(
             self.core.connection, self.router.connection, self.budget.connection,
             work_ref=self.work["id"], work_hash=self.route["work_order_hash"],
             formal={**self.formal, **updates},
+            expected_phase=expected_phase,
         )
 
     def test_exact_local_admission_refusal_proves_no_send(self):
@@ -218,6 +219,25 @@ class BudgetNoSendAuditTests(unittest.TestCase):
         self.reject()
         self.core.connection.execute("DROP TABLE observability_usage_entries")
         self.assertNotEqual(self.proof()["classification"], "atomic_budget_refusal_no_send")
+
+    def test_rejection_for_another_phase_cannot_prove_assessment_no_send(self):
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            self.admit(200_000, phase="verification")
+        self.assertNotEqual(
+            self.proof()["classification"], "atomic_budget_refusal_no_send"
+        )
+
+    def test_verification_rejection_requires_explicit_verification_phase(self):
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            self.admit(200_000, phase="verification")
+        self.assertEqual(
+            self.proof(expected_phase="verification")["classification"],
+            "atomic_budget_refusal_no_send",
+        )
+        self.assertNotEqual(
+            self.proof(expected_phase=None)["classification"],
+            "atomic_budget_refusal_no_send",
+        )
 
 
 if __name__ == "__main__":
