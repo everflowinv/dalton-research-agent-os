@@ -7,6 +7,7 @@ from pathlib import Path
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.model_router import ModelRouter
 from dalton_core.observability import ObservabilityStore
+from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, canonical_json, content_hash
 from dalton_core.thesis_impact_budget import (
     ThesisImpactBudgetStore, ThesisImpactDayBudgetExceeded,
@@ -134,6 +135,219 @@ class ResearchPlanAuditTests(unittest.TestCase):
         )
         self.assertEqual(classification,
                          "proved_paid_output_contract_terminal_barrier")
+
+
+class ModelSpecTaskContractAuditTests(unittest.TestCase):
+    def spec(self, task_hash="a" * 64):
+        spec = {
+            "company_ref": "company:sec-cik:0000051143",
+            "state_hash": "b" * 64,
+            "task_hash": task_hash,
+        }
+        spec["spec_id"] = "company-model-spec:" + content_hash(spec)[:32]
+        return spec
+
+    def authority(self, spec, *, task_hash=None):
+        identity = {
+            "schema_version": "company-model-spec-request-0.1",
+            "state_hash": spec["state_hash"],
+            "task_hash": task_hash or spec["task_hash"],
+            "structured_output_repair": {"max_attempts": 0},
+        }
+        return {
+            "purpose": "model_spec",
+            "request_id": content_hash(identity)[:32],
+            "model_spec_request_identity_present": True,
+            "model_spec_request_identity": identity,
+            "structured_output_repair_present": False,
+            "structured_output_repair": None,
+            "producer_route_decision_refs": [],
+            "work_authority_verified": True,
+        }
+
+    def repair_authority(self, spec):
+        proof = {
+            "work_order_ref": "work:root", "work_order_hash": "1" * 64,
+            "result_envelope_ref": "result:root", "result_envelope_hash": "2" * 64,
+            "invocation_ref": "invocation:root", "route_decision_ref": "route:root",
+        }
+        binding = {
+            "schema_version": "company-model-spec-repair-binding-0.1",
+            "root_original": proof, "repair_parent": dict(proof),
+            "original_text_sha256": "3" * 64, "parent_text_sha256": "4" * 64,
+            "state_hash": spec["state_hash"], "task_hash": spec["task_hash"],
+            "validation_error": {"code": "format", "message": "invalid JSON"},
+            "repair_contract_ref": "contract:company-model-spec-structured-output-repair:0.1",
+            "repair_contract_hash": "5" * 64, "repair_prompt_sha256": "6" * 64,
+            "repair_config": {"max_attempts": 1}, "repair_number": 1,
+        }
+        return {
+            "purpose": "model_spec", "model_spec_request_identity_present": False,
+            "model_spec_request_identity": None,
+            "structured_output_repair_present": True,
+            "structured_output_repair": binding,
+            "request_id": "model-spec-repair:" + content_hash(binding)[:32],
+            "producer_route_decision_refs": [], "work_authority_verified": True,
+        }
+
+    def test_new_and_historical_hashes_are_reported_from_exact_work(self):
+        for task_hash in ("a" * 64, "c" * 64):
+            with self.subTest(task_hash=task_hash):
+                spec = self.spec(task_hash)
+                proof = audit.model_spec_task_contract(spec, self.authority(spec))
+                self.assertEqual(proof["status"], "verified_exact_work_identity")
+                self.assertEqual(proof["task_hash"], task_hash)
+                self.assertEqual(proof["request_id"], content_hash(
+                    self.authority(spec)["model_spec_request_identity"]
+                )[:32])
+
+    def test_missing_historical_work_proof_remains_unknown(self):
+        spec = self.spec()
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, None)["status"],
+            "unknown_legacy_missing_work_identity",
+        )
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, {
+                "purpose": "model_spec", "model_spec_request_identity_present": False,
+                "model_spec_request_identity": None,
+                "structured_output_repair_present": False,
+                "structured_output_repair": None,
+                "work_authority_verified": True,
+            })["status"],
+            "unknown_legacy_missing_request_identity",
+        )
+
+    def test_repair_work_without_root_identity_is_separately_unknown(self):
+        spec = self.spec()
+        proof = audit.model_spec_task_contract(spec, self.repair_authority(spec))
+        self.assertEqual(proof["status"], "unknown_repair_work_missing_root_identity")
+
+    def test_actual_repair_work_replay_keeps_unknown_root_classification(self):
+        spec = self.spec()
+        authority = self.repair_authority(spec)
+        scheduler = Scheduler(":memory:")
+        self.addCleanup(scheduler.close)
+        work = {
+            "schema_version": "0.1", "id": "work:model-spec-repair:a",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00", "question": "repair",
+            "requested_capabilities": ["research"], "runtime_profile_ref": "runtime:test",
+            "budget": {"max_seconds": 60}, "idempotency_key": "model-spec-repair:a",
+            "declared_side_effects": [], "status": "ready", "input_refs": [],
+            "metadata": {
+                "purpose": "model_spec", "request_id": authority["request_id"],
+                "structured_output_repair": authority["structured_output_repair"],
+            },
+        }
+        self.assertEqual(scheduler.enqueue(work)["status"], "fresh")
+        bundle = audit.scheduler_bundle(
+            scheduler.connection, work["id"], include_request_identity=True,
+        )
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, bundle)["status"],
+            "unknown_repair_work_missing_root_identity",
+        )
+
+    def test_malformed_repair_binding_cannot_earn_unknown_classification(self):
+        spec = self.spec()
+        for value in (None, "repair", {}, {"schema_version": "wrong"}):
+            authority = self.repair_authority(spec)
+            authority["structured_output_repair"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(
+                RuntimeError, "repair binding is invalid"
+            ):
+                audit.model_spec_task_contract(spec, authority)
+
+    def test_presence_proofs_require_actual_booleans(self):
+        spec = self.spec()
+        for field in (
+            "model_spec_request_identity_present", "structured_output_repair_present",
+        ):
+            authority = self.repair_authority(spec)
+            authority[field] = 1
+            with self.subTest(field=field), self.assertRaisesRegex(
+                RuntimeError, "presence proof is invalid"
+            ):
+                audit.model_spec_task_contract(spec, authority)
+
+    def test_explicit_null_identity_is_not_treated_as_absent(self):
+        spec = self.spec()
+        authority = self.authority(spec)
+        authority["model_spec_request_identity"] = None
+        with self.assertRaisesRegex(RuntimeError, "explicitly null"):
+            audit.model_spec_task_contract(spec, authority)
+
+    def test_producer_bound_request_id_and_refs_are_verified(self):
+        spec = self.spec()
+        authority = self.authority(spec)
+        refs = ["route-decision:a", "route-decision:b"]
+        authority["producer_route_decision_refs"] = refs
+        authority["request_id"] += ":producer:" + content_hash(refs)[:16]
+        proof = audit.model_spec_task_contract(spec, authority)
+        self.assertEqual(proof["status"], "verified_exact_work_identity")
+        authority["producer_route_decision_refs"] = list(reversed(refs))
+        with self.assertRaisesRegex(RuntimeError, "producer route refs are invalid"):
+            audit.model_spec_task_contract(spec, authority)
+        for malformed in (None, False, 0, {}, "route-decision:a"):
+            authority = self.authority(spec)
+            authority["producer_route_decision_refs"] = malformed
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                RuntimeError, "producer route refs are invalid"
+            ):
+                audit.model_spec_task_contract(spec, authority)
+
+    def test_scheduler_bundle_replays_work_before_exposing_identity(self):
+        spec = self.spec()
+        authority = self.authority(spec)
+        scheduler = Scheduler(":memory:")
+        self.addCleanup(scheduler.close)
+        work = {
+            "schema_version": "0.1", "id": "work:model-spec:a",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00", "question": "model",
+            "requested_capabilities": ["research"], "runtime_profile_ref": "runtime:test",
+            "budget": {"max_seconds": 60}, "idempotency_key": "model-spec:a",
+            "declared_side_effects": [], "status": "ready", "input_refs": [],
+            "metadata": {
+                "purpose": "model_spec", "request_id": authority["request_id"],
+                "model_spec_request_identity": authority["model_spec_request_identity"],
+            },
+        }
+        self.assertEqual(scheduler.enqueue(work)["status"], "fresh")
+        bundle = audit.scheduler_bundle(
+            scheduler.connection, work["id"], include_request_identity=True,
+        )
+        self.assertTrue(bundle["work_authority_verified"])
+        self.assertEqual(
+            audit.model_spec_task_contract(spec, bundle)["status"],
+            "verified_exact_work_identity",
+        )
+
+    def test_inconsistent_or_malformed_proof_is_rejected(self):
+        spec = self.spec()
+        wrong_task = self.authority(spec, task_hash="c" * 64)
+        malformed = self.authority(spec)
+        malformed["model_spec_request_identity"] = {
+            **malformed["model_spec_request_identity"], "extra": "not-authority",
+        }
+        variants = (
+            (wrong_task, "task identities differ"),
+            (malformed, "request identity is invalid"),
+            ({**self.authority(spec), "purpose": "dossier"}, "Work purpose differs"),
+            ({**self.authority(spec), "request_id": "0" * 32}, "request_id differs"),
+            ({**self.authority(spec), "work_authority_verified": False},
+             "was not canonically verified"),
+        )
+        for authority, message in variants:
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                audit.model_spec_task_contract(spec, authority)
+
+    def test_spec_id_must_bind_the_reported_task_hash(self):
+        spec = self.spec()
+        spec["task_hash"] = "c" * 64
+        with self.assertRaisesRegex(RuntimeError, "differs from spec_ref"):
+            audit.model_spec_task_contract(spec, None)
 
 
 class BudgetNoSendAuditTests(unittest.TestCase):

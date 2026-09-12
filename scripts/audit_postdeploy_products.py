@@ -247,7 +247,9 @@ def row_ids(connection: sqlite3.Connection, table: str, column: str) -> list[str
         f"SELECT {column} FROM {table} ORDER BY {column}")]
 
 
-def scheduler_bundle(connection: sqlite3.Connection, work_ref: str) -> dict[str, Any] | None:
+def scheduler_bundle(
+    connection: sqlite3.Connection, work_ref: str, *, include_request_identity: bool = False,
+) -> dict[str, Any] | None:
     row = connection.execute(
         "SELECT * FROM scheduler_work_orders WHERE work_order_id=?", (work_ref,)
     ).fetchone()
@@ -264,23 +266,35 @@ def scheduler_bundle(connection: sqlite3.Connection, work_ref: str) -> dict[str,
         "FROM scheduler_attempt_events WHERE work_order_id=? ORDER BY event_seq",
         (work_ref,),
     )]
+    metadata = work.get("metadata") or {}
     return {
         "work_order_ref": work_ref, "work_order_hash": row["work_order_hash"],
-        "created_at": row["created_at"], "purpose": (work.get("metadata") or {}).get("purpose"),
-        "stage": ((work.get("metadata") or {}).get("stage")
-                  or (work.get("metadata") or {}).get("operation")),
+        "created_at": row["created_at"], "purpose": metadata.get("purpose"),
+        "stage": (metadata.get("stage") or metadata.get("operation")),
+        **({
+            "request_id": metadata.get("request_id"),
+            "model_spec_request_identity_present": "model_spec_request_identity" in metadata,
+            "model_spec_request_identity": metadata.get("model_spec_request_identity"),
+            "structured_output_repair_present": "structured_output_repair" in metadata,
+            "structured_output_repair": metadata.get("structured_output_repair"),
+            "producer_route_decision_refs": metadata.get("producer_route_decision_refs", []),
+            "work_authority_verified": True,
+        } if include_request_identity else {}),
         "requested_capabilities": work.get("requested_capabilities") or [],
         "formals": formals, "events": events,
     }
 
 
 def scheduler_location(core: sqlite3.Connection, service: sqlite3.Connection,
-                       work_ref: str | None) -> dict[str, Any] | None:
+                       work_ref: str | None, *,
+                       include_request_identity: bool = False) -> dict[str, Any] | None:
     if not work_ref:
         return None
     locations = []
     for name, connection in (("core.sqlite", core), ("scheduler.sqlite", service)):
-        bundle = scheduler_bundle(connection, work_ref)
+        bundle = scheduler_bundle(
+            connection, work_ref, include_request_identity=include_request_identity,
+        )
         if bundle is not None:
             locations.append({"database": name, **bundle})
     if len(locations) > 1:
@@ -755,6 +769,151 @@ def directed_lifecycle(connections: Mapping[str, sqlite3.Connection], state: Pat
     }
 
 
+def _sha256_field(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def model_spec_task_contract(
+    spec: Mapping[str, Any], formal_authority: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Bind a persisted spec to its archived model-spec request contract.
+
+    Older Work rows may predate ``model_spec_request_identity``.  Their task
+    contract is unknown: an ID that happens to look derived is not authority
+    for a task hash.  Once the identity is present, every relationship is
+    checked and drift aborts the audit.
+    """
+
+    task_hash = spec.get("task_hash")
+    state_hash = spec.get("state_hash")
+    company_ref = spec.get("company_ref")
+    spec_ref = spec.get("spec_id")
+    if not _sha256_field(task_hash) or not _sha256_field(state_hash):
+        raise RuntimeError("company model spec task identity is invalid")
+    expected_spec_ref = "company-model-spec:" + content_hash({
+        "company_ref": company_ref, "state_hash": state_hash,
+        "task_hash": task_hash,
+    })[:32]
+    if spec_ref != expected_spec_ref:
+        raise RuntimeError("company model spec task identity differs from spec_ref")
+
+    base = {"task_hash": task_hash, "state_hash": state_hash}
+    if formal_authority is None:
+        return {**base, "status": "unknown_legacy_missing_work_identity"}
+    if formal_authority.get("work_authority_verified") is not True:
+        raise RuntimeError("model spec Work authority was not canonically verified")
+    if formal_authority.get("purpose") != "model_spec":
+        raise RuntimeError("company model spec Work purpose differs")
+    producer_refs = formal_authority.get("producer_route_decision_refs", [])
+    if not isinstance(producer_refs, list) or any(
+        not isinstance(ref, str) or not ref for ref in producer_refs
+    ) or producer_refs != sorted(set(producer_refs)):
+        raise RuntimeError("model spec Work producer route refs are invalid")
+    identity_present = formal_authority.get("model_spec_request_identity_present")
+    if type(identity_present) is not bool:
+        raise RuntimeError("model spec Work identity presence proof is invalid")
+    identity = formal_authority.get("model_spec_request_identity")
+    if not identity_present:
+        repair_present = formal_authority.get("structured_output_repair_present")
+        if type(repair_present) is not bool:
+            raise RuntimeError("model spec Work repair presence proof is invalid")
+        if repair_present:
+            _validate_repair_task_binding(
+                formal_authority.get("structured_output_repair"),
+                request_id=formal_authority.get("request_id"),
+                state_hash=state_hash, task_hash=task_hash,
+            )
+            status = "unknown_repair_work_missing_root_identity"
+        else:
+            status = "unknown_legacy_missing_request_identity"
+        return {**base, "status": status}
+    if identity is None:
+        raise RuntimeError("model spec Work request identity is explicitly null")
+    if not isinstance(identity, Mapping) or set(identity) != {
+        "schema_version", "state_hash", "task_hash", "structured_output_repair",
+    }:
+        raise RuntimeError("model spec Work request identity is invalid")
+    repair = identity.get("structured_output_repair")
+    if (
+        identity.get("schema_version") != "company-model-spec-request-0.1"
+        or not _sha256_field(identity.get("state_hash"))
+        or not _sha256_field(identity.get("task_hash"))
+        or not isinstance(repair, Mapping)
+        or set(repair) != {"max_attempts"}
+        or isinstance(repair.get("max_attempts"), bool)
+        or not isinstance(repair.get("max_attempts"), int)
+        or repair["max_attempts"] < 0
+    ):
+        raise RuntimeError("model spec Work request identity is invalid")
+    if identity["state_hash"] != state_hash or identity["task_hash"] != task_hash:
+        raise RuntimeError("company model spec and Work task identities differ")
+    request_id = formal_authority.get("request_id")
+    expected_request_id = content_hash(identity)[:32]
+    if producer_refs:
+        expected_request_id += ":producer:" + content_hash(producer_refs)[:16]
+    if request_id != expected_request_id:
+        raise RuntimeError("model spec Work request_id differs from request identity")
+    return {
+        **base, "status": "verified_exact_work_identity",
+        "request_identity_hash": content_hash(identity),
+        "request_id": request_id,
+    }
+
+
+def _validate_repair_task_binding(
+    value: Any, *, request_id: Any, state_hash: str, task_hash: str,
+) -> None:
+    expected = {
+        "schema_version", "root_original", "repair_parent",
+        "original_text_sha256", "parent_text_sha256", "state_hash",
+        "task_hash", "validation_error", "repair_contract_ref",
+        "repair_contract_hash", "repair_prompt_sha256", "repair_config",
+        "repair_number",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected or value.get(
+        "schema_version"
+    ) != "company-model-spec-repair-binding-0.1":
+        raise RuntimeError("model spec Work repair binding is invalid")
+    authority_keys = {
+        "work_order_ref", "work_order_hash", "result_envelope_ref",
+        "result_envelope_hash", "invocation_ref", "route_decision_ref",
+    }
+    for name in ("root_original", "repair_parent"):
+        proof = value.get(name)
+        if not isinstance(proof, Mapping) or set(proof) != authority_keys or any(
+            not isinstance(item, str) or not item for item in proof.values()
+        ):
+            raise RuntimeError("model spec Work repair binding is invalid")
+    for name in (
+        "original_text_sha256", "parent_text_sha256", "state_hash", "task_hash",
+        "repair_contract_hash", "repair_prompt_sha256",
+    ):
+        if not _sha256_field(value.get(name)):
+            raise RuntimeError("model spec Work repair binding is invalid")
+    error = value.get("validation_error")
+    config = value.get("repair_config")
+    number = value.get("repair_number")
+    if (
+        value["state_hash"] != state_hash or value["task_hash"] != task_hash
+        or not isinstance(value.get("repair_contract_ref"), str)
+        or not value["repair_contract_ref"]
+        or not isinstance(error, Mapping) or set(error) != {"code", "message"}
+        or not all(isinstance(error.get(name), str) and error[name]
+                   for name in ("code", "message"))
+        or not isinstance(config, Mapping) or set(config) != {"max_attempts"}
+        or isinstance(config.get("max_attempts"), bool)
+        or not isinstance(config.get("max_attempts"), int)
+        or config["max_attempts"] < 1
+        or isinstance(number, bool) or not isinstance(number, int)
+        or not 1 <= number <= config["max_attempts"]
+        or request_id != "model-spec-repair:" + content_hash(value)[:32]
+    ):
+        raise RuntimeError("model spec Work repair binding is invalid")
+
+
 def model_evidence(connections: Mapping[str, sqlite3.Connection], cutoff: datetime,
                    baseline_ids: Mapping[str, Sequence[str]]) -> dict[str, Any]:
     core, service = connections["core"], connections["service"]
@@ -765,12 +924,16 @@ def model_evidence(connections: Mapping[str, sqlite3.Connection], cutoff: dateti
         wire = model_spec(row)
         if parse_time(row["created_at"], "spec created_at") < cutoff:
             continue
+        formal_authority = scheduler_location(
+            core, service, row["work_order_ref"], include_request_identity=True,
+        )
         specs.append({
             "spec_ref": row["spec_id"], "company_ref": row["company_ref"],
             "schema_version": wire.get("schema_version"), "content_hash": row["content_hash"],
             "created_at": row["created_at"], "work_order_ref": row["work_order_ref"],
+            "task_contract": model_spec_task_contract(wire, formal_authority),
             "new_since_baseline": row["spec_id"] not in baseline_ids.get("model_specs", []),
-            "formal_authority": scheduler_location(core, service, row["work_order_ref"]),
+            "formal_authority": formal_authority,
         })
     models = []
     for row in core.execute(
