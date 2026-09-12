@@ -25,6 +25,7 @@ from dalton_core.company_model_inputs import (
     NOT_FOUND,
     SHARED,
     ModelInputError,
+    _series_for,
     build_model_inputs,
 )
 from dalton_core.store import content_hash
@@ -323,6 +324,7 @@ class ModelInputTests(unittest.TestCase):
         strict_operating = next(item for item in strict_table["cash_flow_inputs"]
                                 if item["role"] == "operating_cash_flow")
         self.assertEqual(strict_operating["status"], NOT_FOUND)
+
         self.assertIn("duplicate or overlapping", strict_operating["reason"])
 
         future_spec = {**strict_spec, "schema_version": "future-version"}
@@ -335,6 +337,31 @@ class ModelInputTests(unittest.TestCase):
                                 if item["role"] == "operating_cash_flow")
         self.assertEqual(future_operating["status"], NOT_FOUND)
         self.assertIn("duplicate or overlapping", future_operating["reason"])
+
+    def test_legacy_series_preserves_sec_per_share_unit_spelling(self):
+        concept = "us-gaap:EarningsPerShareDiluted"
+        ledger = FakeMissions([
+            _line(concept, "2026-03-01", "2026-05-31", "3.03",
+                  unit="USDPerShare"),
+        ])
+        legacy = _series_for(ledger, ACN, concept, legacy_replay=True)
+        self.assertEqual(legacy["source_units"], ["USDPerShare"])
+        self.assertEqual(legacy["series"]["quarters"][0]["unit"], "USDPerShare")
+        legacy_spec = _spec(drivers=[{
+            "ref": "diluted-eps", "label": "Diluted EPS", "kind": "price",
+            "basis_concept": concept, "unit": "USDPerShare",
+            "because": "Legacy replay fixture.",
+        }])
+        legacy_spec["schema_version"] = "0.2"
+        self.assertEqual(
+            content_hash(build_model_inputs(ledger, legacy_spec)),
+            "7f2f7c7ad42e0e320bb0ccbf7ebed91220a07dbd6d66bac065e0033b0f8a732e",
+        )
+
+        structured = _series_for(ledger, ACN, concept, legacy_replay=False)
+        self.assertEqual(structured["source_units"], ["usd_per_share"])
+        self.assertEqual(structured["series"]["quarters"][0]["unit"],
+                         "usd_per_share")
 
     def test_cash_input_keeps_missing_quarter_and_wrong_sign_as_gaps(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"

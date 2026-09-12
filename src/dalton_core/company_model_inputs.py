@@ -199,13 +199,15 @@ def _series_for(
     # unlabelled row because a reader has no reason to doubt it.
     reported = [row for row in lines
                 if not row.get("is_breakdown") and not row.get("dimension_axis")]
-    source_units = sorted({_model_unit(row.get("unit"))
+    unit_for_model = str if legacy_replay else _model_unit
+    source_units = sorted({unit_for_model(row.get("unit"))
                            for row in reported if row.get("unit")})
     series = quarterly_series(lines, legacy_replay=legacy_replay)
-    for kind in ("quarters", "instants", "durations"):
-        for cell in series.get(kind) or []:
-            if cell.get("unit") is not None:
-                cell["unit"] = _model_unit(cell["unit"])
+    if not legacy_replay:
+        for kind in ("quarters", "instants", "durations"):
+            for cell in series.get(kind) or []:
+                if cell.get("unit") is not None:
+                    cell["unit"] = _model_unit(cell["unit"])
     return {
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
