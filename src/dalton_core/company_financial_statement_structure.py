@@ -107,8 +107,9 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
             "enum": list(ROLES),
             "description": (
                 "Use company_presented_component for an exact filed currency amount whose "
-                "company-specific bridge position is expressed by a tied formula; "
-                "use company_presented_subtotal only for a derived filed currency subtotal. "
+                "company-specific bridge position is expressed by a tied formula; when "
+                "that company-specific total is filed, keep it filed and unavailable. "
+                "Use company_presented_subtotal only for a derived filed currency subtotal. "
                 "Neither role represents shares, per-share figures, ratios or percentages."
             ),
         },
@@ -146,7 +147,9 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
             "enum": list(FORECAST_METHODS),
             "description": (
                 "A filed standard subtotal is historical/tie authority and must use "
-                "unavailable. Forecasting a subtotal requires an explicit derived formula."
+                "unavailable. Forecasting a subtotal requires an explicit derived formula "
+                "that ties in every applicable source period. Historical replay readiness "
+                "does not mean unavailable inputs have forecasts."
             ),
         },
         "forecast_base_ref": {"type": ["string", "null"], "maxLength": 80},

@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.4",
-    "prompt_contract": "company-model-spec-prompt:0.13",
+    "prompt_contract": "company-model-spec-prompt:0.14",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -512,13 +512,18 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "line when GrossProfit or another standard subtotal is available; do not "
         "duplicate it as a derived line merely to forecast a bridge. A filed standard "
         "subtotal is historical/tie authority and uses unavailable, not independent "
-        "growth or shares. Derive a "
+        "growth or shares. When a company-specific total is itself filed, use a "
+        "filed company_presented_component with unavailable; reserve "
+        "company_presented_subtotal for a derived sum. Choose the structure backward "
+        "from a final earnings bridge that ties exactly in every applicable source "
+        "period. Derive a "
         "subtotal only when its formula ties exactly in every applicable source "
         "period; otherwise retain the unavailable forecast gap. Presentation "
         "rounding does not permit arbitrary or global tie "
         "tolerance, rewriting a filed amount, or inventing a balancing term; "
         "per-share division uses each period's disclosed filed precision. Do not assign independent "
         "growth or shares to formula-derived totals as a substitute for the bridge. "
+        "A historically replay-ready formula does not make unavailable inputs forecastable. "
         "When the company directly presents pretax income as gross profit less "
         "company-specific expense totals, the pretax sum may contain exactly one "
         "gross_profit term with coefficient 1 and one or more "

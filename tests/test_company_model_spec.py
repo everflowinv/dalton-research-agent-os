@@ -249,7 +249,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "726ad0d2aac54b8b61c7e98c54ab6e02952474914bc5bd4e42ba91870e10f8a7",
+            "c2f56cdca5828a40159fefb09ea31b7c5f2836b4edb014ad84d08fb085d7decc",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -583,6 +583,21 @@ class CompanyModelSpecTests(unittest.TestCase):
         )
         self.assertIn("otherwise retain the unavailable forecast gap", prompt)
         self.assertIn(
+            "When a company-specific total is itself filed, use a filed "
+            "company_presented_component with unavailable",
+            prompt,
+        )
+        self.assertIn(
+            "Choose the structure backward from a final earnings bridge that ties "
+            "exactly in every applicable source period",
+            prompt,
+        )
+        self.assertIn(
+            "A historically replay-ready formula does not make unavailable inputs "
+            "forecastable",
+            prompt,
+        )
+        self.assertIn(
             "Presentation rounding does not permit arbitrary or global tie "
             "tolerance, rewriting a filed amount, or inventing a balancing term",
             prompt,
@@ -606,7 +621,16 @@ class CompanyModelSpecTests(unittest.TestCase):
         )
         self.assertIn(
             "A filed standard subtotal is historical/tie authority and must use "
-            "unavailable. Forecasting a subtotal requires an explicit derived formula.",
+            "unavailable. Forecasting a subtotal requires an explicit derived formula "
+            "that ties in every applicable source period.",
+            prompt,
+        )
+        self.assertIn(
+            "when that company-specific total is filed, keep it filed and unavailable",
+            prompt,
+        )
+        self.assertIn(
+            "Historical replay readiness does not mean unavailable inputs have forecasts",
             prompt,
         )
 
