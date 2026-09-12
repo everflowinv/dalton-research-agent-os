@@ -425,6 +425,16 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(len(current_line["duration_facts"]), 2)
         self.assertNotEqual(content_hash(current), prior_hash)
 
+        next_contract = build_model_inputs(ledger, {
+            **deployed,
+            "financial_statement_structure": {**structure, "schema_version": "0.5"},
+        })
+        next_line = next(
+            item for item in next_contract["filed_lines"] if item["concept"] == concept)
+        self.assertEqual(next_line["cells"], {})
+        self.assertEqual(next_line["derived_count"], 0)
+        self.assertEqual(len(next_line["duration_facts"]), 2)
+
     def test_cash_input_keeps_missing_quarter_and_wrong_sign_as_gaps(self):
         ocf = "us-gaap:NetCashProvidedByUsedInOperatingActivities"
         capex = "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"

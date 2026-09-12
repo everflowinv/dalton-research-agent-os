@@ -6,6 +6,7 @@ import unittest
 
 from dalton_core.company_financial_statement_structure import (
     ANNUAL_SCHEMA_VERSION,
+    DIRECT_GROSS_PRETAX_SCHEMA_VERSION,
     LEGACY_SCHEMA_VERSION,
     SCHEMA_VERSION,
     TYPED_NOTE_SCHEMA_VERSION,
@@ -268,7 +269,7 @@ class FinancialStatementStructureTests(unittest.TestCase):
         )
         self.assertEqual(structure["schema_version"], SCHEMA_VERSION)
         self.assertEqual(structure["authority_ref"],
-                         "company-financial-statement-structure:0.4")
+                         "company-financial-statement-structure:0.5")
         annual = replay["note_formula_periods"][0]
         self.assertEqual(annual["status"], "validated")
         self.assertEqual(annual["periods"][0]["value"], "7685673000")
@@ -750,6 +751,17 @@ class FinancialStatementStructureTests(unittest.TestCase):
                                     "components must be filed"):
             validate_financial_statement_structure(candidate, company_spec(), inputs)
 
+        candidate = proposal(inputs)
+        operating = next(line for line in candidate["lines"]
+                         if line["ref"] == "operating")
+        operating["role"] = "company_presented_subtotal"
+        formula = next(item for item in candidate["formulas"]
+                       if item["output_ref"] == "operating")
+        formula["tie_out_concept"] = None
+        with self.assertRaisesRegex(FinancialStatementStructureError,
+                                    "must tie to an exact filed concept"):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
+
     def test_direct_company_pretax_bridge_accepts_gross_profit_and_company_subtotal(self):
         inputs = financial_inputs()
         inputs["filed_lines"].append(input_line(
@@ -793,6 +805,15 @@ class FinancialStatementStructureTests(unittest.TestCase):
             [(term["line_ref"], term["coefficient"]) for term in held["terms"]],
             [("operating", "1"), ("total-expense", "-1")],
         )
+
+        prior_gross = copy.deepcopy(candidate)
+        prior_gross["schema_version"] = DIRECT_GROSS_PRETAX_SCHEMA_VERSION
+        prior_gross_structure, prior_gross_replay = validate_financial_statement_structure(
+            prior_gross, company_spec(), inputs)
+        self.assertEqual(prior_gross_structure["authority_ref"],
+                         "company-financial-statement-structure:0.4")
+        self.assertEqual(prior_gross_replay["schema_version"],
+                         "financial-statement-structure-replay-0.4")
 
         old = copy.deepcopy(candidate)
         old["schema_version"] = TYPED_NOTE_SCHEMA_VERSION
@@ -850,16 +871,67 @@ class FinancialStatementStructureTests(unittest.TestCase):
                                     "tie-out unit differs|output unit"):
             validate_financial_statement_structure(invalid, company_spec(), inputs)
 
+    def test_direct_company_pretax_bridge_accepts_revenue_and_company_subtotal(self):
+        inputs = financial_inputs()
+        inputs["filed_lines"].append(input_line(
+            "total_costs", (810, 890, 970, 1050)))
         candidate = proposal(inputs)
-        operating = next(line for line in candidate["lines"]
-                         if line["ref"] == "operating")
-        operating["role"] = "company_presented_subtotal"
-        formula = next(item for item in candidate["formulas"]
-                       if item["output_ref"] == "operating")
-        formula["tie_out_concept"] = None
+        candidate["schema_version"] = SCHEMA_VERSION
+        for line in candidate["lines"]:
+            line["annual_forecast_method"] = (
+                "unavailable"
+                if line["role"] == "diluted_weighted_average_shares" else None
+            )
+        candidate["financial_input_hash"] = financial_input_authority(inputs)["content_hash"]
+        candidate["lines"].append({
+            **derived("total-costs", "company_presented_subtotal"),
+            "annual_forecast_method": None,
+        })
+        candidate["formulas"].insert(1, sum_formula(
+            "total-costs", (("cost", 1), ("opex", 1),
+                            ("interest-expense", 1),
+                            ("interest-income", -1)), "total_costs"))
+        pretax = next(item for item in candidate["formulas"]
+                      if item["output_ref"] == "pretax")
+        pretax["terms"] = [
+            {"line_ref": "revenue", "coefficient": "1"},
+            {"line_ref": "total-costs", "coefficient": "-1"},
+        ]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs)
+        self.assertTrue(replay["ready_for_forecast"])
+        self.assertEqual(
+            [term["coefficient"] for term in next(
+                item for item in structure["formulas"]
+                if item["output_ref"] == "pretax")["terms"]],
+            ["1", "-1"],
+        )
+
+        for mutation in ("duplicate_revenue", "mixed_operating", "wrong_sign"):
+            invalid = copy.deepcopy(candidate)
+            formula = next(item for item in invalid["formulas"]
+                           if item["output_ref"] == "pretax")
+            if mutation == "duplicate_revenue":
+                formula["terms"].append(
+                    {"line_ref": "revenue", "coefficient": "-1"})
+                error = "repeats a term"
+            elif mutation == "mixed_operating":
+                formula["terms"].append(
+                    {"line_ref": "operating", "coefficient": "1"})
+                error = "sum formula roles"
+            else:
+                formula["terms"][0]["coefficient"] = "-1"
+                error = "sum formula roles"
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                FinancialStatementStructureError, error
+            ):
+                validate_financial_statement_structure(invalid, company_spec(), inputs)
+
+        prior = copy.deepcopy(candidate)
+        prior["schema_version"] = DIRECT_GROSS_PRETAX_SCHEMA_VERSION
         with self.assertRaisesRegex(FinancialStatementStructureError,
-                                    "must tie to an exact filed concept"):
-            validate_financial_statement_structure(candidate, company_spec(), inputs)
+                                    "sum formula roles"):
+            validate_financial_statement_structure(prior, company_spec(), inputs)
 
     def test_structure_cannot_claim_readiness_without_a_tied_final_earnings_bridge(self):
         inputs = financial_inputs()

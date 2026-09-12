@@ -249,11 +249,11 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "2b5493d24e1706a0ba34a8387d5bd39b3008f5aa1d90a5bbb9e2570346f46612",
+            "d2cc4afb06cecdc3bf3e26e33813952988d2b4548e26d57ae761476811015f73",
         )
         self.assertNotEqual(
             TASK_HASH,
-            "01df760eba52c6bc36cc539f9ba77877d7b86ab70812d05eac51d2cbf6c32a26",
+            "2b5493d24e1706a0ba34a8387d5bd39b3008f5aa1d90a5bbb9e2570346f46612",
         )
 
     def test_only_syntax_and_schema_text_bounds_are_typed_for_repair(self):

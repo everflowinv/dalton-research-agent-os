@@ -25,12 +25,14 @@ from .store import content_hash
 LEGACY_SCHEMA_VERSION = "0.1"
 ANNUAL_SCHEMA_VERSION = "0.2"
 TYPED_NOTE_SCHEMA_VERSION = "0.3"
-SCHEMA_VERSION = "0.4"
-STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.4"
+DIRECT_GROSS_PRETAX_SCHEMA_VERSION = "0.4"
+SCHEMA_VERSION = "0.5"
+STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.5"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
     ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
     TYPED_NOTE_SCHEMA_VERSION: "company-financial-statement-structure:0.3",
+    DIRECT_GROSS_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.4",
     SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
 }
 
@@ -78,9 +80,12 @@ _NOTE_PERIOD_FIELDS = {"period_start", "period_end"}
 FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION = "financial-note-evidence-binding-0.1"
 DILUTED_EPS_NUMERATOR_NOTE_TARGET = "financial_note:diluted_eps_numerator:0.1"
 _ANNUAL_STRUCTURE_VERSIONS = {
-    ANNUAL_SCHEMA_VERSION, TYPED_NOTE_SCHEMA_VERSION, SCHEMA_VERSION,
+    ANNUAL_SCHEMA_VERSION, TYPED_NOTE_SCHEMA_VERSION,
+    DIRECT_GROSS_PRETAX_SCHEMA_VERSION, SCHEMA_VERSION,
 }
-_TYPED_NOTE_STRUCTURE_VERSIONS = {TYPED_NOTE_SCHEMA_VERSION, SCHEMA_VERSION}
+_TYPED_NOTE_STRUCTURE_VERSIONS = {
+    TYPED_NOTE_SCHEMA_VERSION, DIRECT_GROSS_PRETAX_SCHEMA_VERSION, SCHEMA_VERSION,
+}
 
 
 def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
@@ -157,7 +162,9 @@ _SUM_FORMULA_SCHEMA = _schema_object(
                       "Use the statement bridge roles accepted for the output. A direct "
                       "company presentation may derive pretax_income from exactly one "
                       "gross_profit term at coefficient 1 plus one or more "
-                      "company_presented_component or company_presented_subtotal terms."
+                      "company_presented_component or company_presented_subtotal terms. "
+                      "A direct company presentation may instead use exactly one revenue "
+                      "term at coefficient 1 with those same company-presented terms."
                   ),
                   "items": _schema_object(
                       {"line_ref": _SCHEMA_REF,
@@ -723,21 +730,29 @@ def _normalize_formula(
             if output_role == _COMPANY_SUBTOTAL_ROLE
             else _SUM_ROLE_INPUTS.get(output_role)
         )
+        direct_pretax_role = (
+            "gross_profit"
+            if schema_version in {DIRECT_GROSS_PRETAX_SCHEMA_VERSION, SCHEMA_VERSION}
+            else None
+        )
+        if schema_version == SCHEMA_VERSION:
+            direct_pretax_roles = {"gross_profit", "revenue"}
+        else:
+            direct_pretax_roles = {direct_pretax_role} if direct_pretax_role else set()
+        direct_anchor_terms = [
+            term for term in normalized
+            if lines[term["line_ref"]]["role"] in direct_pretax_roles
+        ]
         direct_pretax_presentation = (
-            schema_version == SCHEMA_VERSION
+            bool(direct_pretax_roles)
             and output_role == "pretax_income"
-            and len([
-                term for term in normalized
-                if lines[term["line_ref"]]["role"] == "gross_profit"
-            ]) == 1
-            and next(
-                term for term in normalized
-                if lines[term["line_ref"]]["role"] == "gross_profit"
-            )["coefficient"] == "1"
+            and len(direct_anchor_terms) == 1
+            and direct_anchor_terms[0]["coefficient"] == "1"
             and len(normalized) >= 2
             and all(
                 lines[term["line_ref"]]["role"] in {
-                    "gross_profit", _COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE,
+                    *direct_pretax_roles,
+                    _COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE,
                 }
                 for term in normalized
             )
@@ -1406,8 +1421,10 @@ def replay_historical_structure(
                 annual_ready = annual_report["status"] == "validated"
     result = {
         "schema_version": (
-            "financial-statement-structure-replay-0.4"
+            "financial-statement-structure-replay-0.5"
             if structure.get("schema_version") == SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.4"
+            if structure.get("schema_version") == DIRECT_GROSS_PRETAX_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.3"
             if structure.get("schema_version") == TYPED_NOTE_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.2"
@@ -1904,8 +1921,10 @@ def forecast_structure_binding(
         raise FinancialStatementStructureError("statement structure is not ready for forecast")
     projection = {
         "schema_version": (
-            "forecast-statement-structure-binding-0.4"
+            "forecast-statement-structure-binding-0.5"
             if structure.get("schema_version") == SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.4"
+            if structure.get("schema_version") == DIRECT_GROSS_PRETAX_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.3"
             if structure.get("schema_version") == TYPED_NOTE_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.2"
@@ -1928,7 +1947,8 @@ def forecast_structure_binding(
 
 __all__ = [
     "ANNUAL_FORECAST_METHODS", "ANNUAL_SEMANTICS", "FORECAST_METHODS",
-    "FinancialStatementStructureError", "LEGACY_SCHEMA_VERSION",
+    "DIRECT_GROSS_PRETAX_SCHEMA_VERSION", "FinancialStatementStructureError",
+    "LEGACY_SCHEMA_VERSION",
     "TYPED_NOTE_SCHEMA_VERSION",
     "LINE_KINDS", "MAX_STRUCTURE_FORMULAS", "MAX_STRUCTURE_LINES", "ROLES",
     "SCHEMA_VERSION", "STRUCTURE_AUTHORITY_REF", "STRUCTURE_PROPOSAL_SCHEMA",

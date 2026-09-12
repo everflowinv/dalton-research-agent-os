@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.4",
-    "prompt_contract": "company-model-spec-prompt:0.11",
+    "prompt_contract": "company-model-spec-prompt:0.12",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -516,8 +516,11 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "When the company directly presents pretax income as gross profit less "
         "company-specific expense totals, the pretax sum may contain exactly one "
         "gross_profit term with coefficient 1 and one or more "
-        "company_presented_component or company_presented_subtotal terms. Do not "
-        "mix that direct bridge with operating_income or other standard roles, "
+        "company_presented_component or company_presented_subtotal terms. "
+        "When the company instead directly presents pretax income as revenue less "
+        "company-specific total costs, the same narrow bridge may use exactly one "
+        "revenue term with coefficient 1. Do not mix either direct bridge with "
+        "operating_income or other standard roles, "
         "relabel a standard filed fact as company-presented, or invent an untied "
         "subtotal. Each derived subtotal and the pretax result still needs its own "
         "exact filed tie. "

@@ -426,7 +426,7 @@ def build_model_inputs(
     structure_definition = spec.get("financial_statement_structure")
     non_additive_duration_policy = (
         isinstance(structure_definition, Mapping)
-        and structure_definition.get("schema_version") == "0.4"
+        and structure_definition.get("schema_version") in {"0.4", "0.5"}
     )
     for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
@@ -438,7 +438,7 @@ def build_model_inputs(
             legacy_replay=legacy_series,
             # The inner structure is the persisted numeric replay contract.
             # Outer company specs already reached 0.4 while their structures
-            # were still 0.3, so only inner 0.4 opts into this correction.
+            # were still 0.3, so only inner 0.4 and later opt into this correction.
             non_additive_duration_policy=non_additive_duration_policy,
         )
 
