@@ -80,9 +80,10 @@ def check(config_path: str | Path, *, max_age_seconds: float | None = None) -> d
         item.get("state") == "ready" for item in heartbeat.get("plugins", {}).values()
     )
     checks["plugins_ready"] = plugin_ok
+    planner_heartbeat = heartbeat.get("bounded_planner") if isinstance(heartbeat, dict) else None
     settlement = (
-        (heartbeat.get("bounded_planner") or {}).get("child_settlement")
-        if isinstance(heartbeat, dict) else None
+        planner_heartbeat.get("child_settlement")
+        if isinstance(planner_heartbeat, dict) else None
     )
     checks["child_settlement_healthy"] = (
         config.bounded_planner is None

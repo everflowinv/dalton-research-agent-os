@@ -2146,6 +2146,37 @@ class ServiceTests(unittest.TestCase):
                     self.assertIs(
                         result["checks"]["child_settlement_healthy"], expected)
 
+    def test_health_fails_closed_for_missing_or_malformed_settlement_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            heartbeat = root / "heartbeat.json"
+            fake_config = mock.Mock(
+                heartbeat_path=heartbeat, tick_seconds=1,
+                writer_socket=root / "writer.sock", control=None,
+                core_db=root / "core.sqlite", scheduler_db=root / "scheduler.sqlite",
+                projection_db=root / "projection.sqlite", bounded_planner=mock.Mock(),
+            )
+            for planner in (None, "invalid", [], {}, {"child_settlement": None}):
+                with self.subTest(planner=planner):
+                    heartbeat.write_text(json.dumps({
+                        "state": "running", "pid": 99999999,
+                        "last_tick_at": "2026-09-12T00:00:00+00:00",
+                        "plugins": {}, "bounded_planner": planner,
+                    }))
+                    with mock.patch(
+                        "dalton_core.health.ServiceConfig.from_file",
+                        return_value=fake_config,
+                    ):
+                        result = check(root / "service.json", max_age_seconds=10**9)
+                    self.assertFalse(result["checks"]["child_settlement_healthy"])
+
+            fake_config.bounded_planner = None
+            with mock.patch(
+                "dalton_core.health.ServiceConfig.from_file", return_value=fake_config,
+            ):
+                result = check(root / "service.json", max_age_seconds=10**9)
+            self.assertTrue(result["checks"]["child_settlement_healthy"])
+
 
 if __name__ == "__main__":
     unittest.main()
