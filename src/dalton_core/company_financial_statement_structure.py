@@ -96,9 +96,10 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
         "role": {
             "enum": list(ROLES),
             "description": (
-                "Use company_presented_component for an exact filed line whose "
+                "Use company_presented_component for an exact filed currency amount whose "
                 "company-specific bridge position is expressed by a tied formula; "
-                "use company_presented_subtotal only for a derived filed subtotal."
+                "use company_presented_subtotal only for a derived filed currency subtotal. "
+                "Neither role represents shares, per-share figures, ratios or percentages."
             ),
         },
         "label": _SCHEMA_TEXT,
@@ -118,7 +119,15 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
             ),
         },
         "statement": {"enum": ["income"]},
-        "unit": {"type": "string", "minLength": 3, "maxLength": 24},
+        "unit": {
+            "type": "string", "minLength": 3, "maxLength": 24,
+            "description": (
+                "Use shares only for diluted_weighted_average_shares and a "
+                "currency-per-share unit such as usd_per_share only for diluted_eps. "
+                "Every other role requires its filed ISO-4217 currency, such as usd. "
+                "Do not change a source unit to fit a role."
+            ),
+        },
         "period_kind": {"const": "duration"},
         "annual_semantics": {"enum": list(ANNUAL_SEMANTICS)},
         "forecast_method": {"enum": list(FORECAST_METHODS)},

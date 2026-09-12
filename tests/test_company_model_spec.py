@@ -539,6 +539,40 @@ class CompanyModelSpecTests(unittest.TestCase):
             prompt,
         )
 
+    def test_source_per_share_and_share_rows_cannot_be_currency_components(self):
+        for concept, unit in (
+            ("us-gaap:EarningsPerShareBasic", "usd_per_share"),
+            ("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic", "shares"),
+            ("us-gaap:CommonStockDividendsPerShareDeclared", "usd_per_share"),
+        ):
+            with self.subTest(concept=concept):
+                state = copy.deepcopy(STATE)
+                state["concepts"].append(concept)
+                state["statements"]["income"].append({
+                    "concept": concept, "label": "Supplementary filed line", "level": 0,
+                    "parent_concept": None, "is_breakdown": False,
+                    "dimension_axis": None, "unit": unit, "period_kind": "duration",
+                })
+                body = _spec()
+                before = copy.deepcopy(body)
+                self.verify(body, state=state)
+                self.assertEqual(body, before)
+                prompt = build_prompt(state)
+                self.assertIn(concept, prompt)
+                self.assertIn("Both company-presented roles are currency amounts", prompt)
+                self.assertIn("Do not change a source unit to fit a role", prompt)
+                body["financial_statement_structure"]["lines"].append({
+                    **copy.deepcopy(body["financial_statement_structure"]["lines"][0]),
+                    "ref": "supplementary", "role": "company_presented_component",
+                    "concept": concept, "unit": unit, "forecast_method": "unavailable",
+                    "forecast_base_ref": None,
+                })
+                invalid = copy.deepcopy(body)
+                with self.assertRaisesRegex(CompanyModelSpecError, "ISO-4217 currency") as caught:
+                    self.verify(body, state=state)
+                self.assertEqual(caught.exception.code, "semantic")
+                self.assertEqual(body, invalid)
+
 
 if __name__ == "__main__":
     unittest.main()
