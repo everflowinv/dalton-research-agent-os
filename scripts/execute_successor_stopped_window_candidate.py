@@ -608,14 +608,11 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 broker_receipt = load_json(
                     self.rollback_root / "openclaw-broker-transition" /
                     "receipt.json")
-                need(broker_receipt.get("source_commit")
-                     == manifest["source"]["commit"]
-                     and broker_receipt.get("transition_content_hash")
-                     == transition["content_hash"]
-                     and broker_receipt.get("managed_host_patch") == {
-                         "receipt_sha256": host_verified["receipt_sha256"],
-                         "status": "installed_checked_no_call"},
-                     "outer broker receipt does not bind installed host patch")
+                broker_window.validate_transition_receipt(
+                    receipt=broker_receipt, transition=transition,
+                    row=broker_row, before=_before, after=expected_openclaw_bytes,
+                    receipt_dir=(self.rollback_root /
+                                 "openclaw-broker-transition"))
         else:
             need(r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"]),
                  "provider plugin authority differs")

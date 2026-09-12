@@ -485,6 +485,64 @@ def _validated_host_patch_receipt(receipt: Mapping[str, Any],
     return tuple(receipt["installed_identity"])
 
 
+def validate_transition_receipt(*, receipt: Mapping[str, Any],
+                                transition: Mapping[str, Any],
+                                row: Mapping[str, Any], before: bytes,
+                                after: bytes, receipt_dir: Path) -> dict[str, Any]:
+    keys = {"schema_version", "status", "source_commit",
+            "transition_content_hash", "openclaw_before_sha256",
+            "openclaw_after_sha256", "historical_unresolved_sha256",
+            "historical_unresolved_count", "retry_authorized",
+            "refund_authorized", "managed_plugins", "managed_host_patch",
+            "before_gateway", "after_gateway", "model_calls", "content_hash"}
+    unsigned = {key: value for key, value in receipt.items()
+                if key != "content_hash"}
+    expected_host = None
+    if row.get("managed_host_patch") is not None:
+        host_path = receipt_dir / "host-patch-receipt.json"
+        _need(host_path.is_file() and not host_path.is_symlink(),
+              "model broker host patch receipt is unavailable")
+        expected_host = {"receipt_sha256": sha256_bytes(host_path.read_bytes()),
+                         "status": "installed_checked_no_call"}
+    expected_plugins = [{"plugin_id": item["plugin_id"],
+                         "destination": item["destination"],
+                         "tree_sha256": item["source_tree"]["tree_sha256"]}
+                        for item in row["managed_plugins"]]
+    receipt_plugins = receipt.get("managed_plugins")
+    plugins_match = (isinstance(receipt_plugins, list)
+                     and len(receipt_plugins) == len(expected_plugins)
+                     and all(set(actual) == {"plugin_id", "destination",
+                                             "tree_sha256", "version"}
+                             and isinstance(actual.get("version"), str)
+                             and bool(actual["version"])
+                             and {key: actual[key] for key in expected}
+                                 == expected
+                             for actual, expected in zip(
+                                 receipt_plugins, expected_plugins)))
+    _need(set(receipt) == keys
+          and receipt.get("schema_version")
+              == "openclaw-broker-stopped-window-receipt-0.1"
+          and receipt.get("status") == "applied_gateway_restarted"
+          and receipt.get("source_commit") == transition["source_commit"]
+          and receipt.get("transition_content_hash") == transition["content_hash"]
+          and receipt.get("openclaw_before_sha256") == sha256_bytes(before)
+          and receipt.get("openclaw_after_sha256") == sha256_bytes(after)
+          and receipt.get("historical_unresolved_sha256")
+              == row["historical_unresolved"]["records_sha256"]
+          and receipt.get("historical_unresolved_count")
+              == len(row["historical_unresolved"]["records"])
+          and receipt.get("retry_authorized") is False
+          and receipt.get("refund_authorized") is False
+          and receipt.get("model_calls") == 0
+          and receipt.get("managed_host_patch") == expected_host
+          and plugins_match
+          and isinstance(receipt.get("before_gateway"), Mapping)
+          and isinstance(receipt.get("after_gateway"), Mapping)
+          and receipt.get("content_hash") == canonical_hash(unsigned),
+          "broker transition receipt does not bind this transition")
+    return dict(receipt)
+
+
 def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
                                  openclaw_root: Path, row: Mapping[str, Any],
                                  receipt_path: Path) -> dict[str, Any]:
@@ -660,23 +718,10 @@ def rollback_reviewed_transition(
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise BrokerStoppedWindowError("broker transition receipt is invalid") from exc
-    _need(isinstance(receipt, Mapping)
-          and receipt.get("schema_version")
-              == "openclaw-broker-stopped-window-receipt-0.1"
-          and receipt.get("status") == "applied_gateway_restarted"
-          and receipt.get("source_commit") == transition["source_commit"]
-          and receipt.get("transition_content_hash") == transition["content_hash"]
-          and receipt.get("openclaw_before_sha256") == sha256_bytes(before)
-          and receipt.get("openclaw_after_sha256") == sha256_bytes(after)
-          and receipt.get("historical_unresolved_sha256")
-              == row["historical_unresolved"]["records_sha256"]
-          and receipt.get("retry_authorized") is False
-          and receipt.get("refund_authorized") is False,
-          "broker transition receipt does not bind this transition")
-    unsigned_receipt = {key: value for key, value in receipt.items()
-                        if key != "content_hash"}
-    _need(receipt.get("content_hash") == canonical_hash(unsigned_receipt),
-          "broker transition receipt content hash differs")
+    _need(isinstance(receipt, Mapping), "broker transition receipt is invalid")
+    validate_transition_receipt(
+        receipt=receipt, transition=transition, row=row, before=before,
+        after=after, receipt_dir=receipt_path.parent)
     host_receipt = receipt_path.parent / "host-patch-receipt.json"
     expected_host = receipt.get("managed_host_patch")
     _need((row.get("managed_host_patch") is None and expected_host is None)

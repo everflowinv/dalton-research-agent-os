@@ -216,6 +216,21 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
 
     def test_rollback_restores_exact_before_and_preserves_historical_pending(self):
         self._apply()
+        receipt_path = self.receipts / "receipt.json"
+        original_receipt = receipt_path.read_bytes()
+        tampered = json.loads(original_receipt)
+        tampered["retry_authorized"] = True
+        tampered["content_hash"] = stopped.canonical_hash({
+            key: value for key, value in tampered.items() if key != "content_hash"})
+        receipt_path.write_text(json.dumps(tampered) + "\n")
+        before, after, row = stopped.expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=self.manifest)
+        with self.assertRaisesRegex(stopped.BrokerStoppedWindowError,
+                                    "does not bind this transition"):
+            stopped.validate_transition_receipt(
+                receipt=tampered, transition=self.manifest, row=row,
+                before=before, after=after, receipt_dir=self.receipts)
+        receipt_path.write_bytes(original_receipt)
         identities = iter([
             {"pid": 12, "started_at": "1970-01-01T00:00:00.300Z",
              "started_at_ms": 300},
