@@ -737,14 +737,50 @@ class LaneStateTests(unittest.TestCase):
             specification, table, mission_version_ref=self.mission["id"])
         filing = self.missions.statement_filings(ACN)[0]
         rows = self.missions.statement_lines(filing["ingest_id"])
-        wrong = json.loads(json.dumps(body))
-        derived = next(cell for cell in wrong["drivers"][0]["history"]
+        derived = next(cell for cell in body["drivers"][0]["history"]
                        if cell["basis"] == "derived_from_cumulative")
-        derived["value"] = str(Decimal(derived["value"]) + 1)
+        source_rows = [row for row in rows
+                       if row["concept"] == derived["concept"]
+                       and row["period_start"] == "2026-01-01"
+                       and row["period_end"] in {"2026-06-30", "2026-09-30"}]
+        self.assertEqual(len(source_rows), 2)
+        wrong_rows = []
+        for ordinal, row in enumerate(source_rows, start=-2):
+            wrong = dict(row)
+            wrong["line_id"] = f"line:wrong-cumulative:{ordinal}"
+            wrong["ordinal"] = ordinal
+            wrong["value"] = str(Decimal(wrong["value"]) + Decimal(ordinal + 10))
+            wrong_rows.append(wrong)
+        self.store.connection.execute(
+            "DROP TRIGGER coverage_mission_statement_lines_authorized_insert")
+        columns = tuple(wrong_rows[0])
+        self.store.connection.executemany(
+            "INSERT INTO coverage_mission_statement_lines(" + ",".join(columns)
+            + ") VALUES(" + ",".join("?" for _ in columns) + ")",
+            [tuple(row[key] for key in columns) for row in wrong_rows],
+        )
+        self.store.connection.commit()
+        rows_with_wrong_first = [*wrong_rows, *rows]
+
+        without_exact_pair = [
+            row for row in rows_with_wrong_first
+            if row["line_id"] not in {item["line_id"] for item in source_rows}
+        ]
         with self.assertRaises(ForecastModelValidationError) as caught:
-            ForecastModelAuthority(self.store).publish(wrong, statement_rows=rows)
+            ForecastModelAuthority(self.store).publish(
+                body, statement_rows=without_exact_pair)
         self.assertIn("filing reconciliation mismatch", str(caught.exception))
-        stored = ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
+
+        wrong = json.loads(json.dumps(body))
+        wrong_derived = next(cell for cell in wrong["drivers"][0]["history"]
+                             if cell["basis"] == "derived_from_cumulative")
+        wrong_derived["value"] = str(Decimal(wrong_derived["value"]) + 1)
+        with self.assertRaises(ForecastModelValidationError) as caught:
+            ForecastModelAuthority(self.store).publish(
+                wrong, statement_rows=rows_with_wrong_first)
+        self.assertIn("filing reconciliation mismatch", str(caught.exception))
+        stored = ForecastModelAuthority(self.store).publish(
+            body, statement_rows=rows_with_wrong_first)
         proof = ForecastModelAuthority(self.store).filing_proof(stored["id"])
         self.assertEqual(proof["invariant_report"]["status"], "available")
 
