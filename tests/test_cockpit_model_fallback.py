@@ -99,7 +99,7 @@ class ChainAdapter:
         if failed and str(scripted.get("code", "")).upper() in {
             "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
             "QUEUE_TIMEOUT", "BROKER_CLOSED",
-        }:
+        } or failed and scripted.get("proved_local_not_sent") is True:
             metadata["dispatch_proof"] = {
                 "authority": "openclaw-model-adapter",
                 "state": "definitely_not_sent",
@@ -1538,6 +1538,41 @@ class CockpitChainTests(unittest.TestCase):
                 producer_route_decision_refs=[producer["route_decision_ref"]],
             )
         self.assertEqual(len(adapter.served), 1)
+
+    def test_proved_local_required_controls_failure_uses_authorized_fallback(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="event_judgement", request_id="controls-producer-proved",
+               prompt="draft", mission=self.mission)
+        class FirstControlUnavailable(ChainAdapter):
+            def execute(self, work, route, profile):
+                if not self.served:
+                    self.script[profile["id"]] = {
+                        "code": "REQUIRED_CONTROLS_UNAVAILABLE",
+                        "message": "selected host endpoint cannot enforce the required provider output limit",
+                        "proved_local_not_sent": True,
+                    }
+                return super().execute(work, route, profile)
+
+        adapter = FirstControlUnavailable({})
+        result = self._model(
+            adapter, policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,
+        ).call(
+            purpose="p14m_route_verify",
+            request_id="controls-fallback-proved",
+            prompt='{"verdict":"pass","findings":[]}',
+            mission=self.mission,
+            producer_route_decision_refs=[producer["route_decision_ref"]],
+        )
+        self.assertEqual(len(adapter.served), 2)
+        self.assertNotEqual(adapter.served[0], adapter.served[1])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            settlement = ledger.connection.execute(
+                "SELECT actual_micros FROM thesis_impact_day_settlements "
+                "ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(settlement["actual_micros"], result["cost_micros"])
 
     def test_dossier_provenance_reads_real_producer_and_verifier_authorities(self) -> None:
         from dalton_core.company_dossier_cli import (

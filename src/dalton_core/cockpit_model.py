@@ -1920,6 +1920,7 @@ class CockpitModel:
                                         "BUSY", "CONCURRENCY_LIMIT",
                                         "BROKER_CONCURRENCY_LIMIT",
                                         "QUEUE_TIMEOUT", "BROKER_CLOSED",
+                                        "REQUIRED_CONTROLS_UNAVAILABLE",
                                     } and result.metadata.get(
                                         "dispatch_proof"
                                     ) == _LOCAL_NOT_SENT_PROOF
@@ -2183,17 +2184,27 @@ class CockpitModel:
                 # a provider call. Every other failed host envelope may have
                 # consumed the full bounded call before validation failed.
                 code = str((envelope.error or {}).get("code", "")).upper()
+                dispatch_proof = (envelope.metadata or {}).get("dispatch_proof")
                 broker_local_code = code in {
                     "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
                     "QUEUE_TIMEOUT", "BROKER_CLOSED",
-                }
-                dispatch_proof = (envelope.metadata or {}).get("dispatch_proof")
+                } or (
+                    code == "REQUIRED_CONTROLS_UNAVAILABLE"
+                    and dispatch_proof == _LOCAL_NOT_SENT_PROOF
+                )
                 broker_local_not_sent = (
                     broker_local_code and dispatch_proof == _LOCAL_NOT_SENT_PROOF
                 )
                 may_have_reached_provider = not broker_local_not_sent
                 if broker_local_not_sent:
                     local_dispatch_proofs[profile["id"]] = dict(dispatch_proof)
+                    if code == "REQUIRED_CONTROLS_UNAVAILABLE":
+                        # The selected endpoint cannot satisfy this Work's
+                        # mandatory controls. Exact broker-local no-send proof
+                        # permits the already-authorized chain to try another
+                        # profile; the same code without proof remains a
+                        # terminal contract violation below.
+                        failure_class = "model_unavailable"
                 spend[route["id"]] = ((ceiling, "reserved")
                                       if may_have_reached_provider else (0, "failed"))
                 uncertain_spend = uncertain_spend or may_have_reached_provider
