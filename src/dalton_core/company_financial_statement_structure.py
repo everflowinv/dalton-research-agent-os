@@ -101,8 +101,22 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
                 "use company_presented_subtotal only for a derived filed subtotal."
             ),
         },
-        "label": _SCHEMA_TEXT, "kind": {"enum": list(LINE_KINDS)},
-        "concept": {"type": ["string", "null"], "maxLength": 200},
+        "label": _SCHEMA_TEXT,
+        "kind": {
+            "enum": list(LINE_KINDS),
+            "description": (
+                "filed requires an exact filed concept; derived requires concept "
+                "null and an associated formula"
+            ),
+        },
+        "concept": {
+            "type": ["string", "null"], "maxLength": 200,
+            "description": (
+                "Exact filed concept for kind filed; always null for kind derived. "
+                "A derived line's historical filed tie belongs only in its "
+                "formula.tie_out_concept."
+            ),
+        },
         "statement": {"enum": ["income"]},
         "unit": {"type": "string", "minLength": 3, "maxLength": 24},
         "period_kind": {"const": "duration"},
@@ -129,7 +143,13 @@ _SUM_FORMULA_SCHEMA = _schema_object(
                       {"line_ref": _SCHEMA_REF,
                        "coefficient": {"enum": ["-1", "1"]}},
                       tuple(sorted(_TERM_FIELDS)))},
-        "tie_out_concept": {"type": ["string", "null"], "maxLength": 200},
+        "tie_out_concept": {
+            "type": ["string", "null"], "maxLength": 200,
+            "description": (
+                "Exact filed historical result tied by this formula; do not copy "
+                "it into the derived output line's concept field."
+            ),
+        },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
                           "items": _SCHEMA_TEXT},
     },
@@ -139,7 +159,13 @@ _DIVIDE_FORMULA_SCHEMA = _schema_object(
     {
         "output_ref": _SCHEMA_REF, "operator": {"const": "divide"},
         "numerator_ref": _SCHEMA_REF, "denominator_ref": _SCHEMA_REF,
-        "tie_out_concept": {"type": ["string", "null"], "maxLength": 200},
+        "tie_out_concept": {
+            "type": ["string", "null"], "maxLength": 200,
+            "description": (
+                "Exact filed historical result tied by this formula; do not copy "
+                "it into the derived output line's concept field."
+            ),
+        },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
                           "items": _SCHEMA_TEXT},
     },

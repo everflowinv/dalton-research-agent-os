@@ -521,6 +521,24 @@ class CompanyModelSpecTests(unittest.TestCase):
         # And the concept list is not repeated: every concept is in the table.
         self.assertNotIn('"concepts"', prompt)
 
+    def test_prompt_places_a_derived_lines_filed_tie_only_on_its_formula(self):
+        prompt = build_prompt(STATE)
+        self.assertIn("Every derived line sets concept to null", prompt)
+        self.assertIn(
+            '"ref":"operating-income","kind":"derived","concept":null',
+            prompt,
+        )
+        self.assertIn(
+            '"output_ref":"operating-income",'
+            '"tie_out_concept":"us-gaap:OperatingIncomeLoss"',
+            prompt,
+        )
+        self.assertIn(
+            "A derived line's historical filed tie belongs only in its "
+            "formula.tie_out_concept.",
+            prompt,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
