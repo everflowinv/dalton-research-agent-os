@@ -1,0 +1,11 @@
+# Financial-note live model-input audit
+
+This audit used integration commit `6e8328c8` against one explicit SQLite snapshot of the live Core for ACN, CTSH, EPAM, IBM and DXC. The connection used URI `mode=ro`, `PRAGMA query_only=ON` and an explicit read transaction. It did not construct a writable authority, bootstrap or migrate schema, copy a database, call a provider, or access the network. The connection reported zero changes.
+
+All five complete company-model prompts fit the current 120,000-byte `model_spec` input authority after applying the configured 300-cell limit. CTSH has 5,752 bytes of headroom. EPAM has 197; ACN and IBM each have 138; DXC has 13. The prompt fitter omitted 25 ACN, 54 EPAM, 55 IBM and 27 DXC numeric cells as complete conflict groups; CTSH retained all 300 selected cells. The note block was the stable `FINANCIAL NOTE EVIDENCE UNAVAILABLE` representation because live Core has zero promoted financial-note authorities.
+
+The current acquired-document inventory exposes one selectable annual diluted-EPS-numerator note target for each of ACN, CTSH, EPAM and IBM. None has a typed admission or promotion, so their gap is execution and promotion rather than source or statement authority. DXC exposes no selectable target: its exact acquired 10-K is present, but the statement filing lacks the required unambiguous standard diluted-EPS and weighted-share authority. The inventory reports `exact_standard_diluted_eps_and_weighted_shares_authority_unavailable`.
+
+The latest persisted company-model specification for every company predates `financial_statement_structure`; therefore none is a candidate structured model ready for forecast replay. This is not a failed note formula. A fresh model-spec result must first return and validate the new structure. Any annual-only note promotion would validate annual numerator history but would not authorize quarterly forecast readiness without independent quarter-period note authority.
+
+The private owner receipt is `foundation-r16a-release/financial-note-live-input-audit/financial-note-live-input-audit.json`. It records the exact mission ref/hash, configuration hash, Core/WAL snapshot metadata, prompt sizes, inventory counts, target accessions and periods, authority gaps, and persisted-model readiness for all five companies.
